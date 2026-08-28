@@ -71,7 +71,7 @@ export class SharedRingBuffer {
 	#control: Int32Array;
 	#samples: Float32Array[];
 
-	// Whether READ/WRITE have been anchored to the first inserted sample (buffered mode).
+	// Whether READ/WRITE have been anchored to the first inserted sample.
 	#anchored = false;
 
 	constructor(init: SharedRingBufferInit) {
@@ -101,9 +101,11 @@ export class SharedRingBuffer {
 		const originalLength = data[0].length;
 		let offset = 0;
 
-		// Buffered mode: anchor READ/WRITE to the first sample so playback starts at its
-		// timestamp, instead of skipping ahead or gap-filling silence from index 0.
-		if (this.buffered && !this.#anchored) {
+		// Anchor to the first sample so playback starts at its timestamp rather than gap-filling
+		// from index 0. Also keeps the indices small: READ/WRITE are Int32, so an absolute sample
+		// index wraps after ~13.5h at 44.1kHz, and a negative one pins WRITE at 0 so the ring
+		// never un-stalls.
+		if (!this.#anchored) {
 			Atomics.store(this.#control, READ, start | 0);
 			Atomics.store(this.#control, WRITE, start | 0);
 			this.#anchored = true;

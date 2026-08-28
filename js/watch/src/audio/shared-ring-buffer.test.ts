@@ -511,6 +511,25 @@ describe("i32 wrapping", () => {
 		}
 	});
 
+	it("plays a stream whose sample index truncates to a negative i32", () => {
+		// Regression: an unanchored index from a long-running stream truncates to a negative
+		// Int32, which pinned WRITE at 0 and left the ring silent forever.
+		const rate = 44100;
+		const buffer = create({ rate, channels: 1, capacity: rate, latency: 4410 });
+
+		// 743975s in: sample 32_809_297_500, negative as an i32.
+		const startMs = 743_975_000;
+		expect(Math.round((startMs / 1000) * rate) | 0).toBeLessThan(0);
+
+		insert(buffer, startMs, 4410, { channels: 1, value: 0.5 });
+		insert(buffer, startMs + 100, 4410, { channels: 1, value: 0.5 });
+
+		expect(buffer.stalled).toBe(false);
+		const output = read(buffer, 128, 1);
+		expect(output[0].length).toBe(128);
+		expect(output[0][0]).toBeCloseTo(0.5, 5);
+	});
+
 	it("should handle slot indexing past capacity boundary", () => {
 		// capacity=10, start at sample 97 → wraps across boundary
 		const buffer = create({ rate: 1000, channels: 1, capacity: 10, latency: 10 });
