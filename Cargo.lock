@@ -5195,6 +5195,7 @@ dependencies = [
  "quinn-proto",
  "rand 0.10.2",
  "rcgen",
+ "rustc-hash 2.1.3",
  "rustls",
  "rustls-platform-verifier",
  "slab",

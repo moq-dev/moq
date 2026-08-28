@@ -1,12 +1,13 @@
 //! The connection: shared state, the driver task, and the session handle.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use rustc_hash::FxHashMap;
 
 use super::{Error, SEGMENT};
 use crate::{Handle, udp};
@@ -64,18 +65,24 @@ pub(crate) struct State {
 	open_waiters: kio::WaiterList,
 
 	/// Per-stream read/write parking, keyed by stream id.
-	readable: HashMap<u64, kio::WaiterList>,
-	writable: HashMap<u64, kio::WaiterList>,
+	///
+	/// FxHash rather than SipHash on all four of these: they sit on the
+	/// driver's per-event path. A peer does shape which of its ids stay parked
+	/// here, but only by opening them in order, so clustering enough of them
+	/// into one bucket costs millions of stream opens for a cluster the
+	/// stream limit caps anyway.
+	readable: FxHashMap<u64, kio::WaiterList>,
+	writable: FxHashMap<u64, kio::WaiterList>,
 	/// Send streams waiting for their end (FIN acknowledged, a STOP, or a
 	/// reset); the driver probes these after connection events since quiche has
 	/// no event for stream collection.
-	finishing: HashMap<u64, kio::WaiterList>,
+	finishing: FxHashMap<u64, kio::WaiterList>,
 	/// How each send stream ended, for the ones the driver saw collected while
 	/// the connection was still up: `None` for a FIN the peer acknowledged,
 	/// `Some(code)` for a `STOP_SENDING` the probe consumed on our behalf.
 	/// That is what makes a later close mean "already delivered" rather than
 	/// "we never found out". Cleared when the stream drops.
-	pub(crate) collected: HashMap<u64, Option<u64>>,
+	pub(crate) collected: FxHashMap<u64, Option<u64>>,
 
 	/// Received datagrams, oldest first; over [`DGRAM_QUEUE`] the oldest drop.
 	datagrams: VecDeque<Bytes>,
@@ -112,10 +119,10 @@ impl State {
 			next_open_bi,
 			next_open_uni,
 			open_waiters: kio::WaiterList::new(),
-			readable: HashMap::new(),
-			writable: HashMap::new(),
-			finishing: HashMap::new(),
-			collected: HashMap::new(),
+			readable: FxHashMap::default(),
+			writable: FxHashMap::default(),
+			finishing: FxHashMap::default(),
+			collected: FxHashMap::default(),
 			datagrams: VecDeque::new(),
 			datagram_recv_waiters: kio::WaiterList::new(),
 			datagram_send_waiters: kio::WaiterList::new(),

@@ -37,6 +37,7 @@ quiche = { version = "0.29", optional = true }
 # moq-tokio wires its quinn dependency.
 quinn-proto = { version = "0.11", default-features = false, features = ["bloom", "log", "rustls-aws-lc-rs"], optional = true }
 rand = "0.10"
+rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
 # OS-native server-cert verifier for the quinn backend. Version matched to the
 # copy moq-tokio pulls in, to avoid duplication.

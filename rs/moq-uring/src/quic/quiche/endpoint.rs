@@ -13,6 +13,8 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::task::Poll;
 
+use rustc_hash::FxHashMap;
+
 use super::{Connection, Error, connection};
 use crate::quic::endpoint::{CID_LEN, Config, cid};
 use crate::{Handle, udp};
@@ -29,9 +31,83 @@ struct Accepting {
 /// One live connection: its shared state and the routes pointing at it.
 struct Conn {
 	shared: connection::Shared,
-	/// Every id in [`Inner::routes`] naming this connection, so teardown can
-	/// remove exactly them.
-	cids: Vec<Vec<u8>>,
+	ids: ConnectionIds,
+}
+
+/// Every destination connection id routing to one connection.
+struct ConnectionIds {
+	/// The ids this endpoint issued, each [`CID_LEN`] bytes.
+	issued: Vec<[u8; CID_LEN]>,
+	/// The destination id the client chose for its Initial, for a connection
+	/// that arrived rather than one we dialed.
+	initial: Option<Vec<u8>>,
+}
+
+impl ConnectionIds {
+	/// The ids for a connection we dialed: just the one we issued.
+	fn issued(cid: [u8; CID_LEN]) -> Self {
+		Self {
+			issued: vec![cid],
+			initial: None,
+		}
+	}
+}
+
+/// Destination connection id -> the connection it belongs to, split by who
+/// chose the id.
+///
+/// The ids we issued are random and fixed width, so FxHash is enough: a peer
+/// cannot pick them, so it cannot aim at a bucket. A client picks its own
+/// Initial destination id, so those keep SipHash and its per-process seed.
+/// Otherwise a peer could open connections whose Initial ids all hash alike
+/// and turn a per-packet lookup into a scan of them.
+#[derive(Default)]
+struct Routes {
+	issued: FxHashMap<[u8; CID_LEN], usize>,
+	initial: HashMap<Vec<u8>, usize>,
+}
+
+impl Routes {
+	/// The connection `cid` names. Ids we issued win, so a client cannot
+	/// steal a live route by naming it as its Initial destination.
+	fn get(&self, cid: &[u8]) -> Option<usize> {
+		if let Ok(cid) = <[u8; CID_LEN]>::try_from(cid)
+			&& let Some(key) = self.issued.get(&cid)
+		{
+			return Some(*key);
+		}
+		self.initial.get(cid).copied()
+	}
+
+	fn insert(&mut self, key: usize, ids: &ConnectionIds) {
+		for cid in &ids.issued {
+			self.issued.insert(*cid, key);
+		}
+		if let Some(cid) = &ids.initial {
+			self.initial.insert(cid.clone(), key);
+		}
+	}
+
+	/// Drop `key`'s routes. Two clients may pick the same Initial destination
+	/// id, so only the entries still naming `key` go: the other connection
+	/// keeps the one it won.
+	fn remove(&mut self, key: usize, ids: &ConnectionIds) {
+		for cid in &ids.issued {
+			self.remove_issued(cid, key);
+		}
+		if let Some(cid) = &ids.initial
+			&& self.initial.get(cid) == Some(&key)
+		{
+			self.initial.remove(cid);
+		}
+	}
+
+	/// Drop `key`'s route for an id it issued and has now retired.
+	fn remove_issued(&mut self, cid: &[u8; CID_LEN], key: usize) {
+		if self.issued.get(cid) == Some(&key) {
+			self.issued.remove(cid);
+		}
+	}
 }
 
 /// State shared by the handles, the demux task, and the per-connection
@@ -43,7 +119,7 @@ struct Inner {
 	accepting: RefCell<Option<Accepting>>,
 	conns: RefCell<slab::Slab<Conn>>,
 	/// Destination connection id -> the connection it belongs to.
-	routes: RefCell<HashMap<Vec<u8>, usize>>,
+	routes: RefCell<Routes>,
 	/// Incoming handshakes in flight. Together with the accept queue this is
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
@@ -88,7 +164,7 @@ impl Endpoint {
 			local,
 			accepting: RefCell::new(accepting),
 			conns: RefCell::new(slab::Slab::new()),
-			routes: RefCell::new(HashMap::new()),
+			routes: RefCell::new(Routes::default()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
 			shard: config.shard,
@@ -139,7 +215,7 @@ impl Endpoint {
 			return Err(err.clone());
 		}
 		let mut quiche_config = super::client_config(config)?;
-		let scid = cid(self.inner.shard);
+		let scid = self.inner.cid();
 		let conn = quiche::connect(
 			Some(&config.server_name),
 			&quiche::ConnectionId::from_ref(&scid),
@@ -149,7 +225,7 @@ impl Endpoint {
 		)?;
 		let (shared, _key) = self
 			.inner
-			.launch(conn, vec![scid.to_vec()], config.transport.keep_alive);
+			.launch(conn, ConnectionIds::issued(scid), config.transport.keep_alive);
 		// Flush the Initial flight; the demux task takes it from here.
 		shared.kick();
 		connection::establish(shared).await
@@ -232,7 +308,7 @@ impl Inner {
 					continue;
 				}
 			};
-			let key = self.routes.borrow().get(hdr.dcid.as_ref()).copied();
+			let key = self.routes.borrow().get(hdr.dcid.as_ref());
 			match key {
 				Some(key) => {
 					let conn = self.conns.borrow()[key].shared.clone();
@@ -287,7 +363,7 @@ impl Inner {
 			return None;
 		}
 
-		let scid = cid(self.shard);
+		let scid = self.cid();
 		let keep_alive = self.accepting.borrow().as_ref().expect("checked above").keep_alive;
 		let mut conn = {
 			let mut accepting = self.accepting.borrow_mut();
@@ -314,7 +390,11 @@ impl Inner {
 
 		// Route our chosen id, and the client's Initial id: retransmitted
 		// Initials (and 0-RTT) keep carrying it until our id takes effect.
-		let (shared, key) = self.launch(conn, vec![scid.to_vec(), hdr.dcid.to_vec()], keep_alive);
+		let ids = ConnectionIds {
+			issued: vec![scid],
+			initial: Some(hdr.dcid.to_vec()),
+		};
+		let (shared, key) = self.launch(conn, ids, keep_alive);
 		shared.mark_ingested();
 
 		// Hand the connection over once (if) its handshake completes.
@@ -367,20 +447,18 @@ impl Inner {
 	fn launch(
 		self: &Rc<Self>,
 		conn: quiche::Connection,
-		cids: Vec<Vec<u8>>,
+		ids: ConnectionIds,
 		keep_alive: Option<std::time::Duration>,
 	) -> (connection::Shared, usize) {
 		let (shared, driver) = connection::launch(&self.handle, self.socket.clone(), conn, keep_alive);
-		let key = self.conns.borrow_mut().insert(Conn {
+		let mut conns = self.conns.borrow_mut();
+		let key = conns.vacant_key();
+		self.routes.borrow_mut().insert(key, &ids);
+		conns.insert(Conn {
 			shared: shared.clone(),
-			cids: cids.clone(),
+			ids,
 		});
-		{
-			let mut routes = self.routes.borrow_mut();
-			for cid in cids {
-				routes.insert(cid, key);
-			}
-		}
+		drop(conns);
 
 		let inner = self.clone();
 		self.handle.spawn(async move {
@@ -401,19 +479,21 @@ impl Inner {
 			// The peer's active_connection_id_limit is the credit; keep it
 			// spent so a migration always has a fresh id to switch to.
 			while conn.scids_left() > 0 {
-				let cid = cid(self.shard);
+				let cid = self.cid();
 				if conn
 					.new_scid(&quiche::ConnectionId::from_ref(&cid), rand::random(), false)
 					.is_err()
 				{
 					break;
 				}
-				self.routes.borrow_mut().insert(cid.to_vec(), key);
-				self.conns.borrow_mut()[key].cids.push(cid.to_vec());
+				self.routes.borrow_mut().issued.insert(cid, key);
+				self.conns.borrow_mut()[key].ids.issued.push(cid);
 			}
 			while let Some(retired) = conn.retired_scid_next() {
-				self.routes.borrow_mut().remove(retired.as_ref());
-				self.conns.borrow_mut()[key].cids.retain(|cid| cid != retired.as_ref());
+				// We only ever issue CID_LEN ids, so this is what we pushed.
+				let retired: [u8; CID_LEN] = retired.as_ref().try_into().expect("retired a foreign id");
+				self.routes.borrow_mut().remove_issued(&retired, key);
+				self.conns.borrow_mut()[key].ids.issued.retain(|cid| cid != &retired);
 			}
 		}
 		shared.kick();
@@ -422,13 +502,24 @@ impl Inner {
 	/// A connection's driver ended; forget it and its routes.
 	fn release(&self, key: usize) {
 		let conn = self.conns.borrow_mut().remove(key);
-		let mut routes = self.routes.borrow_mut();
-		for cid in conn.cids {
-			routes.remove(&cid);
-		}
-		drop(routes);
+		self.routes.borrow_mut().remove(key, &conn.ids);
 		// The demux task may be waiting on us to exit.
 		self.task_waiters.borrow_mut().wake();
+	}
+
+	/// A fresh connection id no live connection already answers to.
+	///
+	/// A sharded endpoint spends a byte on steering, so the draw is 56 bits
+	/// rather than 64. Rerolling a duplicate keeps "one id, one connection" an
+	/// invariant instead of a probability, since a collision would otherwise
+	/// hand one connection's packets to another.
+	fn cid(&self) -> [u8; CID_LEN] {
+		loop {
+			let cid = cid(self.shard);
+			if self.routes.borrow().get(&cid).is_none() {
+				return cid;
+			}
+		}
 	}
 
 	/// The socket died: everything on it fails with `err`.
@@ -444,5 +535,74 @@ impl Inner {
 			conn.fail(err.clone());
 		}
 		self.accept_waiters.borrow_mut().wake();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn routes_register_and_remove_issued_and_initial_ids() {
+		let issued = [1; CID_LEN];
+		// A client's Initial destination id is any width it likes.
+		let initial = vec![2; CID_LEN * 2];
+		let ids = ConnectionIds {
+			issued: vec![issued],
+			initial: Some(initial.clone()),
+		};
+		let mut routes = Routes::default();
+
+		routes.insert(7, &ids);
+		assert_eq!(routes.get(&issued), Some(7));
+		assert_eq!(routes.get(&initial), Some(7));
+
+		routes.remove(7, &ids);
+		assert_eq!(routes.get(&issued), None);
+		assert_eq!(routes.get(&initial), None);
+	}
+
+	#[test]
+	fn an_initial_id_cannot_capture_an_issued_route() {
+		let cid = [3; CID_LEN];
+		let mut routes = Routes::default();
+		routes.insert(1, &ConnectionIds::issued(cid));
+
+		// A second client names the first connection's id as its Initial
+		// destination: it must neither take the route nor take it away.
+		let squatter = ConnectionIds {
+			issued: vec![[4; CID_LEN]],
+			initial: Some(cid.to_vec()),
+		};
+		routes.insert(2, &squatter);
+		assert_eq!(routes.get(&cid), Some(1));
+
+		routes.remove(2, &squatter);
+		assert_eq!(routes.get(&cid), Some(1));
+	}
+
+	#[test]
+	fn releasing_a_connection_leaves_a_shared_initial_id_alone() {
+		// Nothing stops two clients picking the same Initial destination id.
+		let shared = vec![5; CID_LEN * 2];
+		let first = ConnectionIds {
+			issued: vec![[6; CID_LEN]],
+			initial: Some(shared.clone()),
+		};
+		let second = ConnectionIds {
+			issued: vec![[7; CID_LEN]],
+			initial: Some(shared.clone()),
+		};
+		let mut routes = Routes::default();
+		routes.insert(1, &first);
+		routes.insert(2, &second);
+		assert_eq!(routes.get(&shared), Some(2));
+
+		// The loser going away must not strand the winner's retransmits.
+		routes.remove(1, &first);
+		assert_eq!(routes.get(&shared), Some(2));
+
+		routes.remove(2, &second);
+		assert_eq!(routes.get(&shared), None);
 	}
 }

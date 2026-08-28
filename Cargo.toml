@@ -138,6 +138,7 @@ nix = { version = "0.30.1", features = ["net", "socket", "uio"] }
 noq-udp = "1.1.1"
 percent-encoding = "2"
 qmux = { version = "0.5.1", default-features = false }
+rustc-hash = "2.1.3"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 subtle = "2.6"
