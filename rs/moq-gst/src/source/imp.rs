@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -287,6 +287,38 @@ struct Shape {
 	container: hang::catalog::Container,
 }
 
+/// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
+/// win. A pump is torn down two different ways depending on how far it got: before it owns a pad,
+/// stopping it means it must never create one; after, it owns a pad and has to drop it. One
+/// compare-exchange settles which of the two happened, so a pad can't slip out between a
+/// teardown's check and the pump's creation.
+struct PumpState(AtomicU8);
+
+impl PumpState {
+	const SUBSCRIBING: u8 = 0;
+	const LIVE: u8 = 1;
+	const CANCELLED: u8 = 2;
+
+	fn new() -> Self {
+		Self(AtomicU8::new(Self::SUBSCRIBING))
+	}
+
+	/// Claim the right to create a pad, false once a teardown got here first.
+	fn go_live(&self) -> bool {
+		self.0
+			.compare_exchange(Self::SUBSCRIBING, Self::LIVE, Ordering::AcqRel, Ordering::Acquire)
+			.is_ok()
+	}
+
+	/// Stop a pump that hasn't taken a pad, false if it already has one and must be torn down
+	/// through its cancel watch instead.
+	fn cancel_before_live(&self) -> bool {
+		self.0
+			.compare_exchange(Self::SUBSCRIBING, Self::CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+			.is_ok()
+	}
+}
+
 /// A rendition we're currently serving, keyed in the session by moq track name.
 struct ActiveTrack {
 	/// Identity we diff against on each catalog update; a change recreates the pad.
@@ -298,9 +330,25 @@ struct ActiveTrack {
 	/// `is_finished()` to prune this entry once the pump ends (the `JoinSet` owns
 	/// the task and reaps it); teardown goes through `cancel`, never `abort()`.
 	task: tokio::task::AbortHandle,
-	/// Set by the pump once it owns a pad. Until then it is still awaiting its subscription,
-	/// which is the one state a closing catalog has to break it out of.
-	live: Arc<AtomicBool>,
+	/// Shared with the pump, so teardown and pad creation agree on which of them happened.
+	state: Arc<PumpState>,
+}
+
+impl ActiveTrack {
+	/// Tear the pump down whatever stage it reached: one still subscribing never takes a pad,
+	/// one that has drops it when it sees the watch.
+	fn cancel(&self) {
+		self.state.cancel_before_live();
+		let _ = self.cancel.send(true);
+	}
+
+	/// Tear the pump down only if it is still waiting on its subscription, leaving a streaming
+	/// one to reach its own EOS.
+	fn cancel_if_subscribing(&self) {
+		if self.state.cancel_before_live() {
+			let _ = self.cancel.send(true);
+		}
+	}
 }
 
 async fn run_session(
@@ -384,9 +432,7 @@ async fn follow_catalog(
 					None => {
 						catalog_closed = true;
 						for track in active.values() {
-							if !track.live.load(Ordering::Relaxed) {
-								let _ = track.cancel.send(true);
-							}
+							track.cancel_if_subscribing();
 						}
 					}
 				}
@@ -399,7 +445,7 @@ async fn follow_catalog(
 	// while we await the rest.
 	// On the clean catalog-closed exit `active`/`pumps` are already drained, so this is a no-op.
 	for (_, track) in active.drain() {
-		let _ = track.cancel.send(true);
+		track.cancel();
 	}
 	while pumps.join_next().await.is_some() {}
 
@@ -461,7 +507,7 @@ fn reconcile(
 	// Changed renditions also land in `plan.add`, so they respawn below under a fresh pad id.
 	for name in plan.remove {
 		if let Some(track) = active.remove(&name) {
-			let _ = track.cancel.send(true);
+			track.cancel();
 		}
 	}
 
@@ -492,7 +538,7 @@ fn reconcile(
 		};
 
 		let (cancel_tx, cancel_rx) = watch::channel(false);
-		let live = Arc::new(AtomicBool::new(false));
+		let state = Arc::new(PumpState::new());
 		let task = pumps.spawn_on(
 			Pump {
 				element: element.clone(),
@@ -501,7 +547,7 @@ fn reconcile(
 				caps: d.shape.caps.clone(),
 				track,
 				container,
-				live: live.clone(),
+				state: state.clone(),
 				cancel: cancel_rx,
 			}
 			.run(),
@@ -514,7 +560,7 @@ fn reconcile(
 				shape: d.shape.clone(),
 				cancel: cancel_tx,
 				task,
-				live,
+				state,
 			},
 		);
 	}
@@ -585,8 +631,8 @@ struct Pump {
 	caps: gst::Caps,
 	track: moq_net::track::Consumer,
 	container: moq_mux::catalog::hang::Container,
-	/// Shared with this rendition's [`ActiveTrack::live`].
-	live: Arc<AtomicBool>,
+	/// Shared with this rendition's [`ActiveTrack::state`].
+	state: Arc<PumpState>,
 	cancel: watch::Receiver<bool>,
 }
 
@@ -602,7 +648,7 @@ impl Pump {
 			caps,
 			track,
 			container,
-			live,
+			state,
 			mut cancel,
 		} = self;
 		// Resolves once the publisher answers with the track info. A catalog can name a track its
@@ -621,10 +667,12 @@ impl Pump {
 		};
 		let mut track = moq_mux::container::Consumer::new(subscriber, container).with_latency(Duration::from_secs(1));
 
-		// `select!` polls its ready branches in random order, so a cancel that landed while the
-		// subscription was resolving can lose that race. Re-read it before taking a pad: a
-		// rendition reconcile has already removed or reshaped must never publish one.
-		if *cancel.borrow() {
+		// Winning this is what earns a pad. Losing means a teardown got here while the
+		// subscription was still resolving (this rendition was removed, reshaped, or outlived by
+		// a closing catalog), and it must not publish a pad at all: the watch alone can't say
+		// that, since a cancel landing just after we read it would leave a pad exposed and then
+		// yanked without an EOS.
+		if !state.go_live() {
 			return;
 		}
 
@@ -635,7 +683,6 @@ impl Pump {
 		let Some(pad) = create_pad(&element, &descriptor, &caps) else {
 			return;
 		};
-		live.store(true, Ordering::Relaxed);
 
 		let mut reference_ts = None;
 		loop {
@@ -955,6 +1002,15 @@ mod session_tests {
 			.collect()
 	}
 
+	/// Block until a consumer asks the broadcast for a track, returning the request unanswered so
+	/// its subscriber stays parked. Bounded so a session that never subscribes fails the test.
+	fn await_request(dynamic: &mut moq_net::broadcast::Dynamic) -> moq_net::track::Request {
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
+			.expect("no track was ever requested")
+			.expect("broadcast closed")
+	}
+
 	/// Poll for a pad rather than sleeping a fixed beat: the pumps run on another runtime, so
 	/// the only ordering we have is "eventually". Fails the test if it never shows up.
 	fn await_pad(element: &super::super::MoqSrc, kind: &str) -> gst::Pad {
@@ -979,7 +1035,7 @@ mod session_tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		// A live handler is what makes an unserved name park rather than resolve `NotFound`,
 		// which is how it behaves over the wire: the publisher just never answers.
-		let _dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.dynamic();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		// First update announces audio only, and no producer ever answers for it.
@@ -992,6 +1048,13 @@ mod session_tests {
 		let consumer = broadcast.consume();
 		let weak = element.downgrade();
 		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		// Wait for the audio subscription before announcing video, and hold the request
+		// unanswered. A catalog consumer skips to the newest snapshot, so without this the
+		// session could read one update carrying both renditions, and then whether it reached
+		// video before parking on audio would come down to `plan.add` ordering.
+		let pending = await_request(&mut dynamic);
+		assert_eq!(pending.name(), "audio");
 
 		// Second update adds video, backed by a real track so its subscription resolves.
 		let _video = broadcast.create_track("video", None).unwrap();
@@ -1018,21 +1081,21 @@ mod session_tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
+		// Both renditions in one snapshot, so the result can't hinge on which update the
+		// session read: with no handler alive, `audio` resolves `NotFound` rather than parking,
+		// and whichever order `plan.add` visits them in, `video` still has to reach a pad and
+		// the session still has to end cleanly.
+		let _video = broadcast.create_track("video", None).unwrap();
 		{
 			let mut guard = catalog.lock();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
 		let (shutdown, mut shutdown_rx) = watch::channel(false);
 		let consumer = broadcast.consume();
 		let weak = element.downgrade();
 		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
-
-		let _video = broadcast.create_track("video", None).unwrap();
-		{
-			let mut guard = catalog.lock();
-			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
-		}
 
 		await_pad(&element, "video_");
 
@@ -1073,6 +1136,44 @@ mod session_tests {
 		});
 		ended.expect("session never ended").unwrap();
 		assert!(pads(&element, "video_").is_empty(), "the unserved rendition got a pad");
+	}
+
+	/// A subscription can resolve after its pump was already torn down. The pump has to stay
+	/// dead: exposing a pad at that point publishes a rendition the session has finished with,
+	/// and then yanks it without an EOS.
+	#[test]
+	fn a_subscription_resolving_after_cancellation_creates_no_pad() {
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
+		}
+
+		let (_shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		// Hold the subscription pending, then close the catalog so the pump is cancelled while
+		// it is still waiting.
+		let request = await_request(&mut dynamic);
+		catalog.finish().unwrap();
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.expect("session never ended")
+			.unwrap()
+			.unwrap();
+
+		// Only now answer it. The pump is gone, so nothing may reach a pad.
+		let _serving = request.accept(moq_net::track::Info::default());
+		std::thread::sleep(Duration::from_millis(200));
+		assert!(pads(&element, "video_").is_empty(), "a cancelled pump still took a pad");
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
