@@ -244,6 +244,88 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	drop((endpoint, dial_only));
 }
 
+/// Await `future`, failing loudly rather than hanging if it never resolves.
+async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<Output = T>) -> T {
+	let mut deadline = moq_net::runtime::Deadline::after(handle, Duration::from_secs(5));
+	let mut future = std::pin::pin!(future);
+	kio::wait(|waiter| {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+			return Poll::Ready(Some(value));
+		}
+		deadline.poll(waiter).map(|()| None)
+	})
+	.await
+	.unwrap_or_else(|| panic!("timed out waiting for {what}"))
+}
+
+/// A peer's stop reaches the send half of the stream it accepted.
+///
+/// The stop can be processed before or after the application takes the
+/// stream, depending on how the driver's sweep interleaves with the accept,
+/// and `poll_closed` has to report it either way rather than waiting for an
+/// event that has already been and gone.
+#[test]
+fn a_peer_stop_reaches_the_accepted_stream() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		&handle,
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client =
+		quic::Endpoint::new(&handle, socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			// Held, not dropped: dropping the send half would reset it, and
+			// the peer would then see a reset rather than the stop.
+			let (mut send, mut recv) = std::future::poll_fn(|cx| dialed.poll_open_bi(cx))
+				.await
+				.expect("open_bi");
+			// One byte, so both backends surface the stream: quiche queues an
+			// incoming stream for accept when it becomes readable, not when it
+			// is created. Nothing is awaited between the write and the stop, so
+			// both frames leave in the same flush and land in the same sweep.
+			std::future::poll_fn(|cx| send.poll_write(cx, b"x"))
+				.await
+				.expect("write");
+			recv.stop(CLOSE_CODE);
+
+			let (mut send, _recv) = within(
+				&handle,
+				"the stopped stream to arrive",
+				std::future::poll_fn(|cx| accepted.poll_accept_bi(cx)),
+			)
+			.await
+			.expect("accept_bi");
+
+			match within(
+				&handle,
+				"the stop to be reported",
+				std::future::poll_fn(|cx| send.poll_closed(cx)),
+			)
+			.await
+			{
+				Err(quic::Error::Stop(code)) => assert_eq!(code, u64::from(CLOSE_CODE), "stop code"),
+				other => panic!("expected the peer's stop, got {other:?}"),
+			}
+		})
+		.expect("worker");
+}
+
 /// A read timeout, which the platform spells one of two ways.
 fn timed_out(err: &std::io::Error) -> bool {
 	matches!(

@@ -179,8 +179,20 @@ impl Inner {
 	}
 
 	/// Start tracking send stream `id`, which a handle now owns.
+	///
+	/// Seeded from quinn rather than empty: a peer can open a bidirectional
+	/// stream and stop it before the application ever accepts it, and that
+	/// event arrives with no handle to record it against. quinn still knows,
+	/// so a `poll_closed` on the fresh handle reports the stop instead of
+	/// waiting for an event that has already been and gone.
 	pub(crate) fn track(&self, id: StreamId) {
-		self.state.borrow_mut().sends.insert(id, None);
+		// Err means quinn has no send half for the id, which is nothing to
+		// report either way.
+		let stopped = self.conn.borrow_mut().send_stream(id).stopped().ok().flatten();
+		self.state
+			.borrow_mut()
+			.sends
+			.insert(id, stopped.map(|code| End::Stopped(code.into_inner())));
 	}
 
 	/// How send stream `id` ended, if the driver saw it end while a handle
@@ -377,7 +389,10 @@ impl web_transport_trait::poll::Session for Connection {
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let waiter = self.park.hold(cx);
-		if let Some(id) = self.shared.conn.borrow_mut().streams().accept(Dir::Bi) {
+		// The borrow ends before the handles are built: constructing a send
+		// stream reaches back into the connection.
+		let accepted = self.shared.conn.borrow_mut().streams().accept(Dir::Bi);
+		if let Some(id) = accepted {
 			return Poll::Ready(Ok((
 				super::SendStream::new(self.shared.clone(), id),
 				super::RecvStream::new(self.shared.clone(), id),
@@ -398,7 +413,8 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
 		// nothing while it is spent.
-		match self.shared.conn.borrow_mut().streams().open(Dir::Uni) {
+		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Uni);
+		match opened {
 			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
 			None => {
 				let mut state = self.shared.state.borrow_mut();
@@ -416,7 +432,8 @@ impl web_transport_trait::poll::Session for Connection {
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		match self.shared.conn.borrow_mut().streams().open(Dir::Bi) {
+		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Bi);
+		match opened {
 			Some(id) => Poll::Ready(Ok((
 				super::SendStream::new(self.shared.clone(), id),
 				super::RecvStream::new(self.shared.clone(), id),
