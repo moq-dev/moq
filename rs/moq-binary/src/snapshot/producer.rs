@@ -108,6 +108,13 @@ impl Inner {
 			false => payload,
 		};
 
+		// Check before opening a group. `append_group` publishes immediately, so discovering the limit
+		// inside `write_frame` would leave an empty newest group behind: a snapshot consumer jumps to
+		// the newest, so the previous value would be lost even though this update reported an error.
+		if payload.len() as u64 > moq_net::group::MAX_GROUP_CACHE {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+
 		let mut group = self.track.append_group()?;
 		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't

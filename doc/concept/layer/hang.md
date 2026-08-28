@@ -159,7 +159,8 @@ In the browser the pieces are the same, assembled by hand: read the entry from `
 
 ```ts
 const entry = catalog.json?.tracks.chat;
-if (!entry || !Catalog.modeSupported(entry.mode) || (entry.compression && !Catalog.compressionSupported(entry.compression))) return;
+if (!entry || !Catalog.modeSupported(entry.mode)) return;
+if (entry.compression !== undefined && !Catalog.compressionSupported(entry.compression)) return;
 
 const compression = entry.compression === "deflate";
 

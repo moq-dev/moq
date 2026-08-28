@@ -1,5 +1,5 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
 /** Options for a {@link Producer}. */
@@ -47,6 +47,11 @@ export class Producer {
 
 		// One frame per group, so the window spans a single value and starts cold every time.
 		const encoded = this.#compress ? new Flate().frame(payload) : payload;
+
+		// Check before opening a group. `appendGroup` publishes immediately, so letting `writeFrame`
+		// reject the frame would leave an empty newest group behind: a snapshot consumer jumps to the
+		// newest, so the previous value would be lost even though this update threw.
+		if (encoded.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Group.FrameTooLarge();
 
 		const group = this.#track.appendGroup();
 		try {

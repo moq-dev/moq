@@ -22,7 +22,13 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// Doubles as the per-frame size cap: a single frame can be at most this large (a
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
-pub(super) const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+/// Maximum bytes of frames cached in a group before old frames are evicted from the front.
+///
+/// A frame larger than this is rejected outright ([`Error::FrameTooLarge`]), since appending it
+/// would evict it immediately. Public so a producer can check a payload before opening a group,
+/// rather than discovering the limit after publishing an empty one; mirrors the JS
+/// `MAX_GROUP_CACHE_BYTES`.
+pub const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// A group contains a sequence number because they can arrive out of order.
 ///

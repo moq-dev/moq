@@ -112,6 +112,22 @@ mod test {
 		);
 	}
 
+	/// `append_group` publishes immediately, so rejecting the frame inside `write_frame` would leave
+	/// an empty newest group behind. A snapshot consumer jumps to the newest, so the previous value
+	/// would vanish even though the update reported an error.
+	#[test]
+	fn a_rejected_update_leaves_the_previous_value_readable() {
+		let (mut producer, track) = producer(false);
+		producer.update(&b"keep"[..]).unwrap();
+
+		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_GROUP_CACHE as usize + 1]);
+		assert!(producer.update(oversized).is_err());
+		producer.finish().unwrap();
+
+		// A reader arriving now still finds the last good value, not an empty superseding group.
+		assert_eq!(drain(consumer(track, false)), vec![Bytes::from_static(b"keep")]);
+	}
+
 	/// `finish` closes the underlying track, so a later update fails rather than being silently
 	/// accepted, and that holds for every clone since they share one track.
 	#[test]
