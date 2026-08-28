@@ -1,5 +1,5 @@
 import { Decoder as Flate } from "@moq/flate";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 
 /** Options for a {@link Consumer}. */
 export interface ConsumerConfig {
@@ -48,9 +48,13 @@ export class Consumer {
 			let next: Awaited<ReturnType<Moq.Track.Subscriber["readFrameSequence"]>>;
 			try {
 				next = await this.#track.readFrameSequence();
-			} catch {
-				// Fell behind this group's eviction window, or it was reset. The next group carries a
+			} catch (err) {
+				// Falling behind a group's eviction window is recoverable: the next group carries a
 				// complete value of its own, so resync there rather than surfacing a partial read.
+				// Anything else is the track's terminal error, which every later read would throw
+				// again; swallowing it would spin here instead of telling the caller the
+				// subscription died.
+				if (!(err instanceof Moq.Group.Lagged)) throw err;
 				continue;
 			}
 

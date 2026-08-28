@@ -121,3 +121,31 @@ test("a newer group preempts an open one", async () => {
 	stale.close();
 	track.close();
 });
+
+test("an aborted track surfaces its error instead of spinning", async () => {
+	// Every read after an abort throws the same terminal error, so swallowing it as if it were a
+	// recoverable Lagged would loop forever on a rejected promise rather than telling the caller
+	// the subscription died.
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe());
+
+	const boom = new Error("subscription aborted");
+	track.close(boom);
+
+	expect(consumer.next()).rejects.toThrow("subscription aborted");
+});
+
+test("falling behind a group is recoverable", async () => {
+	// The Lagged case still resyncs: the next group carries a complete value of its own.
+	const track = new Track.Producer("test");
+	const producer = new Producer(track);
+	const consumer = new Consumer(track.subscribe());
+
+	producer.update(bytes(1));
+	expect(await consumer.next()).toEqual(bytes(1));
+	producer.update(bytes(2));
+	expect(await consumer.next()).toEqual(bytes(2));
+
+	producer.finish();
+	expect(await consumer.next()).toBeUndefined();
+});
