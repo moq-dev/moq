@@ -682,6 +682,12 @@ fn finishing_under_backpressure_is_not_an_error() {
 	// Set by the server once it has filled the peer's credit: reading is what
 	// returns it, so the peer must not read before then.
 	let reading = std::rc::Rc::new(std::cell::Cell::new(false));
+	// How many streams the peer has seen end cleanly. A reset arrives instead
+	// of a FIN, so this never reaches its target if a finished stream is
+	// cancelled on the way out. A kio channel rather than a flag polled on a
+	// timer: the tests share a machine, and a wall clock loses that race.
+	let ended = kio::Producer::new(0usize);
+	let counted = ended.consume();
 
 	let peer_handle = handle.clone();
 	let peer_reading = reading.clone();
@@ -705,7 +711,18 @@ fn finishing_under_backpressure_is_not_an_error() {
 					if peer_reading.get() {
 						let readable: Vec<u64> = peer.conn.readable().collect();
 						for stream in readable {
-							while peer.conn.stream_recv(stream, &mut scratch).is_ok() {}
+							loop {
+								match peer.conn.stream_recv(stream, &mut scratch) {
+									Ok((_, true)) => {
+										if let Ok(mut count) = ended.write() {
+											*count += 1;
+										}
+										break;
+									}
+									Ok((_, false)) => {}
+									Err(_) => break,
+								}
+							}
 						}
 					}
 					if peer.flush().await.is_err() {
@@ -744,6 +761,14 @@ fn finishing_under_backpressure_is_not_an_error() {
 				.expect("open_uni");
 			blocked.finish().expect("finishing under backpressure");
 
+			// The same case, for a caller that finishes and drops rather than
+			// polling: the FIN is the stream's debt by then, so `Drop` has to
+			// pay it instead of resetting a stream that finished cleanly.
+			let mut dropped = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			dropped.finish().expect("finishing under backpressure");
+
 			reading.set(true);
 			within(
 				&handle,
@@ -752,6 +777,161 @@ fn finishing_under_backpressure_is_not_an_error() {
 			)
 			.await
 			.expect("closed");
+
+			// Credit is back by now, so the drop can make good on the finish.
+			// Both streams have to reach the peer as clean ends; a cancelled
+			// one arrives as a reset and never counts.
+			drop(dropped);
+			within(
+				&handle,
+				"both finished streams to arrive intact",
+				counted.wait(|count| match **count >= 2 {
+					true => std::task::Poll::Ready(()),
+					false => std::task::Poll::Pending,
+				}),
+			)
+			.await
+			.expect("the peer is still reading");
+		})
+		.expect("worker");
+}
+
+/// The arrival cap must not refuse a peer whose control stream is already
+/// first in the queue.
+///
+/// The cap bounds a peer that never sends a control stream. Counting arrivals
+/// before classifying any of them turned it into a limit on how much a valid
+/// client may pipeline: the control stream sat at the head of the queue,
+/// fully arrived, while the streams behind it tripped the cap.
+#[test]
+fn a_pipelining_peer_is_not_refused_by_the_arrival_cap() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let server = endpoint.local_addr();
+
+	// Closed once the server has acknowledged every stream, which is what
+	// proves they are all sitting in its accept queue rather than still on
+	// the wire. The handshake below must not start before that.
+	let queued = kio::Producer::new(());
+	let ready = queued.consume();
+
+	let peer_handle = handle.clone();
+	worker
+		.block_on(async move {
+			peer_handle.clone().spawn(async move {
+				let mut peer = raw_peer(&peer_handle, server, None);
+				peer.flush().await.expect("first flight");
+				while !peer.conn.is_established() {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+
+				// The control stream leads, then comfortably more than the cap
+				// behind it.
+				h3_request(&mut peer, CLIENT_UNI[0], "https://localhost/pipelined");
+				for i in 1..90u64 {
+					let stream = CLIENT_UNI[0] + i * 4;
+					if peer.conn.stream_send(stream, &[0x3f], true).is_err() {
+						break;
+					}
+				}
+				peer.flush().await.expect("flush");
+				// Wait for the server to answer, which it must: the streams
+				// above are ack-eliciting, and an acknowledgement means its
+				// driver has already ingested them into the accept queue. That
+				// is what makes the handshake below start against a full queue
+				// instead of racing the packets into it, which is the
+				// difference between reproducing the bug and not.
+				//
+				// Exactly one round trip. Waiting for a second would hang
+				// until the idle timeout, since the server sends nothing more
+				// while it waits for the signal below.
+				let received = peer.conn.stats().recv;
+				while peer.conn.stats().recv == received {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+				let _ = queued.close();
+
+				while !peer.conn.is_closed() {
+					if peer.step().await.is_err() || peer.flush().await.is_err() {
+						break;
+					}
+				}
+			});
+
+			let conn = endpoint.accept().await.expect("accepted connection");
+			within(&handle, "the peer to queue every stream", ready.closed()).await;
+			let request = within(
+				&handle,
+				"the handshake to accept a pipelining peer",
+				quic::web::Request::accept(&handle, conn),
+			)
+			.await
+			.expect("handshake");
+			assert_eq!(request.url().path(), "/pipelined");
+		})
+		.expect("worker");
+}
+
+/// A rejection abandoned mid-grace still closes the connection.
+///
+/// `reject` waits for the peer to acknowledge the response before closing
+/// deliberately. Disarming the guard before that wait meant a cancelled
+/// `reject` skipped both, leaving the endpoint holding the connection, its
+/// routes, and its driver for a peer that keeps sending.
+#[test]
+fn an_abandoned_rejection_still_closes_the_connection() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let server = endpoint.local_addr();
+
+	let peer_handle = handle.clone();
+	worker
+		.block_on(async move {
+			peer_handle.clone().spawn(async move {
+				let mut peer = raw_peer(&peer_handle, server, None);
+				peer.flush().await.expect("first flight");
+				while !peer.conn.is_established() {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+				h3_request(&mut peer, CLIENT_UNI[0], "https://localhost/abandoned");
+				peer.flush().await.expect("flush");
+
+				// Deliberately never acknowledges the response, so the
+				// rejection stays parked in its grace period.
+				std::future::pending::<()>().await;
+			});
+
+			let conn = endpoint.accept().await.expect("accepted connection");
+			let mut watch = conn.clone();
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+
+			// Drive the rejection until it parks waiting for the peer, then
+			// walk away from it.
+			// Boxed, not `pin!`: dropping a `Pin<&mut F>` leaves the future
+			// itself alive in its hidden local, which is not the case here.
+			let mut reject = Box::pin(request.reject(quic::web::Rejected::NotFound));
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			for _ in 0..64 {
+				match reject.as_mut().poll(&mut cx) {
+					std::task::Poll::Ready(result) => panic!("the rejection must still be waiting: {result:?}"),
+					std::task::Poll::Pending => {}
+				}
+			}
+			drop(reject);
+
+			within(
+				&handle,
+				"the abandoned rejection to close the connection",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
 		})
 		.expect("worker");
 }

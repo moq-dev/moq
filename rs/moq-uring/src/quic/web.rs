@@ -174,16 +174,19 @@ impl Request {
 		let mut peer_control = None;
 		std::future::poll_fn(|cx| {
 			loop {
-				loop {
+				// Stop adopting past the cap, but do not give up on what is
+				// already here: the control stream may be sitting at the head
+				// of a queue a pipelining peer filled behind it, and refusing
+				// that peer is the bug the cap is not for.
+				let mut over = false;
+				while !over {
 					match web_transport_trait::poll::Session::poll_accept_uni(&mut conn, cx) {
 						Poll::Ready(Ok(recv)) => {
 							arrivals += 1;
-							if arrivals > HANDSHAKE_STREAMS {
-								return Poll::Ready(Err(Error::Web(
-									"too many streams before the control stream".into(),
-								)));
+							over = arrivals > HANDSHAKE_STREAMS;
+							if !over {
+								pending.push(PendingUni::new(recv));
 							}
-							pending.push(PendingUni::new(recv));
 						}
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 						Poll::Pending => break,
@@ -214,6 +217,11 @@ impl Request {
 					}
 				}
 
+				// Only now, with everything adopted classified: the peer sent
+				// this many streams and none of them was a control stream.
+				if over {
+					return Poll::Ready(Err(Error::Web("too many streams before the control stream".into())));
+				}
 				if !progressed {
 					return Poll::Pending;
 				}
@@ -301,10 +309,9 @@ impl Request {
 		write_all(&mut self.send, &buf).await?;
 		web_transport_trait::poll::SendStream::finish(&mut self.send)?;
 
-		// The close below is the deliberate one; the guard's abrupt
-		// `H3_GENERAL_PROTOCOL_ERROR` would race the response out.
-		self.guard.disarm();
-
+		// The guard stays armed across the wait below. Cancelling this future
+		// mid-grace would otherwise skip the deliberate close and leak the
+		// connection, which is the very thing the guard is here to prevent.
 		let mut deadline = moq_net::runtime::Deadline::after(&self.handle, CLOSE_GRACE);
 		let send = &mut self.send;
 		kio::wait(|waiter| {
@@ -316,6 +323,9 @@ impl Request {
 		})
 		.await;
 
+		// The peer has the response, so this close is the deliberate one; the
+		// guard's abrupt `H3_GENERAL_PROTOCOL_ERROR` would have raced it out.
+		self.guard.disarm();
 		self.conn.shared().close_code(H3_NO_ERROR, "");
 		Ok(())
 	}
@@ -837,7 +847,8 @@ impl web_transport_trait::poll::SendStream for SendStream {
 				// Zero capacity here is ordinary flow control, which clears
 				// once the peer reads. Reporting it terminally would have the
 				// caller drop (and so reset) a stream that is finishing
-				// cleanly; `poll_closed` writes the rest instead.
+				// cleanly, so the FIN becomes this stream's debt: `poll_closed`
+				// writes the rest, and `Drop` pays what it can if nobody polls.
 				self.finishing = true;
 				return Ok(());
 			}
@@ -879,6 +890,17 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 impl Drop for SendStream {
 	fn drop(&mut self) {
+		// `finish` returned `Ok` with the header still owed, so the FIN is
+		// this stream's debt rather than the caller's. Pay it if the credit
+		// has since arrived, instead of letting a stream the caller finished
+		// cleanly go out as a cancellation.
+		if self.finishing {
+			let n = self.inner.try_write(&self.prefix);
+			self.prefix.advance(n);
+			if self.prefix.is_empty() {
+				let _ = web_transport_trait::poll::SendStream::finish(&mut self.inner);
+			}
+		}
 		// The inner `Drop` resets with a raw 0, which reads to a browser as an
 		// HTTP/3 stream error rather than the WebTransport cancellation that
 		// dropping a stream means. moq cancels subscriptions by dropping, so
