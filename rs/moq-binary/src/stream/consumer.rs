@@ -26,11 +26,15 @@ impl ConsumerConfig {
 	}
 }
 
-/// Consumes an ordered log of binary payloads from a track, yielding every one in order.
+/// Consumes an ordered log of binary payloads from a track, yielding every one.
 ///
-/// A [`Producer`](super::Producer) writes the whole log into one group, but a publisher that rolls
-/// its own (the way a failed write is recovered) is read here too: each group starts a cold
-/// decompression window.
+/// A conforming publisher writes the whole log into one group, but one that writes more is read
+/// here too: each group starts a cold decompression window.
+///
+/// Groups are taken in arrival order ([`recv_group`](moq_net::track::Subscriber::poll_recv_group)),
+/// not by skipping to the newest, so nothing is dropped if a publisher does use more than one. The
+/// monotonic [`next_group`](moq_net::track::Subscriber::poll_next_group) would discard a lower
+/// sequence that arrived late, which for a lossless log means records nothing will repeat.
 pub struct Consumer {
 	track: moq_net::track::Subscriber,
 	group: Option<moq_net::group::Consumer>,
@@ -62,7 +66,8 @@ impl Consumer {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		loop {
 			let Some(group) = &mut self.group else {
-				match self.track.poll_next_group(waiter)? {
+				// Arrival order, so a group that lands late is still delivered.
+				match self.track.poll_recv_group(waiter)? {
 					Poll::Ready(Some(group)) => {
 						// Each group is its own compressed stream, so the window starts cold.
 						self.flate = self.compression.then(moq_flate::Decoder::new);

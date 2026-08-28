@@ -126,8 +126,12 @@ impl<E: CatalogExt> Snapshot<E> {
 		Ok(self.inner.update(payload)?)
 	}
 
-	/// Finish the track. The catalog entry is removed when this handle drops.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Finish the track and retire its catalog entry.
+	///
+	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
+	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
+	/// dropping the handle without finishing retires the entry too.
+	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
 }
@@ -170,8 +174,12 @@ impl<E: CatalogExt> Stream<E> {
 		Ok(self.inner.append(payload)?)
 	}
 
-	/// Finish the track. The catalog entry is removed when this handle drops.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Finish the track and retire its catalog entry.
+	///
+	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
+	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
+	/// dropping the handle without finishing retires the entry too.
+	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
 }
@@ -307,13 +315,16 @@ mod test {
 			.binary_stream("samples", Config::default().with_compression(true))
 			.unwrap();
 
+		let track = samples.consume();
 		let expected: Vec<Bytes> = (0..3u8).map(|n| Bytes::from(vec![n; 8])).collect();
 		for payload in &expected {
 			samples.append(payload.clone()).unwrap();
 		}
+		// `finish` retires the entry, so read both off the live track first.
+		let entry = entry(&catalog, "samples");
 		samples.finish().unwrap();
 
-		let consumer = Consumer::from_track(samples.consume(), &entry(&catalog, "samples")).unwrap();
+		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
 	}
@@ -325,16 +336,16 @@ mod test {
 			.binary_snapshot("thumbnail", Config::default().with_mime("image/jpeg"))
 			.unwrap();
 
+		let track = thumbnail.consume();
 		thumbnail.update(&b"old"[..]).unwrap();
 		thumbnail.update(&b"new"[..]).unwrap();
-		thumbnail.finish().unwrap();
-
 		let entry = entry(&catalog, "thumbnail");
+		thumbnail.finish().unwrap();
 		assert_eq!(entry.mode, Mode::Snapshot);
 		assert_eq!(entry.compression, None);
 		assert_eq!(entry.mime.as_deref(), Some("image/jpeg"));
 
-		let consumer = Consumer::from_track(thumbnail.consume(), &entry).unwrap();
+		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(drain(consumer), vec![Bytes::from_static(b"new")]);
 	}
 

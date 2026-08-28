@@ -121,7 +121,7 @@ A `json` track's frames are UTF-8 JSON values, so a relay, a debugger, or an arc
 `mode` is required and says how a track's groups compose its frames. There is no default, because reading an append log as a latest-value document silently discards every payload but the last:
 
 - `snapshot` is lossy. Each group is self-contained and supersedes the previous one, so a consumer reads only the newest and a publisher may drop older ones. A JSON track may follow a group's first frame with merge-patch deltas; a binary track writes one frame per group.
-- `stream` is lossless. One payload per frame, in order, with nothing superseded. The whole log normally rides a single group, and a publisher only rolls it to recover from a frame it could not write; a later group continues the log rather than replacing it, so a consumer reads them in order.
+- `stream` is lossless. One payload per frame, in order, with nothing superseded, all in a single group that is never rolled. A publisher that cannot write a payload closes the track: a log missing a record is not lossless, so a second group would present a gap as if it were a complete log. A consumer never skips to the newest group, since a later group does not supersede an earlier one.
 
 `compression` names the compression applied to the frames, or is absent when they are uncompressed. `deflate` is the same group-scoped `deflate-raw` the catalog uses. The remaining fields are optional and descriptive: `schema` (a JSON Schema URL) on a JSON track, `mime` on a binary one. Both kinds also accept the `broadcast` and `timeline` fields a media rendition takes.
 
@@ -155,7 +155,19 @@ The entry supplies the track's mode and compression, so a reader cannot pair the
 
 There is one consumer type rather than one per mode. Both modes hand the caller the same thing, a sequence of values ending when the track does, so a reader writes one loop either way; what differs is loss semantics, and `consumer.mode()` answers that for the rare reader that can only work with one. Discovery is the same entries: `catalog.json_tracks()` and `catalog.binary_tracks()` enumerate them, since the catalog is the only thing that announces a data track.
 
-In the browser the pieces are the same, assembled by hand: read the entry from `catalog.json.tracks` (or `catalog.binary.tracks`), subscribe to the track by name, and hand it to `@moq/json` (`Snapshot` or `Stream`) or `@moq/binary` with the entry's `compression` flag.
+In the browser the pieces are the same, assembled by hand: read the entry from `catalog.json.tracks` (or `catalog.binary.tracks`), subscribe to the track by name, and hand it to `@moq/json` or `@moq/binary`. Two mappings to do yourself, since the packages take the mode and compression as code rather than as catalog values:
+
+```ts
+const entry = catalog.json?.tracks.chat;
+if (!entry || !Catalog.modeSupported(entry.mode) || (entry.compression && !Catalog.compressionSupported(entry.compression))) return;
+
+const compression = entry.compression === "deflate";
+const track = broadcast.subscribe("chat");
+const consumer =
+    entry.mode === "stream" ? new Json.Stream.Consumer(track, { compression }) : new Json.Snapshot.Consumer(track, { compression });
+```
+
+`mode` picks the namespace (`Stream` or `Snapshot`), and `compression` is a boolean there while the catalog carries `"deflate"` or nothing. Check both against `modeSupported` / `compressionSupported` first and skip the track if either is unrecognized, rather than guessing.
 
 ### Extensions
 

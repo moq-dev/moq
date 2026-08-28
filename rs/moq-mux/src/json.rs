@@ -130,8 +130,12 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		Ok(self.inner.update(value)?)
 	}
 
-	/// Finish the track. The catalog entry is removed when this handle drops.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Finish the track and retire its catalog entry.
+	///
+	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
+	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
+	/// dropping the handle without finishing retires the entry too.
+	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
 }
@@ -174,8 +178,12 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		Ok(self.inner.append(value)?)
 	}
 
-	/// Finish the track. The catalog entry is removed when this handle drops.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Finish the track and retire its catalog entry.
+	///
+	/// Consumes the handle, so a write after finishing cannot be expressed. Leaving the entry
+	/// advertising a closed track would only mislead a consumer that subscribed afterwards, so
+	/// dropping the handle without finishing retires the entry too.
+	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
 }
@@ -313,14 +321,17 @@ mod test {
 			.json_stream::<Value>("chat", Config::default().with_compression(true))
 			.unwrap();
 
+		let track = chat.consume();
 		let expected: Vec<Value> = (0..3).map(|n| json!({ "n": n })).collect();
 		for value in &expected {
 			chat.append(value).unwrap();
 		}
+		// `finish` retires the entry, so read both off the live track first.
+		let entry = entry(&catalog, "chat");
 		chat.finish().unwrap();
 
 		// The catalog is the only thing the reader is told; mode and compression come from it.
-		let consumer = Consumer::from_track(chat.consume(), &entry(&catalog, "chat")).unwrap();
+		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
 	}
@@ -330,12 +341,14 @@ mod test {
 		let (_broadcast, catalog) = catalog();
 		let mut status = catalog.json_snapshot::<Value>("status", Config::default()).unwrap();
 
+		let track = status.consume();
 		status.update(&json!({ "live": false })).unwrap();
 		status.update(&json!({ "live": true })).unwrap();
+		let entry = entry(&catalog, "status");
 		status.finish().unwrap();
 
 		// A late reader only sees the newest value, which is the point of snapshot mode.
-		let consumer = Consumer::from_track(status.consume(), &entry(&catalog, "status")).unwrap();
+		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Snapshot);
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
 	}
@@ -371,6 +384,18 @@ mod test {
 			!catalog.snapshot().json.tracks.contains_key("chat"),
 			"a track with no publisher must not stay advertised"
 		);
+	}
+
+	/// `finish` consumes the handle, so the entry goes with it: an entry advertising a closed track
+	/// only misleads a consumer that subscribes afterwards.
+	#[test]
+	fn finishing_retires_the_entry_too() {
+		let (_broadcast, catalog) = catalog();
+		let chat = catalog.json_stream::<Value>("chat", Config::default()).unwrap();
+		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
+
+		chat.finish().unwrap();
+		assert!(!catalog.snapshot().json.tracks.contains_key("chat"));
 	}
 
 	/// A catalog entry can exist with no local track behind it, e.g. one seeded at construction that
@@ -426,11 +451,11 @@ mod test {
 
 		let mut chat = catalog.json_stream::<Value>("chat", Config::default()).unwrap();
 		chat.append(&json!({ "text": "hello" })).unwrap();
-		chat.finish().unwrap();
 
 		let snapshot = catalog.snapshot();
 		let entry = snapshot.json_track("chat").expect("missing entry");
 		let mut consumer = entry.subscribe::<Value>(&source).await.unwrap();
+		chat.finish().unwrap();
 
 		assert_eq!(consumer.next().await.unwrap(), Some(json!({ "text": "hello" })));
 		assert_eq!(consumer.next().await.unwrap(), None);

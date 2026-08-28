@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Consumer, Producer } from "./index.ts";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
@@ -98,4 +98,26 @@ test("a backlog collapses to the newest value", async () => {
 
 	expect(await consumer.next()).toEqual(bytes(9));
 	expect(await consumer.next()).toBeUndefined();
+});
+
+test("a newer group preempts an open one", async () => {
+	// A group whose close is delayed must not park the reader while a newer value is available.
+	// Snapshot mode exists to deliver the current value, not to wait out a stale group's FIN, and
+	// groups ride independent QUIC streams so a newer one can land first.
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe());
+
+	const stale = track.appendGroup();
+	stale.writeFrame({ payload: bytes(1), timestamp: Time.Timestamp.now() });
+	expect(await consumer.next()).toEqual(bytes(1));
+
+	// A complete newer value arrives while the previous group is still open.
+	const fresh = track.appendGroup();
+	fresh.writeFrame({ payload: bytes(2), timestamp: Time.Timestamp.now() });
+	fresh.close();
+
+	expect(await consumer.next()).toEqual(bytes(2));
+
+	stale.close();
+	track.close();
 });

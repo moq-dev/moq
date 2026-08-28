@@ -4,12 +4,11 @@
 //! sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it
 //! was appended. For a latest-value document, use [`snapshot`](crate::snapshot) instead.
 //!
-//! On the wire the log normally rides a single group, one payload per frame. A later group
-//! continues the log rather than superseding an earlier one, which is what separates this from
-//! [`snapshot`](crate::snapshot); the producer only rolls a group to recover from a frame it could
-//! not write. With [`ProducerConfig::compression`] on, each group is one sync-flushed DEFLATE
-//! stream, so each payload compresses against the earlier ones and a run of similar payloads
-//! shrinks sharply.
+//! On the wire the log is a single group that is never rolled, one payload per frame. A payload
+//! that cannot be written ends the track rather than opening a second group: a log missing a record
+//! is not lossless, and a gap dressed up as a complete log is worse than a visible failure. With
+//! [`ProducerConfig::compression`] on, that one group is one sync-flushed DEFLATE stream, so each
+//! payload compresses against the earlier ones and a run of similar payloads shrinks sharply.
 
 mod consumer;
 mod producer;
@@ -128,11 +127,11 @@ mod test {
 		);
 	}
 
-	/// A publisher that rolls the group to recover from a frame it could not write starts a cold
-	/// window; the log continues across the boundary rather than restarting, so every payload
-	/// survives. Written by hand because the producer only rolls on a write failure.
+	/// A conforming publisher writes one group, but the consumer tolerates one that writes more:
+	/// each group starts a cold window and its payloads are still delivered. Written by hand
+	/// because this producer never rolls.
 	#[test]
-	fn a_rolled_group_continues_the_log() {
+	fn a_second_group_is_still_read() {
 		let mut track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
@@ -154,6 +153,35 @@ mod test {
 		track.finish().unwrap();
 
 		assert_eq!(drain(subscriber, true), expected);
+	}
+
+	/// Groups are separate QUIC streams, so a second group can land before the first. Reading in
+	/// arrival order still delivers both; the monotonic `next_group` would skip past the lower
+	/// sequence and drop it for good.
+	#[test]
+	fn a_late_group_is_not_dropped() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(None);
+
+		// Publish sequence 1 before sequence 0, the way reordering delivers them.
+		for sequence in [1u64, 0] {
+			let mut flate = moq_flate::Encoder::new();
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), flate.frame(&[sequence as u8; 8]))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		track.finish().unwrap();
+
+		// Delivered in arrival order rather than sequence order, but nothing is lost.
+		assert_eq!(
+			drain(subscriber, true),
+			vec![Bytes::from(vec![1u8; 8]), Bytes::from(vec![0u8; 8])]
+		);
 	}
 
 	/// `finish` closes the underlying track, so a later append fails rather than being silently

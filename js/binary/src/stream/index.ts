@@ -5,10 +5,10 @@
  * sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it
  * was appended. For a latest-value document, use the `Snapshot` module instead.
  *
- * On the wire the log normally rides a **single group**, one payload per frame. A later group
- * continues the log rather than superseding an earlier one, which is what separates this from
- * `Snapshot`; the producer only rolls a group to recover from a frame it could not write. With
- * {@link ProducerConfig.compression} on, each group is one DEFLATE window, so each payload
+ * On the wire the log rides a **single group** that is never rolled, one payload per frame. A
+ * payload that cannot be written ends the track rather than opening a second group: a log missing a
+ * record is not lossless, and a gap dressed up as a complete log is worse than a visible failure.
+ * With {@link ProducerConfig.compression} on, that one group is one DEFLATE window, so each payload
  * compresses against the earlier ones and a run of similar payloads shrinks sharply.
  *
  * @module

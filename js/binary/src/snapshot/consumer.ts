@@ -18,7 +18,8 @@ export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#decompress: boolean;
 
-	#group?: Moq.Group.Consumer;
+	/// The group the current window belongs to, so a boundary restarts it.
+	#group?: number;
 	// The DEFLATE window for the current group, present while decompressing. A snapshot group is
 	// normally one frame, but the window is per group either way.
 	#flate?: Flate;
@@ -31,53 +32,37 @@ export class Consumer {
 	/**
 	 * Get the next value, or `undefined` once the track ends.
 	 *
-	 * Skips straight to the newest group, so a late joiner (or a consumer that has fallen behind)
-	 * starts at the current value instead of replaying superseded ones, and its latency never grows
-	 * with the backlog. Within that group everything already buffered is drained and only the last
-	 * value yielded; a compressed group's frames are still decoded in order, since they share one
-	 * window.
+	 * Every group is a complete value, so any older group is already superseded. Raising the read
+	 * floor to the newest sequence before each read does two things: it discards a backlog instead
+	 * of decoding every superseded value in turn, and it abandons a group a newer one has
+	 * superseded rather than waiting out its close. A snapshot reader's latency therefore never
+	 * grows with the queue, and never depends on a stale group's FIN arriving.
 	 *
 	 * This consumer owns its subscriber's read cursor, which is what lets it discard the backlog.
 	 */
 	async next(): Promise<Uint8Array | undefined> {
 		for (;;) {
-			if (!this.#group) {
-				// Every group is a complete value, so a buffered older one is already superseded.
-				// Raising the floor to the newest sequence drops them instead of decoding each in turn.
-				const latest = this.#track.latest();
-				if (latest !== undefined) this.#track.startAt(latest);
+			const latest = this.#track.latest();
+			if (latest !== undefined) this.#track.startAt(latest);
 
-				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				this.#group = await this.#track.nextGroup();
-				if (!this.#group) return undefined;
-				// Each group is its own compressed stream, so the window starts cold.
+			let next: Awaited<ReturnType<Moq.Track.Subscriber["readFrameSequence"]>>;
+			try {
+				next = await this.#track.readFrameSequence();
+			} catch {
+				// Fell behind this group's eviction window, or it was reset. The next group carries a
+				// complete value of its own, so resync there rather than surfacing a partial read.
+				continue;
+			}
+
+			if (!next) return undefined;
+
+			// Each group is its own compressed stream, so a boundary starts a cold window.
+			if (next.group !== this.#group) {
+				this.#group = next.group;
 				this.#flate = this.#decompress ? new Flate() : undefined;
 			}
 
-			let latest: Uint8Array | undefined;
-			for (let frame = this.#group.tryReadFrame(); frame !== undefined; frame = this.#group.tryReadFrame()) {
-				latest = this.#decode(frame.payload);
-			}
-			if (latest !== undefined) return latest;
-
-			// Nothing buffered: block for the next frame (or the group's end).
-			let frame: Moq.Group.Frame | undefined;
-			try {
-				frame = await this.#group.readFrame();
-			} catch {
-				// The group was reset or we fell behind its eviction window. Resync from the next group,
-				// which carries a complete value of its own, so no partial state is presented.
-				this.#group = undefined;
-				continue;
-			}
-
-			if (frame === undefined) {
-				// The group is exhausted; wait for a newer one.
-				this.#group = undefined;
-				continue;
-			}
-
-			return this.#decode(frame.payload);
+			return this.#flate ? this.#flate.frame(next.payload) : next.payload;
 		}
 	}
 
@@ -88,10 +73,5 @@ export class Consumer {
 			if (value === undefined) return;
 			yield value;
 		}
-	}
-
-	// Decompress one frame, if the track is compressed.
-	#decode(payload: Uint8Array): Uint8Array {
-		return this.#flate ? this.#flate.frame(payload) : payload;
 	}
 }

@@ -322,10 +322,11 @@ A group's first frame is a complete value.
 A `json` track MAY follow it with JSON Merge Patch ({{!RFC7396}}) deltas applied in order; a `binary` track MUST write exactly one frame per group, since an opaque payload has no delta form.
 
 A `stream` track is lossless.
-It carries one self-contained payload per frame, in order, with nothing superseded.
-A publisher SHOULD write the whole log into a single group, and a later group MUST continue the log rather than supersede an earlier one, which is what distinguishes a `stream` group from a `snapshot` group.
-A publisher MAY roll the group to recover from a frame it could not write; the new group then starts a cold compression window ({{compression}}).
-A consumer therefore reads a `stream` track's groups in order and MUST NOT skip to the newest.
+It is a single group, never rolled, carrying one self-contained payload per frame in order with nothing superseded.
+
+A publisher that cannot write a payload MUST close the track rather than continue the log in a second group.
+A log missing a payload is not lossless, so a second group would present a gap as if it were a complete log; ending the track surfaces the failure instead, and a publisher with more to say opens a new track.
+A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
 
 ### compression {#field-compression}
 ~~~
