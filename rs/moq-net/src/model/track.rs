@@ -1441,6 +1441,10 @@ impl Producer {
 	///
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
+	///
+	/// The read cursor starts where the subscription says: at the group it named, or at the
+	/// oldest cached one its [`Subscription::max_age`] still considers fresh, which is the
+	/// latest group at the default budget of zero.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let preferences = subscription.into().unwrap_or_default();
 
@@ -1449,23 +1453,27 @@ impl Producer {
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
 		let info = self.state.read().info.clone().expect("producer always has info");
+
+		// Hoisted, like `broadcast` below: a `read()` guard taken inside the struct literal
+		// would live to the end of it, deadlocking against the reads these make.
+		let state = self.state.consume();
+		let min_sequence = resolve_start(&state, &preferences);
+
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 		let drift_cap = kio::Producer::new(None);
 
-		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
-		// deadlocking against the `consume()` below.
 		let broadcast = self.state.read().broadcast.clone();
 		Subscriber {
 			name: self.name.clone(),
 			broadcast,
 			info,
 			inner: SubscriberKind::Plain(PlainSubscriber {
-				state: self.state.consume(),
+				state,
 				subscription,
+				min_sequence,
 				index: 0,
 				datagram_index: 0,
-				min_sequence: 0,
 				next_sequence: 0,
 				end_sequence: None,
 				parked: BTreeMap::new(),
@@ -1830,6 +1838,32 @@ fn servable_cap(cursor: Option<u64>, outer: Option<u64>) -> Option<u64> {
 	super::subscription::min_some(cursor, outer)
 }
 
+/// Where a new subscription's read cursor starts.
+///
+/// The group it named, or, failing that, the oldest cached group its own
+/// [`Subscription::max_age`] still considers fresh. A zero budget (the default) resolves to
+/// the latest group, since every older group is stale the moment a newer one exists, so a
+/// subscription that says nothing still joins at the live edge. A larger budget starts
+/// further back, handing a subscriber that tolerates some age the head of what it can still
+/// use instead of only the live edge.
+///
+/// Deriving the cursor from the same budget that expires a group is what keeps the two from
+/// disagreeing: a subscriber is never positioned over history it would discard on arrival,
+/// nor past a group it would have taken. It measures against the same capped live edge for
+/// the same reason, since a route running on past the cap is data this subscription can never
+/// be served and so cannot age it. An empty cache resolves to 0, where the first group
+/// produced lands.
+fn resolve_start(state: &kio::Consumer<TrackState>, subscription: &Subscription) -> u64 {
+	if let Some(start) = subscription.start {
+		return start.group;
+	}
+
+	let cap = subscription.end.and_then(|end| end.before()).map(|end| end.group);
+	let state = state.read();
+	let budget = clamp_max_age(subscription.max_age, state.max_age_bound());
+	state.fresh_start(budget, cap).unwrap_or(0)
+}
+
 /// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
 /// group longer than the publisher keeps it around.
 ///
@@ -2087,6 +2121,10 @@ impl Consumer {
 	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
+	///
+	/// The read cursor starts where the subscription says: at the group it named, or at the
+	/// oldest cached one its [`Subscription::max_age`] still considers fresh, which is the
+	/// latest group at the default budget of zero.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
@@ -2390,6 +2428,7 @@ impl Subscribing {
 					.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
 				let drift_cap = kio::Producer::new(None);
+				let min_sequence = resolve_start(state, &self.subscription.read());
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
 					broadcast: self.broadcast.clone(),
@@ -2397,9 +2436,9 @@ impl Subscribing {
 					inner: SubscriberKind::Plain(PlainSubscriber {
 						state: state.clone(),
 						subscription: self.subscription.clone(),
+						min_sequence,
 						index: 0,
 						datagram_index: 0,
-						min_sequence: 0,
 						next_sequence: 0,
 						end_sequence: None,
 						parked: BTreeMap::new(),
@@ -2686,6 +2725,11 @@ impl kio::Pollable for Fetching {
 /// cursor it's never told about. So setting only the cursor still transfers the skipped
 /// groups, and setting only the preference still returns groups another subscriber asked
 /// for. Set both to skip them *and* avoid the transfer.
+///
+/// The one place they meet is where the cursor comes from. A new subscriber starts at the
+/// group its own subscription named, or, failing that, at the oldest cached group its
+/// [`Subscription::max_age`] still considers fresh, which is the latest group at the default
+/// budget of zero. Every later move is the caller's.
 pub struct Subscriber {
 	name: Arc<str>,
 	// The broadcast this track belongs to; see [`Self::broadcast`].
@@ -2915,15 +2959,6 @@ impl PlainSubscriber {
 				edge: state.live_edge(cap),
 			}))
 		})
-	}
-
-	/// The oldest cached group this cursor's own budget still considers fresh, resolved
-	/// against the same clamped budget and live edge a poll would use.
-	fn fresh_start(&self) -> Option<u64> {
-		let max_age = self.subscription.read().max_age;
-		let cap = servable_cap(self.end_sequence, self.stale_cap);
-		let state = self.state.read();
-		state.fresh_start(clamp_max_age(max_age, state.max_age_bound()), cap)
 	}
 
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
@@ -3407,25 +3442,6 @@ impl Subscriber {
 	pub fn latest(&self) -> Option<u64> {
 		match &self.inner {
 			SubscriberKind::Plain(plain) => plain.state.read().max_sequence,
-			SubscriberKind::Spliced(spliced) => spliced.latest(),
-		}
-	}
-
-	/// Where a subscription that named no [`Subscription::start`] should begin: the oldest
-	/// cached group this subscriber's [`Subscription::max_age`] still considers fresh.
-	///
-	/// A zero budget (the default) resolves to [`Self::latest`], since every non-latest
-	/// group is stale the moment a newer one exists. A larger budget resolves further back,
-	/// so a subscriber that tolerates some age is handed the head of what it can still use
-	/// instead of only the live edge, without asking for history it would skip on arrival.
-	/// `None` when nothing is cached.
-	///
-	/// A spliced (route-migrated) track resolves to [`Self::latest`]: its cache is a
-	/// composition of segments rather than one window, so there is no single oldest group to
-	/// measure against the live edge.
-	pub fn fresh_start(&self) -> Option<u64> {
-		match &self.inner {
-			SubscriberKind::Plain(plain) => plain.fresh_start(),
 			SubscriberKind::Spliced(spliced) => spliced.latest(),
 		}
 	}
@@ -4391,23 +4407,26 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
+	/// The cursor a subscription starts at, without going through `subscribe`.
+	fn start_of(producer: &Producer, subscription: &Subscription) -> u64 {
+		resolve_start(&producer.state.consume(), subscription)
+	}
+
 	#[test]
-	fn fresh_start_without_a_budget_is_the_live_edge() {
+	fn a_start_resolves_to_the_live_edge_without_a_budget() {
 		let mut producer = track_producer("test", None);
 		for second in 0..5 {
 			append_at(&mut producer, second * 1000);
 		}
 
-		// The default zero budget calls every non-latest group stale, so the only start
-		// that delivers anything is the live edge: what a publisher already picked before
-		// a start could be resolved from the budget at all.
-		let subscriber = producer.subscribe(None);
-		assert_eq!(subscriber.fresh_start(), subscriber.latest());
-		assert_eq!(subscriber.fresh_start(), Some(4));
+		// The default zero budget calls every non-latest group stale, so the only start that
+		// delivers anything is the live edge. A subscription that says nothing therefore
+		// joins exactly where it always did.
+		assert_eq!(start_of(&producer, &Subscription::default()), 4);
 	}
 
 	#[test]
-	fn fresh_start_reaches_back_over_the_budget() {
+	fn a_start_reaches_back_over_the_budget() {
 		let mut producer = track_producer("test", None);
 		for second in 0..5 {
 			append_at(&mut producer, second * 1000);
@@ -4415,45 +4434,75 @@ mod test {
 
 		// Two seconds of tolerance covers the groups presenting within 2s of the live edge,
 		// so the start resolves to the oldest of those rather than the live edge. It has to
-		// agree with what delivery keeps, or the publisher would either serve groups the
-		// subscriber discards on arrival or withhold ones it would have taken.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(2)));
-		assert_eq!(subscriber.fresh_start(), Some(2));
+		// agree with what delivery keeps, or a subscriber would either be positioned over
+		// groups it discards on arrival or past ones it would have taken.
+		let budget = Subscription::default().with_max_age(Duration::from_secs(2));
+		assert_eq!(start_of(&producer, &budget), 2);
+
+		let mut subscriber = producer.subscribe(budget);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
 	#[test]
-	fn fresh_start_is_clamped_to_the_publisher_window() {
-		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
-		for second in 0..5 {
-			append_at(&mut producer, second * 1000);
-		}
-
-		// Asking to tolerate ten seconds cannot reach back further than the publisher keeps
-		// a group live, the same clamp delivery applies.
-		let subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
-		assert_eq!(subscriber.fresh_start(), Some(2));
-	}
-
-	#[test]
-	fn fresh_start_is_none_until_a_group_exists() {
-		let producer = track_producer("test", None);
-		let subscriber = producer.subscribe(replay());
-		assert_eq!(subscriber.fresh_start(), None);
-	}
-
-	#[test]
-	fn fresh_start_stays_under_the_end_cap() {
+	fn a_named_start_wins_over_the_budget() {
 		let mut producer = track_producer("test", None);
 		for second in 0..5 {
 			append_at(&mut producer, second * 1000);
 		}
 
-		// The cap moves the live edge the budget measures against, so a subscription that
-		// stops at group 2 starts where 2 is the edge rather than 4.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
-		subscriber.end_at(2);
-		assert_eq!(subscriber.fresh_start(), Some(1));
+		// An explicit start is the request; the budget only fills in for its absence. It is
+		// still a start, not an exemption: delivery expires what the budget convicts, which
+		// is why asking for group 0 at real time yields the live edge anyway.
+		let named = Subscription::default().with_start(Position::group(1));
+		assert_eq!(start_of(&producer, &named), 1);
+
+		let mut subscriber = producer.subscribe(named);
+		assert_eq!(drain(&mut subscriber), vec![4]);
+	}
+
+	#[test]
+	fn a_start_is_clamped_to_the_publisher_window() {
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
+		for second in 0..5 {
+			append_at(&mut producer, second * 1000);
+		}
+
+		// Asking to tolerate ten seconds cannot reach back further than the publisher keeps a
+		// group live, the same clamp delivery applies.
+		let over = Subscription::default().with_max_age(Duration::from_secs(10));
+		assert_eq!(start_of(&producer, &over), 2);
+	}
+
+	#[test]
+	fn a_start_on_an_empty_track_takes_the_first_group() {
+		let producer = track_producer("test", None);
+
+		// Nothing cached to measure against, so the cursor sits where the first group lands
+		// rather than skipping it.
+		assert_eq!(start_of(&producer, &replay()), 0);
+	}
+
+	#[test]
+	fn a_resolved_start_is_a_floor_for_later_arrivals() {
+		let mut producer = track_producer("test", None);
+		for (sequence, millis) in [(5, 0), (6, 1000), (7, 2000)] {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		// A budget covering everything cached resolves the start to the oldest of it, 5.
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(5)));
+
+		// That start is a floor like any other, so a group arriving below it afterwards is
+		// behind the subscription, even carrying a timestamp the budget would admit.
+		let mut late = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		late.write_frame(Timestamp::from_millis(500).unwrap(), bytes::Bytes::from_static(b"late"))
+			.unwrap();
+		late.finish().unwrap();
+		assert_eq!(drain(&mut subscriber), vec![5, 6, 7]);
 	}
 
 	#[test]
@@ -4936,13 +4985,17 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_counts_what_it_skips() {
 		let mut producer = track_producer("test", None);
+
+		// Subscribed before any of it exists, so every group below the live edge is one this
+		// reader fell behind rather than backlog it joined past: a start resolves once, and
+		// what it resolved to is not a skip.
+		let mut subscriber = producer.subscribe(None);
 		for second in 0..4 {
 			append_at(&mut producer, second * 1000);
 		}
 
 		// A silent skip is indistinguishable from loss whichever read did it, so the
 		// frame-level path reports its drops like the group-level ones.
-		let mut subscriber = producer.subscribe(None);
 		subscriber.read_frame().await.unwrap().expect("a frame");
 		let stale = subscriber.take_stale();
 		assert_eq!(stale.groups, 3);
@@ -4952,6 +5005,10 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_counts_stale_groups_at_eof() {
 		let mut producer = track_producer("test", None);
+
+		// Subscribed first, so the two groups below the edge are ones this reader fell behind
+		// rather than backlog its start resolved past. See read_frame_counts_what_it_skips.
+		let mut subscriber = producer.subscribe(None);
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1000);
 
@@ -4965,7 +5022,6 @@ mod test {
 		edge.finish().unwrap();
 		producer.finish().unwrap();
 
-		let mut subscriber = producer.subscribe(None);
 		assert!(subscriber.read_frame().await.unwrap().is_none());
 		let stale = subscriber.take_stale();
 		assert_eq!(stale.groups, 2);

@@ -224,7 +224,13 @@ export class Consumer {
 		this.#broadcast = broadcast;
 	}
 
-	/** Open a live subscription to the track. */
+	/**
+	 * Open a live subscription to the track.
+	 *
+	 * The cursor starts where the subscription says: at the group it named, or at the oldest
+	 * cached one its {@link Subscription.maxAge} still considers fresh, which is the latest
+	 * group at the default budget of zero.
+	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
 	}
@@ -394,7 +400,13 @@ export class Producer {
 		return this;
 	}
 
-	/** An independent {@link Subscriber} receiving a full copy of this track's groups. */
+	/**
+	 * An independent {@link Subscriber} reading this track's groups.
+	 *
+	 * Its cursor starts where the subscription says: at the group it named, or at the oldest
+	 * cached one its {@link Subscription.maxAge} still considers fresh, which is the latest
+	 * group at the default budget of zero.
+	 */
 	subscribe(options: Subscription = {}): Subscriber {
 		const sink = new TrackState(options);
 		this.#addSink(sink);
@@ -692,12 +704,12 @@ export class Subscriber {
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	#enforceLatency = true;
 
-	#drift(): {
+	#drift(cap?: number): {
 		budget: number;
 		wall?: { sequence: number; time: number };
 		presentation?: { sequence: number; timestamp: Timestamp };
 	} {
-		const { end } = this.#cursor.peek();
+		const end = cap ?? this.#cursor.peek().end;
 		let wall: { sequence: number; time: number } | undefined;
 		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
 		for (const { group, time } of this.#state.timeline.values()) {
@@ -775,14 +787,49 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
+		this.#cursor.set({ start: this.#resolveStart() });
+	}
+
+	/**
+	 * Where this subscription's read cursor starts.
+	 *
+	 * The group it named, or, failing that, the oldest cached group its own
+	 * {@link Subscription.maxAge} still considers fresh. A zero budget (the default) resolves
+	 * to the latest group, since every older group is stale the moment a newer one exists, so
+	 * a subscription that says nothing still joins at the live edge. A larger budget starts
+	 * further back, handing a subscriber that tolerates some age the head of what it can still
+	 * use instead of only the live edge.
+	 *
+	 * Deriving the cursor from the same budget that expires a group is what keeps the two from
+	 * disagreeing: a subscriber is never positioned over history it would discard on arrival,
+	 * nor past a group it would have taken. An empty cache resolves to 0, where the first
+	 * group produced lands.
+	 */
+	#resolveStart(): number {
+		const subscription = this.#state.update.peek();
+		if (subscription?.startGroup !== undefined) return subscription.startGroup;
+
+		const end = subscription?.endGroup;
+		const drift = this.#drift(end);
+
+		let oldest: number | undefined;
+		for (const { group } of this.#state.timeline.values()) {
+			if (end !== undefined && group.sequence > end) continue;
+			if (group.closed.peek() instanceof Error) continue;
+			if (oldest !== undefined && oldest <= group.sequence) continue;
+			if (this.#isStale(group, drift)) continue;
+			oldest = group.sequence;
+		}
+		return oldest ?? 0;
 	}
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
-		hooks.ignoreLatency = (subscriber) => {
+		hooks.exemptFetch = (subscriber) => {
 			subscriber.#enforceLatency = false;
+			subscriber.#cursor.update((cursor) => ({ ...cursor, start: 0 }));
 		};
 	}
 
@@ -810,31 +857,6 @@ export class Subscriber {
 	/** Return the latest group sequence observed on this track, if any. */
 	latest(): number | undefined {
 		return this.#state.latest;
-	}
-
-	/**
-	 * Where a subscription that named no {@link Subscription.startGroup} should begin: the
-	 * oldest cached group this subscriber's {@link Subscription.maxAge} still considers fresh.
-	 *
-	 * A zero budget (the default) resolves to {@link latest}, since every non-latest group is
-	 * stale the moment a newer one exists. A larger budget resolves further back, so a
-	 * subscriber that tolerates some age is handed the head of what it can still use instead
-	 * of only the live edge, without asking for history it would skip on arrival. Undefined
-	 * when nothing is cached.
-	 */
-	freshStart(): number | undefined {
-		const drift = this.#drift();
-		const { end } = this.#cursor.peek();
-
-		let oldest: number | undefined;
-		for (const { group } of this.#state.timeline.values()) {
-			if (end !== undefined && group.sequence > end) continue;
-			if (group.closed.peek() instanceof Error) continue;
-			if (oldest !== undefined && oldest <= group.sequence) continue;
-			if (this.#isStale(group, drift)) continue;
-			oldest = group.sequence;
-		}
-		return oldest;
 	}
 
 	/**

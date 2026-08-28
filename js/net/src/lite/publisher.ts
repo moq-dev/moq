@@ -279,19 +279,22 @@ function carriesMaxAge(version: Version): boolean {
 }
 
 /**
- * Where a subscription that named no Group Start begins.
+ * Position a subscription's read cursor for the wire serving it.
  *
- * The oldest group its own {@link servingMaxAge} budget still considers fresh, which is the
- * live edge for the default zero budget. A subscriber that tolerates some age is then handed
- * the head of what it can still use, rather than joining at the live edge and missing a
- * track's opening groups that are sitting right here in the cache.
+ * Normally there is nothing to do: `Track.Producer.subscribe` resolves the cursor from the
+ * subscription itself, at the group it named or the oldest one its own Max Age still
+ * considers fresh.
  *
- * A wire that cannot carry Max Age has no budget to resolve a start from: those sessions are
- * served with an unbounded one so a legacy subscriber never has backlog dropped under it, and
- * that must not read as a request to replay the whole cache on join.
+ * A wire that cannot carry Max Age is the exception. Those sessions are served with an
+ * unbounded budget so a legacy subscriber never has backlog dropped under it (see
+ * {@link servingMaxAge}), and read as a start that would replay the whole cache on join.
+ * Their drafts mean the latest group when no start is named, so say so explicitly.
  */
-function resolvedStart(track: track.Subscriber, version: Version): number | undefined {
-	return carriesMaxAge(version) ? track.freshStart() : track.latest();
+function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
+	if (carriesMaxAge(version) || startGroup !== undefined) return;
+
+	const latest = track.latest();
+	if (latest !== undefined) track.startAt(latest);
 }
 
 /**
@@ -491,8 +494,7 @@ export class Publisher {
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
-		const startGroup = msg.startGroup ?? resolvedStart(track, this.version);
-		if (startGroup !== undefined) track.startAt(startGroup);
+		positionCursor(track, this.version, msg.startGroup);
 		track.endAt(msg.endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the

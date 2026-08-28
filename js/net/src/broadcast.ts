@@ -114,7 +114,7 @@ async function fetchGroup(
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	const subscriber = subscribe(state, name, { priority: options.priority });
-	hooks.ignoreLatency(subscriber);
+	hooks.exemptFetch(subscriber);
 	try {
 		for (;;) {
 			const group = await subscriber.recvGroup();

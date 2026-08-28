@@ -108,20 +108,23 @@ fn serving_max_age(version: Version, requested: Duration) -> Duration {
 	}
 }
 
-/// Where a subscription that named no Group Start begins.
+/// Position a subscription's read cursor for the wire serving it.
 ///
-/// The oldest group its own [`serving_max_age`] budget still considers fresh, which is the
-/// live edge for the default zero budget. A subscriber that tolerates some age is then
-/// handed the head of what it can still use, rather than joining at the live edge and
-/// missing a track's opening groups that are sitting right here in the cache.
+/// Normally there is nothing to do: `Consumer::subscribe` resolves the cursor from the
+/// subscription itself, at the group it named or the oldest one its own Max Age still
+/// considers fresh.
 ///
-/// A wire that cannot carry Max Age has no budget to resolve a start from: those sessions
-/// are served with an unbounded one so a legacy subscriber never has backlog dropped under
-/// it, and that must not read as a request to replay the whole cache on join.
-fn resolved_start(track: &track::Subscriber, version: Version) -> Option<u64> {
-	match version.carries_max_age() {
-		true => track.fresh_start(),
-		false => track.latest(),
+/// A wire that cannot carry Max Age is the exception. Those sessions are served with an
+/// unbounded budget so a legacy subscriber never has backlog dropped under it (see
+/// [`serving_max_age`]), and read as a start that would replay the whole cache on join.
+/// Their drafts mean the latest group when no start is named, so say so explicitly.
+fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>) {
+	if version.carries_max_age() || start_group.is_some() {
+		return;
+	}
+
+	if let Some(latest) = track.latest() {
+		track.start_at(latest);
 	}
 }
 
@@ -1776,15 +1779,15 @@ mod test {
 		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
 	}
 
-	/// A subscription that names no start resolves one from its own budget, so a subscriber
-	/// that tolerates some age is handed the head of what it can still use instead of only
-	/// the live edge. A wire that cannot declare a budget resolves to the live edge: those
-	/// sessions are served with an unbounded budget so nothing is dropped under them, and
-	/// reading that as a start would replay the entire cache to every legacy subscriber.
+	/// A wire that cannot declare a budget is served from the live edge. Those sessions get an
+	/// unbounded budget so nothing is dropped under them, and the cursor that budget resolves
+	/// to would replay the entire cache to every legacy subscriber.
 	#[test]
-	fn an_absent_start_resolves_from_the_budget() {
+	fn a_legacy_wire_is_pinned_to_the_live_edge() {
+		use futures::FutureExt;
+
 		let mut producer = track_producer("test");
-		for second in 0..5 {
+		for second in 0..3 {
 			let mut group = producer.append_group().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(second * 1000).unwrap(), b"x".to_vec())
@@ -1792,13 +1795,37 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		let live = producer.subscribe(None);
-		assert_eq!(resolved_start(&live, Version::Lite06Wip), Some(4));
+		// What run_subscribe hands the model for a peer that sent no budget at all.
+		let served = |version| {
+			producer.subscribe(
+				track::Subscription::default().with_max_age(serving_max_age(version, std::time::Duration::ZERO)),
+			)
+		};
+		let drain = |subscriber: &mut track::Subscriber| {
+			let mut sequences = Vec::new();
+			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
+				sequences.push(group.sequence);
+			}
+			sequences
+		};
 
-		let buffered =
-			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(2)));
-		assert_eq!(resolved_start(&buffered, Version::Lite06Wip), Some(2));
-		assert_eq!(resolved_start(&buffered, Version::Lite01), Some(4));
+		let mut unpinned = served(Version::Lite01);
+		assert_eq!(
+			drain(&mut unpinned),
+			vec![0, 1, 2],
+			"the unbounded budget alone resolves to the whole cache"
+		);
+
+		let mut legacy = served(Version::Lite01);
+		position_cursor(&mut legacy, Version::Lite01, None);
+		assert_eq!(drain(&mut legacy), vec![2]);
+
+		// A budget the peer actually declared is a real request, so the start it resolved to
+		// stands.
+		let mut declared =
+			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+		position_cursor(&mut declared, Version::Lite06Wip, None);
+		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
 	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
@@ -2905,15 +2932,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		bounds: Bounds,
 		track_priority_tx: kio::Producer<u8>,
 	) -> Self {
-		// Start the consumer at the specified sequence. Otherwise start at the oldest group
-		// the subscriber's own max age still considers fresh, which is the latest group for
-		// the default zero budget: a subscriber that tolerates some age gets the head of what
-		// it can still use, rather than joining at the live edge and discarding a track's
-		// opening groups that are sitting right here in the cache.
-		let resolved = resolved_start(&track, ctx.version);
-		if let Some(start_group) = bounds.start_group.or(resolved) {
-			track.start_at(start_group);
-		}
+		position_cursor(&mut track, ctx.version, bounds.start_group);
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.

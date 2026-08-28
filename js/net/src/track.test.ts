@@ -270,29 +270,38 @@ test("latency budget admits groups within its presentation-time window", async (
 	expect((await track.recvGroup())?.sequence).toBe(2);
 });
 
-test("freshStart resolves a start from the subscriber's own budget", () => {
-	// A subscription that names no start resolves one from its budget, so a subscriber that
-	// tolerates some age is handed the head of what it can still use instead of only the live
-	// edge. It has to agree with what delivery keeps, or the publisher would either serve
-	// groups the subscriber discards on arrival or withhold ones it would have taken.
-	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
-	const live = producer.subscribe();
-	const buffered = producer.subscribe({ maxAge: 1500 });
-
-	expect(live.freshStart()).toBeUndefined();
-
-	for (const timestamp of [0, 1000, 2000]) {
-		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+test("a resolved start is a floor for later arrivals", async () => {
+	// A subscription that names no start resolves one from its budget when it opens: the
+	// oldest cached group that budget still admits. That start is a floor like any other, so a
+	// group arriving below it afterwards is behind the subscription, even carrying a timestamp
+	// the budget would otherwise admit.
+	const producer = new TrackProducer("test").accept({ maxAge: 30_000 });
+	for (const [sequence, timestamp] of [
+		[5, 0],
+		[6, 1000],
+		[7, 2000],
+	]) {
+		const group = new GroupProducer(sequence);
+		producer.writeGroup(group);
+		group.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+		group.close();
 	}
 
-	// The default zero budget calls every non-latest group stale, so the only start that
-	// delivers anything is the live edge.
-	expect(live.freshStart()).toBe(live.latest());
-	expect(live.freshStart()).toBe(2);
-	expect(buffered.freshStart()).toBe(1);
+	const track = producer.subscribe({ maxAge: 5000 });
+
+	const late = new GroupProducer(4);
+	producer.writeGroup(late);
+	late.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.fromMillis(500) });
+	late.close();
+
+	expect((await track.recvGroup())?.sequence).toBe(5);
+	expect((await track.recvGroup())?.sequence).toBe(6);
+	expect((await track.recvGroup())?.sequence).toBe(7);
+	producer.close();
+	expect(await track.recvGroup()).toBeUndefined();
 });
 
-test("freshStart is clamped to the publisher's window", () => {
+test("a start is clamped to the publisher's window", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 1500 });
 	const track = producer.subscribe({ maxAge: 60_000 });
 
@@ -302,7 +311,7 @@ test("freshStart is clamped to the publisher's window", () => {
 
 	// Asking to tolerate a minute cannot reach back further than the publisher keeps a group
 	// live, the same clamp delivery applies.
-	expect(track.freshStart()).toBe(1);
+	expect((await track.recvGroup())?.sequence).toBe(1);
 });
 
 test("wall-clock age expires a group stalled before its first frame", async () => {
