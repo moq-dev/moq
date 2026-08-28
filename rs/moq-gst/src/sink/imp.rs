@@ -419,12 +419,13 @@ impl ElementImpl for MoqSink {
 			}
 			// The parent goes first, because it is what deactivates the pads and waits for the streaming
 			// functions to return; finalizing the producers before that lets a chain function write into a
-			// finalized producer. The cleanup runs whatever the parent answers, since a failed downward
-			// transition still leaves nothing that would ever release the publication.
+			// finalized producer. A failed parent leaves the element in PAUSED rather than committing the
+			// transition, so the session stays with it: tearing down anyway would leave a PAUSED element
+			// publishing nothing, with no transition left to build a replacement. The retry cleans up.
 			gst::StateChange::PausedToReady => {
-				let result = self.parent_change_state(transition);
+				let success = self.parent_change_state(transition)?;
 				self.stop_session();
-				result
+				Ok(success)
 			}
 			_ => self.parent_change_state(transition),
 		}

@@ -195,8 +195,8 @@ fn ready_to_paused_completes_without_a_buffer() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// The regression: a failed chain-up used to leave the session publishing in READY, where no later
-// transition would ever stop it.
+// A failed chain-up must leave nothing publishing: the element has no READY -> NULL path that would
+// stop a session later, so a publication surviving here survives until the element is destroyed.
 #[test]
 fn a_failed_ready_to_paused_rolls_back_the_publication() {
 	init();
@@ -215,24 +215,77 @@ fn a_failed_ready_to_paused_rolls_back_the_publication() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// Going down, the cleanup is unconditional for the same reason. This passed before the reordering too:
-// it guards the property, not the ordering, which is a race no hermetic test observes.
+// A failed parent leaves the element in PAUSED, so the session stays with it. Tearing it down would
+// leave a PAUSED element publishing nothing and no transition left to build a replacement.
 #[test]
-fn a_failed_paused_to_ready_still_releases_the_publication() {
+fn a_failed_paused_to_ready_keeps_the_publication() {
 	init();
 	let sink = publisher();
 	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
 	let (blocker, enabled) = state_change_blocker(false);
 	sink.add_pad(&blocker).expect("add deactivation blocker");
 	sink.set_state(gst::State::Paused).expect("start the publication");
+	pad.set_active(true).expect("activate the pad");
+	assert!(send_caps(&pad));
 
 	assert!(
 		sink.set_state(gst::State::Ready).is_err(),
 		"the parent transition reached the controlled deactivation failure"
 	);
-	assert_pad_has_no_live_publication(&pad);
+	assert!(
+		pad.property::<Option<String>>("track").is_some(),
+		"the element is still in PAUSED, so its publication is still live"
+	);
 
+	// The retry succeeds and is what releases it.
 	enabled.store(false, Ordering::SeqCst);
+	sink.set_state(gst::State::Ready).expect("the retry completes");
+	assert_eq!(
+		pad.property::<Option<String>>("track"),
+		None,
+		"reaching READY released the reservation"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// The teardown ordering: the parent is what deactivates the pads and waits for the streaming functions
+// to return, so the publication has to outlive that. Finalizing first lets a chain function still in
+// flight write into a finalized producer. Observed from inside pad deactivation, where a streaming
+// function would be.
+#[test]
+fn the_publication_outlives_pad_deactivation() {
+	init();
+	let sink = publisher();
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+	pad.set_active(true).expect("activate the pad");
+	assert!(send_caps(&pad));
+	let reserved = pad.property::<Option<String>>("track").expect("CAPS reserved a track");
+
+	let seen = Arc::new(Mutex::new(None));
+	let record = seen.clone();
+	let observed = pad.clone();
+	let probe = gst::Pad::builder(gst::PadDirection::Sink)
+		.name("deactivation-probe")
+		.activatemode_function(move |_, _, _, active| {
+			if !active {
+				record
+					.lock()
+					.unwrap()
+					.replace(observed.property::<Option<String>>("track"));
+			}
+			Ok(())
+		})
+		.build();
+	sink.add_pad(&probe).expect("add the probe");
+	probe.set_active(true).expect("activate the probe");
+
+	sink.set_state(gst::State::Ready).expect("tear down");
+	assert_eq!(
+		seen.lock().unwrap().clone().flatten().as_deref(),
+		Some(reserved.as_str()),
+		"the publication was still live while the pads were being deactivated"
+	);
 	let _ = sink.set_state(gst::State::Null);
 }
 
