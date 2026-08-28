@@ -525,6 +525,8 @@ describe("i32 wrapping", () => {
 		insert(buffer, startMs + 100, 4410, { channels: 1, value: 0.5 });
 
 		expect(buffer.stalled).toBe(false);
+		// The anchor is preserved, so media time survives the wrap rather than reading negative.
+		expect(buffer.timestamp).toBe(Time.Micro.fromMilli(startMs as Time.Milli));
 		const output = read(buffer, 128, 1);
 		expect(output[0].length).toBe(128);
 		expect(output[0][0]).toBeCloseTo(0.5, 5);
