@@ -83,6 +83,15 @@ _doc-names-test:
     JSON
     just rs _doc-names "$scratch/ok.json"
 
+    # Same package, differing only by `-` vs `_`: cargo folds before suppressing, so
+    # this must pass too. Comparing the names as spelled would report it.
+    cat > "$scratch/folded.json" <<'JSON'
+    {"packages":[{"name":"folded","targets":[
+      {"name":"foo_bar","kind":["lib"],"doc":true},
+      {"name":"foo-bar","kind":["bin"],"doc":true}]}]}
+    JSON
+    just rs _doc-names "$scratch/folded.json"
+
     # Different packages: a real collision, must be reported.
     cat > "$scratch/bad.json" <<'JSON'
     {"packages":[
