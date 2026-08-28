@@ -292,6 +292,7 @@ pub(crate) fn launch(
 	let mut driver = Driver {
 		shared: shared.clone(),
 		socket,
+		runtime: handle.clone(),
 		deadline: moq_net::runtime::Deadline::new(handle),
 		keep_alive: match keep_alive {
 			Some(every) => moq_net::runtime::Deadline::after(handle, every),
@@ -565,6 +566,8 @@ impl web_transport_trait::Stats for Stats {
 struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
+	/// Read for the turn's instant when re-arming the keep-alive.
+	runtime: Handle,
 	deadline: moq_net::runtime::Deadline<Handle>,
 	/// Fires when the connection owes the peer an ack-eliciting packet, so an
 	/// idle path (and whatever NAT sits on it) stays open. Disarmed when the
@@ -767,7 +770,7 @@ impl Driver {
 	fn arm_keep_alive(&mut self) {
 		let at = self
 			.keep_alive_every
-			.and_then(|every| std::time::Instant::now().checked_add(every));
+			.and_then(|every| moq_net::Timers::now(&self.runtime).checked_add(every));
 		self.keep_alive.set(at);
 	}
 

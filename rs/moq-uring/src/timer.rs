@@ -70,13 +70,15 @@ impl Heap {
 /// [`crate::Handle`].
 pub struct Timer {
 	heap: Rc<RefCell<Heap>>,
+	clock: Rc<crate::shared::Clock>,
 	slot: Rc<Slot>,
 }
 
 impl Timer {
-	pub(crate) fn new(heap: Rc<RefCell<Heap>>) -> Self {
+	pub(crate) fn new(heap: Rc<RefCell<Heap>>, clock: Rc<crate::shared::Clock>) -> Self {
 		Self {
 			heap,
+			clock,
 			slot: Rc::new(Slot {
 				key: Cell::new(None),
 				elapsed: Cell::new(false),
@@ -109,7 +111,7 @@ impl moq_net::runtime::Timer for Timer {
 		let Some((at, _)) = self.slot.key.get() else {
 			return Poll::Pending;
 		};
-		if at <= Instant::now() {
+		if at <= self.clock.now() {
 			// Fire eagerly rather than waiting for the sweep, and drop the
 			// heap entry so the sweep doesn't wake anyone spuriously.
 			self.heap.borrow_mut().remove(self.slot.key.take().expect("armed"));
@@ -135,5 +137,30 @@ impl std::fmt::Debug for Timer {
 			.field("at", &self.slot.key.get().map(|key| key.0))
 			.field("elapsed", &self.slot.elapsed.get())
 			.finish()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use moq_net::runtime::Timer as _;
+	use std::time::Duration;
+
+	#[test]
+	fn poll_uses_the_worker_turn_clock() {
+		let start = Instant::now();
+		let clock = Rc::new(crate::shared::Clock::default());
+		let mut timer = Timer::new(Rc::new(RefCell::new(Heap::default())), clock.clone());
+		timer.set(Some(start + Duration::from_secs(1)));
+
+		let turn = clock.turn(start);
+		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
+		drop(turn);
+
+		// The deadline is still a second out in real time, so a `Ready` here
+		// can only come from the turn's instant.
+		let turn = clock.turn(start + Duration::from_secs(2));
+		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
+		drop(turn);
 	}
 }

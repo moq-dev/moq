@@ -11,9 +11,47 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use io_uring::{IoUring, squeue};
+use moq_net::runtime::Instant;
 
 use crate::park::Unpark;
 use crate::{timer, udp};
+
+/// One instant shared by everything the worker polls in a turn.
+///
+/// `Instant::now` is a vDSO `clock_gettime`, and a busy turn polls a deadline
+/// per connection plus whatever those arm, all wanting the same answer. The
+/// worker samples once and freezes the clock for the turn, so the whole pass
+/// agrees on the time instead of paying for its own read.
+#[derive(Default)]
+pub(crate) struct Clock {
+	/// The frozen instant, or `None` outside a turn.
+	now: Cell<Option<Instant>>,
+}
+
+impl Clock {
+	/// Freeze the clock at `now` until the returned guard drops.
+	pub fn turn(&self, now: Instant) -> Turn<'_> {
+		self.now.set(Some(now));
+		Turn(self)
+	}
+
+	/// The turn's instant, or the real clock outside one.
+	///
+	/// Reads before the first turn and while the worker is parked hit the real
+	/// clock, so a snapshot is never served past the turn that took it.
+	pub fn now(&self) -> Instant {
+		self.now.get().unwrap_or_else(Instant::now)
+	}
+}
+
+/// Holds a [`Clock`] frozen; dropping it, including on unwind, thaws it.
+pub(crate) struct Turn<'a>(&'a Clock);
+
+impl Drop for Turn<'_> {
+	fn drop(&mut self) {
+		self.0.now.set(None);
+	}
+}
 
 /// A spawned task: the plain poll-closure shape `kio::Tasks` drives.
 pub(crate) type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
@@ -51,6 +89,8 @@ pub(crate) enum Op {
 pub(crate) struct Shared {
 	pub ring: RefCell<IoUring>,
 	pub ops: RefCell<slab::Slab<Op>>,
+	/// The monotonic clock sampled once at the start of each worker turn.
+	pub clock: Rc<Clock>,
 	/// Its own `Rc` so a [`crate::Timer`] holds just the heap, not the ring.
 	pub timers: Rc<RefCell<timer::Heap>>,
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
@@ -89,5 +129,25 @@ impl Shared {
 	/// Insert an op and return its `user_data` key.
 	pub fn insert(&self, op: Op) -> u64 {
 		self.ops.borrow_mut().insert(op) as u64
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::time::Duration;
+
+	#[test]
+	fn the_turn_freezes_and_the_guard_thaws() {
+		let clock = Clock::default();
+		let start = Instant::now() - Duration::from_secs(60);
+
+		let turn = clock.turn(start);
+		assert_eq!(clock.now(), start);
+		assert_eq!(clock.now(), start);
+		drop(turn);
+
+		// A minute-old snapshot must not outlive the turn that took it.
+		assert!(clock.now() > start);
 	}
 }

@@ -94,6 +94,7 @@ impl Worker {
 			shared: Rc::new(Shared {
 				ring: RefCell::new(ring),
 				ops: RefCell::new(slab::Slab::new()),
+				clock: Rc::new(crate::shared::Clock::default()),
 				timers: Rc::new(RefCell::new(timer::Heap::default())),
 				spawns: RefCell::new(Vec::new()),
 				unpark: Unpark::new(),
@@ -122,6 +123,13 @@ impl Worker {
 		let mut future = std::pin::pin!(future);
 		let waker = self.shared.unpark.waker();
 		loop {
+			// One clock read per turn: every deadline polled below reads this
+			// snapshot instead of the vDSO. A timer that comes due mid-turn
+			// therefore fires on the next one, which is also what keeps the
+			// sweep and the eager `Timer::poll` path agreeing on the time.
+			let now = Instant::now();
+			let turn = self.shared.clock.turn(now);
+
 			// Adopt tasks spawned since the last turn (spawning wakes us).
 			let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
 			for task in spawns {
@@ -137,7 +145,8 @@ impl Worker {
 			// registered for the next push.
 			let _ = self.tasks.poll(waiter);
 
-			self.shared.timers.borrow_mut().fire(Instant::now());
+			self.shared.timers.borrow_mut().fire(now);
+			drop(turn);
 			self.pump()?;
 			self.maybe_park()?;
 		}
@@ -398,7 +407,11 @@ impl moq_net::Timers for Handle {
 	type Timer = crate::Timer;
 
 	fn timer(&self) -> Self::Timer {
-		crate::Timer::new(self.shared.timers.clone())
+		crate::Timer::new(self.shared.timers.clone(), self.shared.clock.clone())
+	}
+
+	fn now(&self) -> moq_net::runtime::Instant {
+		self.shared.clock.now()
 	}
 }
 
@@ -511,6 +524,30 @@ mod tests {
 		let elapsed = start.elapsed();
 		assert!(elapsed >= Duration::from_millis(50), "woke early: {elapsed:?}");
 		assert!(elapsed < Duration::from_secs(5), "woke far too late: {elapsed:?}");
+	}
+
+	#[test]
+	fn the_clock_is_frozen_for_a_turn() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+
+		// Outside a turn the handle reads the real clock.
+		let before = handle.now();
+		std::thread::sleep(Duration::from_millis(5));
+		assert!(handle.now() > before);
+
+		let handle2 = handle.clone();
+		let during = worker
+			.block_on(async move {
+				let first = handle2.now();
+				std::thread::sleep(Duration::from_millis(5));
+				// Every read in the turn is the one instant the worker sampled.
+				assert_eq!(handle2.now(), first);
+				first
+			})
+			.unwrap();
+
+		assert!(handle.now() > during);
 	}
 
 	#[test]
