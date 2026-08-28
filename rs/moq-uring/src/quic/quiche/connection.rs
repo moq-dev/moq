@@ -203,11 +203,22 @@ impl Inner {
 		self.state.borrow().collected.get(&id).copied()
 	}
 
-	/// Forget stream `id`'s bookkeeping; called when a handle drops.
-	pub(crate) fn forget(&self, id: u64) {
+	/// Forget send stream `id`'s bookkeeping; called when its handle drops.
+	///
+	/// The parking table goes with it. A stream shut down on the way out is
+	/// never reported writable again, so nothing else would ever remove the
+	/// entry, and a peer withholding flow control credit could have streams
+	/// opened and cancelled against it without bound.
+	pub(crate) fn forget_send(&self, id: u64) {
 		let mut state = self.state.borrow_mut();
 		state.collected.remove(&id);
 		state.finishing.remove(&id);
+		state.writable.remove(&id);
+	}
+
+	/// The same for the read half, which parks on its own table.
+	pub(crate) fn forget_recv(&self, id: u64) {
+		self.state.borrow_mut().readable.remove(&id);
 	}
 
 	/// Wake anyone parked on stream `id` being readable.

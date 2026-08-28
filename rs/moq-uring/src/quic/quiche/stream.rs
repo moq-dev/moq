@@ -179,7 +179,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 impl Drop for SendStream {
 	fn drop(&mut self) {
-		self.shared.forget(self.id);
+		self.shared.forget_send(self.id);
 		if !self.fin && !self.reset {
 			let _ = self
 				.shared
@@ -374,6 +374,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
+		self.shared.forget_recv(self.id);
 		if !self.finished && !self.stopped {
 			let _ = self
 				.shared

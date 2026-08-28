@@ -175,11 +175,22 @@ impl Inner {
 		self.state.borrow().sends.get(&id).copied().flatten()
 	}
 
-	/// Forget stream `id`'s bookkeeping; called when a handle drops.
-	pub(crate) fn forget(&self, id: StreamId) {
+	/// Forget send stream `id`'s bookkeeping; called when its handle drops.
+	///
+	/// The parking table goes with it. A stream reset on the way out is never
+	/// reported writable again, so nothing else would ever remove the entry,
+	/// and a peer withholding flow control credit could have streams opened
+	/// and cancelled against it without bound.
+	pub(crate) fn forget_send(&self, id: StreamId) {
 		let mut state = self.state.borrow_mut();
 		state.sends.remove(&id);
 		state.finishing.remove(&id);
+		state.writable.remove(&id);
+	}
+
+	/// The same for the read half, which parks on its own table.
+	pub(crate) fn forget_recv(&self, id: StreamId) {
+		self.state.borrow_mut().readable.remove(&id);
 	}
 
 	/// Wake anyone parked on stream `id` being readable.
@@ -473,7 +484,6 @@ impl web_transport_trait::poll::Session for Connection {
 			packets_received: stats.udp_rx.datagrams,
 			packets_lost: stats.path.lost_packets,
 			rtt: stats.path.rtt,
-			cwnd: stats.path.cwnd,
 		}
 	}
 }
@@ -494,7 +504,6 @@ struct Stats {
 	packets_received: u64,
 	packets_lost: u64,
 	rtt: std::time::Duration,
-	cwnd: u64,
 }
 
 impl web_transport_trait::Stats for Stats {
@@ -526,15 +535,18 @@ impl web_transport_trait::Stats for Stats {
 		Some(self.rtt)
 	}
 
-	/// quinn-proto measures no delivery rate, so this is the window the
-	/// congestion controller is willing to keep in flight per round trip,
-	/// which is the rate it is pacing towards.
+	/// Nothing, because quinn-proto exposes no delivery or pacing rate.
+	///
+	/// The congestion window over the RTT is not a stand-in for one: BBR
+	/// deliberately holds about twice the bandwidth-delay product (nearly
+	/// three times it while starting up), so that number is a multiple of
+	/// what the path will carry, and moq-net feeds this straight into its
+	/// bandwidth allocator and PROBE. A missing sample is a state the model
+	/// already handles (`stats.estimated_send_rate` is an `Option`, and no
+	/// bandwidth producer is created without one); an inflated one is a rate
+	/// an encoder will chase.
 	fn estimated_send_rate(&self) -> Option<u64> {
-		let rtt = self.rtt.as_secs_f64();
-		if rtt <= 0.0 {
-			return None;
-		}
-		Some((self.cwnd as f64 * 8.0 / rtt) as u64)
+		None
 	}
 }
 
@@ -651,10 +663,11 @@ impl Driver {
 	/// Publish the terminal error for a close this side asked for.
 	///
 	/// quinn raises no event for it, so the driver is what reports it, and
-	/// only once the flush above has handed the CONNECTION_CLOSE to the
-	/// socket: the application is free to stop driving the worker the moment
-	/// `poll_closed` resolves, and the peer would then wait out its idle
-	/// timeout instead of being told.
+	/// only once the flush above has staged the CONNECTION_CLOSE, since an
+	/// application is free to stop driving the worker the moment
+	/// `poll_closed` resolves. Staged is not delivered: the send is
+	/// fire-and-forget, so a worker torn down in the same breath can still
+	/// take the packet with it and leave the peer to idle out.
 	fn publish_close(&mut self) {
 		if self.blocked || !self.shared.conn.borrow().is_closed() {
 			return;
