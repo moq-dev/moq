@@ -216,6 +216,6 @@ kio = { path = "rs/kio" }
 # octets/qlog, so without these patches tokio-quiche would compile against the
 # registry octets while quiche's error types use the git one, and the two
 # don't unify.
-quiche = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
-octets = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
-qlog = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
+quiche = { git = "https://github.com/moq-dev/quiche", rev = "55e12064f384aa024a0d340599e1b4485cbfe5a9" }
+octets = { git = "https://github.com/moq-dev/quiche", rev = "55e12064f384aa024a0d340599e1b4485cbfe5a9" }
+qlog = { git = "https://github.com/moq-dev/quiche", rev = "55e12064f384aa024a0d340599e1b4485cbfe5a9" }
