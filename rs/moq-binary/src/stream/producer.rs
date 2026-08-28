@@ -107,6 +107,15 @@ struct Inner {
 
 impl Inner {
 	fn append(&mut self, payload: Bytes) -> Result<()> {
+		// A payload no consumer could decode is as terminal as one the track rejects: the log is
+		// missing a record either way, and carrying on would present that gap as a complete log.
+		// Checked before the group is opened, so nothing is published, and routed through the same
+		// abort so a reader sees the failure rather than a clean end.
+		if self.flate.is_some() && payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+			self.abort(moq_net::Error::FrameTooLarge);
+			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+		}
+
 		// Open the group before compressing: a failure here must not leave the window ahead of a
 		// consumer that never received the frame.
 		if self.group.is_none() {
@@ -115,14 +124,7 @@ impl Inner {
 		}
 
 		let payload = match self.flate.as_mut() {
-			Some(flate) => {
-				// See the snapshot producer: a consumer decodes with moq-flate's default output cap, so
-				// a value past it would be unreadable however small it compresses to.
-				if payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
-					return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
-				}
-				flate.frame(&payload)
-			}
+			Some(flate) => flate.frame(&payload),
 			None => payload,
 		};
 

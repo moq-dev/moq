@@ -1,4 +1,4 @@
-import { Encoder as Flate } from "@moq/flate";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
@@ -38,6 +38,13 @@ export class Producer {
 	 * opaque blobs costs a full scan, and only the caller knows whether its bytes changed.
 	 */
 	update(payload: Uint8Array): void {
+		// Consumers all decode with `@moq/flate`'s default cap, so publishing past it would advertise
+		// a value that always fails to read. Rejected before anything is published; unlike a stream
+		// this is not terminal, since the previous value still stands and the next update supersedes.
+		if (this.#compress && payload.byteLength > DEFAULT_MAX_FRAME_SIZE) {
+			throw new Error(`payload larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
+		}
+
 		// One frame per group, so the window spans a single value and starts cold every time.
 		const encoded = this.#compress ? new Flate().frame(payload) : payload;
 

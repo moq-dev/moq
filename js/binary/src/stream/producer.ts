@@ -1,4 +1,4 @@
-import { Encoder as Flate } from "@moq/flate";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
@@ -40,6 +40,16 @@ export class Producer {
 	 * instead of a log that merely looks complete. Every later append fails on the closed track.
 	 */
 	append(payload: Uint8Array): void {
+		// A payload no consumer could decode is as terminal as one the track rejects: consumers all
+		// decode with `@moq/flate`'s default cap, so this would publish a record none of them could
+		// read. Checked before the group is opened, and ends the track like any other lost record.
+		if (this.#flate && payload.byteLength > DEFAULT_MAX_FRAME_SIZE) {
+			const err = new Error(`payload larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
+			this.#group = undefined;
+			this.#track.close(err);
+			throw err;
+		}
+
 		// Open the group before compressing: a failure here must not leave the window ahead of a
 		// consumer that never received the frame.
 		this.#group ??= this.#track.appendGroup();

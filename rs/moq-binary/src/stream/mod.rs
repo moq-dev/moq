@@ -167,6 +167,30 @@ mod test {
 		);
 	}
 
+	/// A record the consumer could never decode is as lost as one the track rejects, so it takes the
+	/// track with it rather than leaving a live log missing a record. Guards the guard: an early
+	/// return here would bypass the terminal path and let a later append continue the gap.
+	#[test]
+	fn an_undecodable_record_ends_the_track() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default().with_compression(true));
+
+		let oversized = Bytes::from(vec![0u8; moq_flate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
+		assert!(matches!(
+			producer.append(oversized),
+			Err(crate::Error::Flate(moq_flate::Error::TooLarge(_)))
+		));
+
+		// Nothing was published, and the track is terminal rather than merely skipping the record.
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))));
+		assert!(producer.append(&b"after"[..]).is_err());
+	}
+
 	/// The track ends with the group, so nothing opens a second one and splits the log.
 	#[test]
 	fn a_failed_write_ends_the_track() {
