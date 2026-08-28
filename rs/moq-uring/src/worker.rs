@@ -12,23 +12,29 @@ use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKE
 use crate::shared::{Cqe, Op, Shared, Task};
 use crate::{Error, timer, udp};
 
-/// The largest submission queue io_uring will set up.
-const MAX_ENTRIES: u32 = 32768;
+/// Submission queue depth. The SQ only holds SQEs staged between submits,
+/// never in-flight operations, so it needs no relation to the socket pools;
+/// [`Shared::push`] submits inline whenever it fills.
+const SQ_ENTRIES: u32 = 256;
+
+/// Completion queue depth. Every in-flight operation can post a completion
+/// (one per send buffer with GSO on, one per provided receive buffer, the
+/// park futex, transient cancels), so this covers a few sockets at the
+/// default pool ceilings in [`udp::Config`]. Running past it is not fatal:
+/// the kernel backlogs completions (`IORING_FEAT_NODROP`) rather than drop
+/// them. But the backlog is an allocation-per-CQE slow path and it ends any
+/// armed multishot receive, so the CQ is sized to keep it out of steady
+/// state.
+const CQ_ENTRIES: u32 = 4096;
 
 /// Worker construction knobs.
-#[derive(Clone, Debug)]
+///
+/// Currently empty: the worker sizes its ring internally, with a completion
+/// queue that comfortably covers the per-socket pool ceilings in
+/// [`udp::Config`]. The struct exists so future knobs stay additive.
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct Config {
-	/// Submission queue depth, from 1 to 32768 (the kernel rounds it up to a
-	/// power of two and sizes the completion queue at twice this).
-	pub entries: u32,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self { entries: 256 }
-	}
-}
+pub struct Config {}
 
 /// A thread-pinned io_uring executor: the ring, a timer heap, and a local
 /// (`!Send`) task set, driven by a caller-owned loop.
@@ -53,24 +59,17 @@ impl Worker {
 	/// park timeout, and batched minimum waits with one code path; there is
 	/// deliberately no fallback (use the tokio stack instead).
 	pub fn new(config: Config) -> Result<Self, Error> {
-		// Checked here so the `EINVAL` below can only mean the kernel refused
-		// one of the setup flags, not that the caller asked for a bad depth.
-		if config.entries == 0 || config.entries > MAX_ENTRIES {
-			return Err(Error::Io(std::io::Error::new(
-				std::io::ErrorKind::InvalidInput,
-				format!("ring depth must be 1 to {MAX_ENTRIES}, got {}", config.entries),
-			)));
-		}
-
+		let Config {} = config;
 		let ring = IoUring::builder()
 			.setup_single_issuer()
 			.setup_defer_taskrun()
 			.setup_coop_taskrun()
-			.build(config.entries)
+			.setup_cqsize(CQ_ENTRIES)
+			.build(SQ_ENTRIES)
 			.map_err(|err| match err.raw_os_error() {
 				// EINVAL from setup means the kernel predates one of the
-				// requested flags (the depth is already validated), so it never
-				// reaches the feature check below.
+				// requested flags (the ring geometry is compile-time valid),
+				// so it never reaches the feature check below.
 				Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::EINVAL) => {
 					Error::Unsupported(format!(
 						"io_uring is unavailable ({err}); kernel {} (Linux 6.12+ required, and container seccomp \
@@ -99,6 +98,7 @@ impl Worker {
 				unpark: Unpark::new(),
 				next_bgid: std::cell::Cell::new(0),
 				stopped: std::cell::Cell::new(false),
+				spill: RefCell::new(std::collections::VecDeque::new()),
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
@@ -148,15 +148,18 @@ impl Worker {
 		self.submit()?;
 		loop {
 			// Copy the completions out so dispatch can borrow the ring (to
-			// re-arm receives, push cancels, and so on).
+			// re-arm receives, push cancels, and so on). Completions spilled
+			// by `Shared::push` predate the CQ's, so they dispatch first.
 			let cqes: Vec<Cqe> = {
 				let mut ring = self.shared.ring.borrow_mut();
-				ring.completion()
-					.map(|entry| Cqe {
+				let mut spill = self.shared.spill.borrow_mut();
+				spill
+					.drain(..)
+					.chain(ring.completion().map(|entry| Cqe {
 						user_data: entry.user_data(),
 						result: entry.result(),
 						flags: entry.flags(),
-					})
+					}))
 					.collect()
 			};
 			if cqes.is_empty() {
@@ -572,12 +575,84 @@ mod tests {
 	}
 
 	#[test]
-	fn invalid_ring_depth_is_not_unsupported() {
-		// A caller's bad depth must not read as "this kernel cannot run the
-		// worker", which is the signal to fall back to the tokio stack.
-		for entries in [0, MAX_ENTRIES + 1] {
-			let err = Worker::new(Config { entries }).expect_err("invalid depth");
-			assert!(matches!(err, Error::Io(_)), "classified as {err:?}");
+	fn cq_covers_the_default_pool_ceilings() {
+		// The completion queue must cover at least two sockets at their
+		// default pool ceilings (plus the futex), or the kernel's overflow
+		// slow path becomes steady state for the workload the ceilings exist
+		// to serve. Fails when someone raises the udp defaults without
+		// revisiting CQ_ENTRIES.
+		let config = udp::Config::default();
+		let per_socket = u32::from(config.tx_buffers_max) + u32::from(config.rx_buffers_max);
+		assert!(CQ_ENTRIES > 2 * per_socket, "CQ_ENTRIES fell behind the pool defaults");
+	}
+
+	#[test]
+	fn completion_overflow_is_survivable() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		// Twice the CQ's worth of sends, staged synchronously so nothing
+		// reaps while they complete: the kernel must backlog the completions
+		// (`IORING_FEAT_NODROP`) and the worker must drain them without any
+		// operation, socket, or the worker itself failing.
+		let ceiling = (CQ_ENTRIES * 2) as u16;
+		let config = udp::Config {
+			tx_buffers_max: ceiling,
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+
+		let mut held = Vec::new();
+		while let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) {
+			held.push(tx);
+		}
+		assert_eq!(held.len(), usize::from(ceiling));
+		for tx in held.drain(..) {
+			tx.send(1200, to, 1200).expect("send");
+		}
+
+		// The point of the test is the overflow, so prove it happened: the
+		// kernel raises this flag while completions sit in its backlog. It
+		// clears once the backlog flushes, so sample it before each sweep.
+		let saw_overflow = |worker: &Worker| worker.shared.ring.borrow_mut().submission().cq_overflow();
+		let mut overflowed = saw_overflow(&worker);
+
+		// Drive the worker until every completion, backlog included, has been
+		// reaped and released its buffer back to the pool.
+		let deadline = Instant::now() + Duration::from_secs(10);
+		loop {
+			overflowed = overflowed || saw_overflow(&worker);
+			let h = handle.clone();
+			worker
+				.block_on(async move {
+					Deadline::after(&h, Duration::from_millis(10)).wait().await;
+				})
+				.unwrap();
+			let mut free = Vec::new();
+			loop {
+				match sock.poll_acquire(&kio::Waiter::noop()) {
+					Poll::Ready(Ok(tx)) => free.push(tx),
+					Poll::Ready(Err(err)) => panic!("send path failed: {err}"),
+					Poll::Pending => break,
+				}
+			}
+			if free.len() == usize::from(ceiling) {
+				break;
+			}
+			assert!(
+				Instant::now() < deadline,
+				"buffers stuck in flight: {} of {ceiling} free",
+				free.len()
+			);
+		}
+		assert!(overflowed, "the burst never overflowed the CQ; it proves nothing");
+		// The receive side rode out the same storm: whatever the loopback
+		// delivered drains without a terminal error.
+		while let Poll::Ready(result) = sock.poll_recv(&kio::Waiter::noop()) {
+			result.expect("receive path failed");
 		}
 	}
 

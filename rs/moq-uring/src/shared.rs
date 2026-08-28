@@ -6,6 +6,7 @@
 //! reaped by the worker loop.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 use std::task::Poll;
@@ -61,6 +62,10 @@ pub(crate) struct Shared {
 	/// Set by [`crate::Worker`]'s drop: handles outlive the loop that would
 	/// drive them, so operations must fail instead of pending forever.
 	pub stopped: Cell<bool>,
+	/// Completions copied out of the CQ by [`push`](Self::push) when the
+	/// kernel reported it full mid-submit. [`crate::Worker`]'s pump dispatches
+	/// these before anything newer in the CQ.
+	pub spill: RefCell<VecDeque<Cqe>>,
 }
 
 impl Shared {
@@ -82,7 +87,32 @@ impl Shared {
 					return Ok(());
 				}
 			}
-			ring.submit()?;
+			if let Err(err) = ring.submit() {
+				// EBUSY: the CQ is full, the kernel could not flush its
+				// overflow backlog into it, and it consumed none of our SQEs.
+				// Only kernels before 5.13 report this (newer ones just grow
+				// the backlog), but it must never surface as an error: it is
+				// ring pressure, not a failure of the operation. Acting on the
+				// completions here would re-enter dispatch (receive re-arms,
+				// cancels) under our ring borrow, so copy them aside for the
+				// worker's pump instead; the freed CQ slots let the next
+				// submit flush the backlog and take our SQEs.
+				if err.raw_os_error() != Some(libc::EBUSY) {
+					return Err(err);
+				}
+				let mut spill = self.spill.borrow_mut();
+				let before = spill.len();
+				spill.extend(ring.completion().map(|entry| Cqe {
+					user_data: entry.user_data(),
+					result: entry.result(),
+					flags: entry.flags(),
+				}));
+				if spill.len() == before {
+					// EBUSY with an empty CQ breaks the kernel's contract;
+					// bail out rather than spin on it.
+					return Err(err);
+				}
+			}
 		}
 	}
 
