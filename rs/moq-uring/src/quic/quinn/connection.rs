@@ -101,6 +101,20 @@ impl State {
 		}
 	}
 
+	/// Drop send stream `id`'s bookkeeping, parking included.
+	fn forget_send(&mut self, id: StreamId) {
+		self.sends.remove(&id);
+		self.finishing.remove(&id);
+		self.writable.remove(&id);
+	}
+
+	/// The same for the read half. Only its own table: the two halves of a
+	/// bidirectional stream are separate handles, and the other one may still
+	/// be parked.
+	fn forget_recv(&mut self, id: StreamId) {
+		self.readable.remove(&id);
+	}
+
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
 	/// the driver included: an externally failed driver has to notice.
 	fn fail(&mut self, err: Error) {
@@ -182,15 +196,12 @@ impl Inner {
 	/// and a peer withholding flow control credit could have streams opened
 	/// and cancelled against it without bound.
 	pub(crate) fn forget_send(&self, id: StreamId) {
-		let mut state = self.state.borrow_mut();
-		state.sends.remove(&id);
-		state.finishing.remove(&id);
-		state.writable.remove(&id);
+		self.state.borrow_mut().forget_send(id);
 	}
 
 	/// The same for the read half, which parks on its own table.
 	pub(crate) fn forget_recv(&self, id: StreamId) {
-		self.state.borrow_mut().readable.remove(&id);
+		self.state.borrow_mut().forget_recv(id);
 	}
 
 	/// Wake anyone parked on stream `id` being readable.
@@ -214,9 +225,9 @@ impl Inner {
 		);
 		// quinn raises no event for a close the application asked for, so the
 		// terminal error is ours to publish. Not here though: the driver
-		// publishes it once the CONNECTION_CLOSE is on the wire, since a
-		// caller that stops driving the worker the moment `poll_closed`
-		// resolves would otherwise leave the peer to idle out.
+		// publishes it once it has staged the CONNECTION_CLOSE, so a caller
+		// that stops driving the worker the moment `poll_closed` resolves has
+		// at least handed the packet over first.
 		let mut state = self.state.borrow_mut();
 		state.local_close.get_or_insert((code, reason.to_string()));
 		state.driver.wake();
@@ -778,5 +789,37 @@ fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
 				waiters.wake();
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use quinn_proto::Side;
+
+	use super::*;
+
+	/// A dropped handle takes its parking with it.
+	///
+	/// Nothing else can: a stream reset or stopped on the way out is never
+	/// reported writable or readable again, so an entry left behind sits
+	/// there for the life of the connection, one per cancelled stream.
+	#[test]
+	fn forgetting_a_handle_clears_its_parking() {
+		let mut state = State::new();
+		let id = StreamId::new(Side::Client, Dir::Bi, 0);
+		state.writable.entry(id).or_default();
+		state.readable.entry(id).or_default();
+		state.finishing.entry(id).or_default();
+		state.sends.insert(id, None);
+
+		state.forget_send(id);
+		assert!(state.writable.is_empty(), "the write half's parking");
+		assert!(state.finishing.is_empty(), "the finish watch");
+		assert!(state.sends.is_empty(), "the end bookkeeping");
+		// The read half is a separate handle, which may still be parked.
+		assert!(!state.readable.is_empty(), "the read half's parking survives");
+
+		state.forget_recv(id);
+		assert!(state.readable.is_empty(), "the read half's parking");
 	}
 }

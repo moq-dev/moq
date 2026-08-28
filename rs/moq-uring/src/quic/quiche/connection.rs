@@ -124,6 +124,20 @@ impl State {
 		}
 	}
 
+	/// Drop send stream `id`'s bookkeeping, parking included.
+	fn forget_send(&mut self, id: u64) {
+		self.collected.remove(&id);
+		self.finishing.remove(&id);
+		self.writable.remove(&id);
+	}
+
+	/// The same for the read half. Only its own table: the two halves of a
+	/// bidirectional stream are separate handles, and the other one may still
+	/// be parked.
+	fn forget_recv(&mut self, id: u64) {
+		self.readable.remove(&id);
+	}
+
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
 	/// the driver included: an externally failed driver has to notice.
 	fn fail(&mut self, err: Error) {
@@ -210,15 +224,12 @@ impl Inner {
 	/// entry, and a peer withholding flow control credit could have streams
 	/// opened and cancelled against it without bound.
 	pub(crate) fn forget_send(&self, id: u64) {
-		let mut state = self.state.borrow_mut();
-		state.collected.remove(&id);
-		state.finishing.remove(&id);
-		state.writable.remove(&id);
+		self.state.borrow_mut().forget_send(id);
 	}
 
 	/// The same for the read half, which parks on its own table.
 	pub(crate) fn forget_recv(&self, id: u64) {
-		self.state.borrow_mut().readable.remove(&id);
+		self.state.borrow_mut().forget_recv(id);
 	}
 
 	/// Wake anyone parked on stream `id` being readable.
@@ -960,5 +971,30 @@ mod tests {
 				drop(client);
 			})
 			.expect("worker");
+	}
+
+	/// A dropped handle takes its parking with it.
+	///
+	/// Nothing else can: a stream shut down on the way out is never reported
+	/// writable or readable again, so an entry left behind sits there for the
+	/// life of the connection, one per cancelled stream.
+	#[test]
+	fn forgetting_a_handle_clears_its_parking() {
+		let mut state = State::new(false);
+		let id = 0;
+		state.writable.entry(id).or_default();
+		state.readable.entry(id).or_default();
+		state.finishing.entry(id).or_default();
+		state.collected.insert(id, None);
+
+		state.forget_send(id);
+		assert!(state.writable.is_empty(), "the write half's parking");
+		assert!(state.finishing.is_empty(), "the finish watch");
+		assert!(state.collected.is_empty(), "the end bookkeeping");
+		// The read half is a separate handle, which may still be parked.
+		assert!(!state.readable.is_empty(), "the read half's parking survives");
+
+		state.forget_recv(id);
+		assert!(state.readable.is_empty(), "the read half's parking");
 	}
 }
