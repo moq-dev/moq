@@ -52,12 +52,15 @@ pub(crate) struct State {
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
 	/// `STOP_SENDING`.
 	finishing: HashMap<StreamId, kio::WaiterList>,
-	/// How each send stream ended, for the ones the driver saw end while the
-	/// connection was still up: `None` for an acknowledged FIN, `Some(code)`
-	/// for a `STOP_SENDING`. That is what makes a later close mean "already
-	/// delivered" rather than "we never found out". Cleared when the stream
-	/// drops.
-	collected: HashMap<StreamId, Option<u64>>,
+	/// Every send stream a handle still holds, and how it ended once the
+	/// driver has seen that happen. That is what makes a later close mean
+	/// "already delivered" rather than "we never found out".
+	///
+	/// Keyed on the live handles, because the verdict arrives as an event: a
+	/// stream finished and then dropped before its FIN was acknowledged would
+	/// otherwise leave an entry nobody can ever remove, one per group, for as
+	/// long as the connection lives.
+	sends: HashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
 	datagram_send_waiters: kio::WaiterList,
@@ -88,7 +91,7 @@ impl State {
 			readable: HashMap::new(),
 			writable: HashMap::new(),
 			finishing: HashMap::new(),
-			collected: HashMap::new(),
+			sends: HashMap::new(),
 			datagram_recv_waiters: kio::WaiterList::new(),
 			datagram_send_waiters: kio::WaiterList::new(),
 			closed: None,
@@ -161,17 +164,21 @@ impl Inner {
 		waiter.register(state.finishing.entry(id).or_default());
 	}
 
-	/// How send stream `id` ended, if the driver saw it end on a live
-	/// connection: `Some(None)` for an acknowledged FIN, `Some(Some(code))`
-	/// for a `STOP_SENDING`.
-	pub(crate) fn collected(&self, id: StreamId) -> Option<Option<u64>> {
-		self.state.borrow().collected.get(&id).copied()
+	/// Start tracking send stream `id`, which a handle now owns.
+	pub(crate) fn track(&self, id: StreamId) {
+		self.state.borrow_mut().sends.insert(id, None);
+	}
+
+	/// How send stream `id` ended, if the driver saw it end while a handle
+	/// still held it.
+	pub(crate) fn ended(&self, id: StreamId) -> Option<End> {
+		self.state.borrow().sends.get(&id).copied().flatten()
 	}
 
 	/// Forget stream `id`'s bookkeeping; called when a handle drops.
 	pub(crate) fn forget(&self, id: StreamId) {
 		let mut state = self.state.borrow_mut();
-		state.collected.remove(&id);
+		state.sends.remove(&id);
 		state.finishing.remove(&id);
 	}
 
@@ -710,6 +717,28 @@ impl Driver {
 	}
 }
 
+/// How a send stream ended, once the driver has seen it happen.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum End {
+	/// The peer acknowledged the FIN.
+	Delivered,
+	/// The peer sent `STOP_SENDING` with this code.
+	Stopped(u64),
+}
+
+/// Record how a send stream ended, and wake whoever is watching it.
+///
+/// A stream whose handle has already dropped records nothing: nobody is left
+/// to read the verdict, and the entry would outlive every use for it.
+fn end(state: &mut State, id: StreamId, end: End) {
+	if let Some(slot) = state.sends.get_mut(&id) {
+		*slot = Some(end);
+	}
+	if let Some(mut waiters) = state.finishing.remove(&id) {
+		waiters.wake();
+	}
+}
+
 /// Apply one stream event to the parking tables.
 fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
 	// Waking removes the entry: a still-interested poller re-registers on its
@@ -728,17 +757,9 @@ fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
 				waiters.wake();
 			}
 		}
-		quinn_proto::StreamEvent::Finished { id } => {
-			state.collected.insert(id, None);
-			if let Some(mut waiters) = state.finishing.remove(&id) {
-				waiters.wake();
-			}
-		}
+		quinn_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
 		quinn_proto::StreamEvent::Stopped { id, error_code } => {
-			state.collected.insert(id, Some(error_code.into_inner()));
-			if let Some(mut waiters) = state.finishing.remove(&id) {
-				waiters.wake();
-			}
+			end(state, id, End::Stopped(error_code.into_inner()));
 			// A writer blocked on capacity has to learn it will never come.
 			if let Some(mut waiters) = state.writable.remove(&id) {
 				waiters.wake();

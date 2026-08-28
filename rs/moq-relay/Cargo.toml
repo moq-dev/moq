@@ -39,14 +39,21 @@ websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
-# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only. Off by
-# default because it links a second TLS stack: moq-uring's default backend is
-# quiche, which brings BoringSSL, and building that needs cmake and a C++
-# toolchain a default relay build does not. Add `moq-uring/quinn` to serve the
-# same path from quinn-proto over the rustls this relay already links.
-# Compiled by the nightly `--all-features` pass (`just rs features`) and by
-# `just rs uring` on demand.
-io-uring = ["dep:moq-sock", "dep:moq-uring"]
+# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only, in one of
+# two flavors. Both are off by default: the relay is useful without io_uring,
+# and `io-uring` links a second TLS stack (quiche brings BoringSSL, which needs
+# cmake and a C++ toolchain a default relay build does not). `io-uring-quinn`
+# serves the same path from quinn-proto over the rustls this relay already
+# links, so it builds no second stack.
+#
+# Cargo features are additive, so asking for both compiles both and runs quinn,
+# which is what the nightly `--all-features` pass (`just rs features`) does.
+# `just rs uring` builds each on its own.
+io-uring = ["_uring", "moq-uring/quiche"]
+io-uring-quinn = ["_uring", "moq-uring/quinn"]
+# The listener both flavors share. Not one to enable on its own: moq-uring has
+# no `quic` module without a backend, so this alone does not build.
+_uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

@@ -11,7 +11,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use quinn_proto::{StreamId, VarInt};
 
 use super::super::Error;
-use super::Shared;
+use super::{End, Shared};
 
 /// An outgoing stream. Dropping it unfinished resets it with code 0.
 pub struct SendStream {
@@ -27,6 +27,9 @@ pub struct SendStream {
 
 impl SendStream {
 	pub(crate) fn new(shared: Shared, id: StreamId) -> Self {
+		// The driver records how this stream ends only while a handle holds
+		// it, so the handle is what announces itself.
+		shared.track(id);
 		Self {
 			shared,
 			id,
@@ -158,9 +161,9 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		}
 		// quinn reports a send stream's end as an event, which the driver
 		// records: an acknowledged FIN, or the peer's STOP_SENDING.
-		match self.shared.collected(self.id) {
-			Some(Some(code)) => Poll::Ready(Err(Error::Stop(code))),
-			Some(None) => Poll::Ready(Ok(())),
+		match self.shared.ended(self.id) {
+			Some(End::Stopped(code)) => Poll::Ready(Err(Error::Stop(code))),
+			Some(End::Delivered) => Poll::Ready(Ok(())),
 			// The end never came. If the connection died first the caller
 			// cannot read success as "every byte arrived".
 			None => match self.shared.closed() {

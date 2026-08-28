@@ -63,6 +63,10 @@ and `udp::Socket`.
 cargo test -p moq-uring --no-default-features --features quinn
 ```
 
+`moq-relay` picks with its own pair: `--features io-uring` takes quiche and
+`--features io-uring-quinn` takes quinn, since cargo features are additive and
+a backend selected on top of a default one would compile both.
+
 ## Validation
 
 Every test runs against whichever backend is compiled, so the suite is the

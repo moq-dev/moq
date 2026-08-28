@@ -18,7 +18,7 @@ pub use connection::Connection;
 pub use endpoint::Endpoint;
 pub use stream::{RecvStream, SendStream};
 
-pub(crate) use connection::Shared;
+pub(crate) use connection::{End, Shared};
 
 use std::sync::Arc;
 

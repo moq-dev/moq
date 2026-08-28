@@ -121,7 +121,10 @@ moq-tokio = { version = "0.19.11", path = "rs/moq-tokio", default-features = fal
 # them on when depended on directly. VAAPI is opt-in everywhere, since that
 # backend has never been validated on real hardware.
 moq-transcode = { version = "0.0.13", path = "rs/moq-transcode", default-features = false }
-moq-uring = { version = "0.0.1", path = "rs/moq-uring" }
+# default-features off (the quiche backend) so the consumer picks which QUIC
+# stack the io_uring path compiles; cargo features are additive, so a default-on
+# backend could not be opted out of.
+moq-uring = { version = "0.0.1", path = "rs/moq-uring", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"

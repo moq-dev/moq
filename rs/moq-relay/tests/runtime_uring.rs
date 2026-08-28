@@ -5,7 +5,7 @@
 //!
 //! Linux-only like the mode itself, and kernel-gated below the io_uring 6.12
 //! floor (GitHub-hosted CI), where it skips loudly.
-#![cfg(all(target_os = "linux", feature = "io-uring"))]
+#![cfg(all(target_os = "linux", feature = "_uring"))]
 
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;

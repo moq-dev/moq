@@ -25,7 +25,7 @@ mod shutdown;
 mod stats;
 #[cfg(test)]
 mod test_env;
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg(all(target_os = "linux", feature = "_uring"))]
 pub mod uring;
 mod web;
 #[cfg(feature = "websocket")]
