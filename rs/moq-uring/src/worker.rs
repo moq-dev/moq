@@ -587,6 +587,17 @@ mod tests {
 	}
 
 	#[test]
+	fn the_ring_honors_the_requested_cq_depth() {
+		// The kernel-reported geometry, not the constant: dropping the
+		// `setup_cqsize` call would silently fall back to a CQ of twice the SQ
+		// (512), and the overflow test below cannot catch that because it
+		// expects overflow. This one pins the operative fix.
+		let Some(worker) = worker() else { return };
+		let cq = worker.shared.ring.borrow().params().cq_entries();
+		assert!(cq >= CQ_ENTRIES, "kernel granted a {cq}-entry CQ, wanted {CQ_ENTRIES}");
+	}
+
+	#[test]
 	fn completion_overflow_is_survivable() {
 		let Some(mut worker) = worker() else { return };
 		let handle = worker.handle();
