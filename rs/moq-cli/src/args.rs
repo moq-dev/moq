@@ -84,6 +84,14 @@ pub struct Invocation {
 	/// The MoQ attachment, shared by every stage.
 	pub moq: MoqSide,
 
+	/// The same attachment, built without consulting the environment.
+	///
+	/// Only [`MoqSide::reject`] reads it. A local verb refuses a MoQ side the user
+	/// asked for, and an exported `MOQ_CONNECT` is not an ask: it is a standing
+	/// setting for the publishing this shell usually does, and it would otherwise
+	/// make `moq token` and `moq completion` fail for everyone who has one.
+	pub typed: MoqSide,
+
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
 }
@@ -179,6 +187,7 @@ impl Invocation {
 		let first = chunks.next().unwrap_or_default();
 		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
 		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
+		let typed = MoqSide::from_argv(&first, Environment::Ignore).unwrap_or_else(|| cli.moq.clone());
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
@@ -217,6 +226,7 @@ impl Invocation {
 		Ok(Self {
 			log: cli.log,
 			moq: cli.moq,
+			typed,
 			stages,
 		})
 	}
@@ -287,6 +297,15 @@ fn parse_error(
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
+}
+
+/// Whether [`MoqSide::from_argv`] lets the environment fill what the words left out.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Environment {
+	/// Apply the `MOQ_*` variables, as an ordinary parse does.
+	Read,
+	/// Read only what the words say, which is what "the user asked for this" means.
+	Ignore,
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -413,13 +432,42 @@ impl MoqSide {
 		Ok(())
 	}
 
+	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
+	///
+	/// Stops at the first thing the grammar cannot take, because the two callers are
+	/// both looking at an incomplete line: a half-typed one being completed, and (via
+	/// [`Environment::Ignore`]) a real one whose typed values are being separated from
+	/// its ambient ones. Whatever was understood before that point is the answer.
+	pub(crate) fn from_argv(argv: &[&OsStr], environment: Environment) -> Option<Self> {
+		use usage::spec::CommandArgs;
+
+		let mut partial = <Self as CommandArgs>::start();
+		let mut parser = usage::Parser::new(Cli::command(), argv);
+		while let Some(event) = parser.next_event() {
+			match event {
+				Ok(event) => {
+					<Self as CommandArgs>::apply(&mut partial, &event);
+				}
+				Err(_) => break,
+			}
+		}
+
+		if environment == Environment::Read {
+			<Self as CommandArgs>::apply_env(&mut partial);
+		}
+		<Self as CommandArgs>::apply_defaults(&mut partial);
+		<Self as CommandArgs>::build(partial).ok()
+	}
+
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
 	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
 	/// next to `token generate` it reads like it scopes the key, which `--root` does.
 	///
-	/// `--origin` is left out on purpose. It reads `MOQ_ORIGIN`, so rejecting it would
-	/// fail `moq token` in any shell that exports the variable for a publisher, and an
-	/// ambient env value is not the deliberate request this is meant to catch.
+	/// Call it on [`Invocation::typed`], not on the resolved side: every one of these
+	/// flags has a `MOQ_*` variable, and a shell that exports one for the publishing it
+	/// usually does has not asked this verb for anything. `--origin` is in the list for
+	/// the same reason it used to be out of it -- an ambient `MOQ_ORIGIN` no longer
+	/// reaches here, so a typed one can be refused like the rest.
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
 		#[cfg(feature = "cluster-lan")]
 		let cluster_secret = self.cluster.secret.is_some();
@@ -435,6 +483,7 @@ impl MoqSide {
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
+			("--origin", self.origin.is_some()),
 		];
 		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
@@ -1503,5 +1552,32 @@ mod tests {
 			choices.sort_unstable();
 			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
 		}
+	}
+
+	/// A local verb refuses a MoQ side the user asked for, not one the shell exports.
+	///
+	/// Every one of these flags has a `MOQ_*` variable, so reading the resolved side
+	/// made `moq token` and `moq completion` fail outright in any shell that exports
+	/// `MOQ_CONNECT` for the publishing it usually does. The ask is what was typed.
+	#[test]
+	fn a_local_verb_refuses_only_a_typed_moq_side() {
+		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", "https://relay.example/room")]);
+
+		let ambient = Invocation::try_parse_from(["moq", "token", "generate"]).expect("parse");
+		assert!(
+			ambient.moq.client.url.is_some(),
+			"the resolved side should still pick the variable up"
+		);
+		assert!(
+			ambient.typed.reject("token").is_ok(),
+			"an exported MOQ_CONNECT was treated as a request"
+		);
+
+		let typed = Invocation::try_parse_from(["moq", "--connect", "https://relay.example/room", "token", "generate"])
+			.expect("parse");
+		assert!(
+			typed.typed.reject("token").is_err(),
+			"a typed --connect stopped being refused"
+		);
 	}
 }

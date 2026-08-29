@@ -19,6 +19,8 @@ mod rtc;
 mod rtmp;
 mod srt;
 mod subscribe;
+#[cfg(test)]
+mod test_env;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -192,16 +194,16 @@ async fn main() -> anyhow::Result<()> {
 	if stages.len() == 1 {
 		match stages.remove(0) {
 			Command::Token(token) => {
-				cli.moq.reject("token")?;
+				cli.typed.reject("token")?;
 				return token.run();
 			}
 			Command::Completion(completion) => {
-				cli.moq.reject("completion")?;
+				cli.typed.reject("completion")?;
 				return completion.run();
 			}
 			#[cfg(feature = "capture")]
 			Command::Devices => {
-				cli.moq.reject("devices")?;
+				cli.typed.reject("devices")?;
 				return devices::run().await;
 			}
 			// Put it back: it needs the transport bound below.
