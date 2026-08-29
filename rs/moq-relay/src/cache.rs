@@ -14,11 +14,11 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration for the relay's group cache.
 ///
-/// Non-latest groups stay cached until their track's retention window expires,
-/// the `duration` ceiling is reached, or the pool runs out of room, whichever
-/// comes first (the latest group of every track is always retained). With none
-/// of the knobs set the pool is unbounded and only each track's own window
-/// bounds memory.
+/// Non-latest groups stay cached until they sit unaccessed past the wall-clock
+/// LRU window (`duration`, 30s by default) or the pool runs out of room,
+/// whichever comes first (the latest group of every track is always retained).
+/// With none of the knobs set the pool is unbounded in bytes and only the
+/// default LRU window bounds memory.
 #[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -43,36 +43,38 @@ pub struct CacheConfig {
 	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
 
-	/// Maximum time a non-latest cached group is retained since it was last
-	/// written or served from cache by a FETCH, e.g. "30s" or "500ms".
+	/// Maximum time a non-latest cached group is retained, e.g. "30s" or "500ms".
 	///
-	/// Caps each track's own retention window: a publisher advertising a longer
-	/// window is clamped down to this, bounding how much history a track can
-	/// accumulate no matter what upstream asks for. A FETCH cache hit restarts
-	/// the clock, so actively-read history stays cached. This bounds memory by
-	/// age where `capacity` bounds it by bytes. Unbounded (each track keeps its
-	/// own window) when unset.
+	/// Sets both halves of the retention bound. The pool's wall-clock LRU window
+	/// becomes this: a group nobody has written or served from cache for this
+	/// long is reclaimed, and a FETCH cache hit restarts that clock, so
+	/// actively-read history stays cached. Each track's own media-timestamp
+	/// retention window is also clamped down to this, so a publisher advertising
+	/// a longer window can't promise more history than the relay keeps. This
+	/// bounds memory by age where `capacity` bounds it by bytes. When unset, the
+	/// LRU window keeps its 30 second default and each track keeps its own
+	/// retention window.
 	///
-	/// Two caveats on the ceiling. The latest group of every track is always
-	/// retained, since it is the live edge. And expiry is evaluated when a track
-	/// writes its next group, so a publisher that stops writing without
-	/// disconnecting keeps whatever it had cached until it resumes or the
-	/// broadcast closes; under memory pressure the `capacity` budget is repaid by
-	/// the tracks that are still writing.
+	/// Two caveats. The latest group of every track is always retained, since it
+	/// is the live edge. And expiry is evaluated when a track writes, so a
+	/// publisher that stops writing without disconnecting keeps whatever it had
+	/// cached until it resumes or the broadcast closes; under memory pressure the
+	/// `capacity` budget is repaid by the tracks that are still writing.
 	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION")]
 	pub duration: Option<moq_tokio::Duration>,
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
-/// age ceiling applied to every track.
+/// retention ceiling applied to every track.
 #[non_exhaustive]
 pub struct Cache {
-	/// The shared byte-budget pool every session's groups register with.
+	/// The shared pool every session's groups register with: the byte budget plus
+	/// the wall-clock LRU window that reclaims idle groups.
 	pub pool: cache::Pool,
 
-	/// Ceiling on how long a non-latest group is retained (the latest group of every
-	/// track is always kept). [`Duration::MAX`] imposes no ceiling, leaving each
-	/// track's own window in force.
+	/// Ceiling on each track's media-timestamp retention window (the latest group of
+	/// every track is always kept). [`Duration::MAX`] imposes no ceiling, leaving
+	/// each track's own window in force.
 	pub duration: Duration,
 }
 
@@ -81,10 +83,15 @@ impl CacheConfig {
 	/// spawning the headroom governor when configured. Requires a tokio runtime.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
-		let pool = match capacity {
+		let mut pool = match capacity {
 			Some(bytes) => cache::Pool::new(bytes),
 			None => cache::Pool::unbounded(),
 		};
+		// The same window also clamps each track's media-timestamp retention below,
+		// via `Cache::duration`; unset leaves the pool's default LRU window in force.
+		if let Some(duration) = self.duration.map(moq_tokio::Duration::into_std) {
+			pool = pool.with_expiry(duration);
+		}
 
 		if let Some(headroom) = self.headroom.as_deref() {
 			let headroom = parse_limit(headroom)?;

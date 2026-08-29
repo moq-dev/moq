@@ -68,13 +68,18 @@ pub struct Info {
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
 	pub timescale: Timescale,
-	/// How old a non-latest group may get before the publisher evicts it. The newest
-	/// group is always retained.
+	/// How far behind the live edge a group may fall, in media timestamps, before it
+	/// is stale. The newest group is always retained.
 	///
 	/// A retention bound rather than a delivery one, the inverse of an HTTP
 	/// `Cache-Control: max-age`. [`Subscription::max_age`] is clamped to this, since a
 	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_MAX_AGE`].
+	///
+	/// Measured against timestamps rather than the wall clock, so a congestion stall
+	/// (timestamps stop advancing) can't age content out. Wall-clock reclamation of
+	/// content nobody is accessing belongs to the cache pool's own
+	/// [`expiry`](crate::cache::Pool::expiry) window, not to this budget.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
 	/// budget [`Subscription::max_age`] sets for a subscriber.
@@ -558,7 +563,12 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Expire groups whose last access is older than `max_age`, never the latest.
+	/// Expire groups idle past the pool's wall-clock LRU window, never the latest.
+	///
+	/// The window is the pool's [`expiry`](cache::Pool::expiry), not the track's
+	/// [`max_age`](Info::max_age): retention is a media-timestamp promise, while this
+	/// is the cache's own guard against unread content pinning RAM, shared by every
+	/// track in the pool.
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
 	/// group except the protected latest. The cursor persists across calls, so
@@ -566,9 +576,9 @@ impl TrackState {
 	/// fetched, or written) entries in front of them: every position is revisited
 	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
 	/// byte budget reclaims the remainder under memory pressure.
-	fn evict_expired(&mut self, max_age: Duration) {
+	pub(super) fn evict_expired(&mut self) {
 		let now = self.cache.pool().now();
-		let max_ticks = cache::Pool::ticks(max_age);
+		let max_ticks = self.cache.pool().expiry_ticks();
 
 		let len = self.evict.len();
 		if len > 0 {
@@ -727,11 +737,11 @@ impl TrackState {
 
 	/// Admit a freshly-created group: settle eviction debt first (so the newcomer
 	/// can never be a victim of the very write that created it), insert it, then
-	/// expire by age.
-	fn commit_group(&mut self, group: &group::Producer, visible: bool, max_age: Duration) {
+	/// expire idle groups.
+	fn commit_group(&mut self, group: &group::Producer, visible: bool) {
 		self.charge_debt();
 		self.insert_group(group, visible);
-		self.evict_expired(max_age);
+		self.evict_expired();
 	}
 
 	/// Accrue and pay eviction debt for everything written since the last charge:
@@ -956,14 +966,13 @@ impl TrackState {
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence, frame_start)?;
 
-		let max_age = info.max_age;
 		let group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
 		// It is also invisible to arrival-order subscribers: fetched on demand,
 		// not produced live by the publisher.
 		group.cache_refresh();
-		self.commit_group(&group, false, max_age);
+		self.commit_group(&group, false);
 		Ok(group)
 	}
 }
@@ -1045,13 +1054,12 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		let track = state.info.clone().unwrap();
-		let max_age = track.max_age;
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true, max_age);
+		state.commit_group(&group, true);
 
 		Ok(group)
 	}
@@ -1070,11 +1078,10 @@ impl Producer {
 		}
 
 		let track = state.info.clone().unwrap();
-		let max_age = track.max_age;
 
 		let group =
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true, max_age);
+		state.commit_group(&group, true);
 
 		Ok(group)
 	}
@@ -3981,8 +3988,8 @@ mod test {
 			assert_eq!(state.offset, 0);
 		}
 
-		// Advance time past the eviction threshold.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		// Advance time past the pool's LRU window.
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -4016,8 +4023,8 @@ mod test {
 			.unwrap();
 		assert_eq!(consumer.next_frame().await.unwrap().unwrap().size, 5);
 
-		// The group stays open well past the max age, then the next period starts.
-		crate::model::clock::advance(DEFAULT_MAX_AGE * 12);
+		// The group stays open well past the LRU window, then the next period starts.
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY * 2);
 		group.finish().unwrap();
 		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
@@ -4046,7 +4053,7 @@ mod test {
 		// Each step stays well inside the retention window, but the whole read
 		// spans several windows. New groups keep the expiry scan running.
 		for seq in 2..12u64 {
-			crate::model::clock::advance(DEFAULT_MAX_AGE / 2);
+			crate::model::clock::advance(cache::DEFAULT_EXPIRY / 2);
 			let frame = reading.next_frame().await;
 			assert!(
 				matches!(frame, Ok(Some(_))),
@@ -4079,7 +4086,7 @@ mod test {
 		// One whole-frame read per half-window: most are served straight from the
 		// prefetch without locking. New groups keep the expiry scan running.
 		for seq in 1..20u64 {
-			crate::model::clock::advance(DEFAULT_MAX_AGE / 2);
+			crate::model::clock::advance(cache::DEFAULT_EXPIRY / 2);
 			let frame = reading.read_frame().await;
 			assert!(
 				matches!(frame, Ok(Some(_))),
@@ -4104,12 +4111,12 @@ mod test {
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
 		// Deliver just inside the window: the delivery stamps the group.
-		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY - Duration::from_secs(1));
 		let mut reading = subscriber.assert_group();
 
 		// Almost another full window passes: far beyond the write, inside the
 		// delivery stamp. The new group runs the expiry scan.
-		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY - Duration::from_secs(1));
 		producer.create_group(2u64.into()).unwrap().finish().unwrap();
 
 		let frame = reading.read_frame().await.unwrap();
@@ -4135,7 +4142,7 @@ mod test {
 		// One chunk per half-window; the whole frame spans several windows. New
 		// groups keep the expiry scan running.
 		for seq in 2..12u64 {
-			crate::model::clock::advance(DEFAULT_MAX_AGE / 2);
+			crate::model::clock::advance(cache::DEFAULT_EXPIRY / 2);
 			frame.write(bytes::Bytes::from_static(b"x")).unwrap();
 			producer.create_group(seq.into()).unwrap().finish().unwrap();
 		}
@@ -4168,14 +4175,14 @@ mod test {
 		subscriber.assert_no_group();
 
 		// Just inside the window, the cap rises and the re-offer stamps group 1.
-		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY - Duration::from_secs(1));
 		subscriber.end_at(1);
 		let mut reading = subscriber.assert_group();
 		assert_eq!(reading.sequence, 1);
 
 		// Almost another full window passes: far beyond the write, inside the
 		// re-offer stamp. The new group runs the expiry scan.
-		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY - Duration::from_secs(1));
 		producer.create_group(2u64.into()).unwrap().finish().unwrap();
 
 		let frame = reading.read_frame().await.unwrap();
@@ -4187,8 +4194,8 @@ mod test {
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
-		// Advance time past threshold.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		// Advance time past the LRU window.
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -4222,7 +4229,7 @@ mod test {
 
 		let mut consumer = producer.subscribe(None);
 
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -4230,20 +4237,62 @@ mod test {
 		assert_eq!(group.sequence, 1);
 	}
 
+	/// Mint a track under an origin whose pool has the given wall-clock LRU window.
+	fn track_producer_expiring(name: impl Into<Arc<str>>, expiry: impl Into<Option<Duration>>) -> Producer {
+		let origin = crate::origin::Info::default().with_pool(cache::Pool::unbounded().with_expiry(expiry));
+		Producer::new(
+			Arc::new(broadcast::Info {
+				origin,
+				..Default::default()
+			}),
+			name,
+			None,
+		)
+	}
+
 	#[tokio::test]
-	async fn cache_age_controls_eviction() {
-		// A shorter cache evicts sooner than the default.
-		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
+	async fn pool_expiry_controls_eviction() {
+		// A shorter LRU window on the pool evicts sooner than the default.
+		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the custom budget but well within DEFAULT_MAX_AGE.
+		// Past the pool's window but well within cache::DEFAULT_EXPIRY.
 		crate::model::clock::advance(Duration::from_secs(2));
 		producer.append_group().unwrap(); // seq 1
 
-		// Seq 0 is gone because the publisher only keeps groups for 1s.
+		// Seq 0 is gone because the pool only keeps idle groups for 1s.
 		let state = producer.state.read();
 		assert_eq!(live_groups(&state), 1);
 		assert_eq!(first_live_sequence(&state), 1);
+	}
+
+	/// A track's `max_age` is a media-timestamp budget: it does not drive wall-clock
+	/// eviction, so a stall (no accesses, no timestamp progress) shorter than the
+	/// pool's LRU window can't age content out no matter how small the window is.
+	#[tokio::test]
+	async fn max_age_does_not_drive_wall_eviction() {
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
+		producer.append_group().unwrap(); // seq 0
+
+		// Far past max_age in wall time, but inside the pool's LRU window.
+		crate::model::clock::advance(Duration::from_secs(10));
+		producer.append_group().unwrap(); // seq 1
+
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 2, "max_age is media time, not a wall clock");
+	}
+
+	/// Disabling the pool's expiry keeps idle groups until byte pressure reclaims them.
+	#[tokio::test]
+	async fn disabled_pool_expiry_never_reclaims() {
+		let mut producer = track_producer_expiring("test", None);
+		producer.append_group().unwrap(); // seq 0
+
+		crate::model::clock::advance(Duration::from_secs(3600));
+		producer.append_group().unwrap(); // seq 1
+
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 2);
 	}
 
 	#[test]
@@ -4302,9 +4351,10 @@ mod test {
 		assert_eq!(under.state.read().max_age_bound(), Some(Duration::from_millis(500)));
 	}
 
+	/// The origin ceiling clamps the media-timestamp budget only; wall-clock
+	/// reclamation belongs to the pool's LRU window, not the ceiling.
 	#[tokio::test]
-	async fn origin_cache_duration_caps_eviction() {
-		// The publisher wants a 60s window, but the origin caps retention at 1s.
+	async fn origin_cache_duration_does_not_wall_evict() {
 		let mut producer = track_producer_capped(
 			"test",
 			Info::default().with_max_age(Duration::from_secs(60)),
@@ -4312,14 +4362,12 @@ mod test {
 		);
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the origin ceiling but far within the publisher's own 60s window.
+		// Far past the ceiling in wall time, but inside the pool's LRU window.
 		crate::model::clock::advance(Duration::from_secs(2));
 		producer.append_group().unwrap(); // seq 1
 
-		// Seq 0 is evicted anyway: the origin ceiling wins over the larger publisher window.
 		let state = producer.state.read();
-		assert_eq!(live_groups(&state), 1);
-		assert_eq!(first_live_sequence(&state), 1);
+		assert_eq!(live_groups(&state), 2);
 	}
 
 	#[test]
@@ -5228,7 +5276,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -5253,7 +5301,7 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -5267,7 +5315,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -6654,9 +6702,9 @@ mod test {
 		);
 	}
 
-	/// A late frame write restarts the retention clock (retention is documented as
-	/// time since last written or fetched), so an actively-growing group is not
-	/// expired as old mid-write.
+	/// A late frame write restarts the LRU clock (the window measures time since
+	/// last written or fetched), so an actively-growing group is not expired as
+	/// idle mid-write.
 	#[tokio::test]
 	async fn write_restarts_retention_clock() {
 		let (mut producer, _pool) = pooled_producer(1 << 40);
@@ -6664,7 +6712,7 @@ mod test {
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
 		// Idle past the window, then the straggler receives a late frame.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		straggler
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 100]))
 			.unwrap();
@@ -6674,7 +6722,7 @@ mod test {
 		assert!(consumer.peek_group(0).is_some(), "the write restarted the clock");
 
 		// Once the writes stop, the group ages out normally.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		producer.append_group().unwrap().finish().unwrap(); // seq 3 runs expiry
 		assert!(consumer.peek_group(0).is_none(), "idle content still expires");
 	}
@@ -6705,7 +6753,7 @@ mod test {
 
 		// Age everything out, then refresh the first four backfills so they sit
 		// fresh at the front of the eviction order, hiding the expired fifth.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		for sequence in 1..=4u64 {
 			consumer.fetch_group(sequence, None).await.unwrap();
 		}
@@ -6874,9 +6922,9 @@ mod test {
 		}
 
 		// Keep seq 2 fresh while seq 3 (behind it in eviction order) expires.
-		crate::model::clock::advance(Duration::from_secs(4));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(1));
 		consumer.fetch_group(2, None).await.unwrap();
-		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(2));
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(1));
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
@@ -7039,8 +7087,8 @@ mod test {
 		pending.await.unwrap();
 		let used = pool.used();
 
-		// Age past the track window; the next write reclaims the backfill.
-		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
+		// Age past the pool's LRU window; the next write reclaims the backfill.
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		assert!(consumer.peek_group(2).is_none(), "expired backfill is reclaimed");

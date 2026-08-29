@@ -599,15 +599,18 @@ environment variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`,
 
 ### \[cache]
 
-Memory budget for cached groups. Old (non-latest) groups stay cached until their
-track's retention window expires, the `duration` ceiling is reached, or the pool
-runs out of room, whichever comes first. Under memory pressure each track evicts
-its own stalest groups as it writes, ordered by when each was last written or
-served from cache, and proportional to how much it writes, so usage converges on
-the budget without any global scan; groups that FETCH requests keep hitting are
-retained over ones nobody reads. The latest group of every track is
-always retained. With none of the knobs set the cache is unbounded and only each
-track's own window limits memory.
+Memory budget for cached groups. Old (non-latest) groups stay cached until they
+sit unaccessed past the wall-clock LRU window (`duration`, 30 seconds by
+default) or the pool runs out of room, whichever comes first. Under memory
+pressure each track evicts its own stalest groups as it writes, ordered by when
+each was last written or served from cache, and proportional to how much it
+writes, so usage converges on the budget without any global scan; groups that
+FETCH requests keep hitting are retained over ones nobody reads. The latest
+group of every track is always retained. With none of the knobs set the cache
+is unbounded in bytes and only the default LRU window limits memory. Each
+track's own retention window (its publisher's max age) is separate: that is
+measured in media timestamps and bounds what subscribers may wait for, not
+when idle memory is reclaimed.
 
 ```toml
 [cache]
@@ -625,20 +628,19 @@ capacity = "8GiB"
 headroom = "2GiB"
 
 # Maximum time a non-latest cached group is retained since it was last written
-# or served from cache by a FETCH ("30s", "500ms"). Caps each track's own
-# retention window: a publisher advertising a longer window is clamped down to
-# this, bounding how much history a track accumulates no matter what upstream
-# asks for. A FETCH cache hit restarts the clock, so actively-read history
-# stays cached. The latest group of every track is always retained, as it is
-# the live edge. Unbounded (each track keeps its own window) when unset.
-duration = "30s"
+# or served from cache by a FETCH ("30s", "500ms"). Sets the pool's wall-clock
+# LRU window (30s when unset), and also clamps each track's media-timestamp
+# retention window, so a publisher advertising a longer window can't promise
+# more history than the relay keeps. A FETCH cache hit restarts the clock, so
+# actively-read history stays cached. The latest group of every track is
+# always retained, as it is the live edge.
+duration = "60s"
 ```
 
 The `capacity` budget counts group payload bytes, not process RSS, so leave
 slack below physical memory (or just use `headroom`, which measures actual
-available memory). `duration` is the age counterpart: it stops a long-running
-relay from accumulating hours of history per track when the byte budget alone
-leaves room for it.
+available memory). `duration` is the age counterpart: it stops idle history
+from pinning memory when the byte budget alone leaves room for it.
 
 All eviction happens as tracks write (there is no background reaper), so both
 `duration` and the byte budget cap how much history *active* publishers build

@@ -106,12 +106,13 @@ pub struct Info {
 	/// across the whole process share one memory budget.
 	pub pool: cache::Pool,
 
-	/// Ceiling on how long any non-latest group under this origin is retained. Each
-	/// track's own [`max_age`](track::Info::max_age) window is clamped down to
-	/// this when the track binds, so a group is never held longer than this regardless
-	/// of what a publisher advertises. The age budget alongside [`Self::pool`]'s byte
-	/// budget: a relay bounds memory by both. [`Duration::MAX`] (the default) imposes no
-	/// ceiling, leaving each track's own window in force.
+	/// Ceiling on each track's media-timestamp retention window under this origin.
+	/// Each track's own [`max_age`](track::Info::max_age) is clamped down to this
+	/// when the track binds, so a subscriber is never promised more history than the
+	/// origin allows, regardless of what a publisher advertises. Wall-clock
+	/// reclamation of idle content is separate: [`Self::pool`]'s
+	/// [`expiry`](cache::Pool::expiry) window. [`Duration::MAX`] (the default)
+	/// imposes no ceiling, leaving each track's own window in force.
 	pub cache_duration: Duration,
 
 	/// The retention window given to a track whose publisher advertises none.

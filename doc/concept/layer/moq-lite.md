@@ -124,8 +124,9 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Subscriber Max Age**: How old a non-latest group may get before it is skipped. Defaults to zero, so stale groups are skipped immediately.
 
-That age is measured both on the media timeline (a group's first timestamp against the newest stamped one) and by wall-clock arrival time, and either limit can expire the group.
-The media timeline keeps a backlog delivered as a burst old, while wall-clock time backstops stalled or empty groups that have no timestamp.
+That age is measured on the media timeline: a group is stale once everything it could still hold falls a full budget behind the newest frame, bounded by where its successor begins.
+Timestamps rather than the wall clock, so a backlog delivered as a burst is still old, while a congestion stall (nothing arrives, timestamps stand still) never expires content on its own.
+Reclaiming idle cached content by wall clock is a separate cache policy, not part of this budget.
 Both ends apply it: the publisher skips a group rather than sending it, and the subscriber skips it again as it reads.
 The publisher only ever sees the most tolerant budget across its subscribers, which is why the subscriber applies it too.
 Asking for old groups with `Group Start` does not exempt them: a floor only bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
@@ -133,6 +134,7 @@ That is also why the budget is what decides where delivery starts: the groups wo
 
 The publisher also keeps old groups around for a best-effort **Publisher Max Age** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's max age is bounded by this window: a group can't be waited for longer than it's actually kept around.
+Best-effort cuts the other way too: a cache reclaims groups nobody has read or written for a while (30 seconds by default) regardless of the advertised window, so idle history doesn't pin memory.
 
 It is declared per track, so a publisher raises it on the tracks that are read as history rather than followed at the live edge.
 hang media tracks ask for 30 seconds on that basis: a segmented egress (HLS/DASH) may only advertise segments a fetch can still reach, and a standard player starts several segments behind the live edge.

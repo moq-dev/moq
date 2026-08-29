@@ -18,10 +18,17 @@
 //! old entries and inserting new ones both advance the mean, so the eviction
 //! frontier moves with cache turnover on its own.
 //!
-//! A pool is inert by default ([`Pool::unbounded`]): publishers and subscribers that
-//! never set a capacity pay only a couple of atomic counters. A relay creates one
-//! bounded pool and shares it across every origin so the whole process caches into a
-//! single budget.
+//! The pool also owns the wall-clock LRU window ([`Pool::expiry`]): a non-latest
+//! group that nobody has read or written for that long is reclaimed by its track's
+//! next write, no matter what retention its track advertises. Track retention
+//! ([`max_age`](crate::track::Info::max_age)) is measured in media timestamps, so a
+//! congestion stall can't age content out; the pool's expiry is the orthogonal
+//! wall-clock bound that keeps unwatched content from pinning RAM.
+//!
+//! A pool is mostly inert by default ([`Pool::unbounded`]): publishers and
+//! subscribers that never set a capacity pay only a couple of atomic counters plus
+//! the default expiry window. A relay creates one bounded pool and shares it across
+//! every origin so the whole process caches into a single budget.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,6 +60,10 @@ const READ_BOOST: u64 = 2;
 /// the mean is count-weighted.
 const TICK_MS: u64 = 100;
 
+/// Default [`Pool::expiry`]: how long an unread, unwritten non-latest group stays
+/// cached before its track's next write reclaims it.
+pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(30);
+
 /// A shared byte budget that caches charge into; cloning shares the same budget.
 ///
 /// The pool tracks how many payload bytes are cached across every registered group,
@@ -71,6 +82,8 @@ struct Inner {
 	used: AtomicU64,
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
+	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
+	expiry: AtomicU64,
 	// Reference point for the coarse tick clock.
 	epoch: crate::runtime::Instant,
 	// Sum and count of last-access ticks across the evictable population, giving a
@@ -85,6 +98,7 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
+			expiry: AtomicU64::new(DEFAULT_EXPIRY.as_millis() as u64),
 			epoch: crate::model::clock::now(),
 			access_sum: AtomicU64::new(0),
 			access_count: AtomicU64::new(0),
@@ -131,6 +145,47 @@ impl Pool {
 		self.inner.capacity.store(capacity, Ordering::Relaxed);
 	}
 
+	/// Set the wall-clock LRU window, returning `self` for chaining.
+	///
+	/// A non-latest cached group that nobody reads or writes for this long is
+	/// reclaimed by its track's next write, surfacing to any remaining reader as
+	/// [`Error::Old`](crate::Error::Old). This is deliberately independent of track
+	/// retention: [`max_age`](crate::track::Info::max_age) is measured in media
+	/// timestamps (so a congestion stall can't age content out), while this window
+	/// keeps content nobody is accessing from pinning RAM. `None` disables idle
+	/// reclamation, leaving only the byte budget. Defaults to [`DEFAULT_EXPIRY`].
+	pub fn with_expiry(self, expiry: impl Into<Option<Duration>>) -> Self {
+		let ms = expiry
+			.into()
+			.map_or(u64::MAX, |expiry| u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX));
+		self.inner.expiry.store(ms, Ordering::Relaxed);
+		self
+	}
+
+	/// The wall-clock LRU window, or `None` when idle content is never reclaimed.
+	pub fn expiry(&self) -> Option<Duration> {
+		match self.inner.expiry.load(Ordering::Relaxed) {
+			u64::MAX => None,
+			ms => Some(Duration::from_millis(ms)),
+		}
+	}
+
+	/// The LRU window in coarse ticks; effectively infinite when disabled.
+	pub(crate) fn expiry_ticks(&self) -> u64 {
+		match self.inner.expiry.load(Ordering::Relaxed) {
+			u64::MAX => u64::MAX,
+			ms => ms / TICK_MS,
+		}
+	}
+
+	/// How often a reader on a lock-free path should re-stamp its group's access
+	/// time: half the LRU window keeps the stamp comfortably inside it while staying
+	/// rare on the hot path. Bounded even when expiry is disabled, since the stamp
+	/// also protects the group from byte-budget eviction.
+	pub(crate) fn refresh_interval(&self) -> Duration {
+		self.expiry().unwrap_or(DEFAULT_EXPIRY) / 2
+	}
+
 	/// Returns true if both handles share the same underlying pool.
 	pub fn same_pool(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.inner, &other.inner)
@@ -150,11 +205,6 @@ impl Pool {
 	pub(crate) fn now(&self) -> u64 {
 		let elapsed = crate::model::clock::now().duration_since(self.inner.epoch);
 		elapsed.as_millis() as u64 / TICK_MS
-	}
-
-	/// Convert a duration into coarse ticks, saturating.
-	pub(crate) fn ticks(duration: Duration) -> u64 {
-		u64::try_from(duration.as_millis() / TICK_MS as u128).unwrap_or(u64::MAX)
 	}
 
 	/// Mean last-access tick across the evictable population, or `None` when it is
@@ -211,6 +261,7 @@ impl std::fmt::Debug for Pool {
 		f.debug_struct("Pool")
 			.field("used", &self.used())
 			.field("capacity", &self.capacity())
+			.field("expiry", &self.expiry())
 			.finish()
 	}
 }
@@ -275,12 +326,13 @@ impl Track {
 		self.written.swap(0, Ordering::Relaxed)
 	}
 
-	/// Settle eviction debt from a frame write, once enough bytes accumulate.
+	/// Settle eviction debt and expire idle groups from a frame write, once enough
+	/// bytes accumulate.
 	///
 	/// Called with no group lock held (locks are ordered track then group). Cheap
 	/// until the threshold crosses: one relaxed load. This is what makes a track
 	/// that only appends frames to open groups, never inserting another group,
-	/// still pay its debt (and age its content out).
+	/// still pay its debt and age its idle content out.
 	pub(crate) fn settle(&self) {
 		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
 			return;
@@ -290,6 +342,7 @@ impl Track {
 		let Some(state) = self.state.upgrade() else { return };
 		if let Ok(mut state) = state.write() {
 			state.charge_debt();
+			state.evict_expired();
 		}
 	}
 }
@@ -570,6 +623,26 @@ mod test {
 		let stamped = c.accessed();
 		c.refresh();
 		assert_eq!(c.accessed(), stamped);
+	}
+
+	#[test]
+	fn expiry_config() {
+		// The LRU window is on by default, even for an unbounded pool.
+		let pool = Pool::unbounded();
+		assert_eq!(pool.expiry(), Some(DEFAULT_EXPIRY));
+		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
+
+		let pool = pool.with_expiry(Duration::from_secs(1));
+		assert_eq!(pool.expiry(), Some(Duration::from_secs(1)));
+		assert_eq!(pool.expiry_ticks(), 10);
+		assert_eq!(pool.refresh_interval(), Duration::from_millis(500));
+
+		// Disabled: never reclaimed by idleness, but readers still re-stamp on a
+		// bounded cadence for byte-eviction protection.
+		let pool = pool.with_expiry(None);
+		assert_eq!(pool.expiry(), None);
+		assert_eq!(pool.expiry_ticks(), u64::MAX);
+		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 	}
 
 	#[test]

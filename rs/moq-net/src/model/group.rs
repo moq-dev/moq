@@ -814,7 +814,7 @@ impl Producer {
 				end: None,
 				prefetch: Prefetch::default(),
 				last_refresh: crate::model::clock::now(),
-				max_age: self.track.max_age,
+				refresh_interval: self.cache.pool().refresh_interval(),
 			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -1014,12 +1014,13 @@ struct Plain {
 
 	// When this consumer last stamped the group's access time. The prefetch bounds
 	// a batch by frame count, not elapsed time, so pops re-stamp on a time bound
-	// (see [`Self::refresh_if_stale`]) or a slow reader could go a full retention
+	// (see [`Self::refresh_if_stale`]) or a slow reader could go a full LRU
 	// window without an access and be expired mid-read.
 	last_refresh: crate::runtime::Instant,
 
-	// The publisher's retention window, used to bound refreshes on the prefetch path.
-	max_age: std::time::Duration,
+	// How long a prefetching reader may go without re-stamping the group's access
+	// time: half the pool's LRU window, captured when the cursor was created.
+	refresh_interval: std::time::Duration,
 }
 
 impl Clone for Plain {
@@ -1032,7 +1033,7 @@ impl Clone for Plain {
 			end: self.end,
 			prefetch: Prefetch::default(),
 			last_refresh: self.last_refresh,
-			max_age: self.max_age,
+			refresh_interval: self.refresh_interval,
 		}
 	}
 }
@@ -1465,12 +1466,12 @@ impl Plain {
 	}
 
 	/// Re-stamp the group's access time from the lock-free prefetch path once half
-	/// the retention window has passed since this consumer last stamped it. The
+	/// the pool's LRU window has passed since this consumer last stamped it. The
 	/// batch bounds frames, not elapsed time, so without this a reader pacing
 	/// through a batch could be expired while demonstrably active. Half the window
 	/// keeps the stamp comfortably inside it while staying rare on the hot path.
 	fn refresh_if_stale(&mut self) {
-		if crate::model::clock::now().duration_since(self.last_refresh) * 2 < self.max_age {
+		if crate::model::clock::now().duration_since(self.last_refresh) < self.refresh_interval {
 			return;
 		}
 		self.state.read().charge.refresh();
