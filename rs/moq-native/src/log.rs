@@ -79,34 +79,6 @@ impl Log {
 			.try_init()
 			.map_err(|e| crate::Error::SetSubscriber(std::sync::Arc::new(e)))?;
 
-		// Start deadlock detection thread (only in debug builds)
-		#[cfg(debug_assertions)]
-		std::thread::spawn(Self::deadlock_detector);
-
 		Ok(())
-	}
-
-	#[cfg(debug_assertions)]
-	fn deadlock_detector() {
-		loop {
-			std::thread::sleep(std::time::Duration::from_secs(1));
-
-			let deadlocks = parking_lot::deadlock::check_deadlock();
-			if deadlocks.is_empty() {
-				continue;
-			}
-
-			tracing::error!("DEADLOCK DETECTED");
-
-			for (i, threads) in deadlocks.iter().enumerate() {
-				tracing::error!("Deadlock #{}", i);
-				for t in threads {
-					tracing::error!("Thread Id {:#?}", t.thread_id());
-					tracing::error!("{:#?}", t.backtrace());
-				}
-			}
-
-			// Optionally: std::process::abort() to get a core dump
-		}
 	}
 }

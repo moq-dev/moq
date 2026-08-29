@@ -26,7 +26,7 @@
 use std::{
 	io,
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::{Duration, Instant},
@@ -214,7 +214,7 @@ struct Inner {
 	connection: AtomicU64,
 	exhausted: AtomicU64,
 	unknown: AtomicU64,
-	state: parking_lot::Mutex<State>,
+	state: Mutex<State>,
 }
 
 struct State {
@@ -235,7 +235,7 @@ impl Health {
 			connection: AtomicU64::new(0),
 			exhausted: AtomicU64::new(0),
 			unknown: AtomicU64::new(0),
-			state: parking_lot::Mutex::new(State {
+			state: Mutex::new(State {
 				stall: None,
 				consecutive: 0,
 				delay: RETRY_MIN,
@@ -251,7 +251,7 @@ impl Health {
 	/// An accept succeeded: the listener is serving, so any stall is over and the
 	/// next failure starts from the shortest delay again.
 	pub fn accepted(&self) {
-		let mut state = self.0.state.lock();
+		let mut state = self.0.state.lock().unwrap();
 		if state.stall.take().is_some() {
 			tracing::info!(listener = self.0.listener, "listener is accepting again");
 		}
@@ -276,7 +276,7 @@ impl Health {
 			return None;
 		}
 
-		let mut state = self.0.state.lock();
+		let mut state = self.0.state.lock().unwrap();
 		state.consecutive += 1;
 		let delay = jitter(state.delay);
 		state.delay = (state.delay * 2).min(RETRY_MAX);
@@ -316,7 +316,7 @@ impl Health {
 	/// Only a successful accept clears it, so a listener with no traffic holds its
 	/// last value rather than claiming a recovery it has no evidence for.
 	pub fn stalled(&self) -> Option<Duration> {
-		self.0.state.lock().stall.map(|since| since.elapsed())
+		self.0.state.lock().unwrap().stall.map(|since| since.elapsed())
 	}
 
 	fn counter(&self, failure: Failure) -> &AtomicU64 {
