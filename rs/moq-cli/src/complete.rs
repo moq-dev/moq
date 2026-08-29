@@ -696,6 +696,7 @@ mod tests {
 	/// against it offers process-wide flags that the chunk refuses.
 	#[tokio::test]
 	async fn retargets_to_the_active_stage() {
+		let _env = EnvGuard::lock();
 		// A stage offers its own flags, and none of the globals it would refuse.
 		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --").await;
 		assert!(!staged.is_empty(), "a later stage completed nothing");
@@ -792,23 +793,30 @@ mod tests {
 
 	/// One lock for every test that touches the process environment.
 	///
-	/// `set_var` is not thread-safe against a concurrent read, and Usage reads the
-	/// `MOQ_*` vars while it parses. Clearing on entry also stops a developer's own
-	/// exported `MOQ_CONNECT` from making a no-dial assertion pass for the wrong
-	/// reason, or fail for one.
+	/// `set_var`'s safety contract is that no other thread reads the environment while
+	/// it runs, and completion reads it on every call: `globals` goes through
+	/// `CommandArgs::apply_env`. So the lock is not only for the test that writes.
+	/// Every test that calls [`complete`] takes it too, which is what makes the write
+	/// sound under a threaded runner, and which also stops a developer's own exported
+	/// `MOQ_CONNECT` from deciding whether an assertion passes.
 	static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-	/// Holds [`ENV_LOCK`] and restores `MOQ_CONNECT` on the way out.
+	/// Holds [`ENV_LOCK`], and restores `MOQ_CONNECT` on the way out.
 	struct EnvGuard {
 		_lock: std::sync::MutexGuard<'static, ()>,
 		saved: Option<OsString>,
 	}
 
 	impl EnvGuard {
+		/// Take the lock and clear `MOQ_CONNECT`, for a test that only reads it.
+		fn lock() -> Self {
+			Self::set(None)
+		}
+
 		fn set(value: Option<&str>) -> Self {
 			let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 			let saved = std::env::var_os("MOQ_CONNECT");
-			// SAFETY: ENV_LOCK is held, and every test here that reads or writes the
+			// SAFETY: ENV_LOCK is held, and every test that reads or writes the
 			// environment takes it first.
 			unsafe {
 				match value {
@@ -873,7 +881,7 @@ mod tests {
 	/// that the completer fired at all.
 	#[tokio::test]
 	async fn no_relay_on_the_line_means_no_dial() {
-		let _env = EnvGuard::set(None);
+		let _env = EnvGuard::lock();
 		for line in [
 			"moq --broadcast ",
 			"moq export --broadcast ",
@@ -916,6 +924,7 @@ mod tests {
 	/// `--broadcast` is answered from what the relay on the line announces.
 	#[tokio::test]
 	async fn a_relay_on_the_line_answers_broadcast() {
+		let _env = EnvGuard::lock();
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let route = moq_net::broadcast::Route::new().with_announce(true);
 		let _alpha = origin.create_broadcast("alpha", route.clone()).expect("alpha");
@@ -937,6 +946,7 @@ mod tests {
 	/// broadcast the stage names, which overrides the process-wide one.
 	#[tokio::test]
 	async fn a_stage_broadcast_picks_the_catalog_to_read() {
+		let _env = EnvGuard::lock();
 		use hang::catalog::{AudioCodec, AudioConfig, H264, VideoConfig};
 
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
@@ -984,6 +994,7 @@ mod tests {
 	/// answers either way and hides the bug.
 	#[tokio::test]
 	async fn the_catalog_format_on_the_line_is_honored() {
+		let _env = EnvGuard::lock();
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let route = moq_net::broadcast::Route::new().with_announce(true);
 		let mut broadcast = origin.create_broadcast("room", route).expect("broadcast");
