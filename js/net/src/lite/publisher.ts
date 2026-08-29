@@ -25,7 +25,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -281,17 +281,17 @@ function carriesMaxAge(version: Version): boolean {
 /**
  * Position a subscription's read cursor for the wire serving it.
  *
- * Normally there is nothing to do: `Track.Producer.subscribe` resolves the cursor from the
- * subscription itself, at the group it named or the oldest one its own Max Age still
- * considers fresh.
+ * On lite-06 there is nothing to do: the cursor is floored at the group the subscription
+ * named (or 0), and its Max Age decides what above the floor is worth delivering.
  *
- * A wire that cannot carry Max Age is the exception. Those sessions are served with an
- * unbounded budget so a legacy subscriber never has backlog dropped under it (see
- * {@link servingMaxAge}), and read as a start that would replay the whole cache on join.
- * Their drafts mean the latest group when no start is named, so say so explicitly.
+ * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
+ * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
+ * carry a Max Age, but there it is a staleness tolerance only; lite-01/02 additionally get
+ * an unbounded budget so nothing is dropped under them (see {@link servingMaxAge}), which
+ * must not read as a request to replay the whole cache on join.
  */
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
-	if (carriesMaxAge(version) || startGroup !== undefined) return;
+	if (resolvesStart(version) || startGroup !== undefined) return;
 
 	const latest = track.latest();
 	if (latest !== undefined) track.startAt(latest);

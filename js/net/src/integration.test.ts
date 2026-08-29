@@ -132,16 +132,18 @@ test("integration: lite subscription options and updates reach the publisher", a
 			const request = await broadcast.requested();
 			if (!request) return;
 			const producer = request.accept();
-			if (request.subscription.startGroup === 0) resolveProducer?.(producer);
+			if (request.subscription.startGroup === 1) resolveProducer?.(producer);
 		}
 	})();
 
 	const remote = client.consume(Path.from("test"));
+	// A floor of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent, since
+	// its encoding of group 0 means "replay from the beginning" instead.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		ordered: true,
 		maxAge: 250,
-		startGroup: 0,
+		startGroup: 1,
 		endGroup: 9,
 	});
 	const producer = await accepted;
@@ -149,7 +151,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 		priority: 3,
 		ordered: true,
 		maxAge: 250,
-		startGroup: 0,
+		startGroup: 1,
 		endGroup: 9,
 	});
 

@@ -13,14 +13,19 @@ function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Arr
 	return data;
 }
 
+/** Write one frame into an open group: `millis` on the timeline, tagged `tag`. */
+function publishFrame(group: Group.Producer, millis: number, tag: number) {
+	group.writeFrame({
+		payload: encodeLegacyFrame(Time.Micro.fromMilli(millis as Time.Milli), new Uint8Array([tag])),
+		timestamp: Time.Timestamp.fromMillis(millis),
+	});
+}
+
 /** Publish one closed group carrying a single frame at `millis`. */
 function publish(track: Track.Producer, sequence: number, millis: number) {
 	const group = new Group.Producer(sequence);
 	track.writeGroup(group);
-	group.writeFrame({
-		payload: encodeLegacyFrame(Time.Micro.fromMilli(millis as Time.Milli), new Uint8Array([sequence])),
-		timestamp: Time.Timestamp.fromMillis(millis),
-	});
+	publishFrame(group, millis, sequence);
 	group.close();
 }
 
@@ -36,9 +41,9 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 	return seen;
 }
 
-// A publisher resolving a start from the subscriber's max age serves the head of the window
-// alongside the live edge, and groups go out newest-first, so the head arrives *after* the
-// group that is already playing. Arriving in that order is not a reason to throw it away:
+// A publisher serving a subscriber's max age hands over the head of the window alongside
+// the live edge, and groups go out newest-first, so the head arrives *after* the group
+// that is already playing. Arriving in that order is not a reason to throw it away:
 // audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
 // subscription's own max age already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
@@ -65,5 +70,44 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 		[2, 2],
 	]);
 
+	consumer.close();
+});
+
+// A below-cursor group may still be downloading when its buffered frames are momentarily
+// drained (the decode loop consumes faster than the network delivers). Removing it at that
+// instant silently truncates its tail, so removal must wait for the group to finish.
+test("a below-cursor group still downloading is not truncated", async () => {
+	const track = new Track.Producer("test").accept({ maxAge: 30_000 });
+	const consumer = new Consumer(track.subscribe({ maxAge: 5000 }), {
+		format: new LegacyFormat(),
+		latency: 5000 as Time.Milli,
+	});
+
+	// The live edge group arrives first and starts delivery (still open).
+	const live = new Group.Producer(3);
+	track.writeGroup(live);
+	publishFrame(live, 3000, 30);
+	expect((await consumer.next())?.frame?.payload[0]).toBe(30);
+
+	// A backlog group lands below the cursor, one frame at a time (mid-download).
+	const backlog = new Group.Producer(1);
+	track.writeGroup(backlog);
+	publishFrame(backlog, 1000, 10);
+	const first = await consumer.next();
+	expect(first?.group).toBe(1);
+	expect(first?.frame?.payload[0]).toBe(10);
+
+	// The consumer finds the group's buffer empty while it is still open. It must wait
+	// rather than shift the group out, so the second frame still arrives.
+	const pending = consumer.next();
+	publishFrame(backlog, 1500, 11);
+	backlog.close();
+
+	const second = (await pending) as { group: number; frame?: { payload: Uint8Array } };
+	expect(second.group).toBe(1);
+	expect(second.frame?.payload[0]).toBe(11);
+
+	live.close();
+	track.close();
 	consumer.close();
 });

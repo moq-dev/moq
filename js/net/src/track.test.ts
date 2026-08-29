@@ -270,11 +270,7 @@ test("latency budget admits groups within its presentation-time window", async (
 	expect((await track.recvGroup())?.sequence).toBe(2);
 });
 
-test("a resolved start is a floor for later arrivals", async () => {
-	// A subscription that names no start resolves one from its budget when it opens: the
-	// oldest cached group that budget still admits. That start is a floor like any other, so a
-	// group arriving below it afterwards is behind the subscription, even carrying a timestamp
-	// the budget would otherwise admit.
+test("a late lower group within the budget is delivered", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 30_000 });
 	for (const [sequence, timestamp] of [
 		[5, 0],
@@ -288,20 +284,42 @@ test("a resolved start is a floor for later arrivals", async () => {
 	}
 
 	const track = producer.subscribe({ maxAge: 5000 });
+	expect((await track.recvGroup())?.sequence).toBe(5);
+	expect((await track.recvGroup())?.sequence).toBe(6);
+	expect((await track.recvGroup())?.sequence).toBe(7);
 
+	// Arriving below everything already delivered is not what makes content stale: the
+	// budget is the only gate, and this straggler's timestamp is within it. A consumer
+	// that needs sequence order reorders (or drops) it itself.
 	const late = new GroupProducer(4);
 	producer.writeGroup(late);
 	late.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.fromMillis(500) });
 	late.close();
 
-	expect((await track.recvGroup())?.sequence).toBe(5);
-	expect((await track.recvGroup())?.sequence).toBe(6);
-	expect((await track.recvGroup())?.sequence).toBe(7);
+	expect((await track.recvGroup())?.sequence).toBe(4);
 	producer.close();
 	expect(await track.recvGroup()).toBeUndefined();
 });
 
-test("a start is clamped to the publisher's window", async () => {
+test("a named start is a floor, not a request", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: 30_000 });
+	for (const timestamp of [0, 1000, 2000, 3000, 4000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	// The budget is the only thing that asks for data; a named start only bounds how far
+	// back it may reach.
+	const floored = producer.subscribe({ startGroup: 3, maxAge: 60_000 });
+	expect((await floored.recvGroup())?.sequence).toBe(3);
+	expect((await floored.recvGroup())?.sequence).toBe(4);
+
+	// Naming group 1 at real time still delivers the live edge alone: the zero budget
+	// calls everything older stale.
+	const named = producer.subscribe({ startGroup: 1 });
+	expect((await named.recvGroup())?.sequence).toBe(4);
+});
+
+test("the budget is clamped to the publisher's window", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 1500 });
 	const track = producer.subscribe({ maxAge: 60_000 });
 

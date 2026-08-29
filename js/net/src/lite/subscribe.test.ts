@@ -86,15 +86,37 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 		startGroup: 0,
 		endGroup: 9,
 	});
+	// Lite-06 carries the raw floor, and a floor of 0 with no frame offset is the same
+	// absence of a constraint as no floor at all, so it canonicalizes to undefined.
 	const got = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
-		Version.DRAFT_05,
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(true);
 	expect(got.maxAge).toBe(250);
-	expect(got.startGroup).toBe(0);
+	expect(got.startGroup).toBeUndefined();
 	expect(got.endGroup).toBe(9);
+
+	// Group 0 stays named when a Frame Start qualifies it: a subscription can resume
+	// partway through group 0 (a catalog never leaves it).
+	message.startFrame = 4;
+	const resumed = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
+	);
+	expect(resumed.startGroup).toBe(0);
+	expect(resumed.startFrame).toBe(4);
+	message.startFrame = 0;
+
+	// A pre-06 wire folds the vacuous floor back to absent: an explicit group 0 there
+	// would mean "replay from the beginning", which is not what a floor of 0 asks for.
+	const folded = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		Version.DRAFT_05,
+	);
+	expect(folded.startGroup).toBeUndefined();
+	expect(folded.endGroup).toBe(9);
 });
 
 test("SubscribeUpdate round-trips every option including startGroup 0", async () => {
@@ -106,14 +128,22 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 		endGroup: 12,
 	});
 	const got = await SubscribeUpdate.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
-		Version.DRAFT_05,
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(8);
 	expect(got.ordered).toBe(true);
 	expect(got.maxAge).toBe(500);
-	expect(got.startGroup).toBe(0);
+	expect(got.startGroup).toBeUndefined();
 	expect(got.endGroup).toBe(12);
+
+	// The same fold as SUBSCRIBE on a pre-06 wire.
+	const folded = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		Version.DRAFT_05,
+	);
+	expect(folded.startGroup).toBeUndefined();
+	expect(folded.endGroup).toBe(12);
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {

@@ -1470,8 +1470,10 @@ impl Subscriber {
 					// case a boundary moved while the subscription was pending. The
 					// upper bounds (segment boundary and `end_at` cap) are enforced by
 					// this subscriber, never on the inner cursor: an inner cap would
-					// park groups there and hide the segment's completion.
-					sub.start_at(seg.first_group().max(min_sequence));
+					// park groups there and hide the segment's completion. Raised, not
+					// assigned: the inner subscription resolved its own start from its
+					// budget and floor, and this must not rewind past it.
+					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_stale_cap(Self::stale_cap(seg, end_sequence));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(sub);
@@ -1829,6 +1831,18 @@ impl Subscriber {
 			let floor = seg.first_group().max(sequence);
 			if let SubState::Active(sub) = &mut seg.sub {
 				sub.start_at(floor);
+			}
+		}
+	}
+
+	/// Raise the floor to `sequence`, keeping any higher floor already set. See
+	/// [`track::Subscriber::raise_start_to`].
+	pub(crate) fn raise_start_to(&mut self, sequence: u64) {
+		self.min_sequence = self.min_sequence.max(sequence);
+		for seg in &mut self.segments {
+			let floor = seg.first_group().max(sequence);
+			if let SubState::Active(sub) = &mut seg.sub {
+				sub.raise_start_to(floor);
 			}
 		}
 	}

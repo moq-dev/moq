@@ -586,12 +586,14 @@ export class Consumer {
 					return { frame, group: seq, discontinuity: this.#rewind.discontinuity, continuous };
 				}
 
-				// Check if the group is done and then remove it.
-				// A group is removable when #active has advanced past it, OR when
-				// its #runGroup task has finished (done) and all frames are consumed.
-				// The latter handles the case where #runGroup finished before
-				// #active reached this group (e.g. after a latency skip).
-				if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
+				// Check if the group is done and then remove it. A group is removable only
+				// once its #runGroup task has finished (done) and all frames are consumed:
+				// a below-#active group (a backlog group admitted behind the live edge) may
+				// still be downloading when its buffer momentarily drains, and removing it
+				// then silently truncates its tail. #runGroup notifies whenever the head
+				// group gains a frame, so waiting here is woken, and #checkLatency bounds
+				// how long a stalled head can hold delivery up.
+				if (this.#groups[0].done) {
 					if (this.#groups[0].consumer.sequence === this.#active) {
 						// The cursor moves past this group here rather than in #runGroup's finally
 						// block whenever the group finished before it became active, so this is the

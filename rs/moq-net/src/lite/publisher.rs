@@ -110,16 +110,17 @@ fn serving_max_age(version: Version, requested: Duration) -> Duration {
 
 /// Position a subscription's read cursor for the wire serving it.
 ///
-/// Normally there is nothing to do: `Consumer::subscribe` resolves the cursor from the
-/// subscription itself, at the group it named or the oldest one its own Max Age still
-/// considers fresh.
+/// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
+/// subscription itself, at the oldest group its own Max Age still considers fresh, floored
+/// at the group it named.
 ///
-/// A wire that cannot carry Max Age is the exception. Those sessions are served with an
-/// unbounded budget so a legacy subscriber never has backlog dropped under it (see
-/// [`serving_max_age`]), and read as a start that would replay the whole cache on join.
-/// Their drafts mean the latest group when no start is named, so say so explicitly.
+/// Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
+/// latest group, so say so explicitly rather than letting the budget reach back. Lite03-05
+/// carry a Max Age, but there it is a staleness tolerance only; Lite01/02 additionally get
+/// an unbounded budget so nothing is dropped under them (see [`serving_max_age`]), which
+/// must not read as a request to replay the whole cache on join.
 fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>) {
-	if version.carries_max_age() || start_group.is_some() {
+	if version.resolves_start() || start_group.is_some() {
 		return;
 	}
 
@@ -1779,11 +1780,12 @@ mod test {
 		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
 	}
 
-	/// A wire that cannot declare a budget is served from the live edge. Those sessions get an
-	/// unbounded budget so nothing is dropped under them, and the cursor that budget resolves
-	/// to would replay the entire cache to every legacy subscriber.
+	/// A pre-06 wire is served from the live edge when it names no start: those drafts
+	/// define an absent `Group Start` as the latest group, and Lite01/02 additionally get
+	/// an unbounded budget (so nothing is dropped under them) that must not read as a
+	/// request to replay the whole cache.
 	#[test]
-	fn a_legacy_wire_is_pinned_to_the_live_edge() {
+	fn a_pre06_wire_is_pinned_to_the_live_edge() {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
@@ -1820,8 +1822,14 @@ mod test {
 		position_cursor(&mut legacy, Version::Lite01, None);
 		assert_eq!(drain(&mut legacy), vec![2]);
 
-		// A budget the peer actually declared is a real request, so the start it resolved to
-		// stands.
+		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
+		// and an absent start as the latest group, so they are pinned all the same.
+		let mut tolerant =
+			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+		position_cursor(&mut tolerant, Version::Lite05, None);
+		assert_eq!(drain(&mut tolerant), vec![2]);
+
+		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
 		position_cursor(&mut declared, Version::Lite06Wip, None);

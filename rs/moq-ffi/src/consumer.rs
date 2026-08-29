@@ -62,7 +62,10 @@ pub struct MoqSubscription {
 	/// buffering, such as `subscribe_media`'s jitter buffer.
 	#[uniffi(default = 0)]
 	pub max_age_ms: u64,
-	/// First group to deliver, or null to start at the latest group.
+	/// The lowest group to deliver (a floor), or null for none. A floor is not a
+	/// request: `max_age_ms` is what asks for data, and delivery starts at the oldest
+	/// group at or above the floor within that budget (the latest group at the default
+	/// budget of 0).
 	#[uniffi(default = None)]
 	pub group_start: Option<u64>,
 	/// Last group to deliver (inclusive), or null for no end.

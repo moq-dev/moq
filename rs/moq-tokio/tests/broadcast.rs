@@ -833,8 +833,12 @@ async fn broadcast_route_migration() {
 	let broadcast = broadcast.expect("expected announce");
 
 	// Subscribe once, with a generous stale window so the continuation B already holds
-	// is served rather than aged out.
-	let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+	// is served rather than aged out, and a floor at the live edge so that window is a
+	// tolerance rather than a request for A's backlog: the budget alone would resolve
+	// the start at a0.
+	let subscription = moq_net::track::Subscription::default()
+		.with_start(moq_net::track::Position::group(1))
+		.with_max_age(Duration::from_secs(10));
 	let mut sub = broadcast
 		.track("video")
 		.unwrap()
@@ -842,8 +846,8 @@ async fn broadcast_route_migration() {
 		.await
 		.expect("subscribe failed");
 
-	// The preferred route (A) serves the track. A live-edge subscription tunes in
-	// at the latest group, so only A's newest group arrives.
+	// The preferred route (A) serves the track from the floor, so only A's newest
+	// group arrives.
 	assert_eq!(read_payloads(&mut sub, 1).await, ["a1"]);
 
 	// Kill the serving session. The track migrates to B and the same subscriber keeps

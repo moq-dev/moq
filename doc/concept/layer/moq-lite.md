@@ -92,8 +92,8 @@ Conceptually, these are join points, and new subscriptions start at the newest g
 Groups are delivered independently and potentially out of order, so you should have some logic to reorder or skip during congestion.
 A group is closed when finished or aborted with an error (ex. during congestion).
 
-A subscription lets the publisher choose the start by default, but can name any (group, frame) position instead.
-Left to the publisher, it resolves to the oldest group within **Subscriber Max Age**, which is the latest group at the default budget of zero.
+A subscription can name a (group, frame) floor, but the floor is not a request: **Subscriber Max Age** is the only thing that asks for data.
+Delivery starts at the oldest group at or above the floor within that budget, which is the latest group at the default budget of zero.
 A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and never history it would skip on arrival: one bound decides both.
 That is how a subscriber follows a track to a different publisher partway through a group, which matters when the current group may stay open indefinitely (a JSON append log, or a catalog that keeps appending deltas).
 A group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
@@ -128,8 +128,8 @@ That age is measured both on the media timeline (a group's first timestamp again
 The media timeline keeps a backlog delivered as a burst old, while wall-clock time backstops stalled or empty groups that have no timestamp.
 Both ends apply it: the publisher skips a group rather than sending it, and the subscriber skips it again as it reads.
 The publisher only ever sees the most tolerant budget across its subscribers, which is why the subscriber applies it too.
-Asking for old groups with `Group Start` does not exempt them: a start bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
-That is also why the budget is what resolves an unset start: the groups worth sending are exactly the ones it would not immediately skip.
+Asking for old groups with `Group Start` does not exempt them: a floor only bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
+That is also why the budget is what decides where delivery starts: the groups worth sending are exactly the ones it would not immediately skip.
 
 The publisher also keeps old groups around for a best-effort **Publisher Max Age** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's max age is bounded by this window: a group can't be waited for longer than it's actually kept around.

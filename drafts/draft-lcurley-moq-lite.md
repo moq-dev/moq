@@ -185,7 +185,8 @@ Only the subscriber knows whether a partial Group is any use to it, so only the 
 
 Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so:
 
-- A `Frame Start` is meaningless without an absolute `Group Start`; a subscriber letting the publisher choose the start (`Group Start` = 0) MUST send `Frame Start` = 0.
+- A `Frame Start` qualifies the group `Group Start` names, group 0 included.
+  A subscriber that has seen no such group MUST send `Frame Start` = 0, since it cannot number the frames of a group it has not received.
 - A `Frame End` is meaningless without a `Group End`; an unbounded subscription (`Group End` = 0) MUST send `Frame End` = 0.
 
 A publisher MUST treat a violation of either rule as a protocol violation and reset the stream.
@@ -986,14 +987,14 @@ This is a delivery-time preference, not a retention rule: the publisher MAY stil
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
-The first group to deliver.
-A value of 0 means the publisher chooses (default).
-A non-zero value is the absolute group sequence + 1.
+The minimum group sequence to deliver: an absolute floor, defaulting to 0 (no floor).
 
-When it does, the publisher SHOULD start at the oldest cached group whose age is within `Subscriber Max Age`, and MUST NOT start at an older one.
+A floor is not a request; `Subscriber Max Age` is the only thing that asks for data.
+The publisher SHOULD start at the oldest group at or above the floor whose age (relative to the latest group, measured from its first frame) is within `Subscriber Max Age`, and MUST NOT deliver an older one.
 A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
-A subscriber that buffers has then been handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
-This is a floor on delivery, not a guarantee that the groups exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
+A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
+A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
+Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
 **Group End**:
 The last group to deliver (inclusive).
@@ -1001,11 +1002,10 @@ A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
 
 **Frame Start**:
-The index of the first frame to deliver within the start group (see [Positions](#positions)).
+The index of the first frame to deliver within the `Group Start` group (see [Positions](#positions)).
 A value of 0 means from the start of that group (default), so the group is delivered whole.
-Unlike `Group Start` this is a plain absolute index, not the `absolute + 1` form: 0 is both a valid index and the default, so there is no absent case to encode around.
-Frames before this index are not delivered, even though the start group itself is.
-MUST be 0 when `Group Start` is 0, since the subscriber cannot number the frames of a group it has not seen.
+Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group is always delivered from frame 0.
+A subscriber that has received no group MUST send 0, since it cannot number the frames of a group it has not seen.
 
 **Frame End**:
 The last frame to deliver (inclusive) within the end group (see [Positions](#positions)).
@@ -1364,7 +1364,7 @@ The `Message Length` describes the payload size on the wire.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
 - Made advertisement selection per subscriber: a publisher MUST NOT advertise a path containing the subscriber's declared origin and otherwise advertises the best remaining one (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant publishers fail over across a mesh.
 - Defined same-path advertisements with the same non-zero Epoch as interchangeable content a relay may splice across at a Position. When both Epochs are 0, identity falls back to a shared non-zero first Hop ID; differing or unknown identities never splice.
-- Added `Frame Start` and `Frame End` to SUBSCRIBE and SUBSCRIBE_UPDATE, qualifying the start and end group with a frame index so a subscription can begin or end partway through a group. `Frame Start` is a plain index; `Frame End` is the index + 1, matching `Group End`. Both MUST be 0 when the group bound they qualify is absent.
+- Added `Frame Start` and `Frame End` to SUBSCRIBE and SUBSCRIBE_UPDATE, qualifying the start and end group with a frame index so a subscription can begin or end partway through a group. `Frame Start` is a plain index qualifying the `Group Start` group; `Frame End` is the index + 1, matching `Group End`, and MUST be 0 when `Group End` is absent.
 - Added `Frame Start` and `Frame End` to FETCH, bounding the returned frames within the group. A publisher that cannot serve the full range resets the stream.
 - Added `Frame Start` to GROUP, giving the index of the first FRAME on the stream so a partial group is self-describing.
 - Added the Positions section defining a (group, frame) position, its lexicographic ordering, and the rule that a partial group is only ever delivered to a subscriber that asked for one. A publisher that cannot serve a group from the requested frame skips it and resolves to a later group, so SUBSCRIBE_OK needs no frame field: the start frame follows from `Group` and the subscriber's own request.
@@ -1373,7 +1373,7 @@ The `Message Length` describes the payload size on the wire.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
 - Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
 - Renamed `Subscriber Max Latency` to `Subscriber Max Age` and `Publisher Max Latency` to `Publisher Max Age`.
-- Resolve an absent `Group Start` from `Subscriber Max Age` rather than always taking the latest group, so a subscriber that buffers is handed the head of what it can still play. A zero budget still resolves to the latest group.
+- Made `Group Start` an absolute floor (the raw minimum group sequence, default 0) rather than the sequence + 1 with 0 meaning the latest group. The start resolves from `Subscriber Max Age` instead: the oldest group at or above the floor within the budget, so a subscriber that buffers is handed the head of what it can still play. A zero budget still resolves to the latest group, which was the only start the old encoding could ask for by default.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

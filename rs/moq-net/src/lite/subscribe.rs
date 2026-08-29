@@ -18,10 +18,15 @@ pub struct Subscribe<'a> {
 	pub priority: u8,
 	pub ordered: bool,
 	pub max_age: std::time::Duration,
+	/// The minimum group to deliver (a floor). On lite-06 the wire carries the raw
+	/// sequence and `None` is interchangeable with `Some(0)`: a floor of 0 constrains
+	/// nothing, and the start resolves from `max_age`. Pre-06 wires encode the
+	/// sequence + 1 and an absent start means the latest group.
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 	/// First frame to deliver within `start_group`'s group; 0 is the whole group.
-	/// Lite06+ only, and meaningless without an explicit `start_group`.
+	/// Lite06+ only. It qualifies the named group, so it needs `start_group` to name one
+	/// (`Some`, including `Some(0)`: group 0 can host a mid-group resume).
 	pub start_frame: u64,
 	/// Last frame to deliver (inclusive) within `end_group`'s group, or `None` for the
 	/// whole group. Lite06+ only, and meaningless without an explicit `end_group`.
@@ -51,13 +56,14 @@ impl Message for Subscribe<'_> {
 			_ => {
 				let ordered = u8::decode(r, version)? != 0;
 				let max_age = std::time::Duration::decode(r, version)?;
-				let start_group = Option::<u64>::decode(r, version)?;
+				let start_group = decode_start_group(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
 				(ordered, max_age, start_group, end_group)
 			}
 		};
 
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
+		let start_group = canonical_start_group(version, start_group, start_frame);
 
 		Ok(Self {
 			id,
@@ -84,7 +90,7 @@ impl Message for Subscribe<'_> {
 			_ => {
 				(self.ordered as u8).encode(w, version)?;
 				self.max_age.encode(w, version)?;
-				self.start_group.encode(w, version)?;
+				encode_start_group(w, version, self.start_group)?;
 				self.end_group.encode(w, version)?;
 			}
 		}
@@ -100,6 +106,47 @@ impl Message for Subscribe<'_> {
 
 		Ok(())
 	}
+}
+
+/// Decode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
+///
+/// Lite-06 carries the raw floor, so every value names a concrete group and 0 decodes as
+/// `Some(0)`. Pre-06 wires encode the sequence + 1, with 0 meaning the latest group
+/// (`None`). Callers canonicalize with [`canonical_start_group`] once the frame bounds
+/// are known.
+fn decode_start_group<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Option<u64>, DecodeError> {
+	if version.resolves_start() {
+		return Ok(Some(u64::decode(r, version)?));
+	}
+	Option::<u64>::decode(r, version)
+}
+
+/// Canonicalize a decoded floor: a lite-06 `Group Start` of 0 with no frame offset is the
+/// same absence of a constraint as no floor at all, so it decodes as `None`. Group 0 stays
+/// named only when a `Frame Start` actually qualifies it (a subscription can resume
+/// partway through group 0, e.g. a catalog that never leaves it).
+fn canonical_start_group(version: Version, start_group: Option<u64>, start_frame: u64) -> Option<u64> {
+	match (start_group, start_frame) {
+		(Some(0), 0) if version.resolves_start() => None,
+		(start_group, _) => start_group,
+	}
+}
+
+/// Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
+///
+/// The inverse of [`decode_start_group`]: lite-06 writes the raw floor (`None` and
+/// `Some(0)` are the same absence of a constraint), while a pre-06 wire gets `Some(0)`
+/// folded back to absent. On those wires an explicit group 0 means "replay from the
+/// beginning", which is not what a vacuous floor asks for.
+fn encode_start_group<W: bytes::BufMut>(
+	w: &mut W,
+	version: Version,
+	start_group: Option<u64>,
+) -> Result<(), EncodeError> {
+	if version.resolves_start() {
+		return start_group.unwrap_or(0).encode(w, version);
+	}
+	start_group.filter(|&group| group > 0).encode(w, version)
 }
 
 /// Decode the trailing `Frame Start` / `Frame End` pair shared by SUBSCRIBE,
@@ -311,16 +358,14 @@ impl Message for SubscribeUpdate {
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
 		let max_age = std::time::Duration::decode(r, version)?;
-		let start_group = match u64::decode(r, version)? {
-			0 => None,
-			group => Some(group - 1),
-		};
+		let start_group = decode_start_group(r, version)?;
 		let end_group = match u64::decode(r, version)? {
 			0 => None,
 			group => Some(group - 1),
 		};
 
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
+		let start_group = canonical_start_group(version, start_group, start_frame);
 
 		Ok(Self {
 			priority,
@@ -345,13 +390,7 @@ impl Message for SubscribeUpdate {
 		(self.ordered as u8).encode(w, version)?;
 		self.max_age.encode(w, version)?;
 
-		match self.start_group {
-			Some(start_group) => start_group
-				.checked_add(1)
-				.ok_or(EncodeError::TooLarge)?
-				.encode(w, version)?,
-			None => 0u64.encode(w, version)?,
-		}
+		encode_start_group(w, version, self.start_group)?;
 
 		match self.end_group {
 			Some(end_group) => end_group
@@ -594,10 +633,12 @@ mod test {
 	}
 
 	/// The whole-group defaults are what a version without the fields decodes to, so
-	/// lite-05 stays byte-identical.
+	/// lite-05 stays byte-identical. Compared without a floor, since `Group Start` itself
+	/// encodes differently across the two (see `group_start_is_absolute_on_lite06`).
 	#[test]
 	fn subscribe_without_frame_bounds_is_unchanged_on_lite05() {
 		let mut msg = subscribe_sample();
+		msg.start_group = None;
 		msg.start_frame = 0;
 		msg.end_frame = None;
 
@@ -612,6 +653,60 @@ mod test {
 
 		let got = Subscribe::decode_msg(&mut lite05.as_slice(), Version::Lite05).unwrap();
 		assert_eq!((got.start_frame, got.end_frame), (0, None));
+	}
+
+	/// Lite06 carries the raw floor; pre-06 wires encode the sequence + 1 with 0 meaning
+	/// the latest group. A vacuous floor folds to absent on the old wire, where an
+	/// explicit group 0 would mean "replay from the beginning" instead.
+	#[test]
+	fn group_start_is_absolute_on_lite06() {
+		let mut msg = subscribe_sample();
+		msg.start_frame = 0;
+		msg.end_frame = None;
+
+		let mut lite05 = Vec::new();
+		msg.encode_msg(&mut lite05, Version::Lite05).unwrap();
+		let mut lite06 = Vec::new();
+		msg.encode_msg(&mut lite06, Version::Lite06Wip).unwrap();
+
+		let on05 = Subscribe::decode_msg(&mut lite05.as_slice(), Version::Lite05).unwrap();
+		let on06 = Subscribe::decode_msg(&mut lite06.as_slice(), Version::Lite06Wip).unwrap();
+		assert_eq!(on05.start_group, Some(7));
+		assert_eq!(on06.start_group, Some(7));
+		// The raw byte differs: 7 on the wire, not 7 + 1.
+		assert_ne!(lite05, lite06);
+
+		// No floor and a floor of 0 are the same absence of a constraint on lite-06:
+		// byte-identical on the wire, and canonicalized to absent on decode.
+		msg.start_group = None;
+		let mut absent = Vec::new();
+		msg.encode_msg(&mut absent, Version::Lite06Wip).unwrap();
+		msg.start_group = Some(0);
+		let mut zero = Vec::new();
+		msg.encode_msg(&mut zero, Version::Lite06Wip).unwrap();
+		assert_eq!(absent, zero);
+		let got = Subscribe::decode_msg(&mut zero.as_slice(), Version::Lite06Wip).unwrap();
+		assert_eq!(got.start_group, None);
+
+		// On the pre-06 wire the vacuous floor folds to absent (the latest group).
+		let mut folded = Vec::new();
+		msg.encode_msg(&mut folded, Version::Lite05).unwrap();
+		let got = Subscribe::decode_msg(&mut folded.as_slice(), Version::Lite05).unwrap();
+		assert_eq!(got.start_group, None);
+	}
+
+	/// A subscription can resume partway through group 0 (a catalog never leaves it), so
+	/// a `Frame Start` qualifying the zero floor must survive the round trip.
+	#[test]
+	fn frame_start_may_qualify_group_zero_on_lite06() {
+		let mut msg = subscribe_sample();
+		msg.start_group = Some(0);
+		msg.start_frame = 4;
+
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
+		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip).unwrap();
+		assert_eq!((got.start_group, got.start_frame), (Some(0), 4));
 	}
 
 	/// Silently widening to the whole group would deliver frames the caller excluded.

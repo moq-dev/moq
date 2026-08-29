@@ -168,6 +168,29 @@ export function hasFrameBounds(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a start
+ * from: the raw minimum group sequence (default 0), with `Subscriber Max Age` as the only
+ * gate on how far back delivery begins. Changed in lite-06.
+ *
+ * Older versions encode `Group Start` as the sequence + 1, with 0 meaning the latest
+ * group, so an absent start there pins the cursor to the live edge instead of letting the
+ * budget reach back.
+ */
+export function resolvesStart(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

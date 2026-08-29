@@ -138,6 +138,22 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a
+	/// start from: the raw minimum group sequence (default 0), with `Subscriber Max Age`
+	/// as the only gate on how far back delivery begins. Changed in lite-06.
+	///
+	/// Older versions encode `Group Start` as the sequence + 1, with 0 meaning the
+	/// latest group, so an absent start there pins the cursor to the live edge instead
+	/// of resolving it from the budget.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn resolves_start(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry the route cost: the marginal cost of pulling
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks

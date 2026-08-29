@@ -53,13 +53,18 @@ pub struct Subscription {
 	/// in three reads as three. The publisher's copy is stamped as it produces, so the
 	/// gate there still holds; it is just the coarser of the two.
 	pub max_age: Duration,
-	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
-	/// group.
+	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
-	/// A request, aggregated across every live subscriber (the earliest explicit start
-	/// wins), so it says what the publisher sends, not what any one subscriber sees.
-	/// [`crate::track::Subscriber::start_at`] is the local read cursor; setting one does
-	/// not imply the other. See [Local cursor vs wire
+	/// A floor, not a request: only [`Self::max_age`] asks for data, and the floor bounds
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing, since
+	/// nothing sits below group 0. Delivery starts at the oldest group at or above the
+	/// floor that the budget still considers fresh, so a floor above the live edge simply
+	/// waits there (a resumed subscription naming where it left off).
+	///
+	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
+	/// without one clears it), so it says what the publisher sends, not what any one
+	/// subscriber sees. [`crate::track::Subscriber::start_at`] is the local read cursor;
+	/// setting one does not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub start: Option<Position>,
 	/// First [`Position`] the publisher should *not* deliver, or `None` for no end.
@@ -111,10 +116,11 @@ impl Subscription {
 		self
 	}
 
-	/// Start delivery at `start`, or at the latest group when `None`. Returns `self` for
+	/// Floor delivery at `start`, or leave it unfloored when `None`. Returns `self` for
 	/// chaining.
 	///
-	/// [`Position::group`] is the whole-group form.
+	/// A floor bounds how far back [`Self::max_age`] may reach; it does not request data
+	/// on its own. [`Position::group`] is the whole-group form.
 	pub fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.start = start.into();
 		self
@@ -147,7 +153,7 @@ impl Subscription {
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
 			// would invent a bound neither asked for.
-			start: min_some(self.start, combined.start),
+			start: min_floored(self.start, combined.start),
 			end: max_unbounded(self.end, combined.end),
 		};
 
@@ -237,6 +243,16 @@ pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
+/// The lower of two optional floors, treating `None` as no floor (and therefore
+/// absorbing). The mirror of [`max_unbounded`]: both bounds only ever *restrict*, so a
+/// subscriber without one keeps the aggregate unrestricted.
+pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(None, _) | (_, None) => None,
+	}
+}
+
 /// The higher of two optional bounds, treating `None` as unbounded (and therefore
 /// absorbing).
 pub(super) fn max_unbounded<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -313,15 +329,18 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_group_start_uses_earliest_explicit_start() {
-		// No start at all is the live edge, which loses to any explicit one.
-		let live = Subscription::default();
+	fn combined_group_start_keeps_the_loosest_floor() {
+		// A floor only restricts, so the lowest one wins across floored subscribers.
 		let catchup = Subscription::default().with_start(Position::group(10));
 		let older_catchup = Subscription::default().with_start(Position::group(5));
-
-		let combined = combine(&[live, catchup, older_catchup]).unwrap();
-
+		let combined = combine(&[catchup.clone(), older_catchup]).unwrap();
 		assert_eq!(combined.start, Some(Position::group(5)));
+
+		// A subscriber with no floor at all clears the aggregate: its budget may reach
+		// below any floor the others set.
+		let unfloored = Subscription::default();
+		let combined = combine(&[catchup, unfloored]).unwrap();
+		assert_eq!(combined.start, None);
 	}
 
 	#[test]

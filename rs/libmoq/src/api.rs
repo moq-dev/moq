@@ -481,9 +481,11 @@ pub struct moq_subscription {
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
 	pub max_age_ms: u64,
 
-	/// First group to deliver.
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_ms` is
+	/// what asks for data, and delivery starts at the oldest group at or above the floor
+	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
-	/// Whether `group_start` is present. When false, delivery starts at the latest group.
+	/// Whether `group_start` is present. When false, there is no floor.
 	pub group_start_present: bool,
 
 	/// Last group to deliver, inclusive.
