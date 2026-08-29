@@ -58,8 +58,8 @@ const SETTLE: Duration = Duration::from_millis(30);
 ///
 /// The value name, not the flag: that is what Usage matches an overlay on, and the
 /// derive spells it in screaming snake case (`--video-name <VIDEO_NAME>`), so a key
-/// of `video-name` silently never fires. `every_overlay_names_a_declared_value` is
-/// what keeps this table honest.
+/// of `video-name` silently never fires. `every_overlay_matches_only_what_it_answers_for`
+/// is what keeps this table honest.
 ///
 /// [`CommandSelector::Any`](usage::spec::CommandSelector::Any) throughout: every one
 /// of these names means the same thing wherever it appears, and `--broadcast`
@@ -70,14 +70,22 @@ static NETWORK: &[CompletionOverlay<'static>] = &[
 	CompletionOverlay::async_any("AUDIO_NAME", audio_names),
 ];
 
+/// The command whose source flags [`CAPTURE`] answers for.
+#[cfg(feature = "capture")]
+const CAPTURE_PATH: &str = "import capture";
+
 /// The completers for `import capture`'s sources, which only that feature declares.
+///
+/// Scoped to the one command, unlike [`NETWORK`]: these names are generic enough to
+/// collide. `export hls --window <DURATION>` is a playlist window, and an `Any`
+/// overlay answered it with this machine's macOS window ids.
 #[cfg(feature = "capture")]
 static CAPTURE: &[CompletionOverlay<'static>] = &[
-	CompletionOverlay::async_any("CAMERA", cameras),
-	CompletionOverlay::async_any("DISPLAY", displays),
-	CompletionOverlay::async_any("WINDOW", windows),
-	CompletionOverlay::async_any("APP", apps),
-	CompletionOverlay::async_any("MICROPHONE", microphones),
+	CompletionOverlay::asynchronous(CAPTURE_PATH, "CAMERA", cameras),
+	CompletionOverlay::asynchronous(CAPTURE_PATH, "DISPLAY", displays),
+	CompletionOverlay::asynchronous(CAPTURE_PATH, "WINDOW", windows),
+	CompletionOverlay::asynchronous(CAPTURE_PATH, "APP", apps),
+	CompletionOverlay::asynchronous(CAPTURE_PATH, "MICROPHONE", microphones),
 ];
 
 /// See [`CAPTURE`].
@@ -619,12 +627,19 @@ async fn dial(side: &MoqSide, deadline: Instant) -> Option<(moq_net::origin::Pro
 	let url = side.client.url.clone()?;
 	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 
-	// No iroh endpoint: binding one is more setup than a keystroke should pay for,
-	// so an `iroh://` peer completes nothing rather than completing slowly.
-	let client = side
-		.client
-		.clone()
-		.init(side.quic.clone())
+	// Building the client reads the TLS material off disk synchronously, so it goes on
+	// the blocking pool and under the deadline like everything else: a `--connect-tls-root`
+	// on a stalled mount (or a FIFO) would otherwise hang the prompt before the first
+	// timeout is even entered. Dropping the timeout cannot cancel the read, but it does
+	// let the process answer and exit.
+	//
+	// No iroh endpoint: binding one is more setup than a keystroke should pay for, so an
+	// `iroh://` peer completes nothing rather than completing slowly.
+	let (connect, quic) = (side.client.clone(), side.quic.clone());
+	let client = timeout_at(deadline, tokio::task::spawn_blocking(move || connect.init(quic)))
+		.await
+		.ok()?
+		.ok()?
 		.ok()?
 		.with_subscriber(origin.clone())
 		.with_reconnect(false);
@@ -702,29 +717,74 @@ mod tests {
 		assert!(complete("moq import fmp4 --").await.is_empty());
 	}
 
-	/// Every overlay names a value some command actually declares.
+	/// Every overlay names a value that only the commands it is meant for declare.
 	///
-	/// An overlay is matched by the value name, which the derive spells for itself, so
-	/// a renamed field silently stops firing its completer. Nothing else would notice:
-	/// a completer that never runs looks exactly like one that found nothing.
+	/// Two ways this goes wrong, and neither is visible at runtime. A renamed field
+	/// leaves an overlay matching nothing, and a completer that never runs looks
+	/// exactly like one that found nothing. A *new* flag that happens to reuse the
+	/// name captures an unrelated value: `export hls --window <DURATION>` was answered
+	/// with this machine's macOS window ids until the capture overlays were scoped.
 	#[test]
-	fn every_overlay_names_a_declared_value() {
-		fn declares(command: &usage::spec::CommandMeta<'_>, value: &str) -> bool {
-			command
+	fn every_overlay_matches_only_what_it_answers_for() {
+		// Where each `Any`-scoped value name is allowed to appear. These are the names
+		// whose meaning really is the same wherever they are written: a broadcast before
+		// the verb and on a stage are one relay path, and a rendition is a rendition.
+		// Anything scoped to a command is checked against that command instead.
+		//
+		// Built rather than declared, because which commands exist depends on the build:
+		// `play` is a feature, and the root itself is the empty path.
+		let renditions = match cfg!(feature = "play") {
+			true => vec!["export", "play"],
+			false => vec!["export"],
+		};
+		let shared = [
+			("BROADCAST", vec!["", "import", "export"]),
+			("VIDEO_NAME", renditions.clone()),
+			("AUDIO_NAME", renditions),
+		];
+
+		/// Every command path that declares a value by this name.
+		fn declaring(command: &usage::spec::CommandMeta<'_>, value: &str, at: &str, found: &mut Vec<String>) {
+			let declares = command
 				.flags
 				.iter()
 				.any(|field| field.value_name.unwrap_or(field.flag.name).eq_ignore_ascii_case(value))
 				|| command
 					.args
 					.iter()
-					.any(|field| field.arg.name.eq_ignore_ascii_case(value))
-				|| command.subcommands.iter().any(|sub| declares(sub, value))
+					.any(|field| field.arg.name.eq_ignore_ascii_case(value));
+			if declares {
+				found.push(at.to_string());
+			}
+			for sub in command.subcommands {
+				let deeper = match at.is_empty() {
+					true => sub.cmd.name.to_string(),
+					false => format!("{at} {}", sub.cmd.name),
+				};
+				declaring(sub, value, &deeper, found);
+			}
 		}
 
 		for overlay in overlays() {
+			let mut found = Vec::new();
+			declaring(Cli::spec().root, overlay.value, "", &mut found);
 			assert!(
-				declares(Cli::spec().root, overlay.value),
+				!found.is_empty(),
 				"no flag or argument takes a value named `{}`, so its completer never runs",
+				overlay.value
+			);
+
+			// A scoped overlay only fires on its own command, so a name reused elsewhere
+			// is harmless; an `Any` one answers everywhere the name appears.
+			let Some((_, allowed)) = shared.iter().find(|(name, _)| *name == overlay.value) else {
+				continue;
+			};
+			found.sort();
+			let mut allowed: Vec<String> = allowed.iter().map(|path| path.to_string()).collect();
+			allowed.sort();
+			assert_eq!(
+				found, allowed,
+				"`{}` is answered everywhere it appears, and the set of commands declaring it changed",
 				overlay.value
 			);
 		}
@@ -777,7 +837,7 @@ mod tests {
 	///
 	/// `--connect` reads `MOQ_CONNECT`, so building the globals in one pass let an
 	/// exported variable turn a keystroke into a session with a relay the user never
-	/// typed -- and that URL can carry a `?jwt=` credential. The gate is what the line
+	/// typed, and that URL can carry a `?jwt=` credential. The gate is what the line
 	/// says, not what the environment says.
 	#[tokio::test]
 	async fn the_environment_cannot_authorize_a_dial() {
