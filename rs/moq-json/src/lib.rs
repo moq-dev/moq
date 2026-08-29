@@ -17,6 +17,7 @@
 mod diff;
 pub mod snapshot;
 pub mod stream;
+pub mod window;
 
 pub use crate::diff::{Diff, diff};
 
@@ -44,6 +45,13 @@ pub enum Error {
 	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
 	#[error("delta before snapshot")]
 	MissingSnapshot,
+
+	/// A [`window`] push or pop arrived with no reset to apply it to.
+	///
+	/// Every group opens with a reset naming the window and its offset, so this means frames reached
+	/// [`window::Decoder`] out of order, or a reader started mid-group.
+	#[error("window op before reset")]
+	MissingReset,
 
 	/// A compressed [`stream`] frame was encoded but never written, so the shared DEFLATE window is
 	/// ahead of what the consumer holds and nothing later in this group can be decoded.

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "reset of an empty window",
+    "frame": "{\"reset\":{\"offset\":0,\"records\":[]}}"
+  },
+  {
+    "name": "reset from zero",
+    "frame": "{\"reset\":{\"offset\":0,\"records\":[{\"n\":0},{\"n\":1}]}}"
+  },
+  {
+    "name": "reset with a non-zero offset",
+    "frame": "{\"reset\":{\"offset\":7,\"records\":[{\"n\":7}]}}"
+  },
+  {
+    "name": "push",
+    "frame": "{\"push\":{\"n\":2}}"
+  },
+  {
+    "name": "pop one",
+    "frame": "{\"pop\":1}"
+  },
+  {
+    "name": "pop several",
+    "frame": "{\"pop\":3}"
+  }
+]
