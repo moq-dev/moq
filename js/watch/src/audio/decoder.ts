@@ -24,14 +24,6 @@ const LEGACY_WARMUP_CALLBACKS = 3;
 export type DecoderInput = {
 	// Enable to download the audio track.
 	enabled: Getter<boolean>;
-
-	// The oldest audio a new subscription will take, in milliseconds. Undefined, the default,
-	// starts at the live edge, which is what a continuous broadcast wants.
-	//
-	// Set it for a publisher that opens a track per utterance: it is already writing by the time the
-	// subscription lands, so the live edge skips the head of every track. Asking for the track from
-	// its start and bounding that by age replays the head and nothing older.
-	maxAge: Getter<Time.Milli | undefined>;
 };
 
 type DecoderOutput = {
@@ -96,18 +88,6 @@ export class Decoder {
 	// Ordered discontinuity and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
-	// How much buffered audio the container consumer retains before skipping
-	// ahead. This must be the latency CEILING (maxBuffer), not the floor
-	// (buffer): in buffered playback the producer writes faster than real-time
-	// with future PTS, so the group span legitimately exceeds the floor and
-	// would otherwise be skipped. When collapsed, maxBuffer equals the floor.
-	//
-	// Held in a plain Signal driven by a running effect (below) rather than a
-	// lazy `computed`: the container consumer only `.peek()`s this (it never
-	// subscribes), and an unsubscribed computed peeks as `undefined`, which
-	// would make the consumer's threshold NaN and skip every group.
-	#consumerLatency = new Signal<Time.Milli>(Time.Milli.zero);
-
 	// The latency floor as of the last settled change, to detect a floor *increase* (needs a deeper
 	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
 	#prevFloor?: Bound;
@@ -120,15 +100,10 @@ export class Decoder {
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
-			maxAge: getter(props?.maxAge),
 		};
 
 		this.source = source;
 		this.sync = sync;
-
-		this.#signals.run((effect) => {
-			this.#consumerLatency.set(effect.get(this.sync.out.maxBuffer));
-		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -290,16 +265,21 @@ export class Decoder {
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();
 
-		// Asking for group 0 requests the track from its start; the age bound is what keeps that to
-		// the caller's window, applied by whoever serves it. A publisher that ignores the bound
-		// replays its whole retention instead, which the container consumer then trims to the
-		// latency target. Omitting both leaves the subscription at the live edge.
-		const maxAge = effect.get(this.in.maxAge);
+		// The Sync ceiling is the maximum age of a non-latest group before both the network and
+		// container consumers skip it. Omitting startGroup keeps a new subscription at the live edge.
+		const priority = Catalog.PRIORITY.audio;
+		let maxAge = this.sync.out.maxBuffer.peek();
 		const sub = active.track(track).subscribe({
-			priority: Catalog.PRIORITY.audio,
-			...(maxAge !== undefined ? { startGroup: 0, latencyMax: maxAge } : {}),
+			priority,
+			latencyMax: maxAge,
 		});
 		effect.cleanup(() => sub.close());
+		effect.run((inner) => {
+			const next = inner.get(this.sync.out.maxBuffer);
+			if (next === maxAge) return;
+			maxAge = next;
+			sub.update({ priority, latencyMax: maxAge });
+		});
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
@@ -317,7 +297,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.#consumerLatency,
+			latency: this.sync.out.maxBuffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -422,7 +402,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.#consumerLatency,
+			latency: this.sync.out.maxBuffer,
 		});
 		effect.cleanup(() => consumer.close());
 
