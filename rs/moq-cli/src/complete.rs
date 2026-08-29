@@ -763,14 +763,15 @@ mod tests {
 		}
 	}
 
-	/// The environment may configure a dial, but it may not authorize one.
+	/// The environment may configure a MoQ side, but it may not ask for one.
 	///
-	/// `--connect` reads `MOQ_CONNECT`, so building the globals in one pass let an
-	/// exported variable turn a keystroke into a session with a relay the user never
-	/// typed, and that URL can carry a `?jwt=` credential. The gate is what the line
-	/// says, not what the environment says.
+	/// Two consumers of that distinction, tested together because both need the
+	/// variable set and this module is where every test holds the lock for it.
+	/// Completion must not turn a keystroke into a session with a relay the user never
+	/// typed (that URL can carry a `?jwt=`), and a local verb must not refuse to run
+	/// because the shell exports a relay for the publishing it usually does.
 	#[tokio::test]
-	async fn the_environment_cannot_authorize_a_dial() {
+	async fn the_environment_cannot_ask_for_a_moq_side() {
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let route = moq_net::broadcast::Route::new().with_announce(true);
 		let _alpha = origin.create_broadcast("alpha", route).expect("alpha");
@@ -791,6 +792,25 @@ mod tests {
 			complete(&format!("moq {connect} --broadcast ")).await,
 			["alpha"],
 			"a typed --connect stopped working"
+		);
+
+		// The other reader of the typed view: `moq token` / `devices` / `completion`
+		// refuse a MoQ side, and an exported variable is not one being asked for.
+		let ambient = crate::args::Invocation::try_parse_from(["moq", "token", "generate"]).expect("parse");
+		assert!(
+			ambient.moq.client.url.is_some(),
+			"the resolved side should still pick the variable up"
+		);
+		assert!(
+			ambient.reject("token").is_ok(),
+			"an exported MOQ_CONNECT was treated as a request"
+		);
+
+		let typed =
+			crate::args::Invocation::try_parse_from(["moq", "--connect", &url, "token", "generate"]).expect("parse");
+		assert!(
+			typed.reject("token").is_err(),
+			"a typed --connect stopped being refused"
 		);
 	}
 

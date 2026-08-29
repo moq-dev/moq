@@ -173,6 +173,14 @@ impl Invocation {
 		}
 	}
 
+	/// Refuse a MoQ side on a verb that runs locally and takes none.
+	///
+	/// Answered from what the command line said, never from the environment; see
+	/// [`Self::typed`] and `MoqSide::reject`.
+	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+		self.typed.reject(command)
+	}
+
 	/// Split `argv` on `--` and run each chunk through a real parser.
 	pub fn try_parse_from<I, T>(argv: I) -> Result<Self, ParseError>
 	where
@@ -463,12 +471,14 @@ impl MoqSide {
 	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
 	/// next to `token generate` it reads like it scopes the key, which `--root` does.
 	///
-	/// Call it on [`Invocation::typed`], not on the resolved side: every one of these
-	/// flags has a `MOQ_*` variable, and a shell that exports one for the publishing it
-	/// usually does has not asked this verb for anything. `--origin` is in the list for
+	/// Private, and reached only through [`Invocation::reject`], so it cannot be asked
+	/// of the resolved side: every one of these flags has a `MOQ_*` variable, and a
+	/// shell that exports one for the publishing it usually does has not asked this
+	/// verb for anything. A call site that picked the wrong view would read correctly
+	/// and be wrong, so there is only one view to pick. `--origin` is in the list for
 	/// the same reason it used to be out of it -- an ambient `MOQ_ORIGIN` no longer
 	/// reaches here, so a typed one can be refused like the rest.
-	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+	fn reject(&self, command: &str) -> anyhow::Result<()> {
 		#[cfg(feature = "cluster-lan")]
 		let cluster_secret = self.cluster.secret.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
@@ -1552,32 +1562,5 @@ mod tests {
 			choices.sort_unstable();
 			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
 		}
-	}
-
-	/// A local verb refuses a MoQ side the user asked for, not one the shell exports.
-	///
-	/// Every one of these flags has a `MOQ_*` variable, so reading the resolved side
-	/// made `moq token` and `moq completion` fail outright in any shell that exports
-	/// `MOQ_CONNECT` for the publishing it usually does. The ask is what was typed.
-	#[test]
-	fn a_local_verb_refuses_only_a_typed_moq_side() {
-		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", "https://relay.example/room")]);
-
-		let ambient = Invocation::try_parse_from(["moq", "token", "generate"]).expect("parse");
-		assert!(
-			ambient.moq.client.url.is_some(),
-			"the resolved side should still pick the variable up"
-		);
-		assert!(
-			ambient.typed.reject("token").is_ok(),
-			"an exported MOQ_CONNECT was treated as a request"
-		);
-
-		let typed = Invocation::try_parse_from(["moq", "--connect", "https://relay.example/room", "token", "generate"])
-			.expect("parse");
-		assert!(
-			typed.typed.reject("token").is_err(),
-			"a typed --connect stopped being refused"
-		);
 	}
 }

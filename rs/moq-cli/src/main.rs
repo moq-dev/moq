@@ -183,27 +183,29 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let cli = Invocation::parse().await;
+	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
 	cli.validate()?;
 
 	// The local verbs never touch the network, so answer them before binding any
 	// transport. `validate` has already refused to pair them with another stage, so
 	// the single stage here is the whole invocation.
-	let mut stages = cli.stages;
+	// Taken rather than moved out: the local verbs below still ask `cli` whether the
+	// command line named a MoQ side.
+	let mut stages = std::mem::take(&mut cli.stages);
 	if stages.len() == 1 {
 		match stages.remove(0) {
 			Command::Token(token) => {
-				cli.typed.reject("token")?;
+				cli.reject("token")?;
 				return token.run();
 			}
 			Command::Completion(completion) => {
-				cli.typed.reject("completion")?;
+				cli.reject("completion")?;
 				return completion.run();
 			}
 			#[cfg(feature = "capture")]
 			Command::Devices => {
-				cli.typed.reject("devices")?;
+				cli.reject("devices")?;
 				return devices::run().await;
 			}
 			// Put it back: it needs the transport bound below.
