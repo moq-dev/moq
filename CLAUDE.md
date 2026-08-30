@@ -71,7 +71,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
-- `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
+- `/py/`, `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. `just check` type-checks it via `just obs compile`, which needs headers rather than an obs-deps download, and obs.yml links it on Linux for `cpp/obs/` and `rs/libmoq/` PRs. Still manual, like `just rs macos`: `just obs build` (a loadable plugin, and the only path on macOS/Windows) and `just obs test` (`cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer). See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - test harnesses that span more than one language or need a server. `test/smoke/` is the cross-language interop matrix (`just test smoke[-full]`); `test/wasm/` runs the `@moq/wasm` bindings in headless Chromium against a real relay (`just test wasm`), which is the only behavioral coverage `rs/moq-wasm` has.
@@ -80,7 +80,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 
 ## Language Bindings
 
-`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
+`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, `/go`, and `/dart` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central, and Dart publishes `moq` and `moq_ffi` to pub.dev. For Python, Dart, and other wrapped bindings, most callers want the ergonomic package rather than the generated bindings directly.
 
 ## Per-Directory Guides
 
@@ -91,7 +91,7 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 - **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
 - **`quest/AGENTS.md`** - long-term project memory: quests.
 
-The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
+The `swift/`, `kt/`, `go/`, and `dart/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
 This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). When editing any of these guides, reference code by file path and symbol name, never by line number; line numbers rot with every edit. The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -105,9 +105,9 @@ and dependency edges alongside the code.
 
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
-- **On the CI, release, and test-harness path, cargo, bun, and Python tooling resolve from committed lock data.** Cargo and bun invocations pass `--locked` / `--frozen-lockfile`. Python project and docs dependencies resolve from `uv.lock`, while isolated build backends use exact `tool.uv.build-constraint-dependencies` pins. A manifest that has drifted from its lock data is a hard error instead of a silent re-resolution against whatever is newest on the registry. That drift is the window a compromised release would come through, so the failure is the point. This is enforced in the lower-level scripts too (`rs/moq-ffi/build.sh`, `rs/libmoq/build.sh`, `rs/scripts/package-windows.sh`, `test/smoke/smoke.sh`, `test/wasm/run.sh`, `test/ts/run.sh`, and the `{go,kt,swift}/scripts/` bindings generators), not just their callers, so it can't be bypassed by invoking one directly. The `demo/` recipes are deliberately exempt: they are local dev conveniences that never publish an artifact.
+- **On the CI, release, and test-harness path, cargo, bun, Python, and Dart tooling resolve from committed lock data.** Cargo and bun invocations pass `--locked` / `--frozen-lockfile`. Python project and docs dependencies resolve from `uv.lock`, while isolated build backends use exact `tool.uv.build-constraint-dependencies` pins. Dart and Flutter checks use each package's committed `pubspec.lock` with `--enforce-lockfile`. A manifest that has drifted from its lock data is a hard error instead of a silent re-resolution against whatever is newest on the registry. That drift is the window a compromised release would come through, so the failure is the point. This is enforced in the lower-level scripts too (`rs/moq-ffi/build.sh`, `rs/libmoq/build.sh`, `rs/scripts/package-windows.sh`, `test/smoke/smoke.sh`, `test/wasm/run.sh`, `test/ts/run.sh`, and the `{go,kt,swift,dart}/scripts/` bindings generators), not just their callers, so it can't be bypassed by invoking one directly. The `demo/` recipes are deliberately exempt: they are local dev conveniences that never publish an artifact.
 - **A `cargo install` in CI needs a pinned version, not just `--locked`.** `--locked` fixes the tool's *own* dependencies; it does not constrain which version of the tool cargo selects, so an unpinned `cargo install foo` still picks up whatever was published most recently. Pin the version (`cargo install --locked "foo@1.2.3"`) or a git tag.
-- Because of that, editing a `Cargo.toml` / `pyproject.toml` / `package.json` dependency and running `just check` will fail until you regenerate the lockfile. Commit the lockfile change alongside the manifest change: `cargo update -p <crate> --precise <version>` (or a bare `cargo check`), `uv lock`, `bun install`.
+- Because of that, editing a `Cargo.toml` / `pyproject.toml` / `package.json` / `pubspec.yaml` dependency and running `just check` will fail until you regenerate the lockfile. Commit the lockfile change alongside the manifest change: `cargo update -p <crate> --precise <version>` (or a bare `cargo check`), `uv lock`, `bun install`, `dart pub get`.
 - Dependabot holds newly published versions for 7 days before proposing them (`cooldown` in [.github/dependabot.yml](.github/dependabot.yml)), which buys time for a compromised release to be yanked. That gate only covers Dependabot; a hand-run `cargo update` / `bun update` / `uv lock` bypasses it, so prefer letting Dependabot drive routine bumps.
 
 ## Package Versions
@@ -200,7 +200,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/moq/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-token` | `js/token` |

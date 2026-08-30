@@ -1,0 +1,3 @@
+[bindings.dart]
+package_name = "moq_ffi"
+cdylib_name = "moq_ffi"

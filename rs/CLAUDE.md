@@ -46,7 +46,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 
 **Bindings**
 
-- `moq-ffi` (cdylib+staticlib): UniFFI bindings (Python/Swift/Kotlin/Go). Proc-macro based (`uniffi::setup_scaffolding!("moq")`, `#[uniffi::Object]`/`#[uniffi::export]`), no `.udl`. Exposes `Moq*Producer`/`Moq*Consumer`, `MoqError` (`#[uniffi(flat_error)]`).
+- `moq-ffi` (cdylib+staticlib): UniFFI bindings (Python/Swift/Kotlin/Go/Dart). Proc-macro based (`uniffi::setup_scaffolding!("moq")`, `#[uniffi::Object]`/`#[uniffi::export]`), no `.udl`. Exposes `Moq*Producer`/`Moq*Consumer`, `MoqError` (`#[uniffi(flat_error)]`).
 - `libmoq` (staticlib): C bindings. `cbindgen` `build.rs` emits `moq.h` + pkg-config. `extern "C"` over opaque handles; dedicated tokio runtime thread (`LazyLock`).
 - `moq-gst` (cdylib): GStreamer plugin. `gst::plugin_define!`, `moqsrc`/`moqsink` elements bridging to a background tokio task.
 - `moq-wasm` (cdylib+rlib): browser/WASM bindings, `wasm-bindgen` over `moq-net`. Consumed by `js/wasm` (`@moq/wasm`); build via `just wasm`.

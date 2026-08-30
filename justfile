@@ -14,6 +14,7 @@ mod py
 mod kt
 mod swift
 mod go
+mod dart
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
 # Unit tests per language (`just test`).
@@ -245,12 +246,13 @@ _tools $FILES="":
     # without it, and a skip that keeps `just check` green is what MOQ_STRICT is
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
+    scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart flutter uniffi_bindgen_dart)
     # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
     # ffmpeg. Every platform: the plugin type-checks against headers, and the
     # dev shell ships those even on Darwin, where obs-studio can't build.
     scoped '^(cpp/obs/|rs/libmoq/)' && tools+=(clang-format gersemi pkg-config cargo)
 
-    # Scopes overlap (rs/moq-ffi/ is in four of them), so the same tool can land
+    # Scopes overlap (rs/moq-ffi/ is in five of them), so the same tool can land
     # in the list twice and be reported missing twice. Splitting on whitespace is
     # safe: every entry is a bare command name.
     tools=($(printf '%s\n' "${tools[@]}" | sort -u))
@@ -309,6 +311,7 @@ check $BASE="":
         just kt check "$files"
         just swift check "$files"
         just go check "$files"
+        just dart check "$files"
     	# Type-checking the plugin needs only headers, so it runs here rather
     	# than waiting for obs.yml to link it on Linux. libmoq is in scope
     	# because the plugin calls through its generated C header, and flake.nix
@@ -347,6 +350,7 @@ check-all *args:
     just kt check
     just swift check
     just go check
+    just dart check
     just obs check
     just obs compile
     just _flake
@@ -437,6 +441,7 @@ fix $BASE="":
     	just js fix "$files"
     	just rs fix-changed "$files"
     	just py fix "$files"
+        just dart fix "$files"
     	if echo "$files" | grep -q '^cpp/obs/'; then
     		just obs fix
     	fi
@@ -451,6 +456,7 @@ fix-all:
     just js fix
     just rs fix --workspace
     just py fix
+    just dart fix
     just obs fix
     just _fix-common
 
@@ -491,6 +497,7 @@ clean:
     just kt clean
     just swift clean
     just go clean
+    just dart clean
 
     # Caches not owned by any one language: nix build result, direnv, wrangler.
     rm -rf result .direnv

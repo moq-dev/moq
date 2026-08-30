@@ -37,6 +37,8 @@ on:
       - moq-token-cli
       - Nightly
       - release-brew
+      - Release Dart
+      - Release Dart FFI
       - Release Go
       - Release Go FFI
       - Release JS
