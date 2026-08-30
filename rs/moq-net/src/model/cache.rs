@@ -62,10 +62,38 @@ const READ_BOOST: u64 = 2;
 const TICK_MS: u64 = 100;
 
 /// Default idle window for standalone origins and relays.
-///
-/// A bare [`Pool`] has no idle expiry until one is configured with
-/// [`Pool::set_expiry`].
 pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(30);
+
+/// The initial policy for a [`Pool`].
+///
+/// The default is inert: no byte target and no idle expiry. Use
+/// [`Self::with_capacity`] and [`Self::with_expiry`] before creating the pool.
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+	capacity: Option<u64>,
+	expiry: Option<Duration>,
+}
+
+impl Config {
+	/// Set the initial byte target. `None` leaves it unbounded.
+	pub fn with_capacity(mut self, capacity: impl Into<Option<u64>>) -> Self {
+		self.capacity = capacity.into();
+		self
+	}
+
+	/// Set the wall-clock LRU window. `None` disables idle reclamation.
+	///
+	/// A non-latest cached group that nobody reads or writes for this long is
+	/// reclaimed by its track's next write, surfacing to any remaining reader as
+	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
+	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
+	/// window keeps idle content from pinning memory. The value is fixed when the
+	/// pool is created.
+	pub fn with_expiry(mut self, expiry: impl Into<Option<Duration>>) -> Self {
+		self.expiry = expiry.into();
+		self
+	}
+}
 
 /// A shared cache policy and byte budget; cloning shares both.
 ///
@@ -75,9 +103,15 @@ pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(30);
 /// pay it, so every operation here is a few atomics with no lock. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Pool {
 	inner: Arc<Inner>,
+}
+
+impl Default for Pool {
+	fn default() -> Self {
+		Self::unbounded()
+	}
 }
 
 struct Inner {
@@ -86,7 +120,7 @@ struct Inner {
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
-	expiry: AtomicU64,
+	expiry: u64,
 	// Reference point for the coarse tick clock.
 	epoch: crate::runtime::Instant,
 	// Sum and count of last-access ticks across the evictable population, giving a
@@ -96,38 +130,32 @@ struct Inner {
 	access_count: AtomicU64,
 }
 
-impl Default for Inner {
-	fn default() -> Self {
-		Self {
-			used: AtomicU64::new(0),
-			capacity: AtomicU64::new(u64::MAX),
-			expiry: AtomicU64::new(u64::MAX),
-			epoch: crate::model::clock::now(),
-			access_sum: AtomicU64::new(0),
-			access_count: AtomicU64::new(0),
-		}
-	}
-}
-
 impl Pool {
-	/// Create a pool with a byte target and the default idle expiry.
+	/// Create a pool from an initial policy.
 	///
 	/// The budget counts frame payload bytes (plus a small fixed overhead per
 	/// group), not process RSS, and is a convergence target rather than a hard
-	/// limit; leave headroom when sizing it from real memory.
-	pub fn new(capacity: u64) -> Self {
-		let pool = Self::default();
-		pool.inner.capacity.store(capacity, Ordering::Relaxed);
-		pool.inner.expiry.store(
-			u64::try_from(DEFAULT_EXPIRY.as_millis()).unwrap_or(u64::MAX),
-			Ordering::Relaxed,
-		);
-		pool
+	/// limit; leave headroom when sizing it from real memory. The expiry is fixed,
+	/// while the capacity can later be changed with [`Self::resize`].
+	pub fn new(config: Config) -> Self {
+		let expiry = config
+			.expiry
+			.map_or(u64::MAX, |expiry| u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX));
+		Self {
+			inner: Arc::new(Inner {
+				used: AtomicU64::new(0),
+				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
+				expiry,
+				epoch: crate::model::clock::now(),
+				access_sum: AtomicU64::new(0),
+				access_count: AtomicU64::new(0),
+			}),
+		}
 	}
 
 	/// Create a pool that never evicts. This is the [`Default`].
 	pub fn unbounded() -> Self {
-		Self::default()
+		Self::new(Config::default())
 	}
 
 	/// The configured byte target, or `None` when unbounded.
@@ -152,27 +180,9 @@ impl Pool {
 		self.inner.capacity.store(capacity, Ordering::Relaxed);
 	}
 
-	/// Set the wall-clock LRU window for this pool and all of its clones.
-	///
-	/// A non-latest cached group that nobody reads or writes for this long is
-	/// reclaimed by its track's next write, surfacing to any remaining reader as
-	/// [`Error::Old`](crate::Error::Old). This is deliberately independent of track
-	/// retention: [`max_age`](crate::track::Info::max_age) is measured in media
-	/// timestamps (so a congestion stall can't age content out), while this window
-	/// keeps content nobody is accessing from pinning RAM. `None` disables idle
-	/// reclamation, leaving only the byte budget. A bare pool has no idle expiry;
-	/// standalone origins and relays configure [`DEFAULT_EXPIRY`]. Changes apply to
-	/// existing tracks because they read the shared policy while writing.
-	pub fn set_expiry(&self, expiry: impl Into<Option<Duration>>) {
-		let ms = expiry
-			.into()
-			.map_or(u64::MAX, |expiry| u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX));
-		self.inner.expiry.store(ms, Ordering::Relaxed);
-	}
-
 	/// The wall-clock LRU window, or `None` when idle content is never reclaimed.
 	pub fn expiry(&self) -> Option<Duration> {
-		match self.inner.expiry.load(Ordering::Relaxed) {
+		match self.inner.expiry {
 			u64::MAX => None,
 			ms => Some(Duration::from_millis(ms)),
 		}
@@ -180,7 +190,7 @@ impl Pool {
 
 	/// The LRU window in coarse ticks; effectively infinite when disabled.
 	pub(crate) fn expiry_ticks(&self) -> u64 {
-		match self.inner.expiry.load(Ordering::Relaxed) {
+		match self.inner.expiry {
 			u64::MAX => u64::MAX,
 			ms => ms / TICK_MS,
 		}
@@ -402,7 +412,7 @@ impl Track {
 		let interval = expiry.clamp(1, EXPIRY_SCAN_TICKS);
 		let deadline = now.saturating_add(interval);
 		let next = self.next_expiry.load(Ordering::Relaxed);
-		if now < next && next <= deadline {
+		if now < next {
 			return false;
 		}
 
@@ -549,6 +559,11 @@ mod test {
 		Track::new(pool.clone(), kio::Weak::new()).charge()
 	}
 
+	fn bounded(capacity: u64) -> Pool {
+		let config = Config::default().with_capacity(capacity).with_expiry(DEFAULT_EXPIRY);
+		Pool::new(config)
+	}
+
 	#[test]
 	fn unbounded_never_accrues() {
 		let pool = Pool::unbounded();
@@ -561,14 +576,15 @@ mod test {
 	}
 
 	#[test]
-	fn bounded_pool_enables_default_expiry() {
-		let pool = Pool::new(1000);
+	fn config_applies_capacity_and_expiry() {
+		let pool = bounded(1000);
+		assert_eq!(pool.capacity(), Some(1000));
 		assert_eq!(pool.expiry(), Some(DEFAULT_EXPIRY));
 	}
 
 	#[test]
 	fn accrue_none_under_capacity() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut charge = charge(&pool);
 		charge.add(500);
 		assert_eq!(pool.accrue(100), None);
@@ -576,7 +592,7 @@ mod test {
 
 	#[test]
 	fn accrue_proportional_over_capacity() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut charge = charge(&pool);
 		charge.add(2000 - ENTRY_OVERHEAD); // used = 2000, twice the capacity
 
@@ -588,7 +604,7 @@ mod test {
 
 	#[test]
 	fn average_tracks_evictable_population() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		assert_eq!(pool.average(), None);
 
 		pool.access_insert(10);
@@ -607,7 +623,7 @@ mod test {
 
 	#[test]
 	fn charge_raii() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut charge = charge(&pool);
 		assert_eq!(pool.used(), ENTRY_OVERHEAD);
 
@@ -635,7 +651,7 @@ mod test {
 	#[test]
 	fn accrue_saturates() {
 		// A huge overshoot against a tiny capacity must saturate, not wrap.
-		let pool = Pool::new(1);
+		let pool = bounded(1);
 		let mut c = charge(&pool);
 		c.add(1 << 40);
 		assert_eq!(pool.accrue(1 << 40), Some(u64::MAX));
@@ -643,7 +659,7 @@ mod test {
 
 	#[test]
 	fn charge_counts_gross_writes() {
-		let track = Track::new(Pool::new(1000), kio::Weak::new());
+		let track = Track::new(bounded(1000), kio::Weak::new());
 		let mut c = track.charge();
 		c.add(100);
 		c.sub(40); // releases don't refund the gross counter
@@ -653,7 +669,7 @@ mod test {
 
 	#[test]
 	fn charge_owns_access_sample() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut c = charge(&pool);
 		assert_eq!(pool.average(), None, "not evictable until demoted");
 
@@ -670,7 +686,7 @@ mod test {
 
 	#[test]
 	fn refresh_updates_a_counted_sample() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut c = charge(&pool);
 		c.demote();
 		c.refresh();
@@ -683,7 +699,7 @@ mod test {
 
 	#[test]
 	fn refresh_protects_within_a_tick() {
-		let pool = Pool::new(1000);
+		let pool = bounded(1000);
 		let mut c = charge(&pool);
 		c.demote();
 		let average = pool.average().unwrap();
@@ -703,31 +719,17 @@ mod test {
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 
-		pool.set_expiry(Duration::from_secs(1));
+		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(1)));
 		assert_eq!(pool.expiry(), Some(Duration::from_secs(1)));
 		assert_eq!(pool.expiry_ticks(), 10);
 		assert_eq!(pool.refresh_interval(), Duration::from_millis(500));
 
 		// Disabled: never reclaimed by idleness, but readers still re-stamp on a
 		// bounded cadence for byte-eviction protection.
-		pool.set_expiry(None);
+		let pool = Pool::new(Config::default());
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.expiry_ticks(), u64::MAX);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
-	}
-
-	#[test]
-	fn shortening_expiry_rechecks_existing_tracks() {
-		let pool = Pool::unbounded();
-		pool.set_expiry(DEFAULT_EXPIRY);
-		let track = Track::new(pool.clone(), kio::Weak::new());
-		assert!(track.expiry_due());
-
-		crate::model::clock::advance(Duration::from_millis(100));
-		assert!(!track.expiry_due(), "the original one-second deadline is pending");
-
-		pool.set_expiry(Duration::from_millis(100));
-		assert!(track.expiry_due(), "the shorter expiry advances the pending scan");
 	}
 
 	#[test]

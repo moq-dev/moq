@@ -82,15 +82,11 @@ impl CacheConfig {
 	/// spawning the headroom governor when configured. Requires a tokio runtime.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
-		let pool = match capacity {
-			Some(bytes) => cache::Pool::new(bytes),
-			None => cache::Pool::unbounded(),
-		};
-		pool.set_expiry(
-			self.duration
-				.map(moq_tokio::Duration::into_std)
-				.unwrap_or(cache::DEFAULT_EXPIRY),
-		);
+		let duration = self.duration.map(moq_tokio::Duration::into_std);
+		let config = cache::Config::default()
+			.with_capacity(capacity)
+			.with_expiry(duration.unwrap_or(cache::DEFAULT_EXPIRY));
+		let pool = cache::Pool::new(config);
 
 		if let Some(headroom) = self.headroom.as_deref() {
 			let headroom = parse_limit(headroom)?;
@@ -101,16 +97,13 @@ impl CacheConfig {
 			tracing::info!(capacity, "cache capacity set");
 		}
 
-		if let Some(duration) = self.duration.map(moq_tokio::Duration::into_std) {
+		if let Some(duration) = duration {
 			tracing::info!(?duration, "cache duration ceiling set");
 		}
 
 		Ok(Cache {
 			pool,
-			duration: self
-				.duration
-				.map(moq_tokio::Duration::into_std)
-				.unwrap_or(Duration::MAX),
+			duration: duration.unwrap_or(Duration::MAX),
 		})
 	}
 }
@@ -183,6 +176,18 @@ mod tests {
 		let cache = CacheConfig::default().init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(cache::DEFAULT_EXPIRY));
 		assert_eq!(cache.duration, Duration::MAX);
+	}
+
+	#[test]
+	fn explicit_duration_configures_both_bounds() {
+		let duration = Duration::from_secs(5);
+		let config = CacheConfig {
+			duration: Some(duration.into()),
+			..Default::default()
+		};
+		let cache = config.init().unwrap();
+		assert_eq!(cache.pool.expiry(), Some(duration));
+		assert_eq!(cache.duration, duration);
 	}
 
 	#[test]

@@ -34,7 +34,10 @@ struct Fanout {
 impl Fanout {
 	fn new(subscribers: usize) -> Self {
 		let mut info = broadcast::Info::default();
-		info.origin.pool = cache::Pool::new(CACHE_CAPACITY);
+		let config = cache::Config::default()
+			.with_capacity(CACHE_CAPACITY)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		info.origin.pool = cache::Pool::new(config);
 		let mut broadcast = broadcast::Producer::new(info);
 		let track = broadcast.create_track("bench", None).unwrap();
 		let mut subscribers: Vec<_> = (0..subscribers).map(|_| track.subscribe(None)).collect();

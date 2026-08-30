@@ -4299,8 +4299,7 @@ mod test {
 
 	/// Mint a track under an origin whose pool has the given wall-clock LRU window.
 	fn track_producer_expiring(name: impl Into<Arc<str>>, expiry: impl Into<Option<Duration>>) -> Producer {
-		let pool = cache::Pool::unbounded();
-		pool.set_expiry(expiry);
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
 		let origin = crate::origin::Info::default().with_pool(pool);
 		Producer::new(
 			Arc::new(broadcast::Info {
@@ -6467,7 +6466,10 @@ mod test {
 
 	/// Mint a track whose groups charge into a bounded [`cache::Pool`].
 	fn pooled_producer(capacity: u64) -> (Producer, cache::Pool) {
-		let pool = cache::Pool::new(capacity);
+		let config = cache::Config::default()
+			.with_capacity(capacity)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
 			origin: crate::origin::Info::default().with_pool(pool.clone()),
 			..Default::default()
@@ -6632,7 +6634,10 @@ mod test {
 	/// can't strand the bytes already-created groups keep charging.
 	#[tokio::test]
 	async fn accept_preserves_write_accounting() {
-		let pool = cache::Pool::new(12_000);
+		let config = cache::Config::default()
+			.with_capacity(12_000)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
 			origin: crate::origin::Info::default().with_pool(pool.clone()),
 			..Default::default()
@@ -6814,7 +6819,10 @@ mod test {
 	/// `Info` can't leave already-created groups writing for free.
 	#[tokio::test]
 	async fn pre_accept_backfill_settles_late_writes() {
-		let pool = cache::Pool::new(2_000);
+		let config = cache::Config::default()
+			.with_capacity(2_000)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
 			origin: crate::origin::Info::default().with_pool(pool.clone()),
 			..Default::default()

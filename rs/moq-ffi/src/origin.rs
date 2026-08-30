@@ -172,7 +172,10 @@ impl MoqOriginProducer {
 	fn from_options(options: MoqOriginOptions) -> Self {
 		let mut info = moq_net::origin::Info::new(moq_net::Origin::random());
 		if let Some(capacity) = options.cache_capacity_bytes {
-			info = info.with_pool(moq_net::cache::Pool::new(capacity));
+			let config = moq_net::cache::Config::default()
+				.with_capacity(capacity)
+				.with_expiry(info.pool.expiry());
+			info = info.with_pool(moq_net::cache::Pool::new(config));
 		}
 
 		Self { inner: spawn(info) }

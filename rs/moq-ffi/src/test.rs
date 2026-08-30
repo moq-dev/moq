@@ -144,6 +144,10 @@ fn origin_options_set_cache_capacity() {
 		cache_capacity_bytes: Some(4096),
 	});
 	assert_eq!(origin.inner().info().pool.capacity(), Some(4096));
+	assert_eq!(
+		origin.inner().info().pool.expiry(),
+		Some(moq_net::cache::DEFAULT_EXPIRY)
+	);
 }
 
 #[test]

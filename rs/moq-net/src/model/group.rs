@@ -817,8 +817,7 @@ impl Producer {
 				end: None,
 				prefetch: Prefetch::default(),
 				last_refresh: crate::model::clock::now(),
-				pool: self.cache.pool().clone(),
-				max_age: self.track.max_age,
+				refresh_interval: self.cache.pool().refresh_interval().min(self.track.max_age / 2),
 			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -1022,13 +1021,9 @@ struct Plain {
 	// window without an access and be expired mid-read.
 	last_refresh: crate::runtime::Instant,
 
-	// The shared pool supplies the current idle-expiry cadence. Its expiry can be
-	// reconfigured after this cursor is created.
-	pool: cache::Pool,
-
-	// The publisher's media-retention window also bounds refreshes so moving idle
-	// expiry to the pool does not weaken protection from byte-budget eviction.
-	max_age: std::time::Duration,
+	// The shorter of half the immutable pool expiry and half the publisher's
+	// media-retention window.
+	refresh_interval: std::time::Duration,
 }
 
 impl Clone for Plain {
@@ -1041,8 +1036,7 @@ impl Clone for Plain {
 			end: self.end,
 			prefetch: Prefetch::default(),
 			last_refresh: self.last_refresh,
-			pool: self.pool.clone(),
-			max_age: self.max_age,
+			refresh_interval: self.refresh_interval,
 		}
 	}
 }
@@ -1480,8 +1474,7 @@ impl Plain {
 	/// through a batch could be expired or evicted while demonstrably active.
 	fn refresh_if_stale(&mut self) {
 		let now = crate::model::clock::now();
-		let interval = self.pool.refresh_interval().min(self.max_age / 2);
-		if now.duration_since(self.last_refresh) < interval {
+		if now.duration_since(self.last_refresh) < self.refresh_interval {
 			return;
 		}
 		self.state.read().charge.refresh();
@@ -1964,25 +1957,22 @@ mod test {
 	}
 
 	#[test]
-	fn prefetch_refresh_uses_current_pool_expiry() {
-		let pool = cache::Pool::unbounded();
-		pool.set_expiry(std::time::Duration::from_secs(30));
+	fn prefetch_refresh_honors_pool_expiry() {
+		let config = cache::Config::default().with_expiry(std::time::Duration::from_secs(1));
+		let pool = cache::Pool::new(config);
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
 		let before = producer.cache_accessed();
 
-		// The first read prefetched the second frame with a 15-second refresh
-		// interval. Shortening the shared pool must affect this existing cursor.
-		pool.set_expiry(std::time::Duration::from_secs(1));
 		crate::model::clock::advance(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
-		assert!(producer.cache_accessed() > before, "the current pool cadence is used");
+		assert!(producer.cache_accessed() > before, "the pool cadence is used");
 	}
 
 	#[test]
 	fn prefetch_refresh_honors_track_max_age() {
-		let pool = cache::Pool::unbounded();
-		pool.set_expiry(std::time::Duration::from_secs(30));
+		let config = cache::Config::default().with_expiry(std::time::Duration::from_secs(30));
+		let pool = cache::Pool::new(config);
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::from_secs(1));
 		let before = producer.cache_accessed();
 

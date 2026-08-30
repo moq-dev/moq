@@ -110,14 +110,16 @@ fn subscriber_wakes_parked_demand() {
 /// a cache leaks, and loom's Arc-leak check catches the reference-cycle flavor of the
 /// same bug.
 ///
-/// This does not model the charge accounting itself. `cache::Pool` counts with bare
-/// `AtomicU64`s and guards its LRU with a `web_async::Lock`, so loom permutes the two
-/// tracks only where they meet in kio. Reordering the pool's own counters would need
-/// those swapped for loom's too.
+/// This does not model the charge accounting itself. `cache::Pool` uses standard
+/// atomics, so loom permutes the two tracks only where they meet in kio. Reordering
+/// the pool's own counters would need those swapped for loom's atomics too.
 #[test]
 fn concurrent_tracks_drain_a_shared_pool() {
 	loom::model(|| {
-		let pool = cache::Pool::new(512);
+		let config = cache::Config::default()
+			.with_capacity(512)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		let pool = cache::Pool::new(config);
 		let mut info = broadcast::Info::new();
 		info.origin = origin::Info::default().with_pool(pool.clone());
 		let mut broadcast = info.produce();
