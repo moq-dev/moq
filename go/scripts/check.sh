@@ -111,17 +111,11 @@ if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
     cp -R "$STAGE_BINDINGS/uniffi/moq" "$STAGE_BINDINGS/moq"
 fi
 
-# Every generated flat-error sentinel gets a shorter wrapper alias. Comparing
-# the generated output makes a new Rust variant fail this check instead of
-# silently shipping without errors.Is support in the ergonomic package.
-GENERATED_ERRORS=$(grep -hoE 'ErrMoqError[A-Za-z0-9_]+' "$STAGE_BINDINGS/moq/"*.go | sort -u)
-WRAPPED_ERRORS=$(grep -hoE 'ffi\.ErrMoqError[A-Za-z0-9_]+' "$GO_DIR/wrapper/moq/errors.go" | sed 's/^ffi\.//' | sort -u)
-MISSING_ERRORS=$(comm -23 <(printf '%s\n' "$GENERATED_ERRORS") <(printf '%s\n' "$WRAPPED_ERRORS"))
-if [[ -n "$MISSING_ERRORS" ]]; then
-    echo "go check: wrapper is missing generated error sentinels:" >&2
-    echo "$MISSING_ERRORS" >&2
-    exit 1
-fi
+echo "go check: checking error sentinels..."
+bash "$SCRIPT_DIR/check-errors.sh" \
+    "$STAGE_BINDINGS/moq/moq.go" \
+    "$GO_DIR/wrapper/moq/errors.go" \
+    "$GO_DIR/wrapper/moq/errors_test.go"
 
 echo "go check: assembling ffi module..."
 # --skip-size-check because the lib above is a plain host build, unrelated to
