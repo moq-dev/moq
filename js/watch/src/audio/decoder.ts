@@ -12,6 +12,7 @@ import { Handover } from "./handover";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
+import { subscribe } from "./subscription";
 import { type DecodedSpan, Terminal } from "./terminal";
 import { unlockOnGesture } from "./unlock";
 import { Warmup } from "./warmup";
@@ -267,19 +268,7 @@ export class Decoder {
 
 		// The Sync ceiling is the maximum age of a non-latest group before both the network and
 		// container consumers skip it. Omitting startGroup keeps a new subscription at the live edge.
-		const priority = Catalog.PRIORITY.audio;
-		let maxAge = this.sync.out.maxBuffer.peek();
-		const sub = active.track(track).subscribe({
-			priority,
-			latencyMax: maxAge,
-		});
-		effect.cleanup(() => sub.close());
-		effect.run((inner) => {
-			const next = inner.get(this.sync.out.maxBuffer);
-			if (next === maxAge) return;
-			maxAge = next;
-			sub.update({ priority, latencyMax: maxAge });
-		});
+		const sub = subscribe(effect, active, track, this.sync.out.maxBuffer);
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
