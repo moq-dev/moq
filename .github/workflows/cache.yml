@@ -1,13 +1,12 @@
 name: Cache
 
-# Populates the Rust build caches that pull request jobs restore, and the dev
+# Populates the Rust build cache that pull request jobs restore, and the dev
 # shell closure that every nix job substitutes.
 #
 # Actions scopes cache reads to the current branch plus the default branch, so
 # only caches written here on `main` are reachable from a pull request. This
 # workflow is therefore the single trusted writer, with one cache per runner
-# architecture. Pull requests are readers (`save-if: false`) rather than writers
-# of private entries that fill the repository's 10 GB budget.
+# architecture. The action makes pull requests restore-only automatically.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
@@ -28,8 +27,6 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/cache.yml"
-  # Priming a cold cache by hand, e.g. after a toolchain bump evicts everything.
-  workflow_dispatch:
 
 # Newest `main` wins; an older warm is worth less than the runner it holds.
 concurrency:
@@ -89,25 +86,25 @@ jobs:
           nix develop --profile /tmp/devshell --command true
           cachix push kixelated /tmp/devshell
 
-      # `shared-key` replaces the automatic per-job key, which is what lets
-      # check.yml's differently-named jobs restore what this one saves.
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Rust cache
+        uses: jdx/mr-boxington-action@9a406893b83a977c45324a34aed553e3c43f414d # main
         with:
-          shared-key: rust
-          cache-on-failure: true
+          version: 1.0.1
+          toolchain: 1.95.0
 
       # Both halves, so the saved cache carries the lint artifacts (clippy rmeta)
       # and the test artifacts (codegen + linked test binaries). They share
       # little, and a PR usually needs both.
       - name: Check
-        run: nix develop --command just check-all
+        run: nix develop --command env -u RUSTC_WRAPPER just check-all
         env:
+          MOQ_CARGO: mbx
           MOQ_STRICT: 1
 
       - name: Test
         if: ${{ !cancelled() }}
-        run: nix develop --command just test all
+        run: nix develop --command env -u RUSTC_WRAPPER just test all
         env:
+          MOQ_CARGO: mbx
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci

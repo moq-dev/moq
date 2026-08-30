@@ -3,6 +3,9 @@
 
 set unstable
 
+# CI sets this to `mbx`; local recipes keep using Cargo directly.
+cargo_compile := env_var_or_default("MOQ_CARGO", "cargo")
+
 # Per-language modules. Language-specific recipes live in their own justfiles.
 mod js
 mod rs
@@ -472,7 +475,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
-    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    {{ cargo_compile }} build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 

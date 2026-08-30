@@ -434,19 +434,19 @@
 
         formatter = pkgs.nixfmt-tree;
 
-        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just
-        # check` and `just test` (see rs/justfile), no longer through crane.
+        # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
+        # test` (see rs/justfile). CI selects mbx with MOQ_CARGO; local commands
+        # default to plain cargo. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #
-        # On the self-hosted runner those cargo checks transparently reuse a
-        # per-crate compiler cache (rustc is wrapped by sccache via the runner
-        # environment), so a Cargo.lock change recompiles only the changed crate
-        # + its reverse-deps. That's a runner-side concern -- nothing here or in
-        # the workflows configures it.
+        # GitHub Actions persists mbx's per-crate compiler cache, so a Cargo.lock
+        # change recompiles only the changed crate plus its reverse-deps. The
+        # cache wrapper is a workflow concern; nothing in this flake configures
+        # it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
             for asset in \
