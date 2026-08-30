@@ -78,7 +78,7 @@ export class Encoder<T> {
 	// Reference size the op budget is measured against: this group's header frame.
 	#headerLen = 0;
 	#groupFrames = 0;
-	// Whether the next frame must be a header, after a lost frame or a caller-driven roll.
+	// Whether the next frame must be a header after a lost frame.
 	#resync = true;
 	// Whether the frame from the last push/pop is still unacknowledged.
 	#pending = false;
@@ -109,13 +109,8 @@ export class Encoder<T> {
 		return this.#offset + this.#window.length;
 	}
 
-	/**
-	 * Make the next frame open a new group with a header.
-	 *
-	 * Call this whenever the caller closes the current group behind the encoder's back. The window
-	 * survives: the group header restates it in full anyway.
-	 */
-	startGroup(): void {
+	/** Discard group-local state after an encoded frame did not reach the wire. */
+	#resyncGroup(): void {
 		this.#flate = undefined;
 		this.#opBytes = 0;
 		this.#headerLen = 0;
@@ -127,7 +122,7 @@ export class Encoder<T> {
 
 	/** Append one record to the back of the window. */
 	push(value: T): Pending {
-		if (this.#pending) this.startGroup();
+		if (this.#pending) this.#resyncGroup();
 		if (this.end >= Number.MAX_SAFE_INTEGER) throw new Error("window index exceeds the safe integer range");
 
 		// Encode before touching the window, so a value that can't be serialized leaves the encoder
@@ -154,7 +149,7 @@ export class Encoder<T> {
 		if (!Number.isSafeInteger(count) || count < 0) {
 			throw new Error("pop count must be a nonnegative safe integer");
 		}
-		if (this.#pending) this.startGroup();
+		if (this.#pending) this.#resyncGroup();
 
 		const dropped = Math.min(count, this.#window.length);
 		if (dropped <= 0) return undefined;

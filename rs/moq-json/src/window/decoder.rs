@@ -48,6 +48,30 @@ pub enum Event<T> {
 	Skip(std::ops::Range<u64>),
 }
 
+/// Decodes one MoQ group's frames while borrowing the continuous window state.
+pub struct Group<'a, T> {
+	decoder: &'a mut Decoder<T>,
+	codec: Codec,
+}
+
+/// Group-local decoding state used by both [`Group`] and [`Consumer`](super::Consumer).
+pub(super) struct Codec {
+	/// The group's DEFLATE decoder, `Some` while reading compressed frames.
+	flate: Option<moq_flate::Decoder>,
+
+	/// Whether the required frame-zero header has been decoded.
+	positioned: bool,
+}
+
+impl Codec {
+	pub(super) fn new() -> Self {
+		Self {
+			flate: None,
+			positioned: false,
+		}
+	}
+}
+
 /// Reconstructs window events from frame payloads.
 ///
 /// The track-free core of [`Consumer`](super::Consumer). It tracks indices, not contents: it knows
@@ -60,9 +84,6 @@ pub enum Event<T> {
 pub struct Decoder<T> {
 	config: ConsumerConfig,
 
-	/// The current group's DEFLATE decoder, `Some` while compressing.
-	flate: Option<moq_flate::Decoder>,
-
 	/// Absolute index of the window's front, once a group header has positioned us.
 	front: u64,
 
@@ -73,9 +94,6 @@ pub struct Decoder<T> {
 	/// header's offset rather than skipping everything that came before it.
 	delivered: Option<u64>,
 
-	/// Whether the current group header has been decoded.
-	positioned: bool,
-
 	/// Events produced by the frames decoded so far, oldest first.
 	events: VecDeque<Event<T>>,
 }
@@ -85,28 +103,25 @@ impl<T> Decoder<T> {
 	pub fn new(config: ConsumerConfig) -> Self {
 		Self {
 			config,
-			flate: None,
 			front: 0,
 			len: 0,
 			delivered: None,
-			positioned: false,
 			events: VecDeque::new(),
 		}
 	}
 
-	/// Start a cold DEFLATE window, for a reader that has just moved to a new group.
-	///
-	/// Only the group-local state resets. The index cursor deliberately survives: it is what lets
-	/// the next group's header report just the records this reader has not seen.
-	pub fn start_group(&mut self) {
-		self.flate = None;
-		self.positioned = false;
+	/// Borrow this decoder for one MoQ group.
+	pub fn group(&mut self) -> Group<'_, T> {
+		Group {
+			decoder: self,
+			codec: Codec::new(),
+		}
 	}
 
 	/// Take the next event produced by the frames decoded so far.
 	///
 	/// Returns `None` once the queue is drained, which is a request for more frames rather than the
-	/// end of anything: [`decode`](Self::decode) refills it. Deliberately not [`Iterator`], whose
+	/// end of anything: [`Group::decode`] refills it. Deliberately not [`Iterator`], whose
 	/// `None` a caller would reasonably read as exhausted.
 	pub fn next_event(&mut self) -> Option<Event<T>> {
 		self.events.pop_front()
@@ -120,16 +135,18 @@ impl<T> Decoder<T> {
 
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode one frame, queueing the events it implies.
-	pub fn decode(&mut self, payload: &[u8]) -> Result<()> {
+	pub(super) fn decode(&mut self, group: &mut Codec, payload: &[u8]) -> Result<()> {
 		let bytes = match self.config.compression {
-			true => self.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?,
+			true => group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?,
 			false => bytes::Bytes::copy_from_slice(payload),
 		};
 
-		if !self.positioned {
+		if !group.positioned {
 			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
 				.map_err(|err| Error::Json(err.to_string()))?;
-			return self.apply_header(header.offset, header.records);
+			self.apply_header(header.offset, header.records)?;
+			group.positioned = true;
+			return Ok(());
 		}
 
 		match serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
@@ -185,8 +202,6 @@ impl<T: DeserializeOwned> Decoder<T> {
 		self.front = offset;
 		self.len = end - offset;
 		self.delivered = Some(delivered.max(end));
-		self.positioned = true;
-
 		Ok(())
 	}
 
@@ -240,5 +255,24 @@ impl<T: DeserializeOwned> Decoder<T> {
 		self.delivered = Some(delivered.max(self.front));
 
 		Ok(())
+	}
+}
+
+impl<T> Group<'_, T> {
+	/// Take the next event produced by this group's frames so far.
+	pub fn next_event(&mut self) -> Option<Event<T>> {
+		self.decoder.next_event()
+	}
+
+	/// Absolute index of the oldest record in the window, and of the next to arrive.
+	pub fn range(&self) -> std::ops::Range<u64> {
+		self.decoder.range()
+	}
+}
+
+impl<T: DeserializeOwned> Group<'_, T> {
+	/// Decode the next frame in this group.
+	pub fn decode(&mut self, payload: &[u8]) -> Result<()> {
+		self.decoder.decode(&mut self.codec, payload)
 	}
 }

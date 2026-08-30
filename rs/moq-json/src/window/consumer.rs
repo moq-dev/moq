@@ -4,6 +4,7 @@ use std::task::Poll;
 
 use serde::de::DeserializeOwned;
 
+use super::decoder::Codec;
 use super::{ConsumerConfig, Decoder, Event};
 use crate::Result;
 
@@ -19,6 +20,7 @@ use crate::Result;
 pub struct Consumer<T> {
 	track: moq_net::track::Subscriber,
 	group: Option<moq_net::group::Consumer>,
+	codec: Option<Codec>,
 	decoder: Decoder<T>,
 }
 
@@ -28,6 +30,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 		Self {
 			track,
 			group: None,
+			codec: None,
 			decoder: Decoder::new(config),
 		}
 	}
@@ -56,10 +59,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 			let Some(group) = &mut self.group else {
 				match self.track.poll_next_group(waiter)? {
 					Poll::Ready(Some(group)) => {
-						// Each group is its own compressed stream, so the window starts cold. The index
-						// cursor deliberately survives, which is what makes the header report only what this
-						// reader is missing.
-						self.decoder.start_group();
+						self.codec = Some(Codec::new());
 						self.group = Some(group);
 						continue;
 					}
@@ -69,11 +69,15 @@ impl<T: DeserializeOwned> Consumer<T> {
 			};
 
 			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => self.decoder.decode(&frame.payload)?,
+				Poll::Ready(Some(frame)) => {
+					let codec = self.codec.as_mut().expect("an open MoQ group has a window codec");
+					self.decoder.decode(codec, &frame.payload)?;
+				}
 				Poll::Ready(None) => {
 					// This group is exhausted. Clear it and poll for a later one, which restates the
 					// window; the stream ends only when the track does.
 					self.group = None;
+					self.codec = None;
 				}
 				Poll::Pending => return Poll::Pending,
 			}

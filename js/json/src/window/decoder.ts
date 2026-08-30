@@ -37,6 +37,12 @@ export interface Span {
 	end: number;
 }
 
+/** Decodes the frames in one MoQ group, requiring a header at frame zero. */
+export interface Group {
+	/** Decode the next frame in this group. */
+	decode(payload: Uint8Array): void;
+}
+
 /**
  * Reconstructs window events from frame payloads.
  *
@@ -50,7 +56,7 @@ export interface Span {
  */
 export class Decoder<T> {
 	#compress: boolean;
-	#flate?: Flate;
+	#generation = 0;
 
 	// Absolute index of the window's front, once a group header has positioned us.
 	#front = 0;
@@ -58,9 +64,6 @@ export class Decoder<T> {
 	// Next index to deliver, or undefined before the first header. A fresh consumer adopts the first
 	// header's offset rather than skipping everything that came before it.
 	#delivered?: number;
-	// Whether the current group header has been decoded.
-	#positioned = false;
-
 	#events: Event<T>[] = [];
 	#nextEvent = 0;
 
@@ -68,15 +71,41 @@ export class Decoder<T> {
 		this.#compress = config.compression ?? false;
 	}
 
-	/**
-	 * Start a cold DEFLATE window, for a reader that has just moved to a new group.
-	 *
-	 * Only the group-local state resets. The index cursor deliberately survives: it is what lets the
-	 * next group's header report just the records this reader has not seen.
-	 */
-	startGroup(): void {
-		this.#flate = undefined;
-		this.#positioned = false;
+	/** Create the decoder for one MoQ group. */
+	group(): Group {
+		const generation = ++this.#generation;
+		let flate: Flate | undefined;
+		let positioned = false;
+
+		return {
+			decode: (payload) => {
+				if (generation !== this.#generation) throw new Error("stale window group");
+				if (this.#compress) flate ??= new Flate();
+				const bytes = flate ? flate.frame(payload) : payload;
+				const frame = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window frame");
+
+				if (!positioned) {
+					if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");
+					this.#applyHeader(index(frame.offset, "window offset"), frame.records as T[]);
+					positioned = true;
+					return;
+				}
+
+				const keys = Object.keys(frame);
+				if (keys.length !== 1) throw new Error("window op must contain exactly one operation");
+
+				switch (keys[0]) {
+					case "push":
+						this.#applyPush(frame.push as T);
+						break;
+					case "pop":
+						this.#applyPop(index(frame.pop, "window pop count"));
+						break;
+					default:
+						throw new Error("unrecognized window op");
+				}
+			},
+		};
 	}
 
 	/** Absolute index of the oldest record in the window. */
@@ -92,33 +121,6 @@ export class Decoder<T> {
 			this.#nextEvent = 0;
 		}
 		return event;
-	}
-
-	/** Decode one frame, queueing the events it implies. */
-	decode(payload: Uint8Array): void {
-		if (this.#compress) this.#flate ??= new Flate();
-		const bytes = this.#flate ? this.#flate.frame(payload) : payload;
-		const frame = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window frame");
-
-		if (!this.#positioned) {
-			if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");
-			this.#applyHeader(index(frame.offset, "window offset"), frame.records as T[]);
-			return;
-		}
-
-		const keys = Object.keys(frame);
-		if (keys.length !== 1) throw new Error("window op must contain exactly one operation");
-
-		switch (keys[0]) {
-			case "push":
-				this.#applyPush(frame.push as T);
-				break;
-			case "pop":
-				this.#applyPop(index(frame.pop, "window pop count"));
-				break;
-			default:
-				throw new Error("unrecognized window op");
-		}
 	}
 
 	/** The window is exactly these records. Report what this reader missed, then what is new. */
@@ -149,7 +151,6 @@ export class Decoder<T> {
 		this.#front = offset;
 		this.#len = end - offset;
 		this.#delivered = Math.max(delivered, end);
-		this.#positioned = true;
 	}
 
 	/** One record joined the back. */

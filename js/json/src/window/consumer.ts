@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/net";
 
-import { type ConsumerConfig, Decoder, type Event } from "./decoder.ts";
+import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.ts";
 
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
@@ -18,6 +18,7 @@ export class Consumer<T> {
 	#decoder: Decoder<T>;
 
 	#group?: Moq.Group.Consumer;
+	#codec?: Group;
 
 	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
 		this.#track = track;
@@ -39,9 +40,7 @@ export class Consumer<T> {
 			if (!this.#group) {
 				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
-				// Each group is its own compressed stream, so the window starts cold. The index cursor
-				// deliberately survives, which is what makes the header report only what this reader missed.
-				this.#decoder.startGroup();
+				this.#codec = this.#decoder.group();
 			}
 
 			const frame = await this.#group.readFrame();
@@ -49,10 +48,12 @@ export class Consumer<T> {
 				// This group is exhausted. Wait for a later one, which restates the window; the stream
 				// ends only when the track does.
 				this.#group = undefined;
+				this.#codec = undefined;
 				continue;
 			}
 
-			this.#decoder.decode(frame.payload);
+			if (!this.#codec) throw new Error("an open MoQ group has a window codec");
+			this.#codec.decode(frame.payload);
 		}
 	}
 

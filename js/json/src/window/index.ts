@@ -34,6 +34,6 @@
  */
 
 export { Consumer } from "./consumer.ts";
-export { type ConsumerConfig, Decoder, type Event, type Span } from "./decoder.ts";
+export { type ConsumerConfig, Decoder, type Event, type Group, type Span } from "./decoder.ts";
 export { type Encoded, Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
 export { Producer } from "./producer.ts";

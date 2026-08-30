@@ -83,10 +83,6 @@ export class Producer<T> {
 		this.#group?.close();
 		this.#group = undefined;
 
-		// The open group goes with the track, so the encoder must not keep emitting ops into it. Any
-		// further edit fails on the closed track, but it has to fail as a track error rather than as an
-		// op with nowhere to put it.
-		this.#encoder.startGroup();
 		this.#track.close();
 	}
 }

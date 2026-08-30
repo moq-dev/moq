@@ -122,7 +122,7 @@ impl<T> Pending<'_, T> {
 impl<T> Drop for Pending<'_, T> {
 	fn drop(&mut self) {
 		if self.edit.is_some() {
-			self.encoder.start_group();
+			self.encoder.resync();
 		}
 	}
 }
@@ -158,8 +158,8 @@ pub struct Encoder<T> {
 	/// Frames emitted into the current group, header included.
 	group_frames: usize,
 
-	/// Whether the next frame must be a header, because a frame was lost or the caller rolled the
-	/// group. Kept separate from the window, which a resync must never discard.
+	/// Whether the next frame must be a header because a frame was lost. Kept separate from the
+	/// window, which a resync must never discard.
 	resync: bool,
 
 	_marker: PhantomData<fn(T)>,
@@ -193,14 +193,8 @@ impl<T> Encoder<T> {
 		self.offset..self.offset + self.window.len() as u64
 	}
 
-	/// Make the next frame open a new group with a header.
-	///
-	/// Call this whenever the caller closes the current group behind the encoder's back. Without it
-	/// the next frame may be a push against a DEFLATE window and an index base the new group does
-	/// not carry.
-	///
-	/// The window survives: the group header restates it in full anyway.
-	pub fn start_group(&mut self) {
+	/// Discard group-local state after an encoded frame did not reach the wire.
+	fn resync(&mut self) {
 		self.flate = None;
 		self.op_bytes = 0;
 		self.header_len = 0;

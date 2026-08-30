@@ -44,12 +44,13 @@ test("the encoder emits the shared group header bytes", () => {
 for (const vector of vectors) {
 	test(`vector decodes: ${vector.name}`, () => {
 		const decoder = new Decoder<unknown>();
+		const group = decoder.group();
 		// Every group opens with a header, so position the decoder before a bare op.
 		if (!vector.first) {
-			decoder.decode(new TextEncoder().encode('{"offset":0,"records":[{"n":0},{"n":1},{"n":2}]}'));
+			group.decode(new TextEncoder().encode('{"offset":0,"records":[{"n":0},{"n":1},{"n":2}]}'));
 			while (decoder.next());
 		}
 
-		expect(() => decoder.decode(new TextEncoder().encode(vector.frame))).not.toThrow();
+		expect(() => group.decode(new TextEncoder().encode(vector.frame))).not.toThrow();
 	});
 }

@@ -203,9 +203,8 @@ test("a fresh consumer adopts the current offset", async () => {
 
 test("a large gap is one skip event", () => {
 	const decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
-	decoder.startGroup();
-	decoder.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
+	decoder.group().decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
+	decoder.group().decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
 
 	expect(decoder.next()).toEqual({ skip: { start: 0, end: Number.MAX_SAFE_INTEGER } });
 	expect(decoder.next()).toBeUndefined();
@@ -213,30 +212,37 @@ test("a large gap is one skip event", () => {
 
 test("indices must fit the shared safe integer range", () => {
 	let decoder = new Decoder<unknown>();
-	expect(() => decoder.decode(new TextEncoder().encode('{"offset":9007199254740992,"records":[]}'))).toThrow(
+	expect(() => decoder.group().decode(new TextEncoder().encode('{"offset":9007199254740992,"records":[]}'))).toThrow(
 		"nonnegative safe integer",
 	);
 
 	decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
-	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("safe integer range");
+	const group = decoder.group();
+	group.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
+	expect(() => group.decode(new TextEncoder().encode('{"push":null}'))).toThrow("safe integer range");
 });
 
 test("every group requires a header", () => {
 	const decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
-	decoder.startGroup();
+	decoder.group().decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
 
-	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("window header records");
+	expect(() => decoder.group().decode(new TextEncoder().encode('{"push":null}'))).toThrow("window header records");
 });
 
 test("a header is only valid as frame zero", () => {
 	const decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
+	const group = decoder.group();
+	group.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
 
-	expect(() => decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'))).toThrow(
-		"exactly one operation",
-	);
+	expect(() => group.decode(new TextEncoder().encode('{"offset":0,"records":[]}'))).toThrow("exactly one operation");
+});
+
+test("an old group cannot decode after a new one starts", () => {
+	const decoder = new Decoder<unknown>();
+	const old = decoder.group();
+	decoder.group();
+
+	expect(() => old.decode(new TextEncoder().encode('{"offset":0,"records":[]}'))).toThrow("stale window group");
 });
 
 test("pop counts are nonnegative safe integers", () => {
@@ -288,6 +294,9 @@ test("an uncommitted edit leaves the window unchanged", () => {
 
 	const popped = encoder.pop(1);
 	if (!popped) throw new Error("expected a pop frame");
-	encoder.startGroup();
-	expect(encoder.window).toEqual([2]);
+	const next = encoder.push(3);
+	expect(next.keyframe).toBeTrue();
+	next.commit();
+	popped.commit();
+	expect(encoder.window).toEqual([2, 3]);
 });

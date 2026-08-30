@@ -52,7 +52,7 @@ mod op;
 mod producer;
 
 pub use consumer::Consumer;
-pub use decoder::{ConsumerConfig, Decoder, Event};
+pub use decoder::{ConsumerConfig, Decoder, Event, Group};
 pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
 
@@ -280,8 +280,8 @@ mod test {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		for n in 0..2 {
 			let frame = encoder.push(&rec(n)).unwrap();
-			decoder.start_group();
-			decoder.decode(&frame.payload).unwrap();
+			let mut group = decoder.group();
+			group.decode(&frame.payload).unwrap();
 			frame.commit();
 		}
 		assert_eq!(
@@ -307,8 +307,8 @@ mod test {
 			latest = Some(frame.payload.clone());
 			frame.commit();
 		}
-		decoder.start_group();
-		decoder.decode(&latest.unwrap()).unwrap();
+		let mut group = decoder.group();
+		group.decode(&latest.unwrap()).unwrap();
 
 		let events = std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>();
 		let skipped: Vec<std::ops::Range<u64>> = events
@@ -403,9 +403,10 @@ mod test {
 	#[test]
 	fn a_large_gap_is_one_skip_event() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
-		decoder.start_group();
-		decoder.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
+		let mut group = decoder.group();
+		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+		let mut group = decoder.group();
+		group.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
 
 		assert_eq!(decoder.next_event(), Some(Event::Skip(0..super::encoder::MAX_INDEX)));
 		assert_eq!(decoder.next_event(), None);
@@ -414,28 +415,32 @@ mod test {
 	#[test]
 	fn indices_must_fit_the_shared_safe_integer_range() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		assert!(decoder.decode(br#"{"offset":9007199254740992,"records":[]}"#).is_err());
+		let mut group = decoder.group();
+		assert!(group.decode(br#"{"offset":9007199254740992,"records":[]}"#).is_err());
 
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
-		assert!(decoder.decode(br#"{"push":null}"#).is_err());
+		let mut group = decoder.group();
+		group.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
+		assert!(group.decode(br#"{"push":null}"#).is_err());
 	}
 
 	#[test]
 	fn every_group_requires_a_header() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
-		decoder.start_group();
+		let mut group = decoder.group();
+		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+		let mut group = decoder.group();
 
-		assert!(decoder.decode(br#"{"push":null}"#).is_err());
+		assert!(group.decode(br#"{"push":null}"#).is_err());
 	}
 
 	#[test]
 	fn a_header_is_only_valid_as_frame_zero() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+		let mut group = decoder.group();
+		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 
-		assert!(decoder.decode(br#"{"offset":0,"records":[]}"#).is_err());
+		assert!(group.decode(br#"{"offset":0,"records":[]}"#).is_err());
 	}
 
 	#[test]
