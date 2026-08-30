@@ -1,6 +1,18 @@
 import { Decoder as Flate } from "@moq/flate";
 
-import type { Op } from "./encoder.ts";
+function object(value: unknown, label: string): Record<string, unknown> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`${label} must be an object`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function index(value: unknown, label: string): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw new Error(`${label} must be a nonnegative safe integer`);
+	}
+	return value;
+}
 
 /** Options for a {@link Decoder}, and so for the {@link Consumer} wrapping one. */
 export interface ConsumerConfig {
@@ -11,11 +23,19 @@ export interface ConsumerConfig {
 /**
  * One change to the window, as the consumer sees it.
  *
- * Every index is reported exactly once: `push` when a record first reaches this consumer, `pop`
- * when it leaves the window, and `skip` when it existed but was dropped before this consumer ever
- * saw it.
+ * A record is `push`ed when it first reaches this consumer. Contiguous spans are `pop`ped when they
+ * leave the window or `skip`ped when they were dropped before this consumer saw them.
  */
-export type Event<T> = { push: { index: number; value: T } } | { pop: number } | { skip: number };
+export type Event<T> = { push: { index: number; value: T } } | { pop: Span } | { skip: Span };
+
+/** A half-open range of absolute record indices. */
+export interface Span {
+	/** First index in the span. */
+	start: number;
+
+	/** One past the last index in the span. */
+	end: number;
+}
 
 /**
  * Reconstructs window events from frame payloads.
@@ -38,8 +58,11 @@ export class Decoder<T> {
 	// Next index to deliver, or undefined before the first reset. A fresh consumer adopts the first
 	// reset's offset rather than skipping everything that came before it.
 	#delivered?: number;
+	// Whether the current group has opened with its required reset.
+	#positioned = false;
 
 	#events: Event<T>[] = [];
+	#nextEvent = 0;
 
 	constructor(config: ConsumerConfig = {}) {
 		this.#compress = config.compression ?? false;
@@ -53,6 +76,7 @@ export class Decoder<T> {
 	 */
 	reset(): void {
 		this.#flate = undefined;
+		this.#positioned = false;
 	}
 
 	/** Absolute index of the oldest record in the window. */
@@ -62,44 +86,58 @@ export class Decoder<T> {
 
 	/** Take the next event produced by the frames decoded so far. */
 	next(): Event<T> | undefined {
-		return this.#events.shift();
+		const event = this.#events[this.#nextEvent++];
+		if (this.#nextEvent >= this.#events.length) {
+			this.#events = [];
+			this.#nextEvent = 0;
+		}
+		return event;
 	}
 
 	/** Decode one frame, queueing the events it implies. */
 	decode(payload: Uint8Array): void {
 		if (this.#compress) this.#flate ??= new Flate();
 		const bytes = this.#flate ? this.#flate.frame(payload) : payload;
-		const op = JSON.parse(new TextDecoder().decode(bytes)) as Op<T>;
+		const op = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window op");
+		const keys = Object.keys(op);
+		if (keys.length !== 1) throw new Error("window op must contain exactly one operation");
 
-		if ("reset" in op) {
-			this.#applyReset(op.reset.offset, op.reset.records);
-		} else if ("push" in op) {
-			this.#applyPush(op.push);
-		} else if ("pop" in op) {
-			this.#applyPop(op.pop);
-		} else {
-			throw new Error("unrecognized window op");
+		switch (keys[0]) {
+			case "reset": {
+				const reset = object(op.reset, "window reset");
+				if (!Array.isArray(reset.records)) throw new Error("window reset records must be an array");
+				this.#applyReset(index(reset.offset, "window offset"), reset.records as T[]);
+				break;
+			}
+			case "push":
+				this.#applyPush(op.push as T);
+				break;
+			case "pop":
+				this.#applyPop(index(op.pop, "window pop count"));
+				break;
+			default:
+				throw new Error("unrecognized window op");
 		}
 	}
 
 	/** The window is exactly these records. Report what this reader missed, then what is new. */
 	#applyReset(offset: number, records: T[]): void {
+		if (this.#positioned) throw new Error("duplicate window reset in one group");
 		const end = offset + records.length;
+		if (!Number.isSafeInteger(end)) throw new Error("window range exceeds the safe integer range");
 		let delivered = this.#delivered;
 
 		if (delivered === undefined) {
 			// First position: adopt the publisher's offset rather than skipping all of history.
 			delivered = offset;
 		} else {
+			if (offset < this.#front || end < delivered) throw new Error("window reset moved backwards");
+
 			// Records that left the window while we were away. Those we had delivered are pops; those we
-			// never saw are skips. The ranges are disjoint and together cover everything that left, so
-			// every index is still reported exactly once.
-			for (let index = this.#front; index < Math.min(delivered, offset); index++) {
-				this.#events.push({ pop: index });
-			}
-			for (let index = delivered; index < offset; index++) {
-				this.#events.push({ skip: index });
-			}
+			// never saw are skips. Keep each gap compact: the offset is untrusted and may jump by far
+			// more indices than a consumer could materialize individually.
+			this.#range("pop", this.#front, Math.min(delivered, offset));
+			this.#range("skip", delivered, offset);
 		}
 
 		// Deliver only the tail this reader has not seen; a reset that merely restates what it holds
@@ -111,14 +149,16 @@ export class Decoder<T> {
 		this.#front = offset;
 		this.#len = end - offset;
 		this.#delivered = Math.max(delivered, end);
+		this.#positioned = true;
 	}
 
 	/** One record joined the back. */
 	#applyPush(value: T): void {
 		// A group always opens with a reset, so a push before one means we started mid-group.
-		if (this.#delivered === undefined) throw new Error("window op before reset");
+		if (!this.#positioned || this.#delivered === undefined) throw new Error("window op before reset");
 
 		const index = this.#front + this.#len;
+		if (!Number.isSafeInteger(index + 1)) throw new Error("window range exceeds the safe integer range");
 		this.#len += 1;
 
 		if (index >= this.#delivered) {
@@ -129,19 +169,22 @@ export class Decoder<T> {
 
 	/** Records left the front. */
 	#applyPop(count: number): void {
-		if (this.#delivered === undefined) throw new Error("window op before reset");
+		if (!this.#positioned || this.#delivered === undefined) throw new Error("window op before reset");
 		if (count > this.#len) {
 			throw new Error(`pop of ${count} exceeds the ${this.#len} record(s) in the window`);
 		}
 
-		for (let index = this.#front; index < this.#front + count; index++) {
-			// Within a group every frame is seen, so these were delivered; the skip arm only matters for
-			// a window that was already ahead of this reader.
-			this.#events.push(index < this.#delivered ? { pop: index } : { skip: index });
-		}
+		const end = this.#front + count;
+		this.#range("pop", this.#front, Math.min(this.#delivered, end));
+		this.#range("skip", Math.max(this.#delivered, this.#front), end);
 
-		this.#front += count;
+		this.#front = end;
 		this.#len -= count;
 		this.#delivered = Math.max(this.#delivered, this.#front);
+	}
+
+	#range(kind: "pop" | "skip", start: number, end: number): void {
+		if (start >= end) return;
+		this.#events.push(kind === "pop" ? { pop: { start, end } } : { skip: { start, end } });
 	}
 }

@@ -22,10 +22,10 @@
  * reset that opened it. That is purely a compression decision: there is no caller-driven cut and no
  * age bound, and a {@link Consumer} never surfaces it.
  *
- * Every index is reported exactly once: a `push` event when a record arrives, `pop` when it leaves,
- * and `skip` when it existed but was dropped before this reader saw it. A reader that keeps up sees
- * pushes and pops; one that joins late, or falls a group behind, learns from the reset's offset
- * which records it will never get rather than silently missing them.
+ * A reader gets a `push` event when a record arrives, `pop` when a contiguous span leaves, and
+ * `skip` when a span was dropped before this reader saw it. A reader that keeps up sees pushes and
+ * pops; one that falls a group behind learns from the reset's offset which records it will never
+ * get rather than silently missing them.
  *
  * {@link Producer} and {@link Consumer} own a track. {@link Encoder} and {@link Decoder} are the
  * same logic without it, for when something else is already in charge of the track.
@@ -34,6 +34,6 @@
  */
 
 export { Consumer } from "./consumer.ts";
-export { type ConsumerConfig, Decoder, type Event } from "./decoder.ts";
+export { type ConsumerConfig, Decoder, type Event, type Span } from "./decoder.ts";
 export { type Encoded, Encoder, type Op, type Pending, type ProducerConfig } from "./encoder.ts";
 export { Producer } from "./producer.ts";

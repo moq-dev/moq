@@ -34,10 +34,10 @@
 //!
 //! # What a reader is told
 //!
-//! Every index is reported exactly once: [`Event::Push`] when a record arrives, [`Event::Pop`] when
-//! it leaves, and [`Event::Skip`] when it existed but was dropped before this reader saw it. A
-//! reader that keeps up sees pushes and pops; one that joins late, or falls a group behind, learns
-//! from the reset's offset which records it will never get, rather than silently missing them.
+//! A reader gets [`Event::Push`] when a record arrives, [`Event::Pop`] when a contiguous range
+//! leaves, and [`Event::Skip`] when a range was dropped before this reader saw it. A reader that
+//! keeps up sees pushes and pops; one that falls a group behind learns from the reset's offset which
+//! records it will never get, rather than silently missing them.
 //!
 //! # Choosing a layer
 //!
@@ -72,11 +72,6 @@ mod test {
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
-	}
-
-	/// A subscription patient enough to read every group of a finished track.
-	fn replay(track: &moq_net::track::Producer) -> moq_net::track::Subscriber {
-		track.subscribe(moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30)))
 	}
 
 	fn consumer(track: moq_net::track::Subscriber, compression: bool) -> Consumer<Value> {
@@ -164,7 +159,7 @@ mod test {
 			vec![
 				Event::Push(0, rec(0)),
 				Event::Push(1, rec(1)),
-				Event::Pop(0),
+				Event::Pop(0..1),
 				Event::Push(2, rec(2)),
 			]
 		);
@@ -201,7 +196,7 @@ mod test {
 			vec![
 				Event::Push(0, rec(0)),
 				Event::Push(1, rec(1)),
-				Event::Pop(0),
+				Event::Pop(0..1),
 				Event::Push(2, rec(2)),
 			]
 		);
@@ -213,48 +208,59 @@ mod test {
 			.produce()
 			.create_track("test", None)
 			.unwrap();
-		let replay = replay(&track);
-		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_op_ratio(0));
 
 		for n in 0..5 {
 			producer.push(&rec(n)).unwrap();
 		}
 		producer.pop(3).unwrap();
+		let mut subscriber = producer.consume();
+		subscriber.start_at(subscriber.latest().unwrap());
+		let mut fresh = consumer(subscriber, false);
 		producer.finish().unwrap();
 
 		// Joining at offset 3 must not report 3 skips for records that were never this reader's to
 		// miss: it simply starts where the window starts.
-		let events = drain(&mut consumer(replay, false));
-		assert_eq!(events.first(), Some(&Event::Push(0, rec(0))));
+		let events = drain(&mut fresh);
+		assert_eq!(events, vec![Event::Push(3, rec(3)), Event::Push(4, rec(4))]);
 		assert!(!events.iter().any(|e| matches!(e, Event::Skip(_))));
 	}
 
 	#[test]
 	fn a_lagging_consumer_is_told_what_it_missed() {
-		// Ops disabled, so every edit rolls: a reader that stops polling really does lose groups.
-		let (mut producer, track) = producer(ProducerConfig::default().with_op_ratio(0));
-		let mut consumer = consumer(track, false);
-
-		producer.push(&rec(0)).unwrap();
-		producer.push(&rec(1)).unwrap();
+		// Ops are disabled, so every edit is a reset in a new group. Feed the first two groups to the
+		// decoder, skip the middle groups as a lagging track subscriber would, then resume at the
+		// latest reset.
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		for n in 0..2 {
+			let frame = encoder.push(&rec(n)).unwrap();
+			decoder.reset();
+			decoder.decode(&frame.payload).unwrap();
+			frame.commit();
+		}
 		assert_eq!(
-			drain(&mut consumer),
+			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
 			vec![Event::Push(0, rec(0)), Event::Push(1, rec(1))]
 		);
 
-		// The consumer stops reading. The window slides past everything it holds, and the publisher
-		// rolls, so the groups it would have read are gone.
+		let mut latest = None;
 		for n in 2..8 {
-			producer.push(&rec(n)).unwrap();
-			producer.pop(1).unwrap();
-		}
-		producer.finish().unwrap();
+			let frame = encoder.push(&rec(n)).unwrap();
+			frame.commit();
 
-		let events = drain(&mut consumer);
-		let skipped: Vec<u64> = events
+			let frame = encoder.pop(1).unwrap().unwrap();
+			latest = Some(frame.payload.clone());
+			frame.commit();
+		}
+		decoder.reset();
+		decoder.decode(&latest.unwrap()).unwrap();
+
+		let events = std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>();
+		let skipped: Vec<std::ops::Range<u64>> = events
 			.iter()
 			.filter_map(|e| match e {
-				Event::Skip(i) => Some(*i),
+				Event::Skip(range) => Some(range.clone()),
 				_ => None,
 			})
 			.collect();
@@ -262,14 +268,15 @@ mod test {
 		// Records 2..=5 existed but this reader will never receive them, and it is told so rather than
 		// silently jumping from 1 to 6.
 		assert!(!skipped.is_empty(), "expected skips, got {events:?}");
-		assert_eq!(skipped.first(), Some(&2));
+		assert_eq!(skipped.first().map(|range| range.start), Some(2));
 
 		// Every index is still accounted for exactly once, in order.
 		let reported: Vec<u64> = events
 			.iter()
-			.filter_map(|e| match e {
-				Event::Push(i, _) | Event::Skip(i) => Some(*i),
-				Event::Pop(_) => None,
+			.flat_map(|e| match e {
+				Event::Push(i, _) => vec![*i],
+				Event::Skip(range) => range.clone().collect(),
+				Event::Pop(_) => Vec::new(),
 			})
 			.collect();
 		assert!(reported.windows(2).all(|w| w[1] == w[0] + 1), "gaps in {reported:?}");
@@ -308,8 +315,33 @@ mod test {
 
 		assert_eq!(
 			live.finish(),
-			vec![Event::Push(0, rec(0)), Event::Pop(0), Event::Push(1, rec(1))]
+			vec![Event::Push(0, rec(0)), Event::Pop(0..1), Event::Push(1, rec(1))]
 		);
+	}
+
+	#[test]
+	fn a_large_gap_is_one_skip_event() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		decoder.decode(br#"{"reset":{"offset":0,"records":[]}}"#).unwrap();
+		decoder.reset();
+		decoder
+			.decode(br#"{"reset":{"offset":18446744073709551615,"records":[]}}"#)
+			.unwrap();
+
+		assert_eq!(decoder.next_event(), Some(Event::Skip(0..u64::MAX)));
+		assert_eq!(decoder.next_event(), None);
+	}
+
+	#[test]
+	fn every_group_requires_a_reset() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		decoder.decode(br#"{"reset":{"offset":0,"records":[]}}"#).unwrap();
+		decoder.reset();
+
+		assert!(matches!(
+			decoder.decode(br#"{"push":null}"#),
+			Err(crate::Error::MissingReset)
+		));
 	}
 
 	#[test]

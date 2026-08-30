@@ -26,20 +26,20 @@ impl ConsumerConfig {
 
 /// One change to the window, as the consumer sees it.
 ///
-/// Every index is reported exactly once, as one of these three. A record is `Push`ed when it first
-/// reaches this consumer, `Pop`ped when it leaves the window, and `Skip`ped when it existed but was
-/// dropped before this consumer ever saw it.
+/// A record is `Push`ed when it first reaches this consumer. Contiguous ranges are `Pop`ped when
+/// they leave the window or `Skip`ped when they were dropped before this consumer saw them.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Event<T> {
 	/// This record joined the window, at this absolute index.
 	Push(u64, T),
 
-	/// The record at this index left the window.
-	Pop(u64),
+	/// These records left the window.
+	Pop(std::ops::Range<u64>),
 
-	/// The record at this index existed but will never be delivered: it was pushed and dropped
-	/// while this consumer was behind, or before it joined mid-stream.
-	Skip(u64),
+	/// These records existed but will never be delivered: they were pushed and dropped while this
+	/// consumer was behind.
+	Skip(std::ops::Range<u64>),
 }
 
 /// Reconstructs window events from frame payloads.
@@ -67,6 +67,9 @@ pub struct Decoder<T> {
 	/// reset's offset rather than skipping everything that came before it.
 	delivered: Option<u64>,
 
+	/// Whether the current group has opened with its required reset.
+	positioned: bool,
+
 	/// Events produced by the frames decoded so far, oldest first.
 	events: VecDeque<Event<T>>,
 }
@@ -80,6 +83,7 @@ impl<T> Decoder<T> {
 			front: 0,
 			len: 0,
 			delivered: None,
+			positioned: false,
 			events: VecDeque::new(),
 		}
 	}
@@ -90,6 +94,7 @@ impl<T> Decoder<T> {
 	/// the next group's reset report just the records this reader has not seen.
 	pub fn reset(&mut self) {
 		self.flate = None;
+		self.positioned = false;
 	}
 
 	/// Take the next event produced by the frames decoded so far.
@@ -126,20 +131,33 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 	/// The window is exactly these records. Report what this reader missed, then what is new.
 	fn apply_reset(&mut self, offset: u64, records: Vec<T>) -> Result<()> {
-		let end = offset + records.len() as u64;
+		if self.positioned {
+			return Err(Error::Json("duplicate window reset in one group".into()));
+		}
+
+		let len = u64::try_from(records.len()).map_err(|_| Error::Json("window length exceeds u64".into()))?;
+		let end = offset
+			.checked_add(len)
+			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
 
 		let delivered = match self.delivered {
 			// First position: adopt the publisher's offset rather than skipping all of history.
 			None => offset,
 			Some(delivered) => {
-				// Records that left the window while we were away. Those we had delivered are pops; those
-				// we never saw are skips. The two ranges are disjoint and together cover everything that
-				// left, so every index is still reported exactly once.
-				for index in self.front..delivered.min(offset) {
-					self.events.push_back(Event::Pop(index));
+				if offset < self.front || end < delivered {
+					return Err(Error::Json("window reset moved backwards".into()));
 				}
-				for index in delivered..offset {
-					self.events.push_back(Event::Skip(index));
+
+				// Records that left the window while we were away. Those we had delivered are pops; those
+				// we never saw are skips. Keep each gap compact: the offset is untrusted and may jump by
+				// far more indices than a consumer could materialize individually.
+				let popped = self.front..delivered.min(offset);
+				if !popped.is_empty() {
+					self.events.push_back(Event::Pop(popped));
+				}
+				let skipped = delivered..offset;
+				if !skipped.is_empty() {
+					self.events.push_back(Event::Skip(skipped));
 				}
 				delivered
 			}
@@ -156,6 +174,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 		self.front = offset;
 		self.len = end - offset;
 		self.delivered = Some(delivered.max(end));
+		self.positioned = true;
 
 		Ok(())
 	}
@@ -163,14 +182,23 @@ impl<T: DeserializeOwned> Decoder<T> {
 	/// One record joined the back.
 	fn apply_push(&mut self, record: T) -> Result<()> {
 		// A group always opens with a reset, so a push before one means we started mid-group.
+		if !self.positioned {
+			return Err(Error::MissingReset);
+		}
 		let delivered = self.delivered.ok_or(Error::MissingReset)?;
 
-		let index = self.front + self.len;
-		self.len += 1;
+		let index = self
+			.front
+			.checked_add(self.len)
+			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
+		let end = index
+			.checked_add(1)
+			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
+		self.len = end - self.front;
 
 		if index >= delivered {
 			self.events.push_back(Event::Push(index, record));
-			self.delivered = Some(index + 1);
+			self.delivered = Some(end);
 		}
 
 		Ok(())
@@ -178,6 +206,9 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 	/// Records left the front.
 	fn apply_pop(&mut self, count: u64) -> Result<()> {
+		if !self.positioned {
+			return Err(Error::MissingReset);
+		}
 		let delivered = self.delivered.ok_or(Error::MissingReset)?;
 		if count > self.len {
 			return Err(Error::Json(format!(
@@ -186,16 +217,20 @@ impl<T: DeserializeOwned> Decoder<T> {
 			)));
 		}
 
-		for index in self.front..self.front + count {
-			// Within a group every frame is seen, so these were delivered; the skip arm only matters
-			// for a window that was already ahead of this reader.
-			self.events.push_back(match index < delivered {
-				true => Event::Pop(index),
-				false => Event::Skip(index),
-			});
+		let end = self
+			.front
+			.checked_add(count)
+			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
+		let popped = self.front..delivered.min(end);
+		if !popped.is_empty() {
+			self.events.push_back(Event::Pop(popped));
+		}
+		let skipped = delivered.max(self.front)..end;
+		if !skipped.is_empty() {
+			self.events.push_back(Event::Skip(skipped));
 		}
 
-		self.front += count;
+		self.front = end;
 		self.len -= count;
 		self.delivered = Some(delivered.max(self.front));
 

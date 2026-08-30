@@ -69,6 +69,7 @@ impl ProducerConfig {
 
 /// One encoded frame, and the group boundary it implies.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Encoded {
 	/// The frame payload, DEFLATE-compressed when [`ProducerConfig::compression`] is set.
 	pub payload: Bytes,
@@ -226,6 +227,17 @@ impl<T> Encoder<T> {
 		}
 	}
 
+	/// Emit an op when the reset will remain cached, otherwise restate the window in a new group.
+	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
+		let encoded = self.frame(bytes);
+		let group_bytes = self.reset_len.saturating_add(self.op_bytes);
+		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
+			self.emit_reset()
+		} else {
+			Ok(encoded)
+		}
+	}
+
 	/// Encode a reset restating the whole window, opening a new group.
 	fn emit_reset(&mut self) -> Result<Encoded> {
 		let records: Vec<&Value> = self.window.iter().collect();
@@ -274,7 +286,7 @@ impl<T> Encoder<T> {
 			true => self.emit_reset()?,
 			false => {
 				let bytes = serde_json::to_vec(&Op::<&Value>::Pop(count))?;
-				self.frame(bytes)
+				self.emit_op(bytes)?
 			}
 		};
 
@@ -311,10 +323,39 @@ impl<T: Serialize> Encoder<T> {
 				// Serialize the record out of the window rather than the caller's value, so its bytes
 				// match what a later reset would restate.
 				let bytes = serde_json::to_vec(&Op::Push(self.window.back().expect("just pushed")))?;
-				self.frame(bytes)
+				self.emit_op(bytes)?
 			}
 		};
 
 		Ok(self.pending(encoded))
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn an_op_that_would_evict_the_reset_rolls_first() {
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_op_ratio(u32::MAX));
+		let first = "a".repeat(16 * 1024 * 1024);
+		let next = "b".repeat(15 * 1024 * 1024);
+
+		let frame = encoder.push(&first).unwrap();
+		assert!(frame.keyframe);
+		frame.commit();
+
+		let frame = encoder.push(&next).unwrap();
+		assert!(!frame.keyframe);
+		frame.commit();
+
+		let frame = encoder.pop(1).unwrap().unwrap();
+		assert!(!frame.keyframe);
+		frame.commit();
+
+		let frame = encoder.push(&next).unwrap();
+		assert!(frame.keyframe);
+		assert!(frame.payload.len() < moq_net::group::MAX_CACHE_BYTES as usize);
+		frame.commit();
 	}
 }

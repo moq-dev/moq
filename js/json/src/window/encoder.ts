@@ -1,4 +1,5 @@
 import { Encoder as Flate } from "@moq/flate";
+import { Group } from "@moq/net";
 
 /** Frames (reset included) in one group before a reset is forced, matching the Snapshot cap. */
 const MAX_GROUP_FRAMES = 256;
@@ -92,6 +93,9 @@ export class Encoder<T> {
 
 	constructor(config: ProducerConfig = {}) {
 		this.#opRatio = config.opRatio ?? DEFAULT_OP_RATIO;
+		if (!Number.isSafeInteger(this.#opRatio) || this.#opRatio < 0 || this.#opRatio > 0xffffffff) {
+			throw new Error("opRatio must be an unsigned 32-bit integer");
+		}
 		this.#compress = config.compression ?? false;
 	}
 
@@ -128,6 +132,7 @@ export class Encoder<T> {
 	/** Append one record to the back of the window. */
 	push(value: T): Pending {
 		this.#resync ||= this.#lost();
+		if (this.end >= Number.MAX_SAFE_INTEGER) throw new Error("window index exceeds the safe integer range");
 
 		// Encode before touching the window, so a value that can't be serialized leaves the encoder
 		// exactly as it was.
@@ -149,6 +154,9 @@ export class Encoder<T> {
 	 * Clamped to what the window holds.
 	 */
 	pop(count: number): Pending | undefined {
+		if (!Number.isSafeInteger(count) || count < 0) {
+			throw new Error("pop count must be a nonnegative safe integer");
+		}
 		this.#resync ||= this.#lost();
 
 		const dropped = Math.min(count, this.#window.length);
@@ -178,6 +186,7 @@ export class Encoder<T> {
 
 		this.#opBytes += payload.length;
 		this.#groupFrames += 1;
+		if (this.#resetLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) return this.#emitReset();
 
 		return this.#pendingFrame(payload, false);
 	}

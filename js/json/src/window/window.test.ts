@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
-import { type Event, Producer } from "./index.ts";
+import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
 type Rec = { n: number };
 
@@ -55,6 +55,7 @@ class Live {
 }
 
 const pushed = (events: Event<Rec>[]): number[] => events.flatMap((e) => ("push" in e ? [e.push.index] : []));
+const span = ({ start, end }: Span): number[] => Array.from({ length: end - start }, (_, i) => start + i);
 
 test("push and pop round-trip", async () => {
 	const live = new Live();
@@ -66,7 +67,7 @@ test("push and pop round-trip", async () => {
 	expect(await live.finish()).toEqual([
 		{ push: { index: 0, value: { n: 0 } } },
 		{ push: { index: 1, value: { n: 1 } } },
-		{ pop: 0 },
+		{ pop: { start: 0, end: 1 } },
 		{ push: { index: 2, value: { n: 2 } } },
 	]);
 });
@@ -84,7 +85,7 @@ test("a popped record is never restated", async () => {
 	expect(await live.finish()).toEqual([
 		{ push: { index: 0, value: { n: 0 } } },
 		{ push: { index: 1, value: { n: 1 } } },
-		{ pop: 0 },
+		{ pop: { start: 0, end: 1 } },
 		{ push: { index: 2, value: { n: 2 } } },
 	]);
 });
@@ -134,7 +135,7 @@ test("a pop is clamped to the window", async () => {
 
 	expect(await live.finish()).toEqual([
 		{ push: { index: 0, value: { n: 0 } } },
-		{ pop: 0 },
+		{ pop: { start: 0, end: 1 } },
 		{ push: { index: 1, value: { n: 1 } } },
 	]);
 });
@@ -155,7 +156,8 @@ test("a lagging consumer is told what it missed", async () => {
 	const producer = new Producer<Rec>(track, { opRatio: 0 });
 	const live = new Live();
 	live.producer = producer;
-	live.consumer = new Consumer<Rec>(track.subscribe());
+	const subscriber = track.subscribe();
+	live.consumer = new Consumer<Rec>(subscriber);
 
 	await live.push(0);
 	await live.push(1);
@@ -166,15 +168,83 @@ test("a lagging consumer is told what it missed", async () => {
 		producer.push({ n });
 		producer.pop(1);
 	}
+	subscriber.startAt(subscriber.latest() as number);
 	const events = await live.finish();
 
-	const skipped = events.flatMap((e) => ("skip" in e ? [e.skip] : []));
+	const skipped = events.flatMap((e) => ("skip" in e ? span(e.skip) : []));
 	expect(skipped.length).toBeGreaterThan(0);
 	expect(skipped[0]).toBe(2);
 
 	// Every index is still accounted for exactly once, in order.
-	const reported = events.flatMap((e) => ("push" in e ? [e.push.index] : "skip" in e ? [e.skip] : []));
+	const reported = events.flatMap((e) => ("push" in e ? [e.push.index] : "skip" in e ? span(e.skip) : []));
 	for (let i = 1; i < reported.length; i++) {
 		expect(reported[i]).toBe((reported[i - 1] as number) + 1);
 	}
+});
+
+test("a fresh consumer adopts the current offset", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>(track, { opRatio: 0 });
+	for (let n = 0; n < 5; n++) producer.push({ n });
+	producer.pop(3);
+
+	const subscriber = track.subscribe();
+	subscriber.startAt(subscriber.latest() as number);
+	const consumer = new Consumer<Rec>(subscriber);
+	producer.finish();
+	const events: Event<Rec>[] = [];
+	for await (const event of consumer) events.push(event);
+
+	expect(events).toEqual([{ push: { index: 3, value: { n: 3 } } }, { push: { index: 4, value: { n: 4 } } }]);
+});
+
+test("a large gap is one skip event", () => {
+	const decoder = new Decoder<unknown>();
+	decoder.decode(new TextEncoder().encode('{"reset":{"offset":0,"records":[]}}'));
+	decoder.reset();
+	decoder.decode(new TextEncoder().encode(`{"reset":{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}}`));
+
+	expect(decoder.next()).toEqual({ skip: { start: 0, end: Number.MAX_SAFE_INTEGER } });
+	expect(decoder.next()).toBeUndefined();
+});
+
+test("every group requires a reset", () => {
+	const decoder = new Decoder<unknown>();
+	decoder.decode(new TextEncoder().encode('{"reset":{"offset":0,"records":[]}}'));
+	decoder.reset();
+
+	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("window op before reset");
+});
+
+test("pop counts are nonnegative safe integers", () => {
+	const encoder = new Encoder<unknown>();
+	for (const count of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => encoder.pop(count)).toThrow("pop count must be a nonnegative safe integer");
+	}
+	expect(encoder.offset).toBe(0);
+	expect(encoder.window).toEqual([]);
+});
+
+test("an op that would evict the reset rolls first", () => {
+	const encoder = new Encoder<string>({ opRatio: 0xffffffff });
+	const first = "a".repeat(16 * 1024 * 1024);
+	const next = "b".repeat(15 * 1024 * 1024);
+
+	let frame = encoder.push(first);
+	expect(frame.keyframe).toBeTrue();
+	frame.commit();
+
+	frame = encoder.push(next);
+	expect(frame.keyframe).toBeFalse();
+	frame.commit();
+
+	const popped = encoder.pop(1);
+	if (!popped) throw new Error("expected a pop frame");
+	frame = popped;
+	expect(frame.keyframe).toBeFalse();
+	frame.commit();
+
+	frame = encoder.push(next);
+	expect(frame.keyframe).toBeTrue();
+	frame.commit();
 });
