@@ -817,7 +817,7 @@ impl Producer {
 				end: None,
 				prefetch: Prefetch::default(),
 				last_refresh: crate::model::clock::now(),
-				refresh_interval: self.cache.pool().refresh_interval(),
+				pool: self.cache.pool().clone(),
 			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -1021,9 +1021,9 @@ struct Plain {
 	// window without an access and be expired mid-read.
 	last_refresh: crate::runtime::Instant,
 
-	// How long a prefetching reader may go without re-stamping the group's access
-	// time: half the pool's LRU window, captured when the cursor was created.
-	refresh_interval: std::time::Duration,
+	// The shared pool supplies the current refresh cadence. Its expiry can be
+	// reconfigured after this cursor is created.
+	pool: cache::Pool,
 }
 
 impl Clone for Plain {
@@ -1036,7 +1036,7 @@ impl Clone for Plain {
 			end: self.end,
 			prefetch: Prefetch::default(),
 			last_refresh: self.last_refresh,
-			refresh_interval: self.refresh_interval,
+			pool: self.pool.clone(),
 		}
 	}
 }
@@ -1474,11 +1474,12 @@ impl Plain {
 	/// through a batch could be expired while demonstrably active. Half the window
 	/// keeps the stamp comfortably inside it while staying rare on the hot path.
 	fn refresh_if_stale(&mut self) {
-		if crate::model::clock::now().duration_since(self.last_refresh) < self.refresh_interval {
+		let now = crate::model::clock::now();
+		if now.duration_since(self.last_refresh) < self.pool.refresh_interval() {
 			return;
 		}
 		self.state.read().charge.refresh();
-		self.last_refresh = crate::model::clock::now();
+		self.last_refresh = now;
 	}
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
@@ -1941,6 +1942,28 @@ mod test {
 
 		let end = c2.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
+	}
+
+	#[test]
+	fn prefetch_refresh_uses_current_pool_expiry() {
+		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		let before = producer.cache_accessed();
+
+		// The first read prefetched the second frame with a 15-second refresh
+		// interval. Shortening the shared pool must affect this existing cursor.
+		let _ = pool.clone().with_expiry(std::time::Duration::from_secs(1));
+		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		assert!(producer.cache_accessed() > before, "the current pool cadence is used");
 	}
 
 	/// Reading more than one prefetch batch drains every frame in order across the
