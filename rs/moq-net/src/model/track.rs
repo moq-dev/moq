@@ -441,27 +441,23 @@ impl TrackState {
 	/// Fetched backfill is absent from `arrival`, so it cannot age subscription content
 	/// as though it were a live replacement.
 	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
-		let mut presentation: Option<PresentationEdge> = None;
-		for slot in self.lookup.values() {
-			if !slot.visible {
-				continue;
-			}
-			let group = &slot.group;
-			if cap.is_some_and(|cap| group.sequence > cap) || group.is_aborted() {
-				continue;
-			}
-			// The edge wants the newest content that exists, so it takes the newest
-			// stamped group's latest frame.
-			if let Some(timestamp) = group.timestamp()
-				&& presentation.is_none_or(|edge| group.sequence > edge.sequence)
-			{
-				presentation = Some(PresentationEdge {
-					sequence: group.sequence,
+		let presentation = self
+			.lookup
+			.range(..=cap.unwrap_or(u64::MAX))
+			.rev()
+			.find_map(|(_, slot)| {
+				if !slot.visible || slot.group.is_aborted() {
+					return None;
+				}
+				// The map is ordered by sequence, so the first stamped group from the
+				// back is the newest content that exists.
+				let timestamp = slot.group.timestamp()?;
+				Some(PresentationEdge {
+					sequence: slot.group.sequence,
 					stamp: slot.stamp,
-					timestamp: group.latest().unwrap_or(timestamp),
-				});
-			}
-		}
+					timestamp: slot.group.latest().unwrap_or(timestamp),
+				})
+			});
 
 		presentation.map(|presentation| Edge { presentation, cap })
 	}

@@ -12,6 +12,8 @@ TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
 fi
+BASE_TARGET=$TARGET/base
+CURRENT_TARGET=$TARGET/current
 
 RUN=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench.XXXXXX")
 WORKTREE=
@@ -34,7 +36,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-export CARGO_TARGET_DIR=$TARGET
 export CRITERION_HOME=$RUN/criterion
 
 # Shorter than Criterion's defaults, but still enough samples for confidence
@@ -51,55 +52,59 @@ criterion_targets() {
     (
         cd "$checkout" || exit 1
         cargo metadata --locked --format-version 1 --no-deps |
-            jq -r '
+            jq -r --arg root "$checkout/" '
                 .packages[] as $package
                 | $package.targets[]
                 | select(any(.kind[]; . == "bench"))
-                | [$package.name, .name]
+                | [($package.manifest_path | ltrimstr($root)), .name]
                 | @tsv
             ' |
             sort
     )
 }
 
+target_dir() {
+    local checkout=$1
+    if [[ $checkout == "$ROOT" ]]; then
+        printf '%s\n' "$CURRENT_TARGET"
+    else
+        printf '%s\n' "$BASE_TARGET"
+    fi
+}
+
 run_criterion() {
     local checkout=$1
-    local package target
+    local manifest target
     local target_list=$RUN/criterion-targets
-    local -a targets
     shift
     if ! criterion_targets "$checkout" >"$target_list"; then
         return 1
     fi
-    targets=()
-    while IFS=$'\t' read -r package target; do
-        targets+=(--package "$package" --bench "$target")
-    done <"$target_list"
-    if ((${#targets[@]} == 0)); then
+    if [[ ! -s $target_list ]]; then
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    (
-        cd "$checkout" || exit 1
-        cargo bench --locked "${targets[@]}" -- "${CRITERION_ARGS[@]}" "$@"
-    )
+    while IFS=$'\t' read -r manifest target; do
+        run_criterion_target "$checkout" "$manifest" "$target" "$@"
+    done <"$target_list"
 }
 
 run_criterion_target() {
     local checkout=$1
-    local package=$2
+    local manifest=$2
     local target=$3
     shift 3
     (
         cd "$checkout" || exit 1
-        cargo bench --locked --package "$package" --bench "$target" -- \
+        CARGO_TARGET_DIR=$(target_dir "$checkout") \
+            cargo bench --locked --manifest-path "$manifest" --bench "$target" -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
 }
 
 criterion_cases() {
     local checkout=$1
-    local package target benchmark
+    local manifest target benchmark
     local listing=$RUN/criterion-listing
     local target_list=$RUN/criterion-targets
 
@@ -110,19 +115,20 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r package target; do
+    while IFS=$'\t' read -r manifest target; do
         if ! (
             cd "$checkout" || exit 1
-            cargo bench --locked --package "$package" --bench "$target" -- --list
+            CARGO_TARGET_DIR=$(target_dir "$checkout") \
+                cargo bench --locked --manifest-path "$manifest" --bench "$target" -- --list
         ) | sed -n 's/: benchmark$//p' >"$listing"; then
             return 1
         fi
         if [[ ! -s $listing ]]; then
-            printf 'Criterion target has no benchmark cases: %s/%s\n' "$package" "$target" >&2
+            printf 'Criterion target has no benchmark cases: %s/%s\n' "$manifest" "$target" >&2
             return 1
         fi
         while IFS= read -r benchmark; do
-            printf '%s\t%s\t%s\n' "$package" "$target" "$benchmark"
+            printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
         done <"$listing"
     done <"$target_list"
 }
@@ -133,30 +139,30 @@ compare_criterion() {
     local base_cases=$RUN/criterion-base.cases
     local current_cases=$RUN/criterion-current.cases
     local keys=$RUN/criterion-case.keys
-    local package target benchmark base_match current_match
+    local manifest target benchmark base_match current_match
 
     criterion_cases "$base_checkout" >"$base_cases"
     criterion_cases "$current_checkout" >"$current_cases"
     sort -u "$base_cases" "$current_cases" >"$keys"
 
-    while IFS=$'\t' read -r package target benchmark; do
-        base_match=$(awk -F '\t' -v package="$package" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == package && $2 == target && $3 == benchmark { print; exit }' "$base_cases")
-        current_match=$(awk -F '\t' -v package="$package" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == package && $2 == target && $3 == benchmark { print; exit }' "$current_cases")
+    while IFS=$'\t' read -r manifest target benchmark; do
+        base_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
+            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$base_cases")
+        current_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
+            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$current_cases")
 
         if [[ -n $base_match ]]; then
             printf '\nCriterion baseline: %s\n' "$benchmark"
-            run_criterion_target "$base_checkout" "$package" "$target" \
+            run_criterion_target "$base_checkout" "$manifest" "$target" \
                 --save-baseline base "$benchmark" --exact
         fi
         if [[ -n $current_match ]]; then
             printf '\nCriterion current: %s\n' "$benchmark"
             if [[ -n $base_match ]]; then
-                run_criterion_target "$current_checkout" "$package" "$target" \
+                run_criterion_target "$current_checkout" "$manifest" "$target" \
                     --baseline-lenient base "$benchmark" --exact
             else
-                run_criterion_target "$current_checkout" "$package" "$target" \
+                run_criterion_target "$current_checkout" "$manifest" "$target" \
                     --discard-baseline "$benchmark" --exact
             fi
         fi
@@ -374,18 +380,27 @@ run_workload() {
             ;;
     esac
 
-    "$LOAD_BIN" \
-        --client-connect "https://localhost:$RELAY_PORT" \
-        --client-tls-disable-verify \
+    if ! "$LOAD_BIN" \
+        --connect "https://localhost:$RELAY_PORT" \
+        --connect-tls-insecure \
         --name "bench-$label-$workload" \
         --startup 2s \
         --duration 10s \
         --report 500ms \
         --output "$stats" \
-        "${shape[@]}" >"$directory/load.log" 2>&1
+        "${shape[@]}" >"$directory/load.log" 2>&1; then
+        printf 'load benchmark failed: %s/%s\n' "$label" "$workload" >&2
+        cat "$directory/load.log" >&2
+        return 1
+    fi
 
     if [[ -n $HOST_PID ]]; then
-        wait "$HOST_PID"
+        if ! wait "$HOST_PID"; then
+            printf 'host benchmark failed: %s/%s\n' "$label" "$workload" >&2
+            cat "$directory/host.log" >&2
+            HOST_PID=
+            return 1
+        fi
         HOST_PID=
     fi
     stop_relay
@@ -471,9 +486,9 @@ if [[ -n $BASE ]]; then
     printf '\nBuilding relay binaries...\n'
     (
         cd "$WORKTREE"
-        cargo build --locked --release -p moq-relay
+        CARGO_TARGET_DIR=$BASE_TARGET cargo build --locked --release -p moq-relay
     )
-    cp "$TARGET/release/moq-relay" "$RUN/moq-relay-base"
+    cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
     printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
@@ -481,18 +496,18 @@ else
     printf '\nBuilding relay binaries...\n'
 fi
 
-cargo build --locked --release -p moq-relay -p moq-bench
-LOAD_BIN=$TARGET/release/moq-bench
-HOST_BIN=$TARGET/release/moq-bench-host
+CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
+LOAD_BIN=$CURRENT_TARGET/release/moq-bench
+HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
     for workload in video fanout; do
         run_workload base "$RUN/moq-relay-base" "$workload"
-        run_workload current "$TARGET/release/moq-relay" "$workload"
+        run_workload current "$CURRENT_TARGET/release/moq-relay" "$workload"
     done
 else
-    run_relay_suite current "$TARGET/release/moq-relay"
+    run_relay_suite current "$CURRENT_TARGET/release/moq-relay"
 fi
 
 if [[ -n $BASE ]]; then
