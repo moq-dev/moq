@@ -413,6 +413,13 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
+#[cfg(any(feature = "capture", test))]
+fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
+	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
+	// for demand again so the next timestamp does not stretch the previous frame across the gap.
+	producer.discontinuity()
+}
+
 /// Async capture/encode loop. Opens the camera while at least one viewer is
 /// watching and releases it when the last one leaves.
 ///
@@ -504,6 +511,8 @@ async fn capture_loop<E: CatalogExt>(
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
+		drop(encoder);
+		capture_stopped(producer)?;
 		tracing::info!("no viewers: released camera");
 	}
 }
@@ -563,6 +572,48 @@ mod tests {
 		let snapshot = catalog.snapshot();
 		let (name, config) = snapshot.video.renditions.iter().next()?;
 		Some((name.clone(), config.clone()))
+	}
+
+	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+		let mut groups = Vec::new();
+		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while group.next_frame().await.unwrap().is_some() {
+				frames += 1;
+			}
+			groups.push(frames);
+		}
+		groups
+	}
+
+	/// An on-demand capture resumes on the same wall clock after releasing its camera and encoder,
+	/// so the idle transition must publish an empty group between the two runs. This uses synthetic
+	/// frames and the software encoder to exercise the transition without capture hardware.
+	#[tokio::test]
+	async fn idle_capture_publishes_a_discontinuity_before_resume() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let track = broadcast.create_track("video", catalog.track_info()).unwrap();
+		let consumer = track.subscribe(None);
+
+		let mut config = Config::new(320, 240, 30);
+		config.kind = encoder::Kind::Software;
+		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+
+		for timestamp in [0, 10_000_000] {
+			if timestamp > 0 {
+				capture_stopped(&mut producer).unwrap();
+			}
+			encoder.keyframe();
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		}
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![1, 0, 1]);
 	}
 
 	/// Regression: a caller's container selection has to survive the config -> hint conversion.
