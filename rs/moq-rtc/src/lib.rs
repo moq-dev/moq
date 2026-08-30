@@ -53,6 +53,9 @@ mod net;
 mod sdp;
 mod session;
 
+#[cfg(test)]
+mod integration_test;
+
 /// Re-export of the underlying WebRTC stack, so consumers can name the str0m
 /// types that surface through [`Error::Rtc`] / [`Error::RtcInput`] without adding
 /// their own str0m dependency (and risking a version mismatch). A major str0m
