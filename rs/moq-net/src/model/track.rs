@@ -1124,6 +1124,9 @@ impl Producer {
 			timestamp,
 			payload,
 		});
+		let cache = state.cache.clone();
+		drop(state);
+		cache.settle();
 		Ok(sequence)
 	}
 
@@ -1153,6 +1156,9 @@ impl Producer {
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(datagram.sequence));
 		meter.datagram(datagram.payload.len() as u64);
 		state.push_datagram(datagram);
+		let cache = state.cache.clone();
+		drop(state);
+		cache.settle();
 		Ok(())
 	}
 
@@ -4296,6 +4302,38 @@ mod test {
 
 		let expired = !producer.state.read().lookup.contains_key(&0);
 		assert!(expired, "a streamed chunk runs expiry");
+	}
+
+	#[tokio::test]
+	async fn appended_datagram_expires_idle_groups() {
+		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		producer.append_group().unwrap().finish().unwrap(); // seq 0
+		producer.append_group().unwrap().finish().unwrap(); // seq 1
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
+
+		let expired = !producer.state.read().lookup.contains_key(&0);
+		assert!(expired, "an appended datagram runs expiry");
+	}
+
+	#[tokio::test]
+	async fn forwarded_datagram_expires_idle_groups() {
+		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		producer.append_group().unwrap().finish().unwrap(); // seq 0
+		producer.append_group().unwrap().finish().unwrap(); // seq 1
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		producer
+			.write_datagram(Datagram {
+				sequence: 2,
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+
+		let expired = !producer.state.read().lookup.contains_key(&0);
+		assert!(expired, "a forwarded datagram runs expiry");
 	}
 
 	/// A track's `max_age` is a media-timestamp budget: it does not drive wall-clock
