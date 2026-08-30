@@ -149,10 +149,14 @@ impl Message for Subscribe<'_> {
 				self.group_order.encode(w, version)?;
 				true.encode(w, version)?; // forward
 
-				debug_assert!(
-					!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
-					"Absolute subscribe not supported"
-				);
+				// Decoding keeps the filter type but drops the Location an absolute filter
+				// carries after it, so there is nothing left to write. Refuse rather than
+				// emit a truncated SUBSCRIBE whose next field the peer would read as that
+				// Location. Reachable from a peer's own message, so it is an error, not an
+				// assertion.
+				if matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange) {
+					return Err(EncodeError::Unsupported);
+				}
 
 				self.filter_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters

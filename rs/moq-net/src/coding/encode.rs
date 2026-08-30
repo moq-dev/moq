@@ -26,6 +26,9 @@ pub enum EncodeError {
 	/// The field does not exist in the negotiated protocol version.
 	#[error("unsupported version")]
 	Version,
+	/// The value is well-formed but this implementation cannot put it on the wire.
+	#[error("unsupported")]
+	Unsupported,
 }
 
 impl From<BoundsExceeded> for EncodeError {

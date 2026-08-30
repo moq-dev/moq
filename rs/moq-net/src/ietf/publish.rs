@@ -319,11 +319,13 @@ impl Message for PublishOk {
 				self.forward.encode(w, version)?;
 				self.subscriber_priority.encode(w, version)?;
 				self.group_order.encode(w, version)?;
+				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
+				// decode, so encoding one would truncate the message.
+				if !matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup) {
+					return Err(EncodeError::Unsupported);
+				}
+
 				self.filter_type.encode(w, version)?;
-				debug_assert!(
-					matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup),
-					"absolute subscribe not supported"
-				);
 				// no parameters
 				0u8.encode(w, version)?;
 			}
