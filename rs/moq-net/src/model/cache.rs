@@ -50,15 +50,17 @@ const ENTRY_OVERHEAD: u64 = 256;
 /// delivered or fetched group, a frame read, a backfill's birth) outranks both.
 const WRITE_BOOST: u64 = 1;
 const READ_BOOST: u64 = 2;
+const ACCESS_SHIFT: u32 = 2;
 
 /// Milliseconds per tick of the coarse clock behind access timestamps.
 ///
 /// Coarse ticks keep the count-weighted timestamp sum far from u64 overflow: the
-/// sum is bounded by `elapsed_ticks * live_groups`, live groups are bounded by
-/// `used / ENTRY_OVERHEAD`, and twenty years of ticks (6.3e9) times a 64 GiB
-/// target's worst-case ~270M groups is ~1.7e18, a tenth of `u64::MAX`. A
-/// byte-weighted mean would overflow u64 even at whole-second ticks, which is why
-/// the mean is count-weighted.
+/// sum is bounded by `elapsed_ticks * live_groups`, plus two low tie-breaking
+/// bits. Live groups are bounded by `used / ENTRY_OVERHEAD`, and twenty years of
+/// ticks (6.3e9) times a 64 GiB target's worst-case ~270M groups is ~6.8e18 after
+/// that encoding, still below half of `u64::MAX`. A byte-weighted mean would
+/// overflow u64 even at whole-second ticks, which is why the mean is
+/// count-weighted.
 const TICK_MS: u64 = 100;
 
 /// Default idle window for standalone origins and relays.
@@ -88,7 +90,8 @@ impl Config {
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
 	/// window keeps idle content from pinning memory. The value is fixed when the
-	/// pool is created.
+	/// pool is created. Values are rounded up to the pool's 100 ms clock tick, with
+	/// 100 ms as the minimum effective window.
 	pub fn with_expiry(mut self, expiry: impl Into<Option<Duration>>) -> Self {
 		self.expiry = expiry.into();
 		self
@@ -138,9 +141,13 @@ impl Pool {
 	/// limit; leave headroom when sizing it from real memory. The expiry is fixed,
 	/// while the capacity can later be changed with [`Self::resize`].
 	pub fn new(config: Config) -> Self {
-		let expiry = config
-			.expiry
-			.map_or(u64::MAX, |expiry| u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX));
+		let expiry = config.expiry.map_or(u64::MAX, |expiry| {
+			let ms = u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX);
+			if ms == u64::MAX {
+				return u64::MAX;
+			}
+			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
+		});
 		Self {
 			inner: Arc::new(Inner {
 				used: AtomicU64::new(0),
@@ -223,6 +230,11 @@ impl Pool {
 	pub(crate) fn now(&self) -> u64 {
 		let elapsed = crate::model::clock::now().duration_since(self.inner.epoch);
 		elapsed.as_millis() as u64 / TICK_MS
+	}
+
+	/// Encode the current clock tick and an access-priority tie breaker.
+	fn stamp(&self, boost: u64) -> u64 {
+		self.now().saturating_mul(1 << ACCESS_SHIFT).saturating_add(boost)
 	}
 
 	/// Mean last-access tick across the evictable population, or `None` when it is
@@ -346,7 +358,7 @@ impl Track {
 	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
 		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
-		let last = self.pool.now();
+		let last = self.pool.stamp(0);
 		Charge {
 			track: Some(self.clone()),
 			bytes: ENTRY_OVERHEAD,
@@ -482,6 +494,11 @@ impl Charge {
 		self.last.load(Ordering::Relaxed)
 	}
 
+	/// Coarse clock tick of the group's last cache access, without its priority bits.
+	pub(crate) fn accessed_tick(&self) -> u64 {
+		self.accessed() >> ACCESS_SHIFT
+	}
+
 	/// Enter the group into the evictable population (demoted from the live edge,
 	/// or inserted behind it), sampling its access time into the pool's mean.
 	/// Idempotent.
@@ -509,16 +526,16 @@ impl Charge {
 		self.touch(WRITE_BOOST);
 	}
 
-	/// Advance the last-access tick to `boost` ticks past the coarse clock.
+	/// Advance the last-access stamp to the current clock tick with `boost` priority.
 	///
 	/// The boost breaks ties within one coarse tick: written content outranks
 	/// merely-inserted content, and explicitly read content outranks both, so a
 	/// same-tick access still reads as strictly newer than the population mean of
 	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
-	/// repeated accesses can't run ahead of the clock by more than the boost.
+	/// repeated accesses remain idempotent without advancing the expiry clock.
 	fn touch(&self, boost: u64) {
 		let Some(track) = &self.track else { return };
-		let target = track.pool.now().saturating_add(boost);
+		let target = track.pool.stamp(boost);
 		// `fetch_max` keeps the stamp monotone, and its prior value makes the
 		// paired mean update exact even for back-to-back accesses.
 		let prev = self.last.fetch_max(target, Ordering::Relaxed);
@@ -706,6 +723,7 @@ mod test {
 		// A refresh in the same coarse tick still lifts the group above the mean.
 		c.refresh();
 		assert!(c.accessed() > average);
+		assert_eq!(c.accessed_tick(), pool.now(), "priority does not advance expiry time");
 		// Repeated same-tick refreshes are idempotent, not runaway.
 		let stamped = c.accessed();
 		c.refresh();
@@ -723,6 +741,10 @@ mod test {
 		assert_eq!(pool.expiry(), Some(Duration::from_secs(1)));
 		assert_eq!(pool.expiry_ticks(), 10);
 		assert_eq!(pool.refresh_interval(), Duration::from_millis(500));
+
+		let pool = Pool::new(Config::default().with_expiry(Duration::from_millis(1)));
+		assert_eq!(pool.expiry(), Some(Duration::from_millis(TICK_MS)));
+		assert_eq!(pool.expiry_ticks(), 1);
 
 		// Disabled: never reclaimed by idleness, but readers still re-stamp on a
 		// bounded cadence for byte-eviction protection.

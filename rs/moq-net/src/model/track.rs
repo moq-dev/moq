@@ -609,7 +609,7 @@ impl TrackState {
 				}
 				if slot.group.is_aborted()
 					|| (Some(sequence) != self.latest_group
-						&& scan.now.saturating_sub(slot.group.cache_accessed()) > scan.max_ticks)
+						&& scan.now.saturating_sub(slot.group.cache_accessed_tick()) > scan.max_ticks)
 				{
 					return true;
 				}
@@ -647,7 +647,7 @@ impl TrackState {
 					continue;
 				}
 				if Some(sequence) == self.latest_group
-					|| scan.now.saturating_sub(slot.group.cache_accessed()) <= scan.max_ticks
+					|| scan.now.saturating_sub(slot.group.cache_accessed_tick()) <= scan.max_ticks
 				{
 					continue;
 				}

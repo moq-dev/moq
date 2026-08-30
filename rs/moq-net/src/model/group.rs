@@ -789,6 +789,11 @@ impl Producer {
 		self.state.read().charge.accessed()
 	}
 
+	/// Coarse clock tick of the group's last cache access, used by age expiry.
+	pub(crate) fn cache_accessed_tick(&self) -> u64 {
+		self.state.read().charge.accessed_tick()
+	}
+
 	/// Enter the group into the evictable population: demoted from the live edge,
 	/// or inserted behind it. Idempotent; a no-op once the group is closed.
 	pub(crate) fn cache_demote(&self) {
