@@ -117,7 +117,9 @@ test("closing mid-connect aborts the pending attempt", async () => {
 test("a peer that severs immediately keeps escalating the backoff", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
+	let attempts = 0;
 	const stub = function StubWebTransport() {
+		attempts++;
 		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 		// Sever the session as soon as the server side finishes the handshake.
 		void accept(pair.server, url).then((server) => server.close());
@@ -139,6 +141,14 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 	});
 	try {
 		await expect(reload.closed).rejects.toThrow();
+
+		// A terminal loop ignores later reactive edits instead of opening another session.
+		const terminalAttempts = attempts;
+		reload.enabled.set(false);
+		await settle();
+		reload.enabled.set(true);
+		await settle();
+		expect(attempts).toBe(terminalAttempts);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -371,6 +381,11 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		]);
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
+		expect(attempts).toBe(1);
+
+		// The terminal authorization result survives a URL edit that would normally reconnect.
+		reload.url.set(new URL("https://example.com/changed"));
+		await settle();
 		expect(attempts).toBe(1);
 	} finally {
 		reload.close();
