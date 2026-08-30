@@ -30,10 +30,21 @@ QUIC uses UDP and performs TLS in the relay process. Network infrastructure must
 forward UDP to a relay that can terminate the QUIC connection. If HTTPS or the
 WebSocket fallback is enabled, forward the corresponding TCP port as well.
 
-Use a certificate from a CA trusted by your clients. Configure its certificate
-chain and private key under `server.tls`; the same files can be used for the
-HTTPS listener. Generated certificates and disabled verification are intended
-for development.
+Use a certificate from a CA trusted by your clients. QUIC and HTTPS/WSS have
+separate TLS sections, although they can reuse the same certificate files:
+
+```toml
+[server.tls]
+cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+[web.https]
+listen = "[::]:443"
+cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+```
+
+Generated certificates and disabled verification are intended for development.
 
 Browser clients can use certificate fingerprint verification for short-lived
 self-signed development certificates. Native clients can use custom root CAs,

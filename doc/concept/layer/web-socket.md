@@ -13,12 +13,12 @@ moq-lite layer does not need a separate protocol path.
 
 The client can race WebTransport and WebSocket connections and keep the first
 one that succeeds. The WebSocket path changes `https://` to `wss://` (or
-`http://` to `ws://`) and negotiates the `webtransport` subprotocol.
+`http://` to `ws://`) and negotiates a QMux subprotocol for the MoQ version.
 
-The [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws)
-polyfill multiplexes bidirectional and unidirectional logical streams over the
-WebSocket connection. Its frame types cover stream data, stream completion,
-reset, stop-sending, and connection close.
+The [QMux implementation](https://github.com/moq-dev/web-transport/tree/main/rs/qmux)
+multiplexes bidirectional and unidirectional logical streams over the WebSocket
+connection. Its frame types cover stream data, stream completion, reset,
+stop-sending, and connection close.
 
 ## Tradeoffs
 

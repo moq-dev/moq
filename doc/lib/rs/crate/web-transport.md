@@ -32,7 +32,7 @@ The repository contains multiple crates:
 |-------|-------------|
 | `web-transport` | Core WebTransport implementation |
 | `web-transport-quinn` | Quinn-based QUIC transport |
-| `web-transport-ws` | WebSocket polyfill for non-WebTransport browsers |
+| `qmux` | QMux over TCP, TLS, Unix sockets, and WebSocket |
 
 ## Installation
 
@@ -58,7 +58,7 @@ For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-nat
 - **Datagrams** - Unreliable, unordered data
 - **Session Management** - Peer/local addresses, graceful close
 - **TLS** - Self-signed certificates (dev), Let's Encrypt (production), certificate fingerprints
-- **WebSocket Polyfill** - See [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws)
+- **WebSocket fallback** - See [qmux](https://github.com/moq-dev/web-transport/tree/main/rs/qmux)
 
 ## Integration with MoQ
 

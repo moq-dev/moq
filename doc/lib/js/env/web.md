@@ -345,7 +345,9 @@ For production, you'll want to:
 3. Use a bundler, see [examples](https://github.com/moq-dev/web) for Vite, Webpack, esbuild, and more.
 
 **NOTE** both of these libraries are intended for client-side.
-However, `@moq/net` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws).
+However, `@moq/net` can run on the server side using [Deno](https://deno.com/),
+the WebSocket-based [`@moq/qmux`](https://github.com/moq-dev/web-transport/tree/main/js/qmux),
+or the native [`@moq/web-transport`](https://github.com/moq-dev/web-transport/tree/main/js/web-transport) package.
 Don't even try to run `@moq/hang` on the server side or you'll run into a ton of issues, *especially* with Next.js.
 
 ## Next Steps

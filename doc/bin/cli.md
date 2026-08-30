@@ -758,7 +758,7 @@ curl http://relay.example.com:4443/announced/
 
 - The relay needs a valid TLS certificate
 - For development, use the fingerprint method
-- See [TLS Setup](/bin/relay/#tls-setup)
+- See [Production TLS setup](/setup/prod#networking-and-tls)
 
 ### "Permission denied"
 

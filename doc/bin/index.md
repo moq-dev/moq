@@ -23,9 +23,8 @@ Use these tools to operate MoQ or bridge it to an existing media workflow.
 | [moq-rtmp](/bin/rtmp) | Accept RTMP and enhanced RTMP publishers and forward them into MoQ. |
 | [moq-rtc](/bin/rtc) | Bridge WHIP/WHEP and MoQ in either client or server roles. |
 
-The same gateway endpoints are available through `moq-cli` when one process
-only needs to bridge a specific broadcast. The standalone gateways are better
-suited to services that route multiple sessions.
+These pages document gateway endpoints exposed by `moq-cli` and the libraries
+that implement them.
 
 ## Media integrations
 

@@ -28,7 +28,7 @@ Container images for `linux/amd64` and `linux/arm64` are published on
 [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay):
 
 ```bash
-docker run -p 4443:4443/udp \
+docker run -p 4443:4443/udp -p 4443:4443/tcp \
   -v "$(pwd)/relay.toml:/app/relay.toml:ro" \
   moqdev/moq-relay -- /app/relay.toml
 ```

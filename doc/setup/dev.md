@@ -18,9 +18,9 @@ CI.
 | `just fix` | Format and lint changed packages and their dependents. |
 | `just check` | Compile and lint the same changed-package scope. |
 | `just test` | Run tests for the same changed-package scope. |
-| `just fix-all` | Format and lint every package. |
+| `just fix-all` | Format and lint every Rust, TypeScript, and Python package. |
 | `just check-all` | Compile and lint every package. |
-| `just test all` | Test every package. |
+| `just test all` | Test every Rust, TypeScript, and Python package. |
 
 For example, publish the Tears of Steel HLS fixture over MoQ with:
 
@@ -86,8 +86,10 @@ just test
 ```
 
 These commands scope work to packages changed from the branch's configured
-upstream and include their dependents. Use the `-all` variants when changing
-shared tooling or configuration that the package diff cannot attribute.
+upstream and include their dependents. Use `just fix-all`, `just check-all`, and
+`just test all` when changing shared tooling or configuration that the package
+diff cannot attribute. `just check-all` also covers language wrappers whose
+tests are part of their check recipe.
 
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
 for branch targeting, commits, and pull requests.
