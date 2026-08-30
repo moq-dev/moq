@@ -23,6 +23,7 @@ kio = { workspace = true, features = ["time"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
+slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 web-async = { workspace = true }

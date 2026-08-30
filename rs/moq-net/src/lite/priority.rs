@@ -1,9 +1,11 @@
 use std::{
 	cmp::{Ordering, Reverse},
-	collections::{BinaryHeap, HashMap},
+	collections::BinaryHeap,
 	sync::{Arc, Mutex},
 	task::Poll,
 };
+
+use slab::Slab;
 
 // Hybrid priority queue that provides strict priority ordering for the top 255 items.
 //
@@ -89,6 +91,12 @@ enum Location {
 	Overflow,   // In the overflow heap
 }
 
+struct PriorityEntry {
+	location: Location,
+	rank: u8,
+	tx: kio::Producer<u8>,
+}
+
 #[derive(Default)]
 struct PriorityState {
 	// Sorted vec for top 255 items (index 0 = highest priority)
@@ -99,21 +107,20 @@ struct PriorityState {
 	// return the *lowest*-priority overflow item, not the highest. With the
 	// wrapper, `pop()` returns the next item that should be promoted into vec.
 	overflow: BinaryHeap<Reverse<PriorityItem>>,
-	// Track location and notification channel for each ID
-	indexes: HashMap<usize, (Location, kio::Producer<u8>)>,
-	next_id: usize,
+	// Track location, rank, and notification channel for each reusable ID.
+	entries: Slab<PriorityEntry>,
 }
 
 impl PriorityState {
 	pub fn insert(&mut self, priority: Priority, myself: PriorityQueue) -> PriorityHandle {
-		let id = self.next_id;
-		self.next_id += 1;
-
 		// Pre-register the channel so `place` can update it via `update_location`.
-		// The initial value is overwritten as soon as `place` decides where the item lands.
 		let tx = kio::Producer::new(u8::MAX);
 		let rx = tx.consume();
-		self.indexes.insert(id, (Location::Overflow, tx));
+		let id = self.entries.insert(PriorityEntry {
+			location: Location::Overflow,
+			rank: u8::MAX,
+			tx,
+		});
 		self.place(PriorityItem { id, priority });
 
 		PriorityHandle {
@@ -127,32 +134,32 @@ impl PriorityState {
 
 	fn update_indices_from(&mut self, start: usize) {
 		for (idx, item) in self.vec.iter().enumerate().skip(start) {
-			Self::update_location(&mut self.indexes, item.id, Location::Vec(idx));
+			Self::update_location(&mut self.entries, item.id, Location::Vec(idx));
 		}
 	}
 
-	fn update_location(indexes: &mut HashMap<usize, (Location, kio::Producer<u8>)>, id: usize, location: Location) {
-		let (loc, tx) = indexes.get_mut(&id).expect("item not in indexes");
-		*loc = location;
+	fn update_location(entries: &mut Slab<PriorityEntry>, id: usize, location: Location) {
+		let entry = entries.get_mut(id).expect("item not in entries");
+		entry.location = location;
 
-		let new_priority = match loc {
+		let new_rank = match &entry.location {
 			Location::Vec(idx) => (*idx).try_into().unwrap_or(u8::MAX),
 			Location::Overflow => u8::MAX,
 		};
 
-		// Only touch the write guard on a real change, so unchanged items don't wake.
-		// Read first and drop the guard: the write below takes the same lock.
-		let current = *tx.read();
-		if current != new_priority
-			&& let Ok(mut value) = tx.write()
+		// The state owns the only producer, so its cached rank avoids locking the
+		// channel once to discover whether the following write is necessary.
+		if entry.rank != new_rank
+			&& let Ok(mut value) = entry.tx.write()
 		{
-			*value = new_priority;
+			entry.rank = new_rank;
+			*value = new_rank;
 		}
 	}
 
-	// Place an item into vec or overflow based on its priority, updating the HashMap
+	// Place an item into vec or overflow based on its priority, updating the entry
 	// location and notifying watch channels. The item's id must already be present in
-	// `self.indexes`; the entry's location is overwritten here.
+	// `self.entries`; the entry's location is overwritten here.
 	fn place(&mut self, item: PriorityItem) {
 		let id = item.id;
 
@@ -168,19 +175,19 @@ impl PriorityState {
 			{
 				let Reverse(promoted) = self.overflow.pop().unwrap();
 				self.overflow.push(Reverse(item));
-				Self::update_location(&mut self.indexes, id, Location::Overflow);
+				Self::update_location(&mut self.entries, id, Location::Overflow);
 
 				let insert_pos = self.vec.binary_search(&promoted).unwrap_or_else(|pos| pos);
 				let promoted_id = promoted.id;
 				self.vec.insert(insert_pos, promoted);
-				Self::update_location(&mut self.indexes, promoted_id, Location::Vec(insert_pos));
+				Self::update_location(&mut self.entries, promoted_id, Location::Vec(insert_pos));
 				self.update_indices_from(insert_pos + 1);
 				return;
 			}
 
 			let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 			self.vec.insert(insert_pos, item);
-			Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+			Self::update_location(&mut self.entries, id, Location::Vec(insert_pos));
 			self.update_indices_from(insert_pos + 1);
 			return;
 		}
@@ -190,25 +197,25 @@ impl PriorityState {
 		let lowest_in_vec = self.vec.last().unwrap();
 		if item > *lowest_in_vec {
 			self.overflow.push(Reverse(item));
-			Self::update_location(&mut self.indexes, id, Location::Overflow);
+			Self::update_location(&mut self.entries, id, Location::Overflow);
 			return;
 		}
 
 		// Higher priority than the tail of vec: demote the tail into overflow.
 		let removed = self.vec.pop().unwrap();
-		Self::update_location(&mut self.indexes, removed.id, Location::Overflow);
+		Self::update_location(&mut self.entries, removed.id, Location::Overflow);
 		self.overflow.push(Reverse(removed));
 
 		let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 		self.vec.insert(insert_pos, item);
-		Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+		Self::update_location(&mut self.entries, id, Location::Vec(insert_pos));
 		self.update_indices_from(insert_pos + 1);
 	}
 
-	// Pull an item out of vec/overflow, returning it. The HashMap entry is left in place;
+	// Pull an item out of vec/overflow, returning it. The slab entry is left in place;
 	// callers must either drop it (true removal) or call `place` again (reinsertion).
 	fn extract(&mut self, id: usize) -> PriorityItem {
-		let (location, _) = self.indexes.get(&id).expect("item not in indexes");
+		let location = &self.entries.get(id).expect("item not in entries").location;
 
 		match location {
 			Location::Vec(idx) => {
@@ -242,9 +249,12 @@ impl PriorityState {
 	}
 
 	fn remove(&mut self, id: usize) {
-		let was_in_vec = matches!(self.indexes.get(&id), Some((Location::Vec(_), _)));
+		let was_in_vec = matches!(
+			self.entries.get(id).map(|entry| &entry.location),
+			Some(Location::Vec(_))
+		);
 		self.extract(id);
-		self.indexes.remove(&id);
+		self.entries.remove(id);
 
 		// If we removed from vec, promote the highest-priority overflow item to backfill.
 		// The overflow item still has lower priority than every existing vec entry, so it
@@ -252,7 +262,7 @@ impl PriorityState {
 		if was_in_vec && let Some(Reverse(overflow_item)) = self.overflow.pop() {
 			let overflow_id = overflow_item.id;
 			self.vec.push(overflow_item);
-			Self::update_location(&mut self.indexes, overflow_id, Location::Vec(self.vec.len() - 1));
+			Self::update_location(&mut self.entries, overflow_id, Location::Vec(self.vec.len() - 1));
 		}
 	}
 }
