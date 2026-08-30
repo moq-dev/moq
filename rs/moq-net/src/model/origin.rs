@@ -132,9 +132,11 @@ impl Default for Info {
 	/// An unknown origin (id `0`, no loop detection) with no byte target and the
 	/// default idle expiry. This is what a standalone broadcast inherits.
 	fn default() -> Self {
+		let pool = cache::Pool::unbounded();
+		pool.set_expiry(cache::DEFAULT_EXPIRY);
 		Self {
 			id: Origin::UNKNOWN,
-			pool: cache::Pool::unbounded().with_expiry(cache::DEFAULT_EXPIRY),
+			pool,
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
 		}

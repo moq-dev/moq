@@ -32,7 +32,7 @@
 //! process caches into a single policy.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::track::TrackState;
@@ -64,10 +64,10 @@ const TICK_MS: u64 = 100;
 /// Default idle window for standalone origins and relays.
 ///
 /// A bare [`Pool`] has no idle expiry until one is configured with
-/// [`Pool::with_expiry`].
+/// [`Pool::set_expiry`].
 pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(30);
 
-/// A shared byte budget that caches charge into; cloning shares the same budget.
+/// A shared cache policy and byte budget; cloning shares both.
 ///
 /// The pool tracks how many payload bytes are cached across every registered group,
 /// plus the mean last-access time of the evictable ones. It never evicts on its own:
@@ -152,7 +152,7 @@ impl Pool {
 		self.inner.capacity.store(capacity, Ordering::Relaxed);
 	}
 
-	/// Set the wall-clock LRU window, returning `self` for chaining.
+	/// Set the wall-clock LRU window for this pool and all of its clones.
 	///
 	/// A non-latest cached group that nobody reads or writes for this long is
 	/// reclaimed by its track's next write, surfacing to any remaining reader as
@@ -161,13 +161,13 @@ impl Pool {
 	/// timestamps (so a congestion stall can't age content out), while this window
 	/// keeps content nobody is accessing from pinning RAM. `None` disables idle
 	/// reclamation, leaving only the byte budget. A bare pool has no idle expiry;
-	/// standalone origins and relays configure [`DEFAULT_EXPIRY`].
-	pub fn with_expiry(self, expiry: impl Into<Option<Duration>>) -> Self {
+	/// standalone origins and relays configure [`DEFAULT_EXPIRY`]. Changes apply to
+	/// existing tracks because they read the shared policy while writing.
+	pub fn set_expiry(&self, expiry: impl Into<Option<Duration>>) {
 		let ms = expiry
 			.into()
 			.map_or(u64::MAX, |expiry| u64::try_from(expiry.as_millis()).unwrap_or(u64::MAX));
 		self.inner.expiry.store(ms, Ordering::Relaxed);
-		self
 	}
 
 	/// The wall-clock LRU window, or `None` when idle content is never reclaimed.
@@ -308,6 +308,9 @@ pub(crate) struct Track {
 	// Earliest coarse tick when a frame write may run another expiry scan.
 	next_expiry: AtomicU64,
 
+	// Rotating position of the expiry scan over the track's eviction order.
+	expiry_cursor: AtomicUsize,
+
 	// The track that pays this account off, holding the groups being charged.
 	state: kio::Weak<TrackState>,
 }
@@ -319,6 +322,7 @@ impl Track {
 			pool,
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
+			expiry_cursor: AtomicUsize::new(0),
 			state,
 		})
 	}
@@ -349,26 +353,42 @@ impl Track {
 	/// Settle eviction debt and expire idle groups from a frame write.
 	///
 	/// Called with no group lock held (locks are ordered track then group). Cheap
-	/// until the byte or time gate crosses: relaxed atomics only. This is what makes
-	/// a track that only appends frames to open groups, never inserting another
-	/// group, still pay its debt and age its idle content out.
+	/// until the byte or time gate crosses: relaxed atomics plus a coarse clock read
+	/// when expiry is enabled. This is what makes a track that only appends frames to
+	/// open groups, never inserting another group, still pay its debt and age its
+	/// idle content out.
 	pub(crate) fn settle(&self) {
 		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
-		let expire = self.expiry_due();
-		if !settle_debt && !expire {
+		let scan_expiry = self.expiry_due();
+		if !settle_debt && !scan_expiry {
 			return;
 		}
 		// Counts as a producer while it lives, which is why `track::Producer` gates
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else { return };
+		let expiry = if scan_expiry {
+			let state = state.read();
+			let scan = state.expiry_scan();
+			state.expiry_mutation_due(scan).then_some(scan)
+		} else {
+			None
+		};
+		if !settle_debt && expiry.is_none() {
+			return;
+		}
 		if let Ok(mut state) = state.write() {
 			if settle_debt {
 				state.charge_debt();
 			}
-			if expire {
-				state.evict_expired();
+			if let Some(scan) = expiry {
+				state.evict_expired_scan(scan);
 			}
 		}
+	}
+
+	/// Claim the next rotating window in the track's eviction order.
+	pub(crate) fn next_expiry_scan(&self, width: usize) -> usize {
+		self.expiry_cursor.fetch_add(width, Ordering::Relaxed)
 	}
 
 	/// Claim the next write-driven expiry scan when its time gate is due.
@@ -683,14 +703,14 @@ mod test {
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 
-		let pool = pool.with_expiry(Duration::from_secs(1));
+		pool.set_expiry(Duration::from_secs(1));
 		assert_eq!(pool.expiry(), Some(Duration::from_secs(1)));
 		assert_eq!(pool.expiry_ticks(), 10);
 		assert_eq!(pool.refresh_interval(), Duration::from_millis(500));
 
 		// Disabled: never reclaimed by idleness, but readers still re-stamp on a
 		// bounded cadence for byte-eviction protection.
-		let pool = pool.with_expiry(None);
+		pool.set_expiry(None);
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.expiry_ticks(), u64::MAX);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
@@ -698,14 +718,15 @@ mod test {
 
 	#[test]
 	fn shortening_expiry_rechecks_existing_tracks() {
-		let pool = Pool::unbounded().with_expiry(DEFAULT_EXPIRY);
+		let pool = Pool::unbounded();
+		pool.set_expiry(DEFAULT_EXPIRY);
 		let track = Track::new(pool.clone(), kio::Weak::new());
 		assert!(track.expiry_due());
 
 		crate::model::clock::advance(Duration::from_millis(100));
 		assert!(!track.expiry_due(), "the original one-second deadline is pending");
 
-		let _ = pool.clone().with_expiry(Duration::from_millis(100));
+		pool.set_expiry(Duration::from_millis(100));
 		assert!(track.expiry_due(), "the shorter expiry advances the pending scan");
 	}
 

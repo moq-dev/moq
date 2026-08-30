@@ -85,8 +85,8 @@ impl CacheConfig {
 		let pool = match capacity {
 			Some(bytes) => cache::Pool::new(bytes),
 			None => cache::Pool::unbounded(),
-		}
-		.with_expiry(
+		};
+		pool.set_expiry(
 			self.duration
 				.map(moq_tokio::Duration::into_std)
 				.unwrap_or(cache::DEFAULT_EXPIRY),

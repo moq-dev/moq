@@ -1965,13 +1965,14 @@ mod test {
 
 	#[test]
 	fn prefetch_refresh_uses_current_pool_expiry() {
-		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+		let pool = cache::Pool::unbounded();
+		pool.set_expiry(std::time::Duration::from_secs(30));
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
 		let before = producer.cache_accessed();
 
 		// The first read prefetched the second frame with a 15-second refresh
 		// interval. Shortening the shared pool must affect this existing cursor.
-		let _ = pool.clone().with_expiry(std::time::Duration::from_secs(1));
+		pool.set_expiry(std::time::Duration::from_secs(1));
 		crate::model::clock::advance(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
@@ -1980,7 +1981,8 @@ mod test {
 
 	#[test]
 	fn prefetch_refresh_honors_track_max_age() {
-		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+		let pool = cache::Pool::unbounded();
+		pool.set_expiry(std::time::Duration::from_secs(30));
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::from_secs(1));
 		let before = producer.cache_accessed();
 

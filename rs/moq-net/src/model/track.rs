@@ -48,6 +48,14 @@ const EVICT_SLACK: usize = 64;
 /// groups, small enough that a write never scans a long queue.
 const EVICT_SCAN: usize = 4;
 
+/// One bounded pass over the eviction order at a fixed cache time.
+#[derive(Clone, Copy)]
+pub(super) struct ExpiryScan {
+	start: usize,
+	now: u64,
+	max_ticks: u64,
+}
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -190,10 +198,6 @@ pub(crate) struct TrackState {
 
 	// Incarnation counter for `Slot::stamp`.
 	next_stamp: u32,
-
-	// Rotating position of the expiry scan over `evict`, so entries beyond one
-	// scan window can't be starved by fresh entries in front of them.
-	expire_cursor: usize,
 
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
@@ -571,18 +575,62 @@ impl TrackState {
 	/// track in the pool.
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
-	/// group except the protected latest. The cursor persists across calls, so
+	/// group except the protected latest. The cursor persists in the cache account, so
 	/// entries beyond one scan window can't be starved by fresh (recently read,
 	/// fetched, or written) entries in front of them: every position is revisited
 	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
 	/// byte budget reclaims the remainder under memory pressure.
 	pub(super) fn evict_expired(&mut self) {
-		let now = self.cache.pool().now();
-		let max_ticks = self.cache.pool().expiry_ticks();
+		let scan = self.expiry_scan();
+		self.evict_expired_scan(scan);
+	}
 
+	/// Describe the next bounded expiry scan without mutating observable track state.
+	pub(super) fn expiry_scan(&self) -> ExpiryScan {
+		ExpiryScan {
+			start: self.cache.next_expiry_scan(EVICT_SCAN),
+			now: self.cache.pool().now(),
+			max_ticks: self.cache.pool().expiry_ticks(),
+		}
+	}
+
+	/// Whether an expiry scan would change observable track state.
+	pub(super) fn expiry_mutation_due(&self, scan: ExpiryScan) -> bool {
 		let len = self.evict.len();
 		if len > 0 {
-			let start = self.expire_cursor % len;
+			let start = scan.start % len;
+			for step in 0..len.min(EVICT_SCAN) {
+				let (sequence, stamp) = self.evict[(start + step) % len];
+				let Some(slot) = self.lookup.get(&sequence) else {
+					continue;
+				};
+				if slot.stamp != stamp {
+					continue;
+				}
+				if slot.group.is_aborted()
+					|| (Some(sequence) != self.latest_group
+						&& scan.now.saturating_sub(slot.group.cache_accessed()) > scan.max_ticks)
+				{
+					return true;
+				}
+			}
+		}
+
+		self.arrival
+			.front()
+			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+			|| self
+				.evict
+				.front()
+				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
+	}
+
+	/// Apply a scan previously selected by [`Self::expiry_scan`].
+	pub(super) fn evict_expired_scan(&mut self, scan: ExpiryScan) {
+		let len = self.evict.len();
+		if len > 0 {
+			let start = scan.start % len;
 			for step in 0..len.min(EVICT_SCAN) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
@@ -598,7 +646,9 @@ impl TrackState {
 					self.lookup.remove(&sequence);
 					continue;
 				}
-				if Some(sequence) == self.latest_group || now.saturating_sub(slot.group.cache_accessed()) <= max_ticks {
+				if Some(sequence) == self.latest_group
+					|| scan.now.saturating_sub(slot.group.cache_accessed()) <= scan.max_ticks
+				{
 					continue;
 				}
 				// Take the group out of the cache and abort it, so any consumer
@@ -607,7 +657,6 @@ impl TrackState {
 				let slot = self.lookup.remove(&sequence).unwrap();
 				let _ = slot.group.abort(Error::Old);
 			}
-			self.expire_cursor = (start + EVICT_SCAN) % len;
 		}
 
 		// Trim dead leading arrival entries to advance the subscriber offset. An
@@ -635,6 +684,11 @@ impl TrackState {
 			self.evict
 				.retain(|(sequence, stamp)| lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp));
 		}
+	}
+
+	/// Whether `(sequence, stamp)` names the currently cached incarnation.
+	fn is_current(&self, sequence: u64, stamp: u32) -> bool {
+		self.lookup.get(&sequence).is_some_and(|slot| slot.stamp == stamp)
 	}
 
 	/// Drop every cached group and reset the eviction bookkeeping. Each group's
@@ -4245,7 +4299,9 @@ mod test {
 
 	/// Mint a track under an origin whose pool has the given wall-clock LRU window.
 	fn track_producer_expiring(name: impl Into<Arc<str>>, expiry: impl Into<Option<Duration>>) -> Producer {
-		let origin = crate::origin::Info::default().with_pool(cache::Pool::unbounded().with_expiry(expiry));
+		let pool = cache::Pool::unbounded();
+		pool.set_expiry(expiry);
+		let origin = crate::origin::Info::default().with_pool(pool);
 		Producer::new(
 			Arc::new(broadcast::Info {
 				origin,
@@ -4283,6 +4339,28 @@ mod test {
 
 		let expired = !producer.state.read().lookup.contains_key(&0);
 		assert!(expired, "a small frame write runs expiry");
+	}
+
+	#[tokio::test]
+	async fn fresh_expiry_scan_does_not_wake_track_consumers() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
+		producer.append_group().unwrap().finish().unwrap();
+		let mut live = producer.append_group().unwrap();
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(consumer.assert_group().sequence, 0);
+		assert_eq!(consumer.assert_group().sequence, 1);
+
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(consumer.poll_recv_group(&waiter).is_pending());
+
+		live.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		assert!(
+			!woken.load(Ordering::SeqCst),
+			"a no-op expiry scan must not wake track consumers"
+		);
 	}
 
 	#[tokio::test]
