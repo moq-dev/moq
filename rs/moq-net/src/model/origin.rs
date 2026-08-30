@@ -89,9 +89,9 @@ impl Origin {
 /// parent handle every broadcast carries ([`broadcast::Info::origin`]): the origin owns
 /// the [`cache::Pool`] every group in the tree charges into, so a relay configures one
 /// bounded pool here and every broadcast, track, and group beneath it reaches that single
-/// budget by walking up the ownership chain. Defaults to an unbounded pool. Cheap to
-/// clone (a `Copy` id plus an `Arc`-handle bump), so it's stored by value rather than
-/// behind another `Arc`.
+/// budget by walking up the ownership chain. Defaults to no byte target and the
+/// cache's standard idle expiry. Cheap to clone (a `Copy` id plus an `Arc`-handle
+/// bump), so it's stored by value rather than behind another `Arc`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
@@ -101,9 +101,10 @@ pub struct Info {
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
-	/// an account against it, and its groups charge through that. Unbounded by
-	/// default; a relay sets a bounded one (via [`Self::with_pool`]) so cached groups
-	/// across the whole process share one memory budget.
+	/// an account against it, and its groups charge through that. It has no byte target
+	/// and uses [`cache::DEFAULT_EXPIRY`] by default; a relay sets a shared configured
+	/// pool (via [`Self::with_pool`]) so cached groups across the whole process share
+	/// one policy.
 	pub pool: cache::Pool,
 
 	/// Ceiling on each track's media-timestamp retention window under this origin.
@@ -128,12 +129,12 @@ pub struct Info {
 }
 
 impl Default for Info {
-	/// An unknown origin (id `0`, no loop detection) with an unbounded pool. This is
-	/// what a standalone broadcast (no relay origin) inherits.
+	/// An unknown origin (id `0`, no loop detection) with no byte target and the
+	/// default idle expiry. This is what a standalone broadcast inherits.
 	fn default() -> Self {
 		Self {
 			id: Origin::UNKNOWN,
-			pool: cache::Pool::default(),
+			pool: cache::Pool::unbounded().with_expiry(cache::DEFAULT_EXPIRY),
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
 		}
@@ -141,7 +142,7 @@ impl Default for Info {
 }
 
 impl Info {
-	/// Config for the given origin id with an unbounded cache pool.
+	/// Config for the given origin id with no byte target and the default idle expiry.
 	pub fn new(id: Origin) -> Self {
 		Self { id, ..Self::default() }
 	}

@@ -46,9 +46,8 @@ pub struct CacheConfig {
 	/// Maximum time a non-latest cached group is retained, e.g. "30s" or "500ms".
 	///
 	/// Sets both halves of the retention bound. The pool's wall-clock LRU window
-	/// becomes this: a group nobody has written or served from cache for this
-	/// long is reclaimed, and a FETCH cache hit restarts that clock, so
-	/// actively-read history stays cached. Each track's own media-timestamp
+	/// becomes this: a group nobody has read or written for this long is
+	/// reclaimed, so actively-read history stays cached. Each track's own media-timestamp
 	/// retention window is also clamped down to this, so a publisher advertising
 	/// a longer window can't promise more history than the relay keeps. This
 	/// bounds memory by age where `capacity` bounds it by bytes. When unset, the
@@ -83,15 +82,15 @@ impl CacheConfig {
 	/// spawning the headroom governor when configured. Requires a tokio runtime.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
-		let mut pool = match capacity {
+		let pool = match capacity {
 			Some(bytes) => cache::Pool::new(bytes),
 			None => cache::Pool::unbounded(),
-		};
-		// The same window also clamps each track's media-timestamp retention below,
-		// via `Cache::duration`; unset leaves the pool's default LRU window in force.
-		if let Some(duration) = self.duration.map(moq_tokio::Duration::into_std) {
-			pool = pool.with_expiry(duration);
 		}
+		.with_expiry(
+			self.duration
+				.map(moq_tokio::Duration::into_std)
+				.unwrap_or(cache::DEFAULT_EXPIRY),
+		);
 
 		if let Some(headroom) = self.headroom.as_deref() {
 			let headroom = parse_limit(headroom)?;
@@ -178,6 +177,13 @@ async fn governor(pool: cache::Pool, capacity: Option<u64>, headroom: u64) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn default_config_enables_expiry_without_clamping_media_time() {
+		let cache = CacheConfig::default().init().unwrap();
+		assert_eq!(cache.pool.expiry(), Some(cache::DEFAULT_EXPIRY));
+		assert_eq!(cache.duration, Duration::MAX);
+	}
 
 	#[test]
 	fn parse_limit_bytes() {

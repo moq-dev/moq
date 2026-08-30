@@ -667,6 +667,9 @@ impl Producer {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.record_write();
 		}
+		// The payload was charged when the frame opened, but a long streamed frame
+		// still counts as track activity for the independent expiry time gate.
+		self.cache.settle();
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).

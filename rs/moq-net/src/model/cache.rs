@@ -25,10 +25,11 @@
 //! congestion stall can't age content out; the pool's expiry is the orthogonal
 //! wall-clock bound that keeps unwatched content from pinning RAM.
 //!
-//! A pool is mostly inert by default ([`Pool::unbounded`]): publishers and
-//! subscribers that never set a capacity pay only a couple of atomic counters plus
-//! the default expiry window. A relay creates one bounded pool and shares it across
-//! every origin so the whole process caches into a single budget.
+//! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
+//! that never set a capacity or expiry pay only a couple of atomic counters. A
+//! standalone [`origin`](crate::origin::Info) enables [`DEFAULT_EXPIRY`], while a
+//! relay creates one configured pool and shares it across every origin so the whole
+//! process caches into a single policy.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,8 +61,10 @@ const READ_BOOST: u64 = 2;
 /// the mean is count-weighted.
 const TICK_MS: u64 = 100;
 
-/// Default [`Pool::expiry`]: how long an unread, unwritten non-latest group stays
-/// cached before its track's next write reclaims it.
+/// Default idle window for standalone origins and relays.
+///
+/// A bare [`Pool`] has no idle expiry until one is configured with
+/// [`Pool::with_expiry`].
 pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(30);
 
 /// A shared byte budget that caches charge into; cloning shares the same budget.
@@ -98,7 +101,7 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
-			expiry: AtomicU64::new(DEFAULT_EXPIRY.as_millis() as u64),
+			expiry: AtomicU64::new(u64::MAX),
 			epoch: crate::model::clock::now(),
 			access_sum: AtomicU64::new(0),
 			access_count: AtomicU64::new(0),
@@ -107,7 +110,7 @@ impl Default for Inner {
 }
 
 impl Pool {
-	/// Create a pool with a byte target that tracks evict toward as they write.
+	/// Create a pool with a byte target and the default idle expiry.
 	///
 	/// The budget counts frame payload bytes (plus a small fixed overhead per
 	/// group), not process RSS, and is a convergence target rather than a hard
@@ -115,6 +118,10 @@ impl Pool {
 	pub fn new(capacity: u64) -> Self {
 		let pool = Self::default();
 		pool.inner.capacity.store(capacity, Ordering::Relaxed);
+		pool.inner.expiry.store(
+			u64::try_from(DEFAULT_EXPIRY.as_millis()).unwrap_or(u64::MAX),
+			Ordering::Relaxed,
+		);
 		pool
 	}
 
@@ -153,7 +160,8 @@ impl Pool {
 	/// retention: [`max_age`](crate::track::Info::max_age) is measured in media
 	/// timestamps (so a congestion stall can't age content out), while this window
 	/// keeps content nobody is accessing from pinning RAM. `None` disables idle
-	/// reclamation, leaving only the byte budget. Defaults to [`DEFAULT_EXPIRY`].
+	/// reclamation, leaving only the byte budget. A bare pool has no idle expiry;
+	/// standalone origins and relays configure [`DEFAULT_EXPIRY`].
 	pub fn with_expiry(self, expiry: impl Into<Option<Duration>>) -> Self {
 		let ms = expiry
 			.into()
@@ -271,6 +279,14 @@ impl std::fmt::Debug for Pool {
 /// pays. Coarse: the cost is one track-state lock per threshold crossing.
 const WRITE_CHARGE_THRESHOLD: u64 = 256 * 1024;
 
+/// Maximum cadence for write-driven expiry scans, in the pool's coarse ticks.
+///
+/// Byte debt settles only after enough data accumulates, but expiry is a time
+/// policy and must also run for low-bitrate tracks. Limiting that extra track lock
+/// to once per second keeps the write hot path cheap while a bounded scan drains
+/// stale backlogs steadily.
+const EXPIRY_SCAN_TICKS: u64 = 1000 / TICK_MS;
+
 /// One track's account against the [`Pool`], shared with every group it creates.
 ///
 /// Groups charge their bytes here (through a [`Charge`]) rather than straight into the
@@ -289,6 +305,9 @@ pub(crate) struct Track {
 	// decremented here: the track swaps it out as it accrues debt.
 	written: AtomicU64,
 
+	// Earliest coarse tick when a frame write may run another expiry scan.
+	next_expiry: AtomicU64,
+
 	// The track that pays this account off, holding the groups being charged.
 	state: kio::Weak<TrackState>,
 }
@@ -299,6 +318,7 @@ impl Track {
 		Arc::new(Self {
 			pool,
 			written: AtomicU64::new(0),
+			next_expiry: AtomicU64::new(0),
 			state,
 		})
 	}
@@ -326,24 +346,48 @@ impl Track {
 		self.written.swap(0, Ordering::Relaxed)
 	}
 
-	/// Settle eviction debt and expire idle groups from a frame write, once enough
-	/// bytes accumulate.
+	/// Settle eviction debt and expire idle groups from a frame write.
 	///
 	/// Called with no group lock held (locks are ordered track then group). Cheap
-	/// until the threshold crosses: one relaxed load. This is what makes a track
-	/// that only appends frames to open groups, never inserting another group,
-	/// still pay its debt and age its idle content out.
+	/// until the byte or time gate crosses: relaxed atomics only. This is what makes
+	/// a track that only appends frames to open groups, never inserting another
+	/// group, still pay its debt and age its idle content out.
 	pub(crate) fn settle(&self) {
-		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
+		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
+		let expire = self.expiry_due();
+		if !settle_debt && !expire {
 			return;
 		}
 		// Counts as a producer while it lives, which is why `track::Producer` gates
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else { return };
 		if let Ok(mut state) = state.write() {
-			state.charge_debt();
-			state.evict_expired();
+			if settle_debt {
+				state.charge_debt();
+			}
+			if expire {
+				state.evict_expired();
+			}
 		}
+	}
+
+	/// Claim the next write-driven expiry scan when its time gate is due.
+	fn expiry_due(&self) -> bool {
+		let expiry = self.pool.expiry_ticks();
+		if expiry == u64::MAX {
+			return false;
+		}
+
+		let now = self.pool.now();
+		let next = self.next_expiry.load(Ordering::Relaxed);
+		if now < next {
+			return false;
+		}
+
+		let interval = expiry.clamp(1, EXPIRY_SCAN_TICKS);
+		self.next_expiry
+			.compare_exchange(next, now.saturating_add(interval), Ordering::Relaxed, Ordering::Relaxed)
+			.is_ok()
 	}
 }
 
@@ -496,6 +540,12 @@ mod test {
 	}
 
 	#[test]
+	fn bounded_pool_enables_default_expiry() {
+		let pool = Pool::new(1000);
+		assert_eq!(pool.expiry(), Some(DEFAULT_EXPIRY));
+	}
+
+	#[test]
 	fn accrue_none_under_capacity() {
 		let pool = Pool::new(1000);
 		let mut charge = charge(&pool);
@@ -627,9 +677,9 @@ mod test {
 
 	#[test]
 	fn expiry_config() {
-		// The LRU window is on by default, even for an unbounded pool.
+		// A bare pool preserves the unbounded contract in both dimensions.
 		let pool = Pool::unbounded();
-		assert_eq!(pool.expiry(), Some(DEFAULT_EXPIRY));
+		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 
 		let pool = pool.with_expiry(Duration::from_secs(1));
@@ -643,6 +693,11 @@ mod test {
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.expiry_ticks(), u64::MAX);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
+	}
+
+	#[test]
+	fn standalone_origin_enables_default_expiry() {
+		assert_eq!(crate::origin::Info::default().pool.expiry(), Some(DEFAULT_EXPIRY));
 	}
 
 	#[test]

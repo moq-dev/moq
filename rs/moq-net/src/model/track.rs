@@ -4266,6 +4266,38 @@ mod test {
 		assert_eq!(first_live_sequence(&state), 1);
 	}
 
+	#[tokio::test]
+	async fn small_frame_write_expires_idle_siblings() {
+		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		producer.append_group().unwrap().finish().unwrap(); // seq 0
+		let mut live = producer.append_group().unwrap(); // seq 1
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		live.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+
+		let expired = !producer.state.read().lookup.contains_key(&0);
+		assert!(expired, "a small frame write runs expiry");
+	}
+
+	#[tokio::test]
+	async fn streaming_frame_write_expires_idle_siblings() {
+		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		producer.append_group().unwrap().finish().unwrap(); // seq 0
+		let mut live = producer.append_group().unwrap(); // seq 1
+		let mut frame = live
+			.create_frame(frame::Info {
+				size: 1,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		frame.write(b"x".as_slice()).unwrap();
+
+		let expired = !producer.state.read().lookup.contains_key(&0);
+		assert!(expired, "a streamed chunk runs expiry");
+	}
+
 	/// A track's `max_age` is a media-timestamp budget: it does not drive wall-clock
 	/// eviction, so a stall (no accesses, no timestamp progress) shorter than the
 	/// pool's LRU window can't age content out no matter how small the window is.

@@ -603,7 +603,7 @@ Memory budget for cached groups. Old (non-latest) groups stay cached until they
 sit unaccessed past the wall-clock LRU window (`duration`, 30 seconds by
 default) or the pool runs out of room, whichever comes first. Under memory
 pressure each track evicts its own stalest groups as it writes, ordered by when
-each was last written or served from cache, and proportional to how much it
+each was last read or written, and proportional to how much it
 writes, so usage converges on the budget without any global scan; groups that
 FETCH requests keep hitting are retained over ones nobody reads. The latest
 group of every track is always retained. With none of the knobs set the cache
@@ -627,8 +627,8 @@ capacity = "8GiB"
 # with `capacity` to also bound the target from above.
 headroom = "2GiB"
 
-# Maximum time a non-latest cached group is retained since it was last written
-# or served from cache by a FETCH ("30s", "500ms"). Sets the pool's wall-clock
+# Maximum time a non-latest cached group is retained since it was last read or
+# written ("30s", "500ms"). Sets the pool's wall-clock
 # LRU window (30s when unset), and also clamps each track's media-timestamp
 # retention window, so a publisher advertising a longer window can't promise
 # more history than the relay keeps. A FETCH cache hit restarts the clock, so
