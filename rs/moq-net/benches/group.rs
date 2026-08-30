@@ -9,6 +9,7 @@
 //!
 //! `track_recv_groups` covers the layer above: how much it costs to hand out one
 //! cached group, swept over cache depth so a per-delivery scan shows up as a slope.
+//! It also covers the steady-state path after a subscriber has reached the edge.
 //!
 //! Run with `cargo bench -p moq-net`.
 
@@ -33,6 +34,9 @@ const COUNTS: [usize; 3] = [512, 8_192, 32_768];
 /// so the top end is deliberately past anything realistic: a per-delivery scan over
 /// the cache shows up as a slope here, while a seek stays flat.
 const DEPTHS: [usize; 3] = [64, 512, 4_096];
+
+/// Groups appended and received in one caught-up benchmark iteration.
+const LIVE_BATCH: usize = 128;
 
 /// Keeps the broadcast/track producers alive alongside the group so the group
 /// isn't torn down mid-benchmark. Only `group` is written to.
@@ -250,6 +254,29 @@ fn bench_track_recv(c: &mut Criterion) {
 				|(ctx, mut subscriber)| {
 					for _ in 0..n {
 						let group = subscriber.next_group().now_or_never().unwrap().unwrap().unwrap();
+						black_box(group);
+					}
+					(ctx, subscriber)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+		g.throughput(Throughput::Elements(LIVE_BATCH as u64));
+		g.bench_with_input(BenchmarkId::new("caught_up", n), &n, |b, &n| {
+			b.iter_batched(
+				|| {
+					let ctx = filled_track(n, &payload);
+					let mut subscriber = ctx.track.subscribe(None);
+					let edge = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+					assert_eq!(edge.sequence, n as u64 - 1);
+					(ctx, subscriber)
+				},
+				|(mut ctx, mut subscriber)| {
+					for _ in 0..LIVE_BATCH {
+						let mut group = ctx.track.append_group().unwrap();
+						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+						group.finish().unwrap();
+						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 						black_box(group);
 					}
 					(ctx, subscriber)

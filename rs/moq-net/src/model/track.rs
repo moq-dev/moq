@@ -4386,6 +4386,74 @@ mod test {
 	}
 
 	#[test]
+	fn real_time_skips_a_backlog_after_catching_up() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		let mut subscriber = producer.subscribe(None);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+
+		// Catch-up is a subscriber state, not a startup-only choice. A reader can pause
+		// between groups and still needs to shed the backlog that accumulated meanwhile.
+		for second in 1..6 {
+			append_at(&mut producer, second * 1000);
+		}
+		assert_eq!(drain(&mut subscriber), vec![5]);
+	}
+
+	#[test]
+	fn a_newer_edge_changes_an_active_catch_up() {
+		let mut producer = track_producer("test", None);
+		for second in 0..5 {
+			append_at(&mut producer, second * 1000);
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		assert_eq!(
+			subscriber
+				.recv_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.sequence,
+			3
+		);
+
+		// Group 4 was the edge at the first delivery. Advancing twice puts it outside
+		// the budget before the subscriber asks for another group.
+		append_at(&mut producer, 5000);
+		append_at(&mut producer, 10000);
+		assert_eq!(drain(&mut subscriber), vec![5, 6]);
+	}
+
+	#[test]
+	fn a_growing_edge_changes_an_active_catch_up() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 1000);
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"a"))
+			.unwrap();
+
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(2)));
+		assert_eq!(
+			subscriber
+				.recv_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.sequence,
+			0
+		);
+
+		// The edge is still the same group, but its newest presentation moved far
+		// enough that group 1 has fallen out of range.
+		edge.write_frame(Timestamp::from_millis(5000).unwrap(), bytes::Bytes::from_static(b"b"))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
+	#[test]
 	fn a_budget_admits_groups_within_it() {
 		let mut producer = track_producer("test", None);
 		for second in 0..5 {
