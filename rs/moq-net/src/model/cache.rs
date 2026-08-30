@@ -379,14 +379,15 @@ impl Track {
 		}
 
 		let now = self.pool.now();
+		let interval = expiry.clamp(1, EXPIRY_SCAN_TICKS);
+		let deadline = now.saturating_add(interval);
 		let next = self.next_expiry.load(Ordering::Relaxed);
-		if now < next {
+		if now < next && next <= deadline {
 			return false;
 		}
 
-		let interval = expiry.clamp(1, EXPIRY_SCAN_TICKS);
 		self.next_expiry
-			.compare_exchange(next, now.saturating_add(interval), Ordering::Relaxed, Ordering::Relaxed)
+			.compare_exchange(next, deadline, Ordering::Relaxed, Ordering::Relaxed)
 			.is_ok()
 	}
 }
@@ -693,6 +694,19 @@ mod test {
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.expiry_ticks(), u64::MAX);
 		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
+	}
+
+	#[test]
+	fn shortening_expiry_rechecks_existing_tracks() {
+		let pool = Pool::unbounded().with_expiry(DEFAULT_EXPIRY);
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		assert!(track.expiry_due());
+
+		crate::model::clock::advance(Duration::from_millis(100));
+		assert!(!track.expiry_due(), "the original one-second deadline is pending");
+
+		let _ = pool.clone().with_expiry(Duration::from_millis(100));
+		assert!(track.expiry_due(), "the shorter expiry advances the pending scan");
 	}
 
 	#[test]
