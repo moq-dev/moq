@@ -6,10 +6,10 @@ import { type ConsumerConfig, Decoder, type Event } from "./decoder.ts";
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
  *
  * A {@link Decoder} that owns its track: it reads groups, starts a cold DEFLATE window at each
- * boundary, and turns each group's reset into just the changes this reader has not been told about.
+ * boundary, and turns each group's header into just the changes this reader has not been told about.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
- * Group rolls never surface. A publisher rolls for compression's sake, and a reset restating the
+ * Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
  * window yields nothing for records already delivered, so this reads as one continuous stream of
  * {@link Event}s regardless of how the publisher framed them.
  */
@@ -40,7 +40,7 @@ export class Consumer<T> {
 				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
 				// Each group is its own compressed stream, so the window starts cold. The index cursor
-				// deliberately survives, which is what makes the reset report only what this reader missed.
+				// deliberately survives, which is what makes the header report only what this reader missed.
 				this.#decoder.reset();
 			}
 

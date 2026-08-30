@@ -11,20 +11,19 @@
  * new ones, so a reader that was keeping up receives them twice. This mode exists to make the
  * restatement explicit, so a reader can tell "you already have these" from "here is another one".
  *
- * Every frame is a tagged op. Each group opens with a `reset` naming the retained records and the
- * absolute `offset` of the first, followed by `push` and `pop` ops. Only the reset carries an index:
- * a push takes the next one and a pop drops from the front, both positional against the reset, which
- * is sound because the group-scoped DEFLATE window already makes a mid-group join undecodable.
+ * The first frame of every group names the retained `records` and the absolute `offset` of the
+ * first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
+ * from the front, both positional against the group header.
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
  * inside the shared compression window instead of a roll that would throw that window away.
  *
  * The publisher rolls a group when the ops in it outgrow {@link ProducerConfig.opRatio} times the
- * reset that opened it. That is purely a compression decision: there is no caller-driven cut and no
+ * header that opened it. That is purely a compression decision: there is no caller-driven cut and no
  * age bound, and a {@link Consumer} never surfaces it.
  *
  * A reader gets a `push` event when a record arrives, `pop` when a contiguous span leaves, and
  * `skip` when a span was dropped before this reader saw it. A reader that keeps up sees pushes and
- * pops; one that falls a group behind learns from the reset's offset which records it will never
+ * pops; one that falls a group behind learns from the header's offset which records it will never
  * get rather than silently missing them.
  *
  * {@link Producer} and {@link Consumer} own a track. {@link Encoder} and {@link Decoder} are the

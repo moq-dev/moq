@@ -7,14 +7,14 @@ import { type Encoded, Encoder, type ProducerConfig } from "./encoder.ts";
  * Publishes a sliding window of JSON records to a track.
  *
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
- * the encoder emits a reset. When something else already owns the track, use the {@link Encoder}
+ * the encoder emits a header. When something else already owns the track, use the {@link Encoder}
  * directly.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
 	#encoder: Encoder<T>;
 
-	// The group an op would be appended to, open between resets.
+	// The group an op would be appended to, open after a header.
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a window into it. */

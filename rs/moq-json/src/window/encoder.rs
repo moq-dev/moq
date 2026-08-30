@@ -7,12 +7,12 @@ use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::op::Op;
+use super::op::{Header, Op};
 use crate::Result;
 
-/// Frames (reset included) in one group before a reset is forced, matching
+/// Frames (header included) in one group before a new group is forced, matching
 /// [`snapshot`](crate::snapshot)'s cap. Kept well below moq-net's per-group frame cap so a late
-/// joiner can always read the reset at frame 0.
+/// joiner can always read the header at frame 0.
 pub(super) const MAX_GROUP_FRAMES: usize = 256;
 
 /// Configuration for an [`Encoder`] and the [`Producer`](super::Producer) wrapping one.
@@ -22,21 +22,21 @@ pub(super) const MAX_GROUP_FRAMES: usize = 256;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProducerConfig {
-	/// How much the ops in a group may cost before a fresh reset is emitted.
+	/// How much the ops in a group may cost before a fresh group is emitted.
 	///
 	/// A new group opens once the pushes and pops *already written* exceed `op_ratio` times the
-	/// size of the group's reset frame. The pending op is excluded from that check, so the one that
+	/// size of the group's header frame. The pending op is excluded from that check, so the one that
 	/// tips the group over budget still lands: a group overshoots by at most one op before rolling.
-	/// `0` disables ops entirely, so every edit is its own single-frame reset.
+	/// `0` disables ops entirely, so every edit is its own single-frame group.
 	///
 	/// This is the window's counterpart to
 	/// [`snapshot::ProducerConfig::delta_ratio`](crate::snapshot::ProducerConfig::delta_ratio), and
-	/// the same trade: a bigger ratio spends less on resets and makes a late joiner read more ops.
+	/// the same trade: a bigger ratio spends less on headers and makes a late joiner read more ops.
 	///
 	/// Defaults to `8`.
 	pub op_ratio: u32,
 
-	/// Compress each group as one sync-flushed DEFLATE stream, so every op reuses the reset and the
+	/// Compress each group as one sync-flushed DEFLATE stream, so every op reuses the header and the
 	/// ops before it as context.
 	///
 	/// `false` (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder) reading them
@@ -74,9 +74,9 @@ pub struct Encoded {
 	/// The frame payload, DEFLATE-compressed when [`ProducerConfig::compression`] is set.
 	pub payload: Bytes,
 
-	/// Whether this frame is a reset, which must open a new group.
+	/// Whether this frame is a group header, which must open a new group.
 	///
-	/// The encoder decides this, never the caller: the op budget and the frame cap force a reset
+	/// The encoder decides this, never the caller: the op budget and the frame cap force a new group
 	/// independently of which edit was requested.
 	pub keyframe: bool,
 }
@@ -84,11 +84,11 @@ pub struct Encoded {
 /// An encoded frame the caller has not yet acknowledged writing.
 ///
 /// Write the frame, then [`commit`](Self::commit). A frame that never reaches the wire leaves the
-/// consumer's view behind the producer's window, so dropping it uncommitted
-/// [`reset`](Encoder::reset)s the encoder and the next frame restates the whole window.
+/// consumer's view behind the producer's window, so dropping it uncommitted starts a new group and
+/// the next frame restates the whole window.
 ///
 /// The window itself is not rolled back. It is the producer's truth, and the edit really happened;
-/// only the consumer's knowledge of it is lost, which the next reset repairs.
+/// only the consumer's knowledge of it is lost, which the next group header repairs.
 #[must_use = "write the frame, then commit it"]
 pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
@@ -133,26 +133,26 @@ impl<T> Drop for Pending<'_, T> {
 pub struct Encoder<T> {
 	config: ProducerConfig,
 
-	/// The retained window. Records are stored decoded so a reset can restate them, and so a record
-	/// serializes identically whether it reaches a reader as a push or in a later reset.
+	/// The retained window. Records are stored decoded so a header can restate them, and so a record
+	/// serializes identically whether it reaches a reader as a push or in a later header.
 	window: VecDeque<Value>,
 
-	/// Absolute index of `window.front()`. Only a reset puts this on the wire.
+	/// Absolute index of `window.front()`. Only a group header puts this on the wire.
 	offset: u64,
 
 	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
 	flate: Option<moq_flate::Encoder>,
 
-	/// Bytes of pushes and pops emitted into the current group, excluding its reset frame.
+	/// Bytes of pushes and pops emitted into the current group, excluding its header frame.
 	op_bytes: u64,
 
-	/// Reference size the op budget is measured against: the current group's reset frame.
-	reset_len: u64,
+	/// Reference size the op budget is measured against: the current group's header frame.
+	header_len: u64,
 
-	/// Frames emitted into the current group, reset included.
+	/// Frames emitted into the current group, header included.
 	group_frames: usize,
 
-	/// Whether the next frame must be a reset, because a frame was lost or the caller rolled the
+	/// Whether the next frame must be a header, because a frame was lost or the caller rolled the
 	/// group. Kept separate from the window, which a resync must never discard.
 	resync: bool,
 
@@ -160,7 +160,7 @@ pub struct Encoder<T> {
 }
 
 impl<T> Encoder<T> {
-	/// Create an encoder with an empty window, so the first edit emits a reset.
+	/// Create an encoder with an empty window, so the first edit opens a group.
 	pub fn new(config: ProducerConfig) -> Self {
 		Self {
 			config,
@@ -168,7 +168,7 @@ impl<T> Encoder<T> {
 			offset: 0,
 			flate: None,
 			op_bytes: 0,
-			reset_len: 0,
+			header_len: 0,
 			group_frames: 0,
 			resync: true,
 			_marker: PhantomData,
@@ -187,17 +187,17 @@ impl<T> Encoder<T> {
 		self.offset..self.offset + self.window.len() as u64
 	}
 
-	/// Force the next frame to be a reset.
+	/// Force the next frame to open a new group with a header.
 	///
 	/// Call this whenever the caller closes the current group behind the encoder's back. Without it
 	/// the next frame may be a push against a DEFLATE window and an index base the new group does
 	/// not carry.
 	///
-	/// The window survives: the reset restates it in full anyway.
+	/// The window survives: the group header restates it in full anyway.
 	pub fn reset(&mut self) {
 		self.flate = None;
 		self.op_bytes = 0;
-		self.reset_len = 0;
+		self.header_len = 0;
 		self.group_frames = 0;
 		self.resync = true;
 	}
@@ -208,7 +208,7 @@ impl<T> Encoder<T> {
 		ratio != 0
 			&& self.group_frames > 0
 			&& self.group_frames < MAX_GROUP_FRAMES
-			&& self.op_bytes <= ratio * self.reset_len
+			&& self.op_bytes <= ratio * self.header_len
 	}
 
 	/// Compress an already-serialized op into the open group, charging it to the budget.
@@ -227,26 +227,26 @@ impl<T> Encoder<T> {
 		}
 	}
 
-	/// Emit an op when the reset will remain cached, otherwise restate the window in a new group.
+	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
 	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
 		let encoded = self.frame(bytes);
-		let group_bytes = self.reset_len.saturating_add(self.op_bytes);
+		let group_bytes = self.header_len.saturating_add(self.op_bytes);
 		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			self.emit_reset()
+			self.emit_header()
 		} else {
 			Ok(encoded)
 		}
 	}
 
-	/// Encode a reset restating the whole window, opening a new group.
-	fn emit_reset(&mut self) -> Result<Encoded> {
+	/// Encode the header restating the whole window and opening a new group.
+	fn emit_header(&mut self) -> Result<Encoded> {
 		let records: Vec<&Value> = self.window.iter().collect();
-		let bytes = serde_json::to_vec(&Op::Reset {
+		let bytes = serde_json::to_vec(&Header {
 			offset: self.offset,
 			records,
 		})?;
 
-		// Open a fresh per-group encoder (cold window) and compress the reset as frame 0, recording
+		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
 		// its wire size as the op budget's anchor.
 		let (payload, flate) = match self.config.compression {
 			true => {
@@ -257,7 +257,7 @@ impl<T> Encoder<T> {
 			false => (Bytes::from(bytes), None),
 		};
 
-		self.reset_len = payload.len() as u64;
+		self.header_len = payload.len() as u64;
 		self.op_bytes = 0;
 		self.group_frames = 1;
 		self.flate = flate;
@@ -272,7 +272,7 @@ impl<T> Encoder<T> {
 	/// Drop `count` records from the front of the window.
 	///
 	/// Returns `None` when there is nothing to drop, so a caller can trim unconditionally. Emits a
-	/// pop into the open group, or a reset restating what is left.
+	/// pop into the open group, or a header restating what is left in a new group.
 	pub fn pop(&mut self, count: u64) -> Result<Option<Pending<'_, T>>> {
 		let count = count.min(self.window.len() as u64);
 		if count == 0 {
@@ -283,7 +283,7 @@ impl<T> Encoder<T> {
 		self.offset += count;
 
 		let encoded = match self.resync || !self.op_allowed() {
-			true => self.emit_reset()?,
+			true => self.emit_header()?,
 			false => {
 				let bytes = serde_json::to_vec(&Op::<&Value>::Pop(count))?;
 				self.emit_op(bytes)?
@@ -306,7 +306,7 @@ impl<T> Encoder<T> {
 impl<T: Serialize> Encoder<T> {
 	/// Append one record to the back of the window.
 	///
-	/// Emits a push into the open group, or a reset restating the window (the new record included)
+	/// Emits a push into the open group, or a header restating the window (the new record included)
 	/// when the op budget is spent or a frame was lost.
 	pub fn push(&mut self, value: &T) -> Result<Pending<'_, T>> {
 		// Serialize before touching the window, so a value that can't be encoded leaves the encoder
@@ -318,10 +318,10 @@ impl<T: Serialize> Encoder<T> {
 		self.window.push_back(record);
 
 		let encoded = match self.resync || !self.op_allowed() {
-			true => self.emit_reset()?,
+			true => self.emit_header()?,
 			false => {
 				// Serialize the record out of the window rather than the caller's value, so its bytes
-				// match what a later reset would restate.
+				// match what a later group header would restate.
 				let bytes = serde_json::to_vec(&Op::Push(self.window.back().expect("just pushed")))?;
 				self.emit_op(bytes)?
 			}
@@ -336,7 +336,7 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn an_op_that_would_evict_the_reset_rolls_first() {
+	fn an_op_that_would_evict_the_header_rolls_first() {
 		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_op_ratio(u32::MAX));
 		let first = "a".repeat(16 * 1024 * 1024);
 		let next = "b".repeat(15 * 1024 * 1024);

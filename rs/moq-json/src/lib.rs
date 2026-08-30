@@ -1,12 +1,15 @@
-//! JSON publishing over [`moq-net`](moq_net) tracks, in two modes:
+//! JSON publishing over [`moq-net`](moq_net) tracks, in three modes:
 //!
 //! - [`snapshot`]: **lossy**. One JSON value updated over time; a consumer only gets the most
 //!   recent value. Intermediate updates are collapsed and older groups are dropped.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained records; every record is
 //!   preserved and delivered in order, nothing is ever superseded.
+//! - [`window`]: **bounded**. An ordered run of records appended to the back and dropped from the
+//!   front, which a reader can join at any point.
 //!
 //! Pick [`snapshot`] when consumers care about "what is the value now" (a catalog, a status
-//! document) and [`stream`] when they care about every record (an event log, a media timeline).
+//! document), [`stream`] when they care about every record of an unbounded log, and [`window`] when
+//! the publisher retires old records and a late reader should start from what is still retained.
 //!
 //! Each mode comes in two layers. `Producer`/`Consumer` own a [`moq_net`] track and manage its
 //! groups. `Encoder`/`Decoder` are the same logic without the track: values in, frame payloads out
@@ -45,13 +48,6 @@ pub enum Error {
 	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
 	#[error("delta before snapshot")]
 	MissingSnapshot,
-
-	/// A [`window`] push or pop arrived with no reset to apply it to.
-	///
-	/// Every group opens with a reset naming the window and its offset, so this means frames reached
-	/// [`window::Decoder`] out of order, or a reader started mid-group.
-	#[error("window op before reset")]
-	MissingReset,
 
 	/// A compressed [`stream`] frame was encoded but never written, so the shared DEFLATE window is
 	/// ahead of what the consumer holds and nothing later in this group can be decoded.

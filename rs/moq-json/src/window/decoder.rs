@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
 
-use super::op::Op;
+use super::op::{Header, Op};
 use crate::{Error, Result};
 
 /// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
@@ -45,10 +45,10 @@ pub enum Event<T> {
 /// Reconstructs window events from frame payloads.
 ///
 /// The track-free core of [`Consumer`](super::Consumer). It tracks indices, not contents: it knows
-/// where the window starts and how far it has delivered, which is all it needs to turn a reset into
+/// where the window starts and how far it has delivered, which is all it needs to turn a header into
 /// the pushes, pops, and skips the reader has not already been told about.
 ///
-/// Group rolls are invisible here on purpose. A reset restates the window, and this decoder emits
+/// Group rolls are invisible here on purpose. A header restates the window, and this decoder emits
 /// only what is new, so a reader sees one continuous stream of edits no matter how often the
 /// publisher rolled for compression's sake.
 pub struct Decoder<T> {
@@ -57,17 +57,17 @@ pub struct Decoder<T> {
 	/// The current group's DEFLATE decoder, `Some` while compressing.
 	flate: Option<moq_flate::Decoder>,
 
-	/// Absolute index of the window's front, once a reset has positioned us.
+	/// Absolute index of the window's front, once a group header has positioned us.
 	front: u64,
 
 	/// Records currently in the window.
 	len: u64,
 
-	/// Next index to deliver, or `None` before the first reset. A fresh consumer adopts the first
-	/// reset's offset rather than skipping everything that came before it.
+	/// Next index to deliver, or `None` before the first header. A fresh consumer adopts the first
+	/// header's offset rather than skipping everything that came before it.
 	delivered: Option<u64>,
 
-	/// Whether the current group has opened with its required reset.
+	/// Whether the current group header has been decoded.
 	positioned: bool,
 
 	/// Events produced by the frames decoded so far, oldest first.
@@ -75,7 +75,7 @@ pub struct Decoder<T> {
 }
 
 impl<T> Decoder<T> {
-	/// Create a decoder that has not yet been positioned by a reset.
+	/// Create a decoder that has not yet been positioned by a group header.
 	pub fn new(config: ConsumerConfig) -> Self {
 		Self {
 			config,
@@ -90,8 +90,8 @@ impl<T> Decoder<T> {
 
 	/// Start a cold DEFLATE window, for a reader that has just moved to a new group.
 	///
-	/// Only the compression state resets. The index cursor deliberately survives: it is what lets
-	/// the next group's reset report just the records this reader has not seen.
+	/// Only the group-local state resets. The index cursor deliberately survives: it is what lets
+	/// the next group's header report just the records this reader has not seen.
 	pub fn reset(&mut self) {
 		self.flate = None;
 		self.positioned = false;
@@ -120,21 +120,22 @@ impl<T: DeserializeOwned> Decoder<T> {
 			false => bytes::Bytes::copy_from_slice(payload),
 		};
 
+		if !self.positioned {
+			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
+				.map_err(|err| Error::Json(err.to_string()))?;
+			return self.apply_header(header.offset, header.records);
+		}
+
 		match serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
 			.map_err(|err| Error::Json(err.to_string()))?
 		{
-			Op::Reset { offset, records } => self.apply_reset(offset, records),
 			Op::Push(record) => self.apply_push(record),
 			Op::Pop(count) => self.apply_pop(count),
 		}
 	}
 
 	/// The window is exactly these records. Report what this reader missed, then what is new.
-	fn apply_reset(&mut self, offset: u64, records: Vec<T>) -> Result<()> {
-		if self.positioned {
-			return Err(Error::Json("duplicate window reset in one group".into()));
-		}
-
+	fn apply_header(&mut self, offset: u64, records: Vec<T>) -> Result<()> {
 		let len = u64::try_from(records.len()).map_err(|_| Error::Json("window length exceeds u64".into()))?;
 		let end = offset
 			.checked_add(len)
@@ -145,7 +146,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 			None => offset,
 			Some(delivered) => {
 				if offset < self.front || end < delivered {
-					return Err(Error::Json("window reset moved backwards".into()));
+					return Err(Error::Json("window header moved backwards".into()));
 				}
 
 				// Records that left the window while we were away. Those we had delivered are pops; those
@@ -163,7 +164,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 			}
 		};
 
-		// Deliver only the tail this reader has not seen; a reset that merely restates what it holds
+		// Deliver only the tail this reader has not seen; a header that merely restates what it holds
 		// yields nothing at all.
 		for (index, record) in (offset..end).zip(records) {
 			if index >= delivered {
@@ -181,11 +182,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 	/// One record joined the back.
 	fn apply_push(&mut self, record: T) -> Result<()> {
-		// A group always opens with a reset, so a push before one means we started mid-group.
-		if !self.positioned {
-			return Err(Error::MissingReset);
-		}
-		let delivered = self.delivered.ok_or(Error::MissingReset)?;
+		let delivered = self.delivered.expect("group header positioned the decoder");
 
 		let index = self
 			.front
@@ -206,10 +203,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 	/// Records left the front.
 	fn apply_pop(&mut self, count: u64) -> Result<()> {
-		if !self.positioned {
-			return Err(Error::MissingReset);
-		}
-		let delivered = self.delivered.ok_or(Error::MissingReset)?;
+		let delivered = self.delivered.expect("group header positioned the decoder");
 		if count > self.len {
 			return Err(Error::Json(format!(
 				"pop of {count} exceeds the {} record(s) in the window",

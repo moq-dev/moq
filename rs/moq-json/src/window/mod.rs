@@ -14,11 +14,9 @@
 //!
 //! # On the wire
 //!
-//! Every frame is a tagged op. Each group opens with a `reset` naming the retained records and the
-//! absolute `offset` of the first, followed by `push` and `pop` ops. Only the reset carries an
-//! index: a push takes the next one and a pop drops from the front, both positional against the
-//! reset, which is sound because the group-scoped DEFLATE window already makes a mid-group join
-//! undecodable.
+//! The first frame of every group names the retained `records` and the absolute `offset` of the
+//! first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
+//! from the front, both positional against the group header.
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
 //! inside the shared compression window instead of a roll that would throw that window away.
@@ -26,9 +24,9 @@
 //! # Group boundaries are invisible
 //!
 //! The publisher rolls a group when the ops in it outgrow
-//! [`ProducerConfig::op_ratio`](ProducerConfig::op_ratio) times the reset that opened it, exactly as
+//! [`ProducerConfig::op_ratio`](ProducerConfig::op_ratio) times the header that opened it, exactly as
 //! [`snapshot`](crate::snapshot) rolls on its delta budget. That is purely a compression decision:
-//! there is no caller-driven cut and no age bound, and a [`Consumer`] never surfaces it. A reset
+//! there is no caller-driven cut and no age bound, and a [`Consumer`] never surfaces it. A header
 //! restating records a reader already has yields nothing, so however often the publisher rolls, the
 //! reader sees one continuous stream of [`Event`]s.
 //!
@@ -36,7 +34,7 @@
 //!
 //! A reader gets [`Event::Push`] when a record arrives, [`Event::Pop`] when a contiguous range
 //! leaves, and [`Event::Skip`] when a range was dropped before this reader saw it. A reader that
-//! keeps up sees pushes and pops; one that falls a group behind learns from the reset's offset which
+//! keeps up sees pushes and pops; one that falls a group behind learns from the header's offset which
 //! records it will never get, rather than silently missing them.
 //!
 //! # Choosing a layer
@@ -96,7 +94,7 @@ mod test {
 	///
 	/// Polling as the publisher goes is what "keeping up" means: a consumer left until the end is a
 	/// whole group behind, and the default subscription abandons a group as soon as a newer one
-	/// exists, so it would resume at the newest reset instead of reading the rolls in between.
+	/// exists, so it would resume at the newest header instead of reading the rolls in between.
 	struct Live {
 		producer: Producer<Value>,
 		consumer: Consumer<Value>,
@@ -182,7 +180,7 @@ mod test {
 
 	#[test]
 	fn a_popped_record_is_never_restated() {
-		// Ops disabled, so every single edit is its own reset restating the whole window.
+		// Ops disabled, so every single edit is its own group restating the whole window.
 		let mut live = Live::new(ProducerConfig::default().with_op_ratio(0));
 		live.push(0);
 		live.push(1);
@@ -228,9 +226,9 @@ mod test {
 
 	#[test]
 	fn a_lagging_consumer_is_told_what_it_missed() {
-		// Ops are disabled, so every edit is a reset in a new group. Feed the first two groups to the
+		// Ops are disabled, so every edit opens a new group. Feed the first two groups to the
 		// decoder, skip the middle groups as a lagging track subscriber would, then resume at the
-		// latest reset.
+		// latest header.
 		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		for n in 0..2 {
@@ -322,10 +320,10 @@ mod test {
 	#[test]
 	fn a_large_gap_is_one_skip_event() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"reset":{"offset":0,"records":[]}}"#).unwrap();
+		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 		decoder.reset();
 		decoder
-			.decode(br#"{"reset":{"offset":18446744073709551615,"records":[]}}"#)
+			.decode(br#"{"offset":18446744073709551615,"records":[]}"#)
 			.unwrap();
 
 		assert_eq!(decoder.next_event(), Some(Event::Skip(0..u64::MAX)));
@@ -333,15 +331,20 @@ mod test {
 	}
 
 	#[test]
-	fn every_group_requires_a_reset() {
+	fn every_group_requires_a_header() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		decoder.decode(br#"{"reset":{"offset":0,"records":[]}}"#).unwrap();
+		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 		decoder.reset();
 
-		assert!(matches!(
-			decoder.decode(br#"{"push":null}"#),
-			Err(crate::Error::MissingReset)
-		));
+		assert!(decoder.decode(br#"{"push":null}"#).is_err());
+	}
+
+	#[test]
+	fn a_header_is_only_valid_as_frame_zero() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+
+		assert!(decoder.decode(br#"{"offset":0,"records":[]}"#).is_err());
 	}
 
 	#[test]

@@ -41,10 +41,10 @@ export interface Span {
  * Reconstructs window events from frame payloads.
  *
  * The track-free core of {@link Consumer}. It tracks indices, not contents: it knows where the
- * window starts and how far it has delivered, which is all it needs to turn a reset into the
+ * window starts and how far it has delivered, which is all it needs to turn a header into the
  * pushes, pops, and skips the reader has not already been told about.
  *
- * Group rolls are invisible here on purpose. A reset restates the window, and this decoder emits
+ * Group rolls are invisible here on purpose. A header restates the window, and this decoder emits
  * only what is new, so a reader sees one continuous stream of edits no matter how often the
  * publisher rolled for compression's sake.
  */
@@ -52,13 +52,13 @@ export class Decoder<T> {
 	#compress: boolean;
 	#flate?: Flate;
 
-	// Absolute index of the window's front, once a reset has positioned us.
+	// Absolute index of the window's front, once a group header has positioned us.
 	#front = 0;
 	#len = 0;
-	// Next index to deliver, or undefined before the first reset. A fresh consumer adopts the first
-	// reset's offset rather than skipping everything that came before it.
+	// Next index to deliver, or undefined before the first header. A fresh consumer adopts the first
+	// header's offset rather than skipping everything that came before it.
 	#delivered?: number;
-	// Whether the current group has opened with its required reset.
+	// Whether the current group header has been decoded.
 	#positioned = false;
 
 	#events: Event<T>[] = [];
@@ -71,8 +71,8 @@ export class Decoder<T> {
 	/**
 	 * Start a cold DEFLATE window, for a reader that has just moved to a new group.
 	 *
-	 * Only the compression state resets. The index cursor deliberately survives: it is what lets the
-	 * next group's reset report just the records this reader has not seen.
+	 * Only the group-local state resets. The index cursor deliberately survives: it is what lets the
+	 * next group's header report just the records this reader has not seen.
 	 */
 	reset(): void {
 		this.#flate = undefined;
@@ -98,22 +98,23 @@ export class Decoder<T> {
 	decode(payload: Uint8Array): void {
 		if (this.#compress) this.#flate ??= new Flate();
 		const bytes = this.#flate ? this.#flate.frame(payload) : payload;
-		const op = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window op");
-		const keys = Object.keys(op);
+		const frame = object(JSON.parse(new TextDecoder().decode(bytes)) as unknown, "window frame");
+
+		if (!this.#positioned) {
+			if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");
+			this.#applyHeader(index(frame.offset, "window offset"), frame.records as T[]);
+			return;
+		}
+
+		const keys = Object.keys(frame);
 		if (keys.length !== 1) throw new Error("window op must contain exactly one operation");
 
 		switch (keys[0]) {
-			case "reset": {
-				const reset = object(op.reset, "window reset");
-				if (!Array.isArray(reset.records)) throw new Error("window reset records must be an array");
-				this.#applyReset(index(reset.offset, "window offset"), reset.records as T[]);
-				break;
-			}
 			case "push":
-				this.#applyPush(op.push as T);
+				this.#applyPush(frame.push as T);
 				break;
 			case "pop":
-				this.#applyPop(index(op.pop, "window pop count"));
+				this.#applyPop(index(frame.pop, "window pop count"));
 				break;
 			default:
 				throw new Error("unrecognized window op");
@@ -121,8 +122,7 @@ export class Decoder<T> {
 	}
 
 	/** The window is exactly these records. Report what this reader missed, then what is new. */
-	#applyReset(offset: number, records: T[]): void {
-		if (this.#positioned) throw new Error("duplicate window reset in one group");
+	#applyHeader(offset: number, records: T[]): void {
 		const end = offset + records.length;
 		if (!Number.isSafeInteger(end)) throw new Error("window range exceeds the safe integer range");
 		let delivered = this.#delivered;
@@ -131,7 +131,7 @@ export class Decoder<T> {
 			// First position: adopt the publisher's offset rather than skipping all of history.
 			delivered = offset;
 		} else {
-			if (offset < this.#front || end < delivered) throw new Error("window reset moved backwards");
+			if (offset < this.#front || end < delivered) throw new Error("window header moved backwards");
 
 			// Records that left the window while we were away. Those we had delivered are pops; those we
 			// never saw are skips. Keep each gap compact: the offset is untrusted and may jump by far
@@ -140,7 +140,7 @@ export class Decoder<T> {
 			this.#range("skip", delivered, offset);
 		}
 
-		// Deliver only the tail this reader has not seen; a reset that merely restates what it holds
+		// Deliver only the tail this reader has not seen; a header that merely restates what it holds
 		// yields nothing at all.
 		for (let index = Math.max(delivered, offset); index < end; index++) {
 			this.#events.push({ push: { index, value: records[index - offset] as T } });
@@ -154,8 +154,7 @@ export class Decoder<T> {
 
 	/** One record joined the back. */
 	#applyPush(value: T): void {
-		// A group always opens with a reset, so a push before one means we started mid-group.
-		if (!this.#positioned || this.#delivered === undefined) throw new Error("window op before reset");
+		if (this.#delivered === undefined) throw new Error("window op before group header");
 
 		const index = this.#front + this.#len;
 		if (!Number.isSafeInteger(index + 1)) throw new Error("window range exceeds the safe integer range");
@@ -169,7 +168,7 @@ export class Decoder<T> {
 
 	/** Records left the front. */
 	#applyPop(count: number): void {
-		if (!this.#positioned || this.#delivered === undefined) throw new Error("window op before reset");
+		if (this.#delivered === undefined) throw new Error("window op before group header");
 		if (count > this.#len) {
 			throw new Error(`pop of ${count} exceeds the ${this.#len} record(s) in the window`);
 		}

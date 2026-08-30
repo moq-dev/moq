@@ -12,7 +12,7 @@ use crate::Result;
 /// Publishes a sliding window of JSON records over a track.
 ///
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
-/// encoder emits a reset. When something else already owns the track, use the [`Encoder`] directly.
+/// encoder emits a header. When something else already owns the track, use the [`Encoder`] directly.
 ///
 /// Cheaply clonable: clones share one underlying track and window, like other MoQ producers.
 pub struct Producer<T> {
@@ -98,7 +98,7 @@ impl<T> Inner<T> {
 			return Ok(());
 		};
 
-		// A failed write drops the frame uncommitted, which resets the encoder so the next edit
+		// A failed write drops the frame uncommitted, which makes the next edit open a new group and
 		// restates the whole window. The pop itself stands: the record really is gone from the
 		// publisher's window, and only the consumer's knowledge of that is lost.
 		track.write(&frame)?;
@@ -132,21 +132,21 @@ impl<T: Serialize> Inner<T> {
 struct Track {
 	inner: moq_net::track::Producer,
 
-	/// The group an op would be appended to, open between resets.
+	/// The group an op would be appended to, open after a header.
 	group: Option<moq_net::group::Producer>,
 }
 
 impl Track {
-	/// Write one encoded frame, rolling a group when it's a reset.
+	/// Write one encoded frame, rolling a group when it is a header.
 	fn write(&mut self, encoded: &Encoded) -> Result<()> {
 		match encoded.keyframe {
-			true => self.write_reset(encoded.payload.clone()),
+			true => self.write_header(encoded.payload.clone()),
 			false => self.write_op(encoded.payload.clone()),
 		}
 	}
 
-	/// Close the open group and write a reset as the first frame of a new one.
-	fn write_reset(&mut self, payload: bytes::Bytes) -> Result<()> {
+	/// Close the open group and write the header as the first frame of a new one.
+	fn write_header(&mut self, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
@@ -165,11 +165,11 @@ impl Track {
 		Ok(())
 	}
 
-	/// Append an op to the group the last reset opened.
+	/// Append an op to the group the last header opened.
 	fn write_op(&mut self, payload: bytes::Bytes) -> Result<()> {
 		self.group
 			.as_mut()
-			.expect("the encoder only emits an op after a reset opened a group")
+			.expect("the encoder only emits an op after a header opened a group")
 			.write_frame(moq_net::Timestamp::now(), payload)?;
 		Ok(())
 	}

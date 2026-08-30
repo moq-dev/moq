@@ -5,7 +5,7 @@ import { Encoder } from "./encoder.ts";
 // Shared cross-impl fixture, owned by the reference Rust crate. This file is the wire contract
 // between the two implementations, so a change here is a format change and both suites move together.
 const url = new URL("../../../../rs/moq-json/tests/window-vectors.json", import.meta.url);
-const vectors = (await Bun.file(url).json()) as Array<{ name: string; frame: string }>;
+const vectors = (await Bun.file(url).json()) as Array<{ name: string; first: boolean; frame: string }>;
 
 const frames = new Map(vectors.map((v) => [v.name, v.frame]));
 const text = (payload: Uint8Array) => new TextDecoder().decode(payload);
@@ -28,25 +28,25 @@ function commit(frame: { payload: Uint8Array; commit(): void } | undefined): str
 test("the encoder emits the shared frame bytes", () => {
 	const encoder = new Encoder<{ n: number }>();
 
-	// A fresh encoder resyncs, so the first push is a reset restating the window.
-	expect(commit(encoder.push({ n: 0 }))).toBe('{"reset":{"offset":0,"records":[{"n":0}]}}');
+	// A fresh encoder opens a group with a header restating the window.
+	expect(commit(encoder.push({ n: 0 }))).toBe('{"offset":0,"records":[{"n":0}]}');
 	expect(commit(encoder.push({ n: 2 }))).toBe(frame("push"));
 	expect(commit(encoder.pop(1))).toBe(frame("pop one"));
 });
 
-test("the encoder emits the shared reset bytes", () => {
-	// opRatio 0 forces every edit to restate the window, which is how the reset shapes are reached.
+test("the encoder emits the shared group header bytes", () => {
+	// opRatio 0 forces every edit to restate the window in a new group.
 	const encoder = new Encoder<{ n: number }>({ opRatio: 0 });
 	commit(encoder.push({ n: 0 }));
-	expect(commit(encoder.push({ n: 1 }))).toBe(frame("reset from zero"));
+	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header from zero"));
 });
 
 for (const vector of vectors) {
 	test(`vector decodes: ${vector.name}`, () => {
 		const decoder = new Decoder<unknown>();
-		// Every group opens with a reset, so position the decoder before a bare op.
-		if (!vector.frame.startsWith('{"reset"')) {
-			decoder.decode(new TextEncoder().encode('{"reset":{"offset":0,"records":[{"n":0},{"n":1},{"n":2}]}}'));
+		// Every group opens with a header, so position the decoder before a bare op.
+		if (!vector.first) {
+			decoder.decode(new TextEncoder().encode('{"offset":0,"records":[{"n":0},{"n":1},{"n":2}]}'));
 			while (decoder.next());
 		}
 

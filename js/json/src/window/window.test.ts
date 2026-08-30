@@ -10,12 +10,13 @@ type Rec = { n: number };
  *
  * Polling as the publisher goes is what "keeping up" means: a consumer left until the end is a whole
  * group behind, and the default subscription abandons a group as soon as a newer one exists, so it
- * would resume at the newest reset instead of reading the rolls in between.
+ * would resume at the newest header instead of reading the rolls in between.
  */
 class Live {
 	producer: Producer<Rec>;
 	consumer: Consumer<Rec>;
 	events: Event<Rec>[] = [];
+	#next?: Promise<Event<Rec> | undefined>;
 
 	constructor(config: { opRatio?: number; compression?: boolean } = {}) {
 		const track = new Track.Producer("test");
@@ -33,16 +34,18 @@ class Live {
 		await this.read();
 	}
 
-	// Drain whatever is decodable right now. `next()` blocks once the queue is empty, so race it
-	// against a turn of the event loop rather than awaiting it directly.
+	// Drain whatever is decodable right now. Keep the pending read when the timer wins, since an
+	// abandoned `next()` would still consume a later event with nobody left to observe its result.
 	async read(): Promise<void> {
 		for (;;) {
 			const idle = Symbol("idle");
+			this.#next ??= this.consumer.next();
 			const event = await Promise.race([
-				this.consumer.next(),
+				this.#next,
 				new Promise<typeof idle>((resolve) => setTimeout(() => resolve(idle), 0)),
 			]);
 			if (event === idle || event === undefined) return;
+			this.#next = undefined;
 			this.events.push(event);
 		}
 	}
@@ -73,7 +76,7 @@ test("push and pop round-trip", async () => {
 });
 
 test("a popped record is never restated", async () => {
-	// Ops disabled, so every single edit is its own reset restating the whole window.
+	// Ops disabled, so every single edit is its own group restating the whole window.
 	const live = new Live({ opRatio: 0 });
 	await live.push(0);
 	await live.push(1);
@@ -200,20 +203,29 @@ test("a fresh consumer adopts the current offset", async () => {
 
 test("a large gap is one skip event", () => {
 	const decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode('{"reset":{"offset":0,"records":[]}}'));
+	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
 	decoder.reset();
-	decoder.decode(new TextEncoder().encode(`{"reset":{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}}`));
+	decoder.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
 
 	expect(decoder.next()).toEqual({ skip: { start: 0, end: Number.MAX_SAFE_INTEGER } });
 	expect(decoder.next()).toBeUndefined();
 });
 
-test("every group requires a reset", () => {
+test("every group requires a header", () => {
 	const decoder = new Decoder<unknown>();
-	decoder.decode(new TextEncoder().encode('{"reset":{"offset":0,"records":[]}}'));
+	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
 	decoder.reset();
 
-	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("window op before reset");
+	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("window header records");
+});
+
+test("a header is only valid as frame zero", () => {
+	const decoder = new Decoder<unknown>();
+	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
+
+	expect(() => decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'))).toThrow(
+		"exactly one operation",
+	);
 });
 
 test("pop counts are nonnegative safe integers", () => {
@@ -225,7 +237,7 @@ test("pop counts are nonnegative safe integers", () => {
 	expect(encoder.window).toEqual([]);
 });
 
-test("an op that would evict the reset rolls first", () => {
+test("an op that would evict the header rolls first", () => {
 	const encoder = new Encoder<string>({ opRatio: 0xffffffff });
 	const first = "a".repeat(16 * 1024 * 1024);
 	const next = "b".repeat(15 * 1024 * 1024);

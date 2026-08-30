@@ -1,23 +1,24 @@
-//! The wire ops, shared by the encoder and decoder.
+//! The group header and wire ops, shared by the encoder and decoder.
 
 use serde::{Deserialize, Serialize};
 
-/// One frame: what the publisher did to its window.
+/// The first frame in every group, naming the complete retained window.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Header<T> {
+	/// Absolute index of `records[0]`, so a reader knows which records it missed.
+	pub offset: u64,
+	/// The retained records, oldest first.
+	pub records: Vec<T>,
+}
+
+/// An incremental frame after the group header.
 ///
-/// Externally tagged, so a frame is `{"reset":{...}}`, `{"push":...}`, or `{"pop":n}` and a reader
-/// can tell them apart without position. Only [`Reset`](Self::Reset) carries an index; a `push`
-/// takes the next one and a `pop` drops from the front, both positional against the reset that
-/// opened the group. That is sound because the group-scoped DEFLATE window already makes a
-/// mid-group join undecodable, so a reader never sees a subset of a group's frames.
+/// A `push` takes the next index and a `pop` drops from the front, both positional against the
+/// header that opened the group. That is sound because a reader never sees a subset of a group.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum Op<T> {
-	/// The window is exactly these records, the first at `offset`. Opens every group.
-	Reset {
-		/// Absolute index of `records[0]`, so a reader knows which records it missed.
-		offset: u64,
-		records: Vec<T>,
-	},
 	/// Append one record to the back.
 	Push(T),
 	/// Drop this many records from the front.
@@ -33,6 +34,7 @@ mod test {
 	#[derive(serde::Deserialize)]
 	struct Vector {
 		name: String,
+		first: bool,
 		frame: String,
 	}
 
@@ -45,24 +47,33 @@ mod test {
 		let vectors: Vec<Vector> = serde_json::from_str(include_str!("../../tests/window-vectors.json")).unwrap();
 
 		for vector in vectors {
-			let op: Op<Value> =
-				serde_json::from_str(&vector.frame).unwrap_or_else(|err| panic!("{}: {err}", vector.name));
-			let encoded = serde_json::to_string(&op).unwrap();
+			let encoded = match vector.first {
+				true => {
+					let header: Header<Value> =
+						serde_json::from_str(&vector.frame).unwrap_or_else(|err| panic!("{}: {err}", vector.name));
+					serde_json::to_string(&header).unwrap()
+				}
+				false => {
+					let op: Op<Value> =
+						serde_json::from_str(&vector.frame).unwrap_or_else(|err| panic!("{}: {err}", vector.name));
+					serde_json::to_string(&op).unwrap()
+				}
+			};
 			assert_eq!(encoded, vector.frame, "{}", vector.name);
 		}
 	}
 
 	#[test]
-	fn ops_are_externally_tagged() {
+	fn frames_have_the_expected_shapes() {
 		// Pinning the shapes the vectors encode, so a rename of a variant or field is a visible break
 		// rather than a silently different wire.
-		let reset = Op::Reset {
+		let header = Header {
 			offset: 4,
 			records: vec![json!({ "a": 1 })],
 		};
 		assert_eq!(
-			serde_json::to_value(&reset).unwrap(),
-			json!({ "reset": { "offset": 4, "records": [{ "a": 1 }] } })
+			serde_json::to_value(&header).unwrap(),
+			json!({ "offset": 4, "records": [{ "a": 1 }] })
 		);
 		assert_eq!(
 			serde_json::to_value(Op::Push(json!({ "a": 1 }))).unwrap(),
