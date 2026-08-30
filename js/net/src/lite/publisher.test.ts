@@ -393,6 +393,19 @@ async function servedSubscription(
 
 	return {
 		client,
+		async update(options: { maxLatency?: number; startGroup?: number; endGroup?: number }) {
+			await new SubscribeUpdate({ priority: 0, ...options }).encode(client.writer, version);
+			for (;;) {
+				const current = track.subscription.peek();
+				if (
+					current?.latencyMax === (options.maxLatency ?? 0) &&
+					current.startGroup === options.startGroup &&
+					current.endGroup === options.endGroup
+				)
+					return;
+				await track.subscription.changed();
+			}
+		},
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
 			group.writeString("hello");
@@ -423,6 +436,16 @@ test("every lite version resolves an omitted start from the zero max-latency bud
 		} finally {
 			sub.close();
 		}
+	}
+});
+
+test("lite draft-05: an update re-resolves an absent start from max latency", async () => {
+	const sub = await servedSubscription({ startGroup: 10, initialGroups: [0, 1] });
+	try {
+		await sub.update({ maxLatency: 0 });
+		expect(await sub.servedSequence()).toBe(1);
+	} finally {
+		sub.close();
 	}
 });
 
@@ -460,9 +483,11 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
 		expect(resp.start.group).toBe(2);
 
-		// A straggler below the announced start never reaches the wire: the next
-		// stream the publisher opens is group 3's.
+		// Re-resolving an update with a cap below the announced start must not
+		// lower the promise already sent to the peer.
+		await sub.update({ maxLatency: 60_000, endGroup: 1 });
 		sub.serve(1);
+		await sub.update({ maxLatency: 0 });
 		sub.serve(3);
 		expect(await sub.servedSequence()).toBe(3);
 	} finally {

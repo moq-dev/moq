@@ -169,7 +169,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
-test("an unfloored subscriber clears the aggregate start floor", () => {
+test("a publisher-selected start clears the aggregate explicit floor", () => {
 	const producer = new TrackProducer("test");
 	producer.subscribe({ startGroup: 10 });
 	producer.subscribe();
@@ -178,6 +178,7 @@ test("an unfloored subscriber clears the aggregate start floor", () => {
 });
 
 test("max latency resolves cached history while zero selects the live edge", async () => {
+	const replayBudget = 60_000;
 	const producer = new TrackProducer("test");
 	producer.writeGroup(new GroupProducer(0));
 	producer.writeGroup(new GroupProducer(1));
@@ -185,11 +186,11 @@ test("max latency resolves cached history while zero selects the live edge", asy
 	const live = producer.subscribe();
 	expect((await live.recvGroup())?.sequence).toBe(1);
 
-	const replay = producer.subscribe({ latencyMax: 1 });
+	const replay = producer.subscribe({ latencyMax: replayBudget });
 	expect((await replay.recvGroup())?.sequence).toBe(0);
 	expect((await replay.recvGroup())?.sequence).toBe(1);
 
-	const floored = producer.subscribe({ latencyMax: 1, startGroup: 1 });
+	const floored = producer.subscribe({ latencyMax: replayBudget, startGroup: 1 });
 	expect((await floored.recvGroup())?.sequence).toBe(1);
 
 	const bounded = new TrackProducer("bounded").accept({ latencyMax: 0 });

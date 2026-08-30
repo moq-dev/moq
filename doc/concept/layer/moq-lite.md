@@ -112,7 +112,7 @@ Each Subscription consists of a few properties:
 - **Track Priority**: A value between 0 and 255. Tracks with higher priority will be delivered first.
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Subscriber Max Latency**: The maximum age of a non-latest group before it is skipped. Defaults to zero, so stale groups are skipped immediately.
-- **Group Start**: An optional absolute floor. It limits how far back Subscriber Max Latency may reach, but does not request history by itself. Omitting it is equivalent to a floor of group 0.
+- **Group Start**: An optional absolute floor on the publisher's choice. When omitted, the publisher chooses the starting group using Subscriber Max Latency with an implicit floor of group 0. A supplied floor restricts that choice but does not request history by itself.
 
 The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.

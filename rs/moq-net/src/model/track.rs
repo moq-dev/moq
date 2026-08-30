@@ -226,10 +226,9 @@ pub(crate) struct TrackState {
 /// handle releases the bytes and the sample together.
 struct Slot {
 	group: group::Producer,
-	// Queue time, kept separate from the cache access stamp. Main does not yet
-	// carry dev's presentation-time expiry machinery, so this is the wall-clock
-	// approximation used to resolve subscriber max latency.
-	inserted: u64,
+	// Queue time, kept separate from the coarse cache access stamp so a
+	// millisecond-scale subscriber latency remains precise.
+	inserted: web_async::time::Instant,
 
 	// Incarnation stamp, echoed by this slot's arrival entry (if any). A re-served
 	// sequence (an aborted group re-created by the publisher or re-fetched as
@@ -275,10 +274,8 @@ impl TrackState {
 		}
 	}
 
-	/// Resolve a new subscriber's cursor from its absolute floor and max latency.
-	/// Cache queue time is the deliberate backport approximation for presentation
-	/// age; once serving begins, the wire's existing in-flight latency handling takes
-	/// over.
+	/// Resolve a new subscriber's cursor from the publisher-selected start, its
+	/// implicit or explicit floor, and max latency.
 	fn subscription_start(&self, subscription: &Subscription) -> u64 {
 		let floor = subscription.group_start.unwrap_or(0);
 		let budget = self
@@ -296,8 +293,6 @@ impl TrackState {
 		let Some((latest_sequence, latest_inserted)) = latest else {
 			return floor;
 		};
-		let budget_ticks = cache::Pool::ticks(budget);
-
 		self.arrival
 			.iter()
 			.filter_map(|(sequence, stamp)| {
@@ -308,7 +303,7 @@ impl TrackState {
 				*sequence >= floor
 					&& subscription.group_end.is_none_or(|end| *sequence <= end)
 					&& (*sequence == latest_sequence
-						|| (!budget.is_zero() && latest_inserted.saturating_sub(*inserted) <= budget_ticks))
+						|| (!budget.is_zero() && latest_inserted.saturating_duration_since(*inserted) <= budget))
 			})
 			.map(|(sequence, _)| sequence)
 			.min()
@@ -685,7 +680,7 @@ impl TrackState {
 			sequence,
 			Slot {
 				group: group.clone(),
-				inserted: self.cache.pool().now(),
+				inserted: web_async::time::Instant::now(),
 				stamp,
 			},
 		);
@@ -2254,6 +2249,17 @@ struct PlainSubscriber {
 }
 
 impl PlainSubscriber {
+	/// Re-resolve the publisher-selected start from the current preferences and
+	/// retained groups.
+	fn reposition(&mut self) {
+		self.min_sequence = self.state.read().subscription_start(&self.subscription.read());
+	}
+
+	/// Raise the local floor without undoing a later publisher-selected start.
+	fn start_at_least(&mut self, sequence: u64) {
+		self.min_sequence = self.min_sequence.max(sequence);
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -2574,6 +2580,24 @@ impl Subscriber {
 		}
 	}
 
+	/// Re-resolve the publisher-selected start from this subscriber's current
+	/// preferences and retained groups.
+	pub(crate) fn reposition(&mut self) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.reposition(),
+			SubscriberKind::Spliced(spliced) => spliced.reposition(),
+		}
+	}
+
+	/// Raise the local floor without lowering an already resolved or announced
+	/// start.
+	pub(crate) fn start_at_least(&mut self, sequence: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.start_at_least(sequence),
+			SubscriberKind::Spliced(spliced) => spliced.start_at_least(sequence),
+		}
+	}
+
 	/// Cap this subscriber's read cursor at the given sequence (inclusive), or remove the
 	/// cap entirely.
 	///
@@ -2877,20 +2901,31 @@ mod test {
 
 	#[tokio::test]
 	async fn max_latency_resolves_cached_history_while_zero_selects_the_live_edge() {
+		tokio::time::pause();
 		let mut producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		tokio::time::advance(Duration::from_millis(40)).await;
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 
 		let mut live = producer.subscribe(None);
 		assert_eq!(recv_group(&mut live).sequence, 1);
 
-		let replay = Subscription::default().with_latency_max(Duration::from_millis(1));
+		let replay = Subscription::default().with_latency_max(Duration::from_millis(50));
 		let mut replay = producer.subscribe(replay);
 		assert_eq!(recv_group(&mut replay).sequence, 0);
 		assert_eq!(recv_group(&mut replay).sequence, 1);
 
+		let tight = Subscription::default().with_latency_max(Duration::from_millis(39));
+		let mut tight = producer.subscribe(tight);
+		assert_eq!(recv_group(&mut tight).sequence, 1);
+
+		let mut updated = producer.subscribe(Subscription::default().with_group_start(10));
+		updated.update(Subscription::default()).unwrap();
+		updated.reposition();
+		assert_eq!(recv_group(&mut updated).sequence, 1);
+
 		let floored = Subscription::default()
-			.with_latency_max(Duration::from_millis(1))
+			.with_latency_max(Duration::from_millis(50))
 			.with_group_start(1);
 		let mut floored = producer.subscribe(floored);
 		assert_eq!(recv_group(&mut floored).sequence, 1);

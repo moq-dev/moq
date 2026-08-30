@@ -266,8 +266,8 @@ export class Decoder {
 		this.#handover.opened();
 
 		// The Sync ceiling is the maximum age of a non-latest group before both the network and
-		// container consumers skip it. Omitting startGroup leaves the default floor of group 0,
-		// so this age budget alone selects how far behind the live edge delivery may begin.
+		// container consumers skip it. With startGroup absent, the publisher uses this ceiling
+		// to choose a start no lower than the implicit floor of group 0.
 		const sub = subscribe(effect, {
 			broadcast: active,
 			track,

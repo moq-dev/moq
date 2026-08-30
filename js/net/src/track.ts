@@ -84,11 +84,11 @@ export interface Subscription {
 	/** Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`. */
 	latencyMax?: number;
 	/**
-	 * Lowest group the publisher may deliver, or omit for no floor.
+	 * Optional lower bound on the publisher-selected starting group.
 	 *
-	 * This does not request history. {@link latencyMax} decides how far behind the
-	 * live edge delivery may begin; omitting this field and setting it to 0 are
-	 * equivalent.
+	 * When omitted, the publisher chooses the start using {@link latencyMax} with
+	 * an implicit floor of group 0. Supplying a value restricts that choice but
+	 * does not request history by itself.
 	 */
 	startGroup?: number;
 	/** Last group the publisher should deliver (inclusive), or omit for no end. */
@@ -122,8 +122,8 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.ordered = (combined.ordered ?? false) && (subscription.ordered ?? false);
 		combined.latencyMax = Math.max(combined.latencyMax ?? 0, subscription.latencyMax ?? 0);
 
-		// A floor only restricts. Any subscriber without one keeps the aggregate
-		// unrestricted, otherwise the loosest (lowest) floor wins.
+		// A floor only restricts. Any publisher-selected start clears the aggregate
+		// explicit floor; otherwise the loosest (lowest) floor wins.
 		if (combined.startGroup === undefined || subscription.startGroup === undefined) {
 			combined.startGroup = undefined;
 		} else {
@@ -245,8 +245,8 @@ export class Consumer {
 class TrackState {
 	groups = new Signal<GroupConsumer[]>([]);
 	// Cache queue time for every mirrored group, including one already handed to
-	// the caller. The backport uses this as the wall-clock approximation for
-	// subscriber max latency; the live edge is the highest retained sequence.
+	// the caller. This is the wall-clock approximation for subscriber max latency;
+	// the live edge is the highest retained sequence.
 	timeline = new Map<number, { group: GroupConsumer; time: number }>();
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
@@ -665,16 +665,16 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
+	#startPinned = false;
 
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
-		this.#cursor.set({ start: this.#subscriptionStart() });
+		this.#position();
 	}
 
-	// Resolve the initial cursor from the absolute floor and max latency. Cache
-	// queue time is the deliberate backport approximation for presentation age;
-	// once serving begins, the wire's existing in-flight latency handling takes over.
+	// Resolve the publisher-selected cursor from the implicit or explicit floor
+	// and max latency.
 	#subscriptionStart(): number {
 		const subscription = this.#state.update.peek();
 		const floor = subscription?.startGroup ?? 0;
@@ -697,8 +697,13 @@ export class Subscriber {
 		return floor;
 	}
 
+	#position(announcedStart = 0): void {
+		this.#cursor.update((cursor) => ({ ...cursor, start: Math.max(this.#subscriptionStart(), announcedStart) }));
+	}
+
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
+		hooks.positionSubscriber = (subscriber, announcedStart) => subscriber.#position(announcedStart);
 	}
 
 	/**
@@ -729,6 +734,7 @@ export class Subscriber {
 
 	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */
 	startAt(sequence: number): void {
+		this.#startPinned = true;
 		this.#cursor.update((cursor) => ({ ...cursor, start: sequence }));
 	}
 
@@ -771,11 +777,17 @@ export class Subscriber {
 		for (;;) {
 			const groups = this.#state.groups.peek();
 			const { start, end } = this.#cursor.peek();
-			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+			if (this.#startPinned) {
+				while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+			}
 
-			const group = groups[0];
+			// Before SUBSCRIBE_START pins the resolved floor, keep older cached groups
+			// available in case a SUBSCRIBE_UPDATE widens the latency budget or removes
+			// an explicit floor. Once pinned, the loop above permanently rejects them.
+			const index = this.#startPinned ? 0 : groups.findIndex((candidate) => candidate.sequence >= start);
+			const group = index >= 0 ? groups[index] : undefined;
 			if (group && (end === undefined || group.sequence <= end)) {
-				groups.shift();
+				groups.splice(index, 1);
 				return group;
 			}
 

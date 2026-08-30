@@ -2,6 +2,7 @@ import { type Dispose, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
+import { hooks } from "../internal.ts";
 import type { Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
@@ -314,7 +315,8 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
+			const range: { start?: number } = {};
+			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale, range);
 
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
@@ -330,6 +332,7 @@ export class Publisher {
 
 				if (result instanceof SubscribeUpdate) {
 					console.debug(`subscribe update: broadcast=${msg.broadcast} track=${track.name}`);
+					const previous = track.subscription.peek();
 					track.update({
 						priority: result.priority,
 						ordered: result.ordered,
@@ -337,7 +340,13 @@ export class Publisher {
 						startGroup: result.startGroup,
 						endGroup: result.endGroup,
 					});
-					if (result.startGroup !== undefined) track.startAt(result.startGroup);
+					if (
+						previous?.latencyMax !== result.maxLatency ||
+						previous.startGroup !== result.startGroup ||
+						previous.endGroup !== result.endGroup
+					) {
+						hooks.positionSubscriber(track, range.start);
+					}
 					track.endAt(result.endGroup);
 				}
 			}
@@ -406,7 +415,14 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(sub: bigint, broadcast: Path.Valid, track: track.Subscriber, stream: Writer, timescale: Timescale) {
+	async #runTrack(
+		sub: bigint,
+		broadcast: Path.Valid,
+		track: track.Subscriber,
+		stream: Writer,
+		timescale: Timescale,
+		range: { start?: number },
+	) {
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -451,6 +467,7 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
+					range.start = group.sequence;
 					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
 					// Arrival-order serving could later surface a straggler below the first
 					// group, so pin the floor to what was announced.

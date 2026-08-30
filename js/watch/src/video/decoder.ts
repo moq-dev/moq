@@ -305,9 +305,9 @@ class DecoderTrack {
 	}
 
 	#run(effect: Effect): void {
-		// The Sync ceiling is also the network's maximum useful group age. With an
-		// omitted start floor, zero selects the live edge and a larger value permits
-		// retained history within that budget.
+		// The Sync ceiling is also the network's maximum useful group age. With
+		// startGroup absent, the publisher chooses the live edge for zero and may
+		// choose retained history for a larger budget.
 		const sub = subscribe(effect, {
 			broadcast: this.broadcast,
 			track: this.track,

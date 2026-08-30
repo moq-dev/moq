@@ -1994,11 +1994,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
-		// The model cursor already starts at the requested floor (or 0), and its
-		// subscriber max latency decides which cached group is still useful. In
-		// particular, a zero budget naturally resolves to the latest group without
-		// treating an omitted Group Start as a live-edge sentinel.
-
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SubscribeUpdate select arm below.
 		track.end_at(initial_end_group);
@@ -2008,6 +2003,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// exclusive final sequence (which may be ahead of the live edge).
 		let emit_range = self.version.has_track_stream();
 		let mut start_sent = false;
+		let mut announced_start = None;
 		let mut end_sent = false;
 
 		// Serve datagrams off this same subscriber, but only on lite-05 over a datagram-capable
@@ -2056,6 +2052,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					Recv::Group(group) => {
 						if emit_range && !start_sent {
 							start_sent = true;
+							announced_start = Some(group.sequence);
 							// SUBSCRIBE_OK promises nothing below this sequence will be
 							// delivered. Arrival-order serving could later surface a
 							// straggler below the first group, so pin the floor to what
@@ -2099,16 +2096,24 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					}
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
-					let _ = track.update(crate::track::Subscription {
+					let previous = track.subscription();
+					let subscription = crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
 						latency_max: upd.max_latency,
 						group_start: upd.start_group,
 						group_end: upd.end_group,
 						..Default::default()
-					});
-					if let Some(start_group) = upd.start_group {
-						track.start_at(start_group);
+					};
+					let reposition = previous.latency_max != subscription.latency_max
+						|| previous.group_start != subscription.group_start
+						|| previous.group_end != subscription.group_end;
+					let _ = track.update(subscription);
+					if reposition {
+						track.reposition();
+					}
+					if let Some(start_group) = announced_start {
+						track.start_at_least(start_group);
 					}
 					track.end_at(upd.end_group);
 				}

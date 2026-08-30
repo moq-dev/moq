@@ -844,8 +844,8 @@ This is a delivery-time preference, not a retention rule: the publisher MAY stil
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
-The lowest group the publisher may deliver.
-A value of 0 means no floor (default); `Subscriber Max Latency` determines the first group actually delivered.
+An optional lower bound on the publisher-selected starting group.
+A value of 0 means absent (default): the publisher chooses using `Subscriber Max Latency` with an implicit floor of absolute group 0.
 A non-zero value is the absolute group sequence + 1.
 
 **Group End**:
@@ -853,7 +853,7 @@ The last group to deliver (inclusive).
 A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence. An absent `Group Start` is equivalent to an absolute floor of group 0, not a request for the latest group. With the default `Subscriber Max Latency` of 0 the result is nevertheless the latest group, because every older group is immediately stale.
+`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence. An absent `Group Start` leaves the starting position to the publisher, bounded below by absolute group 0. With the default `Subscriber Max Latency` of 0 the publisher chooses the latest group, because every older group is immediately stale.
 
 
 ## SUBSCRIBE_UPDATE
@@ -1138,6 +1138,7 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Made an absent `Group Start` publisher-selected with an implicit floor of group 0; `Subscriber Max Latency` determines the starting group.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.

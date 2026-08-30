@@ -5,7 +5,7 @@
  *
  * @module
  */
-import type { Producer, Request } from "./track.ts";
+import type { Producer, Request, Subscriber } from "./track.ts";
 
 /** The next group or datagram sequence shared by dynamic producers of one broadcast track. */
 export interface TrackSequence {
@@ -29,8 +29,13 @@ export interface TrackRequestOptions {
 export const hooks: {
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
+	/** Re-resolve a subscriber's publisher-selected start, preserving an announced floor. */
+	positionSubscriber: (subscriber: Subscriber, announcedStart?: number) => void;
 } = {
 	makeRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	positionSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 };
