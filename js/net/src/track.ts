@@ -255,6 +255,8 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+	/** Recompute the subscriber start after immutable publisher properties resolve. */
+	position?: () => void;
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -380,7 +382,10 @@ export class Producer {
 		const resolved = infoDefaults(info);
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		for (const sink of this.#sinks) sink.info.set(resolved);
+		for (const sink of this.#sinks) {
+			sink.info.set(resolved);
+			sink.position?.();
+		}
 		return this;
 	}
 
@@ -670,6 +675,7 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
+		this.#state.position = () => this.#position();
 		this.#position();
 	}
 

@@ -199,6 +199,17 @@ test("max latency resolves cached history while zero selects the live edge", asy
 	expect((await bounded.subscribe({ latencyMax: 1000 }).recvGroup())?.sequence).toBe(1);
 });
 
+test("publisher latency repositions an on-demand subscriber before delivery", async () => {
+	const producer = new TrackProducer("test");
+	producer.writeGroup(new GroupProducer(0));
+	producer.writeGroup(new GroupProducer(1));
+
+	const subscriber = producer.subscribe({ latencyMax: 60_000 });
+	producer.accept({ latencyMax: 0 });
+
+	expect((await subscriber.recvGroup())?.sequence).toBe(1);
+});
+
 test("nextGroup skips late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

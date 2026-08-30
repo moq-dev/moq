@@ -80,6 +80,16 @@ fn slice(prefs: &Subscription, start: Option<u64>, end: Option<u64>) -> Subscrip
 	sub
 }
 
+/// Resolve the logical live edge once across the segments for a zero-latency
+/// join. Positive budgets remain per-segment in this backport because the
+/// underlying caches do not expose one shared presentation timeline.
+fn logical_join(state: &ResumeState, prefs: &Subscription) -> Option<u64> {
+	if !prefs.latency_max.is_zero() || prefs.group_end.is_some() {
+		return None;
+	}
+	Some(state.latest().unwrap_or(0).max(prefs.group_start.unwrap_or(0)))
+}
+
 /// How many segments a logical track keeps before pruning terminal ones from the
 /// front: the live segment plus a couple of predecessors still draining to slow
 /// readers. Without a bound, every failover leaves one dead segment (pinning a
@@ -421,6 +431,7 @@ impl Consumer {
 	/// [`track::SubscriberControl`]-style handle can update it.
 	pub(crate) fn subscribe_shared(&self, prefs: kio::Producer<Subscription>) -> Subscriber {
 		let last_prefs = prefs.read().clone();
+		let join_sequence = logical_join(&self.state.read(), &last_prefs);
 		let mut subscriber = Subscriber {
 			state: self.state.clone(),
 			prefs,
@@ -435,6 +446,7 @@ impl Consumer {
 			end_sequence: None,
 			reading: None,
 			initializing: true,
+			join_sequence,
 		};
 
 		// Resolve every already-ready segment now, so the publisher selects the
@@ -630,6 +642,9 @@ struct SegmentSub {
 	/// The segment appeared after this logical subscription opened, so it
 	/// continues at its splice floor instead of selecting a fresh live edge.
 	continuation: bool,
+	/// Logical join point shared by segments that existed when the subscription
+	/// opened. `None` for continuations and non-zero latency budgets.
+	join_sequence: Option<u64>,
 	sub: SubState,
 	/// Received groups held back by the subscriber's [`Subscriber::end_at`] cap,
 	/// re-offered once the cap rises (arrival-order reads consume the underlying
@@ -643,6 +658,14 @@ struct SegmentSub {
 }
 
 impl SegmentSub {
+	/// Combine the segment boundary, caller cursor, and initial logical join.
+	fn floor(&self, min_sequence: u64) -> u64 {
+		self.start
+			.unwrap_or(0)
+			.max(min_sequence)
+			.max(self.join_sequence.unwrap_or(0))
+	}
+
 	/// Whether a pruned segment owes this reader nothing more, so its cursor can
 	/// be dropped: an uncapped one was replaced before producing (its cursor holds
 	/// nothing), and a capped one is kept until it drains through its cap and any
@@ -706,6 +729,8 @@ pub struct Subscriber {
 	/// True only while the constructor snapshots the segments that already
 	/// existed when this logical subscription opened.
 	initializing: bool,
+	/// One publisher-selected join point across the segments present at open.
+	join_sequence: Option<u64>,
 }
 
 impl Subscriber {
@@ -767,13 +792,20 @@ impl Subscriber {
 				|| prefs.group_start != self.last_prefs.group_start
 				|| prefs.group_end != self.last_prefs.group_end;
 			self.last_prefs = prefs;
+			if reposition {
+				self.join_sequence = logical_join(&self.state.read(), &self.last_prefs);
+			}
 			for seg in &mut self.segments {
+				if reposition && !seg.continuation {
+					seg.join_sequence = self.join_sequence;
+				}
+				let floor = seg.floor(self.min_sequence);
 				if let SubState::Active(sub) = &mut seg.sub {
 					let _ = sub.update(slice(&self.last_prefs, seg.start, seg.end));
 					if reposition {
 						sub.reposition();
 					}
-					sub.start_at_least(seg.start.unwrap_or(0).max(self.min_sequence));
+					sub.start_at_least(floor);
 				}
 			}
 		}
@@ -839,6 +871,7 @@ impl Subscriber {
 				Some(existing) => {
 					if existing.end != segment.end {
 						existing.end = segment.end;
+						let floor = existing.floor(self.min_sequence);
 						if let SubState::Active(sub) = &mut existing.sub {
 							// Shrink the demand so the session can cap upstream. The
 							// read bounds stay on this subscriber (see `poll_recv_group`):
@@ -846,7 +879,7 @@ impl Subscriber {
 							// inner cursor, hiding the segment's completion.
 							let _ = sub.update(slice(&self.last_prefs, segment.start, segment.end));
 							sub.reposition();
-							sub.start_at_least(segment.start.unwrap_or(0).max(self.min_sequence));
+							sub.start_at_least(floor);
 						}
 						// A still-pending subscription picks the moved boundary up
 						// when it activates (see `poll_activate`).
@@ -861,6 +894,7 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						continuation: !self.initializing,
+						join_sequence: if self.initializing { self.join_sequence } else { None },
 						sub: SubState::Pending(sub),
 						parked: BTreeMap::new(),
 						pruned: false,
@@ -874,6 +908,7 @@ impl Subscriber {
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
 	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let floor = seg.floor(min_sequence);
 		if let SubState::Pending(pending) = &mut seg.sub {
 			// Apply moved boundaries and preference updates before resolving: a
 			// plain subscription chooses its max-latency start as it resolves.
@@ -885,7 +920,6 @@ impl Subscriber {
 					// upper bounds (segment boundary and `end_at` cap) are enforced by
 					// this subscriber, never on the inner cursor: an inner cap would
 					// park groups there and hide the segment's completion.
-					let floor = seg.start.unwrap_or(0).max(min_sequence);
 					if seg.continuation {
 						sub.start_at(floor);
 					} else {
@@ -1204,7 +1238,12 @@ impl Subscriber {
 	/// current preferences and retained groups.
 	pub(crate) fn reposition(&mut self) {
 		self.last_prefs = self.prefs.read().clone();
+		self.join_sequence = logical_join(&self.state.read(), &self.last_prefs);
 		for seg in &mut self.segments {
+			if !seg.continuation {
+				seg.join_sequence = self.join_sequence;
+			}
+			let floor = seg.floor(self.min_sequence);
 			match &mut seg.sub {
 				SubState::Pending(pending) => {
 					let _ = pending.update(slice(&self.last_prefs, seg.start, seg.end));
@@ -1212,7 +1251,7 @@ impl Subscriber {
 				SubState::Active(sub) => {
 					let _ = sub.update(slice(&self.last_prefs, seg.start, seg.end));
 					sub.reposition();
-					sub.start_at_least(seg.start.unwrap_or(0).max(self.min_sequence));
+					sub.start_at_least(floor);
 				}
 				SubState::Done(_) => {}
 			}
@@ -1313,6 +1352,23 @@ mod test {
 		let mut replay = producer.consume().subscribe(replay);
 		assert_eq!(recv(&mut replay), 0);
 		assert_eq!(recv(&mut replay), 1);
+	}
+
+	#[tokio::test]
+	async fn initial_zero_latency_join_uses_the_logical_live_edge() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+
+		producer.switch(&consumer_a, None).unwrap();
+		write_group(&mut track_a, 0, "a0");
+		write_group(&mut track_a, 1, "a1");
+		producer.switch(&consumer_b, 2).unwrap();
+		write_group(&mut track_b, 2, "b2");
+		write_group(&mut track_b, 3, "b3");
+
+		let mut live = producer.consume().subscribe(None);
+		assert_eq!(recv(&mut live), 3);
 	}
 
 	/// A waker that counts its wakes, for asserting a pending poll left a live
