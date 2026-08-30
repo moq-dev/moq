@@ -358,13 +358,22 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 
 // Opens a served subscription and returns the machinery to write groups and observe
 // which of them the publisher put on the wire (each group gets its own uni stream).
-async function servedSubscription(options: { startGroup?: number } = {}) {
+async function servedSubscription(
+	options: { startGroup?: number; maxLatency?: number; version?: Version; initialGroups?: number[] } = {},
+) {
+	const version = options.version ?? Version.DRAFT_05;
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const publisher = new Publisher(pair.server, version, randomOrigin());
 
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video");
 	publisher.publish(Path.from("test"), broadcast);
+	for (const sequence of options.initialGroups ?? []) {
+		const group = new GroupProducer(sequence);
+		group.writeString("cached");
+		group.close();
+		track.writeGroup(group);
+	}
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);
@@ -375,6 +384,7 @@ async function servedSubscription(options: { startGroup?: number } = {}) {
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 0,
+		maxLatency: options.maxLatency,
 		startGroup: options.startGroup,
 	});
 	void publisher.runSubscribe(msg, server);
@@ -405,11 +415,22 @@ async function servedSubscription(options: { startGroup?: number } = {}) {
 	};
 }
 
+test("every lite version resolves an omitted start from the zero max-latency budget", async () => {
+	for (const version of Object.values(Version)) {
+		const sub = await servedSubscription({ version, initialGroups: [0, 1] });
+		try {
+			expect(await sub.servedSequence()).toBe(1);
+		} finally {
+			sub.close();
+		}
+	}
+});
+
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
 // newest-first). The older group is cached and in demand, so serving must still
 // deliver it; a sequence cursor would skip it permanently.
 test("lite draft-05: a late-arriving older group is still served", async () => {
-	const sub = await servedSubscription({ startGroup: 1 });
+	const sub = await servedSubscription({ startGroup: 1, maxLatency: 1 });
 	try {
 		// Serve one at a time so arrival order at the publisher is the order given.
 		sub.serve(1);

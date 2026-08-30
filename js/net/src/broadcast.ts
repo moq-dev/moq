@@ -114,6 +114,10 @@ async function fetchGroup(
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	const subscriber = subscribe(state, name, { priority: options.priority });
+	// FETCH names an exact cached group, so it must not inherit the live
+	// subscription cursor selected from max latency (zero selects the latest).
+	subscriber.startAt(sequence);
+	subscriber.endAt(sequence);
 	try {
 		for (;;) {
 			const group = await subscriber.recvGroup();

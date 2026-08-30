@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Broadcast, Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { subscribe } from "./subscription";
+import { subscribe } from "../subscription";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -12,7 +12,12 @@ test("audio subscription tracks the playback latency ceiling without restarting"
 	const broadcast = source.consume();
 	const maxLatency = new Signal<Time.Milli>(Time.Milli(38.75));
 	const effect = new Effect();
-	const subscriber = subscribe(effect, { broadcast, track: "audio", maxLatency });
+	const subscriber = subscribe(effect, {
+		broadcast,
+		track: "audio",
+		priority: Catalog.PRIORITY.audio,
+		maxLatency,
+	});
 
 	expect(subscriber.subscription.peek()).toEqual({
 		priority: Catalog.PRIORITY.audio,

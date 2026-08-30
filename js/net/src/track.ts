@@ -83,7 +83,13 @@ export interface Subscription {
 	ordered?: boolean;
 	/** Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`. */
 	latencyMax?: number;
-	/** First group the publisher should deliver, or omit to start at the latest group. */
+	/**
+	 * Lowest group the publisher may deliver, or omit for no floor.
+	 *
+	 * This does not request history. {@link latencyMax} decides how far behind the
+	 * live edge delivery may begin; omitting this field and setting it to 0 are
+	 * equivalent.
+	 */
 	startGroup?: number;
 	/** Last group the publisher should deliver (inclusive), or omit for no end. */
 	endGroup?: number;
@@ -116,11 +122,12 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.ordered = (combined.ordered ?? false) && (subscription.ordered ?? false);
 		combined.latencyMax = Math.max(combined.latencyMax ?? 0, subscription.latencyMax ?? 0);
 
-		if (subscription.startGroup !== undefined) {
-			combined.startGroup =
-				combined.startGroup === undefined
-					? subscription.startGroup
-					: Math.min(combined.startGroup, subscription.startGroup);
+		// A floor only restricts. Any subscriber without one keeps the aggregate
+		// unrestricted, otherwise the loosest (lowest) floor wins.
+		if (combined.startGroup === undefined || subscription.startGroup === undefined) {
+			combined.startGroup = undefined;
+		} else {
+			combined.startGroup = Math.min(combined.startGroup, subscription.startGroup);
 		}
 
 		if (combined.endGroup === undefined || subscription.endGroup === undefined) {
@@ -237,6 +244,10 @@ export class Consumer {
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
 	groups = new Signal<GroupConsumer[]>([]);
+	// Cache queue time for every mirrored group, including one already handed to
+	// the caller. The backport uses this as the wall-clock approximation for
+	// subscriber max latency; the live edge is the highest retained sequence.
+	timeline = new Map<number, { group: GroupConsumer; time: number }>();
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
 	latest?: number;
@@ -459,6 +470,7 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		entry.mirrors.set(sink, dst);
+		sink.timeline.set(dst.sequence, { group: dst, time: entry.time });
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
@@ -473,6 +485,7 @@ export class Producer {
 				const i = groups.indexOf(mirror);
 				if (i >= 0) groups.splice(i, 1);
 			});
+			if (sink.timeline.get(mirror.sequence)?.group === mirror) sink.timeline.delete(mirror.sequence);
 			mirror.close();
 		}
 		entry.mirrors.clear();
@@ -656,6 +669,32 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
+		this.#cursor.set({ start: this.#subscriptionStart() });
+	}
+
+	// Resolve the initial cursor from the absolute floor and max latency. Cache
+	// queue time is the deliberate backport approximation for presentation age;
+	// once serving begins, the wire's existing in-flight latency handling takes over.
+	#subscriptionStart(): number {
+		const subscription = this.#state.update.peek();
+		const floor = subscription?.startGroup ?? 0;
+		const end = subscription?.endGroup;
+		const candidates = [...this.#state.timeline.values()]
+			.filter((entry) => !(entry.group.closed.peek() instanceof Error))
+			.filter((entry) => end === undefined || entry.group.sequence <= end)
+			.sort((a, b) => a.group.sequence - b.group.sequence);
+		const latest = candidates.at(-1);
+		if (!latest || latest.group.sequence < floor) return floor;
+
+		const requested = subscription?.latencyMax ?? 0;
+		const retained = this.#state.info.peek()?.latencyMax;
+		const budget = retained === undefined ? requested : Math.min(requested, retained);
+		for (const candidate of candidates) {
+			if (candidate.group.sequence < floor) continue;
+			if (candidate.group.sequence === latest.group.sequence) return candidate.group.sequence;
+			if (budget > 0 && latest.time - candidate.time <= budget) return candidate.group.sequence;
+		}
+		return floor;
 	}
 
 	static {
@@ -713,6 +752,7 @@ export class Subscriber {
 			for (const group of groups) group.close(abort);
 			groups.length = 0;
 		});
+		this.#state.timeline.clear();
 	}
 
 	/**
@@ -733,8 +773,6 @@ export class Subscriber {
 			const { start, end } = this.#cursor.peek();
 			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
 
-			// The buffer is sequence-sorted, so an in-range group that arrives behind a
-			// beyond-cap one sorts in front of it and is never blocked by it.
 			const group = groups[0];
 			if (group && (end === undefined || group.sequence <= end)) {
 				groups.shift();

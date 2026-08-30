@@ -23,10 +23,12 @@ pub struct Subscription {
 	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
 	/// locally, and a group is skipped once either measure exceeds it.
 	pub latency_max: Duration,
-	/// First group the publisher should deliver, or `None` to start at the latest group.
+	/// Lowest group the publisher may deliver, or `None` for no floor.
 	///
-	/// A request, aggregated across every live subscriber (the earliest explicit start
-	/// wins), so it says what the publisher sends, not what any one subscriber sees.
+	/// A floor, not a request: [`Self::latency_max`] decides how far behind the live
+	/// edge delivery may begin. `None` and group 0 are equivalent. The floor is
+	/// aggregated across every live subscriber (any subscriber without one clears it),
+	/// so it says what the publisher sends, not what any one subscriber sees.
 	/// [`crate::track::Subscriber::start_at`] is the local read cursor; setting one does
 	/// not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
@@ -73,7 +75,7 @@ impl Subscription {
 		self
 	}
 
-	/// Set the first group to deliver, returning `self` for chaining.
+	/// Set the lowest group that may be delivered, returning `self` for chaining.
 	pub fn with_group_start(mut self, group_start: impl Into<Option<u64>>) -> Self {
 		self.group_start = group_start.into();
 		self
@@ -98,7 +100,7 @@ impl Subscription {
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
 			latency_max: self.latency_max.max(combined.latency_max),
-			group_start: min_some(self.group_start, combined.group_start),
+			group_start: min_floored(self.group_start, combined.group_start),
 			group_end: max_unbounded(self.group_end, combined.group_end),
 		};
 
@@ -116,6 +118,16 @@ pub(super) fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 		(Some(a), Some(b)) => Some(a.min(b)),
 		(Some(a), None) | (None, Some(a)) => Some(a),
 		(None, None) => None,
+	}
+}
+
+/// The lower of two optional floors, treating `None` as no floor (and therefore
+/// absorbing). A floor only restricts, so one unfloored subscriber keeps the
+/// aggregate unrestricted.
+fn min_floored(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(None, _) | (_, None) => None,
 	}
 }
 
@@ -160,14 +172,17 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_group_start_uses_earliest_explicit_start() {
-		let live = Subscription::default().with_group_start(None);
+	fn combined_group_start_keeps_the_loosest_floor() {
 		let catchup = Subscription::default().with_group_start(10);
 		let older_catchup = Subscription::default().with_group_start(5);
 
-		let combined = combine(&[live, catchup, older_catchup]).unwrap();
+		let combined = combine(&[catchup.clone(), older_catchup]).unwrap();
 
 		assert_eq!(combined.group_start, Some(5));
+
+		let unfloored = Subscription::default();
+		let combined = combine(&[catchup, unfloored]).unwrap();
+		assert_eq!(combined.group_start, None);
 	}
 
 	#[test]

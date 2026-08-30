@@ -226,6 +226,10 @@ pub(crate) struct TrackState {
 /// handle releases the bytes and the sample together.
 struct Slot {
 	group: group::Producer,
+	// Queue time, kept separate from the cache access stamp. Main does not yet
+	// carry dev's presentation-time expiry machinery, so this is the wall-clock
+	// approximation used to resolve subscriber max latency.
+	inserted: u64,
 
 	// Incarnation stamp, echoed by this slot's arrival entry (if any). A re-served
 	// sequence (an aborted group re-created by the publisher or re-fetched as
@@ -269,6 +273,46 @@ impl TrackState {
 		} else {
 			Poll::Pending
 		}
+	}
+
+	/// Resolve a new subscriber's cursor from its absolute floor and max latency.
+	/// Cache queue time is the deliberate backport approximation for presentation
+	/// age; once serving begins, the wire's existing in-flight latency handling takes
+	/// over.
+	fn subscription_start(&self, subscription: &Subscription) -> u64 {
+		let floor = subscription.group_start.unwrap_or(0);
+		let budget = self
+			.latency_bound()
+			.map_or(subscription.latency_max, |bound| subscription.latency_max.min(bound));
+		let latest = self
+			.arrival
+			.iter()
+			.filter_map(|(sequence, stamp)| {
+				let slot = self.lookup.get(sequence)?;
+				(slot.stamp == *stamp && !slot.group.is_aborted()).then_some((*sequence, slot.inserted))
+			})
+			.filter(|(sequence, _)| subscription.group_end.is_none_or(|end| *sequence <= end))
+			.max_by_key(|(sequence, _)| *sequence);
+		let Some((latest_sequence, latest_inserted)) = latest else {
+			return floor;
+		};
+		let budget_ticks = cache::Pool::ticks(budget);
+
+		self.arrival
+			.iter()
+			.filter_map(|(sequence, stamp)| {
+				let slot = self.lookup.get(sequence)?;
+				(slot.stamp == *stamp && !slot.group.is_aborted()).then_some((*sequence, slot.inserted))
+			})
+			.filter(|(sequence, inserted)| {
+				*sequence >= floor
+					&& subscription.group_end.is_none_or(|end| *sequence <= end)
+					&& (*sequence == latest_sequence
+						|| (!budget.is_zero() && latest_inserted.saturating_sub(*inserted) <= budget_ticks))
+			})
+			.map(|(sequence, _)| sequence)
+			.min()
+			.unwrap_or(floor)
 	}
 
 	/// Find the next live group at or after `index` in arrival order.
@@ -356,7 +400,6 @@ impl TrackState {
 				// incarnation, delivered (if at all) at its own arrival position.
 				continue;
 			}
-
 			let mut consumer = slot.group.consume();
 			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
@@ -642,6 +685,7 @@ impl TrackState {
 			sequence,
 			Slot {
 				group: group.clone(),
+				inserted: self.cache.pool().now(),
 				stamp,
 			},
 		);
@@ -1184,7 +1228,10 @@ impl Producer {
 		// requiring a live producer state. If the track already ended, the returned
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
-		let info = self.state.read().info.clone().expect("producer always has info");
+		let state = self.state.read();
+		let info = state.info.clone().expect("producer always has info");
+		let min_sequence = state.subscription_start(&preferences);
+		drop(state);
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -1196,7 +1243,7 @@ impl Producer {
 				subscription,
 				index: 0,
 				datagram_index: 0,
-				min_sequence: 0,
+				min_sequence,
 				next_sequence: 0,
 				end_sequence: None,
 				parked: BTreeMap::new(),
@@ -1893,6 +1940,7 @@ impl Subscribing {
 				// Wait until the track info is available
 				let info = ready!(state.poll(waiter, |state| state.poll_info()))
 					.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+				let min_sequence = state.read().subscription_start(&self.subscription.read());
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
@@ -1902,7 +1950,7 @@ impl Subscribing {
 						subscription: self.subscription.clone(),
 						index: 0,
 						datagram_index: 0,
-						min_sequence: 0,
+						min_sequence,
 						next_sequence: 0,
 						end_sequence: None,
 						parked: BTreeMap::new(),
@@ -2301,7 +2349,7 @@ impl PlainSubscriber {
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		let lower = self.min_sequence.max(self.next_sequence);
 		let Some((frame, found_index, sequence)) =
-			ready!(self.poll(waiter, |state| { state.poll_read_frame(self.index, lower, waiter) })?)
+			ready!(self.poll(waiter, |state| state.poll_read_frame(self.index, lower, waiter))?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
@@ -2815,6 +2863,44 @@ mod test {
 			.expect("datagram would have blocked")
 			.expect("would have errored")
 			.expect("track was closed")
+	}
+
+	/// Helper: non-blocking group receive that must be ready with a group.
+	fn recv_group(subscriber: &mut Subscriber) -> group::Consumer {
+		subscriber
+			.recv_group()
+			.now_or_never()
+			.expect("group would have blocked")
+			.expect("would have errored")
+			.expect("track was closed")
+	}
+
+	#[tokio::test]
+	async fn max_latency_resolves_cached_history_while_zero_selects_the_live_edge() {
+		let mut producer = track_producer("test", None);
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		let mut live = producer.subscribe(None);
+		assert_eq!(recv_group(&mut live).sequence, 1);
+
+		let replay = Subscription::default().with_latency_max(Duration::from_millis(1));
+		let mut replay = producer.subscribe(replay);
+		assert_eq!(recv_group(&mut replay).sequence, 0);
+		assert_eq!(recv_group(&mut replay).sequence, 1);
+
+		let floored = Subscription::default()
+			.with_latency_max(Duration::from_millis(1))
+			.with_group_start(1);
+		let mut floored = producer.subscribe(floored);
+		assert_eq!(recv_group(&mut floored).sequence, 1);
+
+		let mut bounded = track_producer("bounded", Info::default().with_latency_max(Duration::ZERO));
+		bounded.create_group(group::Info { sequence: 0 }).unwrap();
+		bounded.create_group(group::Info { sequence: 1 }).unwrap();
+		let replay = Subscription::default().with_latency_max(Duration::from_secs(1));
+		let mut bounded = bounded.subscribe(replay);
+		assert_eq!(recv_group(&mut bounded).sequence, 1);
 	}
 
 	#[tokio::test]
@@ -5192,7 +5278,7 @@ mod test {
 		producer.create_group(2u64.into()).unwrap().finish().unwrap();
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(1)));
 		assert_eq!(subscriber.assert_group().sequence, 0);
 		assert_eq!(subscriber.assert_group().sequence, 2);
 		assert_eq!(
@@ -5313,7 +5399,7 @@ mod test {
 
 		// The backfill serves by sequence, but never in arrival order.
 		assert!(consumer.peek_group(1).is_some());
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(1)));
 		assert_eq!(subscriber.assert_group().sequence, 0);
 		assert_eq!(subscriber.assert_group().sequence, 2);
 		subscriber.assert_no_group();
@@ -5486,7 +5572,7 @@ mod test {
 		assert!(consumer.peek_group(2).is_some(), "backfill is cached for later fetches");
 
 		// ...but an arrival-order subscriber only sees the live groups.
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(1)));
 		assert_eq!(subscriber.assert_group().sequence, 5);
 		assert_eq!(subscriber.assert_group().sequence, 6);
 		subscriber.assert_no_group();

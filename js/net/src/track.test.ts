@@ -169,6 +169,35 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
+test("an unfloored subscriber clears the aggregate start floor", () => {
+	const producer = new TrackProducer("test");
+	producer.subscribe({ startGroup: 10 });
+	producer.subscribe();
+
+	expect(producer.subscription.peek()?.startGroup).toBeUndefined();
+});
+
+test("max latency resolves cached history while zero selects the live edge", async () => {
+	const producer = new TrackProducer("test");
+	producer.writeGroup(new GroupProducer(0));
+	producer.writeGroup(new GroupProducer(1));
+
+	const live = producer.subscribe();
+	expect((await live.recvGroup())?.sequence).toBe(1);
+
+	const replay = producer.subscribe({ latencyMax: 1 });
+	expect((await replay.recvGroup())?.sequence).toBe(0);
+	expect((await replay.recvGroup())?.sequence).toBe(1);
+
+	const floored = producer.subscribe({ latencyMax: 1, startGroup: 1 });
+	expect((await floored.recvGroup())?.sequence).toBe(1);
+
+	const bounded = new TrackProducer("bounded").accept({ latencyMax: 0 });
+	bounded.writeGroup(new GroupProducer(0));
+	bounded.writeGroup(new GroupProducer(1));
+	expect((await bounded.subscribe({ latencyMax: 1000 }).recvGroup())?.sequence).toBe(1);
+});
+
 test("nextGroup skips late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
@@ -189,7 +218,7 @@ test("nextGroup skips late arrivals", async () => {
 
 test("nextGroup returns buffered groups in sequence", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	producer.writeGroup(new GroupProducer(3));
 	producer.writeGroup(new GroupProducer(5));
@@ -200,7 +229,7 @@ test("nextGroup returns buffered groups in sequence", async () => {
 
 test("local cursor bounds can skip, pause, and release buffered groups", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
@@ -223,7 +252,7 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 // deliver it; a sequence cursor would skip it permanently.
 test("recvGroup serves a late arrival after a newer group", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	producer.writeGroup(new GroupProducer(2));
 	expect((await track.recvGroup())?.sequence).toBe(2);
@@ -242,7 +271,7 @@ test("recvGroup serves a late arrival after a newer group", async () => {
 // held, not dropped, and a raised cap re-offers them, even after a clean close.
 test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	for (let sequence = 0; sequence < 3; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
@@ -268,7 +297,7 @@ test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async ()
 // a relay can ingest a burst micro-reordered (newest first).
 test("recvGroup serves in-range groups that arrive behind a capped one", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	track.endAt(1);
 
@@ -373,7 +402,7 @@ test("closing the subscriber releases a recvGroup parked while the producer is l
 
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 1 });
 
 	producer.writeGroup(new GroupProducer(5));
 

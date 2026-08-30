@@ -1043,7 +1043,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// run_track serves groups and best-effort datagrams off the one subscriber.
 		sub.run_track(
 			track,
-			subscribe.start_group,
 			subscribe.end_group,
 			&mut stream.reader,
 			&mut stream.writer,
@@ -1988,7 +1987,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
 		mut track: track::Subscriber,
-		start_group: Option<u64>,
 		initial_end_group: Option<u64>,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
 		writer: &mut Writer<S::SendStream, Version>,
@@ -1996,10 +1994,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	) -> Result<(), Error> {
 		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
+		// The model cursor already starts at the requested floor (or 0), and its
+		// subscriber max latency decides which cached group is still useful. In
+		// particular, a zero budget naturally resolves to the latest group without
+		// treating an omitted Group Start as a live-edge sentinel.
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SubscribeUpdate select arm below.

@@ -1,22 +1,22 @@
-import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
-/** Opens a live-edge audio subscription and keeps its expiry budget aligned with playback. @internal */
+/** Opens a media subscription and keeps its expiry budget aligned with playback. @internal */
 export function subscribe(
 	effect: Effect,
 	{
 		broadcast,
 		track,
+		priority,
 		maxLatency,
 	}: {
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
+		priority: number;
 		maxLatency: Getter<Time.Milli>;
 	},
 ): Moq.Track.Subscriber {
-	const priority = Catalog.PRIORITY.audio;
 	let latencyMax = Math.ceil(maxLatency.peek());
 	const subscriber = broadcast.track(track).subscribe({ priority, latencyMax });
 	effect.cleanup(() => subscriber.close());

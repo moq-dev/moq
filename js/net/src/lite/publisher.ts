@@ -278,8 +278,6 @@ export class Publisher {
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
-		const startGroup = msg.startGroup ?? track.latest();
-		if (startGroup !== undefined) track.startAt(startGroup);
 		track.endAt(msg.endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the

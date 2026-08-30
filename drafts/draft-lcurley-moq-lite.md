@@ -844,8 +844,8 @@ This is a delivery-time preference, not a retention rule: the publisher MAY stil
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
-The first group to deliver.
-A value of 0 means the latest group (default).
+The lowest group the publisher may deliver.
+A value of 0 means no floor (default); `Subscriber Max Latency` determines the first group actually delivered.
 A non-zero value is the absolute group sequence + 1.
 
 **Group End**:
@@ -853,7 +853,7 @@ The last group to deliver (inclusive).
 A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
+`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence. An absent `Group Start` is equivalent to an absolute floor of group 0, not a request for the latest group. With the default `Subscriber Max Latency` of 0 the result is nevertheless the latest group, because every older group is immediately stale.
 
 
 ## SUBSCRIBE_UPDATE
@@ -965,7 +965,7 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 **Group**:
 The absolute sequence number of the first group that will be delivered.
 It MUST be greater than or equal to the requested start group; any groups in between are unavailable and implicitly dropped, with no separate SUBSCRIBE_DROP required.
-A subscriber that requested the latest group learns the resolved sequence here.
+A subscriber with no explicit floor learns the age-resolved sequence here.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.

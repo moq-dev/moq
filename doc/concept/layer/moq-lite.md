@@ -82,7 +82,8 @@ If the peer doesn't have the broadcast/track, they will get an error.
 Otherwise, the subscription is active and will stay open until closed by the publisher (possibly with an error).
 
 A track is broken into **groups**, each with an increasing ID.
-Conceptually, these are join points, and new subscriptions will always start at the latest group.
+Conceptually, these are join points. A new subscription starts at the oldest cached group
+within its Subscriber Max Latency budget; the default zero budget starts at the latest group.
 Groups are delivered independently and potentially out of order, so you should have some logic to reorder or skip during congestion.
 A group is closed when finished or aborted with an error (ex. during congestion).
 
@@ -111,6 +112,7 @@ Each Subscription consists of a few properties:
 - **Track Priority**: A value between 0 and 255. Tracks with higher priority will be delivered first.
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Subscriber Max Latency**: The maximum age of a non-latest group before it is skipped. Defaults to zero, so stale groups are skipped immediately.
+- **Group Start**: An optional absolute floor. It limits how far back Subscriber Max Latency may reach, but does not request history by itself. Omitting it is equivalent to a floor of group 0.
 
 The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.
@@ -168,7 +170,7 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
 - **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
-- **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame.
+- **No Joining Fetch**: Subscriptions start at a group boundary selected by Subscriber Max Latency, never in the middle of a group.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.

@@ -5,14 +5,13 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-
+import { subscribe } from "../subscription";
 import { type Bound, latencyBounds, type Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { Handover } from "./handover";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { subscribe } from "./subscription";
 import { type DecodedSpan, Terminal } from "./terminal";
 import { unlockOnGesture } from "./unlock";
 import { Warmup } from "./warmup";
@@ -267,8 +266,14 @@ export class Decoder {
 		this.#handover.opened();
 
 		// The Sync ceiling is the maximum age of a non-latest group before both the network and
-		// container consumers skip it. Omitting startGroup keeps a new subscription at the live edge.
-		const sub = subscribe(effect, { broadcast: active, track, maxLatency: this.sync.out.maxBuffer });
+		// container consumers skip it. Omitting startGroup leaves the default floor of group 0,
+		// so this age budget alone selects how far behind the live edge delivery may begin.
+		const sub = subscribe(effect, {
+			broadcast: active,
+			track,
+			priority: Catalog.PRIORITY.audio,
+			maxLatency: this.sync.out.maxBuffer,
+		});
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);

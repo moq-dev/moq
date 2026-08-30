@@ -172,7 +172,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const remote = client.consume(Path.from("test"));
 	const subscriber = remote
 		.track("video")
-		.subscribe({ startGroup: INITIAL_START_GROUP, endGroup: INITIAL_END_GROUP });
+		.subscribe({ latencyMax: 1000, startGroup: INITIAL_START_GROUP, endGroup: INITIAL_END_GROUP });
 	try {
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP);

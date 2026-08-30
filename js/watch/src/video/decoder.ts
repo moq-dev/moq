@@ -15,7 +15,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-
+import { subscribe } from "../subscription";
 import type { Sync } from "../sync";
 import {
 	type DecoderConfig,
@@ -305,8 +305,15 @@ class DecoderTrack {
 	}
 
 	#run(effect: Effect): void {
-		const sub = this.broadcast.track(this.track).subscribe({ priority: Catalog.PRIORITY.video });
-		effect.cleanup(() => sub.close());
+		// The Sync ceiling is also the network's maximum useful group age. With an
+		// omitted start floor, zero selects the live edge and a larger value permits
+		// retained history within that budget.
+		const sub = subscribe(effect, {
+			broadcast: this.broadcast,
+			track: this.track,
+			priority: Catalog.PRIORITY.video,
+			maxLatency: this.sync.out.maxBuffer,
+		});
 
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
