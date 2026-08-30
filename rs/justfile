@@ -356,11 +356,28 @@ check-changed $FILES:
     	just rs wasm
     fi
 
-# Compile moq-tokio by itself at the two feature extremes. Its default-feature
-# build is already part of the ordinary clippy pass above.
+# Compile moq-tokio by itself at the feature extremes and with each QUIC backend.
+# Its default-feature build is already part of the ordinary clippy pass above.
 tokio-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
     cargo check --locked -p moq-tokio --no-default-features
     cargo check --locked -p moq-tokio --all-features
+    cargo check --locked -p moq-tokio --no-default-features --features quinn
+    cargo check --locked -p moq-tokio --no-default-features --features quiche
+    cargo check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
+
+    want='the `noq` backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
+    if output=$(cargo check --locked -p moq-tokio --no-default-features --features noq 2>&1); then
+        echo "rs: moq-tokio with only noq should reject its missing crypto provider" >&2
+        exit 1
+    fi
+    if ! grep -qF "$want" <<< "$output"; then
+        echo "rs: moq-tokio with only noq should fail on: $want" >&2
+        echo "$output" | grep -E '^error' >&2 || true
+        exit 1
+    fi
 
 # Same as `fix`, but scoped the same way as `check-changed`.
 fix-changed $FILES:
