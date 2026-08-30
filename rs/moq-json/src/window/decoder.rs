@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
 
+use super::encoder::MAX_INDEX;
 use super::op::{Header, Op};
 use crate::{Error, Result};
 
@@ -32,7 +33,12 @@ impl ConsumerConfig {
 #[non_exhaustive]
 pub enum Event<T> {
 	/// This record joined the window, at this absolute index.
-	Push(u64, T),
+	Push {
+		/// Absolute index assigned to the record.
+		index: u64,
+		/// The decoded record.
+		value: T,
+	},
 
 	/// These records left the window.
 	Pop(std::ops::Range<u64>),
@@ -92,7 +98,7 @@ impl<T> Decoder<T> {
 	///
 	/// Only the group-local state resets. The index cursor deliberately survives: it is what lets
 	/// the next group's header report just the records this reader has not seen.
-	pub fn reset(&mut self) {
+	pub fn start_group(&mut self) {
 		self.flate = None;
 		self.positioned = false;
 	}
@@ -136,10 +142,14 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 	/// The window is exactly these records. Report what this reader missed, then what is new.
 	fn apply_header(&mut self, offset: u64, records: Vec<T>) -> Result<()> {
+		if offset > MAX_INDEX {
+			return Err(Error::Json("window offset exceeds the safe integer range".into()));
+		}
 		let len = u64::try_from(records.len()).map_err(|_| Error::Json("window length exceeds u64".into()))?;
 		let end = offset
 			.checked_add(len)
-			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
+			.filter(|end| *end <= MAX_INDEX)
+			.ok_or_else(|| Error::Json("window range exceeds the safe integer range".into()))?;
 
 		let delivered = match self.delivered {
 			// First position: adopt the publisher's offset rather than skipping all of history.
@@ -168,7 +178,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 		// yields nothing at all.
 		for (index, record) in (offset..end).zip(records) {
 			if index >= delivered {
-				self.events.push_back(Event::Push(index, record));
+				self.events.push_back(Event::Push { index, value: record });
 			}
 		}
 
@@ -190,11 +200,12 @@ impl<T: DeserializeOwned> Decoder<T> {
 			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
 		let end = index
 			.checked_add(1)
-			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
+			.filter(|end| *end <= MAX_INDEX)
+			.ok_or_else(|| Error::Json("window range exceeds the safe integer range".into()))?;
 		self.len = end - self.front;
 
 		if index >= delivered {
-			self.events.push_back(Event::Push(index, record));
+			self.events.push_back(Event::Push { index, value: record });
 			self.delivered = Some(end);
 		}
 

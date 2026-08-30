@@ -41,7 +41,7 @@ export class Consumer<T> {
 				if (!this.#group) return undefined;
 				// Each group is its own compressed stream, so the window starts cold. The index cursor
 				// deliberately survives, which is what makes the header report only what this reader missed.
-				this.#decoder.reset();
+				this.#decoder.startGroup();
 			}
 
 			const frame = await this.#group.readFrame();

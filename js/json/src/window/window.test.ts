@@ -204,17 +204,28 @@ test("a fresh consumer adopts the current offset", async () => {
 test("a large gap is one skip event", () => {
 	const decoder = new Decoder<unknown>();
 	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
-	decoder.reset();
+	decoder.startGroup();
 	decoder.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
 
 	expect(decoder.next()).toEqual({ skip: { start: 0, end: Number.MAX_SAFE_INTEGER } });
 	expect(decoder.next()).toBeUndefined();
 });
 
+test("indices must fit the shared safe integer range", () => {
+	let decoder = new Decoder<unknown>();
+	expect(() => decoder.decode(new TextEncoder().encode('{"offset":9007199254740992,"records":[]}'))).toThrow(
+		"nonnegative safe integer",
+	);
+
+	decoder = new Decoder<unknown>();
+	decoder.decode(new TextEncoder().encode(`{"offset":${Number.MAX_SAFE_INTEGER},"records":[]}`));
+	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("safe integer range");
+});
+
 test("every group requires a header", () => {
 	const decoder = new Decoder<unknown>();
 	decoder.decode(new TextEncoder().encode('{"offset":0,"records":[]}'));
-	decoder.reset();
+	decoder.startGroup();
 
 	expect(() => decoder.decode(new TextEncoder().encode('{"push":null}'))).toThrow("window header records");
 });
@@ -259,4 +270,24 @@ test("an op that would evict the header rolls first", () => {
 	frame = encoder.push(next);
 	expect(frame.keyframe).toBeTrue();
 	frame.commit();
+});
+
+test("an uncommitted edit leaves the window unchanged", () => {
+	const encoder = new Encoder<number>();
+
+	const abandoned = encoder.push(1);
+	expect(encoder.window).toEqual([]);
+
+	const frame = encoder.push(2);
+	expect(frame.keyframe).toBeTrue();
+	frame.commit();
+	expect(encoder.window).toEqual([2]);
+
+	abandoned.commit();
+	expect(encoder.window).toEqual([2]);
+
+	const popped = encoder.pop(1);
+	if (!popped) throw new Error("expected a pop frame");
+	encoder.startGroup();
+	expect(encoder.window).toEqual([2]);
 });

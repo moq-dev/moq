@@ -68,7 +68,7 @@ impl<T> Producer<T> {
 	}
 
 	/// Finish the track, closing any open group.
-	pub fn finish(&mut self) -> Result<()> {
+	pub fn finish(self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
 }
@@ -98,9 +98,8 @@ impl<T> Inner<T> {
 			return Ok(());
 		};
 
-		// A failed write drops the frame uncommitted, which makes the next edit open a new group and
-		// restates the whole window. The pop itself stands: the record really is gone from the
-		// publisher's window, and only the consumer's knowledge of that is lost.
+		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
+		// new group because the attempted frame advanced the group-local compression state.
 		track.write(&frame)?;
 		frame.commit();
 
@@ -111,7 +110,7 @@ impl<T> Inner<T> {
 		// The open group goes with the track, so the encoder must not keep emitting ops into it. Any
 		// further edit fails on the closed track, but it has to fail as a track error rather than by
 		// writing an op with no group to hold it.
-		self.encoder.reset();
+		self.encoder.start_group();
 		self.track.finish()
 	}
 }

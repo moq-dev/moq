@@ -7,8 +7,7 @@ const MAX_GROUP_FRAMES = 256;
 /** Op ratio used when {@link ProducerConfig.opRatio} is left unset. */
 export const DEFAULT_OP_RATIO = 8;
 
-/** An incremental frame after the group header. */
-export type Op<T> = { push: T } | { pop: number };
+type Edit = { push: string } | { pop: number };
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface ProducerConfig {
@@ -48,15 +47,11 @@ export interface Encoded {
 /**
  * An encoded frame the caller has not yet acknowledged writing.
  *
- * Write the frame, then {@link commit}. A frame that never reaches the wire leaves the consumer's
- * view behind the publisher's window, so leaving it uncommitted starts a new group and the next
- * frame restates the whole window.
- *
- * The window itself is not rolled back. It is the publisher's truth and the edit really happened;
- * only the consumer's knowledge of it is lost, which the next group header repairs.
+ * Write the frame, then {@link commit}. The edit is staged until commit, so leaving the frame
+ * uncommitted keeps the window unchanged and makes the next frame open a new group.
  */
 export interface Pending extends Encoded {
-	/** Acknowledge that the frame reached the wire, keeping the encoder's state. */
+	/** Acknowledge that the frame reached the wire, applying its edit to the retained window. */
 	commit(): void;
 }
 
@@ -115,23 +110,24 @@ export class Encoder<T> {
 	}
 
 	/**
-	 * Force the next frame to open a new group with a header.
+	 * Make the next frame open a new group with a header.
 	 *
 	 * Call this whenever the caller closes the current group behind the encoder's back. The window
 	 * survives: the group header restates it in full anyway.
 	 */
-	reset(): void {
+	startGroup(): void {
 		this.#flate = undefined;
 		this.#opBytes = 0;
 		this.#headerLen = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
+		this.#generation += 1;
 	}
 
 	/** Append one record to the back of the window. */
 	push(value: T): Pending {
-		this.#resync ||= this.#lost();
+		if (this.#pending) this.startGroup();
 		if (this.end >= Number.MAX_SAFE_INTEGER) throw new Error("window index exceeds the safe integer range");
 
 		// Encode before touching the window, so a value that can't be serialized leaves the encoder
@@ -141,10 +137,11 @@ export class Encoder<T> {
 			throw new Error("record is not representable as JSON");
 		}
 
-		this.#window.push(text);
-		if (this.#resync || !this.#opAllowed()) return this.#emitHeader();
+		const window = [...this.#window, text];
+		const edit: Edit = { push: text };
+		if (this.#resync || !this.#opAllowed()) return this.#emitHeader(this.#offset, window, edit);
 
-		return this.#emitOp(`{"push":${text}}`);
+		return this.#emitOp(`{"push":${text}}`, this.#offset, window, edit);
 	}
 
 	/**
@@ -157,16 +154,16 @@ export class Encoder<T> {
 		if (!Number.isSafeInteger(count) || count < 0) {
 			throw new Error("pop count must be a nonnegative safe integer");
 		}
-		this.#resync ||= this.#lost();
+		if (this.#pending) this.startGroup();
 
 		const dropped = Math.min(count, this.#window.length);
 		if (dropped <= 0) return undefined;
 
-		this.#window.splice(0, dropped);
-		this.#offset += dropped;
-
-		if (this.#resync || !this.#opAllowed()) return this.#emitHeader();
-		return this.#emitOp(`{"pop":${dropped}}`);
+		const offset = this.#offset + dropped;
+		const window = this.#window.slice(dropped);
+		const edit: Edit = { pop: dropped };
+		if (this.#resync || !this.#opAllowed()) return this.#emitHeader(offset, window, edit);
+		return this.#emitOp(`{"pop":${dropped}}`, offset, window, edit);
 	}
 
 	/** Whether the pending edit may ride as an op in the open group. */
@@ -180,22 +177,24 @@ export class Encoder<T> {
 	}
 
 	/** Compress an already-serialized op into the open group, charging it to the budget. */
-	#emitOp(text: string): Pending {
+	#emitOp(text: string, offset: number, window: string[], edit: Edit): Pending {
 		const bytes = new TextEncoder().encode(text);
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
 		this.#opBytes += payload.length;
 		this.#groupFrames += 1;
-		if (this.#headerLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) return this.#emitHeader();
+		if (this.#headerLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) {
+			return this.#emitHeader(offset, window, edit);
+		}
 
-		return this.#pendingFrame(payload, false);
+		return this.#pendingFrame(payload, false, edit);
 	}
 
 	/** Emit the header restating the whole window and opening a new group. */
-	#emitHeader(): Pending {
+	#emitHeader(offset: number, window: string[], edit: Edit): Pending {
 		// The records are already JSON text, so splice them in rather than re-encoding each one; the
 		// bytes a reader sees are then identical to what the matching push carried.
-		const text = `{"offset":${this.#offset},"records":[${this.#window.join(",")}]}`;
+		const text = `{"offset":${offset},"records":[${window.join(",")}]}`;
 		const bytes = new TextEncoder().encode(text);
 
 		// A fresh per-group encoder (cold window), with the header as frame 0.
@@ -207,10 +206,10 @@ export class Encoder<T> {
 		this.#groupFrames = 1;
 		this.#resync = false;
 
-		return this.#pendingFrame(payload, true);
+		return this.#pendingFrame(payload, true, edit);
 	}
 
-	#pendingFrame(payload: Uint8Array, keyframe: boolean): Pending {
+	#pendingFrame(payload: Uint8Array, keyframe: boolean, edit: Edit): Pending {
 		this.#pending = true;
 		const generation = ++this.#generation;
 		const encoder = this;
@@ -219,19 +218,20 @@ export class Encoder<T> {
 			payload,
 			keyframe,
 			commit() {
-				if (encoder.#generation === generation) encoder.#pending = false;
+				if (encoder.#generation !== generation || !encoder.#pending) return;
+				encoder.#commit(edit);
+				encoder.#pending = false;
 			},
 		};
 	}
 
-	/**
-	 * Whether the previous frame was handed out and never committed.
-	 *
-	 * Clears the flag, since the caller is about to be given a group header that repairs it.
-	 */
-	#lost(): boolean {
-		const lost = this.#pending;
-		this.#pending = false;
-		return lost;
+	/** Apply an edit after its encoded frame reached the wire. */
+	#commit(edit: Edit): void {
+		if ("push" in edit) {
+			this.#window.push(edit.push);
+		} else {
+			this.#window.splice(0, edit.pop);
+			this.#offset += edit.pop;
+		}
 	}
 }

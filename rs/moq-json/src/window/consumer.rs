@@ -59,7 +59,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 						// Each group is its own compressed stream, so the window starts cold. The index
 						// cursor deliberately survives, which is what makes the header report only what this
 						// reader is missing.
-						self.decoder.reset();
+						self.decoder.start_group();
 						self.group = Some(group);
 						continue;
 					}

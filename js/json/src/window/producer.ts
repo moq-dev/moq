@@ -50,9 +50,8 @@ export class Producer<T> {
 	}
 
 	#write(encoded: Encoded & { commit(): void }): void {
-		// A throw here leaves the frame uncommitted, so the next edit restates the whole window. The
-		// edit itself stands: the publisher's window really did change, and only the consumer's
-		// knowledge of it is lost.
+		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
+		// new group because the attempted frame advanced the group-local compression state.
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.
@@ -87,7 +86,7 @@ export class Producer<T> {
 		// The open group goes with the track, so the encoder must not keep emitting ops into it. Any
 		// further edit fails on the closed track, but it has to fail as a track error rather than as an
 		// op with nowhere to put it.
-		this.#encoder.reset();
+		this.#encoder.startGroup();
 		this.#track.close();
 	}
 }

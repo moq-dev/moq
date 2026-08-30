@@ -14,6 +14,7 @@
  * The first frame of every group names the retained `records` and the absolute `offset` of the
  * first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
  * from the front, both positional against the group header.
+ * Indices stop at `Number.MAX_SAFE_INTEGER`, matching the Rust implementation's wire domain.
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
  * inside the shared compression window instead of a roll that would throw that window away.
  *
@@ -34,5 +35,5 @@
 
 export { Consumer } from "./consumer.ts";
 export { type ConsumerConfig, Decoder, type Event, type Span } from "./decoder.ts";
-export { type Encoded, Encoder, type Op, type Pending, type ProducerConfig } from "./encoder.ts";
+export { type Encoded, Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
 export { Producer } from "./producer.ts";

@@ -17,6 +17,7 @@
 //! The first frame of every group names the retained `records` and the absolute `offset` of the
 //! first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
 //! from the front, both positional against the group header.
+//! Indices stop at 2^53 - 1, the largest integer represented exactly by both implementations.
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
 //! inside the shared compression window instead of a roll that would throw that window away.
@@ -76,6 +77,17 @@ mod test {
 		Consumer::new(track, ConsumerConfig::default().with_compression(compression))
 	}
 
+	/// A track whose timestamp conversion rejects every frame after its group is published.
+	fn rejecting_track() -> moq_net::track::Producer {
+		let mut info = moq_net::track::Info::default();
+		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+
+		moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap()
+	}
+
 	/// Drain every event currently available without blocking.
 	fn drain(consumer: &mut Consumer<Value>) -> Vec<Event<Value>> {
 		let waiter = kio::Waiter::noop();
@@ -126,10 +138,15 @@ mod test {
 			self.events.extend(drain(&mut self.consumer));
 		}
 
-		fn finish(mut self) -> Vec<Event<Value>> {
-			self.producer.finish().unwrap();
-			self.read();
-			self.events
+		fn finish(self) -> Vec<Event<Value>> {
+			let Live {
+				producer,
+				mut consumer,
+				mut events,
+			} = self;
+			producer.finish().unwrap();
+			events.extend(drain(&mut consumer));
+			events
 		}
 
 		/// Just the indices pushed, in order.
@@ -137,7 +154,7 @@ mod test {
 			events
 				.iter()
 				.filter_map(|e| match e {
-					Event::Push(i, _) => Some(*i),
+					Event::Push { index, .. } => Some(*index),
 					_ => None,
 				})
 				.collect()
@@ -155,10 +172,19 @@ mod test {
 		assert_eq!(
 			live.finish(),
 			vec![
-				Event::Push(0, rec(0)),
-				Event::Push(1, rec(1)),
+				Event::Push {
+					index: 0,
+					value: rec(0)
+				},
+				Event::Push {
+					index: 1,
+					value: rec(1)
+				},
 				Event::Pop(0..1),
-				Event::Push(2, rec(2)),
+				Event::Push {
+					index: 2,
+					value: rec(2)
+				},
 			]
 		);
 	}
@@ -192,10 +218,19 @@ mod test {
 		assert_eq!(
 			live.finish(),
 			vec![
-				Event::Push(0, rec(0)),
-				Event::Push(1, rec(1)),
+				Event::Push {
+					index: 0,
+					value: rec(0)
+				},
+				Event::Push {
+					index: 1,
+					value: rec(1)
+				},
 				Event::Pop(0..1),
-				Event::Push(2, rec(2)),
+				Event::Push {
+					index: 2,
+					value: rec(2)
+				},
 			]
 		);
 	}
@@ -220,7 +255,19 @@ mod test {
 		// Joining at offset 3 must not report 3 skips for records that were never this reader's to
 		// miss: it simply starts where the window starts.
 		let events = drain(&mut fresh);
-		assert_eq!(events, vec![Event::Push(3, rec(3)), Event::Push(4, rec(4))]);
+		assert_eq!(
+			events,
+			vec![
+				Event::Push {
+					index: 3,
+					value: rec(3)
+				},
+				Event::Push {
+					index: 4,
+					value: rec(4)
+				}
+			]
+		);
 		assert!(!events.iter().any(|e| matches!(e, Event::Skip(_))));
 	}
 
@@ -233,13 +280,22 @@ mod test {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		for n in 0..2 {
 			let frame = encoder.push(&rec(n)).unwrap();
-			decoder.reset();
+			decoder.start_group();
 			decoder.decode(&frame.payload).unwrap();
 			frame.commit();
 		}
 		assert_eq!(
 			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
-			vec![Event::Push(0, rec(0)), Event::Push(1, rec(1))]
+			vec![
+				Event::Push {
+					index: 0,
+					value: rec(0)
+				},
+				Event::Push {
+					index: 1,
+					value: rec(1)
+				}
+			]
 		);
 
 		let mut latest = None;
@@ -251,7 +307,7 @@ mod test {
 			latest = Some(frame.payload.clone());
 			frame.commit();
 		}
-		decoder.reset();
+		decoder.start_group();
 		decoder.decode(&latest.unwrap()).unwrap();
 
 		let events = std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>();
@@ -272,7 +328,7 @@ mod test {
 		let reported: Vec<u64> = events
 			.iter()
 			.flat_map(|e| match e {
-				Event::Push(i, _) => vec![*i],
+				Event::Push { index, .. } => vec![*index],
 				Event::Skip(range) => range.clone().collect(),
 				Event::Pop(_) => Vec::new(),
 			})
@@ -305,6 +361,23 @@ mod test {
 	}
 
 	#[test]
+	fn a_rejected_edit_leaves_the_window_unchanged() {
+		let track = rejecting_track();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+
+		assert!(producer.push(&rec(1)).is_err());
+		assert_eq!(producer.range(), 0..0);
+		assert!(producer.window().is_empty());
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the rejected group's header was published");
+		};
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
 	fn a_pop_is_clamped_to_the_window() {
 		let mut live = Live::new(ProducerConfig::default());
 		live.push(0);
@@ -313,7 +386,17 @@ mod test {
 
 		assert_eq!(
 			live.finish(),
-			vec![Event::Push(0, rec(0)), Event::Pop(0..1), Event::Push(1, rec(1))]
+			vec![
+				Event::Push {
+					index: 0,
+					value: rec(0)
+				},
+				Event::Pop(0..1),
+				Event::Push {
+					index: 1,
+					value: rec(1)
+				},
+			]
 		);
 	}
 
@@ -321,20 +404,28 @@ mod test {
 	fn a_large_gap_is_one_skip_event() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
-		decoder.reset();
-		decoder
-			.decode(br#"{"offset":18446744073709551615,"records":[]}"#)
-			.unwrap();
+		decoder.start_group();
+		decoder.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
 
-		assert_eq!(decoder.next_event(), Some(Event::Skip(0..u64::MAX)));
+		assert_eq!(decoder.next_event(), Some(Event::Skip(0..super::encoder::MAX_INDEX)));
 		assert_eq!(decoder.next_event(), None);
+	}
+
+	#[test]
+	fn indices_must_fit_the_shared_safe_integer_range() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		assert!(decoder.decode(br#"{"offset":9007199254740992,"records":[]}"#).is_err());
+
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		decoder.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
+		assert!(decoder.decode(br#"{"push":null}"#).is_err());
 	}
 
 	#[test]
 	fn every_group_requires_a_header() {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		decoder.decode(br#"{"offset":0,"records":[]}"#).unwrap();
-		decoder.reset();
+		decoder.start_group();
 
 		assert!(decoder.decode(br#"{"push":null}"#).is_err());
 	}

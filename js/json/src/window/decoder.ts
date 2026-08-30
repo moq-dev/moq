@@ -74,7 +74,7 @@ export class Decoder<T> {
 	 * Only the group-local state resets. The index cursor deliberately survives: it is what lets the
 	 * next group's header report just the records this reader has not seen.
 	 */
-	reset(): void {
+	startGroup(): void {
 		this.#flate = undefined;
 		this.#positioned = false;
 	}

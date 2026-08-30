@@ -15,6 +15,9 @@ use crate::Result;
 /// joiner can always read the header at frame 0.
 pub(super) const MAX_GROUP_FRAMES: usize = 256;
 
+/// Largest index represented exactly by both Rust and JavaScript implementations.
+pub(super) const MAX_INDEX: u64 = (1 << 53) - 1;
+
 /// Configuration for an [`Encoder`] and the [`Producer`](super::Producer) wrapping one.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
@@ -83,17 +86,19 @@ pub struct Encoded {
 
 /// An encoded frame the caller has not yet acknowledged writing.
 ///
-/// Write the frame, then [`commit`](Self::commit). A frame that never reaches the wire leaves the
-/// consumer's view behind the producer's window, so dropping it uncommitted starts a new group and
-/// the next frame restates the whole window.
-///
-/// The window itself is not rolled back. It is the producer's truth, and the edit really happened;
-/// only the consumer's knowledge of it is lost, which the next group header repairs.
+/// Write the frame, then [`commit`](Self::commit). The edit is staged until commit, so dropping the
+/// frame leaves the window unchanged and makes the next frame open a new group.
 #[must_use = "write the frame, then commit it"]
 pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
 	encoded: Encoded,
-	committed: bool,
+	edit: Option<Edit>,
+}
+
+/// The window mutation staged behind a [`Pending`] frame.
+enum Edit {
+	Push(Value),
+	Pop(u64),
 }
 
 impl<T> std::ops::Deref for Pending<'_, T> {
@@ -105,18 +110,19 @@ impl<T> std::ops::Deref for Pending<'_, T> {
 }
 
 impl<T> Pending<'_, T> {
-	/// Acknowledge that the frame reached the wire, keeping the encoder's state.
+	/// Acknowledge that the frame reached the wire, applying its edit to the retained window.
 	///
 	/// Only call this once the write has actually succeeded.
 	pub fn commit(mut self) {
-		self.committed = true;
+		let edit = self.edit.take().expect("pending edit");
+		self.encoder.commit(edit);
 	}
 }
 
 impl<T> Drop for Pending<'_, T> {
 	fn drop(&mut self) {
-		if !self.committed {
-			self.encoder.reset();
+		if self.edit.is_some() {
+			self.encoder.start_group();
 		}
 	}
 }
@@ -187,19 +193,30 @@ impl<T> Encoder<T> {
 		self.offset..self.offset + self.window.len() as u64
 	}
 
-	/// Force the next frame to open a new group with a header.
+	/// Make the next frame open a new group with a header.
 	///
 	/// Call this whenever the caller closes the current group behind the encoder's back. Without it
 	/// the next frame may be a push against a DEFLATE window and an index base the new group does
 	/// not carry.
 	///
 	/// The window survives: the group header restates it in full anyway.
-	pub fn reset(&mut self) {
+	pub fn start_group(&mut self) {
 		self.flate = None;
 		self.op_bytes = 0;
 		self.header_len = 0;
 		self.group_frames = 0;
 		self.resync = true;
+	}
+
+	/// Apply an edit after its encoded frame reached the wire.
+	fn commit(&mut self, edit: Edit) {
+		match edit {
+			Edit::Push(record) => self.window.push_back(record),
+			Edit::Pop(count) => {
+				self.window.drain(..count as usize);
+				self.offset += count;
+			}
+		}
 	}
 
 	/// Whether the pending edit may ride as an op in the open group.
@@ -228,24 +245,23 @@ impl<T> Encoder<T> {
 	}
 
 	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
-	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
+	fn emit_op(&mut self, bytes: Vec<u8>) -> Option<Encoded> {
 		let encoded = self.frame(bytes);
 		let group_bytes = self.header_len.saturating_add(self.op_bytes);
 		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			self.emit_header()
+			None
 		} else {
-			Ok(encoded)
+			Some(encoded)
 		}
 	}
 
-	/// Encode the header restating the whole window and opening a new group.
-	fn emit_header(&mut self) -> Result<Encoded> {
-		let records: Vec<&Value> = self.window.iter().collect();
-		let bytes = serde_json::to_vec(&Header {
-			offset: self.offset,
-			records,
-		})?;
+	/// Serialize a header before mutably borrowing the compression state.
+	fn header(offset: u64, records: Vec<&Value>) -> Result<Vec<u8>> {
+		Ok(serde_json::to_vec(&Header { offset, records })?)
+	}
 
+	/// Encode the header restating the whole window and opening a new group.
+	fn emit_header(&mut self, bytes: Vec<u8>) -> Encoded {
 		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
 		// its wire size as the op budget's anchor.
 		let (payload, flate) = match self.config.compression {
@@ -263,10 +279,10 @@ impl<T> Encoder<T> {
 		self.flate = flate;
 		self.resync = false;
 
-		Ok(Encoded {
+		Encoded {
 			payload,
 			keyframe: true,
-		})
+		}
 	}
 
 	/// Drop `count` records from the front of the window.
@@ -279,26 +295,33 @@ impl<T> Encoder<T> {
 			return Ok(None);
 		}
 
-		self.window.drain(..count as usize);
-		self.offset += count;
-
+		let offset = self.offset + count;
 		let encoded = match self.resync || !self.op_allowed() {
-			true => self.emit_header()?,
+			true => {
+				let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
+				self.emit_header(bytes)
+			}
 			false => {
 				let bytes = serde_json::to_vec(&Op::<&Value>::Pop(count))?;
-				self.emit_op(bytes)?
+				match self.emit_op(bytes) {
+					Some(encoded) => encoded,
+					None => {
+						let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
+						self.emit_header(bytes)
+					}
+				}
 			}
 		};
 
-		Ok(Some(self.pending(encoded)))
+		Ok(Some(self.pending(encoded, Edit::Pop(count))))
 	}
 
 	/// Wrap an encoded frame so the caller has to say whether it reached the wire.
-	fn pending(&mut self, encoded: Encoded) -> Pending<'_, T> {
+	fn pending(&mut self, encoded: Encoded, edit: Edit) -> Pending<'_, T> {
 		Pending {
 			encoder: self,
 			encoded,
-			committed: false,
+			edit: Some(edit),
 		}
 	}
 }
@@ -314,20 +337,34 @@ impl<T: Serialize> Encoder<T> {
 		// identical to what a push would have put on the wire.
 		let bytes = serde_json::to_vec(value)?;
 		let record: Value = serde_json::from_slice(&bytes)?;
-
-		self.window.push_back(record);
+		if self.range().end >= MAX_INDEX {
+			return Err(crate::Error::Json("window index exceeds the safe integer range".into()));
+		}
 
 		let encoded = match self.resync || !self.op_allowed() {
-			true => self.emit_header()?,
+			true => {
+				let bytes = Self::header(
+					self.offset,
+					self.window.iter().chain(std::iter::once(&record)).collect(),
+				)?;
+				self.emit_header(bytes)
+			}
 			false => {
-				// Serialize the record out of the window rather than the caller's value, so its bytes
-				// match what a later group header would restate.
-				let bytes = serde_json::to_vec(&Op::Push(self.window.back().expect("just pushed")))?;
-				self.emit_op(bytes)?
+				let bytes = serde_json::to_vec(&Op::Push(&record))?;
+				match self.emit_op(bytes) {
+					Some(encoded) => encoded,
+					None => {
+						let bytes = Self::header(
+							self.offset,
+							self.window.iter().chain(std::iter::once(&record)).collect(),
+						)?;
+						self.emit_header(bytes)
+					}
+				}
 			}
 		};
 
-		Ok(self.pending(encoded))
+		Ok(self.pending(encoded, Edit::Push(record)))
 	}
 }
 
@@ -357,5 +394,21 @@ mod test {
 		assert!(frame.keyframe);
 		assert!(frame.payload.len() < moq_net::group::MAX_CACHE_BYTES as usize);
 		frame.commit();
+	}
+
+	#[test]
+	fn an_uncommitted_edit_leaves_the_window_unchanged() {
+		let mut encoder = Encoder::<u64>::new(ProducerConfig::default());
+
+		drop(encoder.push(&1).unwrap());
+		assert!(encoder.window().next().is_none());
+
+		let frame = encoder.push(&2).unwrap();
+		assert!(frame.keyframe);
+		frame.commit();
+		assert_eq!(encoder.window().collect::<Vec<_>>(), vec![&Value::from(2)]);
+
+		drop(encoder.pop(1).unwrap().unwrap());
+		assert_eq!(encoder.window().collect::<Vec<_>>(), vec![&Value::from(2)]);
 	}
 }
