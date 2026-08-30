@@ -10,27 +10,27 @@ test("audio subscription tracks the playback latency ceiling without restarting"
 	const source = new Broadcast.Producer();
 	source.createTrack("audio");
 	const broadcast = source.consume();
-	const maxLatency = new Signal<Time.Milli>(Time.Milli(100));
+	const maxLatency = new Signal<Time.Milli>(Time.Milli(38.75));
 	const effect = new Effect();
 	const subscriber = subscribe(effect, { broadcast, track: "audio", maxLatency });
 
 	expect(subscriber.subscription.peek()).toEqual({
 		priority: Catalog.PRIORITY.audio,
 		ordered: false,
-		latencyMax: 100,
+		latencyMax: 39,
 		startGroup: undefined,
 		endGroup: undefined,
 	});
 
 	await settle();
-	maxLatency.set(Time.Milli(500));
+	maxLatency.set(Time.Milli(500.25));
 	await settle();
 
 	expect(subscriber.closed.peek()).toBeUndefined();
 	expect(subscriber.subscription.peek()).toEqual({
 		priority: Catalog.PRIORITY.audio,
 		ordered: false,
-		latencyMax: 500,
+		latencyMax: 501,
 		startGroup: undefined,
 		endGroup: undefined,
 	});

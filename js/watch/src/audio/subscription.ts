@@ -17,12 +17,12 @@ export function subscribe(
 	},
 ): Moq.Track.Subscriber {
 	const priority = Catalog.PRIORITY.audio;
-	let latencyMax = maxLatency.peek();
+	let latencyMax = Math.ceil(maxLatency.peek());
 	const subscriber = broadcast.track(track).subscribe({ priority, latencyMax });
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		const next = inner.get(maxLatency);
+		const next = Math.ceil(inner.get(maxLatency));
 		if (next === latencyMax) return;
 		latencyMax = next;
 		subscriber.update({ priority, latencyMax });
