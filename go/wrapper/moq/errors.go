@@ -30,8 +30,12 @@ var (
 	ErrMedia = ffi.ErrMoqErrorMedia
 	// ErrMux matches a muxing or demuxing failure from moq-mux.
 	ErrMux = ffi.ErrMoqErrorMux
+	// ErrJSONTrack matches a JSON track encoding or decoding failure.
+	ErrJSONTrack = ffi.ErrMoqErrorJsonTrack
 	// ErrAudio matches a raw-audio encode or decode failure.
 	ErrAudio = ffi.ErrMoqErrorAudio
+	// ErrVideo matches a raw-video encode or decode failure.
+	ErrVideo = ffi.ErrMoqErrorVideo
 	// ErrURL matches a malformed URL passed when connecting or publishing.
 	ErrURL = ffi.ErrMoqErrorUrl
 	// ErrTimeOverflow matches a timestamp that overflowed its timescale.
@@ -40,6 +44,8 @@ var (
 	ErrLogLevel = ffi.ErrMoqErrorLogLevel
 	// ErrTask matches a panic or cancellation in a background native task.
 	ErrTask = ffi.ErrMoqErrorTask
+	// ErrJSON matches malformed JSON supplied to a binding API.
+	ErrJSON = ffi.ErrMoqErrorJson
 	// ErrCancelled is returned when an operation is cancelled, e.g. via a cancelled context; IsShutdown treats it as a graceful stop.
 	ErrCancelled = ffi.ErrMoqErrorCancelled
 	// ErrClosed is returned when the session or stream has closed; IsShutdown treats it as a graceful stop.
@@ -62,6 +68,8 @@ var (
 	ErrNotFound = ffi.ErrMoqErrorNotFound
 	// ErrUnsupported is returned when the requested operation is not supported.
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
+	// ErrInvalidRoute is returned when a route has an invalid hop id or too many hops.
+	ErrInvalidRoute = ffi.ErrMoqErrorInvalidRoute
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 )

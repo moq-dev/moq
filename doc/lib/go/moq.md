@@ -179,7 +179,7 @@ err := broadcast.SetVideoProperties(moq.VideoProperties{
 
 ## Error handling
 
-A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
+A server can reject the connection on auth grounds: `moq.ErrUnauthorized` (HTTP 401) or `moq.ErrForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
 
 ```go
 session, err := client.Connect("https://relay.example.com")
