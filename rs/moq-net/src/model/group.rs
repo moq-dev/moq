@@ -818,6 +818,7 @@ impl Producer {
 				prefetch: Prefetch::default(),
 				last_refresh: crate::model::clock::now(),
 				pool: self.cache.pool().clone(),
+				max_age: self.track.max_age,
 			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -1021,9 +1022,13 @@ struct Plain {
 	// window without an access and be expired mid-read.
 	last_refresh: crate::runtime::Instant,
 
-	// The shared pool supplies the current refresh cadence. Its expiry can be
+	// The shared pool supplies the current idle-expiry cadence. Its expiry can be
 	// reconfigured after this cursor is created.
 	pool: cache::Pool,
+
+	// The publisher's media-retention window also bounds refreshes so moving idle
+	// expiry to the pool does not weaken protection from byte-budget eviction.
+	max_age: std::time::Duration,
 }
 
 impl Clone for Plain {
@@ -1037,6 +1042,7 @@ impl Clone for Plain {
 			prefetch: Prefetch::default(),
 			last_refresh: self.last_refresh,
 			pool: self.pool.clone(),
+			max_age: self.max_age,
 		}
 	}
 }
@@ -1469,13 +1475,13 @@ impl Plain {
 	}
 
 	/// Re-stamp the group's access time from the lock-free prefetch path once half
-	/// the pool's LRU window has passed since this consumer last stamped it. The
+	/// the shorter of its track retention or the pool's idle window has passed. The
 	/// batch bounds frames, not elapsed time, so without this a reader pacing
-	/// through a batch could be expired while demonstrably active. Half the window
-	/// keeps the stamp comfortably inside it while staying rare on the hot path.
+	/// through a batch could be expired or evicted while demonstrably active.
 	fn refresh_if_stale(&mut self) {
 		let now = crate::model::clock::now();
-		if now.duration_since(self.last_refresh) < self.pool.refresh_interval() {
+		let interval = self.pool.refresh_interval().min(self.max_age / 2);
+		if now.duration_since(self.last_refresh) < interval {
 			return;
 		}
 		self.state.read().charge.refresh();
@@ -1944,17 +1950,23 @@ mod test {
 		assert!(end.is_none());
 	}
 
-	#[test]
-	fn prefetch_refresh_uses_current_pool_expiry() {
-		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Producer, Consumer) {
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let track = track::Info::default().with_max_age(max_age);
+		let mut producer = Producer::new(Info { sequence: 0 }, track, cache);
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		(producer, consumer)
+	}
+
+	#[test]
+	fn prefetch_refresh_uses_current_pool_expiry() {
+		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
 		let before = producer.cache_accessed();
 
 		// The first read prefetched the second frame with a 15-second refresh
@@ -1964,6 +1976,18 @@ mod test {
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
 		assert!(producer.cache_accessed() > before, "the current pool cadence is used");
+	}
+
+	#[test]
+	fn prefetch_refresh_honors_track_max_age() {
+		let pool = cache::Pool::unbounded().with_expiry(std::time::Duration::from_secs(30));
+		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::from_secs(1));
+		let before = producer.cache_accessed();
+
+		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		assert!(producer.cache_accessed() > before, "the track cadence remains in force");
 	}
 
 	/// Reading more than one prefetch batch drains every frame in order across the
