@@ -80,8 +80,8 @@ pub async fn publish_capture(
 trait CaptureSource {
 	type Stream;
 
-	async fn open(&mut self) -> Result<Self::Stream, Error>;
-	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, Error>;
+	async fn open(&mut self) -> Result<Self::Stream, capture::Failure>;
+	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure>;
 }
 
 struct DeviceSource<'a> {
@@ -91,11 +91,11 @@ struct DeviceSource<'a> {
 impl CaptureSource for DeviceSource<'_> {
 	type Stream = capture::Stream;
 
-	async fn open(&mut self) -> Result<Self::Stream, Error> {
+	async fn open(&mut self) -> Result<Self::Stream, capture::Failure> {
 		capture::open(self.config).await
 	}
 
-	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, Error> {
+	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure> {
 		stream.read().await
 	}
 }
@@ -226,12 +226,6 @@ impl Supervisor {
 
 				let failure = match opened {
 					Ok(mut input) => {
-						let recovered = last_error.take().is_some();
-						self.reset();
-						if recovered {
-							tracing::info!("audio capture recovered");
-						}
-
 						loop {
 							// Demand wins over a simultaneous buffer or error, so an unused
 							// track releases the device without starting a retry sequence.
@@ -241,7 +235,10 @@ impl Supervisor {
 									drop(input);
 									output.reset_epoch();
 									if !unused {
-										return Ok(());
+										return match last_error {
+											Some(err) => Err(err),
+											None => Ok(()),
+										};
 									}
 									tracing::info!("no listeners: released audio capture");
 									continue 'demand;
@@ -251,20 +248,34 @@ impl Supervisor {
 
 							match samples {
 								Ok(Some(samples)) => {
+									// An open is not a recovery until it actually delivers audio.
+									// Otherwise a flapping device would reset its backoff after each
+									// empty stream and retry at the minimum delay forever.
+									if last_error.take().is_some() {
+										self.reset();
+										tracing::info!("audio capture recovered");
+									}
 									// A bounded-queue drop is a real hole in the timeline.
 									if samples.gap {
 										output.reset_epoch();
 									}
 									output.write(samples)?;
 								}
-								Ok(None) => break Error::Capture("audio capture stream stopped".into()),
+								Ok(None) => {
+									break capture::Failure::retry(Error::Capture(
+										"audio capture stream stopped".into(),
+									));
+								}
 								Err(err) => break err,
 							}
 						}
 					}
-					Err(err) if retryable(&err) => err,
-					Err(err) => return Err(err),
+					Err(err) => err,
 				};
+				if !failure.is_retryable() {
+					return Err(failure.into_error());
+				}
+				let failure = failure.into_error();
 
 				// The failed stream was dropped by the match above. Reset before waiting
 				// so a publication that ends during recovery cannot flush stale samples.
@@ -286,10 +297,6 @@ impl Supervisor {
 			}
 		}
 	}
-}
-
-fn retryable(err: &Error) -> bool {
-	matches!(err, Error::Capture(_) | Error::Device(_))
 }
 
 /// A dropped or closed track is the normal end of a publish; any other cause is
@@ -325,13 +332,12 @@ mod tests {
 		Arc,
 		atomic::{AtomicUsize, Ordering},
 	};
-
-	use tokio::sync::{mpsc, watch};
+	use std::task::Poll;
 
 	use super::*;
 
 	struct MockStream {
-		events: mpsc::UnboundedReceiver<Result<capture::Samples, Error>>,
+		events: kio::Queue<Result<capture::Samples, capture::Failure>>,
 		drops: Option<Arc<AtomicUsize>>,
 	}
 
@@ -345,6 +351,7 @@ mod tests {
 
 	enum Open {
 		Error(&'static str),
+		Fatal(&'static str),
 		Stream(MockStream),
 	}
 
@@ -357,39 +364,42 @@ mod tests {
 	impl CaptureSource for MockSource {
 		type Stream = MockStream;
 
-		async fn open(&mut self) -> Result<Self::Stream, Error> {
+		async fn open(&mut self) -> Result<Self::Stream, capture::Failure> {
 			self.attempts.fetch_add(1, Ordering::SeqCst);
 			match self.opens.pop_front() {
-				Some(Open::Error(message)) => Err(Error::Capture(message.into())),
+				Some(Open::Error(message)) => Err(capture::Failure::retry(Error::Capture(message.into()))),
+				Some(Open::Fatal(message)) => Err(capture::Failure::fatal(Error::Capture(message.into()))),
 				Some(Open::Stream(stream)) => Ok(stream),
-				None if self.fallback_error => Err(Error::Capture("still unavailable".into())),
+				None if self.fallback_error => Err(capture::Failure::retry(Error::Capture("still unavailable".into()))),
 				None => std::future::pending().await,
 			}
 		}
 
-		async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, Error> {
-			match stream.events.recv().await {
-				Some(Ok(samples)) => Ok(Some(samples)),
-				Some(Err(err)) => Err(err),
-				None => Ok(None),
+		async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure> {
+			match stream.events.pop().await {
+				Ok(Ok(samples)) => Ok(Some(samples)),
+				Ok(Err(err)) => Err(err),
+				Err(_) => Ok(None),
 			}
 		}
 	}
 
 	struct MockDemand {
-		rx: watch::Receiver<bool>,
+		state: kio::Consumer<bool>,
 	}
 
 	impl MockDemand {
 		async fn wait(&mut self, value: bool) -> bool {
-			loop {
-				if *self.rx.borrow() == value {
-					return true;
-				}
-				if self.rx.changed().await.is_err() {
-					return false;
-				}
-			}
+			self.state
+				.wait(|state| {
+					if **state == value {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await
+				.is_ok()
 		}
 	}
 
@@ -434,9 +444,26 @@ mod tests {
 		}
 	}
 
-	fn stream(drops: Option<Arc<AtomicUsize>>) -> (mpsc::UnboundedSender<Result<capture::Samples, Error>>, MockStream) {
-		let (events, rx) = mpsc::unbounded_channel();
-		(events, MockStream { events: rx, drops })
+	fn demand(value: bool) -> (kio::Producer<bool>, MockDemand) {
+		let state = kio::Producer::new(value);
+		let demand = MockDemand { state: state.consume() };
+		(state, demand)
+	}
+
+	fn set_demand(state: &kio::Producer<bool>, value: bool) {
+		let Ok(mut state) = state.write() else {
+			panic!("demand state closed");
+		};
+		*state = value;
+	}
+
+	fn stream(drops: Option<Arc<AtomicUsize>>) -> (kio::Queue<Result<capture::Samples, capture::Failure>>, MockStream) {
+		let events = kio::Queue::new();
+		let stream = MockStream {
+			events: events.clone(),
+			drops,
+		};
+		(events, stream)
 	}
 
 	/// Poll `future` through all immediately-ready work until its next real wait.
@@ -452,8 +479,7 @@ mod tests {
 	async fn failed_reopens_back_off_to_the_cap() {
 		let mut source = source([], true);
 		let attempts = source.attempts.clone();
-		let (demand_tx, demand_rx) = watch::channel(true);
-		let mut demand = MockDemand { rx: demand_rx };
+		let (demand_tx, mut demand) = demand(true);
 		let mut output = MockOutput::default();
 		let mut supervisor = Supervisor::exact();
 		let future = supervisor.run(&mut source, &mut demand, &mut output);
@@ -479,10 +505,89 @@ mod tests {
 		assert!(matches!(err, Error::Capture(message) if message == "still unavailable"));
 	}
 
+	#[tokio::test]
+	async fn permanent_open_error_is_not_retried() {
+		let mut source = source([Open::Fatal("permission denied")], true);
+		let attempts = source.attempts.clone();
+		let (_demand_tx, mut demand) = demand(true);
+		let mut output = MockOutput::default();
+
+		let err = Supervisor::exact()
+			.run(&mut source, &mut demand, &mut output)
+			.await
+			.expect_err("permanent failure was ignored");
+
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+		assert!(matches!(err, Error::Capture(message) if message == "permission denied"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn empty_reopens_do_not_reset_the_backoff() {
+		let (first_tx, first) = stream(None);
+		first_tx
+			.try_push(Err(capture::Failure::retry(Error::Capture("first lost".into()))))
+			.unwrap();
+		let (second_tx, second) = stream(None);
+		second_tx
+			.try_push(Err(capture::Failure::retry(Error::Capture("second lost".into()))))
+			.unwrap();
+		let mut source = source([Open::Stream(first), Open::Stream(second)], true);
+		let attempts = source.attempts.clone();
+		let (demand_tx, mut demand) = demand(true);
+		let mut output = MockOutput::default();
+		let mut supervisor = Supervisor::exact();
+		let future = supervisor.run(&mut source, &mut demand, &mut output);
+		tokio::pin!(future);
+
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+		tokio::time::advance(Duration::from_millis(500)).await;
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+		tokio::time::advance(Duration::from_millis(999)).await;
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 2);
+		tokio::time::advance(Duration::from_millis(1)).await;
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+		drop(demand_tx);
+		let err = future.await.expect_err("recovery ended without its device error");
+		assert!(matches!(err, Error::Capture(message) if message == "still unavailable"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn track_end_after_empty_reopen_returns_the_last_error() {
+		let (failed_tx, failed) = stream(None);
+		failed_tx
+			.try_push(Err(capture::Failure::retry(Error::Capture("lost".into()))))
+			.unwrap();
+		let (_recovered_tx, recovered) = stream(None);
+		let mut source = source([Open::Stream(failed), Open::Stream(recovered)], false);
+		let attempts = source.attempts.clone();
+		let (demand_tx, mut demand) = demand(true);
+		let mut output = MockOutput::default();
+		let mut supervisor = Supervisor::exact();
+		let future = supervisor.run(&mut source, &mut demand, &mut output);
+		tokio::pin!(future);
+
+		poll_pending(future.as_mut()).await;
+		tokio::time::advance(Duration::from_millis(500)).await;
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+		drop(demand_tx);
+		let err = future.await.expect_err("track end hid the pending device error");
+		assert!(matches!(err, Error::Capture(message) if message == "lost"));
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn successful_reopen_resumes_the_same_output_after_an_epoch_reset() {
 		let (failed_tx, failed) = stream(None);
-		failed_tx.send(Err(Error::Capture("lost".into()))).unwrap();
+		failed_tx
+			.try_push(Err(capture::Failure::retry(Error::Capture("lost".into()))))
+			.unwrap();
 		let (recovered_tx, recovered) = stream(None);
 		let mut source = source(
 			[
@@ -493,8 +598,7 @@ mod tests {
 			false,
 		);
 		let attempts = source.attempts.clone();
-		let (demand_tx, demand_rx) = watch::channel(true);
-		let mut demand = MockDemand { rx: demand_rx };
+		let (demand_tx, mut demand) = demand(true);
 		let mut output = MockOutput::default();
 		let mut supervisor = Supervisor::exact();
 		{
@@ -511,14 +615,14 @@ mod tests {
 			assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
 			recovered_tx
-				.send(Ok(capture::Samples {
+				.try_push(Ok(capture::Samples {
 					data: vec![0.25],
 					gap: false,
 				}))
 				.unwrap();
 			poll_pending(future.as_mut()).await;
 
-			demand_tx.send(false).unwrap();
+			set_demand(&demand_tx, false);
 			poll_pending(future.as_mut()).await;
 			drop(demand_tx);
 			future.await.unwrap();
@@ -538,8 +642,7 @@ mod tests {
 	async fn demand_loss_stops_a_pending_retry() {
 		let mut source = source([Open::Error("lost")], true);
 		let attempts = source.attempts.clone();
-		let (demand_tx, demand_rx) = watch::channel(true);
-		let mut demand = MockDemand { rx: demand_rx };
+		let (demand_tx, mut demand) = demand(true);
 		let mut output = MockOutput::default();
 		let mut supervisor = Supervisor::exact();
 		let future = supervisor.run(&mut source, &mut demand, &mut output);
@@ -547,7 +650,7 @@ mod tests {
 
 		poll_pending(future.as_mut()).await;
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
-		demand_tx.send(false).unwrap();
+		set_demand(&demand_tx, false);
 		poll_pending(future.as_mut()).await;
 		tokio::time::advance(Duration::from_secs(60)).await;
 		poll_pending(future.as_mut()).await;
@@ -562,8 +665,7 @@ mod tests {
 		let drops = Arc::new(AtomicUsize::new(0));
 		let (_events, live) = stream(Some(drops.clone()));
 		let mut source = source([Open::Stream(live)], false);
-		let (_demand_tx, demand_rx) = watch::channel(true);
-		let mut demand = MockDemand { rx: demand_rx };
+		let (_demand_tx, mut demand) = demand(true);
 		let mut output = MockOutput::default();
 		let mut supervisor = Supervisor::exact();
 

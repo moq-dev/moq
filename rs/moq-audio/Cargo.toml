@@ -28,6 +28,7 @@ default = ["aac"]
 # is a no-op elsewhere).
 capture = [
     "dep:cpal",
+    "dep:kio",
     "dep:tokio",
     "dep:tracing",
     "dep:block2",
@@ -63,6 +64,7 @@ cpal = { version = "0.18", optional = true }
 # `fft-resampler` stays off, matching the sinc-only stance below.
 fixed-resample = { version = "0.12", optional = true, default-features = false, features = ["channel", "resampler"] }
 hang = { workspace = true }
+kio = { workspace = true, optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # We only use the sinc resampler (Async::new_sinc), so skip the default
