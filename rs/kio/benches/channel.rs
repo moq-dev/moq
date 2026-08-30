@@ -9,12 +9,37 @@
 
 use std::hint::black_box;
 use std::task::{Poll, Waker};
+use std::thread;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Consumer, Producer, Waiter};
 
 /// Fanout sizes that cover a lone reader, a small room, and a busy broadcast.
 const FANOUT: [usize; 3] = [1, 8, 128];
+
+/// Concurrent constructors and channels per constructor in the contention case.
+const CONSTRUCTORS: usize = 8;
+const CHANNELS_PER_CONSTRUCTOR: usize = 1_024;
+
+/// Measure channel construction when several executor workers create state at once.
+fn bench_create_parallel(c: &mut Criterion) {
+	let mut group = c.benchmark_group("channel_create_parallel");
+	group.throughput(Throughput::Elements((CONSTRUCTORS * CHANNELS_PER_CONSTRUCTOR) as u64));
+	group.bench_function("workers", |b| {
+		b.iter(|| {
+			thread::scope(|scope| {
+				for _ in 0..CONSTRUCTORS {
+					scope.spawn(|| {
+						for _ in 0..CHANNELS_PER_CONSTRUCTOR {
+							black_box(Producer::new(black_box(0u64)));
+						}
+					});
+				}
+			});
+		});
+	});
+	group.finish();
+}
 
 /// One consumer and the cursor it has most recently observed.
 struct Reader {
@@ -102,5 +127,5 @@ fn bench_notify(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_notify);
+criterion_group!(benches, bench_create_parallel, bench_notify);
 criterion_main!(benches);
