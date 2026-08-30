@@ -268,7 +268,7 @@ export class Decoder {
 
 		// The Sync ceiling is the maximum age of a non-latest group before both the network and
 		// container consumers skip it. Omitting startGroup keeps a new subscription at the live edge.
-		const sub = subscribe(effect, active, track, this.sync.out.maxBuffer);
+		const sub = subscribe(effect, { broadcast: active, track, maxLatency: this.sync.out.maxBuffer });
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
