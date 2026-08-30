@@ -7,11 +7,11 @@ description: GStreamer plugin for MoQ
 
 A GStreamer plugin for publishing and consuming MoQ streams.
 
-::: warning Work in Progress
-This plugin is currently under development, but it works okay.
+::: warning Active development
+The plugin is usable, but its API may still change.
 :::
 
-## Overview
+## Elements and properties
 
 The GStreamer plugin provides two elements:
 
@@ -160,7 +160,7 @@ nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
 cargo build -p moq-gst
 ```
 
-This produces a shared library (cdylib) in `target/debug/`. GStreamer needs to find this plugin via the `GST_PLUGIN_PATH_1_0` environment variable — the `just` commands below handle this automatically.
+This produces a shared library (cdylib) in `target/debug/`. GStreamer needs to find this plugin via the `GST_PLUGIN_PATH_1_0` environment variable; the `just` commands below handle this automatically.
 
 ## Running Locally
 

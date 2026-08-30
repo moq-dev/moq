@@ -138,6 +138,6 @@ peer stays loudly visible in the logs and a returning one is picked up within se
 
 ## Next steps
 
-- Deploy to [Production](/bin/relay/prod)
+- Review [Production deployment](/setup/prod)
 - Set up [Authentication](/bin/relay/auth)
 - Learn about [Protocol concepts](/concept/layer/)

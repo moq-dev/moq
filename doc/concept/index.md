@@ -1,30 +1,25 @@
 ---
 title: Concepts
-description: Understanding MoQ's fundamental concepts
+description: Architecture, standards, and use cases for MoQ
 ---
 
 # Concepts
 
-Welcome to my favorite section.
-MoQ has been a multi-year journey to solve some very real problems in the industry and now it's time to flex the design.
+MoQ separates network transport, live pub/sub, media packaging, and application
+behavior. That separation lets relays remain media-agnostic while applications
+choose the formats and features they need.
 
-## Layers
+## [Layers](/concept/layer/)
 
-MoQ is carefully broken into layers to make it simple, composable, and customizable.
-We don't want you to hit a brick wall if you deviate from the standard path (*ahem* WebRTC).
+How QUIC, WebTransport, moq-lite, hang, and application tracks fit together.
+Start here if you are new to the protocol or deciding which library layer to use.
 
-See [Layers](/concept/layer/) for more information.
+## [Standards](/concept/standard/)
 
-## Standards
+How this implementation relates to the IETF MoQ work, including MoqTransport,
+MSF, LOC, and the specifications maintained by moq.dev.
 
-MoQ is built on open standards and protocol specifications.
-We're in this together, even if we disagree on some details.
+## [Use cases](/concept/use-case/)
 
-See [Standards](/concept/standard/) for more information.
-
-## Use Cases
-
-MoQ is designed to be used in a variety of use-cases.
-Distribution, contribution, conferencing, and more.
-
-See [Use Cases](/concept/use-case/) for more information.
+The requirements and tradeoffs for contribution, distribution, conferencing,
+and real-time AI workloads.
