@@ -197,3 +197,9 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
   - Before trusting a *passing* model, mutate the code it covers and confirm it fails. A model that never exercises the race is worse than none.
 
   Two constraints when adding to it: every non-loom `#[cfg(test)]` in kio must be `#[cfg(all(test, not(loom)))]`, or the tokio tests build loom primitives outside `loom::model` and panic; and loom's `Arc` has no `downgrade`, so `lock.rs` and `waiter.rs` keep std's (see `kio/src/sync.rs`).
+
+- **`just rs fuzz <target>` fuzzes the moq-net wire codecs** (libFuzzer via cargo-fuzz; `lite`, `ietf`, `varint`, `path`). Like `loom` it stays outside `check` and `test`, and for the same kind of reason: libFuzzer needs `-Zsanitizer`, so it is the one recipe that steps off the pinned toolchain onto nightly. Bound a run with `just rs fuzz lite -- -max_total_time=300`.
+
+  What CI gets instead is the replay. The target bodies live in moq-net's hidden `fuzz` module (`src/fuzz.rs`, behind `#[cfg(any(test, feature = "fuzz"))]`), not in `fuzz/fuzz_targets/`, because `lite` and `ietf` are private modules and no outside crate can reach a single decoder. Sharing them means `fuzz::tests` replays the generated corpus, plus every crash input committed under `fuzz/regressions/<target>/`, on stable as part of `just test`. So the workflow after a crash is: fix it, then copy the artifact into `fuzz/regressions/<target>/`, and it is covered from then on without anyone installing cargo-fuzz.
+
+  Adding a type to a target means adding an arm and bumping `LITE_KINDS`/`IETF_KINDS`; `seeds_reach_every_arm` fails if nothing in the generated corpus decodes for an arm, which is what keeps a dispatch from silently covering less than it lists. See `rs/moq-net/fuzz/README.md` for what the targets assert and why an encode failure is not a finding.

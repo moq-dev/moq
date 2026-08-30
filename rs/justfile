@@ -529,6 +529,47 @@ loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: {{ args }}
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom {{ args }}
 
+# Coverage-guided fuzzing of the moq-net wire codecs (libFuzzer, via cargo-fuzz).
+#
+# The one recipe that steps off the pinned toolchain: libFuzzer needs `-Zsanitizer`,
+# which is nightly-only, so this stays out of `check` and `test` the same way `loom`
+# does. What CI gets instead is the replay: the target bodies live in moq-net's hidden
+# `fuzz` module, and its own tests run the generated corpus plus everything committed
+# under `fuzz/regressions/` on stable. A crash found here becomes a regression test
+# nobody has to install cargo-fuzz to run.
+#
+# Seeds are regenerated first so the corpus follows the dispatch rather than a stale
+# run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
+# why the generated seeds are passed second and stay read-only.
+#
+# TARGET is lite, ietf, varint, or path. Arguments pass through, so
+# `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! command -v cargo-fuzz > /dev/null 2>&1; then
+    	echo "rs: cargo-fuzz is missing: cargo install --locked cargo-fuzz" >&2
+    	exit 1
+    fi
+
+    if ! rustup run nightly rustc --version > /dev/null 2>&1; then
+    	echo "rs: the nightly toolchain is missing: rustup toolchain install nightly" >&2
+    	exit 1
+    fi
+
+    cargo run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds
+    mkdir -p rs/moq-net/fuzz/corpus/{{ target }}
+
+    # Nightly by PATH rather than by `cargo +nightly`: the dev shell puts a
+    # Nix-provided cargo ahead of the rustup shim, so the `+` form is not
+    # understood, and cargo-fuzz shells out to a bare `cargo` and `rustc` anyway.
+    # Both have to be the nightly ones or the sanitizer flags are rejected.
+    export PATH="$(rustup run nightly rustc --print sysroot)/bin:$PATH"
+
+    cargo fuzz run --fuzz-dir rs/moq-net/fuzz {{ target }} \
+    	rs/moq-net/fuzz/corpus/{{ target }} rs/moq-net/fuzz/seeds/{{ target }} {{ args }}
+
 build:
     cargo build --locked
 

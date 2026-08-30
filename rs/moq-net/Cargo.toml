@@ -15,6 +15,11 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
 
+# Exposes the wire codecs to the `fuzz/` harness through the hidden `fuzz` module.
+# Off by default and hidden from the docs; nothing depends on it but that harness.
+[features]
+fuzz = []
+
 [dependencies]
 arrayvec = "0.7"
 bytes = { workspace = true }
@@ -50,6 +55,13 @@ wasm-bindgen-test = "=0.3.71"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "group"
