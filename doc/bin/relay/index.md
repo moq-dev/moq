@@ -48,11 +48,11 @@ A local-only configuration can use a generated certificate and anonymous access:
 
 ```toml
 [server]
-listen = "[::]:4443"
+listen = "127.0.0.1:4443"
 tls.generate = ["localhost"]
 
 [web.http]
-listen = "[::]:4443"
+listen = "127.0.0.1:4443"
 
 [auth]
 public = ""
