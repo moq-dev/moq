@@ -110,13 +110,14 @@ pub(crate) enum Stream {
 }
 
 impl Stream {
-	/// Await the next buffer, or `None` once the source stops. Cancel-safe: drop
-	/// the future to release the device.
-	pub(crate) async fn read(&mut self) -> Option<Samples> {
+	/// Await the next buffer, or `None` once the source stops. A microphone stream
+	/// error is returned immediately even if the device delivers no more samples.
+	/// Cancel-safe: drop the future to release the device.
+	pub(crate) async fn read(&mut self) -> Result<Option<Samples>, Error> {
 		match self {
 			Self::Microphone(mic) => mic.read().await,
 			#[cfg(target_os = "macos")]
-			Self::System(system) => system.read().await,
+			Self::System(system) => Ok(system.read().await),
 		}
 	}
 }
@@ -166,10 +167,43 @@ pub(crate) async fn open(config: &Config) -> Result<Stream, Error> {
 pub(crate) struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: channel::Receiver<Vec<f32>>,
+	reader: MicrophoneReader,
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
-	pending: Option<Vec<f32>>,
+	pending: Option<Samples>,
+}
+
+/// The async half of a microphone stream, separate from the cpal handle so its
+/// failure wakeup and stream-generation isolation can be tested without audio
+/// hardware.
+struct MicrophoneReader {
+	rx: channel::Receiver<Vec<f32>>,
+	errors: tokio::sync::mpsc::UnboundedReceiver<Error>,
+}
+
+impl MicrophoneReader {
+	/// Return the buffer consumed during open unless a stream error arrived in
+	/// the meantime.
+	async fn pending(&mut self, samples: Samples) -> Result<Option<Samples>, Error> {
+		tokio::select! {
+			biased;
+			Some(err) = self.errors.recv() => Err(err),
+			_ = std::future::ready(()) => Ok(Some(samples)),
+		}
+	}
+
+	/// Race samples against cpal's error callback. Errors win if both are ready so
+	/// a dead device is never kept alive just to drain already-buffered audio.
+	async fn read(&mut self) -> Result<Option<Samples>, Error> {
+		tokio::select! {
+			biased;
+			Some(err) = self.errors.recv() => Err(err),
+			data = self.rx.recv() => Ok(data.map(|data| Samples {
+				data,
+				gap: self.rx.gap(),
+			})),
+		}
+	}
 }
 
 impl Microphone {
@@ -195,7 +229,9 @@ impl Microphone {
 			aec.open(sample_rate, channels)?;
 		}
 
-		let (tx, mut rx) = channel::bounded::<Vec<f32>>();
+		let (tx, rx) = channel::bounded::<Vec<f32>>();
+		let (error_tx, errors) = tokio::sync::mpsc::unbounded_channel();
+		let mut reader = MicrophoneReader { rx, errors };
 
 		// What every sample format funnels into once it is interleaved `f32`.
 		// Echo cancellation edits the buffer in place, so it costs no allocation
@@ -216,24 +252,33 @@ impl Microphone {
 		// The callback runs on cpal's realtime audio thread. Sample conversion
 		// allocates one Vec per callback; the bounded handoff never blocks.
 		let stream = match sample_format {
-			cpal::SampleFormat::F32 => device.build_input_stream(
-				stream_config,
-				move |data: &[f32], _: &_| deliver(data.to_vec()),
-				stream_err,
-				None,
-			),
-			cpal::SampleFormat::I16 => device.build_input_stream(
-				stream_config,
-				move |data: &[i16], _: &_| deliver(data.iter().map(|&s| s as f32 / 32768.0).collect()),
-				stream_err,
-				None,
-			),
-			cpal::SampleFormat::U16 => device.build_input_stream(
-				stream_config,
-				move |data: &[u16], _: &_| deliver(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
-				stream_err,
-				None,
-			),
+			cpal::SampleFormat::F32 => {
+				let errors = error_tx.clone();
+				device.build_input_stream(
+					stream_config,
+					move |data: &[f32], _: &_| deliver(data.to_vec()),
+					move |err| stream_err(&errors, err),
+					None,
+				)
+			}
+			cpal::SampleFormat::I16 => {
+				let errors = error_tx.clone();
+				device.build_input_stream(
+					stream_config,
+					move |data: &[i16], _: &_| deliver(data.iter().map(|&s| s as f32 / 32768.0).collect()),
+					move |err| stream_err(&errors, err),
+					None,
+				)
+			}
+			cpal::SampleFormat::U16 => {
+				let errors = error_tx.clone();
+				device.build_input_stream(
+					stream_config,
+					move |data: &[u16], _: &_| deliver(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
+					move |err| stream_err(&errors, err),
+					None,
+				)
+			}
 			other => {
 				return Err(Error::Unsupported(format!("unsupported input sample format {other:?}")));
 			}
@@ -244,13 +289,14 @@ impl Microphone {
 
 		// Await the first buffer to surface a permission failure (or dead device)
 		// as an error rather than a silent hang in the capture loop.
-		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
-			Ok(Some(samples)) => samples,
-			Ok(None) => {
+		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, reader.read()).await {
+			Ok(Ok(Some(samples))) => samples,
+			Ok(Ok(None)) => {
 				return Err(Error::Capture(format!(
 					"microphone {device} stopped before any samples"
 				)));
 			}
+			Ok(Err(err)) => return Err(err),
 			Err(_) => {
 				return Err(Error::Capture(format!(
 					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
@@ -262,23 +308,19 @@ impl Microphone {
 
 		Ok(Self {
 			_stream: stream,
-			rx,
+			reader,
 			pending: Some(pending),
 		})
 	}
 
-	/// Await the next buffer, or `None` once the stream stops. Cancel-safe: drop
-	/// the future to stop reading.
-	async fn read(&mut self) -> Option<Samples> {
-		if let Some(data) = self.pending.take() {
-			return Some(Samples { data, gap: false });
+	/// Await the next buffer or stream error. Cancel-safe: drop the future to stop
+	/// reading.
+	async fn read(&mut self) -> Result<Option<Samples>, Error> {
+		if let Some(samples) = self.pending.take() {
+			return self.reader.pending(samples).await;
 		}
 
-		let data = self.rx.recv().await?; // stream dropped / device gone
-		Some(Samples {
-			data,
-			gap: self.rx.gap(),
-		})
+		self.reader.read().await
 	}
 }
 
@@ -368,10 +410,68 @@ fn resolve(
 	Ok((device, sample_format, stream_config))
 }
 
-fn stream_err(err: cpal::Error) {
+fn stream_err(errors: &tokio::sync::mpsc::UnboundedSender<Error>, err: cpal::Error) {
 	tracing::error!(error = %err, "microphone stream error");
+	let _ = errors.send(capture_err(err));
 }
 
 fn capture_err(err: impl std::fmt::Display) -> Error {
 	Error::Capture(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn reader() -> (
+		channel::Sender<Vec<f32>>,
+		tokio::sync::mpsc::UnboundedSender<Error>,
+		MicrophoneReader,
+	) {
+		let (tx, rx) = channel::bounded();
+		let (error_tx, errors) = tokio::sync::mpsc::unbounded_channel();
+		(tx, error_tx, MicrophoneReader { rx, errors })
+	}
+
+	#[tokio::test]
+	async fn stream_error_wakes_a_reader_without_samples() {
+		let (_samples, errors, mut reader) = reader();
+		errors.send(Error::Capture("device lost".into())).unwrap();
+
+		let err = match reader.read().await {
+			Err(err) => err,
+			Ok(_) => panic!("the reader ignored its stream error"),
+		};
+		assert!(matches!(err, Error::Capture(message) if message == "device lost"));
+	}
+
+	#[tokio::test]
+	async fn replaced_stream_cannot_fail_its_replacement() {
+		let (_old_samples, old_errors, old_reader) = reader();
+		let (new_samples, _new_errors, mut new_reader) = reader();
+		drop(old_reader);
+
+		assert!(old_errors.send(Error::Capture("stale".into())).is_err());
+		new_samples.push(vec![1.0]);
+		let samples = new_reader.read().await.unwrap().unwrap();
+		assert_eq!(samples.data, vec![1.0]);
+	}
+
+	#[tokio::test]
+	async fn stream_error_wins_over_the_buffer_saved_during_open() {
+		let (_samples, errors, mut reader) = reader();
+		errors.send(Error::Capture("device lost".into())).unwrap();
+
+		let result = reader
+			.pending(Samples {
+				data: vec![1.0],
+				gap: false,
+			})
+			.await;
+		let err = match result {
+			Err(err) => err,
+			Ok(_) => panic!("the pending sample hid a stream error"),
+		};
+		assert!(matches!(err, Error::Capture(message) if message == "device lost"));
+	}
 }
