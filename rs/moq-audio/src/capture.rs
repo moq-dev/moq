@@ -499,7 +499,6 @@ fn retryable(kind: cpal::ErrorKind) -> bool {
 			| cpal::ErrorKind::HostUnavailable
 			| cpal::ErrorKind::ResourceExhausted
 			| cpal::ErrorKind::StreamInvalidated
-			| cpal::ErrorKind::BackendError
 	)
 }
 
@@ -582,6 +581,12 @@ mod tests {
 	#[test]
 	fn permission_errors_are_not_retryable() {
 		let failure = Failure::cpal(cpal::Error::new(cpal::ErrorKind::PermissionDenied));
+		assert!(!failure.is_retryable());
+	}
+
+	#[test]
+	fn opaque_backend_errors_are_not_retryable() {
+		let failure = Failure::cpal(cpal::Error::new(cpal::ErrorKind::BackendError));
 		assert!(!failure.is_retryable());
 	}
 }
