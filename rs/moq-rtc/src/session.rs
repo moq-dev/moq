@@ -87,6 +87,21 @@ pub enum MediaRole {
 	Egress(Box<EgressSource>),
 }
 
+#[derive(Clone, Copy)]
+enum MediaFlow {
+	Ingest,
+	Egress,
+}
+
+impl MediaFlow {
+	fn accepts(self, direction: str0m::media::Direction) -> bool {
+		match self {
+			Self::Ingest => direction.is_receiving(),
+			Self::Egress => direction.is_sending(),
+		}
+	}
+}
+
 /// Drives a [`Rtc`] instance until it ends.
 ///
 /// The caller pre-populates the `Rtc` with whatever SDP exchange they need.
@@ -337,6 +352,13 @@ impl Session {
 			return Ok(());
 		};
 		let kind = media.kind();
+		let flow = match &self.role {
+			MediaRole::Ingest(_) => MediaFlow::Ingest,
+			MediaRole::Egress(_) => MediaFlow::Egress,
+		};
+		if !flow.accepts(media.direction()) {
+			return Ok(());
+		}
 		let pt = media.remote_pts().first().copied();
 		let params = pt.and_then(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == pt).copied());
 		let params = match params {
@@ -689,6 +711,21 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[test]
+	fn media_flow_respects_negotiated_direction() {
+		use str0m::media::Direction::{Inactive, RecvOnly, SendOnly, SendRecv};
+
+		assert!(MediaFlow::Ingest.accepts(RecvOnly));
+		assert!(MediaFlow::Ingest.accepts(SendRecv));
+		assert!(!MediaFlow::Ingest.accepts(SendOnly));
+		assert!(!MediaFlow::Ingest.accepts(Inactive));
+
+		assert!(MediaFlow::Egress.accepts(SendOnly));
+		assert!(MediaFlow::Egress.accepts(SendRecv));
+		assert!(!MediaFlow::Egress.accepts(RecvOnly));
+		assert!(!MediaFlow::Egress.accepts(Inactive));
+	}
 
 	#[test]
 	fn advertised_candidates_use_loopback_for_unspecified_ipv4() {
