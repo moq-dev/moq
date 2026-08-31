@@ -91,7 +91,12 @@ _changed $BASE $LIMIT=changed_max:
     	git ls-files --others --exclude-standard
     } | sort -u)
 
-    if [[ "$(printf '%s' "$files" | just _changed-cap "$LIMIT")" == ALL ]]; then
+    # Assigned rather than tested inline, so a failing `_changed-cap` aborts here
+    # under `set -e`. Inside `[[ ]]` its exit status is discarded, and the caller
+    # would then scope to a list that never got budgeted -- straight back into the
+    # E2BIG this exists to prevent.
+    cap=$(printf '%s' "$files" | just _changed-cap "$LIMIT")
+    if [[ "$cap" == ALL ]]; then
     	echo ALL
     	exit 0
     fi
@@ -168,6 +173,10 @@ _changed-test $LIMIT=changed_max:
     # A byte count is the whole input, so anything else is a caller bug, not a
     # reason to silently scope to nothing.
     ! printf '' | just _changed-cap not-a-number 2> /dev/null || fail "a bad budget must be rejected"
+
+    # ...and that rejection has to reach the caller. A swallowed one would hand
+    # back an unbudgeted list, which is the failure this whole recipe prevents.
+    ! just _changed "" not-a-number 2> /dev/null || fail "a rejected budget must fail _changed"
 
     # Linux caps a single argv/env string at MAX_ARG_STRLEN (32 pages), whatever
     # ARG_MAX says, and the list travels as one string. Asserted rather than
