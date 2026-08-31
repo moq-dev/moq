@@ -63,7 +63,6 @@ class SmokeTest {
     fun `all public ffi records and handles have aliases`() {
         val hint: VideoHint = VideoHint(
             coded = Dimensions(1920u, 1080u),
-            displayAspect = null,
             bitrate = 4_000_000uL,
             framerate = 60.0,
             optimizeForLatency = true,

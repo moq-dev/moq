@@ -49,7 +49,6 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let hint = VideoHint(
             coded: Dimensions(width: 1920, height: 1080),
-            displayAspect: nil,
             bitrate: 4_000_000,
             framerate: 60,
             optimizeForLatency: true

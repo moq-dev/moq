@@ -840,3 +840,26 @@ async def test_read_frame_returns_none_when_track_finished():
     assert frame is not None
     assert frame.payload == b"only"
     assert await consumer.read_frame() is None
+
+
+def test_optional_binding_records_use_none_defaults():
+    """Optional UniFFI record fields are optional in generated constructors."""
+    hint = moq.VideoHint()
+    assert hint.coded is None
+    assert hint.display_aspect is None
+    assert hint.bitrate is None
+    assert hint.framerate is None
+    assert hint.optimize_for_latency is None
+
+    encoder = moq.AudioEncoderOutput(
+        codec=moq.AudioCodec.OPUS,
+        frame_duration_ms=20,
+    )
+    assert encoder.sample_rate is None
+    assert encoder.channels is None
+    assert encoder.bitrate is None
+
+    decoder = moq.AudioDecoderOutput(format=moq.AudioFormat.F32)
+    assert decoder.sample_rate is None
+    assert decoder.channels is None
+    assert decoder.latency_max_ms is None

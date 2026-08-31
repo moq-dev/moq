@@ -71,8 +71,11 @@ pub struct MoqAudioEncoderInput {
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
 	pub codec: MoqAudioCodec,
+	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
+	#[uniffi(default = None)]
 	pub channels: Option<u32>,
+	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in milliseconds. Opus accepts
 	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
@@ -84,8 +87,10 @@ pub struct MoqAudioEncoderOutput {
 pub struct MoqAudioDecoderOutput {
 	pub format: MoqAudioFormat,
 	/// `None` delivers samples at the codec's native rate.
+	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
 	/// `None` delivers samples at the codec's native channel count.
+	#[uniffi(default = None)]
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
@@ -94,6 +99,7 @@ pub struct MoqAudioDecoderOutput {
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
 	/// aggressively). Named `_max` to leave room for a future
 	/// `latency_min_ms` (jitter buffer).
+	#[uniffi(default = None)]
 	pub latency_max_ms: Option<u64>,
 }
 
