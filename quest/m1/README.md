@@ -16,23 +16,23 @@ with the current dev tree before starting.
 ## Quests
 
 - [Plan: runtime](/quest/m1/plan-runtime.md) - refresh the thread-per-core epic to the remaining work via /plan-quest
-- [#2875](/quest/m1/2875-thread-per-core-relay-runtime-io-uring-quiche-ebpf.md) - Thread-per-core relay runtime: io-uring + quiche, eBPF connection steering, rename moq-native to…
+- [#2875](/quest/m1/2875-thread-per-core-relay-runtime-io-uring-quiche-ebpf.md) - Thread-per-core relay runtime: io-uring + quiche, eBPF connection steering, rename moq-native to moq-tokio
 - [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-native: bring the quiche backend to quinn/noq feature parity
 - [#3092](/quest/m1/3092-moq-sock-make-the-reuseport-groups-invariants.md) - moq-sock: make the reuseport group's invariants unrepresentable, not documented
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - QUIC workers: dropping one split() Server resizes the reuseport group
-- [#2979](/quest/m1/2979-moq-tokio-does-not-compile-with-no-default-features-and.md) - moq-tokio does not compile with --no-default-features, and workspace feature unification hides…
+- [#2979](/quest/m1/2979-moq-tokio-does-not-compile-with-no-default-features-and.md) - moq-tokio does not compile with --no-default-features, and workspace feature unification hides it
 - [#2980](/quest/m1/2980-moq-relay-nothing-guards-the-socket-capturing-acceptor.md) - moq-relay: nothing guards the socket-capturing acceptor being installed on a listener
 - [#2853](/quest/m1/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
 - [#2624](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - moq-native: GOAWAY redirect guard classifies hosts by name, not by resolved address
-- [#3122](/quest/m1/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read…
+- [#3122](/quest/m1/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [#3129](/quest/m1/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
 - [#3199](/quest/m1/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
 - [#3200](/quest/m1/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [#3201](/quest/m1/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - moq-uring: use SENDMSG_ZC for large UDP GSO trains
 - [#3202](/quest/m1/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
 - [#3204](/quest/m1/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [#3086](/quest/m1/3086-refactor-net-make-group-delivery-order-a-handle-and-move.md) - refactor(net): make group delivery order a handle, and move timestamp-based skipping into…
+- [#3086](/quest/m1/3086-refactor-net-make-group-delivery-order-a-handle-and-move.md) - refactor(net): make group delivery order a handle, and move timestamp-based skipping into moq-net
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - Retention should reclaim idle open groups now that expiry is timestamp-only
 - [#699](/quest/m1/699-better-prioritize-ties.md) - Better prioritize ties
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
@@ -54,7 +54,7 @@ with the current dev tree before starting.
 - [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - IETF stream resets send moq-lite error codes, so routine events read as INTERNAL_ERROR
 - [#3002](/quest/m1/3002-no-test-drives-a-late-group-through-the-ietf-dispatch-loop.md) - No test drives a late group through the IETF dispatch loop
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
-- [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range…
+- [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range controls, typed errors)
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - Collapse Reload and Shared into one Connection class
 - [#2714](/quest/m1/2714-per-subscriber-path-predicate-for-originconsumer-0-1-x.md) - Per-subscriber path predicate for OriginConsumer (0.1.x) / AnnounceConsumer (0.2.x)
 - [#2870](/quest/m1/2870-moq-hls-a-named-sibling-rendition-is-pinned-too-late-to.md) - moq-hls: a named sibling rendition is pinned too late to survive a same-path republish
@@ -64,7 +64,7 @@ with the current dev tree before starting.
 - [#3221](/quest/m1/3221-config-stop-cli-defaults-from-clobbering-toml-values.md) - config: stop CLI defaults from clobbering TOML values
 - [#3051](/quest/m1/3051-config-merge-empty-lists-lose-to-the-environment-and-the.md) - Config merge: empty lists lose to the environment, and the file outranks it
 - [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - Fold moq-token into moq token via a Usage executable view
-- [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be…
+- [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
 - [#816](/quest/m1/816-expose-transportconfig.md) - Expose TransportConfig
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - Align origin broadcast creation naming across language bindings
 - [#3188](/quest/m1/3188-make-every-blocking-go-operation-cancellable-with-context.md) - Make every blocking Go operation cancellable with context.Context

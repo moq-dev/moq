@@ -32,8 +32,8 @@ dashboards, fleet rollout) stay downstream.
 - [Plan: captions](/quest/m2/plan-captions.md) - fix the cue format and catalog shape for text tracks via /plan-quest
 - [#2280](/quest/m2/2280-hang-caption-and-subtitle-text-tracks.md) - hang: caption and subtitle text tracks
 - [#3021](/quest/m2/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst: anchor generated media timelines to wall clock
-- [#2779](/quest/m2/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same…
-- [#2829](/quest/m2/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one…
+- [#2779](/quest/m2/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same broadcast emit streams that can never be compared
+- [#2829](/quest/m2/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one broadcast render the same media in different orders
 - [Text schema](/quest/m2/text-schema.md) - a native hang text contract so transcription shares source PTS
 - [SRT metadata parity](/quest/m2/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
@@ -47,7 +47,7 @@ dashboards, fleet rollout) stay downstream.
 - [#3189](/quest/m2/3189-add-uniffi-defaults-to-caller-constructed-configuration.md) - Add UniFFI defaults to caller-constructed configuration records
 - [Plan: CLI arguments](/quest/m2/plan-cli-arguments.md) - decide the client/server flag scheme via /plan-quest
 - [#2696](/quest/m2/2696-re-evaluate-the-client-server-split-in-cli-arguments.md) - Re-evaluate the client/server split in CLI arguments
-- [#3058](/quest/m2/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by…
+- [#3058](/quest/m2/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by closing it
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - Automatic LetsEncrypt support
 - [Plan: multipath](/quest/m2/plan-multipath.md) - split the bonded-contribution multipath work via /plan-quest
@@ -59,4 +59,4 @@ dashboards, fleet rollout) stay downstream.
 - [Plan: video backlog](/quest/m2/plan-video-backlog.md) - prune and split the moq-video tracking epic via /plan-quest
 - [#1837](/quest/m2/1837-moq-video-remaining-work-codecs-platforms-decode-hw.md) - moq-video: remaining work (codecs, platforms, decode, HW validation)
 - [Plan: CLI capture](/quest/m2/plan-cli-capture.md) - split the moq-cli capture and playback backlog via /plan-quest
-- [#2272](/quest/m2/2272-moq-cli-remaining-work-for-capture-and-playback-window.md) - moq-cli: remaining work for capture and playback (window/app capture, device enumeration, native…
+- [#2272](/quest/m2/2272-moq-cli-remaining-work-for-capture-and-playback-window.md) - moq-cli: remaining work for capture and playback (window/app capture, device enumeration, native player)
