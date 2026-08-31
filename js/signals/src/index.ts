@@ -847,9 +847,13 @@ export class Effect {
 		this.#abort.abort();
 
 		// Indexed, not `for...of`: `cleanup` appends cascading teardown onto this same list, and
-		// draining it here keeps a chain of any depth flat.
-		for (let i = 0; i < dispose.length; i++) dispose[i]();
-		this.#closing = undefined;
+		// draining it here keeps a chain of any depth flat. Clear `#closing` even if a callback
+		// throws, or later `cleanup` calls would queue onto a list nothing is draining any more.
+		try {
+			for (let i = 0; i < dispose.length; i++) dispose[i]();
+		} finally {
+			this.#closing = undefined;
+		}
 
 		for (const signal of this.#unwatch) signal();
 		this.#unwatch.length = 0;

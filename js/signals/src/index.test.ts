@@ -309,6 +309,26 @@ describe("Effect", () => {
 		expect(count).toBe(100_001);
 	});
 
+	test("a throwing cleanup does not strand later teardown on a dead queue", async () => {
+		// The drain list is only valid while close() is draining it. Leaving it set after a throw
+		// would make every later cleanup() append to a list nothing reads, silently dropping it.
+		const effect = new Effect();
+		let late = false;
+
+		expect(() => {
+			effect.cleanup(() => {
+				throw new Error("boom");
+			});
+			effect.close();
+		}).toThrow("boom");
+
+		effect.cleanup(() => {
+			late = true;
+		});
+
+		expect(late).toBe(true);
+	});
+
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {
 		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
 		// after that point used to register teardown against the NEXT run: the resource it owned
