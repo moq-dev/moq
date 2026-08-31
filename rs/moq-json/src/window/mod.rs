@@ -14,9 +14,9 @@
 //!
 //! # On the wire
 //!
-//! The first frame of every group names the retained `records` and the absolute `offset` of the
-//! first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
-//! from the front, both positional against the group header.
+//! The first frame of every group names the retained `offset` and a decodable `records` suffix. Its
+//! optional `start` identifies the suffix when a checkpoint bound omits older records. Later frames
+//! are tagged `push` and `pop` ops, positional against the group header.
 //! Indices stop at 2^53 - 1, the largest integer represented exactly by both implementations.
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
@@ -29,7 +29,8 @@
 //! [`snapshot`](crate::snapshot) rolls on its delta budget. That is purely a compression decision:
 //! there is no caller-driven cut and no age bound, and a [`Consumer`] never surfaces it. A header
 //! restating records a reader already has yields nothing, so however often the publisher rolls, the
-//! reader sees one continuous stream of [`Event`]s.
+//! reader sees one continuous stream of [`Event`]s. [`ProducerConfig::checkpoint_records`] bounds
+//! the suffix repeated on each roll for a long-lived window.
 //!
 //! # What a reader is told
 //!
@@ -71,6 +72,16 @@ mod test {
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
+	}
+
+	#[test]
+	#[should_panic(expected = "checkpoint_records must be positive")]
+	fn zero_checkpoint_records_is_rejected() {
+		let config = ProducerConfig {
+			checkpoint_records: Some(0),
+			..Default::default()
+		};
+		let _ = Encoder::<Value>::new(config);
 	}
 
 	fn consumer(track: moq_net::track::Subscriber, compression: bool) -> Consumer<Value> {
@@ -236,6 +247,69 @@ mod test {
 	}
 
 	#[test]
+	fn bounded_checkpoints_keep_a_following_consumer_contiguous() {
+		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let mut live = Live::new(config);
+		for n in 0..6 {
+			live.push(n);
+		}
+
+		assert_eq!(live.producer.range(), 0..6);
+		assert_eq!(live.producer.window(), vec![rec(4), rec(5)]);
+		let events = live.finish();
+		assert_eq!(Live::pushed(&events), (0..6).collect::<Vec<_>>());
+		assert!(!events.iter().any(|event| matches!(event, Event::Skip(_))));
+	}
+
+	#[test]
+	fn a_late_consumer_skips_to_the_bounded_checkpoint() {
+		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let mut encoder = Encoder::<Value>::new(config);
+		let mut latest = None;
+		for n in 0..5 {
+			let frame = encoder.push(&rec(n)).unwrap();
+			latest = Some(frame.payload.clone());
+			frame.commit();
+		}
+
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		decoder.group().decode(&latest.unwrap()).unwrap();
+		assert_eq!(
+			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
+			vec![
+				Event::Skip(0..3),
+				Event::Push {
+					index: 3,
+					value: rec(3)
+				},
+				Event::Push {
+					index: 4,
+					value: rec(4)
+				},
+			]
+		);
+	}
+
+	#[test]
+	fn pops_cross_the_omitted_checkpoint_prefix() {
+		let config = ProducerConfig::default().with_checkpoint_records(2);
+		let mut encoder = Encoder::<Value>::new(config);
+		for n in 0..5 {
+			encoder.push(&rec(n)).unwrap().commit();
+		}
+		assert_eq!(encoder.range(), 0..5);
+		assert_eq!(encoder.window(), vec![rec(3), rec(4)]);
+
+		encoder.pop(2).unwrap().unwrap().commit();
+		assert_eq!(encoder.range(), 2..5);
+		assert_eq!(encoder.window(), vec![rec(3), rec(4)]);
+
+		encoder.pop(2).unwrap().unwrap().commit();
+		assert_eq!(encoder.range(), 4..5);
+		assert_eq!(encoder.window(), vec![rec(4)]);
+	}
+
+	#[test]
 	fn a_fresh_consumer_adopts_the_offset_without_skipping_history() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
@@ -337,6 +411,48 @@ mod test {
 	}
 
 	#[test]
+	fn consumer_resumes_at_a_checkpoint_after_losing_a_group() {
+		for err in [moq_net::Error::Old, moq_net::Error::Lagged, moq_net::Error::Evicted] {
+			let mut track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("test", None)
+				.unwrap();
+			let mut consumer = consumer(track.subscribe(None), false);
+			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
+
+			let first = encoder.push(&rec(0)).unwrap();
+			let payload = first.payload.clone();
+			first.commit();
+			let mut lost = track.append_group().unwrap();
+			lost.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
+			assert_eq!(
+				drain(&mut consumer),
+				vec![Event::Push {
+					index: 0,
+					value: rec(0)
+				}]
+			);
+			lost.abort(err).unwrap();
+
+			let second = encoder.push(&rec(1)).unwrap();
+			let payload = second.payload.clone();
+			second.commit();
+			let mut checkpoint = track.append_group().unwrap();
+			checkpoint.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
+			checkpoint.finish().unwrap();
+			track.finish().unwrap();
+
+			assert_eq!(
+				drain(&mut consumer),
+				vec![Event::Push {
+					index: 1,
+					value: rec(1)
+				}]
+			);
+		}
+	}
+
+	#[test]
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::new(ProducerConfig::default().with_compression(true).with_op_ratio(1));
 		for n in 0..40 {
@@ -363,7 +479,7 @@ mod test {
 	#[test]
 	fn a_rejected_edit_leaves_the_window_unchanged() {
 		let track = rejecting_track();
-		let mut subscriber = track.subscribe(None);
+		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
 		assert!(producer.push(&rec(1)).is_err());
@@ -439,6 +555,13 @@ mod test {
 		let mut group = decoder.group();
 		group.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
 		assert!(group.decode(br#"{"push":null}"#).is_err());
+	}
+
+	#[test]
+	fn a_checkpoint_cannot_start_before_the_window() {
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut group = decoder.group();
+		assert!(group.decode(br#"{"offset":2,"start":1,"records":[]}"#).is_err());
 	}
 
 	#[test]

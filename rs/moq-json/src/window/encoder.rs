@@ -45,6 +45,13 @@ pub struct ProducerConfig {
 	/// `false` (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder) reading them
 	/// must set [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
 	pub compression: bool,
+
+	/// Maximum records retained and repeated in a group checkpoint.
+	///
+	/// `None` (the default) repeats the complete window. A bound keeps checkpoints finite for an
+	/// unbounded window: readers following every group retain earlier records, while one joining a
+	/// later group receives [`Event::Skip`](super::Event::Skip) for the omitted prefix.
+	pub checkpoint_records: Option<usize>,
 }
 
 impl Default for ProducerConfig {
@@ -52,6 +59,7 @@ impl Default for ProducerConfig {
 		Self {
 			op_ratio: 8,
 			compression: false,
+			checkpoint_records: None,
 		}
 	}
 }
@@ -66,6 +74,13 @@ impl ProducerConfig {
 	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_compression(mut self, compression: bool) -> Self {
 		self.compression = compression;
+		self
+	}
+
+	/// Set [`checkpoint_records`](Self::checkpoint_records). Must be at least one.
+	pub fn with_checkpoint_records(mut self, checkpoint_records: usize) -> Self {
+		assert!(checkpoint_records > 0, "checkpoint_records must be positive");
+		self.checkpoint_records = Some(checkpoint_records);
 		self
 	}
 }
@@ -139,12 +154,14 @@ impl<T> Drop for Pending<'_, T> {
 pub struct Encoder<T> {
 	config: ProducerConfig,
 
-	/// The retained window. Records are stored decoded so a header can restate them, and so a record
-	/// serializes identically whether it reaches a reader as a push or in a later header.
+	/// The decodable checkpoint suffix. With no checkpoint bound this is the complete window.
 	window: VecDeque<Value>,
 
-	/// Absolute index of `window.front()`. Only a group header puts this on the wire.
+	/// Absolute index of the oldest logically retained record.
 	offset: u64,
+
+	/// Absolute index of `window.front()`, which may follow `offset` in checkpoint mode.
+	start: u64,
 
 	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
 	flate: Option<moq_flate::Encoder>,
@@ -168,10 +185,15 @@ pub struct Encoder<T> {
 impl<T> Encoder<T> {
 	/// Create an encoder with an empty window, so the first edit opens a group.
 	pub fn new(config: ProducerConfig) -> Self {
+		assert!(
+			config.checkpoint_records != Some(0),
+			"checkpoint_records must be positive"
+		);
 		Self {
 			config,
 			window: VecDeque::new(),
 			offset: 0,
+			start: 0,
 			flate: None,
 			op_bytes: 0,
 			header_len: 0,
@@ -181,16 +203,16 @@ impl<T> Encoder<T> {
 		}
 	}
 
-	/// The retained window, oldest first.
+	/// The retained checkpoint suffix, oldest first.
 	///
-	/// The encoder holds this to restate it on a roll, so a caller needs no parallel copy.
+	/// This is the complete window unless [`ProducerConfig::checkpoint_records`] is set.
 	pub fn window(&self) -> Vec<Value> {
 		self.window.iter().cloned().collect()
 	}
 
 	/// Absolute index of the oldest retained record, and of the next one to be pushed.
 	pub fn range(&self) -> std::ops::Range<u64> {
-		self.offset..self.offset + self.window.len() as u64
+		self.offset..self.start + self.window.len() as u64
 	}
 
 	/// Discard group-local state after an encoded frame did not reach the wire.
@@ -205,10 +227,21 @@ impl<T> Encoder<T> {
 	/// Apply an edit after its encoded frame reached the wire.
 	fn commit(&mut self, edit: Edit) {
 		match edit {
-			Edit::Push(record) => self.window.push_back(record),
+			Edit::Push(record) => {
+				self.window.push_back(record);
+				if let Some(limit) = self.config.checkpoint_records {
+					while self.window.len() > limit {
+						self.window.pop_front();
+						self.start += 1;
+					}
+				}
+			}
 			Edit::Pop(count) => {
-				self.window.drain(..count as usize);
-				self.offset += count;
+				let offset = self.offset + count;
+				let stored = offset.saturating_sub(self.start).min(self.window.len() as u64);
+				self.window.drain(..stored as usize);
+				self.start += stored;
+				self.offset = offset;
 			}
 		}
 	}
@@ -261,9 +294,27 @@ impl<T> Encoder<T> {
 		}
 	}
 
-	/// Serialize a header before mutably borrowing the compression state.
-	fn header(offset: u64, records: Vec<&Value>) -> Result<Vec<u8>> {
-		Ok(serde_json::to_vec(&Header { offset, records })?)
+	/// Serialize a bounded suffix before mutably borrowing the compression state.
+	fn header<'a>(
+		config: &ProducerConfig,
+		offset: u64,
+		start: u64,
+		len: usize,
+		records: impl Iterator<Item = &'a Value>,
+	) -> Result<Vec<u8>> {
+		let skip = config
+			.checkpoint_records
+			.map(|limit| len.saturating_sub(limit))
+			.unwrap_or_default();
+		let start = start
+			.checked_add(skip as u64)
+			.ok_or_else(|| Error::Json("window checkpoint exceeds u64".into()))?;
+		let header = Header {
+			offset,
+			start: (start != offset).then_some(start),
+			records: records.skip(skip).collect(),
+		};
+		Ok(serde_json::to_vec(&header)?)
 	}
 
 	/// Encode the header restating the whole window and opening a new group.
@@ -301,15 +352,23 @@ impl<T> Encoder<T> {
 	/// Returns `None` when there is nothing to drop, so a caller can trim unconditionally. Emits a
 	/// pop into the open group, or a header restating what is left in a new group.
 	pub fn pop(&mut self, count: u64) -> Result<Option<Pending<'_, T>>> {
-		let count = count.min(self.window.len() as u64);
+		let count = count.min(self.range().end - self.offset);
 		if count == 0 {
 			return Ok(None);
 		}
 
 		let offset = self.offset + count;
+		let stored = offset.saturating_sub(self.start).min(self.window.len() as u64) as usize;
+		let start = self.start + stored as u64;
 		let encoded = match self.resync || !self.op_allowed() {
 			true => {
-				let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
+				let bytes = Self::header(
+					&self.config,
+					offset,
+					start,
+					self.window.len() - stored,
+					self.window.iter().skip(stored),
+				)?;
 				self.emit_header(bytes)?
 			}
 			false => {
@@ -317,7 +376,13 @@ impl<T> Encoder<T> {
 				match self.emit_op(bytes)? {
 					Some(encoded) => encoded,
 					None => {
-						let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
+						let bytes = Self::header(
+							&self.config,
+							offset,
+							start,
+							self.window.len() - stored,
+							self.window.iter().skip(stored),
+						)?;
 						self.emit_header(bytes)?
 					}
 				}
@@ -355,8 +420,11 @@ impl<T: Serialize> Encoder<T> {
 		let encoded = match self.resync || !self.op_allowed() {
 			true => {
 				let bytes = Self::header(
+					&self.config,
 					self.offset,
-					self.window.iter().chain(std::iter::once(&record)).collect(),
+					self.start,
+					self.window.len() + 1,
+					self.window.iter().chain(std::iter::once(&record)),
 				)?;
 				self.emit_header(bytes)?
 			}
@@ -366,8 +434,11 @@ impl<T: Serialize> Encoder<T> {
 					Some(encoded) => encoded,
 					None => {
 						let bytes = Self::header(
+							&self.config,
 							self.offset,
-							self.window.iter().chain(std::iter::once(&record)).collect(),
+							self.start,
+							self.window.len() + 1,
+							self.window.iter().chain(std::iter::once(&record)),
 						)?;
 						self.emit_header(bytes)?
 					}

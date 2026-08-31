@@ -90,7 +90,9 @@ export class Decoder<T> {
 
 				if (!positioned) {
 					if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");
-					this.#applyHeader(index(frame.offset, "window offset"), frame.records as T[]);
+					const offset = index(frame.offset, "window offset");
+					const start = frame.start === undefined ? offset : index(frame.start, "window checkpoint start");
+					this.#applyHeader(offset, start, frame.records as T[]);
 					positioned = true;
 					return;
 				}
@@ -146,15 +148,17 @@ export class Decoder<T> {
 		this.#nextEvent = 0;
 	}
 
-	/** The window is exactly these records. Report what this reader missed, then what is new. */
-	#applyHeader(offset: number, records: T[]): void {
-		const end = offset + records.length;
+	/** Apply a logical window range and its decodable suffix. */
+	#applyHeader(offset: number, start: number, records: T[]): void {
+		if (start < offset) throw new Error("window checkpoint starts before its offset");
+		const end = start + records.length;
 		if (!Number.isSafeInteger(end)) throw new Error("window range exceeds the safe integer range");
 		let delivered = this.#delivered;
 
 		if (delivered === undefined) {
 			// First position: adopt the publisher's offset rather than skipping all of history.
 			delivered = offset;
+			this.#range("skip", offset, start);
 		} else {
 			if (offset < this.#front || end < delivered) throw new Error("window header moved backwards");
 
@@ -162,13 +166,13 @@ export class Decoder<T> {
 			// never saw are skips. Keep each gap compact: the offset is untrusted and may jump by far
 			// more indices than a consumer could materialize individually.
 			this.#range("pop", this.#front, Math.min(delivered, offset));
-			this.#range("skip", delivered, offset);
+			this.#range("skip", delivered, start);
 		}
 
 		// Keep the unseen tail as one batch and materialize each push only when the caller asks for it.
-		const next = Math.max(delivered - offset, 0);
+		const next = Math.max(delivered - start, 0);
 		if (next < records.length) {
-			this.#events.push({ offset, records, next });
+			this.#events.push({ offset: start, records, next });
 		}
 
 		this.#front = offset;

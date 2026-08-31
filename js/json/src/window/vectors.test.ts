@@ -41,6 +41,12 @@ test("the encoder emits the shared group header bytes", () => {
 	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header from zero"));
 });
 
+test("the encoder emits the shared bounded checkpoint bytes", () => {
+	const encoder = new Encoder<{ n: number }>({ opRatio: 0, checkpointRecords: 1 });
+	commit(encoder.push({ n: 0 }));
+	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header with a bounded checkpoint"));
+});
+
 for (const vector of vectors) {
 	test(`vector decodes: ${vector.name}`, () => {
 		const decoder = new Decoder<unknown>();

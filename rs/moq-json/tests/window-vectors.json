@@ -15,6 +15,11 @@
     "frame": "{\"offset\":7,\"records\":[{\"n\":7}]}"
   },
   {
+    "name": "group header with a bounded checkpoint",
+    "first": true,
+    "frame": "{\"offset\":0,\"start\":1,\"records\":[{\"n\":1}]}"
+  },
+  {
     "name": "push",
     "first": false,
     "frame": "{\"push\":{\"n\":2}}"

@@ -50,7 +50,9 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
 
-	/// The retained window, oldest first.
+	/// The retained checkpoint suffix, oldest first.
+	///
+	/// This is the complete window unless [`ProducerConfig::checkpoint_records`] is set.
 	pub fn window(&self) -> Vec<Value> {
 		self.inner.lock().unwrap().encoder.window()
 	}

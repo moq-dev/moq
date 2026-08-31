@@ -165,6 +165,17 @@ pub enum Error {
 		duration_max: std::time::Duration,
 	},
 
+	/// [`timeline::Producer::finish`](crate::timeline::Producer::finish) was called before its
+	/// deferred [`timeline::Segmenter`](crate::timeline::Segmenter) completed and every record
+	/// was committed.
+	#[error("finish and commit every deferred timeline record before closing the Producer")]
+	TimelineDeferredPending,
+
+	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a pending record that
+	/// its [`timeline::Deferred`](crate::timeline::Deferred) did not yield.
+	#[error("timeline segment {0} was not yielded for deferred publication")]
+	TimelineDeferredRecord(u64),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

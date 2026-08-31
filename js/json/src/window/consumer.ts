@@ -1,6 +1,10 @@
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 
 import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.ts";
+
+// Rust currently maps expired and evicted groups onto these reserved peer reset codes.
+const OLD = 0x22;
+const EVICTED = 0x23;
 
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
@@ -16,7 +20,7 @@ import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.
  * @public
  */
 export class Consumer<T> {
-	#track: Moq.Track.Subscriber;
+	#track: Moq.Track.Ordered;
 	#decoder: Decoder<T>;
 
 	#group?: Moq.Group.Consumer;
@@ -24,7 +28,7 @@ export class Consumer<T> {
 	#reading = false;
 
 	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
-		this.#track = track;
+		this.#track = track.ordered();
 		this.#decoder = new Decoder(config);
 	}
 
@@ -54,7 +58,23 @@ export class Consumer<T> {
 				this.#codec = this.#decoder.group();
 			}
 
-			const frame = await this.#group.readFrame();
+			let frame: Moq.Group.Frame | undefined;
+			try {
+				frame = await this.#group.readFrame();
+			} catch (err) {
+				const lagged =
+					err instanceof Moq.Group.Lagged ||
+					(err instanceof Moq.StreamError &&
+						(err.code === Moq.StreamCode.TooFarBehind ||
+							Number(err.code) === OLD ||
+							Number(err.code) === EVICTED));
+				if (!lagged) throw err;
+
+				// The next group starts with a checkpoint that accounts for everything missed.
+				this.#group = undefined;
+				this.#codec = undefined;
+				continue;
+			}
 			if (frame === undefined) {
 				// This group is exhausted. Wait for a later one, which restates the window; the stream
 				// ends only when the track does.

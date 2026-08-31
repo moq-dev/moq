@@ -2,13 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The first frame in every group, naming the complete retained window.
+/// The first frame in every group, naming the retained window and a decodable suffix.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Header<T> {
-	/// Absolute index of `records[0]`, so a reader knows which records it missed.
+	/// Absolute index of the oldest retained record.
 	pub offset: u64,
-	/// The retained records, oldest first.
+	/// Absolute index of `records[0]`; omitted when it equals `offset`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub start: Option<u64>,
+	/// A suffix of the retained records, oldest first.
 	pub records: Vec<T>,
 }
 
@@ -69,11 +72,21 @@ mod test {
 		// rather than a silently different wire.
 		let header = Header {
 			offset: 4,
+			start: None,
 			records: vec![json!({ "a": 1 })],
 		};
 		assert_eq!(
 			serde_json::to_value(&header).unwrap(),
 			json!({ "offset": 4, "records": [{ "a": 1 }] })
+		);
+		let checkpoint = Header {
+			offset: 4,
+			start: Some(6),
+			records: vec![json!({ "a": 3 })],
+		};
+		assert_eq!(
+			serde_json::to_value(&checkpoint).unwrap(),
+			json!({ "offset": 4, "start": 6, "records": [{ "a": 3 }] })
 		);
 		assert_eq!(
 			serde_json::to_value(Op::Push(json!({ "a": 1 }))).unwrap(),

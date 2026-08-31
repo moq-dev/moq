@@ -13,15 +13,19 @@ function capture(props?: ConstructorParameters<typeof Producer>[1]): {
 	records: () => Promise<Record[]>;
 } {
 	const track = new Track.Producer("timeline.z");
-	const consumer = new Json.Stream.Consumer<Record>(track.subscribe(), { compression: true });
+	const consumer = new Json.Window.Consumer<Record>(track.subscribe(), { compression: true });
 	const timeline = new Producer(track, props);
 
 	const records = async () => {
 		const out: Record[] = [];
 		for (;;) {
-			const record = await consumer.next();
-			if (!record) return out;
-			out.push(record);
+			const event = await consumer.next();
+			if (!event) return out;
+			if ("push" in event) {
+				out.push(event.push.value);
+			} else {
+				throw new Error("timeline producer only appends records");
+			}
 		}
 	};
 	return { timeline, records };

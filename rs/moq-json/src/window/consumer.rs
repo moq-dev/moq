@@ -18,7 +18,7 @@ use crate::Result;
 /// window yields nothing for records already delivered, so this reads as one continuous stream of
 /// [`Event`]s regardless of how the publisher framed them.
 pub struct Consumer<T> {
-	track: moq_net::track::Subscriber,
+	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 	codec: Option<Codec>,
 	decoder: Decoder<T>,
@@ -28,7 +28,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
 		Self {
-			track,
+			track: track.ordered(),
 			group: None,
 			codec: None,
 			decoder: Decoder::new(config),
@@ -68,12 +68,19 @@ impl<T: DeserializeOwned> Consumer<T> {
 				}
 			};
 
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match group.poll_read_frame(waiter) {
+				Poll::Ready(Err(moq_net::Error::Old | moq_net::Error::Lagged | moq_net::Error::Evicted)) => {
+					// This group is no longer complete, but the next one starts with a checkpoint
+					// that can account for everything this reader missed.
+					self.group = None;
+					self.codec = None;
+				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Ready(Ok(Some(frame))) => {
 					let codec = self.codec.as_mut().expect("an open MoQ group has a window codec");
 					self.decoder.decode(codec, &frame.payload)?;
 				}
-				Poll::Ready(None) => {
+				Poll::Ready(Ok(None)) => {
 					// This group is exhausted. Clear it and poll for a later one, which restates the
 					// window; the stream ends only when the track does.
 					self.group = None;

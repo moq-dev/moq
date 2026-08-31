@@ -26,7 +26,7 @@ export class Producer<T> {
 		this.#encoder = new Encoder(config);
 	}
 
-	/** The retained window, oldest first. */
+	/** The retained checkpoint suffix, oldest first. This is complete unless bounded in the config. */
 	get window(): T[] {
 		return this.#encoder.window;
 	}

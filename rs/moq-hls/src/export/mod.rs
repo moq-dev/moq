@@ -342,8 +342,13 @@ async fn watch(
 	renditions: &renditions::Fanout,
 ) -> crate::Result<()> {
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
-	while let Some(entry) = timeline.next().await? {
-		renditions.push(entry);
+	while let Some(event) = timeline.next().await? {
+		match event {
+			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry),
+			moq_mux::timeline::Event::Pop(range) => renditions.pop(range),
+			moq_mux::timeline::Event::Skip(_) => renditions.skip(),
+			_ => unreachable!("unknown timeline event"),
+		}
 	}
 	Ok(())
 }

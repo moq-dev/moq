@@ -140,8 +140,9 @@ impl Rendition {
 
 	/// Feed one timeline record into this rendition's window: its own ranges (empty when the
 	/// record carries none for it, a gap), timed by the record.
-	pub(crate) fn push(&self, entry: &Entry, window: Duration) {
+	pub(crate) fn push(&self, index: u64, entry: &Entry, window: Duration) {
 		let row = segments::Row {
+			index,
 			segment: entry.segment,
 			ranges: entry.tracks.get(&self.name).cloned().unwrap_or_default(),
 			duration: entry.duration.as_secs_f64(),
@@ -149,6 +150,16 @@ impl Rendition {
 			end: Duration::from(entry.pts) + entry.duration,
 		};
 		self.live.push(row, window);
+	}
+
+	/// Remove source timeline records in `range` from this rendition's window.
+	pub(crate) fn pop(&self, range: std::ops::Range<u64>) {
+		self.live.pop(range);
+	}
+
+	/// Clear rows that can no longer be followed by a consecutive source timeline record.
+	pub(crate) fn clear(&self) {
+		self.live.clear();
 	}
 
 	/// Mark this rendition's window ended (the timeline finished cleanly).

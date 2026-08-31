@@ -479,15 +479,32 @@ A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix 
 The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
 
 ## Track Framing {#timeline-framing}
-The timeline track is an append-log: a single group that is never rolled, with one record per frame, every record preserved in order.
-Each record is a UTF-8 JSON object.
+The timeline track is a sliding window of records.
+An unbounded publisher only appends records, while a DVR publisher also removes records from the front as they expire.
 
-The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each record compresses against all earlier ones.
-The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally with one shared window.
+The first frame of each group is a UTF-8 JSON object containing a checkpoint of the retained window:
+
+~~~
+{
+  "offset": number,
+  "start"?: number,
+  "records": TimelineRecord[],
+}
+~~~
+
+The `offset` is the absolute index of the oldest retained record.
+`start` is the absolute index of `records[0]` and defaults to `offset` when omitted.
+A publisher MAY omit a retained prefix from a checkpoint; a consumer that did not receive that prefix reports `offset` through `start` as skipped.
+Each subsequent frame is one UTF-8 JSON operation, either `{ "push": TimelineRecord }` to append a record at the next absolute index, or `{ "pop": number }` to remove that many records from the front.
+Indices MUST NOT exceed 2^53 - 1.
+
+A publisher MAY roll groups to bound late-join cost or improve compression.
+Each new group restates a decodable suffix of the retained window, so group boundaries are an encoding detail and MUST NOT surface as duplicate records to the application.
+A consumer that missed records reports their absolute index range as skipped before continuing with the retained suffix.
+
+The frames are DEFLATE-compressed ({{!RFC1951}}) within each group.
+The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally from the group's first frame.
 The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
-
-A consumer MUST start reading from the group's first frame; the shared window makes a mid-group join undecodable.
-The live group is therefore bounded history; deep history is served from a recording.
 
 ## Records {#timeline-records}
 Each record describes one complete segment:
@@ -698,15 +715,31 @@ The timeline is needed to *find* an object, not to read one.
 Segment objects are immutable once written.
 
 ## The Timeline Object {#recording-metadata}
-`.timeline` holds the timeline records in order, using the track's framing ({{timeline-framing}}).
+`.timeline` holds the timeline track's complete groups in order:
+
+~~~
+Timeline Object {
+  Group {
+    Sequence (i)
+    Length (i)
+    Frame (..) ...
+  } ...
+}
+~~~
+
+The group encoding is the same as in a segment object ({{recording-segments}}).
+Preserving the boundaries is required because the track uses `moq-json` Window framing
+({{timeline-framing}}): each group starts with a checkpoint and, when compressed, has its own
+DEFLATE window.
 It is the one track not addressed by segment, because it is the index that names the segments.
 
-An unbounded archive re-encodes each source record into a recording-owned timeline stream.
-The object grows as the broadcast does, and its content is append-only: bytes once written never change.
-Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) while keeping one coherent compression window for the recording.
+An unbounded archive pushes each source record through a recording-owned `moq-json` Window.
+It appends a group to the object only after that group is complete, so bytes once written never change.
+Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) before the record becomes visible.
 
-A reader starting fresh reads the object from the beginning, which the shared DEFLATE window requires anyway.
-A reader following a live recording issues a ranged GET from the offset it last read and feeds the new bytes to the decompressor it already holds: each frame's sync-flush block terminates its own compressed data, so the appended bytes decode without re-reading earlier ones.
+A reader starting fresh reads the groups from the beginning and applies their Window checkpoints and operations in order.
+A reader following a live recording issues a ranged GET from the offset after its last complete group.
+Each appended group starts with its own checkpoint and fresh DEFLATE window, so it decodes without re-reading earlier bytes.
 
 A duration-bounded recording instead stores a complete encoding of its current retained timeline suffix.
 When the oldest segment expires, the writer atomically replaces `.timeline` with a new standalone encoding that starts at the oldest retained record.
@@ -727,8 +760,8 @@ Since the timeline record itself is only published once the segment is complete 
 
 If any object for a segment cannot be made durable, the writer MUST record an atomic gap for that segment rather than publish a partial set of tracks.
 The gap is the same timeline record with `tracks` absent or empty, so it preserves the segment number and timing but references no objects.
-The writer encodes that gap and every subsequent record through the recording's own DEFLATE encoder, whose shared dictionary therefore contains the gap rather than the source record it replaced.
-It MUST NOT append a later source frame compressed against the source timeline's different dictionary.
+The writer pushes that gap and every subsequent record through the recording's own Window encoder.
+It MUST NOT copy a later source frame whose Window position or group-local DEFLATE dictionary depends on the source record it replaced.
 The writer then continues with the next segment.
 
 A group that arrives after its segment object has been written is not recorded.

@@ -163,7 +163,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 		if !group.positioned {
 			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
 				.map_err(|err| Error::Json(err.to_string()))?;
-			self.apply_header(header.offset, header.records)?;
+			self.apply_header(header.offset, header.start.unwrap_or(header.offset), header.records)?;
 			group.positioned = true;
 			return Ok(());
 		}
@@ -176,20 +176,28 @@ impl<T: DeserializeOwned> Decoder<T> {
 		}
 	}
 
-	/// The window is exactly these records. Report what this reader missed, then what is new.
-	fn apply_header(&mut self, offset: u64, records: Vec<T>) -> Result<()> {
+	/// Apply a logical window range and its decodable suffix.
+	fn apply_header(&mut self, offset: u64, start: u64, records: Vec<T>) -> Result<()> {
 		if offset > MAX_INDEX {
 			return Err(Error::Json("window offset exceeds the safe integer range".into()));
 		}
+		if start < offset {
+			return Err(Error::Json("window checkpoint starts before its offset".into()));
+		}
 		let len = u64::try_from(records.len()).map_err(|_| Error::Json("window length exceeds u64".into()))?;
-		let end = offset
+		let end = start
 			.checked_add(len)
 			.filter(|end| *end <= MAX_INDEX)
 			.ok_or_else(|| Error::Json("window range exceeds the safe integer range".into()))?;
 
 		let delivered = match self.delivered {
 			// First position: adopt the publisher's offset rather than skipping all of history.
-			None => offset,
+			None => {
+				if offset < start {
+					self.events.push_back(Queued::Event(Event::Skip(offset..start)));
+				}
+				offset
+			}
 			Some(delivered) => {
 				if offset < self.front || end < delivered {
 					return Err(Error::Json("window header moved backwards".into()));
@@ -202,7 +210,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 				if !popped.is_empty() {
 					self.events.push_back(Queued::Event(Event::Pop(popped)));
 				}
-				let skipped = delivered..offset;
+				let skipped = delivered..start;
 				if !skipped.is_empty() {
 					self.events.push_back(Queued::Event(Event::Skip(skipped)));
 				}
@@ -211,7 +219,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 		};
 
 		// Keep the unseen tail as one batch and materialize each push only when the caller asks for it.
-		let skip = usize::try_from(delivered.saturating_sub(offset))
+		let skip = usize::try_from(delivered.saturating_sub(start))
 			.map_err(|_| Error::Json("window length exceeds usize".into()))?;
 		let mut records = records.into_iter();
 		if skip > 0 {
@@ -219,7 +227,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 		}
 		if !records.as_slice().is_empty() {
 			self.events.push_back(Queued::Push {
-				index: offset + skip as u64,
+				index: start + skip as u64,
 				records,
 			});
 		}

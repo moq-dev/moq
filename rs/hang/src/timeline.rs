@@ -22,10 +22,12 @@
 //! [`DEFAULT_NAME`](crate::timeline::DEFAULT_NAME) by convention). A broadcast that doesn't need aligned segments simply
 //! doesn't publish one.
 //!
-//! On the wire the track is a `moq-json` *stream* (see `moq_json::stream`): a single group,
-//! one DEFLATE-compressed record per frame, every record preserved in order. Like the catalog,
-//! a record tolerates and preserves unknown fields: extend it by flattening a [`Record`](crate::timeline::Record) into
-//! your own struct via [`RecordExt`](crate::timeline::RecordExt).
+//! On the wire the track is a DEFLATE-compressed `moq-json` window (see `moq_json::window`).
+//! Each group starts with a checkpoint and continues with push/pop operations; group rolls are an
+//! encoding detail that consumers do not surface as duplicate records. Like the catalog, a record
+//! tolerates and preserves unknown fields: extend it by flattening a
+//! [`Record`](crate::timeline::Record) into your own struct via
+//! [`RecordExt`](crate::timeline::RecordExt).
 
 use std::collections::BTreeMap;
 

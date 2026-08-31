@@ -11,16 +11,17 @@
  * new ones, so a reader that was keeping up receives them twice. This mode exists to make the
  * restatement explicit, so a reader can tell "you already have these" from "here is another one".
  *
- * The first frame of every group names the retained `records` and the absolute `offset` of the
- * first. Later frames are tagged `push` and `pop` ops. A push takes the next index and a pop drops
- * from the front, both positional against the group header.
+ * The first frame of every group names the retained `offset` and a decodable `records` suffix. Its
+ * optional `start` identifies the suffix when a checkpoint bound omits older records. Later frames
+ * are tagged `push` and `pop` ops, positional against the group header.
  * Indices stop at `Number.MAX_SAFE_INTEGER`, matching the Rust implementation's wire domain.
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
  * inside the shared compression window instead of a roll that would throw that window away.
  *
  * The publisher rolls a group when the ops in it outgrow {@link ProducerConfig.opRatio} times the
  * header that opened it. That is purely a compression decision: there is no caller-driven cut and no
- * age bound, and a {@link Consumer} never surfaces it.
+ * age bound, and a {@link Consumer} never surfaces it. `ProducerConfig.checkpointRecords` bounds the
+ * suffix repeated on each roll for a long-lived window.
  *
  * A reader gets a `push` event when a record arrives, `pop` when a contiguous span leaves, and
  * `skip` when a span was dropped before this reader saw it. A reader that keeps up sees pushes and
