@@ -91,7 +91,7 @@ _changed $BASE $LIMIT=changed_max:
     	git ls-files --others --exclude-standard
     } | sort -u)
 
-    if [[ "$(just _changed-cap "${#files}" "$LIMIT")" == ALL ]]; then
+    if [[ "$(printf '%s' "$files" | just _changed-cap "$LIMIT")" == ALL ]]; then
     	echo ALL
     	exit 0
     fi
@@ -110,25 +110,30 @@ _changed $BASE $LIMIT=changed_max:
 # diff that large selects most of the workspace anyway, so the callers widen to
 # the unscoped suite, which passes no list at all.
 #
-# Split out from `_changed` so the decision is a pure function of a byte count:
-# `_changed-test` drives it with synthetic sizes, rather than needing the working
-# tree to hold a diff of a particular size.
+# Split out from `_changed` so `_changed-test` can drive the decision with a
+# synthetic list, rather than needing the working tree to hold a diff of a
+# particular size.
+#
+# The list arrives on stdin, which is both the only channel that can carry an
+# oversized one and the only way to measure it honestly: `${#var}` counts
+# CHARACTERS under a UTF-8 locale while execve counts BYTES, so a path set of
+# 3-byte characters would read as a third of its real size and sail past a
+# budget it actually blows.
 
-# Print `ALL` when BYTES of paths is too much to pass through a single argument.
+# Print `ALL` when the changed-file list on stdin is too long for one argument.
 [private]
-_changed-cap $BYTES $LIMIT=changed_max:
+_changed-cap $LIMIT=changed_max:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    for n in "$BYTES" "$LIMIT"; do
-    	[[ "$n" =~ ^[0-9]+$ ]] || {
-    		echo "changed: not a byte count: $n" >&2
-    		exit 2
-    	}
-    done
+    [[ "$LIMIT" =~ ^[0-9]+$ ]] || {
+    	echo "changed: not a byte count: $LIMIT" >&2
+    	exit 2
+    }
 
-    if ((BYTES > LIMIT)); then
-    	echo "changed: $BYTES bytes of paths exceeds the $LIMIT budget; selecting everything." >&2
+    bytes=$(wc -c | tr -d '[:space:]')
+    if ((bytes > LIMIT)); then
+    	echo "changed: $bytes bytes of paths exceeds the $LIMIT budget; selecting everything." >&2
     	echo ALL
     fi
 
@@ -149,13 +154,20 @@ _changed-test $LIMIT=changed_max:
     # clean checkout has no diff at all, and `check-all` runs there (cache.yml
     # warms the cache from `main`), so a test keyed on the real list would take
     # down the one job allowed to write the shared Rust cache.
-    [[ "$(just _changed-cap 100 99)" == ALL ]] || fail "over budget must print ALL"
-    [[ -z "$(just _changed-cap 99 99)" ]] || fail "at budget must print nothing"
-    [[ -z "$(just _changed-cap 0 99)" ]] || fail "an empty diff must print nothing"
+    [[ "$(printf 'aaaa' | just _changed-cap 3)" == ALL ]] || fail "over budget must print ALL"
+    [[ -z "$(printf 'aaa' | just _changed-cap 3)" ]] || fail "at budget must print nothing"
+    [[ -z "$(printf '' | just _changed-cap 3)" ]] || fail "an empty diff must print nothing"
+
+    # execve counts bytes, so the budget has to as well. Spelled as raw bytes
+    # rather than as characters: this is one CJK character, 3 bytes wide, which
+    # `${#var}` would count as 1 under a UTF-8 locale and let past a 2-byte
+    # budget it actually blows.
+    [[ "$(printf '\xe6\x97\xa5' | just _changed-cap 2)" == ALL ]] \
+    	|| fail "the budget must count bytes, not characters"
 
     # A byte count is the whole input, so anything else is a caller bug, not a
     # reason to silently scope to nothing.
-    ! just _changed-cap 1 not-a-number 2> /dev/null || fail "a bad budget must be rejected"
+    ! printf '' | just _changed-cap not-a-number 2> /dev/null || fail "a bad budget must be rejected"
 
     # Linux caps a single argv/env string at MAX_ARG_STRLEN (32 pages), whatever
     # ARG_MAX says, and the list travels as one string. Asserted rather than
