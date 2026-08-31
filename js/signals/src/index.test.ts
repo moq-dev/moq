@@ -276,8 +276,8 @@ describe("Effect", () => {
 	});
 
 	test("a cleanup registered during close still runs", async () => {
-		// The closed guard makes `cleanup` run its callback immediately rather than appending to
-		// a list nothing will drain, so teardown that cascades still completes.
+		// Teardown that cascades still completes: `cleanup` appends onto the list close() is
+		// draining rather than dropping it on the floor.
 		const effect = new Effect();
 		const order: string[] = [];
 
@@ -289,6 +289,24 @@ describe("Effect", () => {
 		effect.close();
 
 		expect(order).toEqual(["outer", "inner"]);
+	});
+
+	test("a deep cleanup cascade during close drains without recursing", async () => {
+		// close() drains its list by index, so a chain of any depth stays flat. Running each
+		// cascading cleanup nested inside its parent overflows the stack around 19k and abandons
+		// every cleanup after it.
+		const effect = new Effect();
+		let count = 0;
+
+		const chain = (depth: number) => {
+			count++;
+			if (depth > 0) effect.cleanup(() => chain(depth - 1));
+		};
+
+		effect.cleanup(() => chain(100_000));
+		effect.close();
+
+		expect(count).toBe(100_001);
 	});
 
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {

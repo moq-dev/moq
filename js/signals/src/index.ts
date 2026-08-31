@@ -370,6 +370,10 @@ export class Effect {
 
 	#fn?: (effect: Effect) => void;
 	#dispose?: Dispose[] = [];
+
+	// The list `close` is draining, while it is running. Cascading teardown is appended here so it
+	// drains iteratively instead of nesting inside the callback that registered it.
+	#closing?: Dispose[];
 	#unwatch: Dispose[] = [];
 	#async: Promise<void>[] = [];
 
@@ -810,6 +814,14 @@ export class Effect {
 	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
+			// Teardown that cascades goes on the queue `close` is draining rather than running
+			// nested inside its parent, which would turn a long chain into a stack overflow and
+			// abandon the cleanups after it.
+			if (this.#closing !== undefined) {
+				this.#closing.push(fn);
+				return;
+			}
+
 			fn();
 			return;
 		}
@@ -827,14 +839,17 @@ export class Effect {
 		// Mark closed before running teardown. A cleanup that calls back into this effect has to
 		// hit the closed guard: otherwise `spawn`/`timer`/`animate` register work against a list
 		// this call is about to discard, and the task keeps running with nothing tracking it.
-		// `cleanup` itself still works, running immediately rather than appending.
 		this.#dispose = undefined;
+		this.#closing = dispose;
 
 		this.#closed.resolve();
 		this.#stopped.resolve();
 		this.#abort.abort();
 
-		for (const fn of dispose) fn();
+		// Indexed, not `for...of`: `cleanup` appends cascading teardown onto this same list, and
+		// draining it here keeps a chain of any depth flat.
+		for (let i = 0; i < dispose.length; i++) dispose[i]();
+		this.#closing = undefined;
 
 		for (const signal of this.#unwatch) signal();
 		this.#unwatch.length = 0;
