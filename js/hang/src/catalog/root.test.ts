@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 import { RootSchema } from "./root.ts";
 
 // The base catalog is generic: only `video`/`audio`. Applications add their own root sections

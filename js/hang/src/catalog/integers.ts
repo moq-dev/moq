@@ -1,4 +1,4 @@
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /**
  * Branded type for 8-bit unsigned integers (0-255)

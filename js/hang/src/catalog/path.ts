@@ -1,5 +1,5 @@
 import { Path } from "@moq/net";
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /**
  * Zod schema for a relative broadcast reference stored in a catalog (a rendition's

@@ -1,4 +1,4 @@
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /** The container kinds this build knows how to decode. */
 const KNOWN_KINDS = ["legacy", "cmaf", "loc"];

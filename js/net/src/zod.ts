@@ -4,7 +4,7 @@
  * @module
  */
 
-import type * as z from "zod/mini";
+import type * as z from "@zod/mini";
 import type * as group from "./group.ts";
 import type * as track from "./track.ts";
 

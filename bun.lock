@@ -108,7 +108,7 @@
         "@moq/signals": "workspace:^",
         "@svta/cml-iso-bmff": "^1.0.5",
         "@svta/cml-utils": "1.6.0",
-        "zod": "^4.4.3",
+        "@zod/mini": "^4.5.4",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
@@ -133,7 +133,7 @@
         "typescript": "7.0.2",
       },
       "peerDependencies": {
-        "zod": "^4.0.0",
+        "@zod/mini": "^4.5.0",
       },
     },
     "js/loc": {
@@ -156,7 +156,7 @@
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@moq/watch": "workspace:^",
-        "zod": "^4.4.3",
+        "@zod/mini": "^4.5.4",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -173,7 +173,7 @@
       "version": "0.2.1",
       "dependencies": {
         "@moq/net": "workspace:^",
-        "zod": "^4.4.3",
+        "@zod/mini": "^4.5.4",
       },
       "devDependencies": {
         "rimraf": "^6.1.3",
@@ -198,7 +198,7 @@
         "vite-plugin-html": "^3.2.2",
       },
       "peerDependencies": {
-        "zod": "^4.0.0",
+        "@zod/mini": "^4.5.0",
       },
     },
     "js/publish": {
@@ -249,9 +249,9 @@
       },
       "dependencies": {
         "@hexagon/base64": "^2.0.4",
+        "@zod/mini": "^4.5.4",
         "commander": "^15.0.0",
         "jose": "^6.2.9",
-        "zod": "^4.4.3",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -302,7 +302,7 @@
         "@moq/json": "workspace:*",
         "@moq/net": "workspace:*",
         "@moq/web-transport": "^0.1.4",
-        "zod": "^4.0.0",
+        "@zod/mini": "^4.5.0",
       },
       "devDependencies": {
         "tsx": "^4.23.12",
@@ -920,6 +920,8 @@
     "@vueuse/metadata": ["@vueuse/metadata@12.8.2", "", {}, "sha512-rAyLGEuoBJ/Il5AmFHiziCPdQzRt88VxR+Y/A/QhJ1EWtWqPBBAxTAFaSkviwEuOEZNtW8pvkPgoCZQ+HxqW1A=="],
 
     "@vueuse/shared": ["@vueuse/shared@12.8.2", "", { "dependencies": { "vue": "^3.5.13" } }, "sha512-dznP38YzxZoNloI0qpEfpkms8knDtaoQ6Y/sfS0L7Yki4zh40LFHEhur0odJC6xTHG5dxWVPiUWBXn+wCG2s5w=="],
+
+    "@zod/mini": ["@zod/mini@4.5.4", "", { "peerDependencies": { "zod": "^4.5.0" } }, "sha512-/LFQsBM2q92NTOozWQRmun1NfqMDEiNVf52P0znYSHItcyr7HzFW5hJC1y8+x2o0A3D4PZilwoP8DfJ5f5QTiQ=="],
 
     "abbrev": ["abbrev@2.0.0", "", {}, "sha512-6/mh1E2u2YgEsCHdY0Yx5oW+61gZU+1vXaoiHHrpKeuRNNgFvS+/jrwHiQhB5apAf5oB7UB7E19ol2R2LKH8hQ=="],
 
@@ -1791,7 +1793,7 @@
 
     "youch-core": ["youch-core@0.3.3", "", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
 
-    "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+    "zod": ["zod@4.5.4", "", {}, "sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA=="],
 
     "zwitch": ["zwitch@2.0.4", "", {}, "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A=="],
 

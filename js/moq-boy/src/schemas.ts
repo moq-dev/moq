@@ -1,4 +1,4 @@
-import { z } from "zod/mini";
+import { z } from "@zod/mini";
 
 /** Server-reported encoding/emulation performance stats. */
 export const GameStatsSchema = z.object({

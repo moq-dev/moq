@@ -1,5 +1,5 @@
 import { Encoder as Flate } from "@moq/flate";
-import type * as z from "zod/mini";
+import type * as z from "@zod/mini";
 
 import { deepEqual, diff } from "../diff.ts";
 

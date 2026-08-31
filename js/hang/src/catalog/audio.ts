@@ -1,4 +1,4 @@
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";

@@ -7,7 +7,7 @@
  *
  * @module
  */
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /**
  * A relay origin id, encoded as a 62-bit varint on the wire.
