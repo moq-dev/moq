@@ -118,7 +118,7 @@ _doc-names-test:
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
-    {{ cargo_compile }} clippy --locked --fix --allow-staged --allow-dirty --all-targets {{ args }}
+    cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets {{ args }}
     cargo fmt --all
     cargo shear --fix
     cargo sort --workspace --no-format
@@ -376,7 +376,7 @@ fix-changed $FILES:
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
-    {{ cargo_compile }} check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+    cargo check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
@@ -398,7 +398,7 @@ windows *args:
 
 # Compile the Apple-only code paths. Must run ON macOS.
 macos *args:
-    {{ cargo_compile }} check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
 # Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
 # `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
@@ -427,7 +427,7 @@ wasm *args:
 
 # Auto-fix the browser/WASM bindings.
 wasm-fix *args:
-    {{ cargo_compile }} clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }}
+    cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }}
     cargo fmt -p moq-wasm -p moq-mux -p moq-ffi
 
 # Dependency advisories plus the license/ban policy. Time-based rather than
@@ -451,10 +451,10 @@ audit:
 
 # Compile the workspace at the feature extremes.
 features:
-    {{ cargo_compile }} check --locked --workspace --no-default-features
-    {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
-    RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
-    {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features
+    cargo check --locked --workspace --no-default-features
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+    cargo nextest run --locked --workspace --all-targets --all-features
 
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is
@@ -510,7 +510,7 @@ test-changed $FILES:
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
-    {{ cargo_compile }} test --locked --doc {{ args }}
+    cargo test --locked --doc {{ args }}
 
 # Permutation-test the concurrent handoffs with loom.
 #
@@ -529,8 +529,8 @@ doctest *args:
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.
 loom *args:
-    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p kio --lib loom:: {{ args }}
-    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p moq-net --test loom {{ args }}
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: {{ args }}
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom {{ args }}
 
 # Coverage-guided fuzzing of the moq-net wire codecs (libFuzzer, via cargo-fuzz).
 #
@@ -574,17 +574,17 @@ fuzz target *args:
     	rs/moq-net/fuzz/corpus/{{ target }} rs/moq-net/fuzz/seeds/{{ target }} {{ args }}
 
 build:
-    {{ cargo_compile }} build --locked
+    cargo build --locked
 
 # Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
 # Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
 bench preset url *args:
-    {{ cargo_compile }} run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --client-connect '{{ url }}' {{ args }}
+    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --client-connect '{{ url }}' {{ args }}
 
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:
-    {{ cargo_compile }} run --release -p moq-bench --bin moq-bench-host -- {{ args }}
+    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
 
 # Remove the Rust target directory.
 clean:
@@ -641,7 +641,7 @@ package crate packager:
     	*) echo "Unknown packager: {{ packager }} (use deb or rpm)" >&2; exit 1 ;;
     esac
     version=$(grep -m1 '^version' rs/{{ crate }}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-    {{ cargo_compile }} build --locked --release -p {{ crate }}
+    cargo build --locked --release -p {{ crate }}
     mkdir -p dist
     VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
     	nfpm pkg --packager {{ packager }} \

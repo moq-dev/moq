@@ -443,10 +443,8 @@
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #
-        # GitHub Actions persists mbx's per-crate compiler cache, so a Cargo.lock
-        # change recompiles only the changed crate plus its reverse-deps. The
-        # cache wrapper is a workflow concern; nothing in this flake configures
-        # it.
+        # Which compiler cache those runs get is a workflow concern
+        # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
             for asset in \

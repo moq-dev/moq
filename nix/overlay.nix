@@ -259,11 +259,10 @@ let
 
   # CI checks run via `just check` (clippy / doc) and `just test` (nextest), not
   # through crane/`nix flake check`. CI selects mbx with MOQ_CARGO, while local
-  # commands default to plain Cargo. GitHub Actions persists the per-crate mbx
-  # cache, so a Cargo.lock change recompiles only the changed crate plus its
-  # reverse-deps.
-  # ./target stays ephemeral (wiped per job) -- the persistent CARGO_TARGET_DIR
-  # growth that the old crane checks were introduced to fix doesn't recur.
+  # commands default to plain Cargo. Which compiler cache backs those runs is a
+  # workflow concern (`.github/actions/rust-cache`), not configured here.
+  # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
+  # crane checks were introduced to fix doesn't recur.
   # Release artifacts still build via crane `buildPackage` below.
 in
 {

@@ -5,8 +5,8 @@ name: Cache
 #
 # Actions scopes cache reads to the current branch plus the default branch, so
 # only caches written here on `main` are reachable from a pull request. This
-# workflow is therefore the single trusted writer, with one cache per runner
-# architecture. The action makes pull requests restore-only automatically.
+# workflow is therefore the single trusted writer. The action keys the store by
+# runner architecture and toolchain, and refuses to publish from a pull request.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
@@ -27,6 +27,8 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/cache.yml"
+  # Priming a cold cache by hand, e.g. after a toolchain bump rolls the key.
+  workflow_dispatch:
 
 # Newest `main` wins; an older warm is worth less than the runner it holds.
 concurrency:
@@ -86,11 +88,13 @@ jobs:
           nix develop --profile /tmp/devshell --command true
           cachix push kixelated /tmp/devshell
 
+      # The single writer. `save-on-dispatch` is what lets the
+      # `workflow_dispatch` above prime a cold store; the action otherwise saves
+      # only on pushes to the default branch.
       - name: Rust cache
-        uses: jdx/mr-boxington-action@9a406893b83a977c45324a34aed553e3c43f414d # main
+        uses: ./.github/actions/rust-cache
         with:
-          version: 1.0.1
-          toolchain: 1.95.0
+          save-on-dispatch: true
 
       # Both halves, so the saved cache carries the lint artifacts (clippy rmeta)
       # and the test artifacts (codegen + linked test binaries). They share
