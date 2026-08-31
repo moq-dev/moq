@@ -85,6 +85,17 @@ test("concurrent consumer reads are rejected", async () => {
 	expect(await first).toBeUndefined();
 });
 
+test("writes after finish are rejected before encoding", () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<number>(track);
+	producer.push(1);
+	producer.finish();
+
+	expect(() => producer.push(2)).toThrow("track is closed");
+	expect(() => producer.pop(1)).toThrow("track is closed");
+	expect(producer.window).toEqual([1]);
+});
+
 test("a popped record is never restated", async () => {
 	// Ops disabled, so every single edit is its own group restating the whole window.
 	const live = new Live({ opRatio: 0 });

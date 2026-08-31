@@ -39,6 +39,7 @@ impl<T> Producer<T> {
 					group: None,
 				},
 				encoder: Encoder::new(config),
+				finished: false,
 			})),
 			_marker: PhantomData,
 		}
@@ -88,11 +89,13 @@ impl<T: Serialize> Producer<T> {
 struct Inner<T> {
 	track: Track,
 	encoder: Encoder<T>,
+	finished: bool,
 }
 
 impl<T> Inner<T> {
 	fn pop(&mut self, count: u64) -> Result<()> {
-		let Inner { track, encoder } = self;
+		self.ensure_open()?;
+		let Inner { track, encoder, .. } = self;
 
 		let Some(frame) = encoder.pop(count)? else {
 			return Ok(());
@@ -107,13 +110,25 @@ impl<T> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		if self.finished {
+			return Ok(());
+		}
+		self.finished = true;
 		self.track.finish()
+	}
+
+	fn ensure_open(&self) -> Result<()> {
+		if self.finished {
+			return Err(moq_net::Error::Closed.into());
+		}
+		Ok(())
 	}
 }
 
 impl<T: Serialize> Inner<T> {
 	fn push(&mut self, value: &T) -> Result<()> {
-		let Inner { track, encoder } = self;
+		self.ensure_open()?;
+		let Inner { track, encoder, .. } = self;
 
 		let frame = encoder.push(value)?;
 		track.write(&frame)?;

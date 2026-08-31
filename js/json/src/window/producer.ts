@@ -15,6 +15,7 @@ import { type Encoded, Encoder, type ProducerConfig } from "./encoder.ts";
 export class Producer<T> {
 	#track: Moq.Track.Producer;
 	#encoder: Encoder<T>;
+	#finished = false;
 
 	// The group an op would be appended to, open after a header.
 	#group?: Moq.Group.Producer;
@@ -37,6 +38,7 @@ export class Producer<T> {
 
 	/** Append one record to the back of the window. */
 	push(value: T): void {
+		this.#assertOpen();
 		this.#write(this.#encoder.push(value));
 	}
 
@@ -47,8 +49,13 @@ export class Producer<T> {
 	 * unconditionally.
 	 */
 	pop(count: number): void {
+		this.#assertOpen();
 		const frame = this.#encoder.pop(count);
 		if (frame) this.#write(frame);
+	}
+
+	#assertOpen(): void {
+		if (this.#finished) throw new Error("track is closed");
 	}
 
 	#write(encoded: Encoded & { commit(): void }): void {
@@ -82,6 +89,9 @@ export class Producer<T> {
 
 	/** Finish the track, closing any open group. */
 	finish(): void {
+		if (this.#finished) return;
+		this.#finished = true;
+
 		this.#group?.close();
 		this.#group = undefined;
 

@@ -378,6 +378,23 @@ mod test {
 	}
 
 	#[test]
+	fn writes_after_another_clone_finishes_are_rejected() {
+		let (mut producer, _track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.clone().finish().unwrap();
+
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+		assert!(matches!(
+			producer.pop(1),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+		assert_eq!(producer.window(), vec![rec(1)]);
+	}
+
+	#[test]
 	fn a_pop_is_clamped_to_the_window() {
 		let mut live = Live::new(ProducerConfig::default());
 		live.push(0);
