@@ -914,6 +914,17 @@ async function decodeNamespace(bytes: Uint8Array): Promise<Path.Valid> {
 	return await Namespace.decode(reader);
 }
 
+// Helper to encode raw IETF namespace tuple fields
+async function encodeNamespaceTuple(parts: string[]): Promise<Uint8Array> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+	await writer.u53(parts.length);
+	for (const part of parts) await writer.string(part);
+	writer.close();
+	await writer.closed;
+	return concatChunks(written);
+}
+
 test("Namespace: empty encodes as zero-length tuple", async () => {
 	const bytes = await encodeNamespace(Path.empty());
 
@@ -954,6 +965,30 @@ test("Namespace: multi-part encodes correct count", async () => {
 
 	// First byte should be varint 3 (three parts)
 	expect(bytes[0]).toBe(0x03);
+});
+
+test("Namespace: slash in tuple part is escaped", async () => {
+	const tuple = await encodeNamespaceTuple(["foo/bar", "baz"]);
+	const decoded = await decodeNamespace(tuple);
+
+	expect(decoded).toBe("foo\\/bar/baz" as Path.Valid);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
+});
+
+test("Namespace: literal backslash round trips", async () => {
+	const tuple = await encodeNamespaceTuple(["foo\\bar/baz", "qux"]);
+	const decoded = await decodeNamespace(tuple);
+
+	expect(decoded).toBe("foo\\\\bar\\/baz/qux" as Path.Valid);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
+});
+
+test("Namespace: slashes at tuple part boundaries round trip", async () => {
+	const tuple = await encodeNamespaceTuple(["/foo", "bar/", "/baz/"]);
+	const decoded = await decodeNamespace(tuple);
+
+	expect(decoded).toBe("\\/foo/bar\\//\\/baz\\/" as Path.Valid);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
 test("Namespace: Subscribe with empty namespace round trip", async () => {

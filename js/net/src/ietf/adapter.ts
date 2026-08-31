@@ -453,7 +453,7 @@ export class ControlStreamAdapter implements Session {
 			parts.push(decoder.decode(afterLen.subarray(0, len)));
 			cursor = afterLen.subarray(len);
 		}
-		const namespace = parts.join("/");
+		const namespace = Namespace.fromTuple(parts);
 		this.#namespaces.set(namespace, requestId);
 		this.#namespacesByRequestId.set(requestId, namespace);
 	}
