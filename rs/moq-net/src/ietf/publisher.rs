@@ -2129,7 +2129,7 @@ mod tests {
 		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
 
 		let withheld = cluster::Peer {
-			origin: Some(crate::Hop::UNKNOWN),
+			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		assert!(withheld.negotiated(), "the extension is on");
@@ -2139,7 +2139,7 @@ mod tests {
 		assert_eq!(publisher.exclude(&absent), assigned, "so does declaring nothing");
 
 		let named = cluster::Peer {
-			origin: Some(declared),
+			hop: Some(declared),
 			cost: None,
 		};
 		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
@@ -2178,7 +2178,7 @@ mod tests {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::UNKNOWN),
+			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		let echoed = consumer.get_broadcast("from/peer").unwrap();

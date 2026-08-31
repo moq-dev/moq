@@ -947,7 +947,7 @@ mod tests {
 			// makes the cluster parameters mandatory in both directions.
 			peer_declared: Some(peer::Peer {
 				cluster: cluster::Peer {
-					origin: Some(crate::Hop::new(2).unwrap()),
+					hop: Some(crate::Hop::new(2).unwrap()),
 					cost: None,
 				},
 				..Default::default()

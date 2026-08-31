@@ -395,7 +395,7 @@ impl Server {
 			role: None,
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
-			origin: peer_setup.declared.cluster.origin.filter(|o| *o != crate::Hop::UNKNOWN),
+			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),

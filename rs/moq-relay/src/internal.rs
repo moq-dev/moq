@@ -210,9 +210,9 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 
 /// Cluster nodes currently visible through gossip or a direct outbound dial.
 ///
-/// Inbound connections appear only after their SETUP origin identity resolves
-/// to a unique `.internal/origins` node advertisement. Sessions without a
-/// unique match are omitted.
+/// Inbound connections appear only after their SETUP Hop ID resolves to a
+/// unique `.internal/origins` node advertisement. Sessions without a unique
+/// match are omitted.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
 }

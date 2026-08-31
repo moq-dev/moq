@@ -2823,7 +2823,7 @@ mod tests {
 		let consumer = origin.consume();
 
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(3),
 		};
 		let advert = cluster::Advert {
@@ -2859,7 +2859,7 @@ mod tests {
 	fn cluster_advert_loop_is_discarded() {
 		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(5).unwrap());
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 
@@ -2882,7 +2882,7 @@ mod tests {
 	fn unpriced_link_costs_one() {
 		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 		let advert = cluster::Advert {
@@ -2893,7 +2893,7 @@ mod tests {
 
 		// Zero is meaningful and distinct from absent: a free link adds nothing.
 		let free = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.warm, 2);
@@ -3136,7 +3136,7 @@ mod tests {
 
 		// A peer that declared its egress price is charged it, extension or not.
 		let priced_peer = cluster::Peer {
-			origin: None,
+			hop: None,
 			cost: Some(4),
 		};
 		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.warm, 4);
@@ -3247,7 +3247,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		// A free link, so the route cost is exactly what the peer advertised.
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
 		let hops = cluster::HopPath::new(
@@ -3310,7 +3310,7 @@ mod tests {
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 		let hops = cluster::HopPath::new(
@@ -3385,7 +3385,7 @@ mod tests {
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 
@@ -3493,7 +3493,7 @@ mod tests {
 
 	fn peer_9() -> cluster::Peer {
 		cluster::Peer {
-			origin: Some(crate::Hop::new(9).unwrap()),
+			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		}
 	}

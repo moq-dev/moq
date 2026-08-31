@@ -193,7 +193,7 @@ pub struct Peer {
 	/// What the peer put in RELAY_HOPS, or `None` when it did not negotiate the
 	/// extension. Read [`Self::identity`] for the identity; this field answers whether
 	/// the extension is on, which is a different question when the peer declared 0.
-	pub origin: Option<Hop>,
+	pub hop: Option<Hop>,
 
 	/// What the peer said subscribing from it costs, or `None` when it priced nothing
 	/// (meaning [`DEFAULT_COST`]). Directional: this prices what we pull from the peer,
@@ -205,7 +205,7 @@ impl Peer {
 	/// Whether the peer negotiated the extension, which is what decides the NAMESPACE
 	/// encoding. True even for a peer that declared the reserved 0.
 	pub fn negotiated(&self) -> bool {
-		self.origin.is_some()
+		self.hop.is_some()
 	}
 
 	/// The identity the peer declared, or `None` when it declared none.
@@ -214,7 +214,7 @@ impl Peer {
 	/// which reads here exactly like declaring nothing at all. The receiver assigns one
 	/// instead, so there is no third state for callers to get wrong.
 	pub fn identity(&self) -> Option<Hop> {
-		self.origin.filter(|origin| *origin != Hop::UNKNOWN)
+		self.hop.filter(|hop| *hop != Hop::UNKNOWN)
 	}
 }
 
@@ -237,20 +237,20 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 
 	// RELAY_HOPS is odd, so its value is a length-prefixed byte string holding the
 	// sender's Hop ID as a single varint.
-	let origin = match params.get_bytes(super::ParameterBytes::RelayHops) {
+	let hop = match params.get_bytes(super::ParameterBytes::RelayHops) {
 		Some(mut bytes) => {
 			// 0 is legal here: the peer speaks the extension but withholds its identity.
-			let origin = Hop::decode(&mut bytes, version)?;
+			let hop = Hop::decode(&mut bytes, version)?;
 			if bytes.has_remaining() {
 				return Err(DecodeError::TrailingBytes);
 			}
-			Some(origin)
+			Some(hop)
 		}
 		None => None,
 	};
 
 	Ok(Peer {
-		origin,
+		hop,
 		cost: params.get_varint(super::ParameterVarInt::RelayCost),
 	})
 }
@@ -279,7 +279,7 @@ mod tests {
 
 	const VERSION: Version = Version::Draft19;
 
-	fn origin(id: u64) -> Hop {
+	fn hop(id: u64) -> Hop {
 		Hop::new(id).unwrap()
 	}
 
@@ -288,7 +288,7 @@ mod tests {
 			.iter()
 			.map(|&id| match id {
 				0 => Hop::UNKNOWN,
-				id => origin(id),
+				id => hop(id),
 			})
 			.collect::<Vec<_>>();
 		HopPath::new(Hops::try_from(hops).unwrap())
@@ -347,7 +347,7 @@ mod tests {
 		// no longer lets one be built: only a non-conforming sender produces this.
 		let mut value = Vec::new();
 		for id in [4u64, 8, 4] {
-			origin(id).encode(&mut value, VERSION).unwrap();
+			hop(id).encode(&mut value, VERSION).unwrap();
 		}
 
 		let mut buf = BytesMut::new();
@@ -368,11 +368,11 @@ mod tests {
 	#[test]
 	fn forward_refuses_a_chain_it_cannot_extend() {
 		let mut hops = Hops::new();
-		hops.push(origin(1)).unwrap();
-		hops.push(origin(3)).unwrap();
+		hops.push(hop(1)).unwrap();
+		hops.push(hop(3)).unwrap();
 
 		assert_eq!(
-			Advert::forward(&hops, 5, origin(3)),
+			Advert::forward(&hops, 5, hop(3)),
 			Err(crate::InvalidHop::Duplicate),
 			"appending an id the chain already names must not produce an advertisement"
 		);
@@ -381,10 +381,10 @@ mod tests {
 		// than on the id already being there.
 		let mut full = Hops::new();
 		let mut next = 1;
-		while full.push(origin(next)).is_ok() {
+		while full.push(hop(next)).is_ok() {
 			next += 1;
 		}
-		assert_eq!(Advert::forward(&full, 0, origin(next)), Err(crate::InvalidHop::TooMany));
+		assert_eq!(Advert::forward(&full, 0, hop(next)), Err(crate::InvalidHop::TooMany));
 	}
 
 	#[test]
@@ -404,7 +404,7 @@ mod tests {
 		// Entries must exactly fill Length. Chop the last byte off a multi-byte hop id
 		// and shrink the length to match, so the value ends mid-varint.
 		let mut value = Vec::new();
-		origin(300).encode(&mut value, VERSION).unwrap();
+		hop(300).encode(&mut value, VERSION).unwrap();
 		assert!(value.len() > 1, "300 should not fit in one byte");
 		value.pop();
 
@@ -418,12 +418,12 @@ mod tests {
 	#[test]
 	fn forward_appends_self() {
 		let mut hops = Hops::new();
-		hops.push(origin(1)).unwrap();
-		hops.push(origin(2)).unwrap();
+		hops.push(hop(1)).unwrap();
+		hops.push(hop(2)).unwrap();
 
-		let advert = Advert::forward(&hops, 5, origin(3)).unwrap();
+		let advert = Advert::forward(&hops, 5, hop(3)).unwrap();
 		assert_eq!(advert.hops, hop_path(&[1, 2, 3]));
-		assert_eq!(advert.hops.hops().iter().next().copied(), Some(origin(1)));
+		assert_eq!(advert.hops.hops().iter().next().copied(), Some(hop(1)));
 		assert_eq!(advert.cost, 5);
 	}
 
@@ -435,8 +435,8 @@ mod tests {
 		};
 		// A receiver whose own id is 0 cannot detect loops through itself.
 		assert!(!advert.loops(Hop::UNKNOWN));
-		assert!(advert.loops(origin(5)));
-		assert!(!advert.loops(origin(6)));
+		assert!(advert.loops(hop(5)));
+		assert!(!advert.loops(hop(6)));
 	}
 
 	#[test]
@@ -468,29 +468,29 @@ mod tests {
 		assert_eq!(peer.identity(), None);
 
 		let anonymous = Peer {
-			origin: Some(Hop::UNKNOWN),
+			hop: Some(Hop::UNKNOWN),
 			cost: Some(0),
 		};
 		assert!(anonymous.negotiated());
 		assert_eq!(anonymous.identity(), None);
 
 		let named = Peer {
-			origin: Some(origin(9)),
+			hop: Some(hop(9)),
 			cost: None,
 		};
 		assert!(named.negotiated());
-		assert_eq!(named.identity(), Some(origin(9)));
+		assert_eq!(named.identity(), Some(hop(9)));
 	}
 
 	#[test]
 	fn link_cost_prefers_local_policy_over_the_peer() {
 		let unpriced = Peer::default();
 		let priced = Peer {
-			origin: Some(origin(9)),
+			hop: Some(hop(9)),
 			cost: Some(7),
 		};
 		let free = Peer {
-			origin: Some(origin(9)),
+			hop: Some(hop(9)),
 			cost: Some(0),
 		};
 
@@ -509,7 +509,7 @@ mod tests {
 
 	#[test]
 	fn setup_options_round_trip() {
-		for (self_hop, cost) in [(origin(42), Some(0)), (origin(42), Some(9)), (Hop::UNKNOWN, None)] {
+		for (self_hop, cost) in [(hop(42), Some(0)), (hop(42), Some(9)), (Hop::UNKNOWN, None)] {
 			let mut params = super::super::Parameters::default();
 			peer_into_setup(&mut params, self_hop, cost, VERSION);
 
@@ -519,7 +519,7 @@ mod tests {
 			let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
 
 			let peer = peer_from_setup(&decoded, VERSION).unwrap();
-			assert_eq!(peer.origin, Some(self_hop));
+			assert_eq!(peer.hop, Some(self_hop));
 			assert_eq!(peer.cost, cost);
 		}
 	}
@@ -536,7 +536,7 @@ mod tests {
 		// Draft-14..16 exchange SETUP over the legacy control stream, which this
 		// extension does not cover; we neither send nor read the options there.
 		let mut params = super::super::Parameters::default();
-		peer_into_setup(&mut params, origin(42), Some(3), Version::Draft16);
+		peer_into_setup(&mut params, hop(42), Some(3), Version::Draft16);
 		assert!(params.get_bytes(super::super::ParameterBytes::RelayHops).is_none());
 		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated());
 	}

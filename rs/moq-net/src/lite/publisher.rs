@@ -74,7 +74,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	session: S,
 	origin: origin::Consumer,
 	self_hop: Hop,
-	// The peer's SETUP, read for the origin id it declared. Used to serve the
+	// The peer's SETUP, read for the Hop ID it declared. Used to serve the
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
@@ -497,7 +497,7 @@ struct AnnounceServe<S: crate::transport::poll::Session, R: crate::runtime::Runt
 enum AnnounceState<R: crate::runtime::Runtime> {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
-	/// Waiting on the peer's SETUP for the session-wide excluded origin
+	/// Waiting on the peer's SETUP for the session-wide excluded Hop ID
 	/// (lite-05, whose wire carries no per-stream exclude_hop).
 	ExcludeHop { prefix: crate::PathOwned },
 	/// Streaming announce updates.
@@ -528,11 +528,11 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceSer
 					let prefix = interest.prefix.to_owned();
 
 					// The identity whose routes we filter out. Lite-04/05 carry it per
-					// announce stream; lite-06+ reads the session-wide SETUP Origin
+					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
 					// declares nothing falls back to the identity the caller assigned it
 					// (`with_peer_hop`), if any.
-					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
+					let assigned = self.shared.peer_hop.map(|hop| hop.id()).unwrap_or(0);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
 							0 => assigned,
@@ -3752,7 +3752,7 @@ mod tests {
 		// Broadcast visibility is deferred until the executor ticks.
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		// A SETUP that declares no origin of its own, so only the assigned one applies.
+		// A SETUP that declares no Hop ID of its own, so only the assigned one applies.
 		let peer_setup = crate::lite::PeerSetup::default();
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
