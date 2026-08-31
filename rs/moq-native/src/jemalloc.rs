@@ -14,6 +14,12 @@ fn register_signal() -> std::io::Result<tokio::signal::unix::Signal> {
 	tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
 }
 
+#[cfg(test)]
+fn signal_ready() -> &'static tokio::sync::Notify {
+	static READY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+	READY.get_or_init(tokio::sync::Notify::new)
+}
+
 /// Listen for SIGUSR1 and dump a jemalloc heap profile on each signal.
 ///
 /// Profiling must be enabled at startup via `MALLOC_CONF=prof:true`
@@ -24,6 +30,8 @@ pub async fn run() -> crate::Result<()> {
 	// Register before inspecting jemalloc. SIGUSR1's default action is process
 	// termination, so even a build or configuration without profiling must own it.
 	let mut sig = register_signal()?;
+	#[cfg(test)]
+	signal_ready().notify_one();
 
 	let active = match unsafe { raw::read::<bool>(b"prof.active\0") } {
 		Ok(true) => {
@@ -100,7 +108,7 @@ mod tests {
 			.unwrap()
 			.block_on(async {
 				let runner = tokio::spawn(super::run());
-				tokio::task::yield_now().await;
+				super::signal_ready().notified().await;
 				unsafe { libc::raise(libc::SIGUSR1) };
 				tokio::task::yield_now().await;
 				assert!(!runner.is_finished());
