@@ -66,15 +66,36 @@ pub(crate) fn decode_error(code: i32) -> Error {
 
 /// Classify a packet libopus accepted, preserving DTX across packet loss.
 ///
-/// libopus emits one or two bytes for DTX and comfort noise. An empty payload
-/// asks the decoder for packet-loss concealment, which remains DTX only when
-/// the last accepted packet entered DTX.
+/// libopus emits one or two unpadded bytes for DTX and comfort noise. An empty
+/// payload asks the decoder for packet-loss concealment, which remains DTX only
+/// when the last accepted packet entered DTX.
 pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
-	match packet.len() {
+	match unpadded_len(packet) {
 		0 if in_dtx => Activity::Dtx,
 		1 | 2 => Activity::Dtx,
 		_ => Activity::Active,
 	}
+}
+
+fn unpadded_len(packet: &[u8]) -> usize {
+	let Some((&toc, frames)) = packet.split_first() else {
+		return 0;
+	};
+	let Some(&frame_count) = frames.first() else {
+		return packet.len();
+	};
+	if toc & 0x03 != 0x03 || frame_count & 0x40 == 0 {
+		return packet.len();
+	}
+
+	let Ok(len) = i32::try_from(packet.len()) else {
+		return packet.len();
+	};
+	let mut unpadded = packet.to_vec();
+	// SAFETY: `unpadded` is writable for `len` bytes. This only runs after
+	// libopus accepted the packet, so parsing should succeed.
+	let len = unsafe { unsafe_libopus::opus_packet_unpad(unpadded.as_mut_ptr(), len) };
+	usize::try_from(len).unwrap_or(packet.len())
 }
 
 #[cfg(test)]

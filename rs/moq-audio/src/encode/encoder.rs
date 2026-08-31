@@ -675,6 +675,20 @@ mod tests {
 			"a two-byte comfort-noise frame should remain DTX"
 		);
 
+		let mut padded = dtx.value.to_vec();
+		let original_len = padded.len();
+		padded.resize(original_len + 8, 0);
+		// SAFETY: the allocation is sized for the requested padded length and the
+		// encoder produced a valid Opus packet.
+		let rc =
+			unsafe { unsafe_libopus::opus_packet_pad(padded.as_mut_ptr(), original_len as i32, padded.len() as i32) };
+		assert_eq!(rc, unsafe_libopus::OPUS_OK);
+		assert_eq!(
+			dec.decode(&padded).unwrap().activity,
+			Activity::Dtx,
+			"padding must not change a DTX packet's classification"
+		);
+
 		// An absent payload asks libopus for packet-loss concealment. The
 		// classification remains DTX until a normal packet exits that state.
 		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Dtx);
