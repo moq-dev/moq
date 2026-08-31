@@ -310,7 +310,7 @@ export class Publisher {
 	// can detect loops and prefer shorter paths. Created by Connection and
 	// shared with Subscriber, which can optionally use it to filter out its
 	// own announcements.
-	readonly origin: Hop;
+	readonly hop: Hop;
 
 	#quic: WebTransport;
 
@@ -340,10 +340,10 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Hop, publish?: OriginConsumer) {
+	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.version = version;
-		this.origin = origin;
+		this.hop = hop;
 		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
@@ -396,7 +396,7 @@ export class Publisher {
 					for (const suffix of active.keys()) {
 						await encodeAnnounceBroadcast(
 							stream.writer,
-							{ status: "active", suffix, hops: [this.origin] },
+							{ status: "active", suffix, hops: [this.hop] },
 							this.version,
 						);
 					}
@@ -405,7 +405,7 @@ export class Publisher {
 
 				// Report our origin id once via AnnounceOk and the count of initial announces
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
-				const ok = new AnnounceOk(this.origin, active.size);
+				const ok = new AnnounceOk(this.hop, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active.keys()) {
 					if (hasAnnounceId(this.version)) {
@@ -461,7 +461,7 @@ export class Publisher {
 			for (const [added, front] of newActive) {
 				if (active.get(added) === front) continue;
 				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				const hops = hasAnnounceOk(this.version) ? [] : [this.hop];
 				if (hasAnnounceId(this.version)) {
 					announceIds.set(added, nextAnnounceId++);
 				}

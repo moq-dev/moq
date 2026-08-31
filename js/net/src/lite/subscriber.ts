@@ -120,7 +120,7 @@ export class Subscriber {
 
 	// Shared with the Publisher so callers can optionally filter out their
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
-	readonly origin: Hop;
+	readonly hop: Hop;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
 	// lite-05+, or implicit defaults on older drafts); group streams block on it
@@ -158,13 +158,13 @@ export class Subscriber {
 	constructor(
 		quic: WebTransport,
 		version: Version,
-		origin: Hop,
+		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
-		this.origin = origin;
+		this.hop = hop;
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 	}
@@ -187,7 +187,7 @@ export class Subscriber {
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceRequest(prefix, this.origin);
+		const msg = new AnnounceRequest(prefix, this.hop);
 
 		// Drop reflected announces so callers asking for "someone else's broadcasts"
 		// don't re-see their own publishes. A caller can always ask for this, and it is
@@ -221,7 +221,7 @@ export class Subscriber {
 				// nobody, so folding it into a chain would stamp a placeholder that cannot
 				// close a loop or tell two publishers apart. Treat it as absent instead,
 				// which is the loop-blind route the draft describes.
-				responderOrigin = ok.origin === UNKNOWN_HOP ? undefined : ok.origin;
+				responderOrigin = ok.hop === UNKNOWN_HOP ? undefined : ok.hop;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one
@@ -355,7 +355,7 @@ export class Subscriber {
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
-					if (full.includes(this.origin)) {
+					if (full.includes(this.hop)) {
 						// A reflected restart means the peer's remaining route loops back through
 						// us, so the route is gone even though the message says active. The
 						// advertisement stays live: the peer still holds the path and its id still

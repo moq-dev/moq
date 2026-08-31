@@ -776,10 +776,10 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 					}
 				}
 
-				// Report our origin id (stamped onto hops by the receiver, not us)
+				// Report our Hop ID (stamped onto hops by the receiver, not us)
 				// and the count of initial announces that follow immediately.
 				let ok = lite::AnnounceOk {
-					origin: self.self_hop,
+					hop: self.self_hop,
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;

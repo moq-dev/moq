@@ -39,11 +39,7 @@ pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
 	/// Carries the path suffix, the hop chain, and (lite-06+) the warm and cold
 	/// route costs, and assigns the next announce id.
-	Active {
-		suffix: Path<'a>,
-		hops: Hops,
-		cost: Cost,
-	},
+	Active { suffix: Path<'a>, hops: Hops, cost: Cost },
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: Hops },
 	/// ANNOUNCE_END (lite-06+): a broadcast is no longer available, retracted by
@@ -242,7 +238,7 @@ pub struct AnnounceRequest<'a> {
 	// Lite04/05 only: if non-zero, the publisher SHOULD skip announces whose hop IDs
 	// contain this value. Not on the wire elsewhere, so the value set here is ignored
 	// when encoding for another version and decodes as zero; lite-06 carries the
-	// identity session-wide in the SETUP Origin parameter instead.
+	// identity session-wide in the SETUP Hop parameter instead.
 	pub exclude_hop: u64,
 }
 
@@ -340,14 +336,14 @@ impl Message for AnnounceInit<'_> {
 /// Sent by the publisher as the first message on an announce stream, before any
 /// individual Announce messages. Lite05+ only; the successor to [`AnnounceInit`].
 ///
-/// `origin` is the responder's session origin id. In Lite05 the publisher no
+/// `hop` is the responder's session Hop ID. In Lite05 the publisher no
 /// longer stamps it onto each Announce's hop chain; the subscriber appends it on
 /// receipt instead. `active` is the number of currently-active broadcasts the
 /// publisher sends as the initial set immediately after this message, letting the
 /// receiver block until the initial set has arrived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnnounceOk {
-	pub origin: Hop,
+	pub hop: Hop,
 	pub active: u64,
 }
 
@@ -357,9 +353,9 @@ impl Message for AnnounceOk {
 			return Err(DecodeError::Version);
 		}
 
-		let origin = Hop::decode(r, version)?;
+		let hop = Hop::decode(r, version)?;
 		let active = u64::decode(r, version)?;
-		Ok(Self { origin, active })
+		Ok(Self { hop, active })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -367,7 +363,7 @@ impl Message for AnnounceOk {
 			return Err(EncodeError::Version);
 		}
 
-		self.origin.encode(w, version)?;
+		self.hop.encode(w, version)?;
 		self.active.encode(w, version)
 	}
 }
@@ -440,7 +436,7 @@ mod tests {
 	#[test]
 	fn announce_ok_round_trip() {
 		let msg = AnnounceOk {
-			origin: Hop::new(42).unwrap(),
+			hop: Hop::new(42).unwrap(),
 			active: 3,
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -449,7 +445,7 @@ mod tests {
 	#[test]
 	fn announce_ok_zero_active() {
 		let msg = AnnounceOk {
-			origin: Hop::new(7).unwrap(),
+			hop: Hop::new(7).unwrap(),
 			active: 0,
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -635,7 +631,7 @@ mod tests {
 	#[test]
 	fn announce_ok_rejects_old_versions() {
 		let msg = AnnounceOk {
-			origin: Hop::new(1).unwrap(),
+			hop: Hop::new(1).unwrap(),
 			active: 0,
 		};
 		let mut buf = bytes::BytesMut::new();
@@ -650,7 +646,7 @@ mod tests {
 		// Encode a well-formed message then patch the origin to 0 on the wire.
 		let mut buf = bytes::BytesMut::new();
 		AnnounceOk {
-			origin: Hop::new(1).unwrap(),
+			hop: Hop::new(1).unwrap(),
 			active: 0,
 		}
 		.encode(&mut buf, Version::Lite05)
@@ -662,7 +658,7 @@ mod tests {
 		patched[1] = 0x00;
 		let mut slice = &patched[..];
 		let got = AnnounceOk::decode(&mut slice, Version::Lite05).unwrap();
-		assert_eq!(got.origin.id(), 0);
+		assert_eq!(got.hop.id(), 0);
 		assert_eq!(got.active, 0);
 	}
 }

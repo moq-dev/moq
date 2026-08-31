@@ -140,9 +140,9 @@ port. Startup readiness only proves an interface announced, not that anything
 answered, so a firewall shows up as a pair that never meshes rather than as a
 relay that fails to start.
 
-## Origin id
+## Hop ID
 
-Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
+Each relay has a Hop ID: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
 
 Set `cluster.id` to pin a stable id across restarts:
 

@@ -120,18 +120,18 @@ where
 		_ => Some(recv_bw),
 	};
 
-	// Declare our origin (hop) id in SETUP so the peer can serve our
-	// subscriptions from a route that does not flow through us. Taken from the
-	// caller's real handles before the empty-half defaulting below, since those
-	// placeholders carry throwaway ids that never appear in a hop chain. The
-	// publish identity is what we stamp onto forwarded announcements, so it
-	// wins when both halves are wired (they share it in practice).
-	if our_setup.origin.is_none() {
-		our_setup.origin = publish
+	// Declare our Hop ID in SETUP so the peer can serve our subscriptions from a
+	// route that does not flow through us. Taken from the caller's real handles
+	// before the empty-half defaulting below, since those placeholders carry
+	// throwaway ids that never appear in a hop chain. The publish identity is what
+	// we stamp onto forwarded announcements, so it wins when both halves are wired
+	// (they share it in practice).
+	if our_setup.hop.is_none() {
+		our_setup.hop = publish
 			.as_deref()
 			.or(subscribe.as_deref())
 			.copied()
-			.filter(|origin| origin.id() != 0);
+			.filter(|hop| hop.id() != 0);
 	}
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)

@@ -1180,9 +1180,9 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
 					// A peer may legally report id 0 (no identity). When the caller assigned
 					// it one, stand that in so the route isn't loop-blind.
-					let origin = match ok.origin.id() {
-						0 => self.subscriber.peer_hop.unwrap_or(ok.origin),
-						_ => ok.origin,
+					let origin = match ok.hop.id() {
+						0 => self.subscriber.peer_hop.unwrap_or(ok.hop),
+						_ => ok.hop,
 					};
 					let PrefixState::ReadOk { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
 						unreachable!()

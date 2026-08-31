@@ -5128,17 +5128,10 @@ mod tests {
 
 		// Rewrites only the first placeholder, keeping the length the same.
 		assert!(list.replace_first(Hop::UNKNOWN, Hop::new(7).unwrap()).unwrap());
-		assert_eq!(
-			list.as_slice(),
-			&[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]
-		);
+		assert_eq!(list.as_slice(), &[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]);
 
 		// No match leaves the list untouched.
-		assert!(
-			!list
-				.replace_first(Hop::new(99).unwrap(), Hop::new(8).unwrap())
-				.unwrap()
-		);
+		assert!(!list.replace_first(Hop::new(99).unwrap(), Hop::new(8).unwrap()).unwrap());
 		assert_eq!(list.len(), 3);
 
 		// Writing in an id the chain already carries would name it twice, which is the
@@ -5157,14 +5150,8 @@ mod tests {
 
 		// Overwriting a slot with what it already holds is a no-op, not a duplicate: the
 		// entry being replaced is not a second occurrence of itself.
-		assert_eq!(
-			list.replace_first(Hop::new(7).unwrap(), Hop::new(7).unwrap()),
-			Ok(true)
-		);
-		assert_eq!(
-			list.as_slice(),
-			&[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]
-		);
+		assert_eq!(list.replace_first(Hop::new(7).unwrap(), Hop::new(7).unwrap()), Ok(true));
+		assert_eq!(list.as_slice(), &[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]);
 	}
 
 	#[test]
@@ -7461,13 +7448,7 @@ mod tests {
 		tokio::time::pause();
 
 		fn hops(ids: &[u64]) -> Hops {
-			Hops::try_from(
-				ids.iter()
-					.copied()
-					.map(|id| Hop::new(id).unwrap())
-					.collect::<Vec<_>>(),
-			)
-			.unwrap()
+			Hops::try_from(ids.iter().copied().map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>()).unwrap()
 		}
 
 		// Resolve the advertised route for "test" after creating both sources in

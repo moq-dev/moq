@@ -354,11 +354,11 @@ export class AnnounceInit {
 /// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is
 /// the number of initial Announce messages that follow immediately.
 export class AnnounceOk {
-	origin: Hop;
+	hop: Hop;
 	active: number;
 
-	constructor(origin: Hop, active: number) {
-		this.origin = origin;
+	constructor(hop: Hop, active: number) {
+		this.hop = hop;
 		this.active = active;
 	}
 
@@ -369,7 +369,7 @@ export class AnnounceOk {
 	}
 
 	async #encode(w: Writer) {
-		await w.u62(this.origin);
+		await w.u62(this.hop);
 		await w.u53(this.active);
 	}
 

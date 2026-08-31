@@ -172,7 +172,7 @@ impl Client {
 				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
-				origin: None,
+				hop: None,
 			}
 		} else {
 			lite::Setup::default()

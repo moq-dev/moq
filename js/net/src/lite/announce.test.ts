@@ -139,7 +139,7 @@ test("AnnounceOk accepts the reserved unknown origin", async () => {
 	const msg = new AnnounceOk(UNKNOWN_HOP, 3);
 	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
-	expect(got.origin).toBe(UNKNOWN_HOP);
+	expect(got.hop).toBe(UNKNOWN_HOP);
 	expect(got.active).toBe(3);
 });
 
@@ -147,7 +147,7 @@ test("AnnounceOk round-trips a declared origin", async () => {
 	const msg = new AnnounceOk(HopSchema.parse(42n), 1);
 	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
-	expect(got.origin).toBe(HopSchema.parse(42n));
+	expect(got.hop).toBe(HopSchema.parse(42n));
 	expect(got.active).toBe(1);
 });
 

@@ -591,7 +591,7 @@ async fn catalog(
 
 /// Open a throwaway subscribe-only session to the relay `--connect` names.
 ///
-/// The origin id is fresh and random rather than the pinned `--origin`: this
+/// The Hop ID is fresh and random rather than the pinned `--hop`: this
 /// session is not the publisher the user is about to start, and a shared id is
 /// what tells a relay two sessions carry the same content.
 async fn dial(side: &MoqSide, deadline: Instant) -> Option<(moq_net::origin::Producer, moq_tokio::Connection)> {
@@ -672,7 +672,7 @@ mod tests {
 		// A stage offers its own flags, and none of the globals it would refuse.
 		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --").await;
 		assert!(!staged.is_empty(), "a later stage completed nothing");
-		for global in ["--connect", "--origin", "--broadcast"] {
+		for global in ["--connect", "--hop", "--broadcast"] {
 			assert!(
 				!staged.iter().any(|candidate| candidate == global),
 				"{global} leaked into a stage that refuses it: {staged:?}"

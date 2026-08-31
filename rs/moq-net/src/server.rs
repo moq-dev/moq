@@ -100,7 +100,7 @@ impl Server {
 				role: None,
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
-				origin: None,
+				hop: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -171,7 +171,7 @@ impl Server {
 				(
 					client_setup.path.clone(),
 					client_setup.role,
-					client_setup.origin,
+					client_setup.hop,
 					Handshake::LiteSetup {
 						session,
 						version,
@@ -395,11 +395,7 @@ impl Server {
 			role: None,
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
-			origin: peer_setup
-				.declared
-				.cluster
-				.origin
-				.filter(|o| *o != crate::Hop::UNKNOWN),
+			origin: peer_setup.declared.cluster.origin.filter(|o| *o != crate::Hop::UNKNOWN),
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -947,7 +943,7 @@ mod tests {
 	}
 
 	/// Encode a lite-05 Setup Stream: the `DataType::Setup` tag then the SETUP message.
-	fn lite05_setup(path: Option<&str>, role: Option<Role>, origin: Option<Hop>) -> Vec<u8> {
+	fn lite05_setup(path: Option<&str>, role: Option<Role>, hop: Option<Hop>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
 		lite::DataType::Setup.encode(&mut buf, v).unwrap();
@@ -956,7 +952,7 @@ mod tests {
 			path: path.map(str::to_string),
 			role,
 			cost: None,
-			origin,
+			hop,
 		}
 		.encode(&mut buf, v)
 		.unwrap();

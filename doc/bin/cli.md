@@ -129,7 +129,7 @@ moq <MoQ side>  play [playback options]
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
 Any combination may be given at once (e.g. dial a relay *and* accept incoming
-sessions). `--origin <id>` pins the process's origin id (default: fresh and
+sessions). `--hop <id>` pins the process's Hop ID (default: fresh and
 random per run); see [Redundant Publishers](#redundant-publishers-11).
 
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
@@ -347,7 +347,7 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080
 ```
 
-Every stage shares one connection, one origin id, and one Origin, and each keeps
+Every stage shares one connection, one Hop ID, and one Origin, and each keeps
 its own `--help` (`moq import rtmp --help`). A stage without `--broadcast` falls
 back to the process-wide one, so a single-stage command can keep naming the
 broadcast before the verb.
@@ -374,7 +374,7 @@ Rules worth knowing:
 
 ### Redundant Publishers (1+1)
 
-Relays key a broadcast's content identity on the publisher's origin id (the
+Relays key a broadcast's content identity on the publisher's Hop ID (the
 first hop of its announcements). Two publishers of the same broadcast that
 share an id are treated as interchangeable sources: relays hold both routes
 and fail over between them at a group boundary, so killing one leaves viewers
@@ -387,16 +387,16 @@ whenever routing prefers another (not only on failure), splicing at the next
 group boundary, so encoders that drift (for example segment-numbered tracks
 from processes started at different times) tear down subscribers on the
 switch. Independent publishers with different tracks or timelines MUST use
-different origin ids; the newcomer then takes the broadcast over instead of
+different Hop IDs; the newcomer then takes the broadcast over instead of
 joining. Run the same command from two aligned encoders, pinning the same id
 on both:
 
 ```bash
-moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
-moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
-Leave `--origin` unset everywhere else. The default fresh id per run is what
+Leave `--hop` unset everywhere else. The default fresh id per run is what
 makes a restarted encoder look like new content (ending subscriptions and
 invalidating caches) instead of silently splicing mid-stream. A publisher with
 a *different* id takes the broadcast over the moment it announces, ending the
