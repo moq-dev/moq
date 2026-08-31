@@ -1,4 +1,4 @@
-"""List broadcasts announced on a relay under a given prefix.
+"""List routes announced on a relay under a given prefix.
 
 python py/moq-rs/examples/announced.py --url https://relay.example.com
 python py/moq-rs/examples/announced.py --url https://relay.example.com --prefix live/
@@ -12,9 +12,10 @@ import moq
 
 async def run(url: str, prefix: str, tls_verify: bool) -> None:
     async with moq.Client(url, tls_verify=tls_verify) as client:
-        print(f"watching announcements under {prefix!r} at {url}")
+        print(f"watching route announcements under {prefix!r} at {url}")
         async for announcement in client.announced(prefix):
-            print(f"  + {announcement.path}")
+            sign = "+" if announcement.active else "-"
+            print(f"  {sign} {announcement.path}")
 
 
 def main() -> None:

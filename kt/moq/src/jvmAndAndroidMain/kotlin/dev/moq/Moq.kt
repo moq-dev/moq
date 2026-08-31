@@ -35,7 +35,7 @@ class Moq internal constructor(
     fun createBroadcast(path: String): BroadcastProducer = session.publisher().createBroadcast(path)
 
     /**
-     * Discover broadcasts whose path starts with [prefix] as a [Flow]. The
+     * Discover routes whose prefix starts with [prefix] as a [Flow]. The
      * subscription is acquired on collection and cancelled when collection
      * ends. Use [announced] for the raw handle.
      */
@@ -45,7 +45,7 @@ class Moq internal constructor(
     fun announced(prefix: String = ""): MoqAnnounced = session.consumer().announced(prefix)
 
     /**
-     * Await the broadcast announced at exactly [path].
+     * Await a route covering exactly [path], then resolve the broadcast there.
      *
      * Unlike [requestBroadcast] this waits indefinitely for a future
      * announcement. Cancel the returned handle to stop waiting.
@@ -53,9 +53,9 @@ class Moq internal constructor(
     fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consumer().announcedBroadcast(path)
 
     /**
-     * Resolve the broadcast at [path] as soon as it can be served: an existing
-     * exact-path broadcast whether announced or not, otherwise a dynamic fallback
-     * on the origin.
+     * Resolve the broadcast at [path] as soon as it can be served: a local
+     * broadcast at the exact path, the best announced route covering it, or a
+     * dynamic fallback on the origin.
      *
      * Unlike [announcedBroadcast] this does not wait for a future announcement;
      * it throws when neither can serve the path.

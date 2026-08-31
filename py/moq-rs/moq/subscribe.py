@@ -31,7 +31,6 @@ from .types import (
     FetchGroupOptions,
     Frame,
     MediaFrame,
-    Route,
     Subscription,
     TrackInfo,
     Video,
@@ -376,33 +375,12 @@ class CatalogConsumer:
 class BroadcastConsumer:
     """The consume side of one broadcast: subscribe to its tracks, catalog, and media.
 
-    Built by resolving an announcement or request. Read its :attr:`route`, then use
-    the ``subscribe_*`` / :meth:`fetch_group` methods to pull tracks and media.
+    Built by resolving a request. Use the ``subscribe_*`` / :meth:`fetch_group`
+    methods to pull tracks and media.
     """
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
-        self._route_watch = None
-
-    @property
-    def route(self) -> Route:
-        """The route the broadcast currently takes to reach this origin.
-
-        ``route.hops`` is the chain of relay origin ids (oldest first) and
-        ``route.cost`` the publisher's advertised preference (lower wins).
-        """
-        return self._inner.route()
-
-    async def route_changed(self) -> Route | None:
-        """Wait for the broadcast's route to change.
-
-        The first call returns the current route immediately; each later call
-        blocks until it changes again (e.g. an upstream failover). Returns
-        ``None`` once the broadcast ends.
-        """
-        if self._route_watch is None:
-            self._route_watch = self._inner.route_updates()
-        return await self._route_watch.next()
 
     async def subscribe_catalog(self) -> CatalogConsumer:
         """Subscribe to the broadcast's catalog, async-iterating snapshots as it changes."""

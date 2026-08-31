@@ -9,6 +9,7 @@ from .client import Client, connect
 from .errors import is_auth, is_shutdown
 from .log import log_level
 from .origin import (
+    Announce,
     Announced,
     AnnouncedBroadcast,
     Announcement,
@@ -86,6 +87,7 @@ from .types import (
 )
 
 __all__ = [
+    "Announce",
     "Announced",
     "AnnouncedBroadcast",
     "Announcement",

@@ -9,18 +9,6 @@ public final class BroadcastConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// The route the broadcast currently takes to reach this origin: relay hop
-    /// ids (oldest first) plus the publisher's advertised cost (lower wins).
-    public var route: Route {
-        ffi.route()
-    }
-
-    /// Watch the broadcast's route: yields the current route first, then every
-    /// change (e.g. an upstream failover).
-    public func routeUpdates() -> RouteWatch {
-        RouteWatch(ffi.routeUpdates())
-    }
-
     /// Subscribe to the broadcast's catalog (the description of its tracks).
     public func subscribeCatalog() async throws -> CatalogConsumer {
         CatalogConsumer(try await ffi.subscribeCatalog())
@@ -131,38 +119,6 @@ public final class BroadcastConsumer: Sendable {
     }
 }
 
-/// A watch over a broadcast's route: an async sequence yielding the current
-/// route first, then every change, ending when the broadcast does. Created by
-/// `BroadcastConsumer.routeUpdates`.
-public final class RouteWatch: AsyncSequence, Sendable {
-    /// The route emitted by this sequence.
-    public typealias Element = Route
-
-    let ffi: MoqRouteWatch
-
-    init(_ ffi: MoqRouteWatch) {
-        self.ffi = ffi
-    }
-
-    /// Suspend until the next route: the current one on the first call, then
-    /// each change. Returns nil once the broadcast ends.
-    public func next() async throws -> Route? {
-        try await ffi.next()
-    }
-
-    /// Stop the watch, unblocking any in-flight `next()`.
-    public func cancel() {
-        ffi.cancel()
-    }
-
-    /// Create an iterator that cancels native reads when iteration ends.
-    public func makeAsyncIterator() -> AsyncThrowingStream<Route, Swift.Error>.Iterator {
-        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            try await ffi.next()
-        }.makeAsyncIterator()
-    }
-}
-
 /// Write side of a broadcast: open tracks and publish frames.
 ///
 /// Constructing one directly creates a standalone broadcast for serving dynamic
@@ -192,15 +148,7 @@ public final class BroadcastProducer: Sendable {
         BroadcastDynamic(try ffi.dynamic())
     }
 
-    /// Update the broadcast's route: the hop chain, cost, and liveness it advertises.
-    ///
-    /// Use this as conditions shift (e.g. a standby transcoder lowering its cost
-    /// once warm); consumers observe the change via `BroadcastConsumer.routeUpdates()`.
-    public func setRoute(_ route: Route) throws {
-        try ffi.setRoute(route: route)
-    }
-
-    /// Set whether the broadcast is announced, keeping the rest of its route.
+    /// Set whether the broadcast's exact path is announced as a route.
     ///
     /// The origin advertises the path only while announced; an unannounced
     /// broadcast stays reachable by exact path for subscribes and fetches. This is

@@ -199,7 +199,7 @@ fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
 }
 
 /**
- * Stream of broadcast announcements under a prefix.
+ * Stream of route announcements and retractions under a prefix.
  *
  * Acquires the subscription on first collection and cancels it when collection
  * ends, so callers never touch the underlying handle. Use the raw
@@ -220,24 +220,3 @@ fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnouncement> {
     }
 }
 
-/**
- * Stream of route updates for a broadcast: the current route first, then every
- * change (e.g. an upstream failover). Terminates when the broadcast ends.
- *
- * Acquires the watch on first collection and cancels it when collection ends.
- * Use the raw `routeUpdates()` if you need to hold and cancel the handle yourself.
- */
-fun MoqBroadcastConsumer.routes(): Flow<MoqRoute> {
-    val consumer = this
-    return flow {
-        val watch = consumer.routeUpdates()
-        try {
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                emit(watch.next() ?: break)
-            }
-        } finally {
-            watch.cancel()
-        }
-    }
-}
