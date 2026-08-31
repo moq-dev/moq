@@ -28,6 +28,8 @@ export interface ConsumerConfig {
  */
 export type Event<T> = { push: { index: number; value: T } } | { pop: Span } | { skip: Span };
 
+type Queued<T> = Event<T> | { offset: number; records: T[]; next: number };
+
 /** A half-open range of absolute record indices. */
 export interface Span {
 	/** First index in the span. */
@@ -53,6 +55,8 @@ export interface Group {
  * Group rolls are invisible here on purpose. A header restates the window, and this decoder emits
  * only what is new, so a reader sees one continuous stream of edits no matter how often the
  * publisher rolled for compression's sake.
+ *
+ * @public
  */
 export class Decoder<T> {
 	#compress: boolean;
@@ -64,7 +68,7 @@ export class Decoder<T> {
 	// Next index to deliver, or undefined before the first header. A fresh consumer adopts the first
 	// header's offset rather than skipping everything that came before it.
 	#delivered?: number;
-	#events: Event<T>[] = [];
+	#events: Queued<T>[] = [];
 	#nextEvent = 0;
 
 	constructor(config: ConsumerConfig = {}) {
@@ -115,12 +119,31 @@ export class Decoder<T> {
 
 	/** Take the next event produced by the frames decoded so far. */
 	next(): Event<T> | undefined {
-		const event = this.#events[this.#nextEvent++];
-		if (this.#nextEvent >= this.#events.length) {
-			this.#events = [];
-			this.#nextEvent = 0;
+		const queued = this.#events[this.#nextEvent];
+		if (!queued) {
+			this.#clearEvents();
+			return undefined;
 		}
-		return event;
+
+		if ("records" in queued) {
+			const next = queued.next++;
+			const event = { push: { index: queued.offset + next, value: queued.records[next] as T } };
+			if (queued.next >= queued.records.length) this.#advanceEvent();
+			return event;
+		}
+
+		this.#advanceEvent();
+		return queued;
+	}
+
+	#advanceEvent(): void {
+		this.#nextEvent += 1;
+		if (this.#nextEvent >= this.#events.length) this.#clearEvents();
+	}
+
+	#clearEvents(): void {
+		this.#events = [];
+		this.#nextEvent = 0;
 	}
 
 	/** The window is exactly these records. Report what this reader missed, then what is new. */
@@ -142,10 +165,10 @@ export class Decoder<T> {
 			this.#range("skip", delivered, offset);
 		}
 
-		// Deliver only the tail this reader has not seen; a header that merely restates what it holds
-		// yields nothing at all.
-		for (let index = Math.max(delivered, offset); index < end; index++) {
-			this.#events.push({ push: { index, value: records[index - offset] as T } });
+		// Keep the unseen tail as one batch and materialize each push only when the caller asks for it.
+		const next = Math.max(delivered - offset, 0);
+		if (next < records.length) {
+			this.#events.push({ offset, records, next });
 		}
 
 		this.#front = offset;

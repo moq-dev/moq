@@ -48,6 +48,12 @@ pub enum Event<T> {
 	Skip(std::ops::Range<u64>),
 }
 
+/// An event ready to return, or a header's unseen records waiting to become push events.
+enum Queued<T> {
+	Event(Event<T>),
+	Push { index: u64, records: std::vec::IntoIter<T> },
+}
+
 /// Decodes one MoQ group's frames while borrowing the continuous window state.
 pub struct Group<'a, T> {
 	decoder: &'a mut Decoder<T>,
@@ -95,7 +101,7 @@ pub struct Decoder<T> {
 	delivered: Option<u64>,
 
 	/// Events produced by the frames decoded so far, oldest first.
-	events: VecDeque<Event<T>>,
+	events: VecDeque<Queued<T>>,
 }
 
 impl<T> Decoder<T> {
@@ -124,7 +130,19 @@ impl<T> Decoder<T> {
 	/// end of anything: [`Group::decode`] refills it. Deliberately not [`Iterator`], whose
 	/// `None` a caller would reasonably read as exhausted.
 	pub fn next_event(&mut self) -> Option<Event<T>> {
-		self.events.pop_front()
+		match self.events.pop_front()? {
+			Queued::Event(event) => Some(event),
+			Queued::Push { index, mut records } => {
+				let value = records.next().expect("queued push batch is not empty");
+				if !records.as_slice().is_empty() {
+					self.events.push_front(Queued::Push {
+						index: index + 1,
+						records,
+					});
+				}
+				Some(Event::Push { index, value })
+			}
+		}
 	}
 
 	/// Absolute index of the oldest record in the window, and of the next to arrive.
@@ -136,20 +154,21 @@ impl<T> Decoder<T> {
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode one frame, queueing the events it implies.
 	pub(super) fn decode(&mut self, group: &mut Codec, payload: &[u8]) -> Result<()> {
-		let bytes = match self.config.compression {
-			true => group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?,
-			false => bytes::Bytes::copy_from_slice(payload),
+		let inflated = match self.config.compression {
+			true => Some(group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?),
+			false => None,
 		};
+		let bytes = inflated.as_deref().unwrap_or(payload);
 
 		if !group.positioned {
-			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
+			let header: Header<T> = serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
 				.map_err(|err| Error::Json(err.to_string()))?;
 			self.apply_header(header.offset, header.records)?;
 			group.positioned = true;
 			return Ok(());
 		}
 
-		match serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
+		match serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
 			.map_err(|err| Error::Json(err.to_string()))?
 		{
 			Op::Push(record) => self.apply_push(record),
@@ -181,22 +200,28 @@ impl<T: DeserializeOwned> Decoder<T> {
 				// far more indices than a consumer could materialize individually.
 				let popped = self.front..delivered.min(offset);
 				if !popped.is_empty() {
-					self.events.push_back(Event::Pop(popped));
+					self.events.push_back(Queued::Event(Event::Pop(popped)));
 				}
 				let skipped = delivered..offset;
 				if !skipped.is_empty() {
-					self.events.push_back(Event::Skip(skipped));
+					self.events.push_back(Queued::Event(Event::Skip(skipped)));
 				}
 				delivered
 			}
 		};
 
-		// Deliver only the tail this reader has not seen; a header that merely restates what it holds
-		// yields nothing at all.
-		for (index, record) in (offset..end).zip(records) {
-			if index >= delivered {
-				self.events.push_back(Event::Push { index, value: record });
-			}
+		// Keep the unseen tail as one batch and materialize each push only when the caller asks for it.
+		let skip = usize::try_from(delivered.saturating_sub(offset))
+			.map_err(|_| Error::Json("window length exceeds usize".into()))?;
+		let mut records = records.into_iter();
+		if skip > 0 {
+			records.nth(skip - 1);
+		}
+		if !records.as_slice().is_empty() {
+			self.events.push_back(Queued::Push {
+				index: offset + skip as u64,
+				records,
+			});
 		}
 
 		self.front = offset;
@@ -220,7 +245,8 @@ impl<T: DeserializeOwned> Decoder<T> {
 		self.len = end - self.front;
 
 		if index >= delivered {
-			self.events.push_back(Event::Push { index, value: record });
+			self.events
+				.push_back(Queued::Event(Event::Push { index, value: record }));
 			self.delivered = Some(end);
 		}
 
@@ -243,11 +269,11 @@ impl<T: DeserializeOwned> Decoder<T> {
 			.ok_or_else(|| Error::Json("window range exceeds u64".into()))?;
 		let popped = self.front..delivered.min(end);
 		if !popped.is_empty() {
-			self.events.push_back(Event::Pop(popped));
+			self.events.push_back(Queued::Event(Event::Pop(popped)));
 		}
 		let skipped = delivered.max(self.front)..end;
 		if !skipped.is_empty() {
-			self.events.push_back(Event::Skip(skipped));
+			self.events.push_back(Queued::Event(Event::Skip(skipped)));
 		}
 
 		self.front = end;

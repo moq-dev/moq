@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::op::{Header, Op};
-use crate::Result;
+use crate::{Error, Result};
 
 /// Frames (header included) in one group before a new group is forced, matching
 /// [`snapshot`](crate::snapshot)'s cap. Kept well below moq-net's per-group frame cap so a late
@@ -184,8 +184,8 @@ impl<T> Encoder<T> {
 	/// The retained window, oldest first.
 	///
 	/// The encoder holds this to restate it on a roll, so a caller needs no parallel copy.
-	pub fn window(&self) -> impl ExactSizeIterator<Item = &Value> {
-		self.window.iter()
+	pub fn window(&self) -> Vec<Value> {
+		self.window.iter().cloned().collect()
 	}
 
 	/// Absolute index of the oldest retained record, and of the next one to be pushed.
@@ -222,8 +222,19 @@ impl<T> Encoder<T> {
 			&& self.op_bytes <= ratio * self.header_len
 	}
 
+	/// Reject plaintext that the paired DEFLATE decoder could not produce.
+	fn validate_plaintext(len: usize, kind: &str) -> Result<()> {
+		if u64::try_from(len).unwrap_or(u64::MAX) > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+			return Err(Error::Json(format!(
+				"window {kind} exceeds the decoder's decompressed size limit"
+			)));
+		}
+		Ok(())
+	}
+
 	/// Compress an already-serialized op into the open group, charging it to the budget.
-	fn frame(&mut self, bytes: Vec<u8>) -> Encoded {
+	fn frame(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
+		Self::validate_plaintext(bytes.len(), "frame")?;
 		let payload = match self.flate.as_mut() {
 			Some(flate) => flate.frame(&bytes),
 			None => Bytes::from(bytes),
@@ -232,20 +243,21 @@ impl<T> Encoder<T> {
 		self.op_bytes += payload.len() as u64;
 		self.group_frames += 1;
 
-		Encoded {
+		Ok(Encoded {
 			payload,
 			keyframe: false,
-		}
+		})
 	}
 
 	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
-	fn emit_op(&mut self, bytes: Vec<u8>) -> Option<Encoded> {
-		let encoded = self.frame(bytes);
+	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Option<Encoded>> {
+		let encoded = self.frame(bytes)?;
 		let group_bytes = self.header_len.saturating_add(self.op_bytes);
 		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			None
+			self.resync();
+			Ok(None)
 		} else {
-			Some(encoded)
+			Ok(Some(encoded))
 		}
 	}
 
@@ -255,7 +267,9 @@ impl<T> Encoder<T> {
 	}
 
 	/// Encode the header restating the whole window and opening a new group.
-	fn emit_header(&mut self, bytes: Vec<u8>) -> Encoded {
+	fn emit_header(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
+		Self::validate_plaintext(bytes.len(), "header")?;
+
 		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
 		// its wire size as the op budget's anchor.
 		let (payload, flate) = match self.config.compression {
@@ -266,6 +280,9 @@ impl<T> Encoder<T> {
 			}
 			false => (Bytes::from(bytes), None),
 		};
+		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(Error::Json("window header exceeds the group cache limit".into()));
+		}
 
 		self.header_len = payload.len() as u64;
 		self.op_bytes = 0;
@@ -273,10 +290,10 @@ impl<T> Encoder<T> {
 		self.flate = flate;
 		self.resync = false;
 
-		Encoded {
+		Ok(Encoded {
 			payload,
 			keyframe: true,
-		}
+		})
 	}
 
 	/// Drop `count` records from the front of the window.
@@ -293,15 +310,15 @@ impl<T> Encoder<T> {
 		let encoded = match self.resync || !self.op_allowed() {
 			true => {
 				let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
-				self.emit_header(bytes)
+				self.emit_header(bytes)?
 			}
 			false => {
 				let bytes = serde_json::to_vec(&Op::<&Value>::Pop(count))?;
-				match self.emit_op(bytes) {
+				match self.emit_op(bytes)? {
 					Some(encoded) => encoded,
 					None => {
 						let bytes = Self::header(offset, self.window.iter().skip(count as usize).collect())?;
-						self.emit_header(bytes)
+						self.emit_header(bytes)?
 					}
 				}
 			}
@@ -341,18 +358,18 @@ impl<T: Serialize> Encoder<T> {
 					self.offset,
 					self.window.iter().chain(std::iter::once(&record)).collect(),
 				)?;
-				self.emit_header(bytes)
+				self.emit_header(bytes)?
 			}
 			false => {
 				let bytes = serde_json::to_vec(&Op::Push(&record))?;
-				match self.emit_op(bytes) {
+				match self.emit_op(bytes)? {
 					Some(encoded) => encoded,
 					None => {
 						let bytes = Self::header(
 							self.offset,
 							self.window.iter().chain(std::iter::once(&record)).collect(),
 						)?;
-						self.emit_header(bytes)
+						self.emit_header(bytes)?
 					}
 				}
 			}
@@ -395,14 +412,33 @@ mod test {
 		let mut encoder = Encoder::<u64>::new(ProducerConfig::default());
 
 		drop(encoder.push(&1).unwrap());
-		assert!(encoder.window().next().is_none());
+		assert!(encoder.window().is_empty());
 
 		let frame = encoder.push(&2).unwrap();
 		assert!(frame.keyframe);
 		frame.commit();
-		assert_eq!(encoder.window().collect::<Vec<_>>(), vec![&Value::from(2)]);
+		assert_eq!(encoder.window(), vec![Value::from(2)]);
 
 		drop(encoder.pop(1).unwrap().unwrap());
-		assert_eq!(encoder.window().collect::<Vec<_>>(), vec![&Value::from(2)]);
+		assert_eq!(encoder.window(), vec![Value::from(2)]);
+	}
+
+	#[test]
+	fn a_header_larger_than_the_group_cache_is_rejected() {
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default());
+		let record = "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
+
+		let err = encoder.push(&record).err().expect("oversized header should fail");
+		assert!(err.to_string().contains("group cache limit"));
+		assert!(encoder.window().is_empty());
+
+		let frame = encoder.push(&"ok".to_string()).unwrap();
+		assert!(frame.keyframe);
+	}
+
+	#[test]
+	fn plaintext_is_bounded_by_the_decoder_limit() {
+		let len = usize::try_from(moq_flate::DEFAULT_MAX_FRAME_SIZE + 1).unwrap();
+		assert!(Encoder::<()>::validate_plaintext(len, "frame").is_err());
 	}
 }

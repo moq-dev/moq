@@ -9,6 +9,8 @@ import { type Encoded, Encoder, type ProducerConfig } from "./encoder.ts";
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
  * the encoder emits a header. When something else already owns the track, use the {@link Encoder}
  * directly.
+ *
+ * @public
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;

@@ -199,7 +199,7 @@ mod test {
 			}
 		}
 
-		// Three pushes past the first pop, so the window holds the last three and starts at 2.
+		// Three pops leave the two newest records, at indices 3 and 4.
 		assert_eq!(producer.range(), 3..5);
 		assert_eq!(producer.window(), vec![rec(3), rec(4)]);
 	}

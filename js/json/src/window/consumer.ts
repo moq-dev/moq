@@ -12,6 +12,8 @@ import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.
  * Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
  * window yields nothing for records already delivered, so this reads as one continuous stream of
  * {@link Event}s regardless of how the publisher framed them.
+ *
+ * @public
  */
 export class Consumer<T> {
 	#track: Moq.Track.Subscriber;
@@ -19,6 +21,7 @@ export class Consumer<T> {
 
 	#group?: Moq.Group.Consumer;
 	#codec?: Group;
+	#reading = false;
 
 	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
 		this.#track = track;
@@ -31,7 +34,15 @@ export class Consumer<T> {
 	}
 
 	/** Get the next event, or `undefined` once the track ends. */
-	async next(): Promise<Event<T> | undefined> {
+	next(): Promise<Event<T> | undefined> {
+		if (this.#reading) throw new Error("multiple calls to next not supported");
+		this.#reading = true;
+		return this.#read().finally(() => {
+			this.#reading = false;
+		});
+	}
+
+	async #read(): Promise<Event<T> | undefined> {
 		for (;;) {
 			// Drain what the frames already decoded produced before reading more.
 			const event = this.#decoder.next();
@@ -57,6 +68,7 @@ export class Consumer<T> {
 		}
 	}
 
+	/** Iterate over events until the track ends. */
 	async *[Symbol.asyncIterator](): AsyncIterator<Event<T>> {
 		for (;;) {
 			const event = await this.next();

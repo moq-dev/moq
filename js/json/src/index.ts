@@ -1,5 +1,5 @@
 /**
- * JSON publishing over MoQ tracks, in two modes:
+ * JSON publishing over MoQ tracks, in three modes:
  *
  * - {@link Snapshot}: **lossy**. One JSON value updated over time; a consumer only gets the most
  *   recent value. Intermediate updates are collapsed and older groups are dropped.

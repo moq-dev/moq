@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
+import { Group, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -73,6 +73,16 @@ test("push and pop round-trip", async () => {
 		{ pop: { start: 0, end: 1 } },
 		{ push: { index: 2, value: { n: 2 } } },
 	]);
+});
+
+test("concurrent consumer reads are rejected", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer<Rec>(track.subscribe());
+	const first = consumer.next();
+
+	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	track.close();
+	expect(await first).toBeUndefined();
 });
 
 test("a popped record is never restated", async () => {
@@ -276,6 +286,16 @@ test("an op that would evict the header rolls first", () => {
 	frame = encoder.push(next);
 	expect(frame.keyframe).toBeTrue();
 	frame.commit();
+});
+
+test("a header larger than the group cache is rejected", () => {
+	const encoder = new Encoder<string>();
+
+	expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
+	expect(encoder.window).toEqual([]);
+
+	const frame = encoder.push("ok");
+	expect(frame.keyframe).toBeTrue();
 });
 
 test("an uncommitted edit leaves the window unchanged", () => {

@@ -1,4 +1,4 @@
-import { Encoder as Flate } from "@moq/flate";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. */
@@ -61,6 +61,8 @@ export interface Pending extends Encoded {
  * The track-free core of {@link Producer}. It owns the retained window, so it can restate it
  * whenever a group rolls; that restatement is the whole point of the mode, and is what an
  * append-only log cannot do.
+ *
+ * @public
  */
 export class Encoder<T> {
 	#opRatio: number;
@@ -127,16 +129,19 @@ export class Encoder<T> {
 
 		// Encode before touching the window, so a value that can't be serialized leaves the encoder
 		// exactly as it was.
-		const text = JSON.stringify(value);
+		const text: string | undefined = JSON.stringify(value);
 		if (text === undefined) {
 			throw new Error("record is not representable as JSON");
 		}
 
-		const window = [...this.#window, text];
 		const edit: Edit = { push: text };
-		if (this.#resync || !this.#opAllowed()) return this.#emitHeader(this.#offset, window, edit);
+		if (this.#resync || !this.#opAllowed()) {
+			return this.#emitHeader(this.#offset, [...this.#window, text], edit);
+		}
 
-		return this.#emitOp(`{"push":${text}}`, this.#offset, window, edit);
+		const payload = this.#emitOp(`{"push":${text}}`);
+		if (payload) return this.#pendingFrame(payload, false, edit);
+		return this.#emitHeader(this.#offset, [...this.#window, text], edit);
 	}
 
 	/**
@@ -155,10 +160,14 @@ export class Encoder<T> {
 		if (dropped <= 0) return undefined;
 
 		const offset = this.#offset + dropped;
-		const window = this.#window.slice(dropped);
 		const edit: Edit = { pop: dropped };
-		if (this.#resync || !this.#opAllowed()) return this.#emitHeader(offset, window, edit);
-		return this.#emitOp(`{"pop":${dropped}}`, offset, window, edit);
+		if (this.#resync || !this.#opAllowed()) {
+			return this.#emitHeader(offset, this.#window.slice(dropped), edit);
+		}
+
+		const payload = this.#emitOp(`{"pop":${dropped}}`);
+		if (payload) return this.#pendingFrame(payload, false, edit);
+		return this.#emitHeader(offset, this.#window.slice(dropped), edit);
 	}
 
 	/** Whether the pending edit may ride as an op in the open group. */
@@ -171,18 +180,22 @@ export class Encoder<T> {
 		);
 	}
 
-	/** Compress an already-serialized op into the open group, charging it to the budget. */
-	#emitOp(text: string, offset: number, window: string[], edit: Edit): Pending {
+	/** Compress an already-serialized op into the open group, if its header remains cached. */
+	#emitOp(text: string): Uint8Array | undefined {
 		const bytes = new TextEncoder().encode(text);
+		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
+			throw new Error("window frame exceeds the decoder's decompressed size limit");
+		}
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
 		this.#opBytes += payload.length;
 		this.#groupFrames += 1;
 		if (this.#headerLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) {
-			return this.#emitHeader(offset, window, edit);
+			this.#resyncGroup();
+			return undefined;
 		}
 
-		return this.#pendingFrame(payload, false, edit);
+		return payload;
 	}
 
 	/** Emit the header restating the whole window and opening a new group. */
@@ -191,11 +204,18 @@ export class Encoder<T> {
 		// bytes a reader sees are then identical to what the matching push carried.
 		const text = `{"offset":${offset},"records":[${window.join(",")}]}`;
 		const bytes = new TextEncoder().encode(text);
+		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
+			throw new Error("window header exceeds the decoder's decompressed size limit");
+		}
 
 		// A fresh per-group encoder (cold window), with the header as frame 0.
-		this.#flate = this.#compress ? new Flate() : undefined;
-		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
+		const flate = this.#compress ? new Flate() : undefined;
+		const payload = flate ? flate.frame(bytes) : bytes;
+		if (payload.length > Group.MAX_GROUP_CACHE_BYTES) {
+			throw new Error("window header exceeds the group cache limit");
+		}
 
+		this.#flate = flate;
 		this.#headerLen = payload.length;
 		this.#opBytes = 0;
 		this.#groupFrames = 1;

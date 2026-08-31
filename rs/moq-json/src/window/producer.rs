@@ -51,7 +51,7 @@ impl<T> Producer<T> {
 
 	/// The retained window, oldest first.
 	pub fn window(&self) -> Vec<Value> {
-		self.inner.lock().unwrap().encoder.window().cloned().collect()
+		self.inner.lock().unwrap().encoder.window()
 	}
 
 	/// Absolute index of the oldest retained record, and of the next to be pushed.
