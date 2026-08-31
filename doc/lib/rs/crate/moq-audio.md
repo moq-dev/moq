@@ -54,22 +54,50 @@ mix as its reference.
 
 ## Publishing
 
-`encode::publish_capture` advertises the track and catalog up front and opens the
-microphone only while somebody is listening:
+`encode::Publication` advertises the track and catalog up front and opens the
+microphone only while somebody is listening. Its separate driver owns capture
+and encoding, while clones of the retained handle control that same track:
 
 ```rust
 use moq_audio::{capture, encode};
+use tokio::task::LocalSet;
 
-let config = capture::Config::default();
+let local = LocalSet::new();
+local.run_until(async move {
+    let mut options = encode::PublicationOptions::default();
+    options.capture = capture::Config::default();
+    options.clock = clock;
 
-encode::publish_capture(
-    broadcast,
-    catalog,
-    config,
-    encode::Options::default(),
-    clock,
-).await?;
+    let (mut microphone, driver) =
+        encode::Publication::new(broadcast, catalog, options).await?;
+    let publish = tokio::task::spawn_local(driver.run());
+
+    microphone.stop(); // releases the device, but keeps the track
+    microphone.replace(capture::Source::Microphone(Some(device_id)));
+    microphone.start(); // resumes on the same MoQ broadcast and track
+
+    if let Some(state) = microphone.changed().await {
+        tracing::info!(
+            status = ?state.status(),
+            device = ?state.device(),
+            failure = ?state.failure(),
+            level = ?state.level(),
+        );
+    }
+
+    publish.await??;
+    Ok(())
+}).await?;
 ```
+
+The native capture driver is not `Send`, so await it directly or use a
+`LocalSet` when it needs a separate task. `encode::publish_capture` remains the
+shorthand when no controls are needed. Transient input failures retry with
+capped backoff. Terminal failures leave the track registered in
+`Status::Failed`; `start` retries, while `replace` selects another device without
+changing the identity subscribers already know. `State::level` is measured
+after AEC and other capture processing, so it is suitable for a local meter or
+active-speaker input.
 
 `encode::Producer` takes PCM you supply instead. Either way the codec is
 `encode::Codec`: Opus (the default) or uncompressed PCM, which trades bandwidth

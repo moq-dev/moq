@@ -208,6 +208,15 @@ pub(crate) enum Stream {
 }
 
 impl Stream {
+	/// The concrete microphone currently in use, if this is a microphone stream.
+	pub(crate) fn device(&self) -> Option<&Device> {
+		match self {
+			Self::Microphone(mic) => Some(&mic.device),
+			#[cfg(target_os = "macos")]
+			Self::System(_) => None,
+		}
+	}
+
 	/// The PCM layout this opened stream actually delivers.
 	pub(crate) fn layout(&self) -> Layout {
 		match self {
@@ -238,7 +247,7 @@ pub(crate) async fn format(config: &Config) -> Result<Layout, Failure> {
 			// cpal enumerates devices with blocking host I/O, so keep it off the
 			// runtime's worker threads.
 			tokio::task::spawn_blocking(move || {
-				let (_, _, stream_config) = resolve(device.as_deref(), &config)?;
+				let (_, _, _, stream_config) = resolve(device.as_deref(), &config)?;
 				Ok(Layout {
 					sample_rate: stream_config.sample_rate,
 					channels: stream_config.channels as u32,
@@ -286,6 +295,8 @@ pub(crate) struct Microphone {
 	pending: Option<Samples>,
 	/// The format cpal negotiated for this stream generation.
 	layout: Layout,
+	/// The concrete device selected for this stream generation.
+	device: Device,
 }
 
 /// The async half of a microphone stream, separate from the cpal handle so its
@@ -344,7 +355,7 @@ impl Microphone {
 		// stream that silently delivers nothing. A no-op on other platforms.
 		permission::ensure_microphone_access().await.map_err(Failure::fatal)?;
 
-		let (device, sample_format, stream_config) = resolve(selector, config)?;
+		let (device, current, sample_format, stream_config) = resolve(selector, config)?;
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
@@ -428,6 +439,7 @@ impl Microphone {
 			reader,
 			pending: Some(pending),
 			layout: Layout { sample_rate, channels },
+			device: current,
 		})
 	}
 
@@ -443,14 +455,9 @@ impl Microphone {
 }
 
 /// An audio input reported by [`devices`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
 	/// Opaque identifier: pass to [`Source::Microphone`].
-	///
-	/// cpal exposes no identifier other than the device name, so this currently
-	/// equals [`name`](Self::name). Match on `id` anyway: it is what
-	/// [`source`](Self::source) uses, so a host that grows a stable id later
-	/// won't change this API.
 	pub id: String,
 	/// Human-readable name, e.g. "MacBook Pro Microphone".
 	pub name: String,
@@ -473,19 +480,11 @@ pub async fn devices() -> Result<Vec<Device>, Error> {
 /// The blocking half of [`devices`].
 fn list() -> Result<Vec<Device>, Error> {
 	let host = cpal::default_host();
-	let default = host.default_input_device().map(|d| d.to_string());
-	Ok(host
-		.input_devices()
+	let default = host.default_input_device().and_then(|device| device.id().ok());
+	host.input_devices()
 		.map_err(capture_err)?
-		.map(|device| {
-			let name = device.to_string();
-			Device {
-				default: Some(&name) == default.as_ref(),
-				id: name.clone(),
-				name,
-			}
-		})
-		.collect())
+		.map(|device| describe(&device, default.as_ref()).map_err(capture_err))
+		.collect()
 }
 
 /// Run blocking cpal host I/O off the runtime's worker threads.
@@ -503,18 +502,20 @@ where
 fn resolve(
 	selector: Option<&str>,
 	config: &Config,
-) -> Result<(cpal::Device, cpal::SampleFormat, cpal::StreamConfig), Failure> {
+) -> Result<(cpal::Device, Device, cpal::SampleFormat, cpal::StreamConfig), Failure> {
 	let host = cpal::default_host();
+	let default = host.default_input_device().and_then(|device| device.id().ok());
 	let device = match selector {
-		Some(name) => host
-			.input_devices()
-			.map_err(Failure::cpal)?
-			.find(|d| d.to_string() == name)
-			.ok_or_else(|| Failure::retry(Error::Device(format!("input device {name:?} not found"))))?,
+		Some(id) => {
+			let id = id.parse().map_err(Failure::cpal)?;
+			host.device_by_id(&id)
+				.ok_or_else(|| Failure::retry(Error::Device(format!("input device {id:?} not found"))))?
+		}
 		None => host
 			.default_input_device()
 			.ok_or_else(|| Failure::retry(Error::Device("no default input device".into())))?,
 	};
+	let current = describe(&device, default.as_ref()).map_err(Failure::cpal)?;
 
 	let supported = device.default_input_config().map_err(Failure::cpal)?;
 	let sample_format = supported.sample_format();
@@ -525,7 +526,17 @@ fn resolve(
 	if let Some(channels) = config.channels {
 		stream_config.channels = channels as u16;
 	}
-	Ok((device, sample_format, stream_config))
+	Ok((device, current, sample_format, stream_config))
+}
+
+fn describe(device: &cpal::Device, default: Option<&cpal::DeviceId>) -> Result<Device, cpal::Error> {
+	let id = device.id()?;
+	let description = device.description()?;
+	Ok(Device {
+		default: Some(&id) == default,
+		id: id.to_string(),
+		name: description.name().into(),
+	})
 }
 
 fn stream_err(errors: &kio::Producer<Option<cpal::Error>>, err: cpal::Error) {

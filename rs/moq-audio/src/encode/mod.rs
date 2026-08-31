@@ -28,4 +28,4 @@ pub use encoder::{Codec, Config, Encoder, Finish, Input};
 pub use producer::{Options, Producer};
 
 #[cfg(feature = "capture")]
-pub use capture::publish_capture;
+pub use capture::{Driver, Level, Publication, PublicationOptions, State, Status, publish_capture};
