@@ -57,7 +57,7 @@ mod tests {
 	/// Options: an old peer can opt out too.
 	#[test]
 	fn every_version_round_trips() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft19] {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft20] {
 			let mut params = super::super::Parameters::default();
 			into_setup(&mut params, version);
 			assert_eq!(from_setup(&params, version).unwrap(), Some(true));

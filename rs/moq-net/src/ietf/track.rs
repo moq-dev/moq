@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, Parameters, RequestId},
+	ietf::{Filter, GroupOrder, Parameters, RequestId},
 };
 
 use super::Message;
@@ -41,7 +41,7 @@ impl Message for TrackStatus<'_> {
 				0u8.encode(w, version)?; // subscriber priority
 				GroupOrder::Descending.encode(w, version)?;
 				false.encode(w, version)?; // forward
-				FilterType::LargestObject.encode(w, version)?; // filter type
+				Filter::NextObject.encode(w, version)?; // filter
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {

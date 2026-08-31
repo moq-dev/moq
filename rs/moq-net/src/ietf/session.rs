@@ -602,7 +602,10 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 	}
 
 	match kind {
-		FetchHeader::TYPE => Err(Error::Unsupported),
+		// Draft-20 answers a FILL_PARAMETERS subscription on a fetch stream. Earlier drafts
+		// have no fill, so a fetch stream there answers a standalone FETCH we never sent,
+		// which `recv_fill` refuses.
+		FetchHeader::TYPE => subscriber.recv_fill(stream).await,
 		_ => Err(Error::UnexpectedStream),
 	}
 }

@@ -2,12 +2,10 @@
 
 use std::borrow::Cow;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-
 use crate::{
 	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Parameters, Properties, RequestId},
+	ietf::{Fill, Filter, GroupOrder, Location, Param, Parameters, Properties, RequestId},
 };
 
 use super::Message;
@@ -15,26 +13,28 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
-#[repr(u64)]
-pub enum FilterType {
-	NextGroup = 0x01,
-	#[default]
-	LargestObject = 0x2,
-	AbsoluteStart = 0x3,
-	AbsoluteRange = 0x4,
-}
+/// The INCLUDE_PROPERTIES parameter (0x35), draft-20's opt-out from Track Properties.
+///
+/// Length prefixed despite holding a single byte. The Key-Value-Pair rule keys the framing
+/// off the parameter id's parity and 0x35 is odd, so a Length is present even though the
+/// parameter's own section calls the value a uint8. Parity is what the generic parser uses
+/// to skip a parameter it does not know, so following the prose instead would desync every
+/// parameter after this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IncludeProperties(pub bool);
 
-impl Encode<Version> for FilterType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		u64::from(*self).encode(w, version)?;
-		Ok(())
+impl Param for IncludeProperties {
+	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		vec![u8::from(self.0)].encode(w, version)
 	}
-}
 
-impl Decode<Version> for FilterType {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
+	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match Vec::<u8>::decode(r, version)?[..] {
+			// The draft allows exactly 0 or 1; anything else is a protocol violation.
+			[0] => Ok(Self(false)),
+			[1] => Ok(Self(true)),
+			_ => Err(DecodeError::InvalidValue),
+		}
 	}
 }
 
@@ -47,7 +47,12 @@ pub struct Subscribe<'a> {
 	pub track_name: Cow<'a, str>,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
-	pub filter_type: FilterType,
+	/// Which Objects the subscription delivers.
+	pub filter: Filter,
+	/// The draft-20 backfill request, if the subscriber asked for one.
+	pub fill: Option<Fill>,
+	/// Whether the subscriber wants Track Properties on the response (draft-20).
+	pub properties_wanted: bool,
 }
 
 impl Message for Subscribe<'_> {
@@ -71,17 +76,7 @@ impl Message for Subscribe<'_> {
 					return Err(DecodeError::Unsupported);
 				}
 
-				let filter_type = FilterType::decode(r, version)?;
-				match filter_type {
-					FilterType::AbsoluteStart => {
-						let _start = Location::decode(r, version)?;
-					}
-					FilterType::AbsoluteRange => {
-						let _start = Location::decode(r, version)?;
-						let _end_group = u64::decode(r, version)?;
-					}
-					FilterType::NextGroup | FilterType::LargestObject => {}
-				};
+				let filter = Filter::decode(r, version)?;
 
 				let _params = Parameters::decode(r, version)?;
 
@@ -91,7 +86,9 @@ impl Message for Subscribe<'_> {
 					track_name,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
+					fill: None,
+					properties_wanted: true,
 				})
 			}
 			_ => {
@@ -99,9 +96,21 @@ impl Message for Subscribe<'_> {
 					0x04 => rendezvous_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter_type: Option<FilterType>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
+					0x23 => fill: Option<Fill>,
+					0x35 => include_properties: Option<IncludeProperties>,
 				);
+
+				// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions. An unknown
+				// message parameter is a protocol violation, so they stay rejected on the
+				// drafts that predate them rather than being quietly tolerated.
+				if (fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
+
+				// Defaults to 1, so an absent parameter means the subscriber wants them.
+				let properties_wanted = include_properties.is_none_or(|p| p.0);
 
 				// RENDEZVOUS_TIMEOUT arrived in draft-17; 0x04 means MAX_CACHE_DURATION in
 				// draft-15, which is a publisher parameter with no business in a SUBSCRIBE.
@@ -121,7 +130,8 @@ impl Message for Subscribe<'_> {
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
+				// An absent LOCATION_FILTER means the subscription is unfiltered.
+				let filter = filter.unwrap_or(Filter::Unfiltered);
 
 				Ok(Self {
 					request_id,
@@ -129,7 +139,9 @@ impl Message for Subscribe<'_> {
 					track_name,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
+					fill,
+					properties_wanted,
 				})
 			}
 		}
@@ -149,24 +161,21 @@ impl Message for Subscribe<'_> {
 				self.group_order.encode(w, version)?;
 				true.encode(w, version)?; // forward
 
-				// Decoding keeps the filter type but drops the Location an absolute filter
-				// carries after it, so there is nothing left to write. Refuse rather than
-				// emit a truncated SUBSCRIBE whose next field the peer would read as that
-				// Location. Reachable from a peer's own message, so it is an error, not an
-				// assertion.
-				if matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange) {
-					return Err(EncodeError::Unsupported);
-				}
-
-				self.filter_type.encode(w, version)?;
+				self.filter.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
+				// FILL_PARAMETERS arrived in draft-20. Sending it to an older peer would be an
+				// unknown parameter, which is a protocol violation, so it is dropped instead.
+				// A subscriber there simply joins mid-group, which is what it did all along.
+				let fill = self.fill.filter(|_| Filter::is_draft20(version));
+
 				encode_params!(w, version,
 					0x10 => true,
 					0x20 => self.subscriber_priority,
-					0x21 => self.filter_type,
+					0x21 => self.filter,
 					0x22 => self.group_order,
+					0x23 => fill,
 				);
 			}
 		}
@@ -375,7 +384,7 @@ impl Message for SubscribeUpdate {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => FilterType::LargestObject,
+					0x21 => Filter::NextObject,
 				);
 			}
 			_ => {
@@ -391,7 +400,7 @@ impl Message for SubscribeUpdate {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => FilterType::LargestObject,
+					0x21 => Filter::NextObject,
 				);
 			}
 		}
@@ -425,7 +434,7 @@ impl Message for SubscribeUpdate {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter_type: Option<FilterType>,
+					0x21 => _filter: Option<Filter>,
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
@@ -449,7 +458,7 @@ impl Message for SubscribeUpdate {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter_type: Option<FilterType>,
+					0x21 => _filter: Option<Filter>,
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
@@ -492,7 +501,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -512,7 +523,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -549,7 +562,7 @@ mod tests {
 	/// SUBSCRIBE.
 	#[test]
 	fn rendezvous_timeout_is_accepted_and_ignored() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			for millis in [0, 5000] {
 				let encoded = subscribe_with_rendezvous(millis, version);
 				let msg: Subscribe = decode_message(&encoded, version)
@@ -600,10 +613,12 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			// The reader has to be able to see a 0x04, or its absence below proves nothing.
 			assert_eq!(
 				first_param_key(&subscribe_with_rendezvous(5000, version), version),
@@ -627,7 +642,9 @@ mod tests {
 			track_name: "audio".into(),
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -706,7 +723,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_subscribe_rejects_invalid_filter_type() {
+	fn test_subscribe_rejects_invalid_filter() {
 		#[rustfmt::skip]
 		let invalid_bytes = vec![
 			0x01, // subscribe_id
@@ -789,7 +806,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -844,7 +863,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

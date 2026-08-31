@@ -196,13 +196,15 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
 	const modernVersion =
-		protocol === Ietf.ALPN.DRAFT_19
-			? Ietf.Version.DRAFT_19
-			: protocol === Ietf.ALPN.DRAFT_18
-				? Ietf.Version.DRAFT_18
-				: protocol === Ietf.ALPN.DRAFT_17
-					? Ietf.Version.DRAFT_17
-					: undefined;
+		protocol === Ietf.ALPN.DRAFT_20
+			? Ietf.Version.DRAFT_20
+			: protocol === Ietf.ALPN.DRAFT_19
+				? Ietf.Version.DRAFT_19
+				: protocol === Ietf.ALPN.DRAFT_18
+					? Ietf.Version.DRAFT_18
+					: protocol === Ietf.ALPN.DRAFT_17
+						? Ietf.Version.DRAFT_17
+						: undefined;
 	if (modernVersion !== undefined) {
 		return await handshakeAlpn(url, session, modernVersion, discovery);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
@@ -367,6 +369,7 @@ async function connectWebTransport(
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,
+			Ietf.ALPN.DRAFT_20,
 			Ietf.ALPN.DRAFT_19,
 			Ietf.ALPN.DRAFT_18,
 			Ietf.ALPN.DRAFT_17,

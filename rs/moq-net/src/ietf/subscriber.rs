@@ -8,7 +8,7 @@ use crate::{
 	Error, Path, PathOwned, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
-	ietf::{self, Control, FilterType, GroupOrder, RequestId},
+	ietf::{self, Control, Fill, Filter, GroupOrder, RequestId},
 	origin, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
@@ -1472,6 +1472,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		broadcast: &Path<'_>,
 		track: &track::Producer,
 	) -> Result<(), Error> {
+		let subscription = track.subscription();
+		let (filter, fill) = subscribe_filter(
+			subscription.as_ref().and_then(|s| s.group_start),
+			subscription.as_ref().and_then(|s| s.group_end),
+			self.version,
+		);
+
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
@@ -1481,7 +1488,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				track_name: track.name().into(),
 				subscriber_priority: super::priority::to_wire(track.subscription().map(|s| s.priority).unwrap_or(0)),
 				group_order: GroupOrder::Descending,
-				filter_type: FilterType::LargestObject,
+				filter,
+				fill,
+				properties_wanted: true,
 			})
 			.await?;
 		Ok(())
@@ -1513,6 +1522,65 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Err(Error::Cancel)
 			}
 			_ => Err(Error::UnexpectedMessage),
+		}
+	}
+
+	/// Read a fill fetch stream, which draft-20 opens in response to FILL_PARAMETERS.
+	///
+	/// The FETCH_HEADER names the SUBSCRIBE's Request ID rather than a track alias, so the
+	/// subscription resolves directly instead of waiting on the alias table.
+	///
+	/// We only ever ask to fill the current group, so the stream carries exactly one group.
+	/// A second group means the publisher answered a request we did not make, and its
+	/// objects would land in the wrong group here.
+	pub async fn recv_fill(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+		// The dispatcher only peeked the type, so it is still on the stream. Unlike
+		// SUBGROUP_HEADER, FETCH_HEADER carries no flags packed into it.
+		// Only draft-20 has a fill. A fetch stream on any earlier version answers a
+		// standalone FETCH, which we never send and cannot serve.
+		if !Filter::is_draft20(self.version) {
+			return Err(Error::Unsupported);
+		}
+
+		let kind: u64 = stream.decode().await?;
+		debug_assert_eq!(kind, ietf::FetchHeader::TYPE);
+
+		let header: ietf::FetchHeader = stream.decode().await?;
+
+		let (mut track, timescale) = {
+			let state = self.state.lock();
+			let subscribe = state.subscribes.get(&header.request_id).ok_or(Error::NotFound)?;
+			(subscribe.producer.clone(), subscribe.timescale)
+		};
+
+		let mut group: Option<group::Producer> = None;
+		let res = {
+			let watch = track.clone();
+			let mut serve = std::pin::pin!(run_fill(stream, &mut track, timescale, &mut group, self.version));
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = watch.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				waiter.poll_future(serve.as_mut())
+			})
+			.await
+		};
+
+		// A fill that dies part way leaves a group with a hole in it, which moq-lite has no
+		// way to represent, so the group is aborted rather than finished short.
+		match (res, group) {
+			(Ok(()), Some(mut group)) => {
+				group.finish()?;
+				Ok(())
+			}
+			(Ok(()), None) => Ok(()),
+			(Err(err), group) => {
+				if let Some(group) = group {
+					tracing::debug!(%err, group = %group.sequence, "fill error");
+					let _ = group.abort(err.clone());
+				}
+				Err(err)
+			}
 		}
 	}
 
@@ -2069,7 +2137,7 @@ mod tests {
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_a_subscription_stops_the_publisher() {
-		for version in [Version::Draft16, Version::Draft19] {
+		for version in [Version::Draft16, Version::Draft20] {
 			let log = cancel_a_subscription(version).await;
 			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
 			// routine unsubscribe would read to the publisher as a fault on our side.
@@ -2369,7 +2437,7 @@ mod tests {
 	/// fallback, so a reset here means the cancellation never landed.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_does_not_reset_away_the_unsubscribe() {
-		for version in [Version::Draft16, Version::Draft19] {
+		for version in [Version::Draft16, Version::Draft20] {
 			let log = cancel_a_subscription(version).await;
 			assert!(
 				log.resets().is_empty(),
@@ -3592,5 +3660,411 @@ mod tests {
 			1,
 			"the decline reaches the peer as NOT_SUPPORTED"
 		);
+	}
+}
+
+/// The Location Filter, and any fill, that expresses a moq-lite subscription's group range.
+///
+/// moq-lite joins a track at the *start* of the current group, which is a decodable point.
+/// No Location Filter can say that on its own: the filter only restricts which newly
+/// published Objects are forwarded, it never asks for ones already published. So every past
+/// group we want, the current one included, is named as a fill too, which is the draft's own
+/// recipe for joining at the current group.
+///
+/// Only draft-20 has a fill, and it is also the first version that can name a group relative
+/// to a live edge the subscriber has not learned yet. Earlier drafts keep asking for the next
+/// Object and joining mid-group, exactly as they always did: their absolute filters were
+/// never honored by the publishers we talk to, so naming one now would change what an
+/// existing peer sends us.
+fn subscribe_filter(start: Option<u64>, end: Option<u64>, version: Version) -> (Filter, Option<Fill>) {
+	if !Filter::is_draft20(version) {
+		return (Filter::NextObject, None);
+	}
+
+	let fill = |filter| Some(Fill { filter });
+
+	match start {
+		// Live. Ask for the next Object, and fill the current group from its start.
+		None => (Filter::NextObject, fill(Filter::Relative(1))),
+		// The whole track. An absent filter is unrestricted, and an empty fill scope asks
+		// for everything up to Largest Object.
+		Some(0) if end.is_none() => (Filter::Unfiltered, fill(Filter::Unfiltered)),
+		Some(group) => {
+			let range = Filter::Absolute {
+				start: ietf::Location { group, object: 0 },
+				end,
+			};
+			(range, fill(range))
+		}
+	}
+}
+
+#[cfg(test)]
+mod filter_tests {
+	use super::*;
+
+	/// The canonical live join: Next Object on the subscription, with the current group
+	/// filled in from its start so playback has a decodable point.
+	#[test]
+	fn live_fills_the_current_group() {
+		let (filter, fill) = subscribe_filter(None, None, Version::Draft20);
+		assert_eq!(filter, Filter::NextObject);
+		assert_eq!(
+			fill,
+			Some(Fill {
+				filter: Filter::Relative(1)
+			})
+		);
+	}
+
+	/// A past start is named twice: once to restrict what the subscription forwards, and
+	/// once as the fill that actually retrieves it.
+	#[test]
+	fn a_past_start_is_also_a_fill() {
+		let range = Filter::Absolute {
+			start: ietf::Location { group: 7, object: 0 },
+			end: Some(9),
+		};
+		assert_eq!(
+			subscribe_filter(Some(7), Some(9), Version::Draft20),
+			(range, Some(Fill { filter: range }))
+		);
+	}
+
+	/// The whole track: nothing to restrict, and an empty fill scope asks for all of it.
+	#[test]
+	fn the_whole_track_is_unfiltered() {
+		assert_eq!(
+			subscribe_filter(Some(0), None, Version::Draft20),
+			(
+				Filter::Unfiltered,
+				Some(Fill {
+					filter: Filter::Unfiltered
+				})
+			)
+		);
+	}
+
+	/// Earlier drafts have no fill and never had their absolute filters honored, so they
+	/// keep asking for exactly what they always did.
+	#[test]
+	fn older_drafts_ask_for_the_next_object() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft19] {
+			assert_eq!(
+				subscribe_filter(Some(7), Some(9), version),
+				(Filter::NextObject, None),
+				"{version}"
+			);
+		}
+	}
+}
+
+/// Serialization Flags on a fetch object (draft-20 section 11.4.4.1).
+mod fill_flags {
+	/// The two low bits select how the Subgroup ID is encoded.
+	pub const SUBGROUP_MASK: u64 = 0x03;
+	/// Subgroup ID is zero.
+	pub const SUBGROUP_ZERO: u64 = 0x00;
+	/// Subgroup ID is the prior Object's.
+	pub const SUBGROUP_PRIOR: u64 = 0x01;
+	/// Subgroup ID is present as its own field.
+	pub const SUBGROUP_PRESENT: u64 = 0x03;
+
+	pub const OBJECT_DELTA: u64 = 0x04;
+	pub const GROUP_DELTA: u64 = 0x08;
+	pub const PRIORITY: u64 = 0x10;
+	pub const PROPERTIES: u64 = 0x20;
+	pub const DATAGRAM: u64 = 0x40;
+
+	/// Every bit with a meaning. A set bit outside this set is a protocol violation.
+	pub const KNOWN: u64 = SUBGROUP_MASK | OBJECT_DELTA | GROUP_DELTA | PRIORITY | PROPERTIES | DATAGRAM;
+}
+
+/// Read the objects on a fill fetch stream into a single group.
+///
+/// `group` is threaded in from the caller so a stream that dies part way still leaves the
+/// group it had opened where the caller can abort it. It is created lazily, because the
+/// group id arrives with the first object rather than in the header.
+///
+/// The subset accepted here is what moq-lite can represent: one group, subgroup zero, and
+/// objects numbered from zero with no gaps. Anything else resets this stream and leaves the
+/// live subscription running, so a fill we cannot read costs the head of a group, not the
+/// subscription.
+async fn run_fill<R: web_transport_trait::RecvStream>(
+	stream: &mut Reader<R, Version>,
+	track: &mut track::Producer,
+	timescale: Option<Timescale>,
+	group: &mut Option<group::Producer>,
+	version: Version,
+) -> Result<(), Error> {
+	let mut prior: Option<(u64, u64)> = None;
+
+	while let Some(flags) = stream.decode_maybe::<u64>().await? {
+		// The three End of Range markers are the only legal values above the flag range.
+		// Each one declares a span of objects that will not be serialized, which is a gap,
+		// and moq-lite tracks have none.
+		if flags & !fill_flags::KNOWN != 0 {
+			tracing::warn!(flags, "unsupported fetch object flags, dropping fill");
+			return Err(Error::Unsupported);
+		}
+
+		// A datagram-preference object has no subgroup, so it cannot join one here.
+		if flags & fill_flags::DATAGRAM != 0 {
+			tracing::warn!("datagram object on a fill, dropping fill");
+			return Err(Error::Unsupported);
+		}
+
+		let group_delta = match flags & fill_flags::GROUP_DELTA != 0 {
+			true => Some(stream.decode::<u64>().await?),
+			false => None,
+		};
+
+		let subgroup = match flags & fill_flags::SUBGROUP_MASK {
+			fill_flags::SUBGROUP_ZERO => 0,
+			// The prior object's, which this loop only ever lets be zero.
+			fill_flags::SUBGROUP_PRIOR if prior.is_some() => 0,
+			fill_flags::SUBGROUP_PRESENT => stream.decode::<u64>().await?,
+			// Prior-plus-one is always non-zero, and a prior-relative mode on the first
+			// object has no prior to read.
+			_ => {
+				tracing::warn!(flags, "unsupported subgroup on a fill, dropping fill");
+				return Err(Error::Unsupported);
+			}
+		};
+		if subgroup != 0 {
+			tracing::warn!(subgroup, "subgroup ID is not supported, dropping fill");
+			return Err(Error::Unsupported);
+		}
+
+		let object_delta = match flags & fill_flags::OBJECT_DELTA != 0 {
+			true => Some(stream.decode::<u64>().await?),
+			false => None,
+		};
+
+		if flags & fill_flags::PRIORITY != 0 {
+			let _priority: u8 = stream.decode().await?;
+		}
+
+		// Object Properties carry the frame's presentation timestamp in the units the
+		// track declared, exactly as the per-object extensions do on a subgroup.
+		let timestamp = match (flags & fill_flags::PROPERTIES != 0, timescale) {
+			(true, Some(timescale)) => {
+				let size: usize = stream.decode().await?;
+				let mut properties = stream.read_exact(size).await?;
+				ietf::decode_object_time(&mut properties, timescale, version)?
+			}
+			(true, None) => {
+				let size: usize = stream.decode().await?;
+				stream.read_exact(size).await?;
+				None
+			}
+			(false, _) => None,
+		};
+
+		let (sequence, object) = match (prior, group_delta, object_delta) {
+			// The first object carries both deltas, and they are the absolute ids.
+			(None, Some(sequence), Some(object)) => (sequence, object),
+			(None, _, _) => {
+				tracing::warn!(flags, "first fill object must carry both deltas, dropping fill");
+				return Err(Error::Unsupported);
+			}
+			// A group delta after the first object names a second group. We asked to fill
+			// one, so the rest of this stream belongs somewhere we cannot put it.
+			(Some(_), Some(_), _) => {
+				tracing::warn!("fill carried more than one group, dropping fill");
+				return Err(Error::Unsupported);
+			}
+			// Within the group: an explicit delta from the prior id, or implicitly one on.
+			(Some((sequence, prior_object)), None, delta) => {
+				let object = prior_object
+					.checked_add(delta.unwrap_or(1))
+					.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?;
+				(sequence, object)
+			}
+		};
+
+		// moq-lite groups start at object zero and never skip one, so a gap here would
+		// silently renumber every frame after it.
+		let expected = prior.map_or(0, |(_, prior_object)| prior_object + 1);
+		if object != expected {
+			tracing::warn!(object, expected, "gap in a fill, dropping fill");
+			return Err(Error::Unsupported);
+		}
+		prior = Some((sequence, object));
+
+		if group.is_none() {
+			// Stats (groups/frames/bytes) are counted in the model as the group is
+			// written, through the tagged `track::Producer`.
+			*group = Some(track.create_group(group::Info { sequence })?);
+		}
+		let group = group.as_mut().expect("group was just created");
+
+		// A fetch object has no Object Status: the draft says it is only present on a
+		// subscription, so a zero length here is an empty object rather than a status.
+		let size: u64 = stream.decode().await?;
+		let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+
+		// `create_frame` is the allocation chokepoint and rejects an oversized `size`
+		// before allocating, so no pre-check is needed.
+		let mut frame = group.create_frame(frame::Info { size, timestamp })?;
+		while frame.remaining() > 0 {
+			match stream.read_chunk(frame.remaining()).await? {
+				Some(chunk) if !chunk.is_empty() => frame.write(chunk)?,
+				_ => {
+					let _ = frame.abort(Error::WrongSize);
+					return Err(Error::WrongSize);
+				}
+			}
+		}
+		frame.finish()?;
+	}
+
+	Ok(())
+}
+
+#[cfg(test)]
+mod fill_tests {
+	use super::*;
+	use crate::coding::Encode as _;
+	use crate::lite::test_transport::SinkError;
+
+	/// A stream that hands back a fixed script and then reports EOF, so `run_fill` can be
+	/// driven all the way through its exit path.
+	struct Script(Vec<u8>);
+
+	impl web_transport_trait::RecvStream for Script {
+		type Error = SinkError;
+
+		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			if self.0.is_empty() {
+				return Ok(None);
+			}
+			let take = dst.len().min(self.0.len());
+			dst[..take].copy_from_slice(&self.0[..take]);
+			self.0.drain(..take);
+			Ok(Some(take))
+		}
+
+		fn stop(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	fn varint(out: &mut Vec<u8>, v: u64) {
+		v.encode(out, Version::Draft20).expect("varint");
+	}
+
+	/// One object: flags, then the fields those flags say are present, then the payload.
+	fn object(out: &mut Vec<u8>, flags: u64, fields: &[u64], payload: &[u8]) {
+		varint(out, flags);
+		for field in fields {
+			varint(out, *field);
+		}
+		varint(out, payload.len() as u64);
+		out.extend_from_slice(payload);
+	}
+
+	/// The first object carries both deltas, which are the absolute Group and Object ids.
+	const FIRST: u64 = fill_flags::GROUP_DELTA | fill_flags::OBJECT_DELTA;
+	/// A follow-on object in the same group and subgroup, one object id later.
+	const NEXT: u64 = 0;
+
+	/// The track producer comes back with the result: dropping it would close the track,
+	/// and the consumer would then see a clean end instead of the group just written.
+	async fn run(
+		script: Vec<u8>,
+	) -> (
+		Result<(), Error>,
+		Option<group::Producer>,
+		track::Producer,
+		track::Subscriber,
+	) {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let consumer = track.subscribe(None);
+		let mut reader = Reader::new(Script(script), Version::Draft20);
+		let mut group = None;
+		let res = run_fill(&mut reader, &mut track, None, &mut group, Version::Draft20).await;
+		(res, group, track, consumer)
+	}
+
+	#[tokio::test]
+	async fn reads_one_group() {
+		let mut script = Vec::new();
+		object(&mut script, FIRST, &[7, 0], b"first");
+		object(&mut script, NEXT, &[], b"second");
+
+		let (res, group, _track, mut consumer) = run(script).await;
+		res.expect("fill should decode");
+
+		let mut group = group.expect("a group was opened");
+		assert_eq!(group.sequence, 7, "the first object's deltas are absolute ids");
+		group.finish().expect("finish");
+
+		let mut group = consumer.recv_group().await.expect("group").expect("some");
+		let first = group.read_frame().await.unwrap().unwrap();
+		assert_eq!(first.payload.as_ref(), &b"first"[..]);
+		let second = group.read_frame().await.unwrap().unwrap();
+		assert_eq!(second.payload.as_ref(), &b"second"[..]);
+	}
+
+	/// We ask to fill exactly one group, so a second one is a request we never made and
+	/// its objects would land in the wrong group.
+	#[tokio::test]
+	async fn rejects_a_second_group() {
+		let mut script = Vec::new();
+		object(&mut script, FIRST, &[7, 0], b"first");
+		object(&mut script, FIRST, &[8, 0], b"next group");
+
+		let (res, ..) = run(script).await;
+		assert!(matches!(res, Err(Error::Unsupported)), "{res:?}");
+	}
+
+	/// moq-lite groups never skip an object, so a gap would silently renumber every frame
+	/// after it.
+	#[tokio::test]
+	async fn rejects_a_gap() {
+		let mut script = Vec::new();
+		object(&mut script, FIRST, &[7, 0], b"first");
+		// An explicit delta of 2 skips object 1.
+		object(&mut script, fill_flags::OBJECT_DELTA, &[2], b"third");
+
+		let (res, ..) = run(script).await;
+		assert!(matches!(res, Err(Error::Unsupported)), "{res:?}");
+	}
+
+	/// The first object has no prior to reference, so it must carry both deltas.
+	#[tokio::test]
+	async fn rejects_a_first_object_without_deltas() {
+		let mut script = Vec::new();
+		object(&mut script, NEXT, &[], b"nope");
+
+		let (res, ..) = run(script).await;
+		assert!(matches!(res, Err(Error::Unsupported)), "{res:?}");
+	}
+
+	/// A set bit with no meaning is a protocol violation, and the End of Range markers all
+	/// declare a span that will not be serialized, which is a gap.
+	#[tokio::test]
+	async fn rejects_unknown_flags() {
+		for flags in [0x80, 0x8C, 0x10C, 0x20C] {
+			let mut script = Vec::new();
+			object(&mut script, flags, &[7, 0], b"");
+
+			let (res, ..) = run(script).await;
+			assert!(matches!(res, Err(Error::Unsupported)), "{flags:#x}: {res:?}");
+		}
+	}
+
+	/// A subgroup is not something moq-lite can represent, so an explicit non-zero one is
+	/// refused rather than flattened into the group.
+	#[tokio::test]
+	async fn rejects_a_subgroup() {
+		let mut script = Vec::new();
+		object(&mut script, FIRST | fill_flags::SUBGROUP_PRESENT, &[7, 3, 0], b"nope");
+
+		let (res, ..) = run(script).await;
+		assert!(matches!(res, Err(Error::Unsupported)), "{res:?}");
 	}
 }

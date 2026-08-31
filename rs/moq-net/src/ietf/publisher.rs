@@ -6,7 +6,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
 	coding::{Stream, Writer},
-	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
+	ietf::{self, Control, FetchHeader, FetchType, Fill, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
@@ -514,16 +514,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Handle a SUBSCRIBE on its bidi stream.
 	async fn run_subscribe_stream(self, mut stream: Stream<S, Version>, msg: ietf::Subscribe<'_>) -> Result<(), Error> {
-		match msg.filter_type {
-			FilterType::AbsoluteStart | FilterType::AbsoluteRange => {
-				tracing::warn!(?msg, "absolute subscribe not supported, ignoring");
-			}
-			FilterType::NextGroup => {
-				tracing::warn!(?msg, "next group subscribe not supported, ignoring");
-			}
-			FilterType::LargestObject => {}
-		};
-
 		let request_id = msg.request_id;
 		let track_name = msg.track_name.clone();
 		let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
@@ -550,12 +540,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
+		let track = match broadcast.track(&msg.track_name) {
+			Ok(track) => track,
+			Err(err) => {
+				return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
+			}
+		};
+
+		// The filter is relative to the live edge, so resolving it needs the edge itself.
+		let (group_start, group_end) = subscribe_range(&msg, track.latest(), self.version);
+
 		let subscription = Subscription {
 			priority: super::priority::from_wire(msg.subscriber_priority),
+			group_start,
+			group_end,
 			..Default::default()
 		};
 
-		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
+		let track = match track.subscribe(subscription).await {
 			Ok(track) => track,
 			Err(err) => {
 				return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
@@ -572,12 +574,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => None,
 				},
 				track_alias: request_id.0,
-				properties: ietf::Properties {
+				properties: match msg.properties_wanted {
 					// Declaring the timescale is what opts the track into timestamps; every
 					// object Timestamp below is in these units.
-					timescale: Some(track.info().timescale),
 					// We serve the newest group first, matching moq-lite.
-					group_order: Some(GroupOrder::Descending),
+					true => ietf::Properties {
+						timescale: Some(track.info().timescale),
+						group_order: Some(GroupOrder::Descending),
+					},
+					// INCLUDE_PROPERTIES=0. The field stays present but empty, which also
+					// means the track opts out of timestamps for this subscriber.
+					false => ietf::Properties::default(),
 				},
 			})
 			.await?;
@@ -2832,7 +2839,9 @@ mod tests {
 					track_name: "video".into(),
 					subscriber_priority: 128,
 					group_order: GroupOrder::Descending,
-					filter_type: FilterType::LargestObject,
+					filter: Filter::NextObject,
+					fill: None,
+					properties_wanted: true,
 				},
 			)
 			.await
@@ -2871,7 +2880,7 @@ mod tests {
 	/// on a request we already refused. Finishing first makes the drop-time reset a no-op.
 	#[tokio::test]
 	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			let (writes, resets) = subscribe_missing(version).await;
 
 			assert!(!writes.is_empty(), "{version}: nothing was sent");
@@ -2916,7 +2925,7 @@ mod tests {
 			]
 		};
 
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			for (label, fetch_type) in unsupported() {
 				let (writes, resets) = fetch_unsupported(version, fetch_type).await;
 
@@ -2932,5 +2941,205 @@ mod tests {
 				);
 			}
 		}
+	}
+}
+
+/// Resolve a SUBSCRIBE's Location Filter into the moq-lite group range to serve.
+///
+/// Returns `(group_start, group_end)` for [`Subscription`], where a `None` start means the
+/// latest group, which is what moq-lite treats as joining a live track.
+///
+/// Only draft-20 is honored. Earlier drafts have a Filter Type tag whose absolute forms we
+/// never served, and starting to interpret them now would change what an existing peer
+/// receives; draft-20 is also the first version whose relative forms can name a past group
+/// without the subscriber knowing Largest Object.
+///
+/// A fill is folded into the same range rather than answered on its own fetch stream. The
+/// fill reaches further back than the subscription by design, so the earlier of the two
+/// starts wins and everything is delivered as ordinary live subgroups.
+fn subscribe_range(msg: &ietf::Subscribe<'_>, latest: Option<u64>, version: Version) -> (Option<u64>, Option<u64>) {
+	if !Filter::is_draft20(version) {
+		if !matches!(msg.filter, Filter::NextObject | Filter::Unfiltered) {
+			tracing::warn!(filter = ?msg.filter, "filter not supported before draft-20, ignoring");
+		}
+		return (None, None);
+	}
+
+	let (start, end) = filter_range(msg.filter, latest);
+	let fill = msg.fill.map(|Fill { filter }| fill_floor(filter, latest));
+
+	// `None` is the live edge, which is later than any group a fill could name, so a fill
+	// start always wins over an absent subscription start.
+	let start = match (start, fill.flatten()) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(Some(a), None) => Some(a),
+		(None, fill) => fill,
+	};
+
+	(start, end)
+}
+
+/// The first group a fill asks for, resolved against the live edge.
+///
+/// Identical to a subscription's filter except for the unfiltered case: on a subscription
+/// that means "no restriction", which is the live edge, but a fill with no filter asks for
+/// the whole track up to Largest Object.
+fn fill_floor(filter: Filter, latest: Option<u64>) -> Option<u64> {
+	match filter {
+		Filter::Unfiltered => Some(0),
+		_ => filter_range(filter, latest).0,
+	}
+}
+
+/// The group range a single Location Filter selects, resolved against the live edge.
+fn filter_range(filter: Filter, latest: Option<u64>) -> (Option<u64>, Option<u64>) {
+	match filter {
+		// Both mean "from the live edge onward". moq-lite starts at the beginning of the
+		// latest group, which is a slightly earlier point than Next Object names, so a
+		// subscriber can see the current group's earlier objects. That is the join point
+		// moq-lite is built around and the draft's own current-group recipe.
+		Filter::Unfiltered | Filter::NextObject => (None, None),
+		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group, 1 is the current one.
+		Filter::Relative(groups) => match latest {
+			// Nothing published yet, so there is no edge to count back from.
+			None => (None, None),
+			Some(latest) => (Some(latest.saturating_add(1).saturating_sub(groups)), None),
+		},
+		Filter::Absolute { start, end } => (Some(start.group), end),
+	}
+}
+
+#[cfg(test)]
+mod range_tests {
+	use super::*;
+
+	fn subscribe(filter: Filter, fill: Option<Filter>) -> ietf::Subscribe<'static> {
+		ietf::Subscribe {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::new("broadcast"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter,
+			fill: fill.map(|filter| Fill { filter }),
+			properties_wanted: true,
+		}
+	}
+
+	const LATEST: Option<u64> = Some(100);
+
+	/// Earlier drafts never had their absolute filters served, so honoring one now would
+	/// change what an existing peer receives.
+	#[test]
+	fn older_drafts_are_ignored() {
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: Some(9),
+			},
+			None,
+		);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft19), (None, None));
+	}
+
+	/// Both spellings mean "from the live edge onward", which moq-lite represents as no
+	/// explicit start.
+	#[test]
+	fn live_edge_has_no_floor() {
+		for filter in [Filter::NextObject, Filter::Unfiltered] {
+			let msg = subscribe(filter, None);
+			assert_eq!(
+				subscribe_range(&msg, LATEST, Version::Draft20),
+				(None, None),
+				"{filter:?}"
+			);
+		}
+	}
+
+	/// `{Largest.Group + 1 - groups, 0}`: one is the current group, zero is the next one,
+	/// and larger values reach further back.
+	#[test]
+	fn relative_counts_back_from_the_next_group() {
+		for (groups, expected) in [(0, 101), (1, 100), (2, 99), (5, 96)] {
+			let msg = subscribe(Filter::Relative(groups), None);
+			assert_eq!(
+				subscribe_range(&msg, LATEST, Version::Draft20),
+				(Some(expected), None),
+				"{groups} groups back"
+			);
+		}
+	}
+
+	/// Counting back further than the track goes lands at its start rather than wrapping.
+	#[test]
+	fn relative_saturates_at_the_start() {
+		let msg = subscribe(Filter::Relative(500), None);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(0), None));
+	}
+
+	/// Nothing published yet means there is no edge to count back from.
+	#[test]
+	fn relative_without_an_edge_stays_live() {
+		let msg = subscribe(Filter::Relative(3), None);
+		assert_eq!(subscribe_range(&msg, None, Version::Draft20), (None, None));
+	}
+
+	#[test]
+	fn absolute_carries_both_ends() {
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: Some(9),
+			},
+			None,
+		);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(4), Some(9)));
+	}
+
+	/// The canonical current-group join: Next Object on the subscription, and a fill that
+	/// reaches back one group. The fill is what sets the floor.
+	#[test]
+	fn a_fill_lowers_the_floor() {
+		let msg = subscribe(Filter::NextObject, Some(Filter::Relative(1)));
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(100), None));
+	}
+
+	/// A fill reaches further back than the subscription by design, so the earlier of the
+	/// two starts wins.
+	#[test]
+	fn the_earlier_start_wins() {
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 90, object: 0 },
+				end: None,
+			},
+			Some(Filter::Relative(20)),
+		);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(81), None));
+
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 50, object: 0 },
+				end: None,
+			},
+			Some(Filter::Relative(2)),
+		);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(50), None));
+	}
+
+	/// An empty fill scope asks for the whole track, which is the one case where the
+	/// unfiltered spelling means the start of the track rather than the live edge.
+	#[test]
+	fn an_unfiltered_fill_asks_for_the_whole_track() {
+		let msg = subscribe(Filter::NextObject, Some(Filter::Unfiltered));
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(0), None));
+	}
+
+	/// The same spelling on the subscription itself is just "no restriction", so it stays
+	/// at the live edge.
+	#[test]
+	fn an_unfiltered_subscription_stays_live() {
+		let msg = subscribe(Filter::Unfiltered, None);
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (None, None));
 	}
 }

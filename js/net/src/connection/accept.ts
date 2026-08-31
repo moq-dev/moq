@@ -30,6 +30,9 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 
 	const discovery = props?.discovery ?? true;
 
+	if (protocol === Ietf.ALPN.DRAFT_20) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_20, discovery);
+	}
 	if (protocol === Ietf.ALPN.DRAFT_19) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_19, discovery);
 	} else if (protocol === Ietf.ALPN.DRAFT_18) {

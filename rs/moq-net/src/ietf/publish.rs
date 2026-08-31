@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, Parameters, Properties, RequestId,
+		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -137,7 +137,10 @@ impl PublishDoneStatus {
 			| Version::Draft16
 			| Version::Draft17
 			| Version::Draft18
-			| Version::Draft19 => match self {
+			| Version::Draft19
+			// Draft-20 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
+			// emitted, and left the rest of the registry alone.
+			| Version::Draft20 => match self {
 				Self::InternalError => 0x0,
 				Self::TrackEnded => 0x2,
 			},
@@ -324,7 +327,7 @@ pub struct PublishOk {
 	pub forward: bool,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
-	pub filter_type: FilterType,
+	pub filter: Filter,
 	// pub parameters: Parameters,
 }
 
@@ -347,19 +350,18 @@ impl Message for PublishOk {
 				self.group_order.encode(w, version)?;
 				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
 				// decode, so encoding one would truncate the message.
-				if !matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup) {
-					return Err(EncodeError::Unsupported);
-				}
-
-				self.filter_type.encode(w, version)?;
+				self.filter.encode(w, version)?;
 				// no parameters
 				0u8.encode(w, version)?;
 			}
+			// Draft-20 moved the subscription parameters out of PUBLISH_OK; they belong to
+			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
+			_ if Filter::is_draft20(version) => encode_params!(w, version,),
 			_ => {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => self.filter_type,
+					0x21 => self.filter,
 					0x22 => self.group_order,
 				);
 			}
@@ -380,17 +382,7 @@ impl Message for PublishOk {
 				let forward = bool::decode(r, version)?;
 				let subscriber_priority = u8::decode(r, version)?;
 				let group_order = GroupOrder::decode(r, version)?;
-				let filter_type = FilterType::decode(r, version)?;
-				match filter_type {
-					FilterType::AbsoluteStart => {
-						let _start = Location::decode(r, version)?;
-					}
-					FilterType::AbsoluteRange => {
-						let _start = Location::decode(r, version)?;
-						let _end_group = u64::decode(r, version)?;
-					}
-					FilterType::NextGroup | FilterType::LargestObject => {}
-				};
+				let filter = Filter::decode(r, version)?;
 
 				// no parameters
 				let _params = Parameters::decode(r, version)?;
@@ -400,28 +392,28 @@ impl Message for PublishOk {
 					forward,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
 				})
 			}
 			_ => {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter_type: Option<FilterType>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
 
 				let forward = forward.unwrap_or(true);
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
+				let filter = filter.unwrap_or(Filter::Unfiltered);
 
 				Ok(Self {
 					request_id,
 					forward,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
 				})
 			}
 		}
@@ -531,7 +523,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -549,7 +541,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -593,7 +585,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -762,7 +754,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

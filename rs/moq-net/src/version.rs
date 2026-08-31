@@ -26,6 +26,7 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE_04,
 	ALPN_LITE_03,
 	ALPN_LITE,
+	ALPN_20,
 	ALPN_19,
 	ALPN_18,
 	ALPN_17,
@@ -46,14 +47,16 @@ pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 pub(crate) const ALPN_19: &str = "moqt-19";
+pub(crate) const ALPN_20: &str = "moqt-20";
 
-const ALL: [Version; 12] = [
+const ALL: [Version; 13] = [
 	Version::Lite(lite::Version::Lite06Wip),
 	Version::Lite(lite::Version::Lite05),
 	Version::Lite(lite::Version::Lite04),
 	Version::Lite(lite::Version::Lite03),
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
+	Version::Ietf(ietf::Version::Draft20),
 	Version::Ietf(ietf::Version::Draft19),
 	Version::Ietf(ietf::Version::Draft18),
 	Version::Ietf(ietf::Version::Draft17),
@@ -92,6 +95,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft17) => "moq-transport-17",
 			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
 			Self::Ietf(ietf::Version::Draft19) => "moq-transport-19",
+			Self::Ietf(ietf::Version::Draft20) => "moq-transport-20",
 		}
 	}
 
@@ -110,6 +114,7 @@ impl Version {
 			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
 			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
 			0xff000013 => Some(Self::Ietf(ietf::Version::Draft19)),
+			0xff000014 => Some(Self::Ietf(ietf::Version::Draft20)),
 			_ => None,
 		}
 	}
@@ -129,6 +134,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
 			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
 			Self::Ietf(ietf::Version::Draft19) => 0xff000013,
+			Self::Ietf(ietf::Version::Draft20) => 0xff000014,
 		}
 	}
 
@@ -149,6 +155,7 @@ impl Version {
 			ALPN_17 => Some(Self::Ietf(ietf::Version::Draft17)),
 			ALPN_18 => Some(Self::Ietf(ietf::Version::Draft18)),
 			ALPN_19 => Some(Self::Ietf(ietf::Version::Draft19)),
+			ALPN_20 => Some(Self::Ietf(ietf::Version::Draft20)),
 			_ => None,
 		}
 	}
@@ -167,6 +174,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
 			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
 			Self::Ietf(ietf::Version::Draft19) => ALPN_19,
+			Self::Ietf(ietf::Version::Draft20) => ALPN_20,
 		}
 	}
 

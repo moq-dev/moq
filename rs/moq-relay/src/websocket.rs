@@ -225,7 +225,7 @@ const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::
 
 /// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
 /// Mirrors `js/net`'s `connect.ts` and moq-native's `websocket_subprotocols`.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
@@ -430,7 +430,7 @@ mod tests {
 				.iter()
 				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
 				.collect::<Vec<_>>(),
-			vec![Some(0xff000012), Some(0xff000013)]
+			vec![Some(0xff000012), Some(0xff000013), Some(0xff000014)]
 		);
 
 		let list = supported_subprotocols(moq_net::ALPNS);

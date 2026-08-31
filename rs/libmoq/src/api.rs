@@ -630,7 +630,7 @@ pub extern "C" fn moq_client_close(client: u32) -> i32 {
 ///
 /// By default every supported version is offered and the server picks one. Pass a
 /// subset to pin the negotiation, in the same spelling the CLI uses: `moq-lite-01`
-/// through `moq-lite-06-wip`, or `moq-transport-14` through `moq-transport-19`. An
+/// through `moq-lite-06-wip`, or `moq-transport-14` through `moq-transport-20`. An
 /// empty list restores the default.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown or a version
