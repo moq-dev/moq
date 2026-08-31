@@ -4,7 +4,8 @@
 set unstable
 
 # Plain `cargo` unless set; CI sets it to `mbx`. See rs/justfile for the rule.
-cargo_compile := env_var_or_default("RUST_CARGO", "cargo")
+_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
+cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
 
 # Per-language modules. Language-specific recipes live in their own justfiles.
 mod js

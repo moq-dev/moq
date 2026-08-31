@@ -17,7 +17,11 @@ set working-directory := '..'
 # `fix`/`wasm-fix` run `cargo fix`, which drops rustc wrappers. `fuzz` puts
 # nightly on PATH so a bare cargo/rustc resolve to it, and the sanitizer flags
 # are what break if anything else sits in front.
-cargo_compile := env_var_or_default("RUST_CARGO", "cargo")
+# Empty counts as unset: `RUST_CARGO= just build` is how you opt one command out
+# of a shell that exports it, and just would otherwise hand the recipes an empty
+# program name.
+_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
+cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
 
 default:
     just check

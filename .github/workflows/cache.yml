@@ -27,6 +27,10 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/cache.yml"
+      # The action pin and the toolchain read both live here, and either can
+      # roll the cache key. Without this the sole writer would not re-run after
+      # such a change, leaving every PR reader cold until something else landed.
+      - ".github/actions/rust-cache/**"
   # Priming a cold cache by hand, e.g. after a toolchain bump rolls the key.
   workflow_dispatch:
 

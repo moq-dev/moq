@@ -50,7 +50,7 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "go check: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+"${RUST_CARGO:-cargo}" build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |

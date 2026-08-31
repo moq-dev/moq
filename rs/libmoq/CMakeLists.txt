@@ -44,7 +44,7 @@ if(BUILD_RUST_LIB)
     # Same RUST_CARGO knob the justfiles read, so CI's cache wrapper reaches the
     # one Rust compile this plugin actually pays for. Without it the env var is
     # set on the job and silently ignored here.
-    if(DEFINED ENV{RUST_CARGO})
+    if(DEFINED ENV{RUST_CARGO} AND NOT "$ENV{RUST_CARGO}" STREQUAL "")
         set(CARGO_COMMAND "$ENV{RUST_CARGO}")
     else()
         set(CARGO_COMMAND "cargo")
