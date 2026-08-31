@@ -11,15 +11,18 @@
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
-//! With `default-features = false`, the `noq` backend must be paired with the
-//! `aws-lc-rs` or `ring` crypto-provider feature.
+//! With `default-features = false`, the `quinn` and `noq` backends must be paired
+//! with the `aws-lc-rs` or `ring` crypto-provider feature.
 
 #![warn(missing_docs)]
 
-// Noq's provider-specific endpoint constructors are not compiled without one of these features.
-// Unlike Quinn, it cannot use a rustls provider the application installs at runtime.
-#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
-compile_error!("the `noq` backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
+// The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
+// installed at runtime cannot supply constructors removed by their compile-time feature gates.
+#[cfg(all(
+	any(feature = "quinn", feature = "noq"),
+	not(any(feature = "aws-lc-rs", feature = "ring"))
+))]
+compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 pub mod accept;
 pub use moq_sock::bind;

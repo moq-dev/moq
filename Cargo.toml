@@ -193,7 +193,7 @@ web-transport-iroh = "0.7"
 web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
 web-transport-quiche = "0.6"
-web-transport-quinn = "0.12"
+web-transport-quinn = { version = "0.12", default-features = false }
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"
 

@@ -27,7 +27,7 @@ watch = ["dep:notify"]
 qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
 # The QUIC backends pull in their crypto provider from these features (default-features
 # are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
-aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
+aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs", "web-transport-quinn?/aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
@@ -38,7 +38,7 @@ tcp = ["dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
-ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/ring"]
+ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/ring", "web-transport-quinn?/ring"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
