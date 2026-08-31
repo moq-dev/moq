@@ -24,6 +24,7 @@ its verdict lands and the follow-on work becomes concrete.
 - [Quiche GCC](/quest/m3/quiche-gcc.md) - a measured verdict on delay-based congestion control for media egress
 - [Quiche FEC](/quest/m3/quiche-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [SEI delivery](/quest/m3/sei-delivery.md) - prove a sidecar can reach a live stitcher before video; a no-go keeps SEI in-band
+- [GOP overhead](/quest/m3/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [#697](/quest/m3/697-conferencing-demo.md) - Conferencing Demo
 - [#703](/quest/m3/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
 - [#823](/quest/m3/823-svc-support.md) - SVC support?

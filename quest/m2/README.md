@@ -17,8 +17,7 @@ dashboards, fleet rollout) stay downstream.
 - [Generation](/quest/m2/hls-generation.md) - media URLs carry a generation ID so segment caching can be re-enabled
 - [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
-- [Plan: keyframe request](/quest/m2/plan-keyframe-request.md) - settle the keyframe request wire design via /plan-quest
-- [#2284](/quest/m2/2284-moq-net-keyframe-request-pli-equivalent-for-fast-tune-in.md) - moq-net: keyframe request (PLI equivalent) for fast tune-in
+- [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m2/qos/README.md) - broadcast health counters: network backlog, publisher stats, viewer feedback
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Quiche](/quest/m2/quiche/README.md) - media-aware transport features in the moq-dev/quiche fork and their moq-uring adoption
