@@ -30,6 +30,8 @@ mod linux {
 	/// unit as the echo matrix.
 	const FRAMES: usize = 32;
 	const FRAME_SIZE: usize = 32 * 1024;
+	/// Keep small ACK/control packets on ordinary `SENDMSG`.
+	const SEND_ZC_THRESHOLD: usize = 4 * 1024;
 
 	const ALPN: &str = "moq-lite-05";
 
@@ -82,6 +84,8 @@ mod linux {
 
 	fn ablations() -> Vec<Ablation> {
 		let all = udp::Config::default();
+		let mut send_zc = all.clone();
+		send_zc.send_zc_threshold = Some(SEND_ZC_THRESHOLD);
 		let mut no_gso = all.clone();
 		no_gso.gso = false;
 		let mut no_gro = all.clone();
@@ -96,6 +100,10 @@ mod linux {
 			Ablation {
 				name: "all-on",
 				config: all,
+			},
+			Ablation {
+				name: "send-zc-4k",
+				config: send_zc,
 			},
 			Ablation {
 				name: "no-gso",

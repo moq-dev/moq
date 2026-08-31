@@ -49,9 +49,24 @@ pub(crate) enum Op {
 	Cancel,
 }
 
+/// The kernel caps one ring's registered-buffer table at 16384 entries.
+const MAX_REGISTERED_BUFFERS: u16 = 1 << 14;
+
+/// Ring-global allocation state for sparse registered-buffer slots.
+#[derive(Default)]
+pub(crate) struct RegisteredBuffers {
+	initialized: bool,
+	next: u16,
+	free: Vec<u16>,
+}
+
 /// The worker's shared core, `Rc`ed into every handle.
 pub(crate) struct Shared {
 	pub ring: RefCell<IoUring>,
+	pub registered_buffers: RefCell<RegisteredBuffers>,
+	/// Cleared after a kernel rejects fixed-buffer `SENDMSG_ZC`; later sends
+	/// use ordinary `SENDMSG` without repeating the failed experiment.
+	pub sendmsg_zc_fixed: Cell<bool>,
 	pub ops: RefCell<slab::Slab<Op>>,
 	/// Its own `Rc` so a [`crate::Timer`] holds just the heap, not the ring.
 	pub timers: Rc<RefCell<timer::Heap>>,
@@ -73,6 +88,59 @@ impl Shared {
 	/// The error every operation reports once the worker has been dropped.
 	pub fn gone_error() -> io::Error {
 		io::Error::new(io::ErrorKind::NotConnected, "the worker was dropped")
+	}
+
+	/// Register one stable allocation and return its ring-global buffer index.
+	pub fn register_buffer(&self, data: &mut [u8]) -> io::Result<u16> {
+		let mut registered = self.registered_buffers.borrow_mut();
+		let ring = self.ring.borrow();
+		if !registered.initialized {
+			ring.submitter()
+				.register_buffers_sparse(u32::from(MAX_REGISTERED_BUFFERS))?;
+			registered.initialized = true;
+		}
+
+		let (index, fresh) = match registered.free.pop() {
+			Some(index) => (index, false),
+			None if registered.next < MAX_REGISTERED_BUFFERS => (registered.next, true),
+			None => return Err(io::Error::from_raw_os_error(libc::ENOBUFS)),
+		};
+		let iov = libc::iovec {
+			iov_base: data.as_mut_ptr().cast(),
+			iov_len: data.len(),
+		};
+		// SAFETY: the socket owns `data` until it clears this slot, after every
+		// send and zero-copy notification referencing it has completed.
+		if let Err(err) = unsafe { ring.submitter().register_buffers_update(u32::from(index), &[iov], None) } {
+			if !fresh {
+				registered.free.push(index);
+			}
+			return Err(err);
+		}
+		if fresh {
+			registered.next += 1;
+		}
+		Ok(index)
+	}
+
+	/// Clear a registered-buffer slot, returning it to the ring-global pool.
+	pub fn unregister_buffer(&self, index: u16) {
+		let empty = libc::iovec {
+			iov_base: std::ptr::null_mut(),
+			iov_len: 0,
+		};
+		let ring = self.ring.borrow();
+		// SAFETY: a zero-length iovec clears this sparse slot. The socket only
+		// reaches drop after every operation holding its buffers has completed.
+		match unsafe {
+			ring.submitter()
+				.register_buffers_update(u32::from(index), &[empty], None)
+		} {
+			Ok(_) => self.registered_buffers.borrow_mut().free.push(index),
+			// Quarantine the index rather than ever reuse a slot the kernel may
+			// still associate with the old allocation.
+			Err(err) => tracing::error!(index, %err, "failed to clear registered send buffer"),
+		}
 	}
 
 	/// Stage one SQE, submitting inline to make room when the queue is full.

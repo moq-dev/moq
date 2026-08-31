@@ -11,9 +11,10 @@
 //! A completed buffer is handed out as a [`Packet`] and returns to the kernel
 //! once every packet borrowing it drops.
 //!
-//! Send stages datagrams in a pool of buffers owned by id and released
-//! explicitly on completion, the shape `SENDMSG_ZC`'s deferred-reclaim NOTIF
-//! model needs later. Every GSO `sendmsg` carries its `UDP_SEGMENT` control
+//! Send stages datagrams in a pool of stable buffers owned by id. Optionally,
+//! larger sends lazily register those buffers and use fixed-buffer
+//! `SENDMSG_ZC`; its notification CQE, rather than the initial result, returns
+//! the buffer to the pool. Every GSO send carries its `UDP_SEGMENT` control
 //! message explicitly; the socket default is never relied on.
 //!
 //! Both pools are queues of concurrent operations, not byte budgets: one send
@@ -24,8 +25,8 @@
 //! the ceilings in [`Config`]; a pool never shrinks, so it settles at the
 //! socket's high-water concurrency and the memory comes back when it drops.
 //!
-//! The `gro`/`gso`/`multishot` toggles in [`Config`] exist for the ablation
-//! benchmarks; production callers keep the defaults (all on).
+//! The `gro`/`gso`/`multishot` toggles and zero-copy threshold in [`Config`]
+//! exist for ablation benchmarks; production callers keep the defaults.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::cell::{Cell, RefCell};
@@ -38,7 +39,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
 
-use io_uring::{cqueue, opcode, types};
+use io_uring::{cqueue, opcode, squeue, types};
 
 use crate::Error;
 use crate::shared::{Cqe, Op, Shared};
@@ -61,6 +62,12 @@ const MAX_RX_BUFFERS: u16 = 1 << 15;
 const INITIAL_RX_BUFFERS: u16 = 16;
 /// Send buffers allocated before any starvation.
 const INITIAL_TX_BUFFERS: u16 = 64;
+/// `sqe->ioprio`: payload iovecs point into `sqe->buf_index`.
+const IORING_RECVSEND_FIXED_BUF: u16 = 1 << 2;
+/// `sqe->ioprio`: report whether a zero-copy request was copied.
+const IORING_SEND_ZC_REPORT_USAGE: u16 = 1 << 3;
+/// Notification `cqe->res`: at least part of the payload was copied.
+const IORING_NOTIF_USAGE_ZC_COPIED: u32 = 1 << 31;
 
 /// Double a pool, bounded by its ceiling.
 fn grown(len: usize, max: u16) -> Option<u16> {
@@ -101,6 +108,11 @@ pub struct Config {
 	pub tx_buffers_max: u16,
 	/// Send pool: bytes per buffer, the ceiling for one GSO train.
 	pub tx_buffer_len: usize,
+	/// Use fixed-buffer `SENDMSG_ZC` at or above this payload size.
+	///
+	/// `None` keeps ordinary `SENDMSG`. Linux 6.12 through 6.14 also fall
+	/// back automatically because fixed-buffer `SENDMSG_ZC` arrived in 6.15.
+	pub send_zc_threshold: Option<usize>,
 }
 
 impl Default for Config {
@@ -115,6 +127,7 @@ impl Default for Config {
 			rx_buffer_len: MAX_RECV + RECV_OVERHEAD,
 			tx_buffers_max: 1024,
 			tx_buffer_len: 64 * 1024,
+			send_zc_threshold: None,
 		}
 	}
 }
@@ -226,7 +239,10 @@ fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
 	};
 	while tx.bufs.len() < usize::from(target) {
 		tx.free.push(tx.bufs.len() as u16);
-		tx.bufs.push(vec![0u8; config.tx_buffer_len].into_boxed_slice());
+		tx.bufs.push(TxSlot {
+			data: vec![0u8; config.tx_buffer_len].into_boxed_slice(),
+			fixed: None,
+		});
 	}
 	true
 }
@@ -301,11 +317,32 @@ struct Rx {
 
 /// Send-side state.
 struct Tx {
-	bufs: Vec<Box<[u8]>>,
+	bufs: Vec<TxSlot>,
 	free: Vec<u16>,
 	waiters: kio::WaiterList,
+	stats: SendStats,
 	/// Terminal failure, surfaced by `poll_acquire`.
 	error: Option<i32>,
+}
+
+/// One stable send allocation and its lazily assigned ring-global index.
+struct TxSlot {
+	data: Box<[u8]>,
+	fixed: Option<u16>,
+}
+
+/// Zero-copy send counters for a socket.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SendStats {
+	/// Fixed-buffer `SENDMSG_ZC` operations submitted.
+	pub zc_submitted: u64,
+	/// Zero-copy notification CQEs received.
+	pub zc_notifications: u64,
+	/// Notifications reporting that at least part of the payload was copied.
+	pub zc_copied: u64,
+	/// Requests sent normally because registration or the opcode was rejected.
+	pub zc_fallbacks: u64,
 }
 
 /// Everything both the [`Socket`] handle and in-flight ops keep alive.
@@ -351,6 +388,28 @@ impl SockShared {
 		tx.waiters.wake();
 	}
 
+	/// Lazily register a checked-out send buffer for zero-copy use.
+	fn fixed_buffer(&self, shared: &Shared, id: u16) -> Option<u16> {
+		let mut tx = self.tx.borrow_mut();
+		let slot = &mut tx.bufs[id as usize];
+		if let Some(index) = slot.fixed {
+			return Some(index);
+		}
+		match shared.register_buffer(&mut slot.data) {
+			Ok(index) => {
+				slot.fixed = Some(index);
+				Some(index)
+			}
+			Err(err) => {
+				tx.stats.zc_fallbacks += 1;
+				if shared.sendmsg_zc_fixed.replace(false) {
+					tracing::warn!(%err, "registered send buffers unavailable; falling back to SENDMSG");
+				}
+				None
+			}
+		}
+	}
+
 	fn fail_rx(&self, code: i32) {
 		let mut rx = self.rx.borrow_mut();
 		rx.error.get_or_insert(code);
@@ -367,10 +426,14 @@ impl SockShared {
 impl Drop for SockShared {
 	fn drop(&mut self) {
 		// Every op referencing our buffers has completed (ops own an `Rc` of
-		// us), so the kernel is done; give the buffer group id back.
-		if self.rx.borrow().ring.is_some()
-			&& let Some(shared) = self.worker.upgrade()
-		{
+		// us), so the kernel is done; give registered resources back.
+		if let Some(shared) = self.worker.upgrade() {
+			for index in self.tx.get_mut().bufs.iter().filter_map(|slot| slot.fixed) {
+				shared.unregister_buffer(index);
+			}
+			if self.rx.get_mut().ring.is_none() {
+				return;
+			}
 			let ring = shared.ring.borrow_mut();
 			let _ = ring.submitter().unregister_buf_ring(self.bgid);
 		}
@@ -482,10 +545,14 @@ impl Socket {
 		let tx_count = INITIAL_TX_BUFFERS.min(config.tx_buffers_max);
 		let tx = Tx {
 			bufs: (0..tx_count)
-				.map(|_| vec![0u8; config.tx_buffer_len].into_boxed_slice())
+				.map(|_| TxSlot {
+					data: vec![0u8; config.tx_buffer_len].into_boxed_slice(),
+					fixed: None,
+				})
 				.collect(),
 			free: (0..tx_count).collect(),
 			waiters: kio::WaiterList::new(),
+			stats: SendStats::default(),
 			error: None,
 		};
 
@@ -518,6 +585,11 @@ impl Socket {
 	/// The bound local address.
 	pub fn local_addr(&self) -> io::Result<SocketAddr> {
 		self.shared.io.local_addr()
+	}
+
+	/// Current zero-copy send counters.
+	pub fn send_stats(&self) -> SendStats {
+		self.shared.tx.borrow().stats
 	}
 
 	/// A received packet, or the socket's terminal error, registering `waiter`
@@ -570,7 +642,7 @@ impl Socket {
 			grow_tx(&mut tx, &self.shared.config);
 		}
 		if let Some(id) = tx.free.pop() {
-			let buf = &mut tx.bufs[id as usize];
+			let buf = &mut tx.bufs[id as usize].data;
 			// SAFETY: `id` was exclusively checked out of the free list; the
 			// allocation is stable (see TxBuf).
 			let ptr = unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) };
@@ -687,6 +759,22 @@ pub struct TxBuf {
 }
 
 impl TxBuf {
+	/// Build an unsubmitted fixed-buffer operation for completion routing tests.
+	#[cfg(test)]
+	pub(crate) fn test_send_op(mut self) -> SendOp {
+		self.armed = true;
+		SendOp {
+			lease: Rc::new(TxLease {
+				sock: self.sock.clone(),
+				id: self.id,
+			}),
+			// SAFETY: the routing test never submits this header to the kernel.
+			_hdr: Box::new(unsafe { std::mem::zeroed() }),
+			expect: 1,
+			mode: SendMode::FixedZeroCopy(0),
+		}
+	}
+
 	/// Send `self[..len]` on the owning socket, to `to`, as datagrams of
 	/// `segment` bytes (the last may be short). Fire-and-forget: the buffer
 	/// returns to the pool when the kernel completes, and a failed send
@@ -737,15 +825,19 @@ impl TxBuf {
 			id: self.id,
 		});
 		let base = self.ptr.as_ptr();
+		let fixed = match sock.config.send_zc_threshold {
+			Some(threshold) if len >= threshold && shared.sendmsg_zc_fixed.get() => sock.fixed_buffer(&shared, self.id),
+			_ => None,
+		};
 
 		if sock.config.gso {
-			send_one(&shared, &sock, &lease, base, len, to, Some(segment as u16))?;
+			send_one(&shared, &lease, base, len, to, Some(segment as u16), fixed)?;
 		} else {
 			let mut offset = 0;
 			while offset < len {
 				let chunk = segment.min(len - offset);
 				// SAFETY: offset stays within the leased buffer.
-				send_one(&shared, &sock, &lease, unsafe { base.add(offset) }, chunk, to, None)?;
+				send_one(&shared, &lease, unsafe { base.add(offset) }, chunk, to, None, fixed)?;
 				offset += chunk;
 			}
 		}
@@ -814,16 +906,102 @@ pub(crate) struct SendOp {
 	/// Boxed so the pointers inside stay put; referenced by the SQE.
 	_hdr: Box<SendHdr>,
 	expect: usize,
+	mode: SendMode,
+}
+
+impl SendOp {
+	/// A successful zero-copy result with `MORE` retains the operation until
+	/// its notification CQE says the kernel has released the buffer.
+	pub(crate) fn live_after(&self, cqe: Cqe) -> bool {
+		matches!(self.mode, SendMode::FixedZeroCopy(_))
+			&& !cqueue::notif(cqe.flags)
+			&& cqe.result >= 0
+			&& cqueue::more(cqe.flags)
+	}
+
+	/// Clone the state needed to validate a nonterminal result CQE.
+	pub(crate) fn result_target(&self) -> (Rc<SockShared>, usize) {
+		(self.lease.sock.clone(), self.expect)
+	}
+}
+
+#[derive(Clone, Copy)]
+enum SendMode {
+	Plain,
+	FixedZeroCopy(u16),
+}
+
+/// Stable prefix of `struct io_uring_sqe` through its `buf_index` union.
+///
+/// io-uring 0.7.14 exposes `SendMsgZc::ioprio` but not `sqe->buf_index`, so
+/// this private adapter fills the one missing UAPI field.
+#[repr(C)]
+struct SendMsgSqePrefix {
+	_opcode: u8,
+	_flags: u8,
+	_ioprio: u16,
+	_fd: i32,
+	_off: u64,
+	_addr: u64,
+	_len: u32,
+	_op_flags: u32,
+	_user_data: u64,
+	buf_index: u16,
+}
+
+const _: () = assert!(std::mem::size_of::<squeue::Entry>() == 64);
+const _: () = assert!(std::mem::offset_of!(SendMsgSqePrefix, buf_index) == 40);
+
+fn sendmsg_zc_fixed(fd: i32, hdr: *const libc::msghdr, index: u16) -> squeue::Entry {
+	let mut entry = opcode::SendMsgZc::new(types::Fd(fd), hdr)
+		.ioprio(IORING_RECVSEND_FIXED_BUF | IORING_SEND_ZC_REPORT_USAGE)
+		.build();
+	// SAFETY: `squeue::Entry` is a repr(C) wrapper around the 64-byte UAPI
+	// SQE. The compile-time assertions pin the wrapper size and union offset.
+	unsafe {
+		(*(&raw mut entry).cast::<SendMsgSqePrefix>()).buf_index = index;
+	}
+	entry
+}
+
+/// Put a fully-owned send operation in the slab before its SQE is visible.
+fn stage_send(shared: &Rc<Shared>, op: SendOp) -> io::Result<()> {
+	let zero_copy = matches!(op.mode, SendMode::FixedZeroCopy(_));
+	let key = shared.insert(Op::Send(op));
+	let entry = {
+		let ops = shared.ops.borrow();
+		let Op::Send(op) = &ops[key as usize] else {
+			unreachable!()
+		};
+		let hdr = &raw const op._hdr.hdr;
+		match op.mode {
+			SendMode::Plain => opcode::SendMsg::new(types::Fd(op.lease.sock.io.as_raw_fd()), hdr).build(),
+			SendMode::FixedZeroCopy(index) => sendmsg_zc_fixed(op.lease.sock.io.as_raw_fd(), hdr, index),
+		}
+	}
+	.user_data(key);
+	if let Err(err) = shared.push(&entry) {
+		shared.ops.borrow_mut().remove(key as usize);
+		return Err(err);
+	}
+	if zero_copy {
+		let sock = match &shared.ops.borrow()[key as usize] {
+			Op::Send(op) => op.lease.sock.clone(),
+			_ => unreachable!(),
+		};
+		sock.tx.borrow_mut().stats.zc_submitted += 1;
+	}
+	Ok(())
 }
 
 fn send_one(
 	shared: &Rc<Shared>,
-	sock: &Rc<SockShared>,
 	lease: &Rc<TxLease>,
 	base: *mut u8,
 	len: usize,
 	to: SocketAddr,
 	segment: Option<u16>,
+	fixed: Option<u16>,
 ) -> io::Result<()> {
 	// SAFETY: all-zero is valid for these C structs.
 	let mut hdr: Box<SendHdr> = Box::new(unsafe { std::mem::zeroed() });
@@ -851,26 +1029,15 @@ fn send_one(
 		}
 	}
 
-	let key = shared.insert(Op::Send(SendOp {
-		lease: lease.clone(),
-		expect: len,
-		_hdr: hdr,
-	}));
-	let hdr_ptr = {
-		let ops = shared.ops.borrow();
-		match &ops[key as usize] {
-			Op::Send(op) => &raw const op._hdr.hdr,
-			_ => unreachable!(),
-		}
-	};
-	let entry = opcode::SendMsg::new(types::Fd(sock.io.as_raw_fd()), hdr_ptr)
-		.build()
-		.user_data(key);
-	if let Err(err) = shared.push(&entry) {
-		shared.ops.borrow_mut().remove(key as usize);
-		return Err(err);
-	}
-	Ok(())
+	stage_send(
+		shared,
+		SendOp {
+			lease: lease.clone(),
+			expect: len,
+			_hdr: hdr,
+			mode: fixed.map_or(SendMode::Plain, SendMode::FixedZeroCopy),
+		},
+	)
 }
 
 /// Arm (or re-arm) the socket's receive. Failure is recorded on the socket.
@@ -1107,9 +1274,8 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 	))
 }
 
-/// Handle one send completion; the buffer lease releases when the last
-/// completion drops its `SendOp`.
-pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
+/// Validate a send's ordinary result CQE.
+pub(crate) fn on_send_result(sock: &SockShared, expect: usize, cqe: Cqe) {
 	if cqe.result < 0 {
 		let code = -cqe.result;
 		if code == libc::ECONNREFUSED {
@@ -1118,12 +1284,43 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			return;
 		}
 		if code != libc::ECANCELED {
-			op.lease.sock.fail_tx(code);
+			sock.fail_tx(code);
 		}
-	} else if cqe.result as usize != op.expect {
-		tracing::warn!(sent = cqe.result, expected = op.expect, "short UDP send");
-		op.lease.sock.fail_tx(libc::EIO);
+	} else if cqe.result as usize != expect {
+		tracing::warn!(sent = cqe.result, expected = expect, "short UDP send");
+		sock.fail_tx(libc::EIO);
 	}
+}
+
+fn fixed_send_unsupported(result: i32) -> bool {
+	matches!(-result, libc::EINVAL | libc::EOPNOTSUPP)
+}
+
+/// Handle a terminal send CQE. A zero-copy notification releases the lease;
+/// an unsupported fixed-buffer request is retried as ordinary `SENDMSG`.
+pub(crate) fn on_send(shared: &Rc<Shared>, mut op: SendOp, cqe: Cqe) {
+	if cqueue::notif(cqe.flags) {
+		let mut tx = op.lease.sock.tx.borrow_mut();
+		tx.stats.zc_notifications += 1;
+		if cqe.result as u32 & IORING_NOTIF_USAGE_ZC_COPIED != 0 {
+			tx.stats.zc_copied += 1;
+		}
+		return;
+	}
+
+	if fixed_send_unsupported(cqe.result) && matches!(op.mode, SendMode::FixedZeroCopy(_)) {
+		shared.sendmsg_zc_fixed.set(false);
+		op.lease.sock.tx.borrow_mut().stats.zc_fallbacks += 1;
+		tracing::warn!("kernel rejected fixed-buffer SENDMSG_ZC; falling back to SENDMSG");
+		op.mode = SendMode::Plain;
+		let sock = op.lease.sock.clone();
+		if let Err(err) = stage_send(shared, op) {
+			sock.fail_tx(err.raw_os_error().unwrap_or(libc::EIO));
+		}
+		return;
+	}
+
+	on_send_result(&op.lease.sock, op.expect, cqe);
 }
 
 /// The `UDP_GRO` segment size in a received control buffer, if present.
@@ -1244,6 +1441,14 @@ mod tests {
 	fn addr_roundtrip_v4() {
 		let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 7), 4443));
 		assert_eq!(roundtrip(addr), Some(addr));
+	}
+
+	#[test]
+	fn fixed_send_rejection_codes_fall_back() {
+		assert!(fixed_send_unsupported(-libc::EINVAL));
+		assert!(fixed_send_unsupported(-libc::EOPNOTSUPP));
+		assert!(!fixed_send_unsupported(-libc::EFAULT));
+		assert!(!fixed_send_unsupported(1));
 	}
 
 	#[test]

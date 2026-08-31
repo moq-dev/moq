@@ -13,8 +13,9 @@ the UDP sockets bound through it.
   `recvmsg`: the kernel faults the receive once a buffer's leftover tail is
   smaller than the recvmsg header.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
-  staged in a fixed pool of buffers owned by id and released on completion
-  (the shape a later `SENDMSG_ZC` needs).
+  staged in a growable pool of stable buffers owned by id. An opt-in path
+  lazily registers larger buffers for fixed-buffer `SENDMSG_ZC` on Linux 6.15
+  and newer, retaining each buffer until its notification CQE.
 - **Timers**: a heap the worker sweeps; the earliest deadline rides
   `io_uring_enter` as an absolute timeout. Zero timeout SQEs. The worker's
   `Handle` implements `moq_net::Timers`.
@@ -89,9 +90,11 @@ includes GitHub-hosted CI runners.
 
 `udp_tokio` and `udp_uring` are the disposable syscall-level matrices from the
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
-for their methodology. `echo_quiche` is the ablation matrix over the real
-worker: the same quiche echo with receive batching, GRO, and GSO toggled one
-at a time.
+for their methodology. `echo_quiche` and `session_lite` are ablation matrices
+over the real worker: the same workloads with receive batching, GRO, GSO, and
+fixed-buffer `SENDMSG_ZC` toggled one at a time. The zero-copy result is
+meaningful only when the peer is reached through a physical NIC; loopback
+reports copy fallback through `udp::Socket::send_stats`.
 
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1

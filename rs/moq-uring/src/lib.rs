@@ -10,7 +10,8 @@
 //! UDP is the point: [`udp::Socket`] receives through one multishot `recvmsg`
 //! with a registered provided-buffer ring (one whole buffer per completion,
 //! `UDP_GRO` coalesced) and sends with an explicit `UDP_SEGMENT` control
-//! message per `sendmsg` from a growable pool of staging buffers.
+//! message from a growable pool of staging buffers. An opt-in path registers
+//! larger send buffers for fixed-buffer `SENDMSG_ZC` on Linux 6.15 and newer.
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials

@@ -110,6 +110,8 @@ impl Worker {
 		Ok(Self {
 			shared: Rc::new(Shared {
 				ring: RefCell::new(ring),
+				registered_buffers: RefCell::new(Default::default()),
+				sendmsg_zc_fixed: std::cell::Cell::new(true),
 				ops: RefCell::new(slab::Slab::new()),
 				timers: Rc::new(RefCell::new(timer::Heap::default())),
 				spawns: RefCell::new(Vec::new()),
@@ -293,7 +295,8 @@ impl Worker {
 		// nothing for a key after its terminal CQE, so reusing the slot for
 		// an op armed during dispatch is sound.
 		enum Route {
-			Live(Rc<udp::SockShared>),
+			LiveRecv(Rc<udp::SockShared>),
+			LiveSend(Rc<udp::SockShared>, usize),
 			Done(Op),
 		}
 
@@ -305,22 +308,28 @@ impl Worker {
 			};
 			let terminal = match op {
 				Op::Recv { .. } => cqe.result < 0 || !io_uring::cqueue::more(cqe.flags),
+				Op::Send(op) => !op.live_after(cqe),
 				_ => true,
 			};
 			if terminal {
 				Route::Done(ops.remove(key))
 			} else {
 				match op {
-					Op::Recv { sock, .. } => Route::Live(sock.clone()),
-					_ => unreachable!("only receives are non-terminal"),
+					Op::Recv { sock, .. } => Route::LiveRecv(sock.clone()),
+					Op::Send(op) => {
+						let (sock, expect) = op.result_target();
+						Route::LiveSend(sock, expect)
+					}
+					_ => unreachable!("only receives and zero-copy sends are non-terminal"),
 				}
 			}
 		};
 
 		match route {
-			Route::Live(sock) => udp::on_recv(&self.shared, &sock, None, cqe, false),
+			Route::LiveRecv(sock) => udp::on_recv(&self.shared, &sock, None, cqe, false),
+			Route::LiveSend(sock, expect) => udp::on_send_result(&sock, expect, cqe),
 			Route::Done(Op::Recv { sock, one }) => udp::on_recv(&self.shared, &sock, one, cqe, true),
-			Route::Done(Op::Send(op)) => udp::on_send(op, cqe),
+			Route::Done(Op::Send(op)) => udp::on_send(&self.shared, op, cqe),
 			Route::Done(Op::FutexWait) => self.futex_armed = false,
 			Route::Done(Op::Cancel) => {}
 		}
@@ -684,6 +693,99 @@ mod tests {
 	}
 
 	#[test]
+	fn zero_copy_buffer_waits_for_notification() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffers_max: 1,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		let key = worker.shared.insert(Op::Send(tx.test_send_op()));
+
+		// The result CQE reports the byte count but MORE promises a later NOTIF,
+		// so the operation and its only buffer must remain checked out.
+		worker.dispatch(Cqe {
+			user_data: key,
+			result: 1,
+			flags: 1 << 1,
+		});
+		assert!(worker.shared.ops.borrow().contains(key as usize));
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+
+		// NOTIF's result is a usage bit mask, not a negative errno. It is the
+		// terminal CQE that finally permits buffer reuse.
+		worker.dispatch(Cqe {
+			user_data: key,
+			result: i32::MIN,
+			flags: 1 << 3,
+		});
+		assert!(!worker.shared.ops.borrow().contains(key as usize));
+		assert!(matches!(sock.poll_acquire(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+		assert_eq!(
+			sock.send_stats(),
+			udp::SendStats {
+				zc_notifications: 1,
+				zc_copied: 1,
+				..Default::default()
+			}
+		);
+	}
+
+	#[test]
+	fn fixed_buffer_sendmsg_zc_reaches_the_peer() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffers_max: 1,
+			send_zc_threshold: Some(1),
+			..Default::default()
+		};
+		let sender = handle
+			.udp(
+				std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender"),
+				config.clone(),
+			)
+			.expect("sender");
+		let receiver = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver"), config)
+			.expect("receiver");
+		let to = receiver.local_addr().expect("receiver addr");
+
+		let stats = worker
+			.block_on(async {
+				let mut tx = sender.acquire().await.expect("tx buffer");
+				let len = 32 * 1200;
+				tx[..len].fill(0x5a);
+				tx.send(len, to, 1200).expect("send");
+				let packet = receiver.recv().await.expect("receive");
+				assert_eq!(packet.payload().len(), len);
+				assert!(packet.payload().iter().all(|byte| *byte == 0x5a));
+
+				let deadline = Instant::now() + Duration::from_secs(5);
+				loop {
+					let stats = sender.send_stats();
+					if stats.zc_notifications + stats.zc_fallbacks > 0 {
+						break stats;
+					}
+					assert!(Instant::now() < deadline, "zero-copy send never terminated");
+					Deadline::after(&handle, Duration::from_millis(1)).wait().await;
+				}
+			})
+			.expect("worker");
+
+		assert_eq!(stats.zc_submitted, 1);
+		assert_eq!(stats.zc_notifications + stats.zc_fallbacks, 1);
+		assert!(stats.zc_copied <= stats.zc_notifications);
+		assert!(matches!(sender.poll_acquire(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+	}
+
+	#[test]
 	fn teardown_stops_between_completions_at_the_deadline() {
 		let Some(mut worker) = worker() else { return };
 		let first = worker.shared.insert(Op::Cancel);
@@ -748,6 +850,7 @@ mod tests {
 			rx_buffer_len: 2048,
 			tx_buffers_max: 1,
 			tx_buffer_len: 2048,
+			send_zc_threshold: None,
 		};
 		let mut sockets = Vec::new();
 		let mut shared = Vec::new();
