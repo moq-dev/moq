@@ -25,7 +25,7 @@ pub enum Error {
 
 	/// URL parsing error.
 	#[error("url error: {0}")]
-	Url(#[from] url::ParseError),
+	Url(String),
 
 	/// UTF-8 string validation error.
 	#[error("utf8 error: {0}")]
@@ -101,7 +101,7 @@ pub enum Error {
 
 	/// Log level parsing error.
 	#[error("level error: {0}")]
-	Level(Arc<tracing::metadata::ParseLevelError>),
+	Level(String),
 
 	/// Invalid error code conversion.
 	#[error("invalid code")]
@@ -149,7 +149,7 @@ pub enum Error {
 
 	/// Invalid JSON passed for a catalog section.
 	#[error("json error: {0}")]
-	Json(Arc<serde_json::Error>),
+	Json(String),
 
 	/// Error from the moq-json snapshot/stream layer.
 	#[error("json track error: {0}")]
@@ -174,9 +174,17 @@ impl From<moq_json::Error> for Error {
 	}
 }
 
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API.
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
-		Error::Json(Arc::new(err))
+		Error::Json(err.to_string())
+	}
+}
+
+impl From<url::ParseError> for Error {
+	fn from(err: url::ParseError) -> Self {
+		Error::Url(err.to_string())
 	}
 }
 
@@ -194,7 +202,7 @@ impl From<moq_video::Error> for Error {
 
 impl From<tracing::metadata::ParseLevelError> for Error {
 	fn from(err: tracing::metadata::ParseLevelError) -> Self {
-		Error::Level(Arc::new(err))
+		Error::Level(err.to_string())
 	}
 }
 

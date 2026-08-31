@@ -24,22 +24,22 @@ pub enum MoqError {
 	#[error(transparent)]
 	Video(#[from] moq_video::Error),
 
-	#[error(transparent)]
-	Url(#[from] url::ParseError),
+	#[error("url: {0}")]
+	Url(String),
 
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
 
-	#[error(transparent)]
-	LogLevel(#[from] tracing::metadata::ParseLevelError),
+	#[error("log level: {0}")]
+	LogLevel(String),
 
 	// Only the native path spawns onto a runtime, so only it can fail to join.
 	#[cfg(not(target_arch = "wasm32"))]
-	#[error(transparent)]
-	Task(#[from] tokio::task::JoinError),
+	#[error("task: {0}")]
+	Task(String),
 
 	#[error("json: {0}")]
-	Json(#[from] serde_json::Error),
+	Json(String),
 
 	#[error("cancelled")]
 	Cancelled,
@@ -87,4 +87,29 @@ pub enum MoqError {
 
 	#[error("log: {0}")]
 	Log(String),
+}
+
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API.
+macro_rules! from_message {
+	($($ty:ty => $variant:ident),* $(,)?) => {
+		$(
+			impl From<$ty> for MoqError {
+				fn from(err: $ty) -> Self {
+					Self::$variant(err.to_string())
+				}
+			}
+		)*
+	};
+}
+
+from_message! {
+	url::ParseError => Url,
+	tracing::metadata::ParseLevelError => LogLevel,
+	serde_json::Error => Json,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+from_message! {
+	tokio::task::JoinError => Task,
 }

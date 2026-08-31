@@ -62,8 +62,8 @@ pub enum Error {
 	NoRoots,
 
 	/// A configured fingerprint isn't valid hex.
-	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
-	Fingerprint(#[source] hex::FromHexError),
+	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256): {0}")]
+	Fingerprint(String),
 
 	/// A configured fingerprint is valid hex but the wrong size for a SHA-256 digest.
 	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
@@ -152,8 +152,8 @@ pub enum Error {
 
 	/// Generating a self-signed certificate failed.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-	#[error(transparent)]
-	Rcgen(#[from] rcgen::Error),
+	#[error("failed to generate a self-signed certificate: {0}")]
+	Rcgen(String),
 
 	/// The crate was built without a crypto provider, so no TLS is possible.
 	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
@@ -165,12 +165,17 @@ pub enum Error {
 	Deprecated(crate::Deprecated),
 }
 
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+crate::error::from_message! {
+	rcgen::Error => Rcgen,
+}
+
 /// Convenience alias for results produced by this module.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Parse a hex-encoded SHA-256 certificate fingerprint.
 pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
-	let bytes = hex::decode(value.trim()).map_err(Error::Fingerprint)?;
+	let bytes = hex::decode(value.trim()).map_err(|err| Error::Fingerprint(crate::error::message(err)))?;
 	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 

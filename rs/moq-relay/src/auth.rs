@@ -168,13 +168,13 @@ pub enum AuthError {
 	MissingKeyId,
 
 	#[error("auth API request failed: {0}")]
-	ApiUnavailable(#[from] reqwest_middleware::Error),
+	ApiUnavailable(String),
 
 	#[error("auth API response was invalid: {0}")]
-	ApiInvalidResponse(#[from] serde_json::Error),
+	ApiInvalidResponse(String),
 
 	#[error("invalid URL: {0}")]
-	InvalidUrl(#[from] url::ParseError),
+	InvalidUrl(String),
 
 	#[error(transparent)]
 	InvalidKeyId(#[from] moq_token::KeyIdError),
@@ -203,12 +203,31 @@ impl AuthError {
 	}
 }
 
-// reqwest::Error → AuthError flows through reqwest_middleware::Error so callers can use `?`
-// on both .send() (returns reqwest_middleware::Error) and .error_for_status() / .text()
-// (return reqwest::Error) without a manual map_err.
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API. Both HTTP error types land on the same variant, so `?` works on `.send()`
+// (which returns `reqwest_middleware::Error`) and on `.error_for_status()` / `.text()`
+// (which return `reqwest::Error`) alike.
 impl From<reqwest::Error> for AuthError {
-	fn from(e: reqwest::Error) -> Self {
-		Self::ApiUnavailable(e.into())
+	fn from(err: reqwest::Error) -> Self {
+		Self::ApiUnavailable(err.to_string())
+	}
+}
+
+impl From<reqwest_middleware::Error> for AuthError {
+	fn from(err: reqwest_middleware::Error) -> Self {
+		Self::ApiUnavailable(err.to_string())
+	}
+}
+
+impl From<serde_json::Error> for AuthError {
+	fn from(err: serde_json::Error) -> Self {
+		Self::ApiInvalidResponse(err.to_string())
+	}
+}
+
+impl From<url::ParseError> for AuthError {
+	fn from(err: url::ParseError) -> Self {
+		Self::InvalidUrl(err.to_string())
 	}
 }
 

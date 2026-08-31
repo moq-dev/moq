@@ -1,5 +1,42 @@
 use std::sync::Arc;
 
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
+/// plain `to_string()` would drop.
+// A build with no transport feature compiles no backend module, so nothing calls this.
+#[allow(dead_code)]
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
+/// Generates `From` conversions into message-carrying variants of the enclosing module's `Error`,
+/// so `?` still works on a dependency's error without that dependency reaching our public API.
+#[allow(unused_macros)]
+macro_rules! from_message {
+	($($ty:ty => $variant:ident),* $(,)?) => {
+		$(
+			impl From<$ty> for Error {
+				fn from(err: $ty) -> Self {
+					Self::$variant($crate::error::message(err))
+				}
+			}
+		)*
+	};
+}
+
+#[allow(unused_imports)]
+pub(crate) use from_message;
+
 /// Whether an HTTP response status means "ask again later".
 ///
 /// A response that arrived is the server's answer, and only this narrow set invites another
@@ -26,12 +63,12 @@ pub enum Error {
 	MoqNet(#[from] moq_net::Error),
 
 	/// The log filter string (ex. `RUST_LOG`) isn't a valid tracing directive.
-	#[error("invalid log directive")]
-	Directive(#[source] Arc<tracing_subscriber::filter::ParseError>),
+	#[error("invalid log directive: {0}")]
+	Directive(String),
 
 	/// Logging was initialized twice, or something else already claimed the global subscriber.
-	#[error("failed to set global tracing subscriber")]
-	SetSubscriber(#[source] Arc<tracing_subscriber::util::TryInitError>),
+	#[error("failed to set global tracing subscriber: {0}")]
+	SetSubscriber(String),
 
 	/// Logging couldn't attach to Android's logcat.
 	#[error("failed to initialize Android logcat layer")]
@@ -271,9 +308,10 @@ impl From<std::io::Error> for Error {
 	}
 }
 
+// Flattened to its message so `tracing-subscriber` stays out of this crate's public API.
 impl From<tracing_subscriber::filter::ParseError> for Error {
 	fn from(err: tracing_subscriber::filter::ParseError) -> Self {
-		Self::Directive(Arc::new(err))
+		Self::Directive(err.to_string())
 	}
 }
 

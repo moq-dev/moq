@@ -116,16 +116,17 @@ pub enum Error {
 	MatroskaParse,
 
 	#[error("matroska write error: {0}")]
-	MatroskaWrite(std::sync::Arc<webm_iterable::errors::TagWriterError>),
+	MatroskaWrite(String),
 
 	/// Building the Opus codec-private OpusHead for an audio track failed.
 	#[error(transparent)]
 	Opus(#[from] crate::codec::opus::Error),
 }
 
+// Flattened to its message so webm-iterable stays out of this crate's public API.
 impl From<webm_iterable::errors::TagWriterError> for Error {
 	fn from(err: webm_iterable::errors::TagWriterError) -> Self {
-		Error::MatroskaWrite(std::sync::Arc::new(err))
+		Error::MatroskaWrite(err.to_string())
 	}
 }
 

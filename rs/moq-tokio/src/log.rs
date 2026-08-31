@@ -78,7 +78,7 @@ impl Log {
 
 		registry
 			.try_init()
-			.map_err(|e| crate::Error::SetSubscriber(std::sync::Arc::new(e)))?;
+			.map_err(|e| crate::Error::SetSubscriber(e.to_string()))?;
 
 		Ok(())
 	}

@@ -93,7 +93,7 @@ pub enum Error {
 
 	/// URL parse error.
 	#[error("url: {0}")]
-	Url(#[from] url::ParseError),
+	Url(String),
 
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
@@ -195,6 +195,13 @@ impl From<anyhow::Error> for Error {
 impl From<mp4_atom::Error> for Error {
 	fn from(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
+	}
+}
+
+// Flattened to its message so `url` stays out of this crate's public API.
+impl From<url::ParseError> for Error {
+	fn from(err: url::ParseError) -> Self {
+		Error::Url(err.to_string())
 	}
 }
 
