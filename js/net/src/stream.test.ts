@@ -160,7 +160,7 @@ test("Reader readAll", async () => {
 
 test("Reader u53 varint decoding", async () => {
 	// Test various varint sizes
-	const testValues = [0, 63, 64, 16383, 16384, 1073741823, 1073741824];
+	const testValues = [0, 63, 64, 16383, 16384, 1073741823, 1073741824, Number.MAX_SAFE_INTEGER];
 
 	const { stream, written } = createTestWritableStream();
 	const testWriter = new Writer(stream);
@@ -178,6 +178,29 @@ test("Reader u53 varint decoding", async () => {
 	for (const expectedValue of testValues) {
 		const actualValue = await reader.u53();
 		expect(actualValue).toBe(expectedValue);
+	}
+
+	expect(await reader.done()).toBe(true);
+});
+
+test("Reader u53 rejects integers that cannot be represented exactly", async () => {
+	const firstUnsafe = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+	const wireValues = [firstUnsafe, firstUnsafe + 1n];
+	expect(Number(wireValues[0])).toBe(Number(wireValues[1]));
+
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+
+	for (const value of wireValues) {
+		await writer.u62(value);
+	}
+
+	writer.close();
+	await writer.closed;
+
+	const reader = new Reader(undefined, concatChunks(written));
+	for (const value of wireValues) {
+		await expect(reader.u53()).rejects.toThrow(`value larger than 53-bits: ${value}`);
 	}
 
 	expect(await reader.done()).toBe(true);
