@@ -198,8 +198,12 @@ fn links(found: &mut Findings, root: &Path, known: &BTreeSet<&Path>, doc: &Doc) 
 			continue;
 		}
 
+		// A normalized path that still opens with `..` points above the
+		// repository root. Joining it to `root` and testing existence would
+		// follow it into whatever sits beside the checkout, so the repo's own
+		// directory name (or a sibling worktree) could make a broken link pass.
 		let path = resolve(&doc.path, target);
-		if !root.join(&path).exists() {
+		if path.starts_with("..") || !root.join(&path).exists() {
 			found.at(&doc.path, link.line, format!("link does not resolve: {}", link.target));
 			continue;
 		}

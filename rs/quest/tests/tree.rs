@@ -552,6 +552,22 @@ fn repeated_parent_components() {
 	tree.rejects("link does not resolve: ../../../../../CLAUDE.md");
 }
 
+/// Escaping the root must fail even when the joined path happens to exist:
+/// the repository's own directory name (or a sibling worktree) sits beside the
+/// root, so `<root>/../<name>/CLAUDE.md` is a real file that readers of the
+/// repository-relative link can never reach.
+#[test]
+fn escaped_link_resolving_beside_the_root() {
+	let tree = Tree::new();
+	tree.write("CLAUDE.md", "# Guide\n");
+	let name = tree.path().file_name().unwrap().to_str().unwrap();
+	tree.append(
+		"quest/m0/line/one.md",
+		&format!("\n## Plan\n\nSee [the guide](../../../../{name}/CLAUDE.md).\n"),
+	);
+	tree.rejects(&format!("link does not resolve: ../../../../{name}/CLAUDE.md"));
+}
+
 /// A bullet is not an entry. `- TBD` satisfies "the heading has a list" while
 /// leaving a questline that should have been deleted with its last quest.
 #[test]
