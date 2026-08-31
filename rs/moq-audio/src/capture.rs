@@ -24,6 +24,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::Error;
 
+mod buffer;
+#[cfg(target_os = "macos")]
 mod channel;
 mod permission;
 
@@ -98,6 +100,57 @@ pub(crate) struct Samples {
 	/// PTS advances by sample count, so a swallowed gap becomes permanent drift
 	/// behind wall clock.
 	pub gap: bool,
+
+	/// Returns the allocation to the microphone callback after every downstream
+	/// borrower is done with it. `None` for non-cpal capture sources.
+	recycle: Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+}
+
+impl Samples {
+	/// Samples whose allocation belongs to the ordinary async path.
+	pub(crate) fn plain(data: Vec<f32>, gap: bool) -> Self {
+		Self {
+			data,
+			gap,
+			recycle: None,
+		}
+	}
+
+	/// Samples borrowed from the microphone callback's fixed buffer pool.
+	fn pooled(data: Vec<f32>, gap: bool, recycle: std::sync::mpsc::SyncSender<Vec<f32>>) -> Self {
+		Self {
+			data,
+			gap,
+			recycle: Some(recycle),
+		}
+	}
+
+	/// Replace pooled samples with an async allocation, returning the old buffer
+	/// before it gets dropped.
+	pub(crate) fn replace(&mut self, data: Vec<f32>) {
+		self.recycle();
+		self.data = data;
+	}
+
+	fn recycle(&mut self) {
+		let Some(recycle) = self.recycle.take() else {
+			return;
+		};
+
+		let mut data = std::mem::take(&mut self.data);
+		data.clear();
+		if let Err(std::sync::mpsc::TrySendError::Full(_) | std::sync::mpsc::TrySendError::Disconnected(_)) =
+			recycle.try_send(data)
+		{
+			// This is the async consumer, so freeing a buffer here is safe.
+		}
+	}
+}
+
+impl Drop for Samples {
+	fn drop(&mut self) {
+		self.recycle();
+	}
 }
 
 /// The PCM layout delivered by one capture stream.
@@ -239,7 +292,7 @@ pub(crate) struct Microphone {
 /// failure wakeup and stream-generation isolation can be tested without audio
 /// hardware.
 struct MicrophoneReader {
-	rx: channel::Receiver<Vec<f32>>,
+	rx: buffer::Reader,
 	errors: kio::Consumer<Option<cpal::Error>>,
 }
 
@@ -263,10 +316,7 @@ impl MicrophoneReader {
 			data = self.rx.recv() => data,
 		};
 
-		Ok(data.map(|data| Samples {
-			data,
-			gap: self.rx.gap(),
-		}))
+		Ok(data)
 	}
 }
 
@@ -305,35 +355,23 @@ impl Microphone {
 			aec.open(sample_rate, channels).map_err(Failure::fatal)?;
 		}
 
-		let (tx, rx) = channel::bounded::<Vec<f32>>();
+		let (mut writer, rx) = buffer::channel(
+			channels as usize,
+			#[cfg(feature = "aec")]
+			config.aec.clone(),
+		);
 		let error_tx = kio::Producer::new(None);
 		let errors = error_tx.consume();
 		let mut reader = MicrophoneReader { rx, errors };
 
-		// What every sample format funnels into once it is interleaved `f32`.
-		// Echo cancellation edits the buffer in place, so it costs no allocation
-		// beyond the one the conversion already made.
-		let deliver = {
-			#[cfg(feature = "aec")]
-			let aec = config.aec.clone();
-
-			move |#[allow(unused_mut)] mut pcm: Vec<f32>| {
-				#[cfg(feature = "aec")]
-				if let Some(aec) = &aec {
-					aec.process(&mut pcm);
-				}
-				tx.push(pcm);
-			}
-		};
-
-		// The callback runs on cpal's realtime audio thread. Sample conversion
-		// allocates one Vec per callback; the bounded handoff never blocks.
+		// The callback runs on cpal's realtime audio thread. Every format writes
+		// into the same preallocated bounded pool.
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[f32], _: &_| deliver(data.to_vec()),
+					move |data: &[f32], _: &_| writer.write_f32(data),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -342,7 +380,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[i16], _: &_| deliver(data.iter().map(|&s| s as f32 / 32768.0).collect()),
+					move |data: &[i16], _: &_| writer.write_i16(data),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -351,7 +389,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[u16], _: &_| deliver(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
+					move |data: &[u16], _: &_| writer.write_u16(data),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -533,12 +571,12 @@ fn capture_err(err: impl std::fmt::Display) -> Error {
 mod tests {
 	use super::*;
 
-	fn reader() -> (
-		channel::Sender<Vec<f32>>,
-		kio::Producer<Option<cpal::Error>>,
-		MicrophoneReader,
-	) {
-		let (tx, rx) = channel::bounded();
+	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
+		let (tx, rx) = buffer::channel(
+			1,
+			#[cfg(feature = "aec")]
+			None,
+		);
 		let failures = kio::Producer::new(None);
 		let errors = failures.consume();
 		(tx, failures, MicrophoneReader { rx, errors })
@@ -566,11 +604,11 @@ mod tests {
 	#[tokio::test]
 	async fn replaced_stream_cannot_fail_its_replacement() {
 		let (_old_samples, old_errors, old_reader) = reader();
-		let (new_samples, _new_errors, mut new_reader) = reader();
+		let (mut new_samples, _new_errors, mut new_reader) = reader();
 		drop(old_reader);
 
 		fail(&old_errors, "stale");
-		new_samples.push(vec![1.0]);
+		new_samples.write_f32(&[1.0]);
 		let samples = new_reader.read().await.unwrap().unwrap();
 		assert_eq!(samples.data, vec![1.0]);
 	}
@@ -580,12 +618,7 @@ mod tests {
 		let (_samples, errors, mut reader) = reader();
 		fail(&errors, "device lost");
 
-		let result = reader
-			.pending(Samples {
-				data: vec![1.0],
-				gap: false,
-			})
-			.await;
+		let result = reader.pending(Samples::plain(vec![1.0], false)).await;
 		let err = match result {
 			Err(err) => err.into_error(),
 			Ok(_) => panic!("the pending sample hid a stream error"),

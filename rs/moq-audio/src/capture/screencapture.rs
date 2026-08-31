@@ -165,14 +165,11 @@ impl SystemAudio {
 	/// the future to stop reading.
 	pub(super) async fn read(&mut self) -> Option<Samples> {
 		if let Some(data) = self.pending.take() {
-			return Some(Samples { data, gap: false });
+			return Some(Samples::plain(data, false));
 		}
 
 		let buffer = self.rx.recv().await?;
-		Some(Samples {
-			data: buffer.samples,
-			gap: self.rx.gap(),
-		})
+		Some(Samples::plain(buffer.samples, self.rx.gap()))
 	}
 }
 

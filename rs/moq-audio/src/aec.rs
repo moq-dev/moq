@@ -219,12 +219,15 @@ impl Canceller {
 	/// echo.
 	///
 	/// Interleaved at the format passed to [`open`](Self::open). Runs on the
-	/// microphone callback thread, so it locks rather than allocates: the
-	/// buffers are sized in `open` for callbacks up to [`MAX_CALLBACK`] frames,
-	/// and only a larger one grows them.
+	/// microphone callback thread, so it never waits for the playback driver.
+	/// Contention during a reference switch passes this buffer through; the
+	/// next callback resumes cancellation.
 	pub(crate) fn process(&self, buf: &mut [f32]) {
 		let enabled = self.enabled();
-		self.inner.state.lock().unwrap().process(buf, enabled);
+		let Ok(mut state) = self.inner.state.try_lock() else {
+			return;
+		};
+		state.process(buf, enabled);
 	}
 }
 
@@ -258,10 +261,10 @@ impl Drop for Inner {
 	}
 }
 
-/// Everything the microphone callback owns while it holds the lock.
+/// Everything the microphone callback accesses while it holds the lock.
 ///
-/// Uncontended in practice: only that callback takes it, plus the playback
-/// driver on a device switch.
+/// Only the playback driver on a reference switch contends, and the callback
+/// passes that buffer through rather than waiting.
 struct State {
 	/// `None` until a microphone opens and reports its format.
 	processor: Option<AudioProcessing>,
@@ -560,6 +563,7 @@ fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 #[cfg(test)]
 mod tests {
 	use std::collections::VecDeque;
+	use std::time::Duration;
 
 	use super::*;
 
@@ -678,6 +682,28 @@ mod tests {
 		let mut buf = vec![0.5f32; 960 * 2];
 		canceller.process(&mut buf);
 		assert!(buf.iter().all(|s| *s == 0.5), "passthrough altered the samples");
+	}
+
+	#[test]
+	fn reference_switch_contention_never_waits_on_the_callback() {
+		let canceller = opened(48_000, 1);
+		let locked = canceller.inner.state.lock().unwrap();
+		let callback = canceller.clone();
+		let (done, finished) = std::sync::mpsc::sync_channel(1);
+
+		let thread = std::thread::spawn(move || {
+			let mut buf = vec![0.5f32; 480];
+			callback.process(&mut buf);
+			done.send(buf).unwrap();
+		});
+
+		let buf = finished
+			.recv_timeout(Duration::from_millis(100))
+			.expect("the microphone callback waited for the reference lock");
+		assert!(buf.iter().all(|sample| *sample == 0.5));
+
+		drop(locked);
+		thread.join().unwrap();
 	}
 
 	/// Turning it off must drop the partial frame that was in flight, which would

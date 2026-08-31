@@ -163,7 +163,7 @@ impl Output for EncoderOutput<'_> {
 	}
 
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error> {
-		self.producer.write(&frame(samples.data, timestamp_us)?)
+		self.producer.write(&frame(&samples.data, timestamp_us)?)
 	}
 }
 
@@ -226,12 +226,13 @@ impl Converter {
 			self.anchor_us = Some(timestamp_us);
 		}
 
-		samples.data = match self.resampler.as_mut() {
-			Some(resampler) => resampler.process(&samples.data)?,
-			None => samples.data,
-		};
+		if let Some(resampler) = self.resampler.as_mut() {
+			let data = resampler.process(&samples.data)?;
+			samples.replace(data);
+		}
 		if self.input.channels != self.output.channels {
-			samples.data = remix(&samples.data, self.input.channels, self.output.channels)?;
+			let data = remix(&samples.data, self.input.channels, self.output.channels)?;
+			samples.replace(data);
 		}
 		if samples.data.is_empty() {
 			return Ok(None);
@@ -429,9 +430,9 @@ fn log_track_ended(err: moq_net::Error) {
 
 /// Pack interleaved `f32` samples into a timestamped [`Frame`] of little-endian
 /// bytes (i.e. [`Format::F32`]).
-fn frame(samples: Vec<f32>, timestamp_us: u64) -> Result<Frame, Error> {
-	let mut bytes = Vec::with_capacity(samples.len() * size_of::<f32>());
-	for sample in &samples {
+fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
+	let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+	for sample in samples {
 		bytes.extend_from_slice(&sample.to_le_bytes());
 	}
 	Ok(Frame {
@@ -574,8 +575,9 @@ mod tests {
 		}
 
 		fn write(&mut self, samples: capture::Samples, _timestamp_us: u64) -> Result<(), Error> {
-			self.events
-				.push(OutputEvent::Write(samples.data.into_iter().map(f32::to_bits).collect()));
+			self.events.push(OutputEvent::Write(
+				samples.data.iter().copied().map(f32::to_bits).collect(),
+			));
 			Ok(())
 		}
 	}
@@ -813,10 +815,7 @@ mod tests {
 			assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
 			recovered_tx
-				.try_push(Ok(capture::Samples {
-					data: vec![0.25],
-					gap: false,
-				}))
+				.try_push(Ok(capture::Samples::plain(vec![0.25], false)))
 				.unwrap();
 			poll_pending(future.as_mut()).await;
 
@@ -863,10 +862,7 @@ mod tests {
 			poll_pending(future.as_mut()).await;
 
 			recovered_tx
-				.try_push(Ok(capture::Samples {
-					data: vec![1.0, 3.0, 2.0, 4.0],
-					gap: false,
-				}))
+				.try_push(Ok(capture::Samples::plain(vec![1.0, 3.0, 2.0, 4.0], false)))
 				.unwrap();
 			poll_pending(future.as_mut()).await;
 
