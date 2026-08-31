@@ -26,7 +26,6 @@ impl Activity {
 
 /// A produced or consumed audio item and its codec activity classification.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub struct Classified<T> {
 	/// The encoded payload, decoded PCM, or published timestamp.
 	pub value: T,
