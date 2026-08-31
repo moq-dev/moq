@@ -602,7 +602,10 @@ impl Config {
 
 	/// Build the [`crate::Client`] this config describes.
 	pub fn init(self, quic: crate::quic::Config) -> crate::Result<crate::Client> {
-		crate::Client::new(self, quic)
+		crate::client::Config::default()
+			.with_connect(self)
+			.with_quic(quic)
+			.init()
 	}
 
 	/// The local address a dial sends from, resolving the default.

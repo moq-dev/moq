@@ -489,8 +489,11 @@ fn run(
 
 	let built = {
 		let _guard = runtime.enter();
-		Server::build(listen, quic, crate::server::Parts::Shard(shard))
-			.and_then(|server| server.local_addr().map(|addr| (server, addr)))
+		Server::build(
+			crate::server::Config::default().with_listen(listen).with_quic(quic),
+			crate::server::Parts::Shard(shard),
+		)
+		.and_then(|server| server.local_addr().map(|addr| (server, addr)))
 	};
 
 	let (server, addr) = match built {
