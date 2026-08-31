@@ -163,6 +163,9 @@ _changed-test $LIMIT=changed_max:
     [[ -z "$(printf 'aaa' | just _changed-cap 3)" ]] || fail "at budget must print nothing"
     [[ -z "$(printf '' | just _changed-cap 3)" ]] || fail "an empty diff must print nothing"
 
+    # The smallest nonempty list there is, against the only budget below it.
+    [[ "$(printf 'x' | just _changed-cap 0)" == ALL ]] || fail "a 1-byte list must exceed a 0 budget"
+
     # execve counts bytes, so the budget has to as well. Spelled as raw bytes
     # rather than as characters: this is one CJK character, 3 bytes wide, which
     # `${#var}` would count as 1 under a UTF-8 locale and let past a 2-byte
@@ -189,9 +192,12 @@ _changed-test $LIMIT=changed_max:
     [[ "$(just _echo "$payload" | wc -c)" -eq $((LIMIT + 1)) ]] \
     	|| fail "a $LIMIT-byte list does not survive an argv hop"
 
-    # End to end, but only when there is a diff to be oversized: see above.
+    # End to end, but only when there is a diff to be oversized: see above. The
+    # budget is zero rather than one because the real list is whatever the
+    # checkout holds, and a single one-character root path is a one-byte list
+    # that a one-byte budget does not exceed. Zero is below every nonempty list.
     if [[ -n "$(just _changed "" 100000000)" ]]; then
-    	[[ "$(just _changed "" 1)" == ALL ]] || fail "a diff over budget must print ALL"
+    	[[ "$(just _changed "" 0)" == ALL ]] || fail "a diff over budget must print ALL"
     fi
 
     echo "changed: budget ok"
