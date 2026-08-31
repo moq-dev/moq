@@ -65,6 +65,9 @@ async fn opus_round_trip_48k_stereo() {
 	let cfg = snapshot.audio.renditions.get("audio").expect("audio rendition");
 	let mut config = decode::Config::default();
 	config.format = Format::F32;
+	// Every chunk is already published, so the join point needs a budget wide enough to
+	// cover them; without one this subscribes at the live edge and decodes only the last.
+	config.latency_max = Some(Duration::from_millis(500));
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
 		.await
 		.unwrap();

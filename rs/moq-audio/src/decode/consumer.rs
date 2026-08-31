@@ -61,10 +61,14 @@ impl Consumer {
 		};
 
 		let name = name.into();
-		let track = broadcast
-			.track(&name)?
-			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
-			.await?;
+		// The budget has to ride on the subscription, not just the container: it is what
+		// picks the join point, so a consumer that only sets it downstream starts live.
+		let mut subscription =
+			moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio);
+		if let Some(latency) = config.latency_max {
+			subscription = subscription.with_latency_max(latency);
+		}
+		let track = broadcast.track(&name)?.subscribe(subscription).await?;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
