@@ -3,7 +3,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{Origin, OriginList, Path, coding::*};
 
-use super::{Message, Version};
+use super::{Message, Version, message::decode_size};
 
 // lite-06 announce message types: an outer discriminator carried before the length
 // prefix, so each announcement is an independently-typed, length-delimited message
@@ -161,7 +161,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = u64::decode(buf, version)?;
-			let size = usize::decode(buf, version)?;
+			let size = decode_size(buf, version)?;
 			if buf.remaining() < size {
 				return Err(DecodeError::Short);
 			}
@@ -189,7 +189,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		}
 
 		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
-		let size = usize::decode(buf, version)?;
+		let size = decode_size(buf, version)?;
 		if buf.remaining() < size {
 			return Err(DecodeError::Short);
 		}
