@@ -371,7 +371,7 @@ fn map_fetch_error(err: moq_net::Error) -> MoqError {
 /// `moq_net` makes the choice a handle you consume the subscriber into, which a foreign
 /// binding can't express in its type system, so the handle commits on the first group
 /// read instead: whichever group cursor a caller reaches for first is the one this
-/// track keeps, and reaching for the other afterwards is [`MoqError::Unsupported`].
+/// track keeps, and reaching for the other afterwards is [`MoqError::AlreadyCommitted`].
 /// Datagrams are a separate cursor on either handle, so reading them never commits.
 enum Cursor {
 	/// No group read has happened yet; the track can still commit either way.
@@ -389,7 +389,7 @@ struct TrackInner {
 }
 
 impl TrackInner {
-	/// The arrival cursor, committing this track to it, or [`MoqError::Unsupported`]
+	/// The arrival cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
 	/// once it committed to sequence order.
 	fn arrival(&mut self) -> Result<&mut moq_net::track::Subscriber, MoqError> {
 		if let Cursor::Uncommitted(_) = &self.track {
@@ -400,11 +400,14 @@ impl TrackInner {
 		}
 		match &mut self.track {
 			Cursor::Arrival(track) => Ok(track),
-			_ => Err(MoqError::Unsupported),
+			Cursor::Ordered(_) => Err(MoqError::AlreadyCommitted),
+			// Only reachable if a previous conversion unwound mid-swap, leaving the
+			// handle with no subscriber to read: poisoned, not misused.
+			Cursor::Uncommitted(_) | Cursor::Converting => Err(MoqError::Closed),
 		}
 	}
 
-	/// The sequence cursor, committing this track to it, or [`MoqError::Unsupported`]
+	/// The sequence cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
 	/// once it committed to arrival order.
 	fn ordered(&mut self) -> Result<&mut moq_net::track::Ordered, MoqError> {
 		// Only move the subscriber out when there is one to convert: `ordered()` consumes
@@ -417,7 +420,9 @@ impl TrackInner {
 		}
 		match &mut self.track {
 			Cursor::Ordered(track) => Ok(track),
-			_ => Err(MoqError::Unsupported),
+			Cursor::Arrival(_) => Err(MoqError::AlreadyCommitted),
+			// See `arrival`: unreachable unless the handle was left mid-conversion.
+			Cursor::Uncommitted(_) | Cursor::Converting => Err(MoqError::Closed),
 		}
 	}
 
@@ -442,7 +447,9 @@ impl TrackInner {
 		let datagram = match &mut self.track {
 			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.recv_datagram().await?,
 			Cursor::Ordered(track) => track.recv_datagram().await?,
-			Cursor::Converting => return Err(MoqError::Unsupported),
+			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
+			// so this is the only way they can fail on a live handle.
+			Cursor::Converting => return Err(MoqError::Closed),
 		};
 		let Some(datagram) = datagram else {
 			return Ok(None);
@@ -490,7 +497,7 @@ impl MoqTrackConsumer {
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
 	/// ([`Self::next_group`], [`Self::read_frame`]) fail with
-	/// [`MoqError::Unsupported`] afterwards.
+	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
 			.run(|mut state| async move {
@@ -508,7 +515,7 @@ impl MoqTrackConsumer {
 	/// returned, skipping late arrivals. Returns `None` when the track ends.
 	///
 	/// The first call commits this track to sequence order: arrival-order reads
-	/// ([`Self::recv_group`]) fail with [`MoqError::Unsupported`] afterwards.
+	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
 			.run(|mut state| async move {

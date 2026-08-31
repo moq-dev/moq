@@ -1856,7 +1856,7 @@ async fn raw_track_next_group_is_repeatable() {
 	}
 
 	// The arrival cursor is gone once the track committed to sequence order.
-	assert!(matches!(consumer.recv_group().await, Err(MoqError::Unsupported)));
+	assert!(matches!(consumer.recv_group().await, Err(MoqError::AlreadyCommitted)));
 }
 
 /// The first group read commits the cursor either way: mixing arrival and sequence
@@ -1887,8 +1887,8 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.unwrap()
 		.expect("expected a group");
 	assert_eq!(group.sequence(), 0);
-	assert!(matches!(consumer.next_group().await, Err(MoqError::Unsupported)));
-	assert!(matches!(consumer.read_frame().await, Err(MoqError::Unsupported)));
+	assert!(matches!(consumer.next_group().await, Err(MoqError::AlreadyCommitted)));
+	assert!(matches!(consumer.read_frame().await, Err(MoqError::AlreadyCommitted)));
 
 	// The commitment refuses the other cursor without poisoning this one.
 	track

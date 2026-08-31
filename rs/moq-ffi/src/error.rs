@@ -73,8 +73,22 @@ pub enum MoqError {
 	NotFound,
 
 	/// The requested operation is not supported.
+	///
+	/// A statement about this build or this peer, not about the call: the feature is
+	/// unavailable however the caller asks for it. Caller misuse gets its own error, so
+	/// that a binding can tell "MoQ can't do this here" from "you held it wrong".
 	#[error("unsupported")]
 	Unsupported,
+
+	/// This track already committed to the other delivery order.
+	///
+	/// A track is read in arrival order or in sequence order, never both, and the first
+	/// group read picks which. Reaching for the other one afterwards is this error rather
+	/// than [`Self::Unsupported`]: both orders work fine here, the track just isn't
+	/// reading in the one you asked for. Read the track through a second consumer if you
+	/// genuinely need both.
+	#[error("already committed to the other delivery order")]
+	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
 	#[error("invalid route: {0}")]
