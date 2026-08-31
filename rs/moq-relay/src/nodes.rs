@@ -51,9 +51,8 @@ pub(crate) struct Snapshot {
 pub(crate) struct Node {
 	/// Canonical URL advertised for the node.
 	pub node: String,
-	/// The node's [`Hop`](moq_net::Hop) id from its announcement, when available. Named
-	/// for the wire's `Origin` SETUP parameter, which is what this reports.
-	pub origin_id: Option<String>,
+	/// The node's [`Hop`](moq_net::Hop) id from its announcement, when available.
+	pub hop_id: Option<String>,
 	/// Selected route for the node's internal advertisement.
 	pub announced: Option<Announcement>,
 	/// Established direct connections to this node.
@@ -96,7 +95,7 @@ pub(crate) enum Direction {
 }
 
 struct NodeBuilder {
-	origin_id: Option<String>,
+	hop_id: Option<String>,
 	announced: Option<Announcement>,
 	connections: Vec<Connection>,
 }
@@ -107,7 +106,7 @@ struct Announced {
 	nodes: BTreeMap<String, NodeBuilder>,
 	/// Hop id to the single node advertising it, or `None` once more than one
 	/// does and the id no longer identifies a peer.
-	origins: HashMap<u64, Option<String>>,
+	hops: HashMap<u64, Option<String>>,
 }
 
 /// Removes a live connection from the topology view when its session ends.
@@ -177,13 +176,13 @@ impl Nodes {
 
 			let key = canonical_announced_node(update.path.as_str());
 			let route = broadcast.route();
-			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
+			let hop_ids = route.hops.iter().map(|hop| hop.id()).collect::<Vec<_>>();
 			// An advertisement with no hops never crossed a link, so it is our own.
-			let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
+			let hop_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
 
 			scanned
-				.origins
-				.entry(origin_id)
+				.hops
+				.entry(hop_id)
 				.and_modify(|current| {
 					if current.as_deref() != Some(&key) {
 						*current = None;
@@ -194,10 +193,10 @@ impl Nodes {
 			scanned.nodes.insert(
 				key,
 				NodeBuilder {
-					origin_id: Some(origin_id.to_string()),
+					hop_id: Some(hop_id.to_string()),
 					announced: Some(Announcement {
 						hop_count: hop_ids.len(),
-						hops: hop_ids.into_iter().map(|origin| origin.to_string()).collect(),
+						hops: hop_ids.into_iter().map(|hop| hop.to_string()).collect(),
 						cost: route.cost.warm,
 						cold_cost: route.cost.cold,
 					}),
@@ -210,7 +209,7 @@ impl Nodes {
 	}
 
 	pub(crate) fn snapshot(&self) -> Snapshot {
-		let Announced { mut nodes, origins } = self.announced();
+		let Announced { mut nodes, hops } = self.announced();
 
 		let connections = self
 			.connections
@@ -222,15 +221,15 @@ impl Nodes {
 		for (&id, connection) in connections {
 			let key = match &connection.target {
 				ConnectionTarget::Node(node) => canonical_node(node),
-				ConnectionTarget::Hop(origin) => {
-					let Some(Some(node)) = origins.get(&origin.id()) else {
+				ConnectionTarget::Hop(hop) => {
+					let Some(Some(node)) = hops.get(&hop.id()) else {
 						continue;
 					};
 					node.clone()
 				}
 			};
 			let node = nodes.entry(key).or_insert_with(|| NodeBuilder {
-				origin_id: None,
+				hop_id: None,
 				announced: None,
 				connections: Vec::new(),
 			});
@@ -245,7 +244,7 @@ impl Nodes {
 				.into_iter()
 				.map(|(key, node)| Node {
 					node: key,
-					origin_id: node.origin_id,
+					hop_id: node.hop_id,
 					announced: node.announced,
 					connections: node.connections,
 				})
@@ -316,7 +315,7 @@ mod tests {
 		assert_eq!(snapshot.nodes.len(), 1);
 		let node = &snapshot.nodes[0];
 		assert_eq!(node.node, "https://relay-b.example/");
-		assert_eq!(node.origin_id.as_deref(), Some("9007199254740993"));
+		assert_eq!(node.hop_id.as_deref(), Some("9007199254740993"));
 		assert_eq!(node.announced.as_ref().unwrap().hops, vec!["9007199254740993"]);
 		assert_eq!(node.announced.as_ref().unwrap().hop_count, 1);
 		assert_eq!(node.announced.as_ref().unwrap().cost, 7);
@@ -329,7 +328,7 @@ mod tests {
 			serde_json::json!({
 				"nodes": [{
 					"node": "https://relay-b.example/",
-					"origin_id": "9007199254740993",
+					"hop_id": "9007199254740993",
 					"announced": { "hops": ["9007199254740993"], "hop_count": 1, "cost": 7, "cold_cost": 7 },
 					"connections": [
 						{ "id": 0, "direction": "outbound" },
@@ -403,7 +402,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn duplicate_origin_ids_do_not_resolve_inbound_connections() {
+	async fn duplicate_hop_ids_do_not_resolve_inbound_connections() {
 		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let _first = announced_node(&origin, "https://relay-b.example/", &[200], 1).await;
