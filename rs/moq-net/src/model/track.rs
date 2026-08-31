@@ -5136,10 +5136,6 @@ mod test {
 		assert_eq!(drain(&mut patient), vec![0, 1, 2, 3]);
 	}
 
-	/// The arrival cursor writes a backlog off; the ordered cursor does not. A group
-	/// that is already cached costs nothing to deliver, and dropping it would put a
-	/// hole in the sequence a decoder is reading. The budget bounds how long a
-	/// *blocking* group may stall, which is what group expiry enforces.
 	/// A group's age is where its content *ends*, not where it began. A long group whose
 	/// tail is level with the live edge still owes the reader every frame in it, so
 	/// judging it by its first timestamp would discard exactly the group being filled.

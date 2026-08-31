@@ -1091,10 +1091,10 @@ export class Subscriber {
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 *
 	 * Groups are acquired through the same sequence cursor as {@link Ordered.nextGroup},
-	 * so frames never run backwards: a late lower-sequence group is skipped, and a
-	 * buffered backlog is drained in full rather than discarded for age. A group the
-	 * `maxAge` budget abandons mid-stall ends cleanly and the cursor resyncs from the
-	 * next group; an eviction gap inside a group still surfaces as {@link Lagged}.
+	 * so frames never run backwards: a late lower-sequence group is skipped, and so is
+	 * one every frame of which `maxAge` proves is too old. A group the budget abandons
+	 * mid-stall ends cleanly and the cursor resyncs from the next group; an eviction gap
+	 * inside a group still surfaces as {@link Lagged}.
 	 */
 	async #readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {

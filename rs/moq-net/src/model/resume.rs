@@ -1520,12 +1520,12 @@ impl Subscriber {
 	/// `end`, inclusive), without advancing any cursor. The shared engine behind
 	/// [`Self::poll_next_group`] and [`Self::poll_seek_group`].
 	///
-	/// Unlike [`Self::poll_segment`], nothing is discarded for age: the spliced
-	/// sequence path inherits the [`track::Ordered`] contract of bursting a backlog
-	/// instead of skipping it. Nothing is consumed either: each segment is *seeked*
-	/// rather than read, so a candidate a poll does not deliver stays where it was,
-	/// and a cap lowered between polls never strands a group behind a segment cursor
-	/// that had already stepped past it.
+	/// Each segment's own cursor applies the drift budget as it seeks, so a group the
+	/// budget has convicted is stepped over here exactly as [`Self::poll_segment`]
+	/// steps over one. Nothing is *consumed*, though: each segment is seeked rather
+	/// than read, so a candidate a poll does not deliver stays where it was, and a cap
+	/// lowered between polls never strands a group behind a segment cursor that had
+	/// already stepped past it.
 	///
 	/// `deliver` marks the caller as the one handing the group out, which stamps the
 	/// winner's cache entry. A nested seek passes `false`: its candidate may lose at
