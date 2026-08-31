@@ -119,6 +119,32 @@ use super::Message;
 
 use super::Version;
 
+/// PUBLISH_DONE statuses emitted by this implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublishDoneStatus {
+	/// An implementation-specific failure ended the subscription.
+	InternalError,
+	/// The track is no longer being published.
+	TrackEnded,
+}
+
+impl PublishDoneStatus {
+	/// Return the registered wire code for every supported draft.
+	pub(crate) const fn code(self, version: Version) -> u64 {
+		match version {
+			Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17
+			| Version::Draft18
+			| Version::Draft19 => match self {
+				Self::InternalError => 0x0,
+				Self::TrackEnded => 0x2,
+			},
+		}
+	}
+}
+
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]
 pub struct PublishDone<'a> {
@@ -579,21 +605,36 @@ mod tests {
 	}
 
 	#[test]
-	fn test_publish_done_v17_round_trip() {
-		let msg = PublishDone {
-			request_id: None,
-			status_code: 200,
-			stream_count: 5,
-			reason_phrase: "OK".into(),
-		};
+	fn test_publish_done_registered_statuses_all_versions() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+		] {
+			for (status, expected) in [
+				(PublishDoneStatus::InternalError, 0x0),
+				(PublishDoneStatus::TrackEnded, 0x2),
+			] {
+				assert_eq!(status.code(version), expected);
 
-		let encoded = encode_message(&msg, Version::Draft17);
-		let decoded: PublishDone = decode_message(&encoded, Version::Draft17).unwrap();
+				let msg = PublishDone {
+					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(7)),
+					status_code: status.code(version),
+					stream_count: 5,
+					reason_phrase: "done".into(),
+				};
+				let encoded = encode_message(&msg, version);
+				let decoded: PublishDone = decode_message(&encoded, version).unwrap();
 
-		assert_eq!(decoded.request_id, None);
-		assert_eq!(decoded.status_code, 200);
-		assert_eq!(decoded.stream_count, 5);
-		assert_eq!(decoded.reason_phrase, "OK");
+				assert_eq!(decoded.status_code, expected);
+				assert_eq!(decoded.stream_count, 5);
+				assert_eq!(decoded.reason_phrase, "done");
+			}
+		}
 	}
 
 	#[test]
@@ -733,20 +774,18 @@ mod tests {
 	}
 
 	#[test]
-	fn test_publish_done_v18_round_trip() {
+	fn test_publish_done_preserves_unknown_status() {
+		const UNKNOWN: u64 = 0xface;
 		let msg = PublishDone {
 			request_id: None,
-			status_code: 200,
+			status_code: UNKNOWN,
 			stream_count: 5,
-			reason_phrase: "OK".into(),
+			reason_phrase: "extension".into(),
 		};
 
-		let encoded = encode_message(&msg, Version::Draft18);
-		let decoded: PublishDone = decode_message(&encoded, Version::Draft18).unwrap();
+		let encoded = encode_message(&msg, Version::Draft19);
+		let decoded: PublishDone = decode_message(&encoded, Version::Draft19).unwrap();
 
-		assert_eq!(decoded.request_id, None);
-		assert_eq!(decoded.status_code, 200);
-		assert_eq!(decoded.stream_count, 5);
-		assert_eq!(decoded.reason_phrase, "OK");
+		assert_eq!(decoded.status_code, UNKNOWN);
 	}
 }

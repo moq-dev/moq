@@ -277,6 +277,30 @@ test("PublishDone: with error", async () => {
 	expect(decoded.reasonPhrase).toBe("error");
 });
 
+test("PublishDone: preserves unknown statuses across supported versions", async () => {
+	const versions = [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+	] as const;
+
+	for (const version of versions) {
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const msg = new PublishDone({
+			requestId: legacy ? 10n : undefined,
+			statusCode: 0xface,
+			reasonPhrase: "extension",
+		});
+
+		const encoded = await encodeVersioned(msg, version);
+		const decoded = await decodeVersioned(encoded, PublishDone.decode, version);
+		expect(decoded.statusCode).toBe(0xface);
+	}
+});
+
 // Announce/PublishNamespace tests
 test("PublishNamespace: round trip", async () => {
 	const msg = new Announce.PublishNamespace({ requestId: 1n, trackNamespace: Path.from("test/broadcast") });
@@ -1154,14 +1178,14 @@ test("Publish v18: round trip", async () => {
 });
 
 test("PublishDone v18: no requestId", async () => {
-	const msg = new PublishDone({ statusCode: 200, reasonPhrase: "OK" });
+	const msg = new PublishDone({ statusCode: 2, reasonPhrase: "track ended" });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
 	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_18);
 
 	expect(decoded.requestId).toBe(undefined);
-	expect(decoded.statusCode).toBe(200);
-	expect(decoded.reasonPhrase).toBe("OK");
+	expect(decoded.statusCode).toBe(2);
+	expect(decoded.reasonPhrase).toBe("track ended");
 });
 
 test("RequestOk v18: no requestId (regression: don't treat Draft18 as legacy)", async () => {

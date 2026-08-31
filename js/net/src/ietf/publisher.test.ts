@@ -6,6 +6,7 @@ import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { PublishDone } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -403,5 +404,51 @@ test("a same-tick republish survives its predecessor closing", async () => {
 	} finally {
 		pub.close();
 		client.close();
+	}
+});
+
+test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
+	const versions = [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+	] as const;
+
+	for (const version of versions) {
+		for (const abort of [undefined, new Error("failed")]) {
+			const pair = createMockTransportPair(ALPN.DRAFT_19);
+			const session = new NativeSession(pair.server, version, true);
+			const pub = new Publisher({ quic: pair.server, session, requiresSolicitation: false });
+			const broadcast = new BroadcastProducer();
+			const track = broadcast.createTrack("video");
+			const path = Path.from("test");
+			pub.publish(path, broadcast);
+
+			const client = await Stream.open(pair.client, { version });
+			const server = await Stream.accept(pair.server, version);
+			if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+			const requestId = 7n;
+			const running = pub.runSubscribe(
+				new Subscribe({ requestId, trackNamespace: path, trackName: "video", subscriberPriority: 0 }),
+				server,
+			);
+
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			track.close(abort);
+
+			expect(await client.reader.u53()).toBe(PublishDone.id);
+			const done = await PublishDone.decode(client.reader, version);
+			expect(done.requestId).toBe(version <= Version.DRAFT_16 ? requestId : undefined);
+			expect(done.statusCode).toBe(abort ? 0x0 : 0x2);
+
+			await running;
+			pub.close();
+			client.close();
+		}
 	}
 });

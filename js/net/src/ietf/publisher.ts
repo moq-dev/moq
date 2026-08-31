@@ -29,6 +29,12 @@ const RETRY_BASE = 100;
 /** Ceiling on that wait. The loop retries for the life of the session, so it must not spin. */
 const RETRY_MAX = 5000;
 
+/** PUBLISH_DONE statuses this implementation emits. Stable across drafts 14 through 19. */
+const PUBLISH_DONE_STATUS = {
+	INTERNAL_ERROR: 0x0,
+	TRACK_ENDED: 0x2,
+} as const;
+
 /**
  * How long one advertisement may take to be answered. Matches the Rust publisher, and the
  * peer accepting the stream is only half the exchange: one it never answers on holds the
@@ -212,23 +218,33 @@ export class Publisher {
 				}
 			})();
 
-			await Promise.race([serving, stream.reader.closed]);
+			let publishError: Error | undefined;
+			try {
+				await Promise.race([serving, stream.reader.closed]);
+			} catch (err: unknown) {
+				publishError = error(err);
+			}
 
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
+			if (publishError) {
+				console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(publishError)}`);
+			}
 
-			// v14-v16: send PublishDone before closing
-			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-				try {
-					await stream.writer.u53(PublishDone.id);
-					const done = new PublishDone({
-						requestId: msg.requestId,
-						statusCode: 200,
-						reasonPhrase: "OK",
-					});
-					await done.encode(stream.writer, version);
-				} catch {
-					// Stream might already be closed by peer
-				}
+			// PUBLISH_DONE is required for every supported draft. The peer may have already
+			// closed its side to unsubscribe, in which case there is nowhere to send it.
+			try {
+				await stream.writer.u53(PublishDone.id);
+				const done = new PublishDone({
+					requestId:
+						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+							? msg.requestId
+							: undefined,
+					statusCode: publishError ? PUBLISH_DONE_STATUS.INTERNAL_ERROR : PUBLISH_DONE_STATUS.TRACK_ENDED,
+					reasonPhrase: publishError ? "internal error" : "track ended",
+				});
+				await done.encode(stream.writer, version);
+			} catch {
+				// Stream might already be closed by peer.
 			}
 
 			// Only now is the close below ours. Claiming it any earlier would read a peer FIN

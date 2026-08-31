@@ -602,9 +602,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// Send PublishDone
-		let (status_code, reason) = match &res {
-			Ok(()) => (200, "OK"),
-			Err(_) => (500, "error"),
+		let (status, reason) = match &res {
+			Ok(()) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
+			Err(_) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 		};
 		let _ = stream.writer.encode(&ietf::PublishDone::ID).await;
 		let _ = stream
@@ -614,7 +614,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
 					_ => None,
 				},
-				status_code,
+				status_code: status.code(self.version),
 				stream_count: 0,
 				reason_phrase: reason.into(),
 			})
