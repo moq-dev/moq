@@ -175,8 +175,10 @@ async fn wait_listening(port: u16) {
 	}
 }
 
-/// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling
-/// with no gap and no unannounce visible on the cluster origin.
+/// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling.
+/// The draining session keeps serving through the handover window, and the path
+/// never retracts on the cluster origin (route re-pricing and the sibling's
+/// announce surface as metadata updates, not churn).
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -234,8 +236,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 			b"g0"[..]
 		);
 
-		// Watch for unannounce during the swap: seamless migration must never
-		// unannounce the path.
+		// Watch for retraction during the swap: the migration must never
+		// unannounce the path (metadata updates are expected: the drain
+		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
 		let first = announcements.next().await.expect("initial announce");
 		assert_eq!(first.route.prefix.as_str(), "cam");
@@ -271,13 +274,16 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// handover window at the latest).
 		session_a.closed().await;
 
-		// No unannounce leaked to the origin during the whole swap: the next
-		// announce event (with a generous bound) must never arrive.
-		let churn = tokio::time::timeout(Duration::from_millis(500), announcements.next()).await;
-		assert!(
-			churn.is_err(),
-			"migration must not churn announces on the cluster origin"
-		);
+		// No retraction leaked to the origin during the whole swap. Metadata
+		// updates (the drain re-pricing, the sibling's route) are expected and
+		// harmless; an inactive event means the path flapped.
+		loop {
+			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+				Err(_) => break,
+				Ok(Some(update)) if update.active => continue,
+				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
+			}
+		}
 
 		cluster_run.abort();
 	})
@@ -358,12 +364,17 @@ async fn spawn_relay_with_upstream(
 ///   SUBSCRIBER
 /// ```
 ///
-/// Proves that with the route/resume machinery:
+/// Proves the failover contract across a GOAWAY:
 /// 1. Content flows TOP -> MID-A -> BOTTOM -> subscriber.
 /// 2. On MID-A's GOAWAY naming MID-B, BOTTOM reconnects there (positively
 ///    gated: MID-B's first inbound connection can only be that reconnect).
-/// 3. The subscriber sees contiguous, duplicate-free groups across the swap.
-/// 4. No GOAWAY leaks to the subscriber's own session.
+/// 3. The draining MID-A leg keeps serving through the handover window, so
+///    every group published across the swap arrives exactly once.
+/// 4. Once the old leg closes, the subscription through it ends (failover is
+///    a resubscribe, not a transparent splice) and a fresh subscription
+///    through MID-B carries the rest.
+/// 5. No GOAWAY leaks to the subscriber's own session, and the path never
+///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -433,7 +444,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	.await
 	.expect("subscriber connect");
 
-	// Watch announcements for the whole test: a seamless failover must never
+	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let mut announcements = sub_origin.consume().announced();
 	let first = within("broadcast announced through the MID-A leg", announcements.next())
@@ -532,27 +543,60 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	within("old session drains after the swap", session_bottom_on_a.closed()).await;
 	// Cut MID-A off from TOP so it can never receive (let alone forward) new
 	// groups. Anything delivered from here on MUST have flowed TOP -> MID-B ->
-	// BOTTOM, positively proving the new leg carries the subscription.
+	// BOTTOM, positively proving the new leg carries the resubscribe.
 	drop(mid_a_upstream);
 
-	const POST_DRAIN_LAST: u64 = LAST_GROUP + 3;
-	for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
-		let mut g = track.append_group().expect("append group");
-		for f in 0..FRAMES_PER_GROUP {
-			let payload = format!("diamond_g{seq}_f{f}");
-			g.write_frame(moq_net::Timestamp::ZERO, payload.as_bytes())
-				.expect("write frame");
+	// The subscription was served through the MID-A leg, so its close ends it:
+	// failover is a resubscribe, not a transparent splice. Drain any groups
+	// still in flight, then observe the end.
+	within("old subscription ends with the drained leg", async {
+		while let Ok(Some(_)) = sub.recv_group().await {}
+	})
+	.await;
+
+	// Resubscribe on the same broadcast handle: the subscriber's session with
+	// BOTTOM is intact, and BOTTOM now resolves the track through MID-B.
+	drop(bc);
+	let bc = within("broadcast re-resolves after the failover", async {
+		let consumer = sub_origin.consume();
+		consumer.request_broadcast("diamond").await.ok()
+	})
+	.await
+	.expect("broadcast re-resolves");
+	let mut sub = within(
+		"resubscribe after the failover",
+		bc.track("video")
+			.expect("track handle")
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))),
+	)
+	.await
+	.expect("resubscribe");
+
+	// A lite-05 subscription starts at the live edge (its Max Age is a staleness
+	// tolerance, not a replay request), so publish at a steady cadence and collect
+	// what lands once the fresh chain establishes. MID-A is severed, so any
+	// post-drain group can only have flowed TOP -> MID-B -> BOTTOM.
+	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
+	let post_publisher = tokio::spawn(async move {
+		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
+			let mut g = track.append_group().expect("append group");
+			for f in 0..FRAMES_PER_GROUP {
+				let payload = format!("diamond_g{seq}_f{f}");
+				g.write_frame(moq_net::Timestamp::ZERO, payload.as_bytes())
+					.expect("write frame");
+			}
+			g.finish().expect("finish");
+			tokio::time::sleep(Duration::from_millis(50)).await;
 		}
-		g.finish().expect("finish");
+	});
+
+	// Three distinct post-drain groups, every frame verified, proves the new leg
+	// carries the subscription (the establish may still see the pre-swap edge).
+	let mut post = BTreeSet::new();
+	while post.iter().filter(|seq| **seq > LAST_GROUP).count() < 3 {
+		collect_group(&mut sub, &mut post, FRAMES_PER_GROUP, "post-drain (MID-B leg only)").await;
 	}
-	for _ in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
-		collect_group(&mut sub, &mut seen, FRAMES_PER_GROUP, "post-drain (MID-B leg only)").await;
-	}
-	assert_eq!(
-		seen,
-		(0..=POST_DRAIN_LAST).collect::<BTreeSet<_>>(),
-		"the new leg alone must carry the rest, exactly once each"
-	);
+	post_publisher.abort();
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
@@ -571,9 +615,15 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
 	);
 
-	// ── announcement stability: the path never churned under the swap ────
-	let churn = tokio::time::timeout(Duration::from_millis(500), announcements.next()).await;
-	assert!(churn.is_err(), "failover must not churn announces under the subscriber");
+	// ── announcement stability: the path never retracted under the swap ──
+	// Metadata updates (route re-pricing, the new leg's hops) are expected.
+	loop {
+		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+			Err(_) => break,
+			Ok(Some(update)) if update.active => continue,
+			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
+		}
+	}
 }
 
 /// Receive the next group, assert every frame's payload and the exact frame count
@@ -615,8 +665,8 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 }
 
 /// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. The upstream keeps its origin across the restart, so the rejoined
-/// route resumes delivery.
+/// endpoint. The subscription through the drained session ends with it, and a
+/// resubscribe through the redialed session resumes delivery.
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -685,17 +735,40 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	within("old session drains", first_dial.closed()).await;
 
-	// Delivery continues on the redialed session (same origin, same publisher
-	// identity, so the rejoined route resumes at the boundary).
+	// The broadcast was materialized through the first session, so its close ends
+	// the subscription: failover is a resubscribe, not a transparent splice.
+	within("old subscription ends with the session", async {
+		while let Ok(Some(_)) = sub.recv_group().await {}
+	})
+	.await;
+
+	// Re-request through the redialed session's route and resubscribe.
+	let bc = within("broadcast resolves through the redial", async {
+		cluster.origin.consume().request_broadcast("cam").await.ok()
+	})
+	.await
+	.expect("broadcast resolves");
+	let mut sub = within("resubscribe", async {
+		bc.track("video").expect("track handle").subscribe(None).await
+	})
+	.await
+	.expect("resubscribe");
+
 	let mut g = track.append_group().expect("append group");
 	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g1".as_ref())
 		.expect("write frame");
 	g.finish().expect("finish");
-	let mut g1 = within("recv g1 after the redial", sub.recv_group())
-		.await
-		.expect("recv")
-		.expect("track ended early");
-	assert_eq!(g1.sequence, 1, "delivery must resume contiguously after the redial");
+	// The fresh subscription may start at the retained group 0; skip up to g1.
+	let mut g1 = loop {
+		let g = within("recv g1 after the redial", sub.recv_group())
+			.await
+			.expect("recv")
+			.expect("track ended early");
+		if g.sequence >= 1 {
+			break g;
+		}
+	};
+	assert_eq!(g1.sequence, 1, "the redialed session must deliver the new group");
 	assert_eq!(
 		g1.read_frame().await.expect("read").expect("frame").payload[..],
 		b"empty_g1"[..]

@@ -108,6 +108,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	let mut broadcasts = Vec::new();
+	let mut announcements = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
@@ -124,7 +125,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let (mut broadcast, _announcement) = match publish.publish_broadcast(&path) {
+		let (mut broadcast, announcement) = match publish.publish_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
@@ -139,8 +140,10 @@ pub async fn run(ctx: Connection) {
 			}
 		};
 		own.insert(relative);
-		// Hold the broadcast producer for the connection's lifetime so it stays announced.
+		// Hold the broadcast producer and its announcement for the connection's
+		// lifetime so it stays published and advertised.
 		broadcasts.push(broadcast);
+		announcements.push(announcement);
 
 		let stats = stats.clone();
 		tasks.spawn(produce(connection, path, rolled, track, stats));

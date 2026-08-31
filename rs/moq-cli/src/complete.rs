@@ -895,7 +895,7 @@ mod tests {
 		// one fails loudly instead of matching by luck.
 		let mut keep = Vec::new();
 		for (path, video, audio) in [("wanted", "hd", "stereo"), ("other", "sd", "mono")] {
-			let (mut broadcast, _announce_broadcast) = origin.publish_broadcast(path).expect("broadcast");
+			let (mut broadcast, announcement) = origin.publish_broadcast(path).expect("broadcast");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
 			let mut edit = catalog.lock();
 			edit.video.renditions.insert(
@@ -911,7 +911,7 @@ mod tests {
 				.renditions
 				.insert(audio.to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 			edit.commit().expect("publish the catalog");
-			keep.push((broadcast, catalog));
+			keep.push((broadcast, catalog, announcement));
 		}
 
 		// The global names `other`; the stage overrides it, exactly as the invocation

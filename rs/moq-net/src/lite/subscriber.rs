@@ -1223,23 +1223,35 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					if self.subscriber.going_away.poll(waiter).is_ready() {
 						run.announced.drain();
 					}
-					// Materialize requested paths under the attached routes.
-					run.announced.poll_serve(&self.subscriber, waiter);
+					// Drain every buffered announce BEFORE serving requests: a route
+					// this pass attaches must have its request queue polled (and this
+					// machine's waiter registered on it) below, in the same pass.
+					// Serving first and then parking on the decode would strand a
+					// request that arrives in between: its wake finds no waiter, and
+					// nothing else re-polls this machine.
 					loop {
-						let Some(announce) =
-							ready!(stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx))?
-						else {
-							// The publisher FINed: it has nothing (more) to announce for this
-							// prefix (e.g. a publish-only peer). That's a clean completion of
-							// this announce stream, not a session error, so finish our side
-							// and return Ok. Tearing down only the announce stream is correct
-							// since no further progress can be made, but we must not
-							// propagate an error that would kill the whole connection.
-							stream.writer.finish().ok();
-							return Poll::Ready(Ok(()));
-						};
-						self.subscriber.handle_announce(&self.prefix, announce, run)?;
+						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
+							Poll::Ready(Ok(Some(announce))) => {
+								self.subscriber.handle_announce(&self.prefix, announce, run)?;
+							}
+							Poll::Ready(Ok(None)) => {
+								// The publisher FINed: it has nothing (more) to announce for this
+								// prefix (e.g. a publish-only peer). That's a clean completion of
+								// this announce stream, not a session error, so finish our side
+								// and return Ok. Tearing down only the announce stream is correct
+								// since no further progress can be made, but we must not
+								// propagate an error that would kill the whole connection.
+								stream.writer.finish().ok();
+								return Poll::Ready(Ok(()));
+							}
+							Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+							Poll::Pending => break,
+						}
 					}
+					// Materialize requested paths under the attached routes; leaves the
+					// waiter registered on every route's request queue.
+					run.announced.poll_serve(&self.subscriber, waiter);
+					return Poll::Pending;
 				}
 			}
 		}
@@ -2975,8 +2987,11 @@ enum ServeMode<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> ServeLoop<S> {
 	fn new(serve: &TrackServe<S>, request: track::Request, info: track::Info, timescale: Option<Timescale>) -> Self {
+		// Register the fetch handler before accepting: `accept` releases the
+		// request's own fetch gate, and a cache-miss fetch queued while TRACK_INFO
+		// was in flight would be drained as NotFound in the gap.
+		let dynamic = request.dynamic();
 		let serving = request.accept(info);
-		let dynamic = serving.dynamic();
 		Self {
 			serving,
 			dynamic,

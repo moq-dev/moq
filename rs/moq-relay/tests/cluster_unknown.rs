@@ -67,6 +67,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 
 struct Publisher {
 	_broadcast: moq_net::broadcast::Producer,
+	_announcement: moq_net::origin::Announcement,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -83,7 +84,7 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = origin.publish_broadcast(PATH).expect("create broadcast");
+	let (mut broadcast, announcement) = origin.publish_broadcast(PATH).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
@@ -115,6 +116,7 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 
 	Publisher {
 		_broadcast: broadcast,
+		_announcement: announcement,
 		_session: session,
 		streamer,
 	}

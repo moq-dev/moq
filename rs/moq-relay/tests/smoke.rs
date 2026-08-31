@@ -755,12 +755,15 @@ async fn internal_unix_round_trip() {
 		.expect("origin closed");
 	assert_eq!(update.route.prefix.as_str(), "test");
 	assert!(update.active, "expected announce, got retraction");
-	let bc = sub_consumer
-		.request_broadcast("test")
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
+		.expect("request timeout")
 		.expect("announced broadcast resolves");
 
-	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
+	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
+		.await
+		.expect("subscribe timeout")
+		.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")

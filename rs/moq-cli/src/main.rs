@@ -473,8 +473,8 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let (broadcast, _announce_broadcast) = origin.publish_broadcast(&name).context("failed to create broadcast")?;
-		local = Some(Publish::new(broadcast, &format, max_age)?);
+		let published = origin.publish_broadcast(&name).context("failed to create broadcast")?;
+		local = Some(Publish::new(published, &format, max_age)?);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
@@ -517,9 +517,8 @@ fn spawn_import(
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let (broadcast, _announce_broadcast) =
-					origin.publish_broadcast(&name).context("failed to create broadcast")?;
-				local = Some(Publish::capture(broadcast, &capture, bandwidth, max_age)?);
+				let published = origin.publish_broadcast(&name).context("failed to create broadcast")?;
+				local = Some(Publish::capture(published, &capture, bandwidth, max_age)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}
