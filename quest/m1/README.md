@@ -44,8 +44,7 @@ with the current dev tree before starting.
 - [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
-- [Plan: ladder bitrate](/quest/m1/plan-ladder-bitrate.md) - split the demand-driven transcode ladder umbrella via /plan-quest
-- [#2858](/quest/m1/2858-transcode-ladders-encode-every-live-rung-at-full-bitrate.md) - Transcode ladders encode every live rung at full bitrate over one connection
+- [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [#2857](/quest/m1/2857-bindings-cant-reach-encoder-rate-control-so-every-non.md) - Bindings can't reach encoder rate control, so every non-Rust publisher ignores congestion
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - per-broadcast bandwidth estimates and reservation
 - [#3000](/quest/m1/3000-track-teardown-on-poll-unused-is-not-atomic-against-a.md) - Track teardown on poll_unused is not atomic against a consumer reattaching
