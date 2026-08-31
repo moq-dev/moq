@@ -100,6 +100,13 @@ pub(crate) struct Samples {
 	pub gap: bool,
 }
 
+/// The PCM layout delivered by one capture stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Layout {
+	pub sample_rate: u32,
+	pub channels: u32,
+}
+
 /// A capture failure plus whether reopening can succeed without caller action.
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -148,6 +155,15 @@ pub(crate) enum Stream {
 }
 
 impl Stream {
+	/// The PCM layout this opened stream actually delivers.
+	pub(crate) fn layout(&self) -> Layout {
+		match self {
+			Self::Microphone(mic) => mic.layout,
+			#[cfg(target_os = "macos")]
+			Self::System(system) => system.layout(),
+		}
+	}
+
 	/// Await the next buffer, or `None` once the source stops. A microphone stream
 	/// error is returned immediately even if the device delivers no more samples.
 	/// Cancel-safe: drop the future to release the device.
@@ -162,7 +178,7 @@ impl Stream {
 
 /// The format `config` will capture at, without opening the device, so the
 /// catalog can be populated before anything turns on.
-pub(crate) async fn format(config: &Config) -> Result<(u32, u32), Failure> {
+pub(crate) async fn format(config: &Config) -> Result<Layout, Failure> {
 	match &config.source {
 		Source::Microphone(device) => {
 			let (device, config) = (device.clone(), config.clone());
@@ -170,7 +186,10 @@ pub(crate) async fn format(config: &Config) -> Result<(u32, u32), Failure> {
 			// runtime's worker threads.
 			tokio::task::spawn_blocking(move || {
 				let (_, _, stream_config) = resolve(device.as_deref(), &config)?;
-				Ok((stream_config.sample_rate, stream_config.channels as u32))
+				Ok(Layout {
+					sample_rate: stream_config.sample_rate,
+					channels: stream_config.channels as u32,
+				})
 			})
 			.await
 			.map_err(|err| Failure::fatal(Error::Capture(format!("audio host thread failed: {err}"))))?
@@ -212,6 +231,8 @@ pub(crate) struct Microphone {
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
 	pending: Option<Samples>,
+	/// The format cpal negotiated for this stream generation.
+	layout: Layout,
 }
 
 /// The async half of a microphone stream, separate from the cpal handle so its
@@ -368,6 +389,7 @@ impl Microphone {
 			_stream: stream,
 			reader,
 			pending: Some(pending),
+			layout: Layout { sample_rate, channels },
 		})
 	}
 

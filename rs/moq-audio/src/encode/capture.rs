@@ -11,6 +11,7 @@ use rand::RngExt;
 
 use super::{Input, Options, Producer};
 use crate::capture;
+use crate::resample::{Resampler, remix, validate_channels};
 use crate::{Error, Format, Frame};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
@@ -30,7 +31,8 @@ const RETRY_MAX: Duration = Duration::from_secs(4);
 ///
 /// If an active device fails, it is dropped and reopened behind the same track
 /// with capped jittered backoff. A default microphone is resolved again on every
-/// attempt, and recovery stops as soon as the track becomes unused.
+/// attempt, and each replacement's native layout is converted to the layout
+/// already registered in the catalog. Recovery stops as soon as the track becomes unused.
 /// Transient failures during initial format discovery use the same retry policy
 /// before the catalog track is registered.
 ///
@@ -45,18 +47,12 @@ pub async fn publish_capture(
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
 	let mut supervisor = Supervisor::default();
-	let (sample_rate, channels) = supervisor.discover(&mut DeviceSource { config: &capture }).await?;
+	let layout = supervisor.discover(&mut DeviceSource { config: &capture }).await?;
 	let input = Input {
 		format: Format::F32,
-		sample_rate,
-		channels,
+		sample_rate: layout.sample_rate,
+		channels: layout.channels,
 	};
-
-	// The producer's input layout is fixed in the catalog. Re-resolve the device
-	// itself on every open, but keep asking replacements for that same layout.
-	let mut capture = capture;
-	capture.sample_rate = Some(sample_rate);
-	capture.channels = Some(channels);
 
 	let mut producer = Producer::new(&mut broadcast, catalog, input, &encode)?;
 	let track = producer.track().clone();
@@ -83,8 +79,9 @@ pub async fn publish_capture(
 trait CaptureSource {
 	type Stream;
 
-	async fn format(&mut self) -> Result<(u32, u32), capture::Failure>;
+	async fn format(&mut self) -> Result<capture::Layout, capture::Failure>;
 	async fn open(&mut self) -> Result<Self::Stream, capture::Failure>;
+	fn layout(&self, stream: &Self::Stream) -> capture::Layout;
 	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure>;
 }
 
@@ -95,12 +92,16 @@ struct DeviceSource<'a> {
 impl CaptureSource for DeviceSource<'_> {
 	type Stream = capture::Stream;
 
-	async fn format(&mut self) -> Result<(u32, u32), capture::Failure> {
+	async fn format(&mut self) -> Result<capture::Layout, capture::Failure> {
 		capture::format(self.config).await
 	}
 
 	async fn open(&mut self) -> Result<Self::Stream, capture::Failure> {
 		capture::open(self.config).await
+	}
+
+	fn layout(&self, stream: &Self::Stream) -> capture::Layout {
+		stream.layout()
 	}
 
 	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure> {
@@ -143,7 +144,8 @@ impl Demand for TrackDemand<'_> {
 /// The stable producer the supervisor writes through across device replacements.
 trait Output {
 	fn reset_epoch(&mut self);
-	fn write(&mut self, samples: capture::Samples) -> Result<(), Error>;
+	fn now(&self) -> u64;
+	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
 }
 
 struct EncoderOutput<'a> {
@@ -156,14 +158,93 @@ impl Output for EncoderOutput<'_> {
 		self.producer.reset_epoch();
 	}
 
-	fn write(&mut self, samples: capture::Samples) -> Result<(), Error> {
-		self.producer.write(&frame(samples.data, self.clock.micros())?)
+	fn now(&self) -> u64 {
+		self.clock.micros()
+	}
+
+	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error> {
+		self.producer.write(&frame(samples.data, timestamp_us)?)
+	}
+}
+
+/// Converts one opened stream's native layout into the producer's fixed input
+/// layout. A new instance per open keeps filter state out of recovery gaps.
+struct Converter {
+	input: capture::Layout,
+	output: capture::Layout,
+	resampler: Option<Resampler>,
+	anchor_us: Option<u64>,
+}
+
+impl Converter {
+	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
+		if input.channels != output.channels {
+			validate_channels(input.channels)?;
+			validate_channels(output.channels)?;
+		}
+
+		let resampler = if input.sample_rate == output.sample_rate {
+			None
+		} else {
+			// Ten milliseconds bounds recovery buffering while giving rubato a
+			// useful window independent of the device callback size.
+			let chunk_frames = (input.sample_rate as usize / 100).max(1);
+			Some(Resampler::new(
+				input.sample_rate,
+				output.sample_rate,
+				input.channels,
+				chunk_frames,
+			)?)
+		};
+
+		Ok(Self {
+			input,
+			output,
+			resampler,
+			anchor_us: None,
+		})
+	}
+
+	fn reset(&mut self) {
+		if let Some(resampler) = self.resampler.as_mut() {
+			resampler.reset();
+		}
+		self.anchor_us = None;
+	}
+
+	/// Return converted samples plus the timestamp of the first input buffered
+	/// into them. The timestamp preserves the epoch when resampling spans reads.
+	fn process(
+		&mut self,
+		mut samples: capture::Samples,
+		timestamp_us: u64,
+	) -> Result<Option<(capture::Samples, u64)>, Error> {
+		if samples.gap {
+			self.reset();
+		}
+		if self.anchor_us.is_none() && !samples.data.is_empty() {
+			self.anchor_us = Some(timestamp_us);
+		}
+
+		samples.data = match self.resampler.as_mut() {
+			Some(resampler) => resampler.process(&samples.data)?,
+			None => samples.data,
+		};
+		if self.input.channels != self.output.channels {
+			samples.data = remix(&samples.data, self.input.channels, self.output.channels)?;
+		}
+		if samples.data.is_empty() {
+			return Ok(None);
+		}
+
+		Ok(Some((samples, self.anchor_us.take().unwrap_or(timestamp_us))))
 	}
 }
 
 struct Supervisor {
 	next: Duration,
 	jitter: fn(Duration) -> Duration,
+	layout: Option<capture::Layout>,
 }
 
 impl Default for Supervisor {
@@ -171,6 +252,7 @@ impl Default for Supervisor {
 		Self {
 			next: RETRY_MIN,
 			jitter: |delay| delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0),
+			layout: None,
 		}
 	}
 }
@@ -181,6 +263,10 @@ impl Supervisor {
 		Self {
 			next: RETRY_MIN,
 			jitter: std::convert::identity,
+			layout: Some(capture::Layout {
+				sample_rate: 48_000,
+				channels: 2,
+			}),
 		}
 	}
 
@@ -196,11 +282,12 @@ impl Supervisor {
 
 	/// Discover the source format, retrying failures that can clear when the
 	/// device or host state changes.
-	async fn discover<S: CaptureSource>(&mut self, source: &mut S) -> Result<(u32, u32), Error> {
+	async fn discover<S: CaptureSource>(&mut self, source: &mut S) -> Result<capture::Layout, Error> {
 		loop {
 			let failure = match source.format().await {
 				Ok(format) => {
 					self.reset();
+					self.layout = Some(format);
 					return Ok(format);
 				}
 				Err(failure) if failure.is_retryable() => failure.into_error(),
@@ -224,6 +311,7 @@ impl Supervisor {
 		D: Demand,
 		O: Output,
 	{
+		let output_layout = self.layout.expect("capture format must be discovered before running");
 		'demand: loop {
 			// Idle until a listener subscribes; the track ending is a clean exit.
 			if !demand.used().await {
@@ -252,6 +340,7 @@ impl Supervisor {
 
 				let failure = match opened {
 					Ok(mut input) => {
+						let mut converter = Converter::new(source.layout(&input), output_layout)?;
 						loop {
 							// Demand wins over a simultaneous buffer or error, so an unused
 							// track releases the device without starting a retry sequence.
@@ -285,7 +374,9 @@ impl Supervisor {
 									if samples.gap {
 										output.reset_epoch();
 									}
-									output.write(samples)?;
+									if let Some((samples, timestamp_us)) = converter.process(samples, output.now())? {
+										output.write(samples, timestamp_us)?;
+									}
 								}
 								Ok(None) => {
 									break capture::Failure::retry(Error::Capture(
@@ -365,6 +456,7 @@ mod tests {
 	struct MockStream {
 		events: kio::Queue<Result<capture::Samples, capture::Failure>>,
 		drops: Option<Arc<AtomicUsize>>,
+		layout: capture::Layout,
 	}
 
 	impl Drop for MockStream {
@@ -398,12 +490,12 @@ mod tests {
 	impl CaptureSource for MockSource {
 		type Stream = MockStream;
 
-		async fn format(&mut self) -> Result<(u32, u32), capture::Failure> {
+		async fn format(&mut self) -> Result<capture::Layout, capture::Failure> {
 			self.format_attempts.fetch_add(1, Ordering::SeqCst);
 			match self.formats.pop_front() {
 				Some(Discovery::Error(message)) => Err(capture::Failure::retry(Error::Capture(message.into()))),
 				Some(Discovery::Fatal(message)) => Err(capture::Failure::fatal(Error::Capture(message.into()))),
-				Some(Discovery::Format(sample_rate, channels)) => Ok((sample_rate, channels)),
+				Some(Discovery::Format(sample_rate, channels)) => Ok(capture::Layout { sample_rate, channels }),
 				None => std::future::pending().await,
 			}
 		}
@@ -417,6 +509,10 @@ mod tests {
 				None if self.fallback_error => Err(capture::Failure::retry(Error::Capture("still unavailable".into()))),
 				None => std::future::pending().await,
 			}
+		}
+
+		fn layout(&self, stream: &Self::Stream) -> capture::Layout {
+			stream.layout
 		}
 
 		async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure> {
@@ -473,7 +569,11 @@ mod tests {
 			self.events.push(OutputEvent::Reset);
 		}
 
-		fn write(&mut self, samples: capture::Samples) -> Result<(), Error> {
+		fn now(&self) -> u64 {
+			0
+		}
+
+		fn write(&mut self, samples: capture::Samples, _timestamp_us: u64) -> Result<(), Error> {
 			self.events
 				.push(OutputEvent::Write(samples.data.into_iter().map(f32::to_bits).collect()));
 			Ok(())
@@ -508,7 +608,13 @@ mod tests {
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
 		tokio::time::advance(Duration::from_millis(500)).await;
 
-		assert_eq!(future.await.unwrap(), (48_000, 2));
+		assert_eq!(
+			future.await.unwrap(),
+			capture::Layout {
+				sample_rate: 48_000,
+				channels: 2,
+			}
+		);
 		assert_eq!(attempts.load(Ordering::SeqCst), 2);
 	}
 
@@ -545,8 +651,17 @@ mod tests {
 		let stream = MockStream {
 			events: events.clone(),
 			drops,
+			layout: capture::Layout {
+				sample_rate: 48_000,
+				channels: 2,
+			},
 		};
 		(events, stream)
+	}
+
+	fn with_layout(mut stream: MockStream, sample_rate: u32, channels: u32) -> MockStream {
+		stream.layout = capture::Layout { sample_rate, channels };
+		stream
 	}
 
 	/// Poll `future` through all immediately-ready work until its next real wait.
@@ -716,6 +831,56 @@ mod tests {
 				OutputEvent::Reset,
 				OutputEvent::Reset,
 				OutputEvent::Write(vec![0.25f32.to_bits()]),
+				OutputEvent::Reset,
+			]
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn replacement_device_is_converted_to_the_catalog_layout() {
+		let (failed_tx, failed) = stream(None);
+		let failed = with_layout(failed, 48_000, 1);
+		failed_tx
+			.try_push(Err(capture::Failure::retry(Error::Capture("lost".into()))))
+			.unwrap();
+		let (recovered_tx, recovered) = stream(None);
+		let recovered = with_layout(recovered, 48_000, 2);
+		let mut source = source([Open::Stream(failed), Open::Stream(recovered)], false);
+		let (demand_tx, mut demand) = demand(true);
+		let mut output = MockOutput::default();
+		let mut supervisor = Supervisor::exact();
+		supervisor.layout = Some(capture::Layout {
+			sample_rate: 48_000,
+			channels: 1,
+		});
+
+		{
+			let future = supervisor.run(&mut source, &mut demand, &mut output);
+			tokio::pin!(future);
+
+			poll_pending(future.as_mut()).await;
+			tokio::time::advance(RETRY_MIN).await;
+			poll_pending(future.as_mut()).await;
+
+			recovered_tx
+				.try_push(Ok(capture::Samples {
+					data: vec![1.0, 3.0, 2.0, 4.0],
+					gap: false,
+				}))
+				.unwrap();
+			poll_pending(future.as_mut()).await;
+
+			set_demand(&demand_tx, false);
+			poll_pending(future.as_mut()).await;
+			drop(demand_tx);
+			future.await.unwrap();
+		}
+
+		assert_eq!(
+			output.events,
+			[
+				OutputEvent::Reset,
+				OutputEvent::Write(vec![2.0f32.to_bits(), 3.0f32.to_bits()]),
 				OutputEvent::Reset,
 			]
 		);
