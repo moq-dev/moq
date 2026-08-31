@@ -226,6 +226,25 @@ describe("Effect", () => {
 		}
 	});
 
+	test("spawn does not start work after close", async () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const effect = new Effect();
+		let started = false;
+
+		try {
+			effect.close();
+			effect.spawn(async () => {
+				started = true;
+			});
+			await settle();
+
+			expect(started).toBe(false);
+		} finally {
+			effect.close();
+			warn.mockRestore();
+		}
+	});
+
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {
 		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
 		// after that point used to register teardown against the NEXT run: the resource it owned

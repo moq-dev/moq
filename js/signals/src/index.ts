@@ -549,10 +549,6 @@ export class Effect {
 	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
-		const promise = fn().catch((error) => {
-			console.error("spawn error", error);
-		});
-
 		if (this.#dispose === undefined) {
 			if (DEV) {
 				console.warn("Effect.spawn called when closed");
@@ -560,6 +556,14 @@ export class Effect {
 
 			return;
 		}
+
+		const promise = fn().catch((error) => {
+			console.error("spawn error", error);
+		});
+
+		// `fn` can close the effect before it first awaits. `close()` empties `#async` and only the
+		// rerun path drains it, so pushing now would pin the task on an effect that can never rerun.
+		if (this.#dispose === undefined) return;
 
 		this.#async.push(promise);
 	}
@@ -578,7 +582,7 @@ export class Effect {
 			timeout = undefined;
 			fn();
 		}, ms);
-		this.cleanup(() => timeout && clearTimeout(timeout));
+		this.cleanup(() => timeout !== undefined && clearTimeout(timeout));
 	}
 
 	/**
@@ -603,7 +607,7 @@ export class Effect {
 		}, ms);
 
 		this.#dispose.push(() => {
-			if (timeout) {
+			if (timeout !== undefined) {
 				clearTimeout(timeout);
 				effect.close();
 			}
@@ -624,7 +628,7 @@ export class Effect {
 			animate = undefined;
 		});
 		this.cleanup(() => {
-			if (animate) cancelAnimationFrame(animate);
+			if (animate !== undefined) cancelAnimationFrame(animate);
 		});
 	}
 
