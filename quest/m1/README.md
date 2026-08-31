@@ -40,9 +40,6 @@ with the current dev tree before starting.
 - [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
 - [#2708](/quest/m1/2708-origin-open-the-announce-interest-lazily-on-first-consumer.md) - origin: open the announce interest lazily, on first consumer
-- [#2756](/quest/m1/2756-origin-announce-only-entries-advertise-on-demand-content.md) - origin: announce-only entries, advertise on-demand content without instantiating broadcasts
-- [Plan: generations](/quest/m1/plan-generations.md) - re-plan historical broadcast enumeration against the dev announce model via /plan-quest
-- [#2873](/quest/m1/2873-moq-net-enumerate-and-resolve-historical-broadcast.md) - moq-net: enumerate and resolve historical broadcast generations by path and epoch
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
 - [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation

@@ -13,8 +13,8 @@ dashboards, fleet rollout) stay downstream.
 
 ## Quests
 
-- [Broadcast epoch](/quest/m2/broadcast-epoch.md) - every broadcast carries a publisher-minted generation epoch, so restarts never splice
-- [Generation](/quest/m2/hls-generation.md) - media URLs carry the resolved epoch so segment caching can be re-enabled
+- [Plan: HLS identity](/quest/m2/plan-hls-identity.md) - settle where a cacheable generation ID comes from via /plan-quest
+- [Generation](/quest/m2/hls-generation.md) - media URLs carry a generation ID so segment caching can be re-enabled
 - [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
 - [Plan: keyframe request](/quest/m2/plan-keyframe-request.md) - settle the keyframe request wire design via /plan-quest
