@@ -494,7 +494,7 @@ async fn capture_loop<E: CatalogExt>(
 					apply_estimate(&mut encoder, &mut rate, estimate).await;
 					continue;
 				}
-				frame = camera.read() => frame,
+				frame = camera.read() => frame?,
 			};
 
 			let Some(surface) = frame else { break }; // device stopped producing frames

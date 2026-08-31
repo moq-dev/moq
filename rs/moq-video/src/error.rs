@@ -21,6 +21,14 @@ pub enum Error {
 	#[error("not supported on this platform: {0}")]
 	Unsupported(String),
 
+	/// The operating system denied access to a capture source.
+	#[error("capture permission denied: {0}")]
+	PermissionDenied(String),
+
+	/// A requested capture source does not exist or disappeared while capturing.
+	#[error("capture source unavailable: {0}")]
+	SourceUnavailable(String),
+
 	/// The configured framerate was zero (would divide by zero / produce a
 	/// degenerate codec time base).
 	#[error("invalid framerate: {0} (must be non-zero)")]

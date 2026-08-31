@@ -15,8 +15,11 @@
 //!
 //! - `capture` describes a frame source and grabs frames per platform:
 //!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media
-//!   Foundation (camera) and DXGI Desktop Duplication (screen) on Windows. It
-//!   requires the default-on `capture` feature.
+//!   Foundation (camera), DXGI Desktop Duplication (screen), and GDI (window) on
+//!   Windows, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
+//!   [`capture::open`] for an embeddable raw-frame stream or
+//!   [`encode::publish_capture`] for turnkey publication. It requires the
+//!   default-on `capture` feature.
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
@@ -48,10 +51,10 @@
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a
-//! capture implementation. [`encode::Encoder`] takes a [`Frame`],
+//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a codec
+//! implementation. [`encode::Encoder`] takes a [`Frame`],
 //! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
-//! hardware decoded), and the camera capture path stays internal. So swapping or bumping any backend crate is not a breaking change
+//! hardware decoded), and [`capture::Stream`] returns a [`Surface`]. So swapping or bumping any backend crate is not a breaking change
 //! for consumers. Config structs are `#[non_exhaustive]`: build them via
 //! `default()`/`new()` and set fields, so new options stay additive.
 //!

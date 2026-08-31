@@ -387,7 +387,8 @@ Linux, Media Foundation on Windows). `--display` captures a screen instead:
 ScreenCaptureKit on macOS, DXGI Desktop Duplication on Windows, and
 xdg-desktop-portal + PipeWire on Linux (Wayland and X11), where the desktop's
 picker dialog chooses the screen (so the display id is ignored there).
-`--window` and `--app` are macOS-only, and `--no-cursor` applies to all three.
+`--window` works on macOS, Windows, and X11. `--app` is macOS-only, and
+`--no-cursor` applies to all three screen-source forms.
 On macOS these capture at the logical resolution, i.e. what the screen looks like
 to its owner rather than its native pixels: a 2x retina display shares as
 1710x1106, not 3420x2214, which keeps the derived bitrate sane. Pass

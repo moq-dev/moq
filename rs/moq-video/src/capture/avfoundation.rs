@@ -22,7 +22,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
 use super::surface::surface_frame;
-use super::{Camera, Config, FrameChannel, FrameStream};
+use super::{Camera, Config, FrameChannel, Stream};
 use crate::Error;
 
 /// How long `open` waits for the first frame before assuming the camera never
@@ -54,7 +54,7 @@ pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
 }
 
 /// Open the default (or requested) camera and stream its frames.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
 	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
 
 	// Gate on camera authorization before opening the device, so an unauthorized
@@ -66,10 +66,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 		Some(id) => {
 			let id = NSString::from_str(id);
 			unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("no camera with id {id}")))?
+				.ok_or_else(|| Error::SourceUnavailable(format!("no camera with id {id}")))?
 		}
 		None => unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no default camera")))?,
+			.ok_or_else(|| Error::SourceUnavailable("no default camera".to_string()))?,
 	};
 
 	// Honoring these means picking an `activeFormat` and locking a frame
@@ -111,7 +111,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	}
 
 	// The session keeps capturing until dropped; this guard stops it and closes
-	// the channel when the FrameStream goes away.
+	// the channel when the Stream goes away.
 	let guard = SessionGuard {
 		session,
 		chan: chan.clone(),
@@ -122,8 +122,9 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	// Await the first frame to learn the negotiated resolution (and to surface a
 	// permission failure as an error rather than a silent hang).
 	let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
-		Ok(Some(frame)) => frame,
-		Ok(None) | Err(_) => {
+		Ok(Ok(Some(frame))) => frame,
+		Ok(Err(error)) => return Err(error),
+		Ok(Ok(None)) | Err(_) => {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"no frames from camera {device_id} within {FIRST_FRAME_TIMEOUT:?} (permission denied?)"
 			)));
@@ -133,7 +134,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 
 	tracing::info!(device = %device_id, width, height, "opened camera (AVFoundation)");
 
-	Ok(FrameStream::new(
+	Ok(Stream::new(
 		chan,
 		width,
 		height,
@@ -175,22 +176,22 @@ async fn ensure_camera_access(media: &AVMediaType) -> Result<(), Error> {
 
 		return match tokio::time::timeout(ACCESS_TIMEOUT, rx).await {
 			Ok(Ok(true)) => Ok(()),
-			Ok(Ok(false)) => Err(Error::Codec(anyhow::anyhow!(
-				"camera access denied; enable it in System Settings > Privacy & Security > Camera"
-			))),
-			Ok(Err(_)) => Err(Error::Codec(anyhow::anyhow!(
-				"camera-permission prompt dismissed without a decision"
-			))),
-			Err(_) => Err(Error::Codec(anyhow::anyhow!(
+			Ok(Ok(false)) => Err(Error::PermissionDenied(
+				"camera access; enable it in System Settings > Privacy & Security > Camera".to_string(),
+			)),
+			Ok(Err(_)) => Err(Error::PermissionDenied(
+				"camera-permission prompt dismissed without a decision".to_string(),
+			)),
+			Err(_) => Err(Error::PermissionDenied(format!(
 				"timed out after {ACCESS_TIMEOUT:?} waiting for the camera-permission prompt"
 			))),
 		};
 	}
 
 	// Denied or restricted: no prompt will appear, so fail fast with a fix.
-	Err(Error::Codec(anyhow::anyhow!(
-		"camera access not authorized (denied or restricted); enable it in System Settings > Privacy & Security > Camera"
-	)))
+	Err(Error::PermissionDenied(
+		"camera access is denied or restricted; enable it in System Settings > Privacy & Security > Camera".to_string(),
+	))
 }
 
 /// Keeps the capture session (and its delegate) alive; stops it on drop, which

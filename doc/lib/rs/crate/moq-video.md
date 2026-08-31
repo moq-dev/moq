@@ -215,12 +215,30 @@ Each enumerator returns ids that go straight back into `capture::Config::source`
 ```rust
 moq_video::capture::cameras().await?;   // webcams
 moq_video::capture::displays().await?;  // monitors
-moq_video::capture::windows().await?;   // single windows (macOS)
+moq_video::capture::windows().await?;   // single windows (macOS, Windows, X11)
 moq_video::capture::apps().await?;      // every window of an app (macOS)
 ```
 
 The [`moq devices`](/bin/cli) subcommand prints the same lists from the command
 line.
+
+An embedded application can open the selected source directly. Capture keeps
+one unconsumed frame, replacing it when the application is slower than the
+source, so latency stays bounded:
+
+```rust
+let mut config = moq_video::capture::Config::default();
+config.source = moq_video::capture::Source::Display(None);
+
+let mut capture = moq_video::capture::open(&config).await?;
+while let Some(surface) = capture.read().await? {
+    // Encode, render, or process `surface`.
+}
+```
+
+`Error::PermissionDenied` reports an operating-system capture denial.
+`Error::SourceUnavailable` reports a selected source that is missing or was
+removed while the stream was live.
 
 ## API Reference
 

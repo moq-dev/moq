@@ -21,7 +21,7 @@ default = ["capture", "nvidia"]
 # Native camera and screen capture. Enabled by default for direct consumers,
 # but workspace consumers opt in so codec-only bindings avoid device build
 # dependencies such as V4L2 and libclang.
-capture = ["dep:v4l", "dep:zune-jpeg"]
+capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
 # The NVIDIA codecs on Linux: the NVENC encoder and the NVDEC decoder. One
 # feature because they are one dependency stack (cudarc + moq-nvenc, plus a
 # libloading probe for the driver libs) and one code path: NVDEC hands NVENC a
@@ -137,6 +137,10 @@ pipewire = { version = "0.10", optional = true }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = { version = "0.14", optional = true }
+# X11 display/window enumeration and capture. Pure Rust and used when no
+# Wayland session is active, so Linux screen capture still works without a
+# portal and callers can select a stable monitor or window id.
+x11rb = { workspace = true, optional = true }
 zune-jpeg = { version = "0.5", optional = true }
 
 [target.'cfg(target_os="macos")'.dependencies]
@@ -173,8 +177,10 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
     "Win32_System_Ole",
     "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
