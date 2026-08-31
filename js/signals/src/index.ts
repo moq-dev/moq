@@ -819,16 +819,22 @@ export class Effect {
 
 	/** Stops the effect permanently, running all cleanup and unsubscribing from every signal. */
 	close(): void {
-		if (this.#dispose === undefined) {
+		const dispose = this.#dispose;
+		if (dispose === undefined) {
 			return;
 		}
+
+		// Mark closed before running teardown. A cleanup that calls back into this effect has to
+		// hit the closed guard: otherwise `spawn`/`timer`/`animate` register work against a list
+		// this call is about to discard, and the task keeps running with nothing tracking it.
+		// `cleanup` itself still works, running immediately rather than appending.
+		this.#dispose = undefined;
 
 		this.#closed.resolve();
 		this.#stopped.resolve();
 		this.#abort.abort();
 
-		for (const fn of this.#dispose) fn();
-		this.#dispose = undefined;
+		for (const fn of dispose) fn();
 
 		for (const signal of this.#unwatch) signal();
 		this.#unwatch.length = 0;

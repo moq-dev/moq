@@ -245,6 +245,52 @@ describe("Effect", () => {
 		}
 	});
 
+	test("a cleanup that spawns during close cannot start work", async () => {
+		// close() used to run the cleanups while #dispose was still defined, so a cleanup calling
+		// back into the effect passed every guard. The task then outlived the close that cleared
+		// #async, with no rerun left to drain it.
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const effect = new Effect();
+		let started = false;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		try {
+			effect.cleanup(() => {
+				effect.spawn(async () => {
+					started = true;
+					await gate;
+				});
+			});
+
+			effect.close();
+			await settle();
+
+			expect(started).toBe(false);
+		} finally {
+			release();
+			warn.mockRestore();
+		}
+	});
+
+	test("a cleanup registered during close still runs", async () => {
+		// The closed guard makes `cleanup` run its callback immediately rather than appending to
+		// a list nothing will drain, so teardown that cascades still completes.
+		const effect = new Effect();
+		const order: string[] = [];
+
+		effect.cleanup(() => {
+			order.push("outer");
+			effect.cleanup(() => order.push("inner"));
+		});
+
+		effect.close();
+
+		expect(order).toEqual(["outer", "inner"]);
+	});
+
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {
 		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
 		// after that point used to register teardown against the NEXT run: the resource it owned
