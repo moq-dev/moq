@@ -277,7 +277,7 @@ fn canonical_announced_node(node: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{Origin, OriginList, broadcast};
+	use moq_net::{Origin, OriginList};
 
 	async fn announced_node(
 		origin: &moq_net::origin::Producer,
@@ -374,7 +374,7 @@ mod tests {
 	async fn scan_skips_an_unannounce_queued_ahead_of_another_node() {
 		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
-		let mut first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
+		let first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-b.example/", &[300], 1).await;
 
 		let consumer = origin.consume().with_root(MESH_PREFIX).expect("mesh prefix is in root");

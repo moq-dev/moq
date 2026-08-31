@@ -1174,7 +1174,9 @@ where
 	/// path. Idempotent, since the signal stays set.
 	fn drain_route(&self, path: &PathOwned) {
 		let mut state = self.state.lock();
-		let Some(entry) = state.broadcasts.get_mut(path) else { return };
+		let Some(entry) = state.broadcasts.get_mut(path) else {
+			return;
+		};
 		if entry.route.cost == crate::origin::Cost::DRAIN {
 			return;
 		}

@@ -41,12 +41,14 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 
 // Subscribe to a broadcast and read media frames.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
-	// Wait for a broadcast to be announced.
-	let moq_net::announce::Update { path, broadcast } = consumer.announced().next().await.context("origin closed")?;
-
-	let broadcast = broadcast.with_context(|| format!("broadcast unannounced: {path}"))?;
+	// Wait for a route to be announced, then resolve the broadcast at its path.
+	// The convention is that a publisher announces each broadcast's exact path.
+	let update = consumer.announced().next().await.context("origin closed")?;
+	anyhow::ensure!(update.active, "route retracted: {}", update.route.prefix);
+	let path = update.route.prefix;
 
 	tracing::info!(%path, "broadcast announced");
+	let broadcast = consumer.request_broadcast(&path).await?;
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast

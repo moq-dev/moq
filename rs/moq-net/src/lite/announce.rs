@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Origin, OriginList, Path, origin::Cost, coding::*};
+use crate::{Origin, OriginList, Path, coding::*, origin::Cost};
 
 use super::{Message, Version};
 

@@ -111,8 +111,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group

@@ -24,7 +24,8 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -131,7 +132,8 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 
 	// Track with an explicit microsecond timescale (the default is milliseconds).
@@ -254,7 +256,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(
@@ -386,7 +389,8 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	}
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(
@@ -510,8 +514,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	use moq_tokio::moq_net::Timescale;
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
@@ -610,8 +613,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// Announced before the client connects, so it rides the initial set.
-	let (mut first, _announce_first) = pub_origin.publish_broadcast("first")
-		.expect("create broadcast");
+	let (mut first, _announce_first) = pub_origin.publish_broadcast("first").expect("create broadcast");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
@@ -851,16 +853,9 @@ async fn broadcast_route_migration() {
 	// Kill the serving session. The materialized broadcast aborts; the next
 	// request resolves through the standby route and serves its content.
 	drop(session_a);
-	tokio::time::timeout(TIMEOUT, async {
-		loop {
-			match sub.recv_group().await {
-				Ok(Some(_)) | Ok(None) => continue,
-				Err(_) => break,
-			}
-		}
-	})
-	.await
-	.expect("the dead session's subscription should abort");
+	tokio::time::timeout(TIMEOUT, async { while sub.recv_group().await.is_ok() {} })
+		.await
+		.expect("the dead session's subscription should abort");
 
 	let mut sub = tokio::time::timeout(TIMEOUT, async {
 		loop {
@@ -1026,7 +1021,6 @@ async fn broadcast_route_reannounce() {
 async fn broadcast_route_reannounce_lite_06() {
 	route_reannounce_test(Some("moq-lite-06-wip")).await;
 }
-
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
@@ -1221,8 +1215,7 @@ async fn max_age_test(version: &str) -> Duration {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let info = moq_net::track::Info::default().with_max_age(MAX_AGE_PUBLISHED);
 	let track = broadcast.create_track("video", info).expect("create track");
 
@@ -1505,7 +1498,8 @@ async fn broadcast_websocket() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -1620,7 +1614,8 @@ async fn broadcast_websocket_fallback() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -1746,7 +1741,8 @@ const NEWEST_LITE: &str = "moq-lite-05";
 #[tokio::test]
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -1816,7 +1812,8 @@ async fn broadcast_websocket_uses_newest_version() {
 #[tokio::test]
 async fn broadcast_race_quic_wins() {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -1900,7 +1897,8 @@ async fn quic_driver_task_inherits_connection_span() {
 	use tracing::Instrument;
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -2024,8 +2022,7 @@ async fn quic_driver_task_inherits_connection_span() {
 #[tokio::test]
 async fn resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
@@ -2159,8 +2156,7 @@ fn active_viewers(registry: &moq_net::stats::Registry) -> u64 {
 #[tokio::test]
 async fn idle_subscription_releases_the_viewer_count() {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
@@ -2439,8 +2435,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (_broadcast, _announce__broadcast) = pub_origin.publish_broadcast("live")
-		.expect("create broadcast");
+	let (_broadcast, _announce_broadcast) = pub_origin.publish_broadcast("live").expect("create broadcast");
 
 	// Accept the first session and hand it back so the test can kill it. Later
 	// redials are left hanging (the server stops accepting), so the subscriber is
@@ -2501,7 +2496,8 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	// ── publisher (server): only allowed to announce under "allowed" ──
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("allowed/test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("allowed/test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -2640,7 +2636,8 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 	// ── publisher (client): only allowed to serve under "allowed" ──
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("allowed/test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("allowed/test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -2712,7 +2709,8 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
+	let (mut broadcast, _announce_broadcast) = pub_origin
+		.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 

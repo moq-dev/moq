@@ -772,7 +772,7 @@ mod tests {
 	/// `connect` must not depend on the peer answering. A peer that opens the announce
 	/// stream and then says nothing (or promises a count it never delivers) used to hold
 	/// `connect` for the life of the session, since it waited for the initial announce
-	/// set. Resolving a path you need is `announced_broadcast`'s job, which waits for
+	/// set. Resolving a path you need is `routed`'s job, which waits for
 	/// that path rather than for the peer to finish talking.
 	#[tokio::test(start_paused = true)]
 	async fn connect_does_not_wait_for_the_peer_to_announce() {

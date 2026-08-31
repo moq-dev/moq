@@ -694,21 +694,17 @@ mod tests {
 		let origin = moq_tokio::origin::spawn(Origin::random());
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let (_internal, _announce__internal) = origin.publish_broadcast(".stats/node/host")
-			.unwrap();
+		let (_internal, _announce_internal) = origin.publish_broadcast(".stats/node/host").unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let (_previous, _announce__previous) = origin.publish_broadcast("bench/previous/0/0")
-			.unwrap();
+		let (_previous, _announce_previous) = origin.publish_broadcast("bench/previous/0/0").unwrap();
 
-		let (_own, _announce__own) = origin.publish_broadcast("bench/current/9/9")
-			.unwrap();
+		let (_own, _announce_own) = origin.publish_broadcast("bench/current/9/9").unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let (mut peer, _announce_peer) = origin.publish_broadcast("bench/current/0/0")
-			.unwrap();
+		let (mut peer, _announce_peer) = origin.publish_broadcast("bench/current/0/0").unwrap();
 		let mut track = peer.create_track(TRACK, None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
@@ -734,8 +730,7 @@ mod tests {
 		let consume = origin.consume();
 		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
 
-		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("bench/run/chat")
-			.unwrap();
+		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("bench/run/chat").unwrap();
 		let mut track = broadcast.create_track(TRACK, None).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();

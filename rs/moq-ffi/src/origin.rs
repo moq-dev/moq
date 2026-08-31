@@ -318,7 +318,9 @@ impl MoqOriginConsumer {
 		let _guard = crate::ffi::enter();
 		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
-			task: Task::new(Announced { inner: origin.announced() }),
+			task: Task::new(Announced {
+				inner: origin.announced(),
+			}),
 		}))
 	}
 

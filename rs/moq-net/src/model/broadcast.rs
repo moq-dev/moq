@@ -476,11 +476,6 @@ impl SourceGuard {
 		}
 	}
 
-	/// A clone of the guarded producer.
-	pub fn producer(&self) -> Producer {
-		self.producer.clone().expect("guard holds a producer until finished")
-	}
-
 	/// End the source deliberately: the origin detaches it immediately,
 	/// unannouncing the path if it was the last.
 	pub fn finish(mut self) {
@@ -777,14 +772,6 @@ impl Consumer {
 		}
 
 		Ok(consumer)
-	}
-
-	/// A watch-only handle to the broadcast's demand. See [`Demand`].
-	pub(crate) fn demand(&self) -> Demand {
-		Demand {
-			alive: self.alive.weak(),
-			state: self.state.clone(),
-		}
 	}
 
 	/// Block until the broadcast is closed, by [`Producer::finish`],
@@ -1297,5 +1284,4 @@ mod test {
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
 	}
-
 }

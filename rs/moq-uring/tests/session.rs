@@ -61,8 +61,7 @@ fn lite_session_over_the_worker() {
 
 	// Content ready before anyone connects: one broadcast, one track, one
 	// finished group.
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("data", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -178,8 +177,7 @@ fn two_lite_sessions_share_the_server_socket() {
 		});
 	});
 
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
-		.expect("create broadcast");
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
 	let mut track = broadcast.create_track("data", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group

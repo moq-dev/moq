@@ -569,7 +569,6 @@ impl ConsumerId {
 // path; whether anything is *advertised* is a separate concern, owned by the
 // route table (see [`Producer::announce`]).
 struct OriginBroadcast {
-	path: PathOwned,
 	/// The shared, spliced broadcast; its `consume()` is what consumers get.
 	broadcast: broadcast::Producer,
 	/// The source table, shared with every source watcher and the front task.
@@ -1845,7 +1844,9 @@ async fn run_source(task: SourceTask) {
 	} = task;
 	let _ = timers;
 
-	kio::wait(|waiter| source.poll_closed(waiter).map(Ok::<(), Error>)).await.ok();
+	kio::wait(|waiter| source.poll_closed(waiter).map(Ok::<(), Error>))
+		.await
+		.ok();
 
 	// The source ended, deliberately or not: detach it. If it was the last one
 	// the front closes with it.
@@ -1934,7 +1935,6 @@ fn attach_source(
 	// A stale (closed) entry is replaced; its own teardown task then finds the
 	// slot already taken and leaves it alone.
 	leaf_guard.broadcast = Some(OriginBroadcast {
-		path: ctx.full.clone(),
 		broadcast: broadcast.clone(),
 		state: state.clone(),
 	});
@@ -3220,7 +3220,13 @@ impl AnnounceProducer {
 			.iter()
 			.map(|(allowed, _)| self.root.join(allowed).to_owned())
 			.collect();
-		AnnounceConsumer::new(self.root.clone(), allowed, stats::Session::default(), None, &self.shared)
+		AnnounceConsumer::new(
+			self.root.clone(),
+			allowed,
+			stats::Session::default(),
+			None,
+			&self.shared,
+		)
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -3634,7 +3640,8 @@ mod tests {
 			.request_broadcast("room/bob")
 			.now_or_never()
 			.expect("unroutable is synchronous")
-			.err().unwrap();
+			.err()
+			.unwrap();
 		assert!(matches!(err, Error::Unroutable));
 	}
 
@@ -3718,7 +3725,8 @@ mod tests {
 			.request_broadcast("room/alice")
 			.now_or_never()
 			.expect("unroutable")
-			.err().unwrap();
+			.err()
+			.unwrap();
 		assert!(matches!(err, Error::Unroutable));
 	}
 
@@ -3735,7 +3743,8 @@ mod tests {
 			.request_broadcast("room/alice")
 			.now_or_never()
 			.expect("unroutable")
-			.err().unwrap();
+			.err()
+			.unwrap();
 		assert!(matches!(err, Error::Unroutable));
 
 		// A clean requester resolves through the route (the request queues).
@@ -3758,7 +3767,8 @@ mod tests {
 			.request_broadcast(".dash/pid")
 			.now_or_never()
 			.expect("unroutable")
-			.err().unwrap();
+			.err()
+			.unwrap();
 		assert!(matches!(err, Error::Unroutable));
 
 		// Everything else still routes to the broad server.
@@ -3844,7 +3854,12 @@ mod tests {
 		assert!(pending.now_or_never().expect("rejected").is_err());
 		assert!(matches!(producer.announce(Route::new("x")), Err(Error::Closed)));
 		assert!(matches!(producer.create_broadcast("x"), Err(Error::Closed)));
-		let err = consumer.request_broadcast("y").now_or_never().expect("closed").err().unwrap();
+		let err = consumer
+			.request_broadcast("y")
+			.now_or_never()
+			.expect("closed")
+			.err()
+			.unwrap();
 		assert!(matches!(err, Error::Closed));
 
 		// A cursor born after the teardown is born ended.

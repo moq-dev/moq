@@ -6,7 +6,6 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, M
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame, MoqVideoInit, MoqVideoProperties};
-use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///

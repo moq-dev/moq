@@ -214,16 +214,6 @@ impl TimersSlot {
 	pub(crate) fn get(&self) -> AnyTimers {
 		self.0.get().expect("origin driver is not running").clone()
 	}
-
-	/// The installed timers' clock, if the driver is running.
-	pub(crate) fn try_now(&self) -> Option<Instant> {
-		self.0.get().map(Timers::now)
-	}
-
-	/// The installed timers' clock.
-	pub(crate) fn now(&self) -> Instant {
-		self.try_now().expect("origin driver is not running")
-	}
 }
 
 /// A wall-clock deadline: the ergonomic layer over [`Timer`].

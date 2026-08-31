@@ -1422,8 +1422,7 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 
 		let origin = crate::origin::spawn(moq_net::Origin::random());
-		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test")
-			.expect("create broadcast");
+		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test").expect("create broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group

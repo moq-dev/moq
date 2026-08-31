@@ -63,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let (mut broadcast, _announce_broadcast) = origin.publish_broadcast(&config.broadcast)
+			let (mut broadcast, _announce_broadcast) = origin
+				.publish_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
@@ -91,25 +92,27 @@ async fn main() -> anyhow::Result<()> {
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
 			let path: moq_net::Path<'_> = config.broadcast.into();
-			let mut origin = origin
+			let consumer = origin
 				.scope(&[path])
 				.context("not allowed to consume broadcast")?
-				.consume()
-				.announced();
+				.consume();
+			let mut announced = consumer.announced();
 
 			let mut clock: Option<Subscriber> = None;
 
 			loop {
 				tokio::select! {
-					Some(moq_net::announce::Update { path, broadcast }) = origin.next() => match broadcast {
-						Some(broadcast) => {
+					Some(update) = announced.next() => match update.active {
+						true => {
+							let path = update.route.prefix;
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
+							let broadcast = consumer.request_broadcast(&path).await?;
 							let track = broadcast
 								.track(&track)?.subscribe(None).await?;
 							clock = Some(Subscriber::new(track));
 						}
-						None => {
-							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
+						false => {
+							tracing::warn!(broadcast = %update.route.prefix, "broadcast is offline, waiting...");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),

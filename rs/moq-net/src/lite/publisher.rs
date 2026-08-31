@@ -604,7 +604,11 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(OriginList, crate::origin::Cost)> {
+	fn outgoing(
+		&self,
+		route: &crate::origin::Route,
+		absolute: &crate::Path,
+	) -> Option<(OriginList, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -803,7 +807,9 @@ impl AnnounceRun {
 					Some(&id) if lite::restart_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
 						match id {
-							Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
+							Some(id) => stream
+								.writer
+								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
 							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 								suffix: suffix.as_path(),
 								hops,
@@ -1666,7 +1672,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(own(
-					lite::AnnounceBroadcast::decode(&mut slice, VERSION).expect("announce message"),
+					lite::AnnounceBroadcast::decode(&mut slice, VERSION).expect("announce message")
 				));
 			}
 			self.cursor += buf.len();

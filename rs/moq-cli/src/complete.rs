@@ -773,7 +773,7 @@ mod tests {
 	#[tokio::test]
 	async fn the_environment_cannot_ask_for_a_moq_side() {
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-				let (_alpha, _announce__alpha) = origin.publish_broadcast("alpha").expect("alpha");
+		let (_alpha, _announce_alpha) = origin.publish_broadcast("alpha").expect("alpha");
 		let connect = relay(&origin);
 
 		// The same reachable relay, named only by the environment.
@@ -867,8 +867,8 @@ mod tests {
 	async fn a_relay_on_the_line_answers_broadcast() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-				let (_alpha, _announce__alpha) = origin.publish_broadcast("alpha").expect("alpha");
-		let (_nested, _announce__nested) = origin.publish_broadcast("room/beta").expect("beta");
+		let (_alpha, _announce_alpha) = origin.publish_broadcast("alpha").expect("alpha");
+		let (_nested, _announce_nested) = origin.publish_broadcast("room/beta").expect("beta");
 
 		let connect = relay(&origin);
 		let found = complete(&format!("moq {connect} --broadcast ")).await;
@@ -890,7 +890,7 @@ mod tests {
 		use hang::catalog::{AudioCodec, AudioConfig, H264, VideoConfig};
 
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		
+
 		// Two broadcasts with different renditions, so a completer reading the wrong
 		// one fails loudly instead of matching by luck.
 		let mut keep = Vec::new();
@@ -935,7 +935,7 @@ mod tests {
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-				let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("room").expect("broadcast");
+		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("room").expect("broadcast");
 
 		let mut track = broadcast
 			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())

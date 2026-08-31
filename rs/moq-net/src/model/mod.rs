@@ -42,7 +42,9 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceProducer as Producer, AnnounceUpdate as Update};
+	pub use super::origin_impl::{
+		AnnounceConsumer as Consumer, AnnounceProducer as Producer, AnnounceUpdate as Update,
+	};
 }
 
 // Origin identity and the `Consume` conversion trait aren't part of a role

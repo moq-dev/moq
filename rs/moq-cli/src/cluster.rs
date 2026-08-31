@@ -602,7 +602,8 @@ mod tests {
 		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
 
 		// Published before the session exists; announcements flow once it connects.
-		let (_from_a, _announce__from_a) = origin_a.publish_broadcast("from-a")
+		let (_from_a, _announce_from_a) = origin_a
+			.publish_broadcast("from-a")
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -635,7 +636,8 @@ mod tests {
 
 		// And the reverse direction over the same session. This stream replays a's
 		// own "from-a" first, so read until the remote broadcast shows up.
-		let (_from_b, _announce__from_b) = origin_b.publish_broadcast("from-b")
+		let (_from_b, _announce_from_b) = origin_b
+			.publish_broadcast("from-b")
 			.expect("failed to create broadcast");
 		let mut announced_on_a = origin_a.consume().announced();
 		loop {
@@ -655,7 +657,8 @@ mod tests {
 	async fn mesh_rejects_a_dial_without_the_proof() {
 		let origin_a = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (_from_b, _announce__from_b) = origin_b.publish_broadcast("from-b")
+		let (_from_b, _announce_from_b) = origin_b
+			.publish_broadcast("from-b")
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -694,7 +697,8 @@ mod tests {
 	#[tokio::test]
 	async fn a_mesh_only_listener_refuses_ordinary_clients() {
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (_published, _announce__published) = origin.publish_broadcast("secret-stream")
+		let (_published, _announce_published) = origin
+			.publish_broadcast("secret-stream")
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();

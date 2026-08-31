@@ -586,9 +586,7 @@ mod tests {
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let output = origin
-			.create_broadcast("room/transcode")
-			.unwrap();
+		let output = origin.create_broadcast("room/transcode").unwrap();
 		let consumer = output.consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 

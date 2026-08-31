@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
 	// otherwise leave us waiting for an announcement that can never arrive.
 	let consumer = remote.consume();
 	tokio::select! {
-		announced = consumer.announced_broadcast(&source_path) => {
-			announced.context("origin closed before the source broadcast was announced")?;
+		routed = consumer.routed(&source_path) => {
+			routed.context("origin closed before the source broadcast was announced")?;
 		}
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;
@@ -82,7 +82,8 @@ async fn main() -> anyhow::Result<()> {
 	// publishes the rungs and nothing else.
 	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
-	let (output, _announce_output) = publish.publish_broadcast(&output_path)
+	let (output, _announce_output) = publish
+		.publish_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

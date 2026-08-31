@@ -66,7 +66,8 @@ struct AcceptedSession {
 	// finish() it: a clean end instead of an abort error.
 	broadcast: Option<moq_net::broadcast::Producer>,
 	// WHIP only: the route advertising the broadcast; dropping it retracts.
-	announcement: Option<moq_net::origin::Announcement>,
+	// Held for the session's lifetime, released (retracting) when it ends.
+	_announcement: Option<moq_net::origin::Announcement>,
 }
 
 impl AcceptedSession {

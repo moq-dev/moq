@@ -97,10 +97,15 @@ impl Session {
 		Err(js_err(self.inner.closed().await))
 	}
 
-	/// Subscribe to a broadcast by path, waiting until it is announced.
+	/// Subscribe to a broadcast by path, waiting until a route covers it.
 	pub async fn consume(&self, path: String) -> Result<Option<Broadcast>, JsValue> {
-		let broadcast = self.consumer.announced_broadcast(path.as_str()).await;
-		Ok(broadcast.map(|inner| Broadcast { inner }))
+		if self.consumer.routed(path.as_str()).await.is_none() {
+			return Ok(None);
+		}
+		match self.consumer.request_broadcast(path.as_str()).await {
+			Ok(inner) => Ok(Some(Broadcast { inner })),
+			Err(_) => Ok(None),
+		}
 	}
 }
 

@@ -599,7 +599,7 @@ struct Work {
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and route preference come from the hop list carried
-/// on each broadcast's route (see [`moq_net::broadcast::Route`]).
+/// on each announced route (see [`moq_net::origin::Route`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
 /// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
@@ -1646,7 +1646,10 @@ mod tests {
 			.await
 			.expect("stats broadcast announced within 5s")
 			.expect("stats broadcast present");
-		let broadcast = consumer.request_broadcast(&path).await.expect("stats broadcast resolves");
+		let broadcast = consumer
+			.request_broadcast(&path)
+			.await
+			.expect("stats broadcast resolves");
 
 		// Several publish intervals (1s each by default) after the handle went out
 		// of scope, the task is still running and its broadcast still open. The
@@ -2143,7 +2146,10 @@ mod tests {
 
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
-		assert_eq!(update.route.prefix.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert_eq!(
+			update.route.prefix.as_str(),
+			".internal/origins/rendezvous.example.com:4443"
+		);
 		assert!(update.active);
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)

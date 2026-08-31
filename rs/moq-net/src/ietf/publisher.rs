@@ -124,7 +124,6 @@ impl Advert {
 			_ => None,
 		}
 	}
-
 }
 
 /// How long to wait for a stream to advertise one namespace on.
@@ -2031,7 +2030,6 @@ mod tests {
 		);
 	}
 
-
 	/// A same-path source can splice into (or detach from) an existing broadcast
 	/// without an origin-level (un)announce, silently flipping `advertisable`.
 	/// Namespace forwarding must follow: advertise when a clean route appears,
@@ -2132,9 +2130,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce(crate::origin::Route::new("lonely-cam"))
-			.unwrap();
+		let _cam = origin.announce(crate::origin::Route::new("lonely-cam")).unwrap();
 		settle().await;
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
@@ -2223,9 +2219,7 @@ mod tests {
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
-		let early = origin
-			.announce(crate::origin::Route::new("early-cam"))
-			.unwrap();
+		let early = origin.announce(crate::origin::Route::new("early-cam")).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE (the peer stays quiet after);
@@ -2266,9 +2260,7 @@ mod tests {
 		);
 
 		// A later announce reaches the same subscription.
-		let _late = origin
-			.announce(crate::origin::Route::new("late-cam"))
-			.unwrap();
+		let _late = origin.announce(crate::origin::Route::new("late-cam")).unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			if occurrences(&log, b"late-cam") >= 1 {
@@ -2310,9 +2302,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _local = origin
-			.announce(crate::origin::Route::new("local-cam"))
-			.unwrap();
+		let _local = origin.announce(crate::origin::Route::new("local-cam")).unwrap();
 		settle().await;
 
 		// The only stream is the PUBLISH_NAMESPACE request we open ourselves.
@@ -2358,9 +2348,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce(crate::origin::Route::new("cam"))
-			.unwrap();
+		let _cam = origin.announce(crate::origin::Route::new("cam")).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
@@ -2432,9 +2420,7 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let first = origin
-			.announce(crate::origin::Route::new("first-cam"))
-			.unwrap();
+		let first = origin.announce(crate::origin::Route::new("first-cam")).unwrap();
 		settle().await;
 
 		// Open: the peer still has credit for the first advertisement, and answers it.
@@ -2469,9 +2455,7 @@ mod tests {
 
 		// Credit runs out, and a second namespace wants a stream we cannot get.
 		set_gate(&gate, false);
-		let _second = origin
-			.announce(crate::origin::Route::new("second-cam"))
-			.unwrap();
+		let _second = origin.announce(crate::origin::Route::new("second-cam")).unwrap();
 		settle().await;
 
 		// Retiring the first frees a slot and needs no new stream, so the loop has to reach
@@ -2558,9 +2542,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let cam = origin
-			.announce(crate::origin::Route::new("solo-cam"))
-			.unwrap();
+		let cam = origin.announce(crate::origin::Route::new("solo-cam")).unwrap();
 		settle().await;
 
 		// Refused with a wait far longer than any backoff the loop would take on its own.
@@ -2621,9 +2603,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let cam = origin
-			.announce(crate::origin::Route::new("solo-cam"))
-			.unwrap();
+		let cam = origin.announce(crate::origin::Route::new("solo-cam")).unwrap();
 		settle().await;
 
 		let session =
@@ -2676,12 +2656,8 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _first = origin
-			.announce(crate::origin::Route::new("first-cam"))
-			.unwrap();
-		let _second = origin
-			.announce(crate::origin::Route::new("second-cam"))
-			.unwrap();
+		let _first = origin.announce(crate::origin::Route::new("first-cam")).unwrap();
+		let _second = origin.announce(crate::origin::Route::new("second-cam")).unwrap();
 		settle().await;
 
 		// Every stream opens and then goes silent: an exhausted script parks rather than
@@ -2728,9 +2704,7 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce(crate::origin::Route::new("lonely-cam"))
-			.unwrap();
+		let _cam = origin.announce(crate::origin::Route::new("lonely-cam")).unwrap();
 		settle().await;
 
 		// Closed from the start: the peer has granted nothing.

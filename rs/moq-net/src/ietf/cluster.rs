@@ -12,7 +12,7 @@
 //!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
 //! The semantics are the same ones moq-lite carries natively (see
-//! [`crate::broadcast::Route`]); this module is only the moq-transport binding.
+//! [`crate::origin::Route`]); this module is only the moq-transport binding.
 //! Negotiated on draft-17+ only, where SETUP is a Key-Value-Pair block.
 
 use bytes::Buf;
