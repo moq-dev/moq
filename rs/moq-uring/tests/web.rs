@@ -242,11 +242,11 @@ fn lite_session_over_webtransport() {
 				.await
 				.expect("connect_lite");
 
-			let bc = sub_origin
-				.consume()
-				.announced_broadcast("test")
-				.await
-				.expect("broadcast announced");
+			let bc = {
+				let consumer = sub_origin.consume();
+				consumer.routed("test").await.expect("broadcast announced");
+				consumer.request_broadcast("test").await.expect("broadcast resolves")
+			};
 			let mut track = bc
 				.track("data")
 				.expect("track")

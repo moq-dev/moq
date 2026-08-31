@@ -125,18 +125,23 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let mut subscribers = Vec::new();
 	for _ in 0..WORKERS {
 		let origin = moq_tokio::origin::spawn(Origin::random());
-		let announced = origin.consume().announced();
+		let consumer = origin.consume();
+		let announced = consumer.announced();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
-		subscribers.push((connection, announced));
+		subscribers.push((connection, consumer, announced));
 	}
 
-	for (index, (_connection, announced)) in subscribers.iter_mut().enumerate() {
-		let moq_net::announce::Update { path, broadcast } = tokio::time::timeout(TIMEOUT, announced.next())
+	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
-		assert_eq!(path.as_str(), "test");
-		let broadcast = broadcast.expect("expected announce, got unannounce");
+		assert_eq!(update.route.prefix.as_str(), "test");
+		assert!(update.active, "expected announce, got retraction");
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+			.await
+			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
+			.expect("announced broadcast resolves");
 
 		let mut subscription = broadcast
 			.track("video")

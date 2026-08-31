@@ -1654,7 +1654,7 @@ mod tests {
 		// Several publish intervals (1s each by default) after the handle went out
 		// of scope, the task is still running and its broadcast still open. The
 		// re-check is bounded: without the keepalive the broadcast is gone and
-		// `announced_broadcast` waits forever, which must read as a failure rather
+		// `routed` waits forever, which must read as a failure rather
 		// than a hung test.
 		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 		let still_live = tokio::time::timeout(std::time::Duration::from_secs(2), consumer.routed(&path)).await;

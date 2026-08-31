@@ -118,11 +118,11 @@ fn lite_session_over_the_worker() {
 				.await
 				.expect("connect_lite");
 
-			let bc = sub
-				.consume()
-				.announced_broadcast("test")
-				.await
-				.expect("broadcast announced");
+			let bc = {
+				let consumer = sub.consume();
+				consumer.routed("test").await.expect("broadcast announced");
+				consumer.request_broadcast("test").await.expect("broadcast resolves")
+			};
 			let mut track = bc
 				.track("data")
 				.expect("track")
@@ -237,11 +237,11 @@ fn two_lite_sessions_share_the_server_socket() {
 					.await
 					.expect("connect_lite");
 
-				let bc = sub
-					.consume()
-					.announced_broadcast("test")
-					.await
-					.expect("broadcast announced");
+				let bc = {
+					let consumer = sub.consume();
+					consumer.routed("test").await.expect("broadcast announced");
+					consumer.request_broadcast("test").await.expect("broadcast resolves")
+				};
 				let mut track = bc
 					.track("data")
 					.expect("track")

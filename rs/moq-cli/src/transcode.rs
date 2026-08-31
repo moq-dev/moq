@@ -127,8 +127,8 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// otherwise leave us waiting for an announcement that can never arrive.
 	let consumer = remote.consume();
 	tokio::select! {
-		announced = consumer.announced_broadcast(&source_path) => {
-			announced.context("origin closed before the source broadcast was announced")?;
+		routed = consumer.routed(&source_path) => {
+			routed.context("origin closed before the source broadcast was announced")?;
 		}
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;

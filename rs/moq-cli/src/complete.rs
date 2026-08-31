@@ -579,9 +579,9 @@ async fn catalog(
 	path: &str,
 	format: CatalogFormat,
 ) -> Option<moq_mux::catalog::hang::Catalog> {
-	// `announced_broadcast` rather than a plain lookup: the announcement is still in
-	// flight right after connecting, and asking on the spot reports a live broadcast
-	// as unroutable.
+	// Wait for a covering route rather than asking on the spot: the announcement is
+	// still in flight right after connecting, and an immediate request reports a live
+	// broadcast as unroutable.
 	let consumer = origin.consume();
 	consumer.routed(path).await?;
 

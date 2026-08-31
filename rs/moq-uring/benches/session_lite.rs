@@ -190,11 +190,11 @@ mod linux {
 						.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 						.await
 						.expect("connect_lite");
-					let bc = sub_origin
-						.consume()
-						.announced_broadcast("bench")
-						.await
-						.expect("broadcast announced");
+					let bc = {
+						let consumer = sub_origin.consume();
+						consumer.routed("bench").await.expect("broadcast announced");
+						consumer.request_broadcast("bench").await.expect("broadcast resolves")
+					};
 					let sub = bc
 						.track("data")
 						.expect("track")

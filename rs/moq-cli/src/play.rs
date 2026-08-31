@@ -167,7 +167,7 @@ pub fn run(
 	}
 }
 
-/// Wait for `broadcast` to be announced on `origin`, then subscribe to it.
+/// Wait for a route to cover `broadcast` on `origin`, then subscribe to it.
 ///
 /// The wait is the whole point. Subscribing goes through
 /// `origin::Consumer::request_broadcast`, which resolves `Unroutable` on the
@@ -176,7 +176,7 @@ pub fn run(
 /// window is already up, so this shows as a black frame rather than as a hang.
 async fn subscribe(origin: moq_net::origin::Consumer, broadcast: &str) -> anyhow::Result<moq_mux::Source> {
 	origin
-		.announced_broadcast(broadcast)
+		.routed(broadcast)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{broadcast}` was announced"))?;
 
