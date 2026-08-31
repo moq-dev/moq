@@ -28,8 +28,8 @@ default = ["aac"]
 # is a no-op elsewhere).
 capture = [
     "dep:cpal",
-    "dep:crossbeam-channel",
     "dep:kio",
+    "dep:ringbuf",
     "dep:tokio",
     "dep:tracing",
     "dep:block2",
@@ -57,8 +57,6 @@ bytes = { workspace = true }
 # `playback` features need it. Encode stays on unsafe-libopus, so a build
 # without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
-# Fixed-capacity queues keep buffer handoff lock-free on the capture callback.
-crossbeam-channel = { version = "0.5.16", optional = true }
 # The realtime SPSC channel between a caller thread and the audio callback: a
 # preallocated ring buffer that resamples the caller's rate to the device rate
 # and corrects for clock drift, so the callback never allocates or blocks. Not a
@@ -73,6 +71,8 @@ moq-net = { workspace = true }
 # We only use the sinc resampler (Async::new_sinc), so skip the default
 # fft_resampler feature and its RustFFT/realfft dependencies.
 rand = { workspace = true }
+# Fixed-capacity SPSC rings keep buffer handoff lock-free on the capture callback.
+ringbuf = { version = "0.5.1", optional = true }
 rubato = { version = "4.0", default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
 # AGC2). The reason the `aec` feature can exist at all: every other option is a

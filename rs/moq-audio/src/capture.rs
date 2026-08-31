@@ -21,6 +21,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use ringbuf::traits::Producer;
 
 use crate::Error;
 
@@ -103,7 +104,7 @@ pub(crate) struct Samples {
 
 	/// Returns the allocation to the microphone callback after every downstream
 	/// borrower is done with it. `None` for non-cpal capture sources.
-	recycle: Option<crossbeam_channel::Sender<Vec<f32>>>,
+	recycle: Option<ringbuf::HeapProd<Vec<f32>>>,
 }
 
 impl Samples {
@@ -118,7 +119,7 @@ impl Samples {
 	}
 
 	/// Samples borrowed from the microphone callback's fixed buffer pool.
-	fn pooled(data: Vec<f32>, gap: bool, recycle: crossbeam_channel::Sender<Vec<f32>>) -> Self {
+	fn pooled(data: Vec<f32>, gap: bool, recycle: ringbuf::HeapProd<Vec<f32>>) -> Self {
 		Self {
 			data,
 			gap,
@@ -134,15 +135,13 @@ impl Samples {
 	}
 
 	fn recycle(&mut self) {
-		let Some(recycle) = self.recycle.take() else {
+		let Some(mut recycle) = self.recycle.take() else {
 			return;
 		};
 
 		let mut data = std::mem::take(&mut self.data);
 		data.clear();
-		if let Err(crossbeam_channel::TrySendError::Full(_) | crossbeam_channel::TrySendError::Disconnected(_)) =
-			recycle.try_send(data)
-		{
+		if recycle.try_push(data).is_err() {
 			// This is the async consumer, so freeing a buffer here is safe.
 		}
 	}

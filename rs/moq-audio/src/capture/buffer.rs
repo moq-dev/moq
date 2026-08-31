@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver as RecycleReceiver, Sender as RecycleSender};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use ringbuf::{CachingCons, CachingProd, HeapCons, HeapProd, HeapRb};
 use tokio::sync::mpsc;
 
 use super::Samples;
@@ -16,42 +17,43 @@ const DEPTH: usize = 8;
 /// scratch allocation on the realtime thread.
 const CHUNK_FRAMES: usize = 4096;
 
+/// The relay polls so the callback never participates in a blocking wakeup.
+const RELAY_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 /// Drops are logged at most this often, so a sustained stall does not spam.
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Create a pool and its bounded filled-buffer queue.
 pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate::aec::Canceller>) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
-	let (filled, pending) = crossbeam_channel::bounded(DEPTH);
-	let (recycle, recycled) = crossbeam_channel::bounded(DEPTH);
-	let (tx, rx) = mpsc::channel(DEPTH);
+	let (filled, pending) = HeapRb::<Filled>::new(DEPTH).split();
+	let (tx, rx) = mpsc::channel(1);
 
-	// One buffer starts in the callback and the recycle queue holds the rest. The
-	// fixed total, rather than either channel's capacity, bounds the handoff.
-	for _ in 1..DEPTH {
-		recycle
-			.try_send(Vec::with_capacity(samples))
-			.expect("the recycle pool is sized to its initial buffers");
+	let mut recycle = Vec::with_capacity(DEPTH);
+	let mut free = Vec::with_capacity(DEPTH);
+	for slot in 0..DEPTH {
+		let ring = Arc::new(HeapRb::new(1));
+		let recycled = CachingCons::new(ring.clone());
+		recycle.push(RecycleSlot { ring, recycled });
+		free.push(Buffer {
+			data: Vec::with_capacity(samples),
+			slot,
+		});
 	}
 
-	// Tokio's bounded channel allocates linked blocks as it advances. Keep that
-	// work on a relay thread; the callback only touches fixed crossbeam arrays.
+	// Polling isolates Tokio's wakeup and linked-block allocations from the
+	// callback, which only produces into a fixed lock-free SPSC ring.
 	std::thread::Builder::new()
 		.name("moq-audio-capture".into())
-		.spawn(move || {
-			while let Ok(data) = pending.recv() {
-				if tx.blocking_send(data).is_err() {
-					break;
-				}
-			}
-		})
+		.spawn(move || relay(pending, tx))
 		.expect("failed to spawn audio capture handoff");
 
 	let dropped = Arc::new(AtomicU64::new(0));
 	let writer = Writer {
 		filled,
-		recycled,
-		current: Some(Vec::with_capacity(samples)),
+		recycle,
+		free,
+		pending_gap: false,
 		dropped: dropped.clone(),
 		channels,
 		#[cfg(feature = "aec")]
@@ -59,7 +61,6 @@ pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate
 	};
 	let reader = Reader {
 		rx,
-		recycle,
 		dropped,
 		unreported: 0,
 		last_report: None,
@@ -68,11 +69,49 @@ pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate
 	(writer, reader)
 }
 
+/// Move filled buffers into Tokio without waking from the callback.
+fn relay(mut pending: HeapCons<Filled>, tx: mpsc::Sender<Filled>) {
+	loop {
+		if let Some(filled) = pending.try_pop() {
+			if tx.blocking_send(filled).is_err() {
+				return;
+			}
+			continue;
+		}
+
+		if !pending.write_is_held() {
+			return;
+		}
+		std::thread::sleep(RELAY_POLL_INTERVAL);
+	}
+}
+
+/// One callback allocation and the recycle slot that owns it.
+struct Buffer {
+	data: Vec<f32>,
+	slot: usize,
+}
+
+/// One buffer submitted to the async capture pipeline.
+struct Filled {
+	data: Vec<f32>,
+	gap: bool,
+	slot: usize,
+	recycle: HeapProd<Vec<f32>>,
+}
+
+/// A dedicated SPSC return path for one pool allocation.
+struct RecycleSlot {
+	ring: Arc<HeapRb<Vec<f32>>>,
+	recycled: HeapCons<Vec<f32>>,
+}
+
 /// The callback-owned half of the pool.
 pub(super) struct Writer {
-	filled: crossbeam_channel::Sender<Vec<f32>>,
-	recycled: RecycleReceiver<Vec<f32>>,
-	current: Option<Vec<f32>>,
+	filled: HeapProd<Filled>,
+	recycle: Vec<RecycleSlot>,
+	free: Vec<Buffer>,
+	pending_gap: bool,
 	dropped: Arc<AtomicU64>,
 	channels: usize,
 	#[cfg(feature = "aec")]
@@ -106,27 +145,30 @@ impl Writer {
 				continue;
 			};
 
-			debug_assert!(output.capacity() >= input.len());
-			output.extend(input.iter().copied().map(&convert));
+			debug_assert!(output.data.capacity() >= input.len());
+			output.data.extend(input.iter().copied().map(&convert));
 
 			#[cfg(feature = "aec")]
 			if let Some(aec) = &self.aec {
-				aec.process(&mut output);
+				aec.process(&mut output.data);
 			}
 
-			match self.filled.try_send(output) {
-				Ok(()) => {}
-				Err(crossbeam_channel::TrySendError::Full(mut output)) => {
-					output.clear();
-					self.current = Some(output);
+			let recycle = CachingProd::new(self.recycle[output.slot].ring.clone());
+			let filled = Filled {
+				data: output.data,
+				gap: self.pending_gap,
+				slot: output.slot,
+				recycle,
+			};
+
+			match self.filled.try_push(filled) {
+				Ok(()) => self.pending_gap = false,
+				Err(filled) => {
+					self.restore(filled);
+					if !self.filled.read_is_held() {
+						return;
+					}
 					self.drop_one();
-				}
-				Err(crossbeam_channel::TrySendError::Disconnected(mut output)) => {
-					// Retain the allocation until the stream is dropped off the
-					// callback thread.
-					output.clear();
-					self.current = Some(output);
-					return;
 				}
 			}
 		}
@@ -137,21 +179,48 @@ impl Writer {
 	}
 
 	/// Take an empty buffer without waiting for the async reader.
-	fn take(&mut self) -> Option<Vec<f32>> {
-		let mut output = self.current.take().or_else(|| self.recycled.try_recv().ok())?;
-		output.clear();
+	fn take(&mut self) -> Option<Buffer> {
+		self.reclaim();
+		let mut output = self.free.pop()?;
+		output.data.clear();
 		Some(output)
 	}
 
-	fn drop_one(&self) {
+	/// Recover buffers whose downstream borrower has released them.
+	fn reclaim(&mut self) {
+		for (slot, recycle) in self.recycle.iter_mut().enumerate() {
+			if recycle.recycled.write_is_held() {
+				continue;
+			}
+			if let Some(mut data) = recycle.recycled.try_pop() {
+				data.clear();
+				self.free.push(Buffer { data, slot });
+			}
+		}
+	}
+
+	/// Put a failed submission directly back in the callback-owned pool.
+	fn restore(&mut self, filled: Filled) {
+		let Filled {
+			mut data,
+			slot,
+			recycle,
+			..
+		} = filled;
+		drop(recycle);
+		data.clear();
+		self.free.push(Buffer { data, slot });
+	}
+
+	fn drop_one(&mut self) {
+		self.pending_gap = true;
 		self.dropped.fetch_add(1, Ordering::Relaxed);
 	}
 }
 
 /// The async half of the pool.
 pub(super) struct Reader {
-	rx: mpsc::Receiver<Vec<f32>>,
-	recycle: RecycleSender<Vec<f32>>,
+	rx: mpsc::Receiver<Filled>,
 	dropped: Arc<AtomicU64>,
 	unreported: u64,
 	last_report: Option<Instant>,
@@ -161,16 +230,16 @@ impl Reader {
 	/// Await one filled buffer and arrange to recycle it when the samples leave
 	/// the capture pipeline.
 	pub(super) async fn recv(&mut self) -> Option<Samples> {
-		let data = self.rx.recv().await?;
-		let gap = self.observe();
-		Some(Samples::pooled(data, gap, self.recycle.clone()))
+		let filled = self.rx.recv().await?;
+		self.observe();
+		Some(Samples::pooled(filled.data, filled.gap, filled.recycle))
 	}
 
-	/// Fold callback drops into the timeline gap and a throttled log.
-	fn observe(&mut self) -> bool {
+	/// Fold callback drops into a throttled log.
+	fn observe(&mut self) {
 		let dropped = self.dropped.swap(0, Ordering::Relaxed);
 		if dropped == 0 {
-			return false;
+			return;
 		}
 		self.unreported += dropped;
 
@@ -187,8 +256,6 @@ impl Reader {
 			self.last_report = Some(now);
 			self.unreported = 0;
 		}
-
-		true
 	}
 }
 
@@ -196,6 +263,7 @@ impl Reader {
 mod tests {
 	use std::alloc::{GlobalAlloc, Layout, System};
 	use std::cell::Cell;
+	use std::sync::mpsc::sync_channel;
 
 	use super::*;
 
@@ -265,42 +333,63 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn stalled_reader_never_blocks_or_allocates_on_the_writer() {
+		let (mut writer, _reader) = create(1);
+		let input = vec![0.25f32; 480];
+		let (done, wait) = sync_channel(1);
+		let thread = std::thread::spawn(move || {
+			let activity = activity(|| {
+				for _ in 0..DEPTH * 4 {
+					writer.write_f32(&input);
+				}
+			});
+			done.send(activity).unwrap();
+		});
+
+		assert_eq!(wait.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+		thread.join().unwrap();
+	}
+
 	#[tokio::test]
 	async fn recycles_buffers_after_the_pipeline_releases_them() {
 		let (mut writer, mut reader) = create(1);
 		let input = vec![0.5; 480];
 
-		for _ in 0..DEPTH {
-			writer.write_f32(&input);
-		}
-
+		writer.write_f32(&input);
 		let released = reader.recv().await.unwrap();
 		let address = released.data.as_ptr();
-		writer.write_f32(&input);
 		drop(released);
 
-		let held = reader.recv().await.unwrap();
 		writer.write_f32(&input);
-
-		let mut reused = false;
-		for _ in 1..DEPTH {
-			let samples = reader.recv().await.unwrap();
-			reused |= samples.data.as_ptr() == address;
-		}
-		drop(held);
-		assert!(reused, "the released buffer never returned to the callback");
+		let reused = reader.recv().await.unwrap();
+		assert_eq!(reused.data.as_ptr(), address);
 	}
 
 	#[tokio::test]
-	async fn overflow_marks_the_next_buffer_as_a_gap() {
+	async fn overflow_marks_the_first_recovery_buffer_as_a_gap() {
 		let (mut writer, mut reader) = create(1);
-		let input = vec![0.5; 480];
+		let backlog = vec![0.5; 480];
 
-		for _ in 0..=DEPTH {
-			writer.write_f32(&input);
+		for _ in 0..DEPTH {
+			writer.write_f32(&backlog);
 		}
+		writer.write_f32(&[0.75; 480]);
 
-		assert!(reader.recv().await.unwrap().gap);
+		let first = reader.recv().await.unwrap();
+		assert!(!first.gap);
+		assert_eq!(first.data[0], 0.5);
+		drop(first);
+		writer.write_f32(&[1.0; 480]);
+
+		for _ in 1..DEPTH {
+			let backlog = reader.recv().await.unwrap();
+			assert!(!backlog.gap);
+			assert_eq!(backlog.data[0], 0.5);
+		}
+		let recovered = reader.recv().await.unwrap();
+		assert!(recovered.gap);
+		assert_eq!(recovered.data[0], 1.0);
 	}
 
 	#[test]
