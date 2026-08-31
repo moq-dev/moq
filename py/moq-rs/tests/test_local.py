@@ -133,6 +133,103 @@ async def test_local_publish_consume_audio():
         break
 
 
+async def test_route_updates_yields_current_changes_and_clean_end():
+    producer = moq.BroadcastProducer()
+    producer.set_route(moq.Route(hops=[1], cost=10, announce=True))
+    consumer = producer.consume()
+
+    async with consumer.route_updates() as routes:
+        assert isinstance(routes, moq.RouteWatch)
+        assert await asyncio.wait_for(anext(routes), timeout=5.0) == moq.Route(
+            hops=[1], cost=10, announce=True
+        )
+
+        for expected in (
+            moq.Route(hops=[1, 2], cost=5, announce=True),
+            moq.Route(hops=[1, 2, 3], cost=0, announce=True),
+        ):
+            pending = asyncio.create_task(anext(routes))
+            await asyncio.sleep(0)
+            producer.set_route(expected)
+            assert await asyncio.wait_for(pending, timeout=5.0) == expected
+
+        producer.finish()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(routes), timeout=5.0)
+
+
+async def test_route_watch_context_exit_cancels_future_calls():
+    producer = moq.BroadcastProducer()
+    routes = producer.consume().route_updates()
+
+    async with routes:
+        await asyncio.wait_for(anext(routes), timeout=5.0)
+
+    with pytest.raises(moq.Error) as cancelled:  # type: ignore[arg-type]
+        await asyncio.wait_for(anext(routes), timeout=5.0)
+    assert moq.is_shutdown(cancelled.value)
+    producer.finish()
+
+
+async def test_route_watch_cancel_stops_pending_and_future_calls():
+    producer = moq.BroadcastProducer()
+    routes = producer.consume().route_updates()
+    await asyncio.wait_for(anext(routes), timeout=5.0)
+
+    pending = asyncio.create_task(anext(routes))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    routes.cancel()
+
+    with pytest.raises(moq.Error) as cancelled:  # type: ignore[arg-type]
+        await asyncio.wait_for(pending, timeout=5.0)
+    assert moq.is_shutdown(cancelled.value)
+    with pytest.raises(moq.Error) as terminal:  # type: ignore[arg-type]
+        await asyncio.wait_for(anext(routes), timeout=5.0)
+    assert moq.is_shutdown(terminal.value)
+    producer.finish()
+
+
+async def test_route_watch_remains_usable_after_cancelled_or_timed_out_next():
+    producer = moq.BroadcastProducer()
+    routes = producer.consume().route_updates()
+    await asyncio.wait_for(anext(routes), timeout=5.0)
+
+    cancelled = asyncio.create_task(anext(routes))
+    await asyncio.sleep(0)
+    assert not cancelled.done()
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    after_cancel = moq.Route(hops=[10], cost=1, announce=False)
+    producer.set_route(after_cancel)
+    assert await asyncio.wait_for(anext(routes), timeout=5.0) == after_cancel
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(routes), timeout=0.01)
+
+    after_timeout = moq.Route(hops=[10, 20], cost=2, announce=False)
+    producer.set_route(after_timeout)
+    assert await asyncio.wait_for(anext(routes), timeout=5.0) == after_timeout
+    producer.finish()
+
+
+async def test_route_changed_uses_one_compatible_cursor():
+    producer = moq.BroadcastProducer()
+    consumer = producer.consume()
+
+    first = await asyncio.wait_for(consumer.route_changed(), timeout=5.0)
+    assert first is not None
+
+    expected = moq.Route(hops=[7], cost=3, announce=False)
+    producer.set_route(expected)
+    assert await asyncio.wait_for(consumer.route_changed(), timeout=5.0) == expected
+
+    producer.finish()
+    assert await asyncio.wait_for(consumer.route_changed(), timeout=5.0) is None
+
+
 async def test_video_publish_consume():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("video-test")

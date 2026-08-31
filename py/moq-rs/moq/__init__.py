@@ -43,6 +43,7 @@ from .subscribe import (
     JsonStreamConsumer,
     MediaConsumer,
     MediaGroupConsumer,
+    RouteWatch,
     TrackConsumer,
 )
 from .types import (
@@ -119,6 +120,7 @@ __all__ = [
     "OriginProducer",
     "Request",
     "Route",
+    "RouteWatch",
     "Server",
     "Session",
     "Subscription",

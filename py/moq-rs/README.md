@@ -157,10 +157,12 @@ client = moq.Client(
 ### Subscribing
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
+  - `.route_updates() → RouteWatch` (async iterator; current route, then changes)
   - `await .subscribe_catalog() → CatalogConsumer`
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
   - `await .subscribe_media(name, track, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
+- **`RouteWatch`**. Async iterator of `Route` that ends with the broadcast.
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `MediaFrame`.
 - **`TrackConsumer`**. Async iterator of raw groups, in sequence order.
@@ -174,7 +176,7 @@ client = moq.Client(
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
-All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
+All consumers and route watches (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `RouteWatch`) are async context managers; exiting `async with` cancels the subscription or watch.
 
 ### Origin (advanced)
 

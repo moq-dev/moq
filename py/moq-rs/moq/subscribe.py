@@ -17,6 +17,7 @@ from moq_ffi import (
     MoqJsonStreamConsumer,
     MoqMediaConsumer,
     MoqMediaGroupConsumer,
+    MoqRouteWatch,
     MoqTrackConsumer,
 )
 
@@ -338,6 +339,37 @@ class CatalogConsumer:
         self._inner.cancel()
 
 
+class RouteWatch:
+    """Async iterator of a broadcast's route changes.
+
+    Created by :meth:`BroadcastConsumer.route_updates`. The first item is the
+    current route, followed by each update. Iteration ends when the broadcast
+    ends. Usable as an async context manager that cancels on exit.
+    """
+
+    def __init__(self, inner: MoqRouteWatch) -> None:
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> Route:
+        route = await self._inner.next()
+        if route is None:
+            raise StopAsyncIteration
+        return route
+
+    def cancel(self) -> None:
+        """Cancel this watch and stop delivering route updates."""
+        self._inner.cancel()
+
+
 class BroadcastConsumer:
     """The consume side of one broadcast: subscribe to its tracks, catalog, and media.
 
@@ -347,7 +379,7 @@ class BroadcastConsumer:
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
-        self._route_watch = None
+        self._route_watch: RouteWatch | None = None
 
     @property
     def route(self) -> Route:
@@ -358,6 +390,14 @@ class BroadcastConsumer:
         """
         return self._inner.route()
 
+    def route_updates(self) -> RouteWatch:
+        """Watch the current route and each later update.
+
+        The returned async iterator has its own cursor. Cancel it directly or
+        use it as an async context manager to stop a pending wait.
+        """
+        return RouteWatch(self._inner.route_updates())
+
     async def route_changed(self) -> Route | None:
         """Wait for the broadcast's route to change.
 
@@ -366,8 +406,11 @@ class BroadcastConsumer:
         ``None`` once the broadcast ends.
         """
         if self._route_watch is None:
-            self._route_watch = self._inner.route_updates()
-        return await self._route_watch.next()
+            self._route_watch = self.route_updates()
+        try:
+            return await anext(self._route_watch)
+        except StopAsyncIteration:
+            return None
 
     async def subscribe_catalog(self) -> CatalogConsumer:
         """Subscribe to the broadcast's catalog, async-iterating snapshots as it changes."""

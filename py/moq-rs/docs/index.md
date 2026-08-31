@@ -76,6 +76,7 @@ asyncio.run(main())
    :nosignatures:
 
    BroadcastConsumer
+   RouteWatch
    TrackConsumer
    GroupConsumer
    MediaConsumer
