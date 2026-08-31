@@ -103,11 +103,12 @@ pub(crate) struct Samples {
 
 	/// Returns the allocation to the microphone callback after every downstream
 	/// borrower is done with it. `None` for non-cpal capture sources.
-	recycle: Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+	recycle: Option<crossbeam_channel::Sender<Vec<f32>>>,
 }
 
 impl Samples {
 	/// Samples whose allocation belongs to the ordinary async path.
+	#[cfg(any(test, target_os = "macos"))]
 	pub(crate) fn plain(data: Vec<f32>, gap: bool) -> Self {
 		Self {
 			data,
@@ -117,7 +118,7 @@ impl Samples {
 	}
 
 	/// Samples borrowed from the microphone callback's fixed buffer pool.
-	fn pooled(data: Vec<f32>, gap: bool, recycle: std::sync::mpsc::SyncSender<Vec<f32>>) -> Self {
+	fn pooled(data: Vec<f32>, gap: bool, recycle: crossbeam_channel::Sender<Vec<f32>>) -> Self {
 		Self {
 			data,
 			gap,
@@ -139,7 +140,7 @@ impl Samples {
 
 		let mut data = std::mem::take(&mut self.data);
 		data.clear();
-		if let Err(std::sync::mpsc::TrySendError::Full(_) | std::sync::mpsc::TrySendError::Disconnected(_)) =
+		if let Err(crossbeam_channel::TrySendError::Full(_) | crossbeam_channel::TrySendError::Disconnected(_)) =
 			recycle.try_send(data)
 		{
 			// This is the async consumer, so freeing a buffer here is safe.

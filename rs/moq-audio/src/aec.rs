@@ -137,6 +137,7 @@ impl Canceller {
 		let inner = Arc::new(Inner {
 			id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
 			enabled: AtomicBool::new(true),
+			discontinuous: AtomicBool::new(false),
 			config,
 			state: Arc::new(Mutex::new(State::default())),
 			shared: shared.clone(),
@@ -225,8 +226,12 @@ impl Canceller {
 	pub(crate) fn process(&self, buf: &mut [f32]) {
 		let enabled = self.enabled();
 		let Ok(mut state) = self.inner.state.try_lock() else {
+			self.inner.discontinuous.store(true, Ordering::Relaxed);
 			return;
 		};
+		if self.inner.discontinuous.swap(false, Ordering::Relaxed) {
+			state.reset();
+		}
 		state.process(buf, enabled);
 	}
 }
@@ -246,6 +251,8 @@ struct Inner {
 	/// so dropping the first doesn't take the second's tap with it.
 	id: u64,
 	enabled: AtomicBool,
+	/// Whether a callback passed through while the reference was changing.
+	discontinuous: AtomicBool,
 	config: Config,
 	/// Behind its own `Arc` so the playback driver can reach it without holding
 	/// a handle on this `Inner`. Dropping such a handle from inside the driver's
@@ -704,6 +711,30 @@ mod tests {
 
 		drop(locked);
 		thread.join().unwrap();
+	}
+
+	#[test]
+	fn reference_switch_contention_discards_partial_frames() {
+		let canceller = opened(48_000, 1);
+		let frame = frame(48_000);
+
+		let mut first = vec![0.5f32; frame + 32];
+		canceller.process(&mut first);
+		assert_eq!(canceller.inner.state.lock().unwrap().pending.len(), 32);
+
+		let locked = canceller.inner.state.lock().unwrap();
+		let mut bypassed = vec![0.25f32; frame + 32];
+		canceller.process(&mut bypassed);
+		drop(locked);
+		assert!(bypassed.iter().all(|sample| *sample == 0.25));
+
+		let mut resumed = vec![0.75f32; frame - 32];
+		canceller.process(&mut resumed);
+		assert_eq!(
+			canceller.inner.state.lock().unwrap().pending.len(),
+			frame - 32,
+			"samples buffered before contention leaked across the passthrough"
+		);
 	}
 
 	/// Turning it off must drop the partial frame that was in flight, which would

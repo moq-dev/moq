@@ -28,6 +28,7 @@ default = ["aac"]
 # is a no-op elsewhere).
 capture = [
     "dep:cpal",
+    "dep:crossbeam-channel",
     "dep:kio",
     "dep:tokio",
     "dep:tracing",
@@ -56,6 +57,8 @@ bytes = { workspace = true }
 # `playback` features need it. Encode stays on unsafe-libopus, so a build
 # without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
+# Fixed-capacity queues keep buffer handoff lock-free on the capture callback.
+crossbeam-channel = { version = "0.5.16", optional = true }
 # The realtime SPSC channel between a caller thread and the audio callback: a
 # preallocated ring buffer that resamples the caller's rate to the device rate
 # and corrects for clock drift, so the callback never allocates or blocks. Not a

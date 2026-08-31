@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver as RecycleReceiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::{Receiver as RecycleReceiver, Sender as RecycleSender};
 use tokio::sync::mpsc;
 
 use super::Samples;
@@ -22,14 +22,30 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// Create a pool and its bounded filled-buffer queue.
 pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate::aec::Canceller>) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
-	let (filled, rx) = mpsc::channel(DEPTH);
-	let (recycle, recycled) = sync_channel(DEPTH);
+	let (filled, pending) = crossbeam_channel::bounded(DEPTH);
+	let (recycle, recycled) = crossbeam_channel::bounded(DEPTH);
+	let (tx, rx) = mpsc::channel(DEPTH);
 
-	for _ in 0..DEPTH {
+	// One buffer starts in the callback and the recycle queue holds the rest. The
+	// fixed total, rather than either channel's capacity, bounds the handoff.
+	for _ in 1..DEPTH {
 		recycle
 			.try_send(Vec::with_capacity(samples))
 			.expect("the recycle pool is sized to its initial buffers");
 	}
+
+	// Tokio's bounded channel allocates linked blocks as it advances. Keep that
+	// work on a relay thread; the callback only touches fixed crossbeam arrays.
+	std::thread::Builder::new()
+		.name("moq-audio-capture".into())
+		.spawn(move || {
+			while let Ok(data) = pending.recv() {
+				if tx.blocking_send(data).is_err() {
+					break;
+				}
+			}
+		})
+		.expect("failed to spawn audio capture handoff");
 
 	let dropped = Arc::new(AtomicU64::new(0));
 	let writer = Writer {
@@ -54,7 +70,7 @@ pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate
 
 /// The callback-owned half of the pool.
 pub(super) struct Writer {
-	filled: mpsc::Sender<Vec<f32>>,
+	filled: crossbeam_channel::Sender<Vec<f32>>,
 	recycled: RecycleReceiver<Vec<f32>>,
 	current: Option<Vec<f32>>,
 	dropped: Arc<AtomicU64>,
@@ -100,12 +116,12 @@ impl Writer {
 
 			match self.filled.try_send(output) {
 				Ok(()) => {}
-				Err(mpsc::error::TrySendError::Full(mut output)) => {
+				Err(crossbeam_channel::TrySendError::Full(mut output)) => {
 					output.clear();
 					self.current = Some(output);
 					self.drop_one();
 				}
-				Err(mpsc::error::TrySendError::Closed(mut output)) => {
+				Err(crossbeam_channel::TrySendError::Disconnected(mut output)) => {
 					// Retain the allocation until the stream is dropped off the
 					// callback thread.
 					output.clear();
@@ -135,7 +151,7 @@ impl Writer {
 /// The async half of the pool.
 pub(super) struct Reader {
 	rx: mpsc::Receiver<Vec<f32>>,
-	recycle: SyncSender<Vec<f32>>,
+	recycle: RecycleSender<Vec<f32>>,
 	dropped: Arc<AtomicU64>,
 	unreported: u64,
 	last_report: Option<Instant>,
@@ -239,6 +255,17 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn sustained_handoff_never_allocates_on_the_writer() {
+		let (mut writer, mut reader) = create(1);
+		let input = vec![0.25f32; 480];
+
+		for _ in 0..128 {
+			assert_eq!(activity(|| writer.write_f32(&input)), 0);
+			drop(reader.recv().await.unwrap());
+		}
+	}
+
+	#[tokio::test]
 	async fn recycles_buffers_after_the_pipeline_releases_them() {
 		let (mut writer, mut reader) = create(1);
 		let input = vec![0.5; 480];
@@ -256,7 +283,7 @@ mod tests {
 		writer.write_f32(&input);
 
 		let mut reused = false;
-		for _ in 0..DEPTH {
+		for _ in 1..DEPTH {
 			let samples = reader.recv().await.unwrap();
 			reused |= samples.data.as_ptr() == address;
 		}

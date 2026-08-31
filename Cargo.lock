@@ -4630,6 +4630,7 @@ dependencies = [
  "block2 0.6.2",
  "bytes",
  "cpal",
+ "crossbeam-channel",
  "dispatch2",
  "fixed-resample",
  "hang",
