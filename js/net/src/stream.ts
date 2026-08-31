@@ -2,6 +2,7 @@ import { fromTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
+import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -259,7 +260,7 @@ export class Reader {
 	async string(): Promise<string> {
 		const length = await this.u53();
 		const buffer = await this.read(length);
-		return new TextDecoder().decode(buffer);
+		return decodeUtf8(buffer);
 	}
 
 	async bool(): Promise<boolean> {

@@ -7,6 +7,7 @@
 
 import { type Origin, OriginSchema } from "../origin.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
 import { hasSetupStream, type Version } from "./version.ts";
@@ -249,7 +250,7 @@ export class Setup {
 		// An empty path is valid and means the same as omitting the parameter, so a
 		// client that wants the root doesn't have to special-case it.
 		const pathBytes = params.getBytes(PARAM_PATH);
-		const path = pathBytes === undefined ? undefined : new TextDecoder().decode(pathBytes);
+		const path = pathBytes === undefined ? undefined : decodeUtf8(pathBytes);
 
 		const roleCode = params.getVarint(PARAM_ROLE);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);

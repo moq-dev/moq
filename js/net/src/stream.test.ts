@@ -104,6 +104,12 @@ test("Writer string", async () => {
 	expect(str2).toBe("🎉");
 });
 
+test("Reader string rejects malformed UTF-8", async () => {
+	const reader = new Reader(undefined, new Uint8Array([2, 0xc3, 0x28]));
+
+	await expect(reader.string()).rejects.toThrow();
+});
+
 test("Reader u8", async () => {
 	const data = new Uint8Array([42, 255, 0, 128]);
 	const reader = new Reader(undefined, data);

@@ -153,3 +153,7 @@ test("empty path decodes as the root", async () => {
 	const got = await decodeParam(PARAM_PATH, new Uint8Array());
 	expect(got.path).toBe("");
 });
+
+test("SETUP rejects a path with malformed UTF-8", async () => {
+	await expect(decodeParam(PARAM_PATH, new Uint8Array([0xc3, 0x28]))).rejects.toThrow();
+});
