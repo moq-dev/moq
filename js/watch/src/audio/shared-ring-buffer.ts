@@ -5,7 +5,10 @@ const WRITE = 0;
 const READ = 1;
 const LATENCY = 2;
 const STALLED = 3;
-const CONTROL_SLOTS = 4;
+// Bumped every time `insert` re-anchors, so a replacement ring can tell whether it still
+// shares an index space with the ring it is replacing. See the `SharedRingBuffer` constructor.
+const GENERATION = 4;
+const CONTROL_SLOTS = 5;
 
 export interface SharedRingBufferInit {
 	channels: number;
@@ -107,7 +110,16 @@ export class SharedRingBuffer {
 	#position = 0;
 	#lastRead = 0;
 
-	constructor(init: SharedRingBufferInit) {
+	/**
+	 * Wrap the shared memory described by `init`.
+	 *
+	 * Pass `previous` in the worklet when this ring replaces one already being read. `resize`
+	 * snapshots READ on the main thread and then hands the replacement over by message, so the
+	 * worklet keeps draining the old ring in the meantime. Reconciling here advances past those
+	 * samples instead of replaying them, and is skipped when the rings no longer share an index
+	 * space (a re-anchor, or a different stream entirely).
+	 */
+	constructor(init: SharedRingBufferInit, previous?: SharedRingBuffer) {
 		this.channels = init.channels;
 		this.capacity = init.capacity;
 		this.rate = init.rate;
@@ -121,6 +133,72 @@ export class SharedRingBuffer {
 				new Float32Array(init.samples, i * this.capacity * Float32Array.BYTES_PER_ELEMENT, this.capacity),
 			);
 		}
+
+		if (previous !== undefined) this.#reconcile(previous);
+	}
+
+	/**
+	 * Advance past samples the reader consumed from `source` after `resize` snapshotted READ.
+	 *
+	 * Only valid while both rings share an index space, which is what the generation counter
+	 * proves. `#anchor` is main-thread state that never crosses the message boundary, so both
+	 * worklet-side wrappers read it as 0 and comparing it cannot tell a re-anchor apart. Copying
+	 * READ across a re-anchor parks the new timeline behind a playhead measured against the old
+	 * one, swallowing however much of the next utterance the previous one had played. A mismatch
+	 * skips the reconcile rather than throwing: there is nothing to carry over, and the caller is
+	 * mid-swap with no way to recover from an exception.
+	 *
+	 * This runs on the audio thread while the main thread may be re-anchoring, so the generation
+	 * cannot merely be checked once up front: single-word atomics can't read it together with
+	 * READ and WRITE. The loop below closes that in three ways, none of which blocks the audio
+	 * thread. See `#advanceRead`. All three rest on `insert` bumping the generation before it
+	 * rebases the cursors, so no reconcile can complete inside a re-anchor without noticing.
+	 */
+	#reconcile(source: SharedRingBuffer): void {
+		if (source.channels !== this.channels || source.rate !== this.rate) return;
+
+		const candidate = Atomics.load(source.#control, READ);
+
+		for (;;) {
+			const generation = Atomics.load(this.#control, GENERATION);
+			if (Atomics.load(source.#control, GENERATION) !== generation) return;
+			if (this.#advanceRead(candidate, generation)) return;
+		}
+	}
+
+	/**
+	 * One attempt at moving READ to `candidate`, valid only while GENERATION is still
+	 * `generation`. Returns false if a concurrent writer moved READ and the caller should retry.
+	 *
+	 * A re-anchor rebases READ and WRITE and bumps GENERATION, and can land anywhere in here:
+	 *
+	 * - Clamping to a freshly loaded WRITE keeps an advance from parking READ seconds beyond the
+	 *   new timeline, where `read` returns nothing and `insert` drops everything as too old. The
+	 *   clamp never binds on the normal path, since `candidate` came from the same index space.
+	 * - Exchanging from an exact observed READ, rather than advancing unconditionally, fails
+	 *   against the re-anchor's store and retries against the new generation.
+	 * - Re-reading GENERATION after a successful exchange catches the case the exchange cannot:
+	 *   a re-anchor stores READ back to 0, so an observed 0 is indistinguishable from the 0 a
+	 *   fresh ring starts on. Undoing is itself an exchange, so a writer that moved READ in the
+	 *   meantime keeps its value.
+	 *
+	 * What survives is bounded: READ at most at WRITE, which is the empty ring `truncate`
+	 * already documents, costing a quantum of silence that heals on the next insert.
+	 */
+	#advanceRead(candidate: number, generation: number): boolean {
+		const current = Atomics.load(this.#control, READ);
+		const write = Atomics.load(this.#control, WRITE);
+
+		const target = ((candidate - write) | 0) > 0 ? write : candidate;
+		if (((target - current) | 0) <= 0) return true;
+
+		if (Atomics.compareExchange(this.#control, READ, current, target) !== current) return false;
+
+		if (Atomics.load(this.#control, GENERATION) !== generation) {
+			Atomics.compareExchange(this.#control, READ, target, current);
+		}
+
+		return true;
 	}
 
 	/**
@@ -137,6 +215,13 @@ export class SharedRingBuffer {
 		// Anchor to the first sample so playback starts at its timestamp rather than gap-filling
 		// from index 0.
 		if (!this.#anchored) {
+			// Invalidate the generation before rebasing the cursors, never after. A reconcile on
+			// the audio thread that observes a stale generation and a rebased READ would commit an
+			// old-timeline cursor and escape every check it makes, since nothing it reads has
+			// changed yet. Bumping first means such a reconcile either sees the mismatch outright
+			// or catches it on the re-read after its exchange.
+			Atomics.add(this.#control, GENERATION, 1);
+
 			this.#anchor = start;
 			Atomics.store(this.#control, READ, 0);
 			Atomics.store(this.#control, WRITE, 0);
@@ -309,6 +394,7 @@ export class SharedRingBuffer {
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 		const stalled = Atomics.load(this.#control, STALLED);
+		const generation = Atomics.load(this.#control, GENERATION);
 
 		const available = (write - read) | 0;
 		const copyCount = Math.max(0, Math.min(available, dst.capacity));
@@ -327,6 +413,7 @@ export class SharedRingBuffer {
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
 		Atomics.store(dst.#control, STALLED, stalled);
+		Atomics.store(dst.#control, GENERATION, generation);
 
 		// Carry the unwrapped playhead over, rebased onto dst's READ. Fold the same `read`
 		// snapshot the copy used so both sides agree on one observation; `copyStart` is at or

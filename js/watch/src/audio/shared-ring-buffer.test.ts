@@ -52,7 +52,7 @@ describe("initialization", () => {
 		expect(init.capacity).toBe(128);
 		expect(init.rate).toBe(1000);
 		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
-		expect(init.control.byteLength).toBe(4 * 4); // 4 control slots * Int32
+		expect(init.control.byteLength).toBe(5 * 4); // 5 control slots * Int32
 	});
 
 	it("rounds capacity up to a power of two", () => {
@@ -618,6 +618,112 @@ describe("i32 wrapping", () => {
 });
 
 describe("SharedRingBuffer.resize", () => {
+	it("does not replay samples consumed while the replacement message is in flight", () => {
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 0, 64, { channels: 1, value: 1 });
+
+		// resize() snapshots READ=0, but the worklet keeps using src until the replacement
+		// message arrives and consumes another 16 samples in that window.
+		const dst = src.resize(256);
+		read(src, 16, 1);
+
+		// The worklet's view: both wrappers are built from the message, so neither knows the anchor.
+		const replacement = new SharedRingBuffer(dst.init, new SharedRingBuffer(src.init));
+
+		expect(replacement.length).toBe(48);
+		expect(Time.Milli.fromMicro(dst.timestamp)).toBe(16 as Time.Milli);
+		expect(read(replacement, 64, 1)[0].length).toBe(48);
+	});
+
+	it("does not carry the playhead across a re-anchor in flight", () => {
+		// A discontinuity can reset() and re-anchor the replacement while its message is still
+		// queued. The old READ is measured against the old anchor, so folding it into the new
+		// timeline would park the playhead ahead of WRITE and swallow the whole next utterance.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 10_000, 64, { channels: 1, value: 1 });
+		const worklet = new SharedRingBuffer(src.init);
+		read(worklet, 64, 1);
+
+		const dst = src.resize(256);
+		dst.setLatency(64);
+		dst.reset();
+		insert(dst, 30_000, 64, { channels: 1, value: 2 });
+
+		const replacement = new SharedRingBuffer(dst.init, worklet);
+
+		expect(replacement.length).toBe(64);
+		expect(read(replacement, 64, 1)[0]).toEqual(new Float32Array(64).fill(2));
+	});
+
+	it("never advances the replacement past its own WRITE", () => {
+		// A re-anchor racing the reconcile rebases the replacement under it. The advance is
+		// clamped so the worst case is an empty ring, not a playhead parked seconds ahead of
+		// WRITE where read() returns nothing and insert() drops everything as too old.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 10_000, 64, { channels: 1, value: 1 });
+		const worklet = new SharedRingBuffer(src.init);
+		read(worklet, 64, 1);
+
+		const dst = src.resize(256);
+		dst.setLatency(16);
+		dst.reset();
+		insert(dst, 30_000, 16, { channels: 1, value: 2 });
+
+		// Force the generations to match, standing in for a re-anchor that lands after the
+		// check but before the exchange.
+		const control = new Int32Array(dst.init.control);
+		Atomics.store(control, 4, Atomics.load(new Int32Array(src.init.control), 4));
+
+		const replacement = new SharedRingBuffer(dst.init, worklet);
+
+		expect(replacement.length).toBe(0);
+		expect(dst.length).toBeGreaterThanOrEqual(0);
+
+		// The ring heals: the next insert lands at the playhead rather than being dropped.
+		insert(dst, 30_016, 16, { channels: 1, value: 3 });
+		expect(dst.length).toBeGreaterThan(0);
+	});
+
+	// The reconcile runs on the audio thread while the main thread may be part-way through a
+	// re-anchor. Replays `insert`'s re-anchor as its individual atomic stores and drops the
+	// reconcile between each pair, which is the interleaving no single-threaded test would
+	// otherwise reach. Every pause point has to leave the new utterance playable.
+	for (let pause = 0; pause <= 3; pause++) {
+		it(`survives a reconcile landing at step ${pause} of a re-anchor`, () => {
+			const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+			insert(src, 10_000, 64, { channels: 1, value: 1 });
+			const worklet = new SharedRingBuffer(src.init);
+			read(worklet, 64, 1);
+
+			const dst = src.resize(256);
+			dst.setLatency(64);
+
+			// `insert`'s re-anchor, store by store, in source order.
+			const control = new Int32Array(dst.init.control);
+			const steps = [
+				() => Atomics.add(control, 4, 1), // GENERATION, bumped first
+				() => Atomics.store(control, 1, 0), // READ
+				() => Atomics.store(control, 0, 0), // WRITE
+			];
+
+			for (let i = 0; i < pause; i++) steps[i]();
+			const replacement = new SharedRingBuffer(dst.init, worklet);
+			for (let i = pause; i < steps.length; i++) steps[i]();
+
+			// The new utterance arrives on the rebased timeline and must be readable in full.
+			const samples = new Float32Array(64).fill(2);
+			for (let i = 0; i < 64; i++) control[0] = 0; // WRITE stays at the new origin
+			Atomics.store(control, 0, 0);
+			Atomics.store(control, 3, 0); // un-stall
+			const dstSamples = new Float32Array(dst.init.samples, 0, 256);
+			for (let i = 0; i < 64; i++) dstSamples[i] = 2;
+			Atomics.store(control, 0, 64);
+
+			expect(Atomics.load(control, 1)).toBeLessThanOrEqual(Atomics.load(control, 0));
+			expect(read(replacement, 64, 1)[0]).toEqual(samples);
+		});
+	}
+
 	it("preserves the unread window when growing capacity", () => {
 		const src = create({ rate: 1000, channels: 2, capacity: 64, latency: 30 });
 		insert(src, 0, 30, { value: 3.5 });
