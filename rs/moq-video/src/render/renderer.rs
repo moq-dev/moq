@@ -527,6 +527,85 @@ mod tests {
 		assert!(!dma_buf_import_timed_out(&other));
 	}
 
+	/// Capture packed PipeWire DMA-BUFs, import them through Vulkan, and turn
+	/// over enough frames to exercise the producer lease and completion worker.
+	/// Ignored because it needs a Linux desktop, PipeWire, a Vulkan GPU, and a
+	/// human selecting a screen in the portal picker. Run with
+	/// `cargo test -p moq-video --no-default-features --features pipewire,render packed_dmabuf_renders_through_vulkan -- --ignored`.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	#[tokio::test]
+	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
+	async fn packed_dmabuf_renders_through_vulkan() {
+		let instance = wgpu::Instance::default();
+		let adapter = instance
+			.request_adapter(&wgpu::RequestAdapterOptions::default())
+			.await
+			.expect("a GPU adapter");
+		assert_eq!(
+			adapter.get_info().backend,
+			wgpu::Backend::Vulkan,
+			"DMA-BUF import needs Vulkan"
+		);
+
+		let external_memory = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+		assert!(
+			adapter.features().contains(external_memory),
+			"Vulkan adapter does not support DMA-BUF external memory"
+		);
+		let (device, queue) = adapter
+			.request_device(&wgpu::DeviceDescriptor {
+				required_features: external_memory,
+				..Default::default()
+			})
+			.await
+			.expect("a DMA-BUF-capable GPU device");
+		let mut renderer = Renderer::new(&device, &queue, Config::new()).expect("a renderer");
+
+		let capture = crate::capture::Config {
+			source: crate::capture::Source::Display(None),
+			..Default::default()
+		};
+		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");
+
+		for index in 0..16 {
+			let surface = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
+				.await
+				.unwrap_or_else(|_| panic!("timed out waiting for frame {index}"))
+				.unwrap_or_else(|| panic!("capture ended before frame {index}"));
+			let Surface::DmaBuf(buffer) = &surface else {
+				panic!("frame {index} used shared memory instead of DMA-BUF");
+			};
+			assert!(
+				matches!(
+					buffer.format(),
+					crate::DrmFormat::XRGB8888
+						| crate::DrmFormat::ARGB8888
+						| crate::DrmFormat::XBGR8888
+						| crate::DrmFormat::ABGR8888
+				),
+				"frame {index} negotiated unsupported DMA-BUF format {:#x}",
+				buffer.format().as_raw()
+			);
+
+			let frame = Frame::new(surface, Timestamp::ZERO);
+			let imported = renderer
+				.source
+				.import(&device, &frame.surface)
+				.expect("Vulkan DMA-BUF import")
+				.expect("a DMA-BUF import path");
+			assert_eq!(imported.layout, Layout::Rgba);
+			drop(imported);
+
+			let texture = renderer.render(&frame).expect("a zero-copy rendered frame");
+			assert_eq!((texture.width(), texture.height()), (stream.width(), stream.height()));
+		}
+
+		drop(renderer);
+		device
+			.poll(wgpu::PollType::wait_indefinitely())
+			.expect("all imported frame reads completed");
+	}
+
 	/// Every test here draws on a real GPU, which a headless CI runner does not
 	/// have (wgpu finds no adapter and `Renderer::new` never gets built). The
 	/// color math itself is covered by [`super::super::color`]'s tests, which
