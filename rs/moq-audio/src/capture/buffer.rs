@@ -214,6 +214,10 @@ impl Writer {
 
 	fn drop_one(&mut self) {
 		self.pending_gap = true;
+		#[cfg(feature = "aec")]
+		if let Some(aec) = &self.aec {
+			aec.mark_discontinuous();
+		}
 		self.dropped.fetch_add(1, Ordering::Relaxed);
 	}
 }
@@ -310,6 +314,17 @@ mod tests {
 		)
 	}
 
+	#[cfg(feature = "aec")]
+	fn create_with_aec(channels: usize) -> (Writer, Reader, crate::aec::Canceller) {
+		let aec = crate::aec::Canceller::new(
+			Arc::new(crate::playback::Shared::default()),
+			crate::aec::Config::default(),
+		);
+		aec.open(48_000, channels as u32).unwrap();
+		let (writer, reader) = channel(channels, Some(aec.clone()));
+		(writer, reader, aec)
+	}
+
 	#[test]
 	fn every_sample_format_uses_the_preallocated_pool() {
 		let (mut writer, _reader) = create(2);
@@ -390,6 +405,28 @@ mod tests {
 		let recovered = reader.recv().await.unwrap();
 		assert!(recovered.gap);
 		assert_eq!(recovered.data[0], 1.0);
+	}
+
+	#[cfg(feature = "aec")]
+	#[tokio::test]
+	async fn overflow_discards_partial_aec_frames() {
+		let (mut writer, mut reader, aec) = create_with_aec(1);
+
+		writer.write_f32(&[0.5; 512]);
+		for _ in 1..DEPTH {
+			writer.write_f32(&[0.5; 480]);
+		}
+		assert_eq!(aec.pending_samples(), 32);
+
+		writer.write_f32(&[0.75; 512]);
+		drop(reader.recv().await.unwrap());
+		writer.write_f32(&[1.0; 448]);
+
+		assert_eq!(
+			aec.pending_samples(),
+			448,
+			"samples buffered before overflow leaked into the recovery callback"
+		);
 	}
 
 	#[test]

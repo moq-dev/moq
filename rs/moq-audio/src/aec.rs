@@ -226,13 +226,24 @@ impl Canceller {
 	pub(crate) fn process(&self, buf: &mut [f32]) {
 		let enabled = self.enabled();
 		let Ok(mut state) = self.inner.state.try_lock() else {
-			self.inner.discontinuous.store(true, Ordering::Relaxed);
+			self.mark_discontinuous();
 			return;
 		};
 		if self.inner.discontinuous.swap(false, Ordering::Relaxed) {
 			state.reset();
 		}
 		state.process(buf, enabled);
+	}
+
+	/// Discard partial frames before processing the next capture buffer.
+	pub(crate) fn mark_discontinuous(&self) {
+		self.inner.discontinuous.store(true, Ordering::Relaxed);
+	}
+
+	/// Number of microphone samples waiting for a complete AEC frame.
+	#[cfg(test)]
+	pub(crate) fn pending_samples(&self) -> usize {
+		self.inner.state.lock().unwrap().pending.len()
 	}
 }
 
@@ -251,7 +262,7 @@ struct Inner {
 	/// so dropping the first doesn't take the second's tap with it.
 	id: u64,
 	enabled: AtomicBool,
-	/// Whether a callback passed through while the reference was changing.
+	/// Whether capture continuity broke since the last processed callback.
 	discontinuous: AtomicBool,
 	config: Config,
 	/// Behind its own `Arc` so the playback driver can reach it without holding
