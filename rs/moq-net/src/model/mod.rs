@@ -32,21 +32,25 @@ pub use bytes::*;
 pub use datagram::*;
 pub use time::*;
 
-/// Publishing and consuming the set of broadcasts routed through an origin.
+/// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting, Run};
+	pub use super::origin_impl::{
+		Announcement, Consumer, Cost, DRAIN_COST, Driver, Dynamic, Info, MAX_COST, Producer, Request, Requesting,
+		Route, Run,
+	};
 }
 
-/// Subscribing to broadcast (un)announcements from an origin.
+/// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{
-		AnnounceConsumer as Consumer, AnnounceProducer as Producer, OriginAnnounce as Update,
-	};
+	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceProducer as Producer, AnnounceUpdate as Update};
 }
 
 // Origin identity and the `Consume` conversion trait aren't part of a role
 // module; keep them flat at the crate root.
 pub use origin_impl::{Consume, InvalidHop, InvalidOrigin, Origin, OriginList};
+
+// The per-route request queue handed to sessions by `origin::Producer::announce_served`.
+pub(crate) use origin_impl::RouteServer;
 
 #[cfg(test)]
 pub(crate) use origin_impl::ProduceTest;

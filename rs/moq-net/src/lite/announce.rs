@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Origin, OriginList, Path, broadcast::Cost, coding::*};
+use crate::{Origin, OriginList, Path, origin::Cost, coding::*};
 
 use super::{Message, Version};
 
@@ -572,7 +572,7 @@ mod tests {
 	#[test]
 	fn charged_cost_stays_encodable() {
 		let mut buf = Vec::new();
-		Cost::new(crate::broadcast::MAX_COST)
+		Cost::new(crate::origin::MAX_COST)
 			.charged(1)
 			.encode(&mut buf, Version::Lite06Wip)
 			.expect("a charged cost must stay encodable");

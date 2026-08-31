@@ -318,9 +318,10 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Origin::random());
-		let mut broadcast = pub_origin
-			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("create broadcast");
+		let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+		let _announce = pub_origin
+			.announce(moq_net::origin::Route::new("test"))
+			.expect("announce");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		// A second track with content ready, so the gated subscribe below would
 		// deliver immediately if it reached the wire.
@@ -340,11 +341,9 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let MockPair { client, server } = connect_mock(opts).await;
 
 		// Subscribe BEFORE the GOAWAY and receive a first group.
-		let bc = sub_origin
-			.consume()
-			.announced_broadcast("test")
-			.await
-			.expect("broadcast announced");
+		let sub = sub_origin.consume();
+		sub.routed("test").await.expect("route announced");
+		let bc = sub.request_broadcast("test").await.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -418,9 +417,10 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 async fn goaway_drains_routes(version: Version) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Origin::random());
-		let _broadcast = pub_origin
-			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("create broadcast");
+		let _broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+		let _announce = pub_origin
+			.announce(moq_net::origin::Route::new("test"))
+			.expect("announce");
 
 		let sub_origin = produce_origin(Origin::random());
 
@@ -429,14 +429,11 @@ async fn goaway_drains_routes(version: Version) {
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server } = connect_mock(opts).await;
 
-		let mut announced = sub_origin
-			.consume()
-			.announced_broadcast("test")
-			.await
-			.expect("broadcast announced");
+		let sub = sub_origin.consume();
+		let route = sub.routed("test").await.expect("route announced");
 		assert_ne!(
-			announced.route().cost,
-			moq_net::broadcast::Cost::DRAIN,
+			route.cost,
+			moq_net::origin::Cost::DRAIN,
 			"a healthy route must not start out draining"
 		);
 
@@ -444,11 +441,15 @@ async fn goaway_drains_routes(version: Version) {
 		client.draining().recv().await.expect("goaway");
 
 		// Nothing else is sent on the announce stream, so this only resolves if the
-		// subscriber acted on the GOAWAY rather than on another message.
+		// subscriber acted on the GOAWAY rather than on another message. The drain
+		// re-prices the route in place, which arrives as another active update.
+		let mut announced = sub.announced();
 		loop {
-			let route = announced.route_changed().await.expect("route");
-			if route.cost == moq_net::broadcast::Cost::DRAIN {
-				assert!(route.announce, "a draining route stays announced");
+			let update = announced.next().await.expect("update");
+			if update.active
+				&& update.route.prefix.as_str() == "test"
+				&& update.route.cost == moq_net::origin::Cost::DRAIN
+			{
 				break;
 			}
 		}

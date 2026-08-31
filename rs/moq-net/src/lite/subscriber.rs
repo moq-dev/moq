@@ -243,9 +243,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// The route cost off the wire, i.e. as the peer advertised it.
 		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
 		// routing input as before.
-		cost: crate::broadcast::Cost,
-		// This link's price, added to the wire cost; the pre-charge value is kept
-		// on the route so the origin's handover gate can tell a warm peer apart.
+		cost: crate::origin::Cost,
+		// This link's price, added to the wire cost.
 		link_cost: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
@@ -317,51 +316,41 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				.expect("an empty hop chain always has room for one entry, and repeats nothing");
 		}
 
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "announce");
 
-		// The first hop of the reconstructed chain identifies the original
-		// publisher; a later restart advertising a different first hop is a new
-		// broadcast, not an alternate route to this one.
-		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-
-		// Create this session's source feeding the origin-owned broadcast at the
-		// path. The first source creates and announces the broadcast; later sources
-		// (other sessions announcing the same path) join it silently as standbys.
-		// An error means the path is outside our scope, so don't serve it.
-		// Reflections are already filtered above.
-		let route = self.announced_route(hops, cost, link_cost);
-		let Ok(source) = self.origin.create_broadcast(&path, route) else {
+		// Announce this session's route into the origin: paths under the prefix
+		// resolve through this session on demand. An error means the prefix is
+		// disjoint from our scope, so don't serve it. Reflections are already
+		// filtered above.
+		let route = self.announced_route(path.clone(), hops, cost, link_cost);
+		let Ok((announcement, server)) = self.origin.announce_served(route.clone()) else {
 			return Ok(false);
 		};
 
-		// Serve the origin's track requests for this source in the background; the
-		// announce loop keeps the producer so an unannounce can finish it.
-		let _ = self.sources.try_push((path.clone(), source.dynamic()));
-		announced.attach(path, AnnouncedRoute::new(source, publisher));
+		announced.attach(path, AnnouncedRoute::new(route, announcement, server));
 
 		Ok(true)
 	}
 
-	/// The route to attach to a broadcast this peer announced, charging our link's
-	/// price on top of the cost it advertised.
+	/// The route to announce for a prefix this peer advertised, charging our
+	/// link's price on top of the cost it advertised.
 	///
 	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
 	/// including a restart of one already attached: a connection on its way out must
 	/// not win selection, however good the path it advertises looks.
 	fn announced_route(
 		&self,
+		prefix: PathOwned,
 		hops: crate::OriginList,
-		cost: crate::broadcast::Cost,
+		cost: crate::origin::Cost,
 		link_cost: u64,
-	) -> crate::broadcast::Route {
-		let mut route = crate::broadcast::Route::new()
+	) -> crate::origin::Route {
+		let mut route = crate::origin::Route::new(prefix)
 			.with_hops(hops)
-			.with_cost(cost.charged(link_cost))
-			.with_announce(true);
-		route.advertised = cost;
+			.with_cost(cost.charged(link_cost));
 
 		if self.going_away.is_set() {
-			route.cost = crate::broadcast::Cost::DRAIN;
+			route.cost = crate::origin::Cost::DRAIN;
 		}
 
 		route
@@ -386,7 +375,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		path: PathOwned,
 		mut hops: crate::OriginList,
 		// The route cost off the wire and this link's price. See `start_announce`.
-		cost: crate::broadcast::Cost,
+		cost: crate::origin::Cost,
 		link_cost: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
@@ -410,35 +399,21 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
-		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let metadata = self.announced_route(hops, cost, link_cost);
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
+		let metadata = self.announced_route(path.clone(), hops, cost, link_cost);
 
-		match announced.attached(&path) {
-			Some(entry) if entry.publisher != publisher || publisher == crate::Origin::UNKNOWN => {
-				// A different original publisher, or no identity at all (UNKNOWN
-				// never proves continuity): a brand-new broadcast may have replaced
-				// the old one at this path. Detach gracefully (downstream unannounces
-				// if this was the last source) and attach fresh below; cached
-				// TRACK_INFO and subscriptions must not carry over.
-				announced.declined(path.clone());
-			}
-			Some(entry) => {
-				// Same publisher, new path: update the source's route in place.
-				// In-flight tracks keep flowing; the origin only hands over if the
-				// winning source changed.
-				entry.set_route(metadata);
-				return Ok(true);
-			}
-			None => {}
+		// A restart is a metadata update: the route keeps its prefix (and its
+		// served paths) and re-prices in place. In-flight tracks keep flowing.
+		if let Some(entry) = announced.attached(&path) {
+			entry.update(metadata);
+			return Ok(true);
 		}
 
-		let Ok(source) = self.origin.create_broadcast(&path, metadata) else {
+		let Ok((announcement, server)) = self.origin.announce_served(metadata.clone()) else {
 			announced.declined(path);
 			return Ok(false);
 		};
-		let _ = self.sources.try_push((path.clone(), source.dynamic()));
-		announced.attach(path, AnnouncedRoute::new(source, publisher));
+		announced.attach(path, AnnouncedRoute::new(metadata, announcement, server));
 
 		Ok(true)
 	}
@@ -1228,7 +1203,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						self.subscriber.start_announce(
 							path.clone(),
 							crate::OriginList::new(),
-							crate::broadcast::Cost::UNKNOWN,
+							crate::origin::Cost::UNKNOWN,
 							0,
 							run.responder_origin,
 							&mut run.announced,
@@ -1241,6 +1216,15 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					self.state = PrefixState::Run { stream, run };
 				}
 				PrefixState::Run { stream, run } => {
+					// A draining peer usually stops announcing, so react to the
+					// GOAWAY itself; waiting for another message would leave the
+					// route primary until the session finally closed. Idempotent,
+					// since the signal stays set.
+					if self.subscriber.going_away.poll(waiter).is_ready() {
+						run.announced.drain();
+					}
+					// Materialize requested paths under the attached routes.
+					run.announced.poll_serve(&self.subscriber, waiter);
 					loop {
 						let Some(announce) =
 							ready!(stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx))?
@@ -1296,13 +1280,6 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 			if self.closed.poll_closed(&mut cx).is_ready() {
 				// Session gone.
 				return Poll::Ready(());
-			}
-			// A draining peer usually stops announcing, so react to the signal
-			// itself; waiting for another message would leave the route primary
-			// until the session finally closed. Idempotent, since the signal
-			// stays set and this task wakes for other reasons too.
-			if self.subscriber.going_away.poll(waiter).is_ready() {
-				self.dynamic.drain();
 			}
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
@@ -1868,7 +1845,7 @@ mod tests {
 				.start_announce(
 					path.clone(),
 					crate::OriginList::new(),
-					crate::broadcast::Cost::default(),
+					crate::origin::Cost::default(),
 					0,
 					Some(assigned),
 					&mut announced,
@@ -1884,7 +1861,7 @@ mod tests {
 				subscriber.start_announce(
 					path,
 					reflected,
-					crate::broadcast::Cost::default(),
+					crate::origin::Cost::default(),
 					0,
 					Some(assigned),
 					&mut announced,
@@ -1929,7 +1906,7 @@ mod tests {
 				.start_announce(
 					path.clone(),
 					hops,
-					crate::broadcast::Cost::default(),
+					crate::origin::Cost::default(),
 					0,
 					None,
 					&mut announced
@@ -1943,7 +1920,7 @@ mod tests {
 		fresh.push(crate::Origin::new(7).unwrap()).unwrap();
 		assert!(
 			matches!(
-				subscriber.start_announce(path, fresh, crate::broadcast::Cost::default(), 0, None, &mut announced),
+				subscriber.start_announce(path, fresh, crate::origin::Cost::default(), 0, None, &mut announced),
 				Err(Error::ProtocolViolation)
 			),
 			"a declined announce still holds its path, so a second start for it is a violation",
@@ -1976,7 +1953,7 @@ mod tests {
 				.start_announce(
 					path.clone(),
 					reflected,
-					crate::broadcast::Cost::default(),
+					crate::origin::Cost::default(),
 					0,
 					Some(assigned),
 					&mut announced,
@@ -1992,7 +1969,7 @@ mod tests {
 			.start_announce(
 				path,
 				hops,
-				crate::broadcast::Cost::default(),
+				crate::origin::Cost::default(),
 				0,
 				Some(assigned),
 				&mut announced,
@@ -2032,7 +2009,7 @@ mod tests {
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				hops,
-				crate::broadcast::Cost::default(),
+				crate::origin::Cost::default(),
 				0,
 				Some(assigned),
 				&mut announced,
@@ -2072,7 +2049,7 @@ mod tests {
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::OriginList::new(),
-				crate::broadcast::Cost::UNKNOWN,
+				crate::origin::Cost::UNKNOWN,
 				0,
 				None,
 				&mut announced,
@@ -2080,11 +2057,10 @@ mod tests {
 			.unwrap();
 		assert!(accepted);
 
-		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		// The route is announced synchronously.
+		let mut cursor = consumer.announced();
+		let route = cursor.assert_next_active("room/host");
+		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![assigned]);
 	}
 
@@ -2101,16 +2077,16 @@ mod tests {
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::OriginList::new(),
-				crate::broadcast::Cost::UNKNOWN,
+				crate::origin::Cost::UNKNOWN,
 				0,
 				None,
 				&mut announced,
 			)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		let mut cursor = consumer.announced();
+		let route = cursor.assert_next_active("room/host");
+		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Origin::UNKNOWN]);
 	}
 
@@ -2130,12 +2106,10 @@ mod tests {
 		(subscriber, consumer)
 	}
 
-	/// An UNKNOWN (0) first hop identifies nothing, so a restart advertising
-	/// UNKNOWN again may be a different publisher entirely: the old broadcast must
-	/// be replaced, not updated in place. Regression: plain `==` on the publisher
-	/// id treated 0 == 0 as content-continuous and spliced unrelated broadcasts.
+	/// A restart re-prices the announced route in place: consumers observe another
+	/// active update with the new metadata rather than a retract-and-announce.
 	#[tokio::test]
-	async fn unknown_publisher_restart_replaces() {
+	async fn restart_updates_the_route_in_place() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 
 		let mut announced = Announced::default();
@@ -2144,83 +2118,40 @@ mod tests {
 			.start_announce(
 				path.clone(),
 				crate::OriginList::new(),
-				crate::broadcast::Cost::UNKNOWN,
+				crate::origin::Cost::UNKNOWN,
 				0,
-				Some(crate::Origin::UNKNOWN),
+				Some(crate::Origin::new(7).unwrap()),
 				&mut announced,
 			)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		let before = consumer.get_broadcast("room/host").unwrap();
+
+		let mut cursor = consumer.announced();
+		cursor.assert_next_active("room/host");
 
 		subscriber
 			.restart_announce(
 				path,
 				crate::OriginList::new(),
-				crate::broadcast::Cost::UNKNOWN,
+				crate::origin::Cost::new(5),
 				0,
-				Some(crate::Origin::UNKNOWN),
+				Some(crate::Origin::new(7).unwrap()),
 				&mut announced,
 			)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		assert!(before.is_closed(), "an UNKNOWN restart must replace the broadcast");
-		assert!(
-			consumer.get_broadcast("room/host").is_some(),
-			"the fresh source re-attaches"
-		);
+		let route = cursor.assert_next_active("room/host");
+		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
 	}
 
-	/// The counterpart: a real (non-zero) publisher id restarting is a route
-	/// change for the same content, so the broadcast survives in place.
-	#[tokio::test]
-	async fn known_publisher_restart_updates_in_place() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
-		let publisher = crate::Origin::new(7).unwrap();
-
-		let mut announced = Announced::default();
-		let path = Path::new("room/host").to_owned();
-		subscriber
-			.start_announce(
-				path.clone(),
-				crate::OriginList::new(),
-				crate::broadcast::Cost::UNKNOWN,
-				0,
-				Some(publisher),
-				&mut announced,
-			)
-			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		let before = consumer.get_broadcast("room/host").unwrap();
-
-		subscriber
-			.restart_announce(
-				path,
-				crate::OriginList::new(),
-				crate::broadcast::Cost::new(5),
-				0,
-				Some(publisher),
-				&mut announced,
-			)
-			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		assert!(
-			!before.is_closed(),
-			"a known publisher restart keeps the broadcast live"
-		);
-	}
-
-	/// An announce stream that dies without an explicit `ended` closes the broadcast
+	/// An announce stream that dies without an explicit `ended` retracts the route
 	/// as promptly as an explicit retraction: a route into a dead session must not
-	/// stay announced, so viewers observe the loss instead of a stale route.
+	/// stay announced.
 	///
-	/// This falls out of `Announced` being a local whose route guards drop,
+	/// This falls out of `Announced` being a local whose announcements drop,
 	/// which is exactly what makes it worth pinning: a refactor that hoisted the map
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[tokio::test(start_paused = true)]
-	async fn a_lost_announce_stream_closes_the_broadcast() {
+	async fn a_lost_announce_stream_retracts_the_route() {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
@@ -2241,45 +2172,37 @@ mod tests {
 			.start_announce(
 				path.clone(),
 				hops,
-				crate::broadcast::Cost::default(),
+				crate::origin::Cost::default(),
 				1,
 				None,
 				&mut announced,
 			)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_some());
+		let mut cursor = consumer.announced();
+		cursor.assert_next_active("room/host");
 
 		// The stream ends without retracting anything: the map dies with it and the
-		// broadcast closes.
+		// route retracts.
 		drop(announced);
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(
-			consumer.get_broadcast("room/host").is_none(),
-			"an abnormal stream loss must close the broadcast",
-		);
+		cursor.assert_next_ended("room/host");
 
-		// An explicit retraction closes it the same way.
+		// An explicit retraction retracts it the same way.
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
 				path.clone(),
 				hops,
-				crate::broadcast::Cost::default(),
+				crate::origin::Cost::default(),
 				1,
 				None,
 				&mut announced,
 			)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
+		cursor.assert_next_active("room/host");
 		assert!(announced.contains(&path), "the announce was not recorded");
 		announced.retire(&path);
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(
-			consumer.get_broadcast("room/host").is_none(),
-			"an explicit retraction must close the broadcast",
-		);
+		cursor.assert_next_ended("room/host");
 	}
 }
 
@@ -2393,34 +2316,91 @@ impl Announced {
 			route.finish();
 		}
 	}
-}
 
-/// The source created for one received announce, remembering the publisher
-/// identity (the first hop of the reconstructed chain) so a restart can tell an
-/// alternate route to the same broadcast from a brand-new broadcast.
-struct AnnouncedRoute {
-	source: crate::model::broadcast::SourceGuard,
-	publisher: crate::Origin,
-}
-
-impl AnnouncedRoute {
-	fn new(source: crate::broadcast::Producer, publisher: crate::Origin) -> Self {
-		Self {
-			source: crate::model::broadcast::SourceGuard::new(source),
-			publisher,
+	/// Serve queued requests on every attached route: mint a source per requested
+	/// path, hand its dynamic to the driver's serve machines, and answer the
+	/// requester with its consumer.
+	fn poll_serve<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, waiter: &kio::Waiter) {
+		let root = subscriber.origin.root().to_owned();
+		for entry in self.0.values_mut().flatten() {
+			while let Poll::Ready(Ok(request)) = entry.server.poll_requested_broadcast(waiter) {
+				// The request path is absolute; the wire (and our origin handle)
+				// speak paths relative to the session's root.
+				let Some(path) = request.path().strip_prefix(&root) else {
+					// Outside our root: nothing we could name on the wire.
+					continue;
+				};
+				let path = path.to_owned();
+				let source = subscriber.origin.create_source(&path);
+				let _ = subscriber.sources.try_push((path.clone(), source.dynamic()));
+				request.accept(&source);
+				entry
+					.sources
+					.insert(path, crate::model::broadcast::SourceGuard::new(source));
+			}
 		}
 	}
 
-	/// The peer deliberately retracted the path: finish the source so the origin
-	/// detaches it immediately (unannouncing downstream if it was the last).
-	fn finish(self) {
-		self.source.finish();
+	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
+	fn drain(&mut self) {
+		for entry in self.0.values_mut().flatten() {
+			entry.drain();
+		}
+	}
+}
+
+/// One received announce: the route announced into the origin, its request
+/// queue, and the sources minted to serve requested paths beneath it.
+struct AnnouncedRoute {
+	/// The route as last announced (post-charge), so a drain can re-price it
+	/// without recomputing the chain.
+	route: crate::origin::Route,
+	announcement: origin::Announcement,
+	server: crate::model::RouteServer,
+	/// One minted source per requested path, finished on a clean retraction and
+	/// aborted (via drop) when the session dies.
+	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+	/// Whether the GOAWAY drain already re-priced this route.
+	drained: bool,
+}
+
+impl AnnouncedRoute {
+	fn new(route: crate::origin::Route, announcement: origin::Announcement, server: crate::model::RouteServer) -> Self {
+		Self {
+			route,
+			announcement,
+			server,
+			sources: HashMap::new(),
+			drained: false,
+		}
 	}
 
-	/// Update the source's advertised route in place (a restart on the same
-	/// publisher).
-	fn set_route(&mut self, route: crate::broadcast::Route) {
-		self.source.set_route(route);
+	/// The peer deliberately retracted the route: finish the minted sources so
+	/// their consumers observe a clean end, and retract the announcement.
+	fn finish(self) {
+		for (_, source) in self.sources {
+			source.finish();
+		}
+	}
+
+	/// Update the announced route in place (a restart).
+	fn update(&mut self, route: crate::origin::Route) {
+		self.route = route.clone();
+		self.drained = false;
+		let _ = self.announcement.update(route);
+	}
+
+	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
+	/// GOAWAY): every other candidate outranks it while it stays selectable as
+	/// the last path. Idempotent, since the signal stays set.
+	fn drain(&mut self) {
+		if self.drained {
+			return;
+		}
+		self.drained = true;
+		let mut route = self.route.clone();
+		route.cost = crate::origin::Cost::DRAIN;
+		let _ = self.announcement.update(route);
 	}
 }
 

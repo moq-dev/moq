@@ -182,52 +182,26 @@ enum Detach {
 }
 
 struct BroadcastState {
-	// The source feeding this broadcast into our origin: finish() on a
-	// deliberate unannounce, dropping (a dying session) aborts it. Either way
-	// the origin unannounces once the last source detaches.
-	producer: crate::model::broadcast::SourceGuard,
+	// The route announced into our origin for this namespace, post-charge.
+	route: crate::origin::Route,
+
+	// The live advertisement; dropping it retracts the route.
+	announcement: crate::origin::Announcement,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	// The first entry of the advertised path: the original publisher. `None` on an
-	// advertisement that carried no path at all, which is every one on a session
-	// without the MoQ Cluster extension. See [`Advertised::publisher`].
-	publisher: Option<crate::Origin>,
+	// One minted source per requested path under the namespace: finish() on a
+	// deliberate unannounce, dropping (a dying session) aborts them so viewers
+	// observe the loss as an error.
+	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
 struct Advertised {
-	/// The route it describes, with this link's price already charged.
-	route: broadcast::Route,
-
-	/// The original publisher: the first entry of HOP_PATH. Two advertisements that
-	/// share a non-zero one carry interchangeable content, so a new path splices in.
-	/// A different one, or `Some(Origin::UNKNOWN)` (which identifies nothing), is a
-	/// distinct publisher reusing the namespace and must not splice. That comparison
-	/// only applies between separate advertisements; see [`Arrival`].
-	///
-	/// `None` when the advertisement carried no path, so there is no identity to
-	/// compare and nothing ever replaces the source on identity grounds. That covers
-	/// base moq-transport entirely: PUBLISH_NAMESPACE and NAMESPACE for one namespace
-	/// are then two messages describing a single source, not two publishers.
-	publisher: Option<crate::Origin>,
-}
-
-/// How an advertisement relates to whatever already holds the path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Arrival {
-	/// A separate advertisement for a path another one already holds: a
-	/// PUBLISH_NAMESPACE alongside a NAMESPACE. Nothing links the two but the publisher
-	/// identity, so only a matching, real one proves they carry the same content.
-	Separate,
-
-	/// A repeat of the advertisement already holding the path, on the stream that
-	/// carries it. That stream is the continuity: the peer never retracted the
-	/// advertisement, so only a *changed* publisher is a new publisher. The expected
-	/// repeat is a repricing, and a peer that withholds its identity reprices as often
-	/// as any other.
-	Repeat,
+	/// The route it describes, with this link's price already charged. The prefix
+	/// is stamped where the advertisement attaches (the namespace).
+	route: crate::origin::Route,
 }
 
 #[derive(Clone)]
@@ -367,16 +341,15 @@ where
 	/// its true length and can out-rank a longer-looking but genuinely shorter one.
 	/// Price such a link with [`crate::Client::with_cost`] rather than trusting the
 	/// default.
-	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
+	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
 		let mut hops = crate::OriginList::new();
 		hops.push(self.session_origin)
 			.expect("an empty hop chain has room for one entry");
-		broadcast::Route::new()
+		crate::origin::Route::new("")
 			.with_hops(hops)
 			// A peer with no Cluster extension advertises no cost at all, so its cold
 			// path is unknown rather than free.
-			.with_cost(broadcast::Cost::UNKNOWN.charged(cluster::link_cost(self.cost, peer)))
-			.with_announce(true)
+			.with_cost(crate::origin::Cost::UNKNOWN.charged(cluster::link_cost(self.cost, peer)))
 	}
 
 	/// The route an advertisement describes, or `None` when it must be discarded.
@@ -389,7 +362,6 @@ where
 		let Some(advert) = advert else {
 			return Some(Advertised {
 				route: self.session_route(peer),
-				publisher: None,
 			});
 		};
 
@@ -399,15 +371,6 @@ where
 
 		Some(Advertised {
 			route: advert.route(cluster::link_cost(self.cost, peer)),
-			publisher: Some(
-				advert
-					.hops
-					.hops()
-					.iter()
-					.next()
-					.copied()
-					.unwrap_or(crate::Origin::UNKNOWN),
-			),
 		})
 	}
 
@@ -1040,125 +1003,81 @@ where
 		Ok(())
 	}
 
-	/// Attach a source for one newly advertised path, bumping its refcount.
+	/// Attach the route for one newly advertised namespace, bumping its refcount.
 	///
-	/// `route` is what the advertisement described (see [`Self::route`]), or `None` for
-	/// a PUBLISH, which carries no path of its own and must not flatten the route an
-	/// advertisement already set. Pair with [`Self::stop_announce`].
-	fn start_announce(&mut self, path: PathOwned, advert: Advertised) -> Result<broadcast::Producer, Error> {
+	/// Pair with [`Self::stop_announce`].
+	fn start_announce(&mut self, path: PathOwned, advert: Advertised) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		let existing = state.broadcasts.contains_key(&path);
-		let producer = self.attach(&mut state, path.clone(), advert, Arrival::Separate)?;
+		self.attach(&mut state, path.clone(), advert)?;
 		if existing && let Some(entry) = state.broadcasts.get_mut(&path) {
-			// The path was already attached, so this is one more advertisement for it.
-			// A replacement carries the previous count forward, so the increment still
-			// applies; only a freshly created entry starts at one and skips this.
+			// The path was already attached, so this is one more advertisement for
+			// it; only a freshly created entry starts at one and skips this.
 			entry.count += 1;
 		}
-		Ok(producer)
+		Ok(())
 	}
 
-	/// Apply a changed advertisement to a path that is already attached.
+	/// Apply a changed advertisement to a namespace that is already attached.
 	///
-	/// An update replaces the advertisement atomically: the refcount does not move, and
-	/// no subscription is torn down merely because one arrived. A changed original
-	/// publisher is the exception, since that content is not interchangeable.
+	/// An update replaces the advertisement atomically: the refcount does not move,
+	/// and no subscription is torn down merely because one arrived.
 	fn update_announce(&mut self, path: PathOwned, advert: Advertised) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if !state.broadcasts.contains_key(&path) {
 			return Err(Error::NotFound);
 		}
-		self.attach(&mut state, path, advert, Arrival::Repeat)?;
+		self.attach(&mut state, path, advert)?;
 		Ok(())
 	}
 
-	/// Create or update the source for one path, leaving the refcount to the caller.
+	/// Create or update the announced route for one namespace, leaving the
+	/// refcount to the caller.
 	///
-	/// The ingress announce stats (announced / announced_bytes) are driven in the model
-	/// by `create_broadcast`'s route transitions below.
-	fn attach(
-		&self,
-		state: &mut State,
-		path: PathOwned,
-		advert: Advertised,
-		arrival: Arrival,
-	) -> Result<broadcast::Producer, Error> {
-		let Advertised { mut route, publisher } = advert;
+	/// This is the semantic heart of the mapping: a moq-transport namespace IS a
+	/// prefix route, so a PUBLISH_NAMESPACE advertises the whole prefix and paths
+	/// beneath it materialize on demand.
+	fn attach(&self, state: &mut State, path: PathOwned, advert: Advertised) -> Result<(), Error> {
+		let Advertised { mut route } = advert;
+		route.prefix = path.clone();
 
 		// A namespace published after the peer's GOAWAY starts out draining, so
-		// a late arrival on a dying connection can't take over as primary. The
-		// per-source task only ever moves a route in this direction, so there is
-		// no race between the two.
+		// a late arrival on a dying connection can't take over as primary.
 		if self.going_away.is_set() {
-			route.cost = broadcast::Cost::DRAIN;
-		}
-
-		// A different original publisher means a distinct broadcast has taken over this
-		// namespace. Its content is not interchangeable, so detach the old source and
-		// attach fresh instead of splicing the route in place; cached tracks and
-		// subscriptions must not carry over. The refcount rides along: the same
-		// advertisements still reference this path.
-		//
-		// Both sides must be known for the comparison to mean anything. A session
-		// without the MoQ Cluster extension has no identity on either, so nothing ever
-		// replaces there: its PUBLISH_NAMESPACE and NAMESPACE for one namespace are two
-		// messages about a single source, and replacing on the second would tear down
-		// what the first attached.
-		let mut carried = None;
-		if let Entry::Occupied(entry) = state.broadcasts.entry(path.clone())
-			&& let (Some(old), Some(new)) = (entry.get().publisher, publisher)
-			&& match arrival {
-				// Two advertisements, so identity is the only link between them and
-				// UNKNOWN is no link at all: unrelated publishers all present the same
-				// one. Take the later as replacing the earlier.
-				Arrival::Separate => old != new || new == crate::Origin::UNKNOWN,
-				// One advertisement, repeated on the stream that carries it. Continuity
-				// is the stream, not the identity, so an unchanged UNKNOWN stays put; a
-				// peer that never named itself would otherwise lose every subscription
-				// each time it repriced.
-				Arrival::Repeat => old != new,
-			} {
-			tracing::debug!(broadcast = %self.origin.absolute(&path), "publisher changed; replacing the source");
-			carried = Some(entry.get().count);
-			entry.remove().producer.finish();
+			route.cost = crate::origin::Cost::DRAIN;
 		}
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
-				let mut producer = entry.get().producer.producer();
-				producer.set_route(route)?;
-				Ok(producer)
+				// A repeat is a repricing: update the route in place. In-flight
+				// tracks keep flowing.
+				let entry = entry.into_mut();
+				entry.route = route.clone();
+				entry.announcement.update(route)?;
+				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// Propagates Error::Unauthorized if the path is out of scope.
-				let broadcast = self.origin.create_broadcast(&path, route)?;
-
-				// Register the dynamic handler synchronously: the broadcast only
-				// becomes visible to consumers after this function returns to the
-				// executor, so the origin's first track dispatch finds a handler
-				// (mirrors the note in lite::Subscriber).
-				let dynamic = broadcast.dynamic();
+				// Propagates Error::Unauthorized if the namespace is out of scope.
+				let (announcement, server) = self.origin.announce_served(route.clone())?;
 
 				entry.insert(BroadcastState {
-					producer: crate::model::broadcast::SourceGuard::new(broadcast.clone()),
-					count: carried.unwrap_or(1),
-					publisher,
+					route,
+					announcement,
+					count: 1,
+					sources: HashMap::new(),
 				});
 
-				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
+				tracing::debug!(route = %self.origin.absolute(&path), "announce");
 
 				let this = self.clone();
 				self.tasks.push(async move {
-					// stop_announce is the authoritative remover: it drops the entry (and
-					// its producer) once the announce refcount hits zero, which is what
-					// makes run_broadcast exit. Removing here too would let a stale task
-					// delete a freshly re-announced entry for the same path.
-					if let Err(err) = this.run_broadcast(path, dynamic).await {
-						tracing::debug!(%err, "error running broadcast");
-					}
+					// stop_announce is the authoritative remover: it drops the entry
+					// (retracting the route) once the announce refcount hits zero,
+					// which is what makes run_route exit.
+					this.run_route(path, server).await;
 				});
 
-				Ok(broadcast)
+				Ok(())
 			}
 		}
 	}
@@ -1170,13 +1089,16 @@ where
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(broadcast = %self.origin.absolute(&path), ?detach, "unannounced");
-					let producer = entry.remove().producer;
-					match detach {
-						Detach::Graceful => producer.finish(),
-						// Dropping the guard aborts the source, so the loss reads as an
-						// error rather than a clean end.
-						Detach::Abrupt => drop(producer),
+					tracing::debug!(route = %self.origin.absolute(&path), ?detach, "unannounced");
+					// Dropping the entry retracts the route (its announcement drops).
+					let removed = entry.remove();
+					for (_, source) in removed.sources {
+						match detach {
+							Detach::Graceful => source.finish(),
+							// Dropping the guard aborts the source, so the loss reads
+							// as an error rather than a clean end.
+							Detach::Abrupt => {}
+						}
 					}
 				}
 			}
@@ -1184,6 +1106,80 @@ where
 		};
 
 		Ok(())
+	}
+
+	/// Serve materialization requests for one announced namespace: mint a source
+	/// per requested path and serve its track requests until the route is
+	/// retracted or the session dies.
+	async fn run_route(&self, path: PathOwned, mut server: crate::model::RouteServer) {
+		let mut broadcasts = TaskSet::owned();
+		let mut closed_session = self.session.clone();
+		loop {
+			let next = broadcasts
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(None);
+					}
+					// A draining peer usually stops publishing namespaces, so react
+					// to the GOAWAY itself; waiting for another message would leave
+					// the route primary until the session finally closed.
+					// Idempotent, since the signal stays set.
+					if self.going_away.poll(waiter).is_ready() {
+						self.drain_route(&path);
+					}
+					server.poll_requested_broadcast(waiter).map(Some)
+				})
+				.await;
+
+			let request = match next {
+				Some(Ok(request)) => request,
+				// Retracted or torn down: no request will ever arrive again.
+				Some(Err(_)) | None => break,
+			};
+
+			// The request path is absolute; the wire (and our origin handle) speak
+			// paths relative to the session's root.
+			let requested = match request.path().strip_prefix(self.origin.root()) {
+				Some(requested) => requested.to_owned(),
+				None => continue,
+			};
+			let source = self.origin.create_source(&requested);
+			let dynamic = source.dynamic();
+			request.accept(&source);
+
+			// Retain the source so a retraction can finish it. If the route was
+			// retracted since, the guard drops here and consumers observe the abort.
+			{
+				let mut state = self.state.lock();
+				let Some(entry) = state.broadcasts.get_mut(&path) else {
+					continue;
+				};
+				entry
+					.sources
+					.insert(requested.clone(), crate::model::broadcast::SourceGuard::new(source));
+			}
+
+			let this = self.clone();
+			broadcasts.push(async move {
+				if let Err(err) = this.run_broadcast(requested.borrow(), dynamic).await {
+					tracing::debug!(%err, "error running broadcast");
+				}
+			});
+		}
+	}
+
+	/// Re-price one attached route to a draining cost (the peer sent a GOAWAY):
+	/// every other candidate outranks it while it stays selectable as the last
+	/// path. Idempotent, since the signal stays set.
+	fn drain_route(&self, path: &PathOwned) {
+		let mut state = self.state.lock();
+		let Some(entry) = state.broadcasts.get_mut(path) else { return };
+		if entry.route.cost == crate::origin::Cost::DRAIN {
+			return;
+		}
+		entry.route.cost = crate::origin::Cost::DRAIN;
+		let _ = entry.announcement.update(entry.route.clone());
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
@@ -1195,13 +1191,6 @@ where
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
-					}
-					// A draining peer usually stops publishing namespaces, so react to
-					// the signal itself; waiting for another message would leave the
-					// route primary until the session finally closed. Idempotent, since
-					// the signal stays set and this task wakes for other reasons too.
-					if self.going_away.poll(waiter).is_ready() {
-						broadcast.drain();
 					}
 					broadcast.poll_requested_track(waiter).map(Some)
 				})
@@ -1998,18 +1987,18 @@ mod tests {
 			// and errors here, which the assertions below name far better than a poll
 			// would.
 			let _ = futures::poll!(run.as_mut());
-			if consumer.get_broadcast("rootns/cam/x.hang").is_some() {
+			if routed_now(&consumer, "rootns/cam/x.hang").is_some() {
 				break;
 			}
 			settle().await;
 		}
 
 		assert!(
-			consumer.get_broadcast("rootns/cam/x.hang").is_some(),
+			routed_now(&consumer, "rootns/cam/x.hang").is_some(),
 			"the reply mounts under the root once",
 		);
 		assert!(
-			consumer.get_broadcast("rootns/rootns/cam/x.hang").is_none(),
+			routed_now(&consumer, "rootns/rootns/cam/x.hang").is_none(),
 			"the root was applied twice",
 		);
 	}
@@ -2656,15 +2645,13 @@ mod tests {
 		);
 
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		let _producer = subscriber
+		subscriber
 			.start_announce(crate::Path::new("room/host").to_owned(), advert)
 			.unwrap();
 
-		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		let mut announced = consumer.announced();
+		let route = announced.assert_next_active("room/host");
+		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![assigned]);
 	}
 
@@ -2689,21 +2676,13 @@ mod tests {
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).announced();
 
-		// What we are publishing to the peer: a real upstream, announced.
+		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.create_broadcast(
-				"room/host",
-				crate::broadcast::Route::new()
-					.with_hops(upstream.clone())
-					.with_announce(true),
-			)
+			.announce(crate::origin::Route::new("room/host").with_hops(upstream.clone()))
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		announced.assert_next_some("room/host");
-		// Held for as long as the path is advertised, exactly as the publisher holds
-		// it in its `Watched` entry. The exclusion lives on this handle.
-		let _advertised = publishing.assert_next_some("room/host");
+		announced.assert_next_active("room/host");
+		let _advertised = publishing.assert_next_active("room/host");
 
 		// The peer reflects it back over the subscribe direction, which carries no
 		// hop chain of its own.
@@ -2722,18 +2701,15 @@ mod tests {
 			Default::default(),
 		);
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		let _reflected = subscriber
+		subscriber
 			.start_announce(crate::Path::new("room/host").to_owned(), advert)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		// No announce churn, and the path still resolves to the upstream route, which
-		// is the one the publish direction can advertise back to the peer.
+		// No announce churn: the upstream route stays the best one, on both cursors.
 		announced.assert_next_wait();
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let routes = broadcast.routes();
-		assert_eq!(routes.len(), 1, "the reflection must park, not attach");
-		assert_eq!(routes[0].hops, upstream);
+		publishing.assert_next_wait();
+		let route = routed_now(&consumer, "room/host").expect("still routed");
+		assert_eq!(route.hops, upstream);
 	}
 
 	/// The assigned identity is a content identity too, so a second session dialing
@@ -2767,25 +2743,24 @@ mod tests {
 				Default::default(),
 			);
 			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-			let producer = subscriber
+			subscriber
 				.start_announce(crate::Path::new("room/host").to_owned(), advert)
 				.unwrap();
-			(subscriber, producer)
+			subscriber
 		};
 
-		let _first = connect();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		announced.assert_next_some("room/host");
+		let first = connect();
+		announced.assert_next_active("room/host");
 
-		// The peer reconnects before the old session is retired.
+		// The peer reconnects before the old session is retired: an identical route
+		// from the fresh session joins without any consumer-visible churn.
 		let _second = connect();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		// It joined: no announce churn, and both routes are in the table so the front
-		// can fail over the moment the stale one dies.
 		announced.assert_next_wait();
-		let routes = consumer.get_broadcast("room/host").unwrap().routes();
-		assert_eq!(routes.len(), 2, "a reconnect must join, not park or replace");
+
+		// The stale session finally retracting leaves the fresh route standing.
+		drop(first);
+		announced.assert_next_wait();
+		assert!(routed_now(&consumer, "room/host").is_some());
 	}
 
 	fn cluster_subscriber(
@@ -2815,6 +2790,12 @@ mod tests {
 			Default::default(),
 		);
 		(subscriber, origin)
+	}
+
+	/// The current best route covering `path`, if any (synchronous peek).
+	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
+		use futures::FutureExt;
+		consumer.routed(path).now_or_never().flatten()
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
@@ -2848,19 +2829,16 @@ mod tests {
 			"the link's price is added to the advertised cost"
 		);
 		assert_eq!(advertised.route.hops, hop_path(&[7, 9]).hops().clone());
-		assert!(advertised.route.announce);
-		assert_eq!(advertised.publisher, Some(crate::Origin::new(7).unwrap()));
 
 		let mut subscriber = subscriber;
 		subscriber
 			.start_announce(crate::Path::new("room/host").to_owned(), advertised)
 			.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().map(|h| h.id()).collect();
+		let route = routed_now(&consumer, "room/host").expect("routed");
+		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9]);
-		assert_eq!(broadcast.routes()[0].cost.warm, 7);
+		assert_eq!(route.cost.warm, 7);
 	}
 
 	/// An advertisement whose path already contains our own Hop ID looped back:
@@ -2956,8 +2934,8 @@ mod tests {
 		settle().await;
 
 		assert!(
-			consumer.get_broadcast("x.hang").is_none(),
-			"an ended stream must close the broadcast, not leave a stale route",
+			routed_now(&consumer, "x.hang").is_none(),
+			"an ended stream must retract the route, not leave a stale one",
 		);
 	}
 
@@ -2974,10 +2952,9 @@ mod tests {
 		settle().await;
 
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		settle().await;
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
-			"an explicit NAMESPACE_DONE must close the broadcast",
+			routed_now(&consumer, "room/host").is_none(),
+			"an explicit NAMESPACE_DONE must retract the route",
 		);
 	}
 
@@ -3032,7 +3009,7 @@ mod tests {
 		settle().await;
 
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"an explicit withdrawal must close the broadcast",
 		);
 	}
@@ -3088,7 +3065,7 @@ mod tests {
 		settle().await;
 
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"a broken stream must close the broadcast, not leave a stale route",
 		);
 	}
@@ -3118,7 +3095,7 @@ mod tests {
 		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
 		settle().await;
 		assert!(
-			consumer.get_broadcast("room/host").is_some(),
+			routed_now(&consumer, "room/host").is_some(),
 			"the broadcast must survive while an owner remains",
 		);
 
@@ -3126,7 +3103,7 @@ mod tests {
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		settle().await;
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"the last owner out must close the broadcast",
 		);
 	}
@@ -3167,82 +3144,31 @@ mod tests {
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 
-		let first = crate::broadcast::Route::new()
-			.with_hops(hop_path(&[7, 9]).hops().clone())
-			.with_cost(4)
-			.with_announce(true);
 		let first = Advertised {
-			route: first,
-			publisher: Some(crate::Origin::new(7).unwrap()),
+			route: crate::origin::Route::new("")
+				.with_hops(hop_path(&[7, 9]).hops().clone())
+				.with_cost(4),
 		};
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		let original = consumer.get_broadcast("room/host").unwrap();
+		assert!(routed_now(&consumer, "room/host").is_some());
 
-		// Same publisher (hop 7), new path and cost: the route updates in place.
-		let rerouted = crate::broadcast::Route::new()
-			.with_hops(hop_path(&[7, 11]).hops().clone())
-			.with_cost(2)
-			.with_announce(true);
+		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: rerouted,
-			publisher: Some(crate::Origin::new(7).unwrap()),
+			route: crate::origin::Route::new("")
+				.with_hops(hop_path(&[7, 11]).hops().clone())
+				.with_cost(2),
 		};
 		subscriber.update_announce(path.clone(), rerouted).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().map(|h| h.id()).collect();
+		let route = routed_now(&consumer, "room/host").expect("routed");
+		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 11]);
-		assert_eq!(broadcast.routes()[0].cost.warm, 2);
-		assert!(!original.is_closed(), "the source survived the update");
+		assert_eq!(route.cost.warm, 2);
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
-		// refcount, this would leave the source stranded.
+		// refcount, this would leave the route stranded.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_none());
-	}
-
-	/// A different original publisher is not interchangeable content, so the source is
-	/// replaced rather than spliced. The refcount rides along: the same advertisements
-	/// still reference the path.
-	#[tokio::test]
-	async fn cluster_publisher_change_replaces_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
-		let consumer = origin.consume();
-		let path = crate::Path::new("room/host").to_owned();
-
-		let first = crate::broadcast::Route::new()
-			.with_hops(hop_path(&[7, 9]).hops().clone())
-			.with_announce(true);
-		let first = Advertised {
-			route: first,
-			publisher: Some(crate::Origin::new(7).unwrap()),
-		};
-		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		let original = consumer.get_broadcast("room/host").unwrap();
-
-		let taken_over = crate::broadcast::Route::new()
-			.with_hops(hop_path(&[8, 9]).hops().clone())
-			.with_announce(true);
-		let taken_over = Advertised {
-			route: taken_over,
-			publisher: Some(crate::Origin::new(8).unwrap()),
-		};
-		subscriber.update_announce(path.clone(), taken_over).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		assert!(original.is_closed(), "the old source was detached");
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let hops: Vec<_> = broadcast.routes()[0].hops.iter().map(|h| h.id()).collect();
-		assert_eq!(hops, vec![8, 9]);
-
-		// Still one advertisement, so one unannounce is all it takes.
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_none());
+		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
 	/// Regression: a publisher that declares no identity of its own contributes
@@ -3274,49 +3200,34 @@ mod tests {
 				&peer,
 			)
 			.expect("route");
-		assert_eq!(
-			advertised.publisher,
-			Some(crate::Origin::UNKNOWN),
-			"an anonymous publisher has no identity to carry",
-		);
 		subscriber.start_announce(path.clone(), advertised).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		let original = consumer.get_broadcast("room/host").unwrap();
+		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the same path cheaper: it started carrying it.
 		let repriced = subscriber
 			.route(Some(&cluster::Advert { hops, cost: 1 }), &peer)
 			.expect("route");
 		subscriber.update_announce(path.clone(), repriced).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		assert!(
-			!original.is_closed(),
-			"a repricing update must not tear down the source"
-		);
-		let broadcast = consumer.get_broadcast("room/host").unwrap();
-		let routes = broadcast.routes();
-		assert_eq!(routes.len(), 1, "the update replaced the route, it did not add one");
+		let route = routed_now(&consumer, "room/host").expect("still routed");
 		assert_eq!(
-			routes[0].cost,
-			crate::broadcast::Cost {
+			route.cost,
+			crate::origin::Cost {
 				warm: 1,
-				..crate::broadcast::Cost::UNKNOWN
+				..crate::origin::Cost::UNKNOWN
 			},
 			"the repriced warm cost arrives; the Cluster extension has nowhere to carry a cold cost, so it stays unknown rather than reading as the publisher's own zero"
 		);
 
 		// One advertisement, so one unannounce detaches it.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_none());
+		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
-	/// Two *separate* advertisements have nothing linking them but the publisher, and
-	/// `Origin::UNKNOWN` links nothing: any number of unrelated publishers present it.
-	/// So the later one replaces the earlier, unlike the repeat above.
+	/// Two *separate* advertisements for one namespace refcount a single route:
+	/// it takes both retractions to retract it.
 	#[tokio::test(start_paused = true)]
-	async fn separate_anonymous_adverts_replace_the_source() {
+	async fn separate_adverts_refcount_the_route() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
@@ -3331,23 +3242,17 @@ mod tests {
 
 		let first = subscriber.route(Some(&advert), &peer).expect("route");
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		let original = consumer.get_broadcast("room/host").unwrap();
+		assert!(routed_now(&consumer, "room/host").is_some());
 
 		let second = subscriber.route(Some(&advert), &peer).expect("route");
 		subscriber.start_announce(path.clone(), second).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		assert!(routed_now(&consumer, "room/host").is_some());
 
-		assert!(original.is_closed(), "the old source was detached");
-		assert!(consumer.get_broadcast("room/host").is_some());
-
-		// Two advertisements, so it takes two unannounces to detach.
+		// Two advertisements, so it takes two unannounces to retract.
 		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_some());
+		assert!(routed_now(&consumer, "room/host").is_some());
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_none());
+		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
 	/// Regression: without the MoQ Cluster extension an advertisement carries no path,
@@ -3364,26 +3269,19 @@ mod tests {
 
 		// What a PUBLISH_NAMESPACE with no cluster parameters resolves to.
 		let first = subscriber.route(None, &peer).expect("route");
-		assert_eq!(first.publisher, None, "no path means no identity to compare");
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		let original = consumer.get_broadcast("room/host").unwrap();
+		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
 		subscriber.start_announce(path.clone(), second).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
+		assert!(routed_now(&consumer, "room/host").is_some());
 
-		assert!(!original.is_closed(), "the source survived the second advertisement");
-		assert!(consumer.get_broadcast("room/host").is_some());
-
-		// Two advertisements, so it takes two unannounces to detach.
+		// Two advertisements, so it takes two unannounces to retract.
 		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_some());
+		assert!(routed_now(&consumer, "room/host").is_some());
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_none());
+		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
 	/// An update replaces the advertisement it repeats. When the replacement loops back
@@ -3406,8 +3304,7 @@ mod tests {
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
 		subscriber.start_announce(path.clone(), advert).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/host").is_some());
+		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
 		let looped = cluster::Advert {
@@ -3421,9 +3318,8 @@ mod tests {
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
 		);
 	}
@@ -3495,8 +3391,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(Some(attached), peer).expect("route");
 		subscriber.start_announce(path, advert).unwrap();
-		settle().await;
-		assert!(consumer.get_broadcast("room/host").is_some(), "attached to start with");
+		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		(subscriber, consumer, stream)
@@ -3554,7 +3449,7 @@ mod tests {
 					futures::poll!(run.as_mut()).is_pending(),
 					"the stream must stay open after a reflected update"
 				);
-				if consumer.get_broadcast("room/host").is_none() {
+				if routed_now(&consumer, "room/host").is_none() {
 					break;
 				}
 				settle().await;
@@ -3562,7 +3457,7 @@ mod tests {
 		}
 
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"an unusable path must not stay attached"
 		);
 		assert!(!attached, "the caller must not release it a second time");
@@ -3609,7 +3504,7 @@ mod tests {
 
 		assert!(attached, "the clean path must re-attach");
 		assert!(
-			consumer.get_broadcast("room/host").is_some(),
+			routed_now(&consumer, "room/host").is_some(),
 			"the namespace is routable again",
 		);
 	}
@@ -3631,18 +3526,16 @@ mod tests {
 			subscriber.start_announce(path.clone(), advert).unwrap();
 			live.insert(path);
 		}
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		assert!(consumer.get_broadcast("room/a").is_some());
-		assert!(consumer.get_broadcast("room/b").is_some());
+		assert!(routed_now(&consumer, "room/a").is_some());
+		assert!(routed_now(&consumer, "room/b").is_some());
 
 		// What the stream's exit path does with whatever it still holds.
 		for path in live {
 			subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		}
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
-		assert!(consumer.get_broadcast("room/a").is_none(), "room/a leaked a refcount");
-		assert!(consumer.get_broadcast("room/b").is_none(), "room/b leaked a refcount");
+		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");
+		assert!(routed_now(&consumer, "room/b").is_none(), "room/b leaked a refcount");
 	}
 
 	/// PUBLISH offers one track, but a source attaches per namespace and serves every
@@ -3688,7 +3581,7 @@ mod tests {
 		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		assert!(
-			consumer.get_broadcast("room/host").is_none(),
+			routed_now(&consumer, "room/host").is_none(),
 			"a rejected PUBLISH must not announce a broadcast"
 		);
 		// Encode the reply we expect rather than matching the reason alone, so the error code

@@ -35,20 +35,12 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
 struct Watched {
-	broadcast: crate::broadcast::Consumer,
-	/// Demand edges re-price the serving route without a route change (see
-	/// [`crate::broadcast::outgoing_cost`]), so the loop watches this too.
-	demand: crate::broadcast::Demand,
+	/// The route last announced for this namespace, as the origin delivered it.
+	route: crate::origin::Route,
 	/// What the peer currently holds for this namespace, or [`Advert::None`] while it
 	/// is filtered. A selection that differs is worth a wire message; one that matches
 	/// is not.
 	sent: Advert,
-	/// When demand drained while a zero cost was advertised. Restoring the cold cost is
-	/// deferred by [`crate::broadcast::COST_LINGER`] past this, so viewer churn does not
-	/// flap routing across the mesh; demand returning in the window cancels it.
-	idle_at: Option<crate::runtime::Instant>,
-	/// Set once the broadcast errors, so a dead entry stops being polled.
-	dead: bool,
 	/// The peer should hold this namespace but does not: it refused the request, or we
 	/// could not get a stream to make it on. Nothing about that clears on its own, so the
 	/// loop comes back to it on a timer.
@@ -96,28 +88,13 @@ impl Refused {
 }
 
 impl Watched {
-	fn new(broadcast: crate::broadcast::Consumer) -> Self {
+	fn new(route: crate::origin::Route) -> Self {
 		Self {
-			demand: broadcast.demand(),
-			broadcast,
+			route,
 			sent: Advert::None,
-			idle_at: None,
-			dead: false,
 			deferred: false,
 			refused: Refused::No,
 		}
-	}
-
-	/// Record what the peer now holds, retiring any linger the old advertisement armed.
-	///
-	/// Only a discounted advertisement has a cost to restore. Leaving `idle_at` set past
-	/// one that isn't would keep [`Publisher::linger_deadline`] handing back an expired
-	/// instant that nothing ever clears, and the announce loops would spin on it.
-	fn set_sent(&mut self, sent: Advert) {
-		if !sent.discounted() {
-			self.idle_at = None;
-		}
-		self.sent = sent;
 	}
 }
 
@@ -148,20 +125,6 @@ impl Advert {
 		}
 	}
 
-	/// Whether this advertisement carries a zero cost, which is what the serving-route
-	/// discount produces and what the linger is watching to restore.
-	fn discounted(&self) -> bool {
-		matches!(self, Self::Cluster(advert) if advert.cost == 0)
-	}
-}
-
-/// What a watched broadcast reported.
-enum Watch {
-	/// Its route table or demand moved; re-run the selection.
-	Changed(crate::PathOwned),
-	/// Demand just drained while a discounted cost was advertised. The cold cost is
-	/// restored once the linger expires, not now, so viewer churn does not flap routing.
-	Idle(crate::PathOwned),
 }
 
 /// How long to wait for a stream to advertise one namespace on.
@@ -244,15 +207,8 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
 	Closed(Result<(), Error>),
-	/// An origin-level (un)announce, `None` once the announce stream ends.
+	/// An origin-level route (un)announce, `None` once the announce stream ends.
 	Update(Option<crate::announce::Update>),
-	/// A watched broadcast's route table or demand moved; re-run the selection.
-	Routes(crate::PathOwned),
-	/// A watched broadcast's demand drained; start its linger.
-	Idle(crate::PathOwned),
-	/// The linger sleep fired without an expired entry (it was canceled, or a later
-	/// deadline remains): restart the turn so the next deadline arms a fresh sleep.
-	Linger,
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
 }
@@ -356,108 +312,30 @@ where
 		peer.identity().or(self.peer_origin).unwrap_or(crate::Origin::UNKNOWN)
 	}
 
-	/// Pick what to advertise to this peer for one broadcast.
+	/// Pick what to advertise to this peer for one route.
 	///
-	/// A same-path source can splice in or detach without an origin-level (un)announce,
-	/// and demand can re-price the serving route in place, so the announce loops watch
-	/// every announced broadcast (see [`Watched`]) and re-run this when either moves.
-	fn select(&self, watch: &Watched, peer: &cluster::Peer) -> Advert {
-		let routes = watch.broadcast.routes();
-		let exclude = self.exclude(peer);
-
-		for (route, serving) in crate::broadcast::advertisable_routes(&routes, self.self_origin, exclude) {
-			if !peer.negotiated() {
-				return Advert::Plain;
-			}
-
-			// The Cluster extension has room for the warm cost only; a peer on this
-			// wire learns nothing about the cold path (see `cluster::Advert::route`).
-			let cost = crate::broadcast::outgoing_cost(&watch.demand, route, serving).warm;
-			// Our own Hop ID is always the last entry, so the peer reconstructs the full
-			// path. A chain with no room left is a loop in all but name; try the next route.
-			match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
-				Ok(advert) => return Advert::Cluster(advert),
-				Err(_) => continue,
-			}
+	/// The origin's announce cursor already filters routes through the peer
+	/// (control-plane split horizon); this only shapes what the wire can carry.
+	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer) -> Advert {
+		// A route that already passed through us is a reflection. The origin
+		// filters these on receive, so this is defensive.
+		if self.self_origin != crate::Origin::UNKNOWN && route.hops.contains(&self.self_origin) {
+			return Advert::None;
 		}
 
-		Advert::None
-	}
-
-	/// Poll every watched broadcast for a change in what it should advertise, reporting
-	/// the first changed path.
-	///
-	/// Two things move it: the route table (a failover, a standby attaching, a
-	/// re-price) and demand on the serving route (which switches the discount on and
-	/// off). `fired` is the linger deadline's verdict for this turn.
-	fn poll_watched(
-		watched: &mut HashMap<crate::PathOwned, Watched>,
-		fired: Option<crate::runtime::Instant>,
-		waiter: &kio::Waiter,
-	) -> Poll<Watch> {
-		for (path, watch) in watched.iter_mut() {
-			if watch.dead {
-				continue;
-			}
-			match watch.broadcast.poll_routes_changed(waiter) {
-				Poll::Ready(Ok(())) => return Poll::Ready(Watch::Changed(path.clone())),
-				// A dying broadcast has no further route changes; the origin's
-				// unannounce is what removes the entry.
-				Poll::Ready(Err(_)) => {
-					watch.dead = true;
-					continue;
-				}
-				Poll::Pending => {}
-			}
-
-			// Only a cost-carrying advertisement re-prices on demand; a plain one has
-			// nowhere to put the discount, so watching demand would fire forever.
-			if !matches!(watch.sent, Advert::Cluster(_)) {
-				continue;
-			}
-
-			if !watch.sent.discounted() {
-				// Not discounted: demand arriving is what applies the discount.
-				if let Poll::Ready(Ok(())) = watch.demand.poll_used(waiter) {
-					return Poll::Ready(Watch::Changed(path.clone()));
-				}
-				continue;
-			}
-
-			match watch.idle_at {
-				// Demand coming back within the linger cancels the restore; fall through
-				// to re-arm the unused watch.
-				Some(_) if watch.demand.is_used() => watch.idle_at = None,
-				// The linger expired: restore the cold cost.
-				Some(at) if fired.is_some_and(|now| now >= at + crate::broadcast::COST_LINGER) => {
-					watch.idle_at = None;
-					return Poll::Ready(Watch::Changed(path.clone()));
-				}
-				// Still lingering: the sleep owns the wakeup, and `poll_used` re-arms
-				// the cancel check above.
-				Some(_) => {
-					let _ = watch.demand.poll_used(waiter);
-					continue;
-				}
-				None => {}
-			}
-
-			// Demand just drained. Start the linger rather than re-pricing now, and end
-			// the turn so the caller arms a deadline for it.
-			if let Poll::Ready(Ok(())) = watch.demand.poll_unused(waiter) {
-				return Poll::Ready(Watch::Idle(path.clone()));
-			}
+		if !peer.negotiated() {
+			return Advert::Plain;
 		}
-		Poll::Pending
-	}
 
-	/// The earliest deferred cost-restore across every watched broadcast.
-	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<crate::runtime::Instant> {
-		watched
-			.values()
-			.filter_map(|watch| watch.idle_at)
-			.min()
-			.map(|at| at + crate::broadcast::COST_LINGER)
+		// The Cluster extension has room for the warm cost only; a peer on this
+		// wire learns nothing about the cold path (see `cluster::Advert::route`).
+		let cost = route.cost.clamped().warm;
+		// Our own Hop ID is always the last entry, so the peer reconstructs the full
+		// path. A chain with no room left is a loop in all but name.
+		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
+			Ok(advert) => Advert::Cluster(advert),
+			Err(_) => Advert::None,
+		}
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
@@ -862,7 +740,7 @@ where
 		let Some(watch) = watched.get(suffix) else {
 			return Ok(());
 		};
-		let advert = self.select(watch, peer);
+		let advert = self.select(&watch.route, peer);
 		let refused = watch.refused;
 		let wanted = advert.wanted();
 		let held = watch.sent.wanted();
@@ -960,7 +838,7 @@ where
 			// anything else it should hold and does not comes back on one.
 			watch.refused = refused;
 			watch.deferred = wanted && !sent.wanted() && refused.pending();
-			watch.set_sent(sent);
+			watch.sent = sent;
 		}
 		Ok(())
 	}
@@ -1283,8 +1161,6 @@ where
 	) -> Result<(), Error> {
 		let mut announced = origin.announced();
 
-		let mut linger = crate::runtime::Deadline::new(&self.runtime);
-
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
 		// the next time that fails. Jittered so a relay's namespaces don't all come back on
 		// the same tick.
@@ -1292,11 +1168,9 @@ where
 		let mut retry_at: Option<crate::runtime::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
 
-		// Stream updates (origin (un)announces plus watched route and demand
-		// changes), bailing if the peer closes its side first.
+		// Stream updates (origin route (un)announces), bailing if the peer closes
+		// its side first.
 		let res = loop {
-			linger.set(Self::linger_deadline(&ns.watched));
-
 			match ns.watched.values().any(|watch| watch.deferred) {
 				// Arm on the edge, so a turn that changes nothing else doesn't push the
 				// deadline out forever.
@@ -1309,9 +1183,7 @@ where
 			retry.set(retry_at);
 
 			let event = {
-				// Split the borrow so the close watch and the route sweep can both run in
-				// the same turn.
-				let Namespaces { target, watched, .. } = &mut ns;
+				let Namespaces { target, .. } = &mut ns;
 				kio::wait(|waiter| {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
@@ -1323,25 +1195,13 @@ where
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);
 					}
-					// Stamped per poll rather than kept: the turn always ends in a
-					// `Ready` below once it fires, so it never has to survive.
-					let fired = linger.poll(waiter).is_ready().then(|| self.runtime.now());
-					match Self::poll_watched(watched, fired, waiter) {
-						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
-						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
-						Poll::Pending => {}
-					}
-					match fired.is_some() {
-						true => Poll::Ready(NamespaceEvent::Linger),
-						false => Poll::Pending,
-					}
+					Poll::Pending
 				})
 				.await
 			};
 
 			match event {
 				NamespaceEvent::Closed(res) => break res,
-				NamespaceEvent::Linger => continue,
 				NamespaceEvent::Retry => {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
@@ -1371,36 +1231,31 @@ where
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
-				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
+				NamespaceEvent::Update(Some(update)) => {
+					let path = update.route.prefix.clone();
 					let suffix = path
 						.strip_prefix(&prefix)
-						.expect("origin returned invalid path")
+						.expect("origin returned invalid prefix")
 						.to_owned();
-					let path = path.to_owned();
 
-					match broadcast {
-						Some(broadcast) => {
-							ns.watched.insert(suffix.clone(), Watched::new(broadcast));
-							self.sync_namespace(&mut ns, &suffix, &path).await?;
-						}
-						None => {
-							// Only close out namespaces the peer actually saw.
-							let held = ns.watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
-							if held {
-								tracing::debug!(broadcast = %self.origin.absolute(&path), "namespace_done");
-								self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
-									.await?;
+					if update.active {
+						// A repeat for a live suffix is a metadata update: keep the
+						// peer's refusal state and re-run the selection.
+						match ns.watched.get_mut(&suffix) {
+							Some(watch) => watch.route = update.route,
+							None => {
+								ns.watched.insert(suffix.clone(), Watched::new(update.route));
 							}
 						}
-					}
-				}
-				NamespaceEvent::Routes(suffix) => {
-					let path = prefix.join(&suffix);
-					self.sync_namespace(&mut ns, &suffix, &path).await?;
-				}
-				NamespaceEvent::Idle(suffix) => {
-					if let Some(watch) = ns.watched.get_mut(&suffix) {
-						watch.idle_at = Some(self.runtime.now());
+						self.sync_namespace(&mut ns, &suffix, &path).await?;
+					} else {
+						// Only close out namespaces the peer actually saw.
+						let held = ns.watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
+						if held {
+							tracing::debug!(route = %self.origin.absolute(&path), "namespace_done");
+							self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
+								.await?;
+						}
 					}
 				}
 			}
@@ -1986,7 +1841,6 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
-	use crate::runtime::Timers as _;
 	use futures::FutureExt;
 
 	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
@@ -2055,7 +1909,7 @@ mod tests {
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
-		Vec<crate::broadcast::Producer>,
+		Vec<crate::origin::Announcement>,
 	) {
 		let other = crate::Origin::new(778).unwrap();
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
@@ -2075,25 +1929,14 @@ mod tests {
 		let mut echoed_hops = crate::OriginList::new();
 		echoed_hops.push(assigned).unwrap();
 		let echoed = origin
-			.create_broadcast(
-				"from/peer",
-				crate::broadcast::Route::new()
-					.with_hops(echoed_hops)
-					.with_announce(true),
-			)
+			.announce(crate::origin::Route::new("from/peer").with_hops(echoed_hops))
 			.unwrap();
 
 		let mut local_hops = crate::OriginList::new();
 		local_hops.push(other).unwrap();
 		let local = origin
-			.create_broadcast(
-				"from/us",
-				crate::broadcast::Route::new().with_hops(local_hops).with_announce(true),
-			)
+			.announce(crate::origin::Route::new("from/us").with_hops(local_hops))
 			.unwrap();
-
-		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		(publisher, consumer, vec![echoed, local])
 	}
@@ -2109,11 +1952,12 @@ mod tests {
 
 		let peer = cluster::Peer::default();
 
-		let echoed = consumer.get_broadcast("from/peer").unwrap();
-		assert!(!publisher.select(&Watched::new(echoed), &peer).wanted());
+		// The cursor is what filters: an excluded consumer never sees the echoed route.
+		let mut announced = consumer.excluding(assigned).announced();
+		let local = announced.assert_next_active("from/us");
+		announced.assert_next_wait();
 
-		let local = consumer.get_broadcast("from/us").unwrap();
-		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
+		assert_eq!(publisher.select(&local, &peer), Advert::Plain);
 	}
 
 	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
@@ -2170,70 +2014,23 @@ mod tests {
 		let mut hops = crate::OriginList::new();
 		hops.push(crate::Origin::UNKNOWN).unwrap();
 		let _echoed = origin
-			.create_broadcast(
-				"from/peer",
-				crate::broadcast::Route::new().with_hops(hops).with_announce(true),
-			)
+			.announce(crate::origin::Route::new("from/peer").with_hops(hops))
 			.unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		let peer = cluster::Peer {
 			origin: Some(crate::Origin::UNKNOWN),
 			cost: None,
 		};
-		let echoed = consumer.get_broadcast("from/peer").unwrap();
+		// The excluding cursor cannot match hop 0 (it names nobody), so the route
+		// still reaches this peer's stream.
+		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
+		let echoed = announced.assert_next_active("from/peer");
 		assert!(
-			publisher.select(&Watched::new(echoed), &peer).wanted(),
+			publisher.select(&echoed, &peer).wanted(),
 			"known gap: the assigned identity is not in the chain, so nothing filters it",
 		);
 	}
 
-	/// A drained broadcast arms a linger so the cold cost is restored after a grace
-	/// period. If the advertisement stops being discounted before that fires, the
-	/// linger must go with it: an expired deadline that nothing clears makes
-	/// `linger_deadline` hand back the same instant every turn, and the announce loops
-	/// spin on it forever.
-	#[tokio::test]
-	async fn linger_clears_when_the_advert_stops_being_discounted() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let broadcast = origin
-			.clone()
-			.create_broadcast("cam", crate::broadcast::Route::announced())
-			.unwrap();
-
-		let mut watch = Watched::new(broadcast.consume());
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
-
-		// Discounted (cost 0) and drained: the linger is running.
-		watch.set_sent(Advert::Cluster(cluster::Advert {
-			hops: cluster::HopPath::new(hops.clone()),
-			cost: 0,
-		}));
-		watch.idle_at = Some(TestRuntime::new().now());
-		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
-		assert!(Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched).is_some());
-
-		// A re-priced advertisement has a cost to advertise, so there is nothing left
-		// to restore.
-		let mut watch = watched.into_values().next().unwrap();
-		watch.set_sent(Advert::Cluster(cluster::Advert {
-			hops: cluster::HopPath::new(hops),
-			cost: 9,
-		}));
-		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
-		assert_eq!(
-			Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched),
-			None,
-			"a non-discounted advert must not leave a deadline behind"
-		);
-
-		// So does one that stopped being advertisable at all.
-		let mut watch = watched.into_values().next().unwrap();
-		watch.idle_at = Some(TestRuntime::new().now());
-		watch.set_sent(Advert::None);
-		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
-		assert_eq!(Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched), None);
-	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
 	/// without an origin-level (un)announce, silently flipping `advertisable`.
@@ -2258,16 +2055,11 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The broadcast starts with only a route through the assigned peer.
+		// The prefix starts with only a route through the assigned peer.
 		let mut tainted_hops = crate::OriginList::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
-			.create_broadcast(
-				"route-flip-cam",
-				crate::broadcast::Route::new()
-					.with_hops(tainted_hops)
-					.with_announce(true),
-			)
+			.announce(crate::origin::Route::new("route-flip-cam").with_hops(tainted_hops))
 			.unwrap();
 		settle().await;
 
@@ -2283,15 +2075,12 @@ mod tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert_eq!(occurrences(&log, b"route-flip-cam"), 0);
 
-		// A clean source splices in: no origin announce fires, only the route table
-		// changes. The namespace must now be advertised.
+		// A clean route joins the same prefix: the excluded cursor now has a best
+		// visible route, so the namespace must be advertised.
 		let mut clean_hops = crate::OriginList::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
-			.create_broadcast(
-				"route-flip-cam",
-				crate::broadcast::Route::new().with_hops(clean_hops).with_announce(true),
-			)
+			.announce(crate::origin::Route::new("route-flip-cam").with_hops(clean_hops))
 			.unwrap();
 		settle().await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -2301,7 +2090,7 @@ mod tests {
 			"NAMESPACE after a clean route joins"
 		);
 
-		// The clean source detaches, leaving only the tainted route: withdrawn.
+		// The clean route retracts, leaving only the tainted one: withdrawn.
 		drop(clean);
 		settle().await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -2344,7 +2133,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _cam = origin
-			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("lonely-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2435,7 +2224,7 @@ mod tests {
 
 		// Announced before the peer subscribes: it must only hit the wire after.
 		let early = origin
-			.create_broadcast("early-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("early-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2478,7 +2267,7 @@ mod tests {
 
 		// A later announce reaches the same subscription.
 		let _late = origin
-			.create_broadcast("late-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("late-cam"))
 			.unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -2522,7 +2311,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _local = origin
-			.create_broadcast("local-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("local-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2570,7 +2359,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _cam = origin
-			.create_broadcast("cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("cam"))
 			.unwrap();
 		settle().await;
 
@@ -2644,7 +2433,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let first = origin
-			.create_broadcast("first-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("first-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2681,7 +2470,7 @@ mod tests {
 		// Credit runs out, and a second namespace wants a stream we cannot get.
 		set_gate(&gate, false);
 		let _second = origin
-			.create_broadcast("second-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("second-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2728,18 +2517,10 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 
-		// Every route flows through the peer's own identity, so split horizon says this
-		// must never be advertised back to it: `select` wants nothing, which is what the
-		// peer already holds.
+		// A route that already passed through us must never be forwarded: `select`
+		// wants nothing, which is what the peer already holds.
 		let mut hops = crate::OriginList::new();
-		hops.push(assigned).unwrap();
-		let _echoed = origin
-			.create_broadcast(
-				"from/peer",
-				crate::broadcast::Route::new().with_hops(hops).with_announce(true),
-			)
-			.unwrap();
-		settle().await;
+		hops.push(crate::Origin::new(1).unwrap()).unwrap();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
@@ -2755,8 +2536,7 @@ mod tests {
 		// The state a refused or failed offer leaves behind: the peer holds nothing, and
 		// the loop is coming back to it on a timer.
 		let suffix: crate::PathOwned = crate::Path::new("from/peer").to_owned();
-		let broadcast = origin.consume().get_broadcast("from/peer").unwrap();
-		let mut watch = Watched::new(broadcast);
+		let mut watch = Watched::new(crate::origin::Route::new("from/peer").with_hops(hops));
 		watch.deferred = true;
 
 		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests(None));
@@ -2779,7 +2559,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let cam = origin
-			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("solo-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2809,10 +2589,10 @@ mod tests {
 		}
 		assert_eq!(occurrences(&log, b"solo-cam"), 1, "the advertisement never went out");
 
-		// A second route makes the advertisement worth re-pricing, which is a path back
-		// into the reconciliation that does not go through the retry timer.
+		// A cheaper second route makes the advertisement worth re-pricing, which is a
+		// path back into the reconciliation that does not go through the retry timer.
 		let _standby = origin
-			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("solo-cam").with_cost(0))
 			.unwrap();
 
 		for _ in 0..100 {
@@ -2842,7 +2622,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let cam = origin
-			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("solo-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2897,10 +2677,10 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _first = origin
-			.create_broadcast("first-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("first-cam"))
 			.unwrap();
 		let _second = origin
-			.create_broadcast("second-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("second-cam"))
 			.unwrap();
 		settle().await;
 
@@ -2949,7 +2729,7 @@ mod tests {
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _cam = origin
-			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
+			.announce(crate::origin::Route::new("lonely-cam"))
 			.unwrap();
 		settle().await;
 

@@ -1132,21 +1132,13 @@ mod tests {
 		let mut echoed_hops = crate::OriginList::new();
 		echoed_hops.push(assigned).unwrap();
 		let _echoed = origin
-			.create_broadcast(
-				"echoed-route",
-				crate::broadcast::Route::new()
-					.with_hops(echoed_hops)
-					.with_announce(true),
-			)
+			.announce(crate::origin::Route::new("echoed-route").with_hops(echoed_hops))
 			.unwrap();
 
 		let mut local_hops = crate::OriginList::new();
 		local_hops.push(other).unwrap();
 		let _local = origin
-			.create_broadcast(
-				"local-route",
-				crate::broadcast::Route::new().with_hops(local_hops).with_announce(true),
-			)
+			.announce(crate::origin::Route::new("local-route").with_hops(local_hops))
 			.unwrap();
 
 		let session = request.ok().await.unwrap();

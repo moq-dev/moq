@@ -5,25 +5,22 @@
 //! fill. Both handles are refcounted clones of one broadcast, which closes on
 //! [`Producer::finish`] or when the last producer drops.
 //!
-//! [Info] is the static metadata; [Route] is the dynamic path the broadcast takes to
-//! reach an origin, including whether it is announced to subscribers.
+//! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{stats, track};
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use crate::Error;
 
-use super::{Origin, OriginList, Requests, WeakCache};
+use super::{Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
-/// This is the broadcast's static identity, fixed for its lifetime; the path it
-/// takes to get here is the dynamic [`Route`], observed via [`Consumer::route`].
+/// This is the broadcast's static identity, fixed for its lifetime.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Info {
@@ -65,288 +62,6 @@ impl Info {
 	}
 }
 
-/// The highest value either half of a [`Cost`] can take, and where cost
-/// accumulation saturates.
-///
-/// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
-/// varint, which tops out at 2^62-1, so a larger value could be selected on but
-/// never forwarded.
-pub const MAX_COST: u64 = (1 << 62) - 1;
-
-/// The cost given to a route whose session is draining, so every other candidate
-/// outranks it while it stays selectable as the last path to the content.
-///
-/// A session sets this on its routes when its peer sends a GOAWAY. Draining is
-/// deliberately not a distinct state: cost is the whole mechanism, so a route
-/// whose accumulated cost saturates the wire ceiling ranks (and is treated)
-/// identically, as a path of last resort.
-///
-/// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
-/// draining route is still announced downstream, so its cost has to fit the wire.
-pub const DRAIN_COST: u64 = MAX_COST;
-
-/// What pulling a broadcast via a route costs, in two magnitudes that accumulate
-/// together and are compared in that order: lower [`warm`](Self::warm) wins, and
-/// [`cold`](Self::cold) breaks the tie.
-///
-/// Both are the same path priced against different cache states. `warm` is what one
-/// more subscription would actually cost the mesh *right now*, so it collapses to
-/// zero at any relay already carrying the broadcast: those upstream legs exist and
-/// nobody re-pays for them. `cold` prices the identical path as if nothing were
-/// cached, so it keeps flowing through a warm relay unchanged.
-///
-/// Routing optimizes `warm`, which is what deduplicates a cluster onto one copy. But
-/// once two relays are both warm they both advertise zero, and `warm` alone can no
-/// longer say which of them should be the one that pulls: `cold` does, by naming the
-/// relay whose own upstream is cheapest. It is also the stable quantity the origin's
-/// handover gate descends, since adopting a parent adds a link to your own cold cost
-/// and so can never leave you outranking it. Compare EIGRP's reported vs feasible
-/// distance, which splits the same job the same way.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[non_exhaustive]
-pub struct Cost {
-	/// The cost of pulling the broadcast via this route as the mesh stands today,
-	/// accumulated per link and discounted to zero at every relay already carrying
-	/// it. Lower wins.
-	///
-	/// The original publisher seeds it with its production cost (zero for a live
-	/// publish, something large for a standby that would have to start working, like
-	/// a cold transcoder), and each link adds its own configured price as the
-	/// announcement crosses it, so a route over a metered backbone ranks worse than
-	/// an equal-length one within a datacenter.
-	pub warm: u64,
-
-	/// The same path with every warm discount removed: what pulling the broadcast
-	/// would cost if no relay along it were carrying anything.
-	///
-	/// Accumulates exactly like [`warm`](Self::warm) but never restarts, so it stays
-	/// meaningful after the discount has flattened `warm` to zero. [`MAX_COST`] when
-	/// the peer's wire cannot express it (pre-lite-06, or the MoQ Cluster extension),
-	/// which ranks last rather than pretending the path is free.
-	pub cold: u64,
-}
-
-impl Cost {
-	/// Both magnitudes at `cost`: an undiscounted route, which is what a publisher
-	/// seeding its production cost means.
-	pub const fn new(cost: u64) -> Self {
-		Self { warm: cost, cold: cost }
-	}
-
-	/// The cost of a draining route: the ceiling in both magnitudes, so every other
-	/// candidate outranks it. See [`DRAIN_COST`].
-	pub const DRAIN: Self = Self::new(DRAIN_COST);
-
-	/// What a peer advertises when its wire has no room for a cost at all: free to
-	/// reach (leaving hop count as the effective metric, exactly as before route
-	/// cost existed) with an unknown cold path.
-	pub(crate) const UNKNOWN: Self = Self {
-		warm: 0,
-		cold: MAX_COST,
-	};
-
-	/// Add a link's price to both magnitudes, saturating at the largest cost the
-	/// wire can carry so a huge cost sorts last instead of wrapping around to best.
-	pub(crate) fn charged(self, link_cost: u64) -> Self {
-		Self {
-			warm: self.warm.saturating_add(link_cost).min(MAX_COST),
-			cold: self.cold.saturating_add(link_cost).min(MAX_COST),
-		}
-	}
-
-	/// The cost to advertise from a relay that is actively carrying the broadcast:
-	/// nothing extra to serve one more subscriber, on the same cold path as before.
-	pub(crate) fn discounted(self) -> Self {
-		Self {
-			warm: 0,
-			cold: self.cold,
-		}
-	}
-
-	/// Clamp both magnitudes to what a varint can carry, since a locally created
-	/// route can name an arbitrary `u64`.
-	pub(crate) fn clamped(self) -> Self {
-		Self {
-			warm: self.warm.min(MAX_COST),
-			cold: self.cold.min(MAX_COST),
-		}
-	}
-}
-
-impl From<u64> for Cost {
-	fn from(cost: u64) -> Self {
-		Self::new(cost)
-	}
-}
-
-/// The path a broadcast takes to reach this origin, and how preferable it is.
-///
-/// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
-/// over, the upstream topology shifts, or the publisher re-advertises itself.
-/// Publish a change with [`Producer::set_route`] and observe one with
-/// [`Consumer::route_changed`]; downstream sessions forward updates as a restart
-/// on the wire, so route churn never looks like a new broadcast.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Route {
-	/// The chain of origins the broadcast has traversed, oldest first. Each relay
-	/// appends its own [`crate::Origin`] when forwarding; used for loop detection
-	/// and as the selection tie-break.
-	pub hops: OriginList,
-
-	/// What pulling the broadcast via this route costs, accumulated per link:
-	/// lower wins, with ties broken by hop length, then a deterministic hash, and
-	/// finally the most recently attached route. See [`Cost`].
-	///
-	/// Selection accepts any value, but only [`MAX_COST`] of it survives a hop:
-	/// forwarding clamps to what a varint can carry, so a cost set beyond the
-	/// ceiling ranks last locally and is advertised as the ceiling.
-	///
-	/// Carried on the wire from lite-06. Older peers report neither magnitude, which
-	/// reads as free to reach with an unknown cold path, leaving the hop-count
-	/// tie-break as the effective metric exactly as before.
-	pub cost: Cost,
-
-	/// The cost as the announcing peer advertised it, before this link's charge was
-	/// added to [`Self::cost`]. Local bookkeeping, never forwarded.
-	///
-	/// A zero [`warm`](Cost::warm) on a chain of two or more hops means the
-	/// announcing relay is actively carrying the broadcast, and its
-	/// [`cold`](Cost::cold) is then the rank the origin's handover gate descends.
-	pub(crate) advertised: Cost,
-
-	/// Whether the broadcast should be announced: advertised to consumers via
-	/// [`crate::origin::Consumer::announced`] while this is the best route. A
-	/// non-announced broadcast stays reachable by exact path for subscribes and
-	/// fetches (e.g. serving cached or on-demand content), so toggling this via
-	/// [`Producer::set_route`] announces or unannounces without touching the
-	/// broadcast itself. Defaults to `false`.
-	pub announce: bool,
-}
-
-impl Route {
-	/// An unannounced direct route: no hops, best cost.
-	///
-	/// The broadcast is reachable only by its exact path, so subscribers must already
-	/// know it exists. Use [`announced`](Self::announced) to advertise it instead.
-	pub fn new() -> Self {
-		Self::default()
-	}
-
-	/// An announced direct route: no hops, best cost.
-	///
-	/// The broadcast is advertised to subscribers via
-	/// [`crate::origin::Consumer::announced`] while this is the best route, on top of
-	/// staying reachable by exact path. Use [`new`](Self::new) to keep it unadvertised.
-	pub fn announced() -> Self {
-		Self {
-			announce: true,
-			..Self::default()
-		}
-	}
-
-	/// Append a hop to the chain, oldest first.
-	///
-	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
-	/// chain's length cap, or one already in it, which is a loop.
-	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::InvalidHop> {
-		self.hops.push(origin)?;
-		Ok(self)
-	}
-
-	/// Replace the hop chain.
-	pub fn with_hops(mut self, hops: OriginList) -> Self {
-		self.hops = hops;
-		self
-	}
-
-	/// Set the cost: lower wins among routes serving the same broadcast.
-	///
-	/// A bare `u64` prices the route undiscounted (both halves of [`Cost`] alike),
-	/// which is what a publisher seeding its production cost means.
-	pub fn with_cost(mut self, cost: impl Into<Cost>) -> Self {
-		self.cost = cost.into();
-		self
-	}
-
-	/// Set whether the broadcast is announced via this route.
-	pub fn with_announce(mut self, announce: bool) -> Self {
-		self.announce = announce;
-		self
-	}
-}
-
-/// How long a drained broadcast keeps advertising a zero cost before restoring its
-/// cold one.
-///
-/// Pure hysteresis: demand edges arrive exactly (via [`Demand`]), but re-pricing the
-/// instant the last viewer leaves would flap routing across the mesh on viewer churn.
-pub(crate) const COST_LINGER: Duration = Duration::from_secs(5);
-
-/// The routes advertisable to one peer, best first: the announced ones whose hop chain
-/// avoids both the peer (`exclude`) and ourselves (a reflection), each paired with
-/// whether it is the serving route.
-///
-/// `routes` is the broadcast's table in preference order with the serving (active)
-/// route first, so a peer usually receives exactly what we serve everyone; a peer the
-/// active chain flows through receives the best standby instead of nothing. The
-/// subscribe path picks its source by the same exclusion (see
-/// [`origin::Consumer::excluding`](super::origin::Consumer::excluding)), which keeps
-/// the advertised chain truthful and the mesh loop-free.
-///
-/// Callers take the first entry they can actually stamp themselves onto, since a chain
-/// already at `MAX_HOPS` has no room and almost certainly means a loop. Empty when
-/// every chain loops through the peer or us, or none is announced.
-/// [`Origin::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
-pub(crate) fn advertisable_routes(
-	routes: &[Route],
-	self_origin: Origin,
-	exclude: Origin,
-) -> impl Iterator<Item = (&Route, bool)> {
-	routes.iter().enumerate().filter_map(move |(index, route)| {
-		// Offline routes are reachable by exact path but never advertised.
-		if !route.announce {
-			return None;
-		}
-		if exclude != Origin::UNKNOWN && route.hops.contains(&exclude) {
-			return None;
-		}
-		if self_origin != Origin::UNKNOWN && route.hops.contains(&self_origin) {
-			return None;
-		}
-		Some((route, index == 0))
-	})
-}
-
-/// The cost to advertise for a route.
-///
-/// While the broadcast has demand, the *serving* (active) route costs zero: our
-/// ingress is already paid for (or, for a local standby publisher, the work is already
-/// running), so one more subscriber only pays the links below us. That is what lets a
-/// cluster deduplicate onto a warm copy. A standby advertised to a peer the active
-/// chain flows through keeps its own accumulated cost, since serving that peer means
-/// opening a fresh ingest. Otherwise we forward the accumulated cost unchanged.
-///
-/// A ceiling-cost route pierces the carrying discount. For a drain (the ceiling's
-/// primary producer), advertising zero would keep pulling subscribers onto a path
-/// about to vanish. The rule keys on the value because the reason does not travel on
-/// the wire, and a cost that saturated through charges is a last-resort path too.
-///
-/// Only [`Cost::warm`] is discounted. [`Cost::cold`] prices the same path against an
-/// empty cache, so it flows through unchanged and keeps saying which warm relay sits
-/// closest to the publisher once every discount has flattened `warm` to zero.
-///
-/// The receiving side adds its own link price on top, so this never accounts for the
-/// link we are sending over. The result is clamped to the largest wire varint because
-/// locally created routes can name an arbitrary `u64`.
-pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> Cost {
-	let cost = route.cost.clamped();
-	match serving && demand.is_used() && cost.warm < DRAIN_COST {
-		true => cost.discounted(),
-		false => cost,
-	}
-}
-
 #[derive(Default)]
 struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
@@ -364,21 +79,6 @@ struct BroadcastState {
 	// Route-fed mode (a relay/origin "front"): tracks are spliced logical tracks
 	// joined across per-session tracks. `None` for an ordinary broadcast.
 	spliced: Option<SplicedState>,
-
-	// The path the broadcast currently takes to reach us, bumping `route_epoch`
-	// on every change so consumers can watch for updates.
-	route: Route,
-	route_epoch: u64,
-
-	// Every route currently attached at this path, in preference order with the
-	// serving (active) route first. Mirrored from the origin's source table for
-	// route-fed broadcasts so sessions can pick a different route per peer; an
-	// ordinary broadcast holds just its own route. `routes_epoch` bumps on any
-	// table change, including ones that leave the active route untouched (a
-	// standby attaching or repricing), which is why it is tracked separately
-	// from `route_epoch`.
-	routes: Vec<Route>,
-	routes_epoch: u64,
 
 	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
 	// tell a deliberate shutdown apart from a producer dropped by accident.
@@ -623,49 +323,6 @@ impl Producer {
 		)
 	}
 
-	/// Set the broadcast's [`Route`]: the hop chain and cost it advertises.
-	///
-	/// Call this when the path to the content changes (an upstream failover) or the
-	/// publisher's preference changes (e.g. a transcoder warming up lowers its
-	/// cost). Consumers observe the change via [`Consumer::route_changed`] and
-	/// sessions forward it downstream as a restart, never as a new broadcast.
-	/// Setting the current route again is a no-op.
-	pub fn set_route(&mut self, route: Route) -> Result<(), Error> {
-		let mut state = self.state.lock();
-		if state.route == route {
-			return Ok(());
-		}
-		state.route = route.clone();
-		state.route_epoch += 1;
-		// An ordinary broadcast's table is just its own route; a route-fed one is
-		// overwritten by the next `set_routes` from the origin.
-		state.routes = vec![route];
-		state.routes_epoch += 1;
-		Ok(())
-	}
-
-	/// Replace the full route table, in preference order with the active route
-	/// first. Set by the origin's front on every source-table change; the active
-	/// route doubles as the broadcast's advertised [`Route`].
-	///
-	/// `routes` must be non-empty. A front whose table empties is on its way out,
-	/// and it unannounces and aborts rather than advertising a "no route" route,
-	/// so there is no such value to publish here.
-	pub(crate) fn set_routes(&mut self, routes: Vec<Route>) {
-		debug_assert!(!routes.is_empty(), "set_routes requires a non-empty table");
-		let mut state = self.state.lock();
-		if let Some(active) = routes.first()
-			&& state.route != *active
-		{
-			state.route = active.clone();
-			state.route_epoch += 1;
-		}
-		if state.routes != routes {
-			state.routes = routes;
-			state.routes_epoch += 1;
-		}
-	}
-
 	/// Poll for the next spliced track awaiting a serving route, returning its name
 	/// and logical producer. Route-fed broadcasts only.
 	pub(crate) fn poll_spliced_assigned(&self, waiter: &kio::Waiter) -> Poll<(Arc<str>, super::resume::Producer)> {
@@ -700,10 +357,7 @@ impl Producer {
 			info: self.info.clone(),
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
-			route_seen: None,
-			routes_seen: None,
 			stats: stats::Scope::default(),
-			exclusion: None,
 		}
 	}
 
@@ -834,13 +488,6 @@ impl SourceGuard {
 			producer.finish();
 		}
 	}
-
-	/// Update the source's advertised route in place.
-	pub fn set_route(&mut self, route: Route) {
-		if let Some(producer) = &mut self.producer {
-			let _ = producer.set_route(route);
-		}
-	}
 }
 
 impl Drop for SourceGuard {
@@ -901,35 +548,6 @@ impl Dynamic {
 		&self.info
 	}
 
-	/// Bump this source's route to [`Cost::DRAIN`], keeping its hop chain and
-	/// announce flag.
-	///
-	/// Called when the session feeding the source receives a GOAWAY, so the origin
-	/// hands live subscriptions to any other route at the next group boundary
-	/// rather than riding a connection that is about to close and losing the group
-	/// in flight. The draining route stays selectable, so a broadcast with no
-	/// alternative keeps being served until the session actually ends.
-	///
-	/// It lives here rather than on [`Producer`] because the handler is what each
-	/// wire's per-source task already holds, so nothing has to keep a second
-	/// producer clone alive just to reach the route.
-	///
-	/// Idempotent: the signal stays set, so a task may call this on every wakeup.
-	pub(crate) fn drain(&mut self) {
-		let mut state = self.state.lock();
-		if state.route.cost == Cost::DRAIN {
-			return;
-		}
-
-		state.route.cost = Cost::DRAIN;
-		state.route_epoch += 1;
-
-		// An ordinary source's table is just its own route, and the origin reads the
-		// table rather than the route when ranking, so both have to move together.
-		state.routes = vec![state.route.clone()];
-		state.routes_epoch += 1;
-	}
-
 	/// Poll for the next consumer-requested track, without blocking.
 	///
 	/// Returns [`Error::Closed`] once the broadcast was deliberately ended
@@ -968,10 +586,7 @@ impl Dynamic {
 			info: self.info.clone(),
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
-			route_seen: None,
-			routes_seen: None,
 			stats: stats::Scope::default(),
-			exclusion: None,
 		}
 	}
 
@@ -1035,21 +650,10 @@ pub struct Consumer {
 	alive: kio::Consumer<()>,
 	// Track registry plus request queue; `track()` reads the registry and enqueues requests.
 	state: kio::Shared<BroadcastState>,
-	// The route epoch last yielded by `route_changed`, so each consumer clone
-	// observes the current route first and every change after it exactly once.
-	route_seen: Option<u64>,
-	// Same cursor for the full route table (`routes_changed`), tracked separately
-	// because the table can change without the active route moving.
-	routes_seen: Option<u64>,
 	// Egress stats scope, set by a tagged `origin::Consumer` at the broadcast
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
 	stats: stats::Scope,
-	// Keeps the origin's front off routes that flow back through the peer this
-	// handle was resolved for, released when the last clone drops. Only set on the
-	// shared front of a route-fed broadcast, and only for a peer that declared an
-	// origin; `None` everywhere else.
-	exclusion: Option<Arc<super::origin_impl::ExclusionGuard>>,
 }
 
 impl Clone for Consumer {
@@ -1058,25 +662,12 @@ impl Clone for Consumer {
 			info: self.info.clone(),
 			alive: self.alive.clone(),
 			state: self.state.clone(),
-			// Reset the cursor so the clone observes the current route first,
-			// even if the original already drained `route_changed`.
-			route_seen: None,
-			routes_seen: None,
 			stats: self.stats.clone(),
-			exclusion: self.exclusion.clone(),
 		}
 	}
 }
 
 impl Consumer {
-	/// Attach the guard that keeps the origin's front off routes flowing back
-	/// through the peer this handle was resolved for. Set once, at the origin's
-	/// broadcast handoff; the guard is shared by every clone of this handle.
-	pub(crate) fn with_exclusion(mut self, guard: Arc<super::origin_impl::ExclusionGuard>) -> Self {
-		self.exclusion = Some(guard);
-		self
-	}
-
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -1103,66 +694,6 @@ impl Consumer {
 	/// The broadcast's metadata, as reached through this handle.
 	pub fn info(&self) -> &Info {
 		&self.info
-	}
-
-	/// The [`Route`] the broadcast currently takes to reach this origin.
-	pub fn route(&self) -> Route {
-		self.state.read().route.clone()
-	}
-
-	/// Poll for a route change. See [`Self::route_changed`].
-	pub fn poll_route_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Route, Error>> {
-		let seen = self.route_seen;
-		if let Poll::Ready(state) = self.state.poll(waiter, |state| {
-			if seen != Some(state.route_epoch) {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}) {
-			self.route_seen = Some(state.route_epoch);
-			return Poll::Ready(Ok(state.route.clone()));
-		}
-		// No pending change: surface the broadcast's end instead of parking forever.
-		ready!(self.alive.poll_closed(waiter));
-		Poll::Ready(Err(Error::Dropped))
-	}
-
-	/// Wait for the broadcast's [`Route`] to change.
-	///
-	/// The first call returns the current route immediately; each later call blocks
-	/// until it changes again, so a loop observes the initial value followed by
-	/// every update. Returns [`Error::Dropped`] once every producer is gone.
-	pub async fn route_changed(&mut self) -> Result<Route, Error> {
-		kio::wait(|waiter| self.poll_route_changed(waiter)).await
-	}
-
-	/// Every route currently attached at this path, in preference order with the
-	/// serving (active) route first. An ordinary broadcast holds just its own
-	/// route; a route-fed one mirrors the origin's source table so sessions can
-	/// advertise a different route per peer.
-	pub(crate) fn routes(&self) -> Vec<Route> {
-		self.state.read().routes.clone()
-	}
-
-	/// Poll for any change to the route table, including ones that leave the
-	/// active route untouched (a standby attaching, detaching, or repricing).
-	/// The first call is ready immediately; read the table with [`Self::routes`].
-	pub(crate) fn poll_routes_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let seen = self.routes_seen;
-		if let Poll::Ready(state) = self.state.poll(waiter, |state| {
-			if seen != Some(state.routes_epoch) {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}) {
-			self.routes_seen = Some(state.routes_epoch);
-			return Poll::Ready(Ok(()));
-		}
-		// No pending change: surface the broadcast's end instead of parking forever.
-		ready!(self.alive.poll_closed(waiter));
-		Poll::Ready(Err(Error::Dropped))
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -1333,10 +864,7 @@ impl WeakConsumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
 			state: self.state.clone(),
-			route_seen: None,
-			routes_seen: None,
 			stats: stats::Scope::default(),
-			exclusion: None,
 		}
 	}
 }
@@ -1438,6 +966,7 @@ impl Consumer {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use std::time::Duration;
 
 	/// Await with a timeout so a missed demand wake fails the test instead of
 	/// hanging it (time is paused, so the timeout fires instantly when idle).
@@ -1751,33 +1280,6 @@ mod test {
 		again.assert_is_clone(&track.subscribe(None));
 	}
 
-	// Cloning a `Consumer` resets its route cursor: a clone that inherited the
-	// original's `route_seen` would skip the initial-value delivery that
-	// `route_changed` promises.
-	#[tokio::test]
-	async fn route_clone_observes_current_route() {
-		let mut producer = Info::new().produce();
-		let mut consumer = producer.consume();
-
-		// Drain the initial route, then a change.
-		consumer.route_changed().await.unwrap();
-		let route = Route::new().with_cost(7);
-		producer.set_route(route.clone()).unwrap();
-		assert_eq!(consumer.route_changed().await.unwrap(), route);
-
-		// The original is fully drained: no update pending.
-		assert!(consumer.route_changed().now_or_never().is_none());
-
-		// A clone starts fresh, yielding the current route immediately.
-		let mut clone = consumer.clone();
-		let seen = clone
-			.route_changed()
-			.now_or_never()
-			.expect("clone should observe the current route immediately")
-			.unwrap();
-		assert_eq!(seen, route);
-	}
-
 	// Cloning a `Dynamic` and dropping the clone must not flip the handler
 	// count to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
@@ -1796,84 +1298,4 @@ mod test {
 		let _fut = subscribe_pending!(consumer, "track1");
 	}
 
-	/// Draining moves only the cost: the hop chain and announce flag have to
-	/// survive, or the origin would treat the source as a different path (or stop
-	/// advertising it) rather than as the same one on its way out.
-	#[tokio::test]
-	async fn drain_costs_the_route_without_disturbing_it() {
-		let mut producer = Info::new().produce();
-		let mut consumer = producer.consume();
-		let mut dynamic = producer.dynamic();
-
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
-		producer
-			.set_route(Route::new().with_hops(hops.clone()).with_cost(42).with_announce(true))
-			.unwrap();
-
-		let before = consumer.route_changed().await.unwrap();
-		assert_eq!(before.cost, Cost::new(42));
-
-		dynamic.drain();
-
-		let after = consumer.route_changed().await.unwrap();
-		assert_eq!(after.cost, Cost::DRAIN);
-		assert_eq!(after.hops, hops, "draining must not change the path");
-		assert!(after.announce, "a draining route stays advertised");
-
-		// The origin ranks off the route table, so it has to move with the route.
-		assert_eq!(consumer.routes(), vec![after]);
-	}
-
-	/// The signal stays set, so the per-source task calls this on every wakeup. A
-	/// repeat must not bump the epoch, or each wakeup would look like a route
-	/// change and churn the origin.
-	#[tokio::test]
-	async fn drain_is_idempotent() {
-		let producer = Info::new().produce();
-		let mut consumer = producer.consume();
-		let mut dynamic = producer.dynamic();
-
-		dynamic.drain();
-		assert_eq!(consumer.route_changed().await.unwrap().cost, Cost::DRAIN);
-
-		dynamic.drain();
-		assert!(
-			consumer.route_changed().now_or_never().is_none(),
-			"a redundant drain must not look like a route change"
-		);
-	}
-
-	/// Charging a link accumulates onto both halves, saturating rather than wrapping
-	/// so a bogus peer sorts last, not first. The ceiling is the largest cost a
-	/// varint can carry, so whatever a peer advertises, the sum we forward still
-	/// encodes (see `charged_cost_stays_encodable`).
-	#[test]
-	fn cost_charge_saturates() {
-		assert_eq!(Cost { warm: 4, cold: 6 }.charged(5), Cost { warm: 9, cold: 11 });
-		assert_eq!(Cost::new(u64::MAX).charged(10), Cost::new(MAX_COST));
-
-		// An unknown cold path stays unknown however many links it crosses, so it
-		// can never accumulate its way into outranking a path we actually know.
-		assert_eq!(Cost::UNKNOWN.charged(3).cold, MAX_COST);
-	}
-
-	/// The carrying discount is the whole warm/cold split: it zeroes what one more
-	/// subscriber pays and leaves the cold path intact, which is what still ranks
-	/// two relays that have both discounted to zero.
-	#[test]
-	fn cost_discount_keeps_the_cold_path() {
-		assert_eq!(Cost { warm: 6, cold: 6 }.discounted(), Cost { warm: 0, cold: 6 });
-	}
-
-	/// A draining cost still has to fit the wire, since the route keeps being
-	/// announced downstream while it drains.
-	#[test]
-	fn drain_cost_is_encodable() {
-		use crate::coding::Encode;
-
-		let mut buf = Vec::new();
-		Cost::DRAIN
-			.encode(&mut buf, crate::lite::Version::Lite06Wip)
-			.expect("a draining route is still forwarded, so its cost must encode");
-	}
 }
