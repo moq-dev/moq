@@ -403,7 +403,7 @@ export class Publisher {
 					break;
 				}
 
-				// Report our origin id once via AnnounceOk and the count of initial announces
+				// Report our Hop ID once via AnnounceOk and the count of initial announces
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.hop, active.size);
 				await ok.encode(stream.writer, this.version);

@@ -273,7 +273,7 @@ impl Directions {
 /// An invocation that both imports and exports attaches both directions to the
 /// same session rather than opening two, which is how a relay peers with another
 /// relay. Loops are the network's problem, not ours: an announcement carries the
-/// hops it crossed, and our own origin id is one of them, so a broadcast we
+/// hops it crossed, and our own Hop ID is one of them, so a broadcast we
 /// publish is never announced back to us.
 ///
 /// Returns an allocator over the uplink's bandwidth estimate, for the sources that

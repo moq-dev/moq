@@ -60,7 +60,7 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	pub origin: origin::Consumer,
 	pub version: Version,
 	/// The peer's SETUP (lite-05+), shared with the subscriber half that reads
-	/// it. Carries the peer's declared origin id for split-horizon serving.
+	/// it. Carries the peer's declared Hop ID for split-horizon serving.
 	pub peer_setup: super::PeerSetup,
 	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
 	pub goaway: crate::goaway::Protocol,
@@ -3719,7 +3719,7 @@ mod tests {
 	/// The tokio-backed test runtime, matching the fake transport.
 	type TestRuntime = crate::runtime::tokio_test::Tokio<SinkSession>;
 
-	/// A peer that declares no origin in its SETUP is split-horizoned by the identity
+	/// A peer that declares no Hop ID in its SETUP is split-horizoned by the identity
 	/// the caller assigned it, on the data plane and not just the announce filter.
 	/// Otherwise it can subscribe its way back to content that already flowed through
 	/// it, which is the loop the announce filter exists to prevent.

@@ -437,7 +437,7 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 
 /// The Hop ID this session declares and detects loops against.
 ///
-/// Both halves of a session share the process's origin identity, so either one names
+/// Both halves of a session share the process's Hop ID, so either one names
 /// it; the publish half is just the usual one to be set. A session with neither half
 /// has no content to route, so a throwaway id is all it can offer.
 fn self_hop(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Hop {

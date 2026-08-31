@@ -78,7 +78,7 @@ export class Connection implements Established {
 	/** The peer's PROBE estimates; see {@link Established.probe}. */
 	readonly probe: Getter<Probe>;
 
-	/** Random per-connection origin id. Shared by Publisher (for outbound hop
+	/** Random per-connection Hop ID. Shared by Publisher (for outbound hop
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
 	readonly hop: Hop;
 

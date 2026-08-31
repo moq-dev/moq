@@ -296,7 +296,7 @@ export class Reader {
 	// Returns a Number using 53-bits, the max Javascript can use for integer math.
 	// Values > 2^53-1 are coerced to a Number (precision is lost) and logged. We
 	// downgrade overflow from throw to warn so a stray u64 field on the wire (e.g.
-	// a peer's session-level Origin id) doesn't tear down the whole stream/session.
+	// a peer's session-level Hop ID) doesn't tear down the whole stream/session.
 	async u53(): Promise<number> {
 		const v = await this.u62();
 		if (v > Varint.MAX_U53) {

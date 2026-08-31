@@ -136,7 +136,7 @@ impl Default for Info {
 }
 
 impl Info {
-	/// Config for the given origin id with no byte target and the default idle expiry.
+	/// Config for the given Hop ID with no byte target and the default idle expiry.
 	pub fn new(id: Hop) -> Self {
 		Self { id, ..Self::default() }
 	}
@@ -163,7 +163,7 @@ impl Info {
 }
 
 impl From<Hop> for Info {
-	/// Config for the given origin id with the defaults of [`Info::new`].
+	/// Config for the given Hop ID with the defaults of [`Info::new`].
 	fn from(id: Hop) -> Self {
 		Self::new(id)
 	}
@@ -458,7 +458,7 @@ fn route_key(name: &Path, hops: &Hops) -> (usize, u64) {
 	(hops.len(), fnv_key(name, hops.iter().copied()))
 }
 
-/// FNV-1a over the broadcast name and a sequence of origin ids.
+/// FNV-1a over the broadcast name and a sequence of Hop IDs.
 ///
 /// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 /// builds, which matters when nodes run mismatched binaries during a rolling
@@ -3346,7 +3346,7 @@ impl Consumer {
 	/// A clone that never serves the given peer its own data: broadcasts resolve
 	/// to a source whose hop chain excludes `peer`, matching what the announce
 	/// loop advertises to them. Sessions apply this once they learn the peer's
-	/// origin id.
+	/// Hop ID.
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
@@ -6830,7 +6830,7 @@ mod tests {
 	/// A local standby with the same original publisher joining a front that is
 	/// carrying the broadcast from a peer must splice the live subscription onto
 	/// the new source, never tear it down (#2473, e2e finding 2). Redundant
-	/// publishers sharing an origin id MUST produce the same tracks, so the
+	/// publishers sharing an Hop ID MUST produce the same tracks, so the
 	/// splice resumes seamlessly at the group boundary.
 	#[tokio::test]
 	async fn test_standby_join_splices_live_subscriber() {

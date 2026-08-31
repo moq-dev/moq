@@ -62,7 +62,7 @@ function supportsTrackStream(version: Version): boolean {
 export interface AnnouncedOptions {
 	/**
 	 * If true, skip announcements whose hop chain contains this connection's
-	 * own origin id. Useful for meshes that reflect announces back. Defaults
+	 * own Hop ID. Useful for meshes that reflect announces back. Defaults
 	 * to false for backwards compatibility: existing code (notably hang.live)
 	 * relies on seeing its own publishes as the signal that a namespace
 	 * published successfully.
@@ -183,7 +183,7 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		// Lite04/05: send our own session-level origin id so the peer can skip announces
+		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
@@ -211,7 +211,7 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Announce);
 			await msg.encode(stream.writer, this.version);
 
-			// Lite05+: the publisher reports its own origin id before any announces.
+			// Lite05+: the publisher reports its own Hop ID before any announces.
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the ignoreSelf loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;

@@ -2097,7 +2097,7 @@ mod tests {
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
 	}
 
-	/// A valid `cluster.id` is used verbatim as the relay's origin id, giving the
+	/// A valid `cluster.id` is used verbatim as the relay's Hop ID, giving the
 	/// node a stable identity across restarts.
 	#[tokio::test]
 	async fn cluster_id_sets_origin() {

@@ -20,7 +20,7 @@ pub struct MoqOriginOptions {
 /// and observe them with `MoqBroadcastConsumer::route_updates`.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqRoute {
-	/// Origin ids of the relay hops the broadcast traversed, oldest first.
+	/// Hop IDs of the relay hops the broadcast traversed, oldest first.
 	#[uniffi(default = [])]
 	pub hops: Vec<u64>,
 	/// Preference among routes serving the same broadcast: lower wins. A publisher

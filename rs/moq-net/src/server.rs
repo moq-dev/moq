@@ -682,7 +682,7 @@ where
 		self.role
 	}
 
-	/// The origin identity declared by the peer, when the negotiated protocol carries one.
+	/// The Hop ID declared by the peer, when the negotiated protocol carries one.
 	///
 	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
 	/// origin; a `moqt-17`+ endpoint declares it via the MoQ Cluster extension. Older

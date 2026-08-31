@@ -109,7 +109,7 @@ impl Client {
 	/// extension, and moq-transport peers that don't negotiate the MoQ Cluster
 	/// extension (or predate it, on `moqt-16` and earlier).
 	/// Broadcasts received from such a peer are normally attributed to the reserved
-	/// origin 0 ("unknown"), which identifies nothing: it never proves continuity,
+	/// Hop ID 0 ("unknown"), which identifies nothing: it never proves continuity,
 	/// so their advertisements neither splice nor survive a restart in place. This
 	/// knob pins a real identity instead, exactly as if the peer had declared it:
 	///

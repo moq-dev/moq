@@ -596,7 +596,7 @@ mod tests {
 		}
 	}
 
-	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
+	// Lite04/05 carry the subscriber's Hop ID so the publisher can skip reflected
 	// announces before they hit the wire.
 	#[test]
 	fn announce_request_carries_exclude_hop_on_lite05() {
@@ -651,7 +651,7 @@ mod tests {
 		}
 		.encode(&mut buf, Version::Lite05)
 		.unwrap();
-		// origin id 1 sits right after the size prefix; rewrite it to 0.
+		// Hop ID 1 sits right after the size prefix; rewrite it to 0.
 		let bytes = &buf[..];
 		let mut patched = bytes.to_vec();
 		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)

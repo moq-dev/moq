@@ -47,7 +47,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 
 	origin: origin::Producer,
 	recv_bandwidth: Option<bandwidth::Producer>,
-	// Session-level origin id shared with the Publisher. Used to drop reflected
+	// Session-level Hop ID shared with the Publisher. Used to drop reflected
 	// announces: any incoming announce whose hop chain already passed through us
 	// has looped, so it is neither used as a route nor forwarded. On lite-04/05
 	// we also ask the peer to filter them out (AnnounceRequest.exclude_hop) so
@@ -68,7 +68,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	session_hop: crate::Hop,
 	// The identity assigned to the peer by the caller (`Client::with_peer_hop`,
 	// or the per-session default a server hands every request), standing in wherever
-	// the peer declines to declare one (an AnnounceOk reporting origin id 0).
+	// the peer declines to declare one (an AnnounceOk reporting Hop ID 0).
 	peer_hop: Option<crate::Hop>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
@@ -247,7 +247,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// This link's price, added to the wire cost; the pre-charge value is kept
 		// on the route so the origin's handover gate can tell a warm peer apart.
 		link_cost: u64,
-		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
+		// Lite05+: the announce sender's Hop ID (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
@@ -388,7 +388,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// The route cost off the wire and this link's price. See `start_announce`.
 		cost: crate::broadcast::Cost,
 		link_cost: u64,
-		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
+		// Lite05+: the announce sender's Hop ID (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Hop>,
@@ -1171,7 +1171,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					};
 				}
 				PrefixState::ReadOk { stream } => {
-					// Lite05+: the publisher reports its own origin id, which we stamp onto
+					// Lite05+: the publisher reports its own Hop ID, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
 					// Its `active` count marks where the initial set ends; nothing here needs
 					// that boundary, so it is read and dropped. Callers that must not race an
@@ -2022,7 +2022,7 @@ mod tests {
 			going_away: Default::default(),
 		});
 
-		// The sender reports origin 0, so it takes the assigned identity, and its chain
+		// The sender reports Hop ID 0, so it takes the assigned identity, and its chain
 		// already carries that identity: the route came back through it.
 		let mut hops = crate::Hops::new();
 		hops.push(assigned).unwrap();
@@ -2088,7 +2088,7 @@ mod tests {
 		assert_eq!(hops, vec![assigned]);
 	}
 
-	/// A peer with no assigned identity is attributed the reserved origin 0
+	/// A peer with no assigned identity is attributed the reserved Hop ID 0
 	/// (UNKNOWN). This layer never mints one of its own: whether an anonymous peer
 	/// gets an identity, and whether two of its sessions share it, is the caller's
 	/// policy, and a minted id here would be indistinguishable from a declared one.

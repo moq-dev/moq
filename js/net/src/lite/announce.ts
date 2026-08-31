@@ -349,7 +349,7 @@ export class AnnounceInit {
 /// Sent by the publisher as the first message on an announce stream, before any
 /// individual Announce messages. Lite05+ only; the successor to AnnounceInit.
 ///
-/// `origin` is the responder's origin id, which the subscriber stamps onto each
+/// `origin` is the responder's Hop ID, which the subscriber stamps onto each
 /// announce's hop chain (the publisher no longer stamps itself), or the reserved
 /// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is
 /// the number of initial Announce messages that follow immediately.

@@ -1339,7 +1339,7 @@ impl Request {
 		request_ref!(self, r => r.role())
 	}
 
-	/// The origin identity the peer declared in its SETUP (moq-lite-05+).
+	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
 	///
 	/// A peer declares this when it attaches a publish or subscribe origin.
 	/// Older versions and peers without one return `None`.
