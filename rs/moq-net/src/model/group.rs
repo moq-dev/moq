@@ -31,7 +31,7 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// Doubles as the per-frame size cap: a single frame can be at most this large (a
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
-pub(super) const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+pub const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -253,7 +253,7 @@ impl GroupState {
 
 	/// Evict completed frames from the front until within the byte budget.
 	fn evict(&mut self) {
-		while self.cache > MAX_GROUP_CACHE {
+		while self.cache > MAX_CACHE_BYTES {
 			let Some(frame) = self.frames.pop_front() else {
 				break;
 			};
@@ -450,7 +450,7 @@ impl Producer {
 			.convert(self.track.timescale)
 			.map_err(|_| Error::TimestampMismatch)?;
 		let payload = data.into_bytes();
-		if payload.len() as u64 > MAX_GROUP_CACHE {
+		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
 
@@ -502,7 +502,7 @@ impl Producer {
 				.timestamp
 				.convert(self.track.timescale)
 				.map_err(|_| Error::TimestampMismatch)?;
-			if frame.payload.len() as u64 > MAX_GROUP_CACHE {
+			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
 			}
 		}
@@ -557,7 +557,7 @@ impl Producer {
 			.timestamp
 			.convert(self.track.timescale)
 			.map_err(|_| Error::TimestampMismatch)?;
-		if frame.size > MAX_GROUP_CACHE {
+		if frame.size > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
 		let buf = FrameBuf::new(frame.size as usize);
@@ -611,7 +611,7 @@ impl Producer {
 			.timestamp
 			.convert(self.track.timescale)
 			.map_err(|_| Error::TimestampMismatch)?;
-		if frame.size > MAX_GROUP_CACHE {
+		if frame.size > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
 		let buf = FrameBuf::new(frame.size as usize);
@@ -1885,8 +1885,8 @@ mod test {
 	fn eviction_drops_old_frames() {
 		let mut producer = Info { sequence: 0 }.produce();
 
-		// Write frames that total more than MAX_GROUP_CACHE.
-		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
+		// Write frames that total more than MAX_CACHE_BYTES.
+		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
 		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
 		producer.write_frame(Timestamp::ZERO, big).unwrap();
 
@@ -1894,14 +1894,14 @@ mod test {
 		let state = producer.state.read();
 		assert_eq!(state.offset, 1);
 		assert_eq!(state.frames.len(), 1);
-		assert_eq!(state.frames[0].payload.len(), MAX_GROUP_CACHE as usize);
+		assert_eq!(state.frames[0].payload.len(), MAX_CACHE_BYTES as usize);
 	}
 
 	#[test]
 	fn next_frame_returns_cache_full_on_tombstone() {
 		let mut producer = Info { sequence: 0 }.produce();
 
-		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
+		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
 		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
 		producer.write_frame(Timestamp::ZERO, big).unwrap();
 
@@ -2281,7 +2281,7 @@ mod test {
 	fn create_frame_rejects_oversized() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let result = producer.create_frame(frame::Info {
-			size: MAX_GROUP_CACHE + 1,
+			size: MAX_CACHE_BYTES + 1,
 			timestamp: Timestamp::ZERO,
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));

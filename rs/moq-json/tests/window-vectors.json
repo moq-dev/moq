@@ -1,0 +1,32 @@
+[
+  {
+    "name": "empty group header",
+    "first": true,
+    "frame": "{\"offset\":0,\"records\":[]}"
+  },
+  {
+    "name": "group header from zero",
+    "first": true,
+    "frame": "{\"offset\":0,\"records\":[{\"n\":0},{\"n\":1}]}"
+  },
+  {
+    "name": "group header with a non-zero offset",
+    "first": true,
+    "frame": "{\"offset\":7,\"records\":[{\"n\":7}]}"
+  },
+  {
+    "name": "push",
+    "first": false,
+    "frame": "{\"push\":{\"n\":2}}"
+  },
+  {
+    "name": "pop one",
+    "first": false,
+    "frame": "{\"pop\":1}"
+  },
+  {
+    "name": "pop several",
+    "first": false,
+    "frame": "{\"pop\":3}"
+  }
+]

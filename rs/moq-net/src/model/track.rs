@@ -1218,7 +1218,7 @@ impl Producer {
 	/// a presentation time, pass [`Timestamp::now`] explicitly.
 	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
 		let frame = crate::IntoBytes::into_bytes(frame);
-		if frame.len() as u64 > group::MAX_GROUP_CACHE {
+		if frame.len() as u64 > group::MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
 		let mut group = self.append_group()?;
@@ -6186,7 +6186,7 @@ mod test {
 	#[test]
 	fn write_frame_rejects_an_oversized_frame_before_appending_its_group() {
 		let mut producer = track_producer("test", None);
-		let frame = bytes::Bytes::from(vec![0; group::MAX_GROUP_CACHE as usize + 1]);
+		let frame = bytes::Bytes::from(vec![0; group::MAX_CACHE_BYTES as usize + 1]);
 
 		assert!(matches!(
 			producer.write_frame(Timestamp::ZERO, frame),
