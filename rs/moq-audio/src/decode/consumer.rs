@@ -1,5 +1,7 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
@@ -22,8 +24,10 @@ pub struct Consumer {
 	/// One past the last sample handed to the resampler, so the tail it is still
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
-	/// Activity of the packet that supplied the resampler's terminal tail.
-	tail_activity: Activity,
+	/// Codec activity spans still represented by buffered resampler output.
+	activity: VecDeque<ActivitySpan>,
+	/// Resampled frames split at activity boundaries and waiting to be returned.
+	pending: VecDeque<Classified<Frame>>,
 	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
@@ -34,6 +38,11 @@ pub struct Consumer {
 	terminal_start: Option<moq_net::Timestamp>,
 	/// Last container discontinuity applied to codec and resampler state.
 	discontinuity: u64,
+}
+
+struct ActivitySpan {
+	end: moq_net::Timestamp,
+	activity: Activity,
 }
 
 impl Consumer {
@@ -84,7 +93,8 @@ impl Consumer {
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
-			tail_activity: Activity::Active,
+			activity: VecDeque::new(),
+			pending: VecDeque::new(),
 			epoch: None,
 			frames_decoded: 0,
 			end: None,
@@ -114,6 +124,10 @@ impl Consumer {
 	/// track ends.
 	pub async fn read(&mut self) -> Result<Option<Classified<Frame>>, Error> {
 		loop {
+			if let Some(frame) = self.pending.pop_front() {
+				return Ok(Some(frame));
+			}
+
 			let mux_frame = self.track.read().await?;
 			self.apply_discontinuity()?;
 			let Some(mux_frame) = mux_frame else {
@@ -169,8 +183,18 @@ impl Consumer {
 				None => (decoded, decoded_at),
 			};
 
-			self.tail = Some(advance(decoded_at, frames, rate)?);
-			self.tail_activity = activity;
+			let decoded_end = advance(decoded_at, frames, rate)?;
+			self.tail = Some(decoded_end);
+
+			if self.resampler.is_some() {
+				self.activity.push_back(ActivitySpan {
+					end: decoded_end,
+					activity,
+				});
+				let classified = self.classify(pcm, timestamp)?;
+				self.pending.extend(classified);
+				continue;
+			}
 
 			return Ok(Some(Classified::new(self.frame(pcm, timestamp)?, activity)));
 		}
@@ -189,7 +213,8 @@ impl Consumer {
 			resampler.reset();
 		}
 		self.tail = None;
-		self.tail_activity = Activity::Active;
+		self.activity.clear();
+		self.pending.clear();
 		self.epoch = None;
 		self.frames_decoded = 0;
 		self.end = None;
@@ -210,13 +235,52 @@ impl Consumer {
 
 		let pending = resampler.pending_frames();
 		let skipped = resampler.skipped();
+		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
 		let pcm = resampler.flush()?;
-		if pcm.is_empty() {
-			return Ok(None);
+		let classified = self.classify(pcm, timestamp)?;
+		self.pending.extend(classified);
+		Ok(self.pending.pop_front())
+	}
+
+	/// Split resampler output at the codec activity boundaries it spans.
+	fn classify(&mut self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Vec<Classified<Frame>>, Error> {
+		let channels = self.decoder.channel_count().max(1) as usize;
+		let total = pcm.len() / channels;
+		let end = advance(timestamp, total, self.resolved_sample_rate)?;
+		let mut offset = 0;
+		let mut classified = Vec::new();
+
+		while offset < total {
+			let cursor = advance(timestamp, offset, self.resolved_sample_rate)?;
+			while self.activity.front().is_some_and(|span| span.end <= cursor) {
+				self.activity.pop_front();
+			}
+
+			let Some(span) = self.activity.front() else {
+				classified.push(Classified::new(
+					self.frame(pcm[offset * channels..].to_vec(), cursor)?,
+					Activity::Active,
+				));
+				break;
+			};
+			// The sinc filter can leave a rounding frame beyond the final input
+			// boundary. It belongs to the last span rather than a synthetic active
+			// span, while a queued following span is a real split point.
+			let boundary = if self.activity.len() > 1 {
+				span.end.min(end)
+			} else {
+				end
+			};
+			let next = frames_between(timestamp, boundary, self.resolved_sample_rate)?.clamp(offset + 1, total);
+			let activity = span.activity;
+			classified.push(Classified::new(
+				self.frame(pcm[offset * channels..next * channels].to_vec(), cursor)?,
+				activity,
+			));
+			offset = next;
 		}
 
-		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
-		Ok(Some(Classified::new(self.frame(pcm, timestamp)?, self.tail_activity)))
+		Ok(classified)
 	}
 
 	/// Where the output the resampler is about to hand back actually begins.
@@ -457,6 +521,70 @@ mod tests {
 		let total = first_frames + tail_frames;
 		assert!((1105..=1120).contains(&total), "unexpected total: {total}");
 		assert!(consumer.read().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn resampling_splits_frames_at_activity_boundaries() {
+		let mut encoder = Encoder::new(&crate::encode::Config {
+			dtx: true,
+			bitrate: Some(24_000),
+			frame_duration: std::time::Duration::from_millis(10),
+			..crate::encode::Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
+		.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				sample_rate: Some(44_100),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let active = vec![0.5; encoder.frame_size()];
+		let silence = vec![0.0; encoder.frame_size()];
+		let mut first_dtx = None;
+		for index in 0..40u64 {
+			let packet = encoder.encode(if index == 0 { &active } else { &silence }).unwrap();
+			let timestamp = Timestamp::from_scale(index * encoder.frame_size() as u64, 48_000).unwrap();
+			if first_dtx.is_none() && packet.activity.is_dtx() {
+				first_dtx = Some(timestamp);
+			}
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp,
+					payload: packet.value,
+					keyframe: true,
+					duration: None,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let expected = first_dtx.expect("silence should enter Opus DTX");
+		let mut actual = None;
+		while let Some(frame) = consumer.read().await.unwrap() {
+			if frame.activity.is_dtx() {
+				actual = Some(frame.timestamp);
+				break;
+			}
+		}
+		let actual = actual.expect("consumer should report Opus DTX");
+		let error = actual.as_micros().abs_diff(expected.as_micros());
+		assert!(error < 100, "activity boundary moved by {error} us during resampling");
 	}
 
 	#[tokio::test]

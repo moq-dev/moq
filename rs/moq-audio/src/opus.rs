@@ -64,17 +64,54 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	error(code, "opus_decode_float")
 }
 
-/// Classify a packet libopus accepted, preserving DTX across packet loss.
+/// Classify a packet libopus accepted, preserving DTX across loss and SID refreshes.
 ///
-/// libopus emits one or two unpadded bytes for DTX and comfort noise. An empty
-/// payload asks the decoder for packet-loss concealment, which remains DTX only
-/// when the last accepted packet entered DTX.
+/// libopus enters DTX with a one- or two-byte packet, then periodically emits a
+/// longer SID-only refresh. An empty payload asks the decoder for packet-loss
+/// concealment, which remains DTX only when the last accepted packet entered DTX.
 pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 	match unpadded_len(packet) {
 		0 if in_dtx => Activity::Dtx,
 		1 | 2 => Activity::Dtx,
+		_ if in_dtx && is_sid_refresh(packet) => Activity::Dtx,
 		_ => Activity::Active,
 	}
+}
+
+/// Whether every coded frame is empty or the SILK SID payload libopus emits
+/// while refreshing comfort noise during DTX.
+fn is_sid_refresh(packet: &[u8]) -> bool {
+	let Ok(len) = i32::try_from(packet.len()) else {
+		return false;
+	};
+	let mut frames = [std::ptr::null(); 48];
+	let mut sizes = [0i16; 48];
+	// SAFETY: the arrays have libopus's maximum 48 frame slots. The returned
+	// frame pointers refer into `packet` and are read only for their reported sizes.
+	let count = unsafe {
+		unsafe_libopus::opus_packet_parse(
+			packet.as_ptr(),
+			len,
+			std::ptr::null_mut(),
+			frames.as_mut_ptr(),
+			sizes.as_mut_ptr(),
+			std::ptr::null_mut(),
+		)
+	};
+	let Ok(count) = usize::try_from(count) else {
+		return false;
+	};
+
+	frames[..count].iter().zip(&sizes[..count]).all(|(&frame, &size)| {
+		let Ok(size) = usize::try_from(size) else {
+			return false;
+		};
+		if size == 0 {
+			return true;
+		}
+		// SAFETY: opus_packet_parse returned this pointer and size into `packet`.
+		unsafe { std::slice::from_raw_parts(frame, size) == [0xff, 0xfe] }
+	})
 }
 
 fn unpadded_len(packet: &[u8]) -> usize {
@@ -117,6 +154,7 @@ mod tests {
 		assert_eq!(activity(&[0xf8, 0xff], false), Activity::Dtx);
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
-		assert_eq!(activity(&[0xf8, 0xff, 0xfe], true), Activity::Active);
+		assert_eq!(activity(&[0xf8, 0xff, 0xfe], false), Activity::Active);
+		assert_eq!(activity(&[0xf8, 0xff, 0xfe], true), Activity::Dtx);
 	}
 }

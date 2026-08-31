@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use unsafe_libopus::{
-	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE,
-	OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder, opus_encode_float,
-	opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
+	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK,
+	OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder,
+	opus_encode_float, opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
 use crate::opus;
@@ -171,6 +171,7 @@ enum Backend {
 struct Opus {
 	inner: *mut OpusEncoder,
 	scratch: Vec<u8>,
+	in_dtx: bool,
 }
 
 // SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
@@ -248,6 +249,7 @@ impl Encoder {
 			backend: Backend::Opus(Opus {
 				inner,
 				scratch: vec![0u8; MAX_PACKET_BYTES],
+				in_dtx: false,
 			}),
 			config,
 			codec_rate,
@@ -413,6 +415,7 @@ impl Encoder {
 			// SAFETY: `inner` owns a live encoder and OPUS_RESET_STATE takes no arguments.
 			let rc = unsafe { opus_encoder_ctl_impl(opus.inner, OPUS_RESET_STATE, varargs![]) };
 			debug_assert_eq!(rc, OPUS_OK, "OPUS_RESET_STATE failed with {rc}");
+			opus.in_dtx = false;
 		}
 		self.started = false;
 	}
@@ -452,7 +455,17 @@ impl Encoder {
 					return Err(crate::opus::error(n, "opus_encode_float"));
 				}
 				let payload = Bytes::copy_from_slice(&opus.scratch[..n as usize]);
-				let activity = crate::opus::activity(&payload, false);
+				let packet_activity = crate::opus::activity(&payload, opus.in_dtx);
+				let reported = Self::get_opus_ctl(opus.inner, OPUS_GET_IN_DTX_REQUEST, "OPUS_GET_IN_DTX")? != 0;
+				// libopus 1.3 reports DTX one packet before it first omits coded
+				// audio. Require the packet marker to enter the state, then trust the
+				// control for periodic comfort-noise refreshes and recovery.
+				let activity = if reported && (opus.in_dtx || packet_activity.is_dtx()) {
+					Activity::Dtx
+				} else {
+					Activity::Active
+				};
+				opus.in_dtx = activity.is_dtx();
 				Classified::new(payload, activity)
 			}
 			Backend::Pcm => {
@@ -709,6 +722,41 @@ mod tests {
 		}
 		assert!(recovered, "active audio should exit Opus DTX");
 		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Active);
+	}
+
+	#[test]
+	fn opus_classifies_periodic_dtx_refreshes() {
+		for duration_ms in [20, 40, 60] {
+			let mut enc = Encoder::new(&Config {
+				dtx: true,
+				bitrate: Some(24_000),
+				frame_duration: Duration::from_millis(duration_ms),
+				..Config::new(Input {
+					channels: 1,
+					..Input::default()
+				})
+			})
+			.unwrap();
+			let mut dec = Decoder::new(&enc.catalog()).unwrap();
+			let silence = vec![0.0; enc.frame_size()];
+
+			let mut entered = false;
+			let mut refresh = None;
+			for _ in 0..100 {
+				let packet = enc.encode(&silence).unwrap();
+				let decoded = dec.decode(&packet).unwrap();
+				assert_eq!(decoded.activity, packet.activity);
+				entered |= packet.len() <= 2;
+				if entered && packet.len() > 2 && packet.activity.is_dtx() {
+					refresh = Some(packet);
+					break;
+				}
+			}
+			assert!(
+				refresh.is_some(),
+				"{duration_ms} ms Opus should refresh DTX comfort noise"
+			);
+		}
 	}
 
 	#[test]
