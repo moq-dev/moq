@@ -13,7 +13,8 @@ async function drain(track: Track.Subscriber): Promise<Value[]> {
 }
 
 // Inspect the published layout via the public API: the frame count of each group, in order.
-// The track must be finished first so group/frame reads terminate.
+// The track must be finished first so group/frame reads terminate, and the subscriber has to
+// exist before the first update: a fresh one starts at the live edge, not at group 0.
 async function structure(track: Track.Subscriber): Promise<number[]> {
 	const counts: number[] = [];
 	for (;;) {
@@ -30,24 +31,26 @@ async function structure(track: Track.Subscriber): Promise<number[]> {
 test("deltas off: a snapshot group per change", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const subscriber = track.subscribe();
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
 
 	// Two changes => two single-frame snapshot groups, reconstructed in order.
-	expect(await drain(track.subscribe())).toEqual([{ a: 1 }, { a: 2 }]);
+	expect(await drain(subscriber)).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
 test("deltaRatio 0 disables deltas, like off", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const subscriber = track.subscribe();
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
 
 	// `0` is treated as off, not a degenerate "enabled" value that keeps the group open: each change
 	// is its own single-frame snapshot group.
-	expect(await structure(track.subscribe())).toEqual([1, 1]);
+	expect(await structure(subscriber)).toEqual([1, 1]);
 });
 
 test("live consumer sees each update", async () => {
@@ -155,13 +158,14 @@ test("tight ratio rolls snapshots", async () => {
 	// the deltas already written, so the delta that tips the group over budget still lands (a one-frame
 	// overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls group 1.
 	const producer = new Producer<Value>({ track, deltaRatio: 1 });
+	const subscriber = track.subscribe();
 	producer.update({ a: 1 }); // snapshot, group 0
 	producer.update({ a: 2 }); // delta, group 0 (deltas = 7)
 	producer.update({ a: 3 }); // delta, group 0 (deltas = 14, now over budget)
 	producer.update({ a: 4 }); // budget already exceeded, rolls group 1
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([3, 1]);
+	expect(await structure(subscriber)).toEqual([3, 1]);
 });
 
 test("deltas stay within ratio times snapshot", async () => {
@@ -172,10 +176,11 @@ test("deltas stay within ratio times snapshot", async () => {
 	// until they first exceed 56 (nine deltas = 63 bytes) and the next update rolls (a one-frame
 	// overshoot past the 56-byte budget).
 	const producer = new Producer<Value>({ track, deltaRatio: 8 });
+	const subscriber = track.subscribe();
 	for (let n = 0; n <= 10; n++) producer.update({ n });
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([10, 1]);
+	expect(await structure(subscriber)).toEqual([10, 1]);
 });
 
 test("array change is a wholesale delta", async () => {
@@ -206,11 +211,12 @@ test("late joiner collapses a buffered backlog to the latest value", async () =>
 test("frame cap rolls snapshot", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 1_000_000 });
+	const subscriber = track.subscribe();
 	// First update is the snapshot; deltas fill the group until the frame cap forces a roll.
 	for (let i = 0; i <= 256; i++) {
 		producer.update({ n: i });
 	}
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([256, 1]);
+	expect(await structure(subscriber)).toEqual([256, 1]);
 });

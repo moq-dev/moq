@@ -39,12 +39,13 @@ async function groupCount(track: Track.Subscriber): Promise<number> {
 test("compressed snapshot per group round-trips", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 0, compression: true });
+	const subscriber = track.subscribe();
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
 
 	// Deltas off: one compressed snapshot per group, reconstructed in order.
-	expect(await drainCompressed(track.subscribe())).toEqual([{ a: 1 }, { a: 2 }]);
+	expect(await drainCompressed(subscriber)).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
