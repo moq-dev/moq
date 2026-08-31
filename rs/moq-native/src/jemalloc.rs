@@ -60,6 +60,8 @@ pub async fn run() -> crate::Result<()> {
 
 #[cfg(test)]
 mod tests {
+	const USR1_CHILD: &str = "MOQ_NATIVE_USR1_CHILD";
+
 	#[tokio::test(flavor = "current_thread")]
 	async fn blocking_work_leaves_the_runtime_thread() {
 		let runtime = std::thread::current().id();
@@ -67,12 +69,42 @@ mod tests {
 		assert_ne!(runtime, worker);
 	}
 
-	#[tokio::test]
-	async fn usr1_is_caught_without_active_profiling() {
-		let mut signal = super::register_signal().unwrap();
-		unsafe { libc::raise(libc::SIGUSR1) };
-		tokio::time::timeout(std::time::Duration::from_secs(1), signal.recv())
-			.await
+	#[test]
+	fn usr1_is_caught_without_active_profiling() {
+		let output = std::process::Command::new(std::env::current_exe().unwrap())
+			.args(["--exact", "jemalloc::tests::usr1_child_survives_without_profiling"])
+			.env(USR1_CHILD, "1")
+			.env("MALLOC_CONF", "prof:false,prof_active:false")
+			.output()
 			.unwrap();
+		assert!(
+			output.status.success(),
+			"child did not survive SIGUSR1:\n{}",
+			String::from_utf8_lossy(&output.stderr)
+		);
+	}
+
+	#[test]
+	fn usr1_child_survives_without_profiling() {
+		if std::env::var_os(USR1_CHILD).is_none() {
+			return;
+		}
+
+		assert!(!matches!(
+			unsafe { super::raw::read::<bool>(b"prof.active\0") },
+			Ok(true)
+		));
+		tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(async {
+				let runner = tokio::spawn(super::run());
+				tokio::task::yield_now().await;
+				unsafe { libc::raise(libc::SIGUSR1) };
+				tokio::task::yield_now().await;
+				assert!(!runner.is_finished());
+				runner.abort();
+			});
 	}
 }
