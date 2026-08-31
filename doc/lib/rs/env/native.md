@@ -90,8 +90,9 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
-let route = moq_net::broadcast::Route::new().with_announce(true);
-let mut broadcast = origin.create_broadcast("", route)?;
+// Publish the broadcast and announce its exact path as a route; dropping the
+// announcement retracts it while the broadcast itself stays reachable by path.
+let (mut broadcast, _announcement) = origin.publish_broadcast("")?;
 // ... add catalog and tracks to the broadcast ...
 ```
 
@@ -107,15 +108,18 @@ Subscribing works the same way round: wire an origin in before connecting and re
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
 let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-let mut announced = origin.consume().announced();
+let consumer = origin.consume();
+let mut announced = consumer.announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
-// Wait for broadcasts to be announced.
+// Wait for routes to be announced. By convention a publisher announces each
+// broadcast's exact path, so resolve the announced path into a broadcast.
 while let Some(update) = announced.next().await {
-    let Some(broadcast) = update.broadcast else {
-        tracing::info!(path = %update.path, "broadcast ended");
+    if !update.active {
+        tracing::info!(prefix = %update.route.prefix, "route ended");
         continue;
-    };
+    }
+    let broadcast = consumer.request_broadcast(&update.route.prefix).await?;
     // Subscribe to tracks on this broadcast...
 }
 ```

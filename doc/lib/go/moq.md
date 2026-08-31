@@ -49,9 +49,14 @@ for ann, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	fmt.Println("got broadcast", ann.Path())
+	// An announcement is a route; its path is relative to the prefix.
+	fmt.Println("got route", ann.Path())
 
-	catalog, err := ann.Broadcast().Catalog(ctx)
+	broadcast, err := client.RequestBroadcast("demos/" + ann.Path())
+	if err != nil {
+		log.Fatal(err)
+	}
+	catalog, err := broadcast.Catalog(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}

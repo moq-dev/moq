@@ -374,36 +374,33 @@ Rules worth knowing:
 
 ### Redundant Publishers (1+1)
 
-Relays key a broadcast's content identity on the publisher's origin id (the
-first hop of its announcements). Two publishers of the same broadcast that
-share an id are treated as interchangeable sources: relays hold both routes
-and fail over between them at a group boundary, so killing one leaves viewers
-running off the other.
+An announcement's route names the publisher's origin id as its first hop.
+Two publishers of the same broadcast that share an id (and cost) advertise
+identical routes, which relays deduplicate: the mesh sees one route while
+either publisher is alive, so killing one retracts nothing and the survivor
+keeps serving.
 
-Sharing an id is a promise: the publishers MUST produce the same broadcast,
-meaning the same track names carrying the same content, with group sequences
-aligned on the same boundaries. Relays may switch between same-id sources
-whenever routing prefers another (not only on failure), splicing at the next
-group boundary, so encoders that drift (for example segment-numbered tracks
-from processes started at different times) tear down subscribers on the
-switch. Independent publishers with different tracks or timelines MUST use
-different origin ids; the newcomer then takes the broadcast over instead of
-joining. Run the same command from two aligned encoders, pinning the same id
-on both:
+A relay never splices a live subscription from one publisher to another.
+When the publisher serving a subscription goes away, that subscription ends
+and the viewer re-subscribes, landing on the best remaining route; players do
+this automatically when the path is (still) announced. So 1+1 buys a fast
+resubscribe instead of a dead stream, not a seamless mid-group handover, and
+the two encoders should still produce equivalent broadcasts (same track
+names, comparable timelines) so a viewer that fails over keeps decoding. Run
+the same command from two encoders, pinning the same id on both:
 
 ```bash
 moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
 moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
-Leave `--origin` unset everywhere else. The default fresh id per run is what
-makes a restarted encoder look like new content (ending subscriptions and
-invalidating caches) instead of silently splicing mid-stream. A publisher with
-a *different* id takes the broadcast over the moment it announces, ending the
-incumbent rather than waiting behind it, so a reconnect is live again without
-waiting for the relay's transport to time out the connection it replaced. The
-last publisher to announce a path owns it, so use authorization to decide who
-may publish where.
+Leave `--origin` unset everywhere else. The origin id also feeds loop
+detection: a relay drops announcements whose route already contains its own
+id, so reusing one id across unrelated publishers can make their routes
+invisible to each other. New subscriptions always resolve through the best
+current route, newest first on a tie, so a restarted publisher serves new
+viewers the moment it announces; use authorization to decide who may publish
+where.
 
 ### Capture a Webcam
 

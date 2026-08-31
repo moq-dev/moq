@@ -58,21 +58,26 @@ Transports that don't carry a request URI (native QUIC, or qmux over TCP/TLS) al
 
 ### Announcements
 
-`moq-lite` optionally supports live discovery of broadcasts.
+`moq-lite` optionally supports live discovery via announcements.
 
-Depending on the language, there's an `announced(prefix: Path)` method on the session.
-This asks the peer to notify us of any existing broadcasts that match the prefix and any future updates.
+An announcement is a **route**: a claim that broadcasts under a path prefix can be served.
+Depending on the language, there's an `announce(route)` method on the publishing side and an `announced(prefix: Path)` method on the session.
+The latter asks the peer for every route that intersects the prefix, plus any future updates.
+
+By convention a publisher announces each broadcast's exact path, so subscribers can enumerate broadcasts by iterating routes.
+But a route can also cover a whole subtree: a dashboard server announces one short prefix and serves whatever broadcast is requested beneath it, with no per-broadcast announcement.
+It's up to the application to decide that an announced path is a broadcast and request it.
 
 This is extremely useful for conference rooms, as you can live discover when participants join and leave.
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
 The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
-The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
+The peer first replies with the set of routes that are currently advertised, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
 
-Each announcement also describes the route it took: the chain of relay identities it passed through (which is how forwarding loops are caught) and what pulling the broadcast via that route would cost.
+Each route also describes the path it took: the chain of relay identities it passed through (which is how forwarding loops are caught) and what pulling content via that route would cost.
 The cost comes in two magnitudes, compared in order.
-The *warm* cost is what one more subscription would cost the mesh right now, so it collapses to zero at any relay already carrying the broadcast; that is what lets a cluster deduplicate onto a warm copy instead of opening a second ingest.
+The *warm* cost is what one more subscription would cost the mesh right now, so it collapses to zero at any relay already carrying the content; that is what lets a cluster deduplicate onto a warm copy instead of opening a second ingest.
 The *cold* cost prices the same path as if nothing were cached, so when two warm relays tie at zero it still says which of them sits closer to the publisher.
 Subscribers route to the lowest warm cost and break ties on cold; [moq-relay clustering](/bin/relay/cluster) covers how relays use this to pick an aggregation point.
 

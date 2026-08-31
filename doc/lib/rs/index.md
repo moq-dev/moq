@@ -291,12 +291,14 @@ your broadcasts and subscriptions carry across reconnects:
 ```rust
 // Subscribe: wait for broadcasts to be announced.
 let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-let mut announced = origin.consume().announced();
+let consumer = origin.consume();
+let mut announced = consumer.announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
 while let Some(update) = announced.next().await {
-    // `update.broadcast` is None when the path went away.
-    // ... subscribe to tracks on each broadcast ...
+    // `update.active` is false when the route went away. By convention each
+    // broadcast's exact path is announced, so resolve it to subscribe:
+    // `consumer.request_broadcast(&update.route.prefix).await?`
 }
 ```
 
