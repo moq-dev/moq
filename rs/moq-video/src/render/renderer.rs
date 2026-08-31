@@ -597,6 +597,8 @@ mod tests {
 			drop(imported);
 
 			let texture = renderer.render(&frame).expect("a zero-copy rendered frame");
+			assert_eq!(renderer.strikes, 0, "frame {index} fell back to the CPU");
+			assert!(!renderer.retired, "frame {index} retired the zero-copy path");
 			assert_eq!((texture.width(), texture.height()), (stream.width(), stream.height()));
 		}
 
