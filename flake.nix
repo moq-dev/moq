@@ -18,9 +18,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    # Native Assets 2.0 needs a newer Flutter package set than the rest of the
-    # repository. Keep that update isolated from the established toolchain.
-    nixpkgs-dart.url = "github:NixOS/nixpkgs/e8be7818e19ada32105a8af937a6a473b38167ca";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
@@ -33,7 +30,6 @@
     {
       self,
       nixpkgs,
-      nixpkgs-dart,
       flake-utils,
       crane,
       rust-overlay,
@@ -60,7 +56,6 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        dartPkgs = import nixpkgs-dart { inherit system; };
 
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
@@ -328,10 +323,9 @@
           doCheck = false;
         };
 
-        # Dart and Flutter bindings plus the pinned external generator.
+        # Dart bindings plus the pinned external generator.
         dartDeps = [
-          dartPkgs.dart
-          dartPkgs.flutter
+          pkgs.dart
           uniffi-bindgen-dart
         ];
 

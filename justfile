@@ -246,7 +246,7 @@ _tools $FILES="":
     # without it, and a skip that keeps `just check` green is what MOQ_STRICT is
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
-    scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart flutter uniffi_bindgen_dart)
+    scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
     # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
     # ffmpeg. Every platform: the plugin type-checks against headers, and the
     # dev shell ships those even on Darwin, where obs-studio can't build.
@@ -441,7 +441,7 @@ fix $BASE="":
     	just js fix "$files"
     	just rs fix-changed "$files"
     	just py fix "$files"
-        just dart fix "$files"
+    	just dart fix "$files"
     	if echo "$files" | grep -q '^cpp/obs/'; then
     		just obs fix
     	fi

@@ -5,7 +5,13 @@ import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:http/http.dart' as http;
 
-const ffiVersion = '0.3.14';
+/// The moq-ffi release whose native assets this package downloads.
+///
+/// dart/scripts/package.sh rewrites this when staging a release. The sentinel
+/// is never used to download: a checkout builds from source instead, and a
+/// package built without the injection fails loudly rather than fetching a
+/// library that does not match these bindings.
+const ffiVersion = '0.0.0-dev';
 const assetId = 'uniffi:moq_ffi';
 
 Future<void> main(List<String> args) async {
@@ -15,11 +21,12 @@ Future<void> main(List<String> args) async {
     final code = input.config.code;
     final target = _target(code);
     final library = _libraryName(code.targetOS);
-    final source = await _resolveLibrary(input, target, library);
+    final resolved = await _resolveLibrary(input, target, library);
     final bundled = input.outputDirectory.resolve(library);
 
-    await File.fromUri(source).copy(bundled.toFilePath());
-    output.dependencies.add(source);
+    await File.fromUri(resolved.library).copy(bundled.toFilePath());
+    output.dependencies.add(resolved.library);
+    output.dependencies.addAll(resolved.inputs);
     output.assets.code.add(
       CodeAsset(
         package: input.packageName,
@@ -33,7 +40,14 @@ Future<void> main(List<String> args) async {
   });
 }
 
-Future<Uri> _resolveLibrary(
+/// A resolved native library plus the files it was built from.
+///
+/// Downloaded and overridden libraries have no tracked inputs; a library built
+/// from this checkout lists its Rust sources so Dart re-runs the hook when they
+/// change.
+typedef _Resolved = ({Uri library, List<Uri> inputs});
+
+Future<_Resolved> _resolveLibrary(
   BuildInput input,
   String target,
   String library,
@@ -44,40 +58,76 @@ Future<Uri> _resolveLibrary(
     if (!await file.exists()) {
       throw StateError('MOQ_DART_FFI_LIB does not exist: $override');
     }
-    return file.uri;
+    return (library: file.uri, inputs: const <Uri>[]);
   }
 
   final workspace = input.packageRoot.resolve('../../');
   final manifest = workspace.resolve('rs/moq-ffi/Cargo.toml');
   if (await File.fromUri(manifest).exists()) {
-    final built = workspace.resolve('target/$target/release/$library');
-    if (await File.fromUri(built).exists()) return built;
-
-    final result = await Process.run('cargo', [
-      'build',
-      '--locked',
-      '--release',
-      '--package',
-      'moq-ffi',
-      '--no-default-features',
-      '--target',
-      target,
-      '--manifest-path',
-      workspace.resolve('Cargo.toml').toFilePath(),
-    ]);
-    if (result.exitCode != 0) {
-      throw StateError(
-        'cargo build failed:\n${result.stdout}\n${result.stderr}',
-      );
-    }
-
-    if (!await File.fromUri(built).exists()) {
-      throw StateError('cargo did not produce ${built.toFilePath()}');
-    }
-    return built;
+    return _build(workspace, target, library);
   }
 
-  return _download(input.outputDirectoryShared, target, library);
+  return (
+    library: await _download(input.outputDirectoryShared, target, library),
+    inputs: const <Uri>[],
+  );
+}
+
+/// Build moq-ffi from this checkout.
+///
+/// Always shells out to Cargo rather than reusing whatever is already in
+/// target/: an existing artifact may predate a Rust edit, or have been built by
+/// another recipe with different features. Cargo's own timestamp check makes
+/// the no-op case cheap.
+Future<_Resolved> _build(Uri workspace, String target, String library) async {
+  final cargoArgs = [
+    'build',
+    '--locked',
+    '--release',
+    '--package',
+    'moq-ffi',
+    '--no-default-features',
+    '--manifest-path',
+    workspace.resolve('Cargo.toml').toFilePath(),
+  ];
+
+  // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
+  // This mirrors rs/moq-ffi/build.sh.
+  final args = target.contains('-android')
+      ? ['ndk', '--target', target, '--platform', '24', '--', ...cargoArgs]
+      : [...cargoArgs, '--target', target];
+
+  final result = await Process.run('cargo', args);
+  if (result.exitCode != 0) {
+    throw StateError(
+      'cargo ${args.join(' ')} failed:\n${result.stdout}\n${result.stderr}',
+    );
+  }
+
+  final built = workspace.resolve('target/$target/release/$library');
+  if (!await File.fromUri(built).exists()) {
+    throw StateError('cargo did not produce ${built.toFilePath()}');
+  }
+
+  return (library: built, inputs: await _rustInputs(workspace));
+}
+
+/// Every Rust source and manifest the build reads, so an edit anywhere in the
+/// workspace invalidates the cached asset rather than just an edit to moq-ffi.
+Future<List<Uri>> _rustInputs(Uri workspace) async {
+  final inputs = <Uri>[];
+
+  final lock = File.fromUri(workspace.resolve('Cargo.lock'));
+  if (await lock.exists()) inputs.add(lock.uri);
+
+  final sources = Directory.fromUri(workspace.resolve('rs/'));
+  await for (final entry in sources.list(recursive: true, followLinks: false)) {
+    if (entry is! File) continue;
+    final name = entry.uri.pathSegments.last;
+    if (name.endsWith('.rs') || name == 'Cargo.toml') inputs.add(entry.uri);
+  }
+
+  return inputs;
 }
 
 Future<Uri> _download(Uri cache, String target, String library) async {

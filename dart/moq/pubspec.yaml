@@ -13,6 +13,9 @@ environment:
   sdk: ">=3.10.0 <4.0.0"
 
 dependencies:
+  # The published floor, bumped by hand when moq starts relying on newer
+  # bindings. In this checkout the override wins and pub ignores the
+  # constraint, so the path package's 0.0.0-dev sentinel resolves fine.
   moq_ffi: ^0.3.14
 
 dependency_overrides:

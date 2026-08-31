@@ -15,5 +15,11 @@ package_dir=$(
 )
 
 cd "$package_dir"
-dart pub get
+# moq_ffi keeps its committed lock through packaging, so resolve from it.
+# moq loses its lock with the path override (see package.sh).
+if [[ -f pubspec.lock ]]; then
+    dart pub get --enforce-lockfile
+else
+    dart pub get
+fi
 dart pub publish --force

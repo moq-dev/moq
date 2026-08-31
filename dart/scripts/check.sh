@@ -10,8 +10,10 @@ if [[ "${1:-}" == --fix ]]; then
     shift
 fi
 
+# `just check` passes the whole changed-file list, so match the scope anywhere in
+# it rather than only at the start.
 files="${1:-}"
-if [[ -n "$files" ]] && ! grep -qE '^(dart/|rs/moq-ffi/)' <<<"$files"; then
+if [[ -n "$files" ]] && ! grep -qE '(^|[[:space:]])(dart/|rs/moq-ffi/)' <<<"$files"; then
     exit 0
 fi
 
@@ -29,20 +31,23 @@ for package in moq_ffi moq; do
     )
 done
 
-if command -v flutter >/dev/null 2>&1; then
-    (
-        cd "$DART_DIR/example/flutter"
-        flutter pub get --enforce-lockfile
-    )
-fi
-
 if [[ "$ACTION" == fix ]]; then
     dart format "$DART_DIR/moq_ffi" "$DART_DIR/moq"
-    if command -v flutter >/dev/null 2>&1; then
-        dart format "$DART_DIR/example/flutter"
-    fi
     exit 0
 fi
+
+# package.sh injects the real version from the moq-ffi-v* tag. A hardcoded one
+# would silently go stale on the next release-plz bump, and the build hook uses
+# it to name the native assets it downloads, so it would fetch a library whose
+# ABI no longer matches these bindings.
+pubspec_version=$(sed -n 's/^version: //p' "$DART_DIR/moq_ffi/pubspec.yaml" | head -1)
+hook_version=$(sed -n "s/^const ffiVersion = '\(.*\)';/\1/p" "$DART_DIR/moq_ffi/hook/build.dart" | head -1)
+for pinned in "$pubspec_version:moq_ffi/pubspec.yaml" "$hook_version:moq_ffi/hook/build.dart"; do
+    if [[ "${pinned%%:*}" != "0.0.0-dev" ]]; then
+        echo "error: ${pinned#*:} pins ${pinned%%:*}; commit the 0.0.0-dev sentinel instead" >&2
+        exit 1
+    fi
+done
 
 generated=$(mktemp -d)
 trap 'rm -rf "$generated"' EXIT
@@ -57,10 +62,6 @@ done
 
 dart format --output=none --set-exit-if-changed \
     "$DART_DIR/moq_ffi" "$DART_DIR/moq"
-if command -v flutter >/dev/null 2>&1; then
-    dart format --output=none --set-exit-if-changed \
-        "$DART_DIR/example/flutter"
-fi
 
 host=$(rustc -vV | sed -n 's/^host: //p')
 case "$host" in
@@ -92,12 +93,3 @@ for package in moq_ffi moq; do
         dart pub publish --dry-run
     )
 done
-
-if command -v flutter >/dev/null 2>&1; then
-    (
-        cd "$DART_DIR/example/flutter"
-        flutter analyze
-    )
-else
-    echo "dart check: skipping Flutter example, flutter is not installed" >&2
-fi

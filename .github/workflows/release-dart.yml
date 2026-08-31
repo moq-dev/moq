@@ -52,7 +52,11 @@ jobs:
         if: github.event_name == 'pull_request'
         working-directory: dart/moq
         run: |
-          dart pub get
+          if [ -f pubspec.lock ]; then
+            dart pub get --enforce-lockfile
+          else
+            dart pub get
+          fi
           dart analyze
           dart pub publish --dry-run
 
@@ -72,7 +76,11 @@ jobs:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd "release-out/moq-$BUILD_VERSION"
-          dart pub get
+          if [ -f pubspec.lock ]; then
+            dart pub get --enforce-lockfile
+          else
+            dart pub get
+          fi
           dart analyze
           dart pub publish --dry-run
 

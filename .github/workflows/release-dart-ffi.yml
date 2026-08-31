@@ -14,6 +14,7 @@ on:
       - "dart/moq_ffi/**"
       - "dart/scripts/**"
       - "rs/moq-ffi/**"
+      - "!rs/moq-ffi/Cargo.toml"
 
 permissions:
   contents: read
@@ -162,7 +163,7 @@ jobs:
             --version "$BUILD_VERSION" \
             --output release-out
           cd "release-out/moq_ffi-$BUILD_VERSION"
-          dart pub get
+          dart pub get --enforce-lockfile
           dart analyze
           dart pub publish --dry-run
 
@@ -203,6 +204,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+          RELEASE_CHECKSUMS: SHA256SUMS-dart
         run: .github/scripts/release.sh create artifacts
 
   publish:

@@ -207,7 +207,7 @@ packages:
       path: "../moq_ffi"
       relative: true
     source: path
-    version: "0.3.14"
+    version: "0.0.0-dev"
   node_preamble:
     dependency: transitive
     description:

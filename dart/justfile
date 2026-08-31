@@ -1,6 +1,6 @@
 #!/usr/bin/env just --justfile
 
-# Check generated bindings, both Dart packages, and the Flutter example.
+# Check the generated bindings and both Dart packages.
 check $FILES="":
     ./scripts/check.sh "{{ FILES }}"
 
@@ -14,5 +14,5 @@ generate:
 
 # Remove Dart tool state and build output.
 clean:
-    rm -rf moq/.dart_tool moq_ffi/.dart_tool example/flutter/.dart_tool
-    rm -rf moq/build moq_ffi/build example/flutter/build
+    rm -rf moq/.dart_tool moq_ffi/.dart_tool
+    rm -rf moq/build moq_ffi/build

@@ -7,8 +7,12 @@ This directory contains two packages:
 
 Run `just dart check` from the repository root. The check rebuilds
 `moq-ffi` without optional codec features, verifies the generated source,
-analyzes and tests both packages, validates their publish layout, and analyzes
-the Flutter example.
+analyzes and tests both packages, and validates their publish layout.
+
+`dart test` drives the Native Assets hook, so the round-trip tests in
+`moq/test/` exercise the same load path a Flutter application uses. There is no
+example application in-tree: `flutter create` scaffolding is per-platform,
+never built by CI, and adds no coverage the tests don't already give.
 
 Flutter Web is out of scope because the Dart UniFFI generator does not support
 WebAssembly. Browser applications should use the TypeScript packages.
