@@ -109,7 +109,7 @@ _tools $FILES="":
 
     # `_check-common` runs on every invocation, so its tools are unconditional.
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
-    scoped '^(rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
+    scoped '^(quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
@@ -163,12 +163,17 @@ check $BASE="":
     # An empty list means "force-run" to the per-lang recipes, which is the
     # wrong semantic here, so don't dispatch at all.
     if [[ -n "$files" ]]; then
-    	just js check "$files"
-    	just rs check-changed "$files"
-    	just py check "$files"
-    	just kt check "$files"
-    	just swift check "$files"
-    	just go check "$files"
+        just js check "$files"
+        just rs check-changed "$files"
+        # Quest documents form one graph, so validate the whole living tree when
+        # either a quest or its validator changes.
+        if echo "$files" | grep -qE '^(quest/|rs/quest/)'; then
+            cargo run --quiet --locked --package quest -- check
+        fi
+        just py check "$files"
+        just kt check "$files"
+        just swift check "$files"
+        just go check "$files"
     	# Type-checking the plugin needs only headers, so it runs here rather
     	# than waiting for obs.yml to link it on Linux. libmoq is in scope
     	# because the plugin calls through its generated C header, and flake.nix
@@ -200,6 +205,7 @@ check-all *args:
     just _tools ALL
     just js check
     just rs check --workspace {{ args }}
+    cargo run --quiet --locked --package quest -- check
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
     just py check

@@ -28,6 +28,7 @@ members = [
     "rs/moq-transcode",
     "rs/moq-video",
     "rs/moq-wasm",
+    "rs/quest",
 ]
 default-members = [
     "rs/kio",
@@ -58,6 +59,7 @@ default-members = [
     "rs/moq-transcode",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/quest",
 ]
 resolver = "2"
 
@@ -144,6 +146,7 @@ objc2-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 percent-encoding = "2"
 pollster = "1.0"
+pulldown-cmark = { version = "0.13", default-features = false }
 qmux = { version = "0.5.1", default-features = false }
 rand = "0.10.1"
 # default-features off so each consumer picks its own TLS backend and body

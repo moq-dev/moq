@@ -87,10 +87,17 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 - **`rs/CLAUDE.md`** - Rust workspace: crate map, Producer/Consumer model, `poll_*` plumbing, error handling, config/TOML merge, Version matching, testing.
 - **`js/CLAUDE.md`** - TypeScript/JS workspace: package map, the signals + Effect reactivity model and its lifecycle rules, Web Components UI, `bun`/Biome tooling.
 - **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
+- **`quest/AGENTS.md`** - long-term project memory: quests.
 
 The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
 This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). When editing any of these guides, reference code by file path and symbol name, never by line number; line numbers rot with every edit. The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+History belongs in commits and PRs; pending work belongs in a quest. Read
+[`quest/AGENTS.md`](quest/AGENTS.md) whenever work mentions a quest or
+questline, and use the `$plan-quest` or `$start-quest` skills when available.
+GitHub issues remain the public front door, while quests carry durable plans
+and dependency edges alongside the code.
 
 ## Dependencies
 
