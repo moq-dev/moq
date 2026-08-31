@@ -27,8 +27,8 @@ use crate::{
 /// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
 /// origin, and this is the id it stamps into [`broadcast::Route::hops`] as an
 /// announcement passes through, so a receiver can spot its own id and reject a loop.
-/// Its own id lives in [`Info::id`]. The wire calls the SETUP parameter carrying it
-/// `Origin`, which is why the spec and this type disagree on the name.
+/// Its own id lives in [`Info::id`]; the SETUP parameter that carries it session-wide is
+/// `Hop` too.
 ///
 /// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
 /// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal

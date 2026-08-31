@@ -14,8 +14,7 @@ import * as z from "zod/mini";
  *
  * Names a *hop*, not an {@link !Origin | Origin} routing table: this is the id a relay
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
- * id and reject a loop. The wire calls the SETUP parameter carrying it `Origin`, which is
- * why the spec and this type disagree on the name.
+ * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *
  * The {@link HopSchema} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
