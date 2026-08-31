@@ -77,7 +77,7 @@ let transport = moq_wasm::transport::connect(url, Default::default()).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake. The origin's driver
 // runs its lifecycle work: give it the runtime's timers and spawn it yourself.
-let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 wasm_bindgen_futures::spawn_local(origin_driver.run(moq_wasm::runtime::Runtime));
 let mut consumer = origin.consume();
 
@@ -93,7 +93,7 @@ let session = moq_net::Client::new()
 ```
 
 Only the transport setup differs from [native](/lib/rs/env/native); the
-[`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html),
+[`origin`](https://docs.rs/moq-net/latest/moq_net/origin/index.html),
 broadcast, track, group, and frame APIs are the same.
 
 ## Next steps

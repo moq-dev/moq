@@ -9,7 +9,7 @@ use std::{net::TcpListener, time::Duration};
 
 use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, Web, WebConfig};
 use moq_token::{Algorithm, Key, KeyId};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 use wiremock::matchers::{method, path as path_matcher, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -175,7 +175,7 @@ fn room_url(scheme: &str, port: u16, key: &Key, claims: &moq_token::Claims) -> u
 /// Connect a publisher and a subscriber to `url` and prove one frame
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -198,7 +198,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut announcements = sub_origin.consume().announced();
 	let sub_session = tokio::time::timeout(
 		TIMEOUT,

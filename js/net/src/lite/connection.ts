@@ -5,7 +5,7 @@ import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose } from "../error.ts";
-import { type Origin, randomOrigin } from "../hop.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -80,7 +80,7 @@ export class Connection implements Established {
 
 	/** Random per-connection origin id. Shared by Publisher (for outbound hop
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
-	readonly origin: Origin;
+	readonly origin: Hop;
 
 	// The peer's SETUP, recorded once its Setup stream is read (lite-05+). Streams whose
 	// encoding depends on a negotiated capability (e.g. PROBE) wait on this. undefined
@@ -123,7 +123,7 @@ export class Connection implements Established {
 
 		this.probe = this.#probe;
 
-		this.origin = randomOrigin();
+		this.origin = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin, publish);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.#probe, this.#peerSetup);
 

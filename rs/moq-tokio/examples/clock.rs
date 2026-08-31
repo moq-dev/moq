@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let track = config.track;
 
-	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 	match config.role {
 		Command::Publish => {

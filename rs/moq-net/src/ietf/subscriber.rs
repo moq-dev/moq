@@ -193,7 +193,7 @@ struct BroadcastState {
 	// The first entry of the advertised path: the original publisher. `None` on an
 	// advertisement that carried no path at all, which is every one on a session
 	// without the MoQ Cluster extension. See [`Advertised::publisher`].
-	publisher: Option<crate::Origin>,
+	publisher: Option<crate::Hop>,
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
@@ -203,7 +203,7 @@ struct Advertised {
 
 	/// The original publisher: the first entry of HOP_PATH. Two advertisements that
 	/// share a non-zero one carry interchangeable content, so a new path splices in.
-	/// A different one, or `Some(Origin::UNKNOWN)` (which identifies nothing), is a
+	/// A different one, or `Some(Hop::UNKNOWN)` (which identifies nothing), is a
 	/// distinct publisher reusing the namespace and must not splice. That comparison
 	/// only applies between separate advertisements; see [`Arrival`].
 	///
@@ -211,7 +211,7 @@ struct Advertised {
 	/// compare and nothing ever replaces the source on identity grounds. That covers
 	/// base moq-transport entirely: PUBLISH_NAMESPACE and NAMESPACE for one namespace
 	/// are then two messages describing a single source, not two publishers.
-	publisher: Option<crate::Origin>,
+	publisher: Option<crate::Hop>,
 }
 
 /// How an advertisement relates to whatever already holds the path.
@@ -242,18 +242,18 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session, R: crate::runti
 	// this session when the peer declares none of its own (see `session_route`). Base
 	// moq-transport carries no hop ids, so a peer only has an identity if it negotiated
 	// the MoQ Cluster extension or the caller assigned it one
-	// (`Client::with_peer_origin`), which also makes the route recognizable across
+	// (`Client::with_peer_hop`), which also makes the route recognizable across
 	// sessions dialing the same relay.
 	//
-	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
+	// Otherwise this is `Hop::UNKNOWN` (0), the reserved "no identity" value.
 	// Minting one here is not this layer's call: the peer never learns the id, so
 	// only the side that assigned it can exclude it for loop detection, and whether
 	// two sessions should look like one identity or two is the caller's policy. A
 	// server answers it per accepted session; a client only when it knows the peer.
-	session_origin: crate::Origin,
+	session_hop: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
-	self_origin: crate::Origin,
+	self_hop: crate::Hop,
 	// What the peer declared in its SETUP.
 	peer_setup: peer::PeerSetup,
 	// Local policy for what pulling from this peer costs, overriding whatever it
@@ -311,9 +311,9 @@ where
 		session: S,
 		origin: origin::Producer,
 		control: Control,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
-		self_origin: crate::Origin,
+		self_hop: crate::Hop,
 		cost: Option<u64>,
 		version: Version,
 		tasks: Tasks,
@@ -324,8 +324,8 @@ where
 			session,
 			origin,
 			control,
-			session_origin: peer_origin.unwrap_or(crate::Origin::UNKNOWN),
-			self_origin,
+			session_hop: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			self_hop,
 			peer_setup,
 			cost,
 			state: Default::default(),
@@ -347,7 +347,7 @@ where
 	/// The route for an advertisement that carries no path of its own.
 	///
 	/// Base moq-transport has no hops on the wire, so the chain is a single entry
-	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
+	/// attributed to this session (`Hop::UNKNOWN` unless the peer or the caller
 	/// supplied an identity).
 	///
 	/// That entry doubles as the content identity, which is what makes an assigned
@@ -368,8 +368,8 @@ where
 	/// Price such a link with [`crate::Client::with_cost`] rather than trusting the
 	/// default.
 	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
-		let mut hops = crate::OriginList::new();
-		hops.push(self.session_origin)
+		let mut hops = crate::Hops::new();
+		hops.push(self.session_hop)
 			.expect("an empty hop chain has room for one entry");
 		broadcast::Route::new()
 			.with_hops(hops)
@@ -393,21 +393,13 @@ where
 			});
 		};
 
-		if advert.loops(self.self_origin) {
+		if advert.loops(self.self_hop) {
 			return None;
 		}
 
 		Some(Advertised {
 			route: advert.route(cluster::link_cost(self.cost, peer)),
-			publisher: Some(
-				advert
-					.hops
-					.hops()
-					.iter()
-					.next()
-					.copied()
-					.unwrap_or(crate::Origin::UNKNOWN),
-			),
+			publisher: Some(advert.hops.hops().iter().next().copied().unwrap_or(crate::Hop::UNKNOWN)),
 		})
 	}
 
@@ -1111,7 +1103,7 @@ where
 				// Two advertisements, so identity is the only link between them and
 				// UNKNOWN is no link at all: unrelated publishers all present the same
 				// one. Take the later as replacing the earlier.
-				Arrival::Separate => old != new || new == crate::Origin::UNKNOWN,
+				Arrival::Separate => old != new || new == crate::Hop::UNKNOWN,
 				// One advertisement, repeated on the stream that carries it. Continuity
 				// is the stream, not the identity, so an unchanged UNKNOWN stays put; a
 				// peer that never named itself would otherwise lose every subscription
@@ -1822,7 +1814,7 @@ mod tests {
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
 	/// declared `solicit`.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer {
@@ -1838,7 +1830,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			version,
 			tasks,
@@ -1891,7 +1883,7 @@ mod tests {
 	/// so sending it asks for a prefix that matches nothing there.
 	#[tokio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
@@ -1908,7 +1900,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft16,
 			tasks,
@@ -1962,7 +1954,7 @@ mod tests {
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scoped = origin
 			.with_root("rootns")
@@ -1982,7 +1974,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -2110,11 +2102,11 @@ mod tests {
 		let subscriber = Subscriber::new(
 			TestRuntime::new(),
 			crate::lite::test_transport::SinkSession::new(Default::default()),
-			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft19,
 			tasks,
@@ -2264,11 +2256,11 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -2320,11 +2312,11 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -2425,11 +2417,11 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			adapter,
-			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
 			control,
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -2540,11 +2532,11 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			version,
 			tasks,
@@ -2630,15 +2622,15 @@ mod tests {
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
 	/// attributed to a random per-connection origin. An identity assigned via
-	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
+	/// `Client::with_peer_hop` pins it, so sessions dialing the same relay
 	/// resolve to one recognizable route, and a reconnect splices rather than
 	/// replacing.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -2648,7 +2640,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft14,
 			tasks,
@@ -2677,20 +2669,20 @@ mod tests {
 	#[tokio::test]
 	async fn reflected_announce_does_not_evict_the_source_we_publish() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let peer = crate::Origin::new(777).unwrap();
-		let self_origin = crate::Origin::new(1).unwrap();
+		let peer = crate::Hop::new(777).unwrap();
+		let self_hop = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_hop).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
-		// `Client::with_peer_origin` hands the publisher. Holding its announce stream
+		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).announced();
 
 		// What we are publishing to the peer: a real upstream, announced.
-		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
 			.create_broadcast(
 				"room/host",
@@ -2715,7 +2707,7 @@ mod tests {
 			Control::new(None, false),
 			Some(peer),
 			peer::PeerSetup::default(),
-			self_origin,
+			self_hop,
 			None,
 			Version::Draft14,
 			tasks,
@@ -2743,10 +2735,10 @@ mod tests {
 	/// must not cost us it.
 	#[tokio::test]
 	async fn reconnecting_peer_joins_the_front_it_replaces() {
-		let peer = crate::Origin::new(777).unwrap();
-		let self_origin = crate::Origin::new(1).unwrap();
+		let peer = crate::Hop::new(777).unwrap();
+		let self_hop = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_hop).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -2760,7 +2752,7 @@ mod tests {
 				Control::new(None, false),
 				Some(peer),
 				peer::PeerSetup::default(),
-				self_origin,
+				self_hop,
 				None,
 				Version::Draft14,
 				tasks,
@@ -2789,13 +2781,13 @@ mod tests {
 	}
 
 	fn cluster_subscriber(
-		self_origin: crate::Origin,
+		self_hop: crate::Hop,
 	) -> (
 		Subscriber<crate::lite::test_transport::SinkSession, TestRuntime>,
 		crate::origin::Producer,
 	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_hop).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -2808,7 +2800,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			self_origin,
+			self_hop,
 			None,
 			Version::Draft19,
 			tasks,
@@ -2818,11 +2810,8 @@ mod tests {
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
-		let hops = ids
-			.iter()
-			.map(|&id| crate::Origin::new(id).unwrap())
-			.collect::<Vec<_>>();
-		cluster::HopPath::new(crate::OriginList::try_from(hops).unwrap())
+		let hops = ids.iter().map(|&id| crate::Hop::new(id).unwrap()).collect::<Vec<_>>();
+		cluster::HopPath::new(crate::Hops::try_from(hops).unwrap())
 	}
 
 	/// A negotiated advertisement carries the whole path and its accumulated cost, and
@@ -2830,11 +2819,11 @@ mod tests {
 	/// upstream value ranks last rather than wrapping to best).
 	#[tokio::test]
 	async fn cluster_advert_becomes_a_route_with_the_link_charged() {
-		let (subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(3),
 		};
 		let advert = cluster::Advert {
@@ -2849,7 +2838,7 @@ mod tests {
 		);
 		assert_eq!(advertised.route.hops, hop_path(&[7, 9]).hops().clone());
 		assert!(advertised.route.announce);
-		assert_eq!(advertised.publisher, Some(crate::Origin::new(7).unwrap()));
+		assert_eq!(advertised.publisher, Some(crate::Hop::new(7).unwrap()));
 
 		let mut subscriber = subscriber;
 		subscriber
@@ -2868,9 +2857,9 @@ mod tests {
 	/// back to ourselves. Hop ID 0 identifies nothing, so it is never a loop.
 	#[test]
 	fn cluster_advert_loop_is_discarded() {
-		let (subscriber, _origin) = cluster_subscriber(crate::Origin::new(5).unwrap());
+		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(5).unwrap());
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 
@@ -2891,9 +2880,9 @@ mod tests {
 	/// hop count and degenerates to shortest-path routing.
 	#[test]
 	fn unpriced_link_costs_one() {
-		let (subscriber, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 		let advert = cluster::Advert {
@@ -2904,7 +2893,7 @@ mod tests {
 
 		// Zero is meaningful and distinct from absent: a free link adds nothing.
 		let free = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.warm, 2);
@@ -2922,7 +2911,7 @@ mod tests {
 	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
@@ -2941,7 +2930,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -2965,7 +2954,7 @@ mod tests {
 	/// said the namespace is gone, so a later create at the path is new content.
 	#[tokio::test(start_paused = true)]
 	async fn an_explicit_namespace_done_closes_the_broadcast() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -3000,7 +2989,7 @@ mod tests {
 			.unwrap();
 		let script = log.writes.lock().unwrap().clone();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -3012,7 +3001,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -3047,7 +3036,7 @@ mod tests {
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer sends something that does not belong on this stream, ending it with an
@@ -3067,7 +3056,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
 			tasks,
@@ -3103,7 +3092,7 @@ mod tests {
 	/// what the origin sees.
 	#[tokio::test(start_paused = true)]
 	async fn the_last_owner_out_decides_the_detach() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
@@ -3136,7 +3125,7 @@ mod tests {
 	/// advertise a paid upstream as the cheapest route in the mesh.
 	#[test]
 	fn a_pathless_advert_still_pays_for_its_link() {
-		let (unpriced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (unpriced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let peer = cluster::Peer::default();
 
 		// Nothing priced this direction, so it ranks by hop count.
@@ -3153,7 +3142,7 @@ mod tests {
 		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.warm, 4);
 
 		// Local policy still wins over what the peer declared.
-		let (mut priced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut priced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		priced.cost = Some(6);
 		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.warm, 6);
 	}
@@ -3163,7 +3152,7 @@ mod tests {
 	/// it, since that content is not interchangeable.
 	#[tokio::test]
 	async fn cluster_update_replaces_in_place() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 
@@ -3173,7 +3162,7 @@ mod tests {
 			.with_announce(true);
 		let first = Advertised {
 			route: first,
-			publisher: Some(crate::Origin::new(7).unwrap()),
+			publisher: Some(crate::Hop::new(7).unwrap()),
 		};
 		subscriber.start_announce(path.clone(), first).unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
@@ -3186,7 +3175,7 @@ mod tests {
 			.with_announce(true);
 		let rerouted = Advertised {
 			route: rerouted,
-			publisher: Some(crate::Origin::new(7).unwrap()),
+			publisher: Some(crate::Hop::new(7).unwrap()),
 		};
 		subscriber.update_announce(path.clone(), rerouted).unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
@@ -3209,7 +3198,7 @@ mod tests {
 	/// still reference the path.
 	#[tokio::test]
 	async fn cluster_publisher_change_replaces_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 
@@ -3218,7 +3207,7 @@ mod tests {
 			.with_announce(true);
 		let first = Advertised {
 			route: first,
-			publisher: Some(crate::Origin::new(7).unwrap()),
+			publisher: Some(crate::Hop::new(7).unwrap()),
 		};
 		subscriber.start_announce(path.clone(), first).unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
@@ -3229,7 +3218,7 @@ mod tests {
 			.with_announce(true);
 		let taken_over = Advertised {
 			route: taken_over,
-			publisher: Some(crate::Origin::new(8).unwrap()),
+			publisher: Some(crate::Hop::new(8).unwrap()),
 		};
 		subscriber.update_announce(path.clone(), taken_over).unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
@@ -3246,23 +3235,23 @@ mod tests {
 	}
 
 	/// Regression: a publisher that declares no identity of its own contributes
-	/// `Origin::UNKNOWN` as the first hop, which identifies nothing. A repeat NAMESPACE
+	/// `Hop::UNKNOWN` as the first hop, which identifies nothing. A repeat NAMESPACE
 	/// is still the same advertisement being repriced (the expected update, and how a
 	/// relay signals that it started carrying the namespace), so the source and every
 	/// live subscription on it must survive. Reading the repeat as a new publisher
 	/// detached the source milliseconds after SUBSCRIBE went out.
 	#[tokio::test(start_paused = true)]
 	async fn anonymous_publisher_survives_a_repricing_update() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		// A free link, so the route cost is exactly what the peer advertised.
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
 		let hops = cluster::HopPath::new(
-			crate::OriginList::try_from(vec![crate::Origin::UNKNOWN, crate::Origin::new(9).unwrap()]).unwrap(),
+			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
 		);
 
 		let advertised = subscriber
@@ -3276,7 +3265,7 @@ mod tests {
 			.expect("route");
 		assert_eq!(
 			advertised.publisher,
-			Some(crate::Origin::UNKNOWN),
+			Some(crate::Hop::UNKNOWN),
 			"an anonymous publisher has no identity to carry",
 		);
 		subscriber.start_announce(path.clone(), advertised).unwrap();
@@ -3313,19 +3302,19 @@ mod tests {
 	}
 
 	/// Two *separate* advertisements have nothing linking them but the publisher, and
-	/// `Origin::UNKNOWN` links nothing: any number of unrelated publishers present it.
+	/// `Hop::UNKNOWN` links nothing: any number of unrelated publishers present it.
 	/// So the later one replaces the earlier, unlike the repeat above.
 	#[tokio::test(start_paused = true)]
 	async fn separate_anonymous_adverts_replace_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 		let hops = cluster::HopPath::new(
-			crate::OriginList::try_from(vec![crate::Origin::UNKNOWN, crate::Origin::new(9).unwrap()]).unwrap(),
+			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
 		);
 		let advert = cluster::Advert { hops, cost: 0 };
 
@@ -3357,7 +3346,7 @@ mod tests {
 	/// as a subscriber is resolving a track through it.
 	#[tokio::test]
 	async fn pathless_adverts_never_replace_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
@@ -3391,12 +3380,12 @@ mod tests {
 	/// would leave subscriptions on a path the peer no longer offers.
 	#[tokio::test]
 	async fn reflected_replacement_retracts_the_route() {
-		let self_origin = crate::Origin::new(5).unwrap();
-		let (mut subscriber, origin) = cluster_subscriber(self_origin);
+		let self_hop = crate::Hop::new(5).unwrap();
+		let (mut subscriber, origin) = cluster_subscriber(self_hop);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		};
 
@@ -3458,7 +3447,7 @@ mod tests {
 	/// Build a subscriber whose peer replays `updates` on one PUBLISH_NAMESPACE stream,
 	/// with the advertisement already attached.
 	async fn reflected_harness(
-		self_origin: crate::Origin,
+		self_hop: crate::Hop,
 		request_id: RequestId,
 		peer: &cluster::Peer,
 		attached: &cluster::Advert,
@@ -3471,7 +3460,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 		let script = publish_namespace_updates(request_id, "room/host", updates).await;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_hop).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -3485,7 +3474,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			self_origin,
+			self_hop,
 			None,
 			VERSION,
 			tasks,
@@ -3504,7 +3493,7 @@ mod tests {
 
 	fn peer_9() -> cluster::Peer {
 		cluster::Peer {
-			origin: Some(crate::Origin::new(9).unwrap()),
+			origin: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
 		}
 	}
@@ -3530,13 +3519,13 @@ mod tests {
 	/// sibling shares it, which the draft answers with "discard", not PROTOCOL_VIOLATION.
 	#[tokio::test]
 	async fn a_reflected_update_detaches_but_keeps_the_stream() {
-		let self_origin = crate::Origin::new(5).unwrap();
+		let self_hop = crate::Hop::new(5).unwrap();
 		let request_id = RequestId(1);
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
 		let (mut subscriber, consumer, mut stream) =
-			reflected_harness(self_origin, request_id, &peer, &clean, &[Some(looped)]).await;
+			reflected_harness(self_hop, request_id, &peer, &clean, &[Some(looped)]).await;
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
@@ -3572,13 +3561,13 @@ mod tests {
 	/// reason the stream stays open.
 	#[tokio::test]
 	async fn a_clean_update_after_a_reflection_reattaches() {
-		let self_origin = crate::Origin::new(5).unwrap();
+		let self_hop = crate::Hop::new(5).unwrap();
 		let request_id = RequestId(1);
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
 		let (mut subscriber, consumer, mut stream) = reflected_harness(
-			self_origin,
+			self_hop,
 			request_id,
 			&peer,
 			&clean,
@@ -3620,7 +3609,7 @@ mod tests {
 	/// session keeps running).
 	#[tokio::test]
 	async fn namespace_stream_close_releases_live_paths() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
 		let peer = cluster::Peer::default();
 
@@ -3653,7 +3642,7 @@ mod tests {
 		// An open gate, so the rejection actually reaches the wire.
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
@@ -3665,7 +3654,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
-			crate::Origin::new(1).unwrap(),
+			crate::Hop::new(1).unwrap(),
 			None,
 			Version::Draft19,
 			tasks,

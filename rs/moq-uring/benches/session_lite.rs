@@ -135,8 +135,8 @@ mod linux {
 			let mut worker = Worker::new(Config::default()).expect("worker");
 			let handle = worker.handle();
 
-			let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+			let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 			let origins = std::thread::spawn(move || {
 				let rt = tokio::runtime::Builder::new_current_thread()
 					.enable_time()

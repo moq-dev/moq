@@ -4,7 +4,7 @@
 //! namespaces loops forever and has no basis for choosing between two peers
 //! advertising the same namespace. This extension adds it:
 //!
-//! - each endpoint declares its own [`Origin`](crate::Origin) (Hop ID) via the
+//! - each endpoint declares its own [`Hop`](crate::Hop) (Hop ID) via the
 //!   RELAY_HOPS Setup Option, which is also what negotiates the extension;
 //! - each endpoint prices what subscribing from it costs via the RELAY_COST Setup
 //!   Option, so the two directions are priced independently;
@@ -18,7 +18,7 @@
 use bytes::Buf;
 
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
-use crate::{Origin, OriginList};
+use crate::{Hop, Hops};
 
 use super::{Param, Version};
 
@@ -61,29 +61,29 @@ pub fn supported(version: Version) -> bool {
 /// The HOP_PATH parameter value: bare varints filling the parameter length, with no
 /// count of their own. That is the only thing separating this from the moq-lite hop
 /// chain, which counts its entries; the list itself is the same
-/// [`OriginList`](crate::OriginList).
+/// [`Hops`](crate::Hops).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HopPath(OriginList);
+pub struct HopPath(Hops);
 
 impl HopPath {
 	/// Wrap a hop chain.
 	///
-	/// [`OriginList`] already refuses a repeated non-zero entry, so the only wire rule
+	/// [`Hops`] already refuses a repeated non-zero entry, so the only wire rule
 	/// left to check is that the list is non-empty; [`Self::validate`] does that on
 	/// decode, where an empty parameter can arrive.
-	pub fn new(hops: OriginList) -> Self {
+	pub fn new(hops: Hops) -> Self {
 		Self(hops)
 	}
 
 	/// Borrow the hop chain.
-	pub fn hops(&self) -> &OriginList {
+	pub fn hops(&self) -> &Hops {
 		&self.0
 	}
 
 	/// Reject a path that cannot have come from a conforming sender.
 	///
 	/// Only the empty list is left to catch: the other rule, that a non-zero Hop ID may
-	/// not appear twice, is enforced by [`OriginList`] wherever a chain is built, so it
+	/// not appear twice, is enforced by [`Hops`] wherever a chain is built, so it
 	/// holds on the outbound path too rather than only where one was parsed.
 	fn validate(&self) -> Result<(), DecodeError> {
 		match self.0.is_empty() {
@@ -108,10 +108,10 @@ impl Param for HopPath {
 		let value = Vec::<u8>::decode(r, version)?;
 		let mut buf = bytes::Bytes::from(value);
 
-		let mut hops = OriginList::new();
+		let mut hops = Hops::new();
 		while buf.has_remaining() {
 			// A short read here means the entries did not exactly fill the length.
-			hops.push(Origin::decode(&mut buf, version)?)?;
+			hops.push(Hop::decode(&mut buf, version)?)?;
 		}
 
 		let path = Self(hops);
@@ -146,22 +146,22 @@ impl Advert {
 	/// is to advertise a different route rather than send this one: a receiver must
 	/// close the session over a repeated Hop ID, so a malformed chain we build costs
 	/// someone else their session rather than degrading our own routing.
-	pub fn forward(hops: &OriginList, cost: u64, self_origin: Origin) -> Result<Self, crate::InvalidHop> {
+	pub fn forward(hops: &Hops, cost: u64, self_hop: Hop) -> Result<Self, crate::InvalidHop> {
 		let mut hops = hops.clone();
-		hops.push(self_origin)?;
+		hops.push(self_hop)?;
 		Ok(Self {
 			hops: HopPath::new(hops),
 			cost,
 		})
 	}
 
-	/// Whether this advertisement looped back through `self_origin`.
+	/// Whether this advertisement looped back through `self_hop`.
 	///
 	/// A receiver discards such an advertisement: forwarding it would extend the loop,
 	/// and subscribing through it would route the receiver back to itself. Hop ID 0
 	/// identifies nothing, so a receiver that withheld its own identity detects nothing.
-	pub fn loops(&self, self_origin: Origin) -> bool {
-		self_origin != Origin::UNKNOWN && self.hops.hops().contains(&self_origin)
+	pub fn loops(&self, self_hop: Hop) -> bool {
+		self_hop != Hop::UNKNOWN && self.hops.hops().contains(&self_hop)
 	}
 
 	/// The route this advertisement describes, after charging the link it arrived on.
@@ -193,7 +193,7 @@ pub struct Peer {
 	/// What the peer put in RELAY_HOPS, or `None` when it did not negotiate the
 	/// extension. Read [`Self::identity`] for the identity; this field answers whether
 	/// the extension is on, which is a different question when the peer declared 0.
-	pub origin: Option<Origin>,
+	pub origin: Option<Hop>,
 
 	/// What the peer said subscribing from it costs, or `None` when it priced nothing
 	/// (meaning [`DEFAULT_COST`]). Directional: this prices what we pull from the peer,
@@ -213,8 +213,8 @@ impl Peer {
 	/// Declaring the reserved 0 turns the extension on while withholding an identity,
 	/// which reads here exactly like declaring nothing at all. The receiver assigns one
 	/// instead, so there is no third state for callers to get wrong.
-	pub fn identity(&self) -> Option<Origin> {
-		self.origin.filter(|origin| *origin != Origin::UNKNOWN)
+	pub fn identity(&self) -> Option<Hop> {
+		self.origin.filter(|origin| *origin != Hop::UNKNOWN)
 	}
 }
 
@@ -240,7 +240,7 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 	let origin = match params.get_bytes(super::ParameterBytes::RelayHops) {
 		Some(mut bytes) => {
 			// 0 is legal here: the peer speaks the extension but withholds its identity.
-			let origin = Origin::decode(&mut bytes, version)?;
+			let origin = Hop::decode(&mut bytes, version)?;
 			if bytes.has_remaining() {
 				return Err(DecodeError::TrailingBytes);
 			}
@@ -258,15 +258,13 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 /// Write our cluster Setup Options into a SETUP parameter block.
 ///
 /// `cost` is the price we put on this link, which only the dialing side declares.
-pub fn peer_into_setup(params: &mut super::Parameters, self_origin: Origin, cost: Option<u64>, version: Version) {
+pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Option<u64>, version: Version) {
 	if !supported(version) {
 		return;
 	}
 
 	let mut id = Vec::new();
-	self_origin
-		.encode(&mut id, version)
-		.expect("a varint always fits a Vec");
+	self_hop.encode(&mut id, version).expect("a varint always fits a Vec");
 	params.set_bytes(super::ParameterBytes::RelayHops, id);
 
 	if let Some(cost) = cost {
@@ -281,19 +279,19 @@ mod tests {
 
 	const VERSION: Version = Version::Draft19;
 
-	fn origin(id: u64) -> Origin {
-		Origin::new(id).unwrap()
+	fn origin(id: u64) -> Hop {
+		Hop::new(id).unwrap()
 	}
 
 	fn hop_path(ids: &[u64]) -> HopPath {
 		let hops = ids
 			.iter()
 			.map(|&id| match id {
-				0 => Origin::UNKNOWN,
+				0 => Hop::UNKNOWN,
 				id => origin(id),
 			})
 			.collect::<Vec<_>>();
-		HopPath::new(OriginList::try_from(hops).unwrap())
+		HopPath::new(Hops::try_from(hops).unwrap())
 	}
 
 	fn round_trip(path: &HopPath) -> Result<HopPath, DecodeError> {
@@ -345,7 +343,7 @@ mod tests {
 	#[test]
 	fn hop_path_rejects_repeated_hop() {
 		// A non-zero id appearing twice is a loop, which the receiver must reject. The
-		// bytes are forged rather than encoded from a `HopPath`, because `OriginList`
+		// bytes are forged rather than encoded from a `HopPath`, because `Hops`
 		// no longer lets one be built: only a non-conforming sender produces this.
 		let mut value = Vec::new();
 		for id in [4u64, 8, 4] {
@@ -369,7 +367,7 @@ mod tests {
 	/// build costs someone else their session rather than degrading our own routing.
 	#[test]
 	fn forward_refuses_a_chain_it_cannot_extend() {
-		let mut hops = OriginList::new();
+		let mut hops = Hops::new();
 		hops.push(origin(1)).unwrap();
 		hops.push(origin(3)).unwrap();
 
@@ -381,7 +379,7 @@ mod tests {
 
 		// Fill the chain with distinct ids, so the next append fails on length rather
 		// than on the id already being there.
-		let mut full = OriginList::new();
+		let mut full = Hops::new();
 		let mut next = 1;
 		while full.push(origin(next)).is_ok() {
 			next += 1;
@@ -419,7 +417,7 @@ mod tests {
 
 	#[test]
 	fn forward_appends_self() {
-		let mut hops = OriginList::new();
+		let mut hops = Hops::new();
 		hops.push(origin(1)).unwrap();
 		hops.push(origin(2)).unwrap();
 
@@ -436,7 +434,7 @@ mod tests {
 			cost: 0,
 		};
 		// A receiver whose own id is 0 cannot detect loops through itself.
-		assert!(!advert.loops(Origin::UNKNOWN));
+		assert!(!advert.loops(Hop::UNKNOWN));
 		assert!(advert.loops(origin(5)));
 		assert!(!advert.loops(origin(6)));
 	}
@@ -470,7 +468,7 @@ mod tests {
 		assert_eq!(peer.identity(), None);
 
 		let anonymous = Peer {
-			origin: Some(Origin::UNKNOWN),
+			origin: Some(Hop::UNKNOWN),
 			cost: Some(0),
 		};
 		assert!(anonymous.negotiated());
@@ -511,9 +509,9 @@ mod tests {
 
 	#[test]
 	fn setup_options_round_trip() {
-		for (self_origin, cost) in [(origin(42), Some(0)), (origin(42), Some(9)), (Origin::UNKNOWN, None)] {
+		for (self_hop, cost) in [(origin(42), Some(0)), (origin(42), Some(9)), (Hop::UNKNOWN, None)] {
 			let mut params = super::super::Parameters::default();
-			peer_into_setup(&mut params, self_origin, cost, VERSION);
+			peer_into_setup(&mut params, self_hop, cost, VERSION);
 
 			let mut buf = BytesMut::new();
 			params.encode(&mut buf, VERSION).unwrap();
@@ -521,7 +519,7 @@ mod tests {
 			let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
 
 			let peer = peer_from_setup(&decoded, VERSION).unwrap();
-			assert_eq!(peer.origin, Some(self_origin));
+			assert_eq!(peer.origin, Some(self_hop));
 			assert_eq!(peer.cost, cost);
 		}
 	}

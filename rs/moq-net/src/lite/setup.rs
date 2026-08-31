@@ -181,7 +181,7 @@ pub struct Setup {
 	/// a route that does not flow through it (the same split horizon the announce
 	/// filter applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
-	pub origin: Option<crate::Origin>,
+	pub origin: Option<crate::Hop>,
 }
 
 impl Message for Setup {
@@ -209,7 +209,7 @@ impl Message for Setup {
 		// so it decodes as "not declared" rather than an error.
 		let origin = params
 			.get_varint(PARAM_ORIGIN)?
-			.and_then(|id| crate::Origin::new(id).ok());
+			.and_then(|id| crate::Hop::new(id).ok());
 
 		Ok(Self {
 			probe,
@@ -274,9 +274,9 @@ impl PeerSetup {
 		self.poll_get(waiter, |setup| setup.cost)
 	}
 
-	/// Poll for the origin (hop) id the peer declared in its SETUP. `None` when it
-	/// declared none: a leaf with no identity worth excluding.
-	pub fn poll_origin(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Origin>> {
+	/// Poll for the [`Hop`](crate::Hop) id the peer declared in its SETUP `Origin`
+	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
+	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
 		self.poll_get(waiter, |setup| setup.origin)
 	}
 
@@ -378,7 +378,7 @@ mod tests {
 	#[test]
 	fn origin_round_trip() {
 		let msg = Setup {
-			origin: Some(crate::Origin::new(42).unwrap()),
+			origin: Some(crate::Hop::new(42).unwrap()),
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);

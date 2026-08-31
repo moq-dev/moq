@@ -9,7 +9,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use moq_relay::{Config, PublicConfig, Relay};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 4;
@@ -110,7 +110,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
 
 	// ── publisher ───────────────────────────────────────────────────
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -126,7 +126,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	// ── subscribers ─────────────────────────────────────────────────
 	let mut subscribers = Vec::new();
 	for _ in 0..WORKERS {
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 		let announced = origin.consume().announced();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
 		subscribers.push((connection, announced));

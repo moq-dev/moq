@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_tokio::Status;
-use moq_tokio::moq_net::{self, Origin, bytes::Bytes};
+use moq_tokio::moq_net::{self, Hop, bytes::Bytes};
 use moq_tokio::moq_net::{broadcast, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -96,9 +96,9 @@ pub async fn run(ctx: Connection) {
 	let url = config.client.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
-	let publish = moq_tokio::origin::spawn(Origin::random());
+	let publish = moq_tokio::origin::spawn(Hop::random());
 	// Consume side: the session fills this with peer announcements.
-	let consume = moq_tokio::origin::spawn(Origin::random());
+	let consume = moq_tokio::origin::spawn(Hop::random());
 
 	let namespace = format!("{}/{run_id:08x}", config.name());
 	let discovery = if config.publishes() {
@@ -682,7 +682,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 
 		// The relay-internal broadcast: announced, but with no bench data track.
 		let _internal = origin
@@ -725,7 +725,7 @@ mod tests {
 	#[tokio::test]
 	async fn named_subscription_waits_for_the_exact_broadcast() {
 		let stats = Arc::new(Stats::default());
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 		let consume = origin.consume();
 		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
 

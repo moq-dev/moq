@@ -1199,16 +1199,16 @@ impl Request {
 	}
 
 	/// Assign the identity this peer's routes are attributed to; see
-	/// [`moq_net::Request::with_peer_origin`]. Derive it from [`Self::peer_identity`],
+	/// [`moq_net::Request::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
-	pub fn with_peer_origin(self, origin: moq_net::Origin) -> Self {
+	pub fn with_peer_hop(self, hop: moq_net::Hop) -> Self {
 		let Request {
 			transport,
 			url,
 			identity,
 			kind,
 		} = self;
-		let kind = request_map!(kind, request => request.with_peer_origin(origin));
+		let kind = request_map!(kind, request => request.with_peer_hop(hop));
 		Request {
 			transport,
 			url,
@@ -1298,8 +1298,8 @@ impl Request {
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_origin(&self) -> Option<moq_net::Origin> {
-		request_ref!(self, r => r.peer_origin())
+	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
+		request_ref!(self, r => r.peer_hop())
 	}
 
 	/// The client certificate chain the peer presented, if any, validated
@@ -1421,7 +1421,7 @@ mod tests {
 		let path = PathBuf::from(format!("/tmp/moq-tokio-publish-{}.sock", std::process::id()));
 		let _ = std::fs::remove_file(&path);
 
-		let origin = crate::origin::spawn(moq_net::Origin::random());
+		let origin = crate::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin
 			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
@@ -1459,7 +1459,7 @@ mod tests {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
-		let subscriber = crate::origin::spawn(moq_net::Origin::random());
+		let subscriber = crate::origin::spawn(moq_net::Hop::random());
 		let mut announced = subscriber.consume().announced();
 		let client = crate::connect::Config::default()
 			.init(Default::default())

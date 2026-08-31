@@ -44,8 +44,8 @@ fn lite_session_over_the_worker() {
 	let handle = worker.handle();
 
 	// The model and its origins, driven on a tokio thread (see module docs).
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -162,9 +162,9 @@ fn two_lite_sessions_share_the_server_socket() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()

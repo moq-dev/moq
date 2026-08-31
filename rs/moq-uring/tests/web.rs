@@ -210,7 +210,7 @@ fn lite_session_over_webtransport() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -235,7 +235,7 @@ fn lite_session_over_webtransport() {
 	let client = quinn_client(format!("https://{addr}/"), |session| {
 		Box::pin(async move {
 			assert_eq!(session.protocol(), Some(PROTO), "negotiated subprotocol");
-			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 			let driver = tokio::spawn(sub_driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 
 			let moq = moq_net::Client::new()

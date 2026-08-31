@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
-import { type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
+import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
@@ -11,11 +11,11 @@ import { type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
-function origin(id: bigint): Origin {
-	return OriginSchema.parse(id);
+function origin(id: bigint): Hop {
+	return HopSchema.parse(id);
 }
 
-function hops(...ids: bigint[]): Origin[] {
+function hops(...ids: bigint[]): Hop[] {
 	return ids.map(origin);
 }
 
@@ -135,7 +135,7 @@ test("Cluster: a path that cannot have come from a conforming sender is rejected
 });
 
 test("Cluster: the setup options round trip", async () => {
-	for (const declared of [origin(42n), UNKNOWN_ORIGIN]) {
+	for (const declared of [origin(42n), UNKNOWN_HOP]) {
 		const params = new SetupOptions();
 		Cluster.intoSetup(params, declared, VERSION);
 
@@ -173,7 +173,7 @@ test("Cluster: we advertise our own id, and only once negotiated", () => {
 	expect(Cluster.negotiated({ self })).toBe(false);
 
 	// A peer that declared the reserved 0 negotiated, and excludes nothing.
-	expect(Cluster.negotiated({ self, peer: UNKNOWN_ORIGIN })).toBe(true);
+	expect(Cluster.negotiated({ self, peer: UNKNOWN_HOP })).toBe(true);
 	expect(Cluster.advertise({ self, peer: origin(9n) })).toEqual({ hops: [self], cost: 0n });
 });
 
@@ -181,7 +181,7 @@ test("Cluster: a loop is detected by any non-zero id", () => {
 	const advert = { hops: hops(0n, 5n), cost: 0n };
 
 	// A receiver whose own id is 0 cannot detect loops through itself.
-	expect(Cluster.loops(advert, UNKNOWN_ORIGIN)).toBe(false);
+	expect(Cluster.loops(advert, UNKNOWN_HOP)).toBe(false);
 	expect(Cluster.loops(advert, origin(5n))).toBe(true);
 	expect(Cluster.loops(advert, origin(6n))).toBe(false);
 });

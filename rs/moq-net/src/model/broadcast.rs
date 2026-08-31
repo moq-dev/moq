@@ -17,7 +17,7 @@ use std::{
 
 use crate::Error;
 
-use super::{Origin, OriginList, Requests, WeakCache};
+use super::{Hop, Hops, Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -190,9 +190,9 @@ impl From<u64> for Cost {
 #[non_exhaustive]
 pub struct Route {
 	/// The chain of origins the broadcast has traversed, oldest first. Each relay
-	/// appends its own [`crate::Origin`] when forwarding; used for loop detection
+	/// appends its own [`crate::Hop`] when forwarding; used for loop detection
 	/// and as the selection tie-break.
-	pub hops: OriginList,
+	pub hops: Hops,
 
 	/// What pulling the broadcast via this route costs, accumulated per link:
 	/// lower wins, with ties broken by hop length, then a deterministic hash, and
@@ -249,13 +249,13 @@ impl Route {
 	///
 	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
 	/// chain's length cap, or one already in it, which is a loop.
-	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::InvalidHop> {
-		self.hops.push(origin)?;
+	pub fn with_hop(mut self, hop: super::Hop) -> Result<Self, super::InvalidHop> {
+		self.hops.push(hop)?;
 		Ok(self)
 	}
 
 	/// Replace the hop chain.
-	pub fn with_hops(mut self, hops: OriginList) -> Self {
+	pub fn with_hops(mut self, hops: Hops) -> Self {
 		self.hops = hops;
 		self
 	}
@@ -297,21 +297,21 @@ pub(crate) const COST_LINGER: Duration = Duration::from_secs(5);
 /// Callers take the first entry they can actually stamp themselves onto, since a chain
 /// already at `MAX_HOPS` has no room and almost certainly means a loop. Empty when
 /// every chain loops through the peer or us, or none is announced.
-/// [`Origin::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
+/// [`Hop::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
 pub(crate) fn advertisable_routes(
 	routes: &[Route],
-	self_origin: Origin,
-	exclude: Origin,
+	self_hop: Hop,
+	exclude: Hop,
 ) -> impl Iterator<Item = (&Route, bool)> {
 	routes.iter().enumerate().filter_map(move |(index, route)| {
 		// Offline routes are reachable by exact path but never advertised.
 		if !route.announce {
 			return None;
 		}
-		if exclude != Origin::UNKNOWN && route.hops.contains(&exclude) {
+		if exclude != Hop::UNKNOWN && route.hops.contains(&exclude) {
 			return None;
 		}
-		if self_origin != Origin::UNKNOWN && route.hops.contains(&self_origin) {
+		if self_hop != Hop::UNKNOWN && route.hops.contains(&self_hop) {
 			return None;
 		}
 		Some((route, index == 0))
@@ -1805,7 +1805,7 @@ mod test {
 		let mut consumer = producer.consume();
 		let mut dynamic = producer.dynamic();
 
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		producer
 			.set_route(Route::new().with_hops(hops.clone()).with_cost(42).with_announce(true))
 			.unwrap();

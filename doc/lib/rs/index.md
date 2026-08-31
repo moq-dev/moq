@@ -284,13 +284,15 @@ let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 let connection = client.connect(url);
 ```
 
-To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
+To publish or consume, wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html)
 into the client before connecting. The origin outlives any individual session, so
-your broadcasts and subscriptions carry across reconnects:
+your broadcasts and subscriptions carry across reconnects. It is built from a
+[`Hop`](https://docs.rs/moq-net/latest/moq_net/struct.Hop.html), this relay's id in a
+broadcast's hop chain:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 

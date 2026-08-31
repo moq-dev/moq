@@ -5,7 +5,7 @@
  * @module
  */
 
-import { type Origin, OriginSchema } from "../hop.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
@@ -170,7 +170,7 @@ export interface SetupProps {
 	/** See {@link Setup.role}. Defaults to {@link Role.Both}. */
 	role?: Role;
 	/** See {@link Setup.origin}. Omitted by default. */
-	origin?: Origin;
+	origin?: Hop;
 }
 
 /**
@@ -206,7 +206,7 @@ export class Setup {
 	 * per-stream `exclude_hop` in its favor). `undefined` when the endpoint declares
 	 * no identity; a wire value of 0 decodes the same way.
 	 */
-	origin?: Origin;
+	origin?: Hop;
 
 	constructor({ probe, path, role, origin }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
@@ -256,7 +256,7 @@ export class Setup {
 
 		// 0 carries no identity (it cannot be excluded), so it decodes as absent.
 		const originRaw = params.getVarint(PARAM_ORIGIN);
-		const origin = originRaw === undefined || originRaw === 0n ? undefined : OriginSchema.parse(originRaw);
+		const origin = originRaw === undefined || originRaw === 0n ? undefined : HopSchema.parse(originRaw);
 
 		return new Setup({ probe, path, role, origin });
 	}

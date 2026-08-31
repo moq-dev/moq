@@ -387,8 +387,8 @@ impl MoqSide {
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
 		use anyhow::Context;
 		Ok(moq_tokio::origin::spawn(match self.origin {
-			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
-			None => moq_net::Origin::random(),
+			Some(id) => moq_net::Hop::new(id).with_context(|| format!("invalid --origin {id}"))?,
+			None => moq_net::Hop::random(),
 		}))
 	}
 

@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context;
 use moq_net::origin;
-use moq_net::{Origin, Path, stats::Tier};
+use moq_net::{Hop, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use tracing::Instrument as _;
@@ -664,8 +664,8 @@ impl Cluster {
 			Some(id) if id >= 1 << 62 => {
 				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
 			}
-			Some(id) => Origin::new(id).expect("cluster id already validated"),
-			None => Origin::random(),
+			Some(id) => Hop::new(id).expect("cluster id already validated"),
+			None => Hop::random(),
 		};
 		#[allow(deprecated)]
 		if config.linger.is_some() {

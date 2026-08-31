@@ -71,7 +71,7 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
-	let publisher = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let publisher = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
 	serve(server.subscribe_router(), "WHEP", listen).await
 }

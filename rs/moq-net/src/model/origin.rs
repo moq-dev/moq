@@ -22,49 +22,42 @@ use crate::{
 	util::{TaskSet, Tasks},
 };
 
-/// A relay origin, identified by a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
 ///
-/// Local origins are built with [`Origin::new`] or [`Origin::random`], both of
-/// which guarantee a non-zero id so loop detection can work. Remote peers may
-/// still send `0`; it is legal on the wire but cannot be used for loop detection.
+/// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
+/// origin, and this is the id it stamps into [`broadcast::Route::hops`] as an
+/// announcement passes through, so a receiver can spot its own id and reject a loop.
+/// Its own id lives in [`Info::id`]. The wire calls the SETUP parameter carrying it
+/// `Origin`, which is why the spec and this type disagree on the name.
+///
+/// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
+/// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal
+/// on the wire but cannot be used for loop detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Origin {
+pub struct Hop {
 	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
 	id: u64,
 }
 
-/// Returned when a local origin id is zero or outside the 62-bit wire range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct InvalidOrigin;
-
-impl fmt::Display for InvalidOrigin {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "local origin id must be non-zero and below 2^62")
-	}
-}
-
-impl std::error::Error for InvalidOrigin {}
-
-impl Origin {
+impl Hop {
 	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
 	/// Also used for remote peers that choose the legal but loop-blind id 0.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Build an origin from a stable id.
+	/// Build a hop from a stable id.
 	///
 	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0, but local origins should not use it because
+	/// decode accepts remote id 0, but a local hop should not use it because
 	/// downstream peers cannot exclude it for loop detection.
-	pub fn new(id: u64) -> Result<Self, InvalidOrigin> {
+	pub fn new(id: u64) -> Result<Self, InvalidHop> {
 		if id == 0 || id >= 1u64 << 62 {
-			return Err(InvalidOrigin);
+			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
 	}
 
-	/// Generate a fresh origin with a random non-zero id. Use this for any
-	/// origin that does not need a stable identity across restarts.
+	/// Generate a fresh hop with a random non-zero id. Use this for any relay that
+	/// does not need a stable identity across restarts.
 	///
 	/// TEMPORARY: the wire format allows 62 bits, but older `@moq/lite` JS
 	/// clients decode `AnnounceInterest.exclude_hop` as a u53 (number) and
@@ -77,7 +70,7 @@ impl Origin {
 		Self { id }
 	}
 
-	/// Return the origin's wire id.
+	/// Return the hop's wire id.
 	pub fn id(self) -> u64 {
 		self.id
 	}
@@ -97,7 +90,7 @@ impl Origin {
 pub struct Info {
 	/// The origin's wire identity, appended to broadcast hop chains for loop
 	/// detection and shortest-path routing.
-	pub id: Origin,
+	pub id: Hop,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
@@ -134,7 +127,7 @@ impl Default for Info {
 	fn default() -> Self {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
-			id: Origin::UNKNOWN,
+			id: Hop::UNKNOWN,
 			pool,
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
@@ -144,7 +137,7 @@ impl Default for Info {
 
 impl Info {
 	/// Config for the given origin id with no byte target and the default idle expiry.
-	pub fn new(id: Origin) -> Self {
+	pub fn new(id: Hop) -> Self {
 		Self { id, ..Self::default() }
 	}
 
@@ -169,28 +162,28 @@ impl Info {
 	}
 }
 
-impl From<Origin> for Info {
+impl From<Hop> for Info {
 	/// Config for the given origin id with the defaults of [`Info::new`].
-	fn from(id: Origin) -> Self {
+	fn from(id: Hop) -> Self {
 		Self::new(id)
 	}
 }
 
-impl TryFrom<u64> for Origin {
-	type Error = InvalidOrigin;
+impl TryFrom<u64> for Hop {
+	type Error = InvalidHop;
 
 	fn try_from(id: u64) -> Result<Self, Self::Error> {
 		Self::new(id)
 	}
 }
 
-impl fmt::Display for Origin {
+impl fmt::Display for Hop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		self.id.fmt(f)
 	}
 }
 
-impl<V: Copy> Encode<V> for Origin
+impl<V: Copy> Encode<V> for Hop
 where
 	u64: Encode<V>,
 {
@@ -199,7 +192,7 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for Origin
+impl<V: Copy> Decode<V> for Hop
 where
 	u64: Decode<V>,
 {
@@ -212,27 +205,31 @@ where
 	}
 }
 
-/// Maximum number of origins (hops) an [`OriginList`] can hold.
+/// Maximum number of hops a [`Hops`] chain can hold.
 ///
 /// Caps pathological or loop-induced announcements at a reasonable cluster
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
 pub(crate) const MAX_HOPS: usize = 32;
 
-/// Bounded, loop-free list of [`Origin`] entries: the hop chain of a broadcast.
+/// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
-/// Guarantees `len() <= MAX_HOPS` and that no non-zero [`Origin`] appears twice. Both
+/// Guarantees `len() <= MAX_HOPS` and that no non-zero [`Hop`] appears twice. Both
 /// are wire rules, and both hold wherever a list exists rather than only where one was
 /// parsed, so a chain that a conforming receiver would reject cannot be built and sent.
-/// Construct via [`OriginList::new`] + [`OriginList::push`], or fall back to the
-/// fallible [`TryFrom<Vec<Origin>>`].
+/// Construct via [`Hops::new`] + [`Hops::push`], or fall back to the
+/// fallible [`TryFrom<Vec<Hop>>`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OriginList(Vec<Origin>);
+pub struct Hops(Vec<Hop>);
 
-/// Why an [`Origin`] cannot join an [`OriginList`].
+/// Why a [`Hop`] is not usable, on its own or as part of a [`Hops`] chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
+	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
+	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	Range,
+
 	/// The list is already at its hop-count cap, which a real path never reaches and a
 	/// loop does.
 	TooMany,
@@ -246,8 +243,9 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::TooMany => write!(f, "too many origins (max {MAX_HOPS})"),
-			Self::Duplicate => write!(f, "origin already in the hop chain"),
+			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
+			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
 	}
 }
@@ -258,30 +256,30 @@ impl From<InvalidHop> for DecodeError {
 	fn from(err: InvalidHop) -> Self {
 		match err {
 			InvalidHop::TooMany => DecodeError::BoundsExceeded,
-			InvalidHop::Duplicate => DecodeError::InvalidValue,
+			InvalidHop::Range | InvalidHop::Duplicate => DecodeError::InvalidValue,
 		}
 	}
 }
 
-impl OriginList {
+impl Hops {
 	/// Create an empty list.
 	pub fn new() -> Self {
 		Self(Vec::new())
 	}
 
-	/// Append an [`Origin`], rejecting anything a conforming receiver would.
+	/// Append a [`Hop`], rejecting anything a conforming receiver would.
 	///
 	/// Fails with [`InvalidHop::TooMany`] once the list is full, and with
 	/// [`InvalidHop::Duplicate`] for an id already in the chain, which is a loop. The
 	/// reserved id 0 identifies nothing, so it may repeat.
-	pub fn push(&mut self, origin: Origin) -> Result<(), InvalidHop> {
+	pub fn push(&mut self, hop: Hop) -> Result<(), InvalidHop> {
 		if self.0.len() >= MAX_HOPS {
 			return Err(InvalidHop::TooMany);
 		}
-		if origin != Origin::UNKNOWN && self.0.contains(&origin) {
+		if hop != Hop::UNKNOWN && self.0.contains(&hop) {
 			return Err(InvalidHop::Duplicate);
 		}
-		self.0.push(origin);
+		self.0.push(hop);
 		Ok(())
 	}
 
@@ -292,12 +290,12 @@ impl OriginList {
 	/// `replacement` twice, which is the loop [`Self::push`] refuses to build. A `target`
 	/// that is not present changes nothing and so cannot duplicate anything, and the slot
 	/// being overwritten is not a duplicate of itself.
-	pub fn replace_first(&mut self, target: Origin, replacement: Origin) -> Result<bool, InvalidHop> {
+	pub fn replace_first(&mut self, target: Hop, replacement: Hop) -> Result<bool, InvalidHop> {
 		let Some(index) = self.0.iter().position(|entry| *entry == target) else {
 			return Ok(false);
 		};
 
-		if replacement != Origin::UNKNOWN
+		if replacement != Hop::UNKNOWN
 			&& self
 				.0
 				.iter()
@@ -311,9 +309,9 @@ impl OriginList {
 		Ok(true)
 	}
 
-	/// Returns true if any entry matches `origin`.
-	pub fn contains(&self, origin: &Origin) -> bool {
-		self.0.contains(origin)
+	/// Returns true if any entry matches `hop`.
+	pub fn contains(&self, hop: &Hop) -> bool {
+		self.0.contains(hop)
 	}
 
 	/// Number of entries currently in the list (always `<= MAX_HOPS`).
@@ -327,26 +325,26 @@ impl OriginList {
 	}
 
 	/// Iterate over the entries in hop order (oldest first).
-	pub fn iter(&self) -> std::slice::Iter<'_, Origin> {
+	pub fn iter(&self) -> std::slice::Iter<'_, Hop> {
 		self.0.iter()
 	}
 
 	/// Borrow the entries as a slice.
-	pub fn as_slice(&self) -> &[Origin] {
+	pub fn as_slice(&self) -> &[Hop] {
 		&self.0
 	}
 }
 
-impl TryFrom<Vec<Origin>> for OriginList {
+impl TryFrom<Vec<Hop>> for Hops {
 	type Error = InvalidHop;
 
-	fn try_from(v: Vec<Origin>) -> Result<Self, Self::Error> {
+	fn try_from(v: Vec<Hop>) -> Result<Self, Self::Error> {
 		if v.len() > MAX_HOPS {
 			return Err(InvalidHop::TooMany);
 		}
 		// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
 		for (i, origin) in v.iter().enumerate() {
-			if *origin != Origin::UNKNOWN && v[i + 1..].contains(origin) {
+			if *origin != Hop::UNKNOWN && v[i + 1..].contains(origin) {
 				return Err(InvalidHop::Duplicate);
 			}
 		}
@@ -354,19 +352,19 @@ impl TryFrom<Vec<Origin>> for OriginList {
 	}
 }
 
-impl<'a> IntoIterator for &'a OriginList {
-	type Item = &'a Origin;
-	type IntoIter = std::slice::Iter<'a, Origin>;
+impl<'a> IntoIterator for &'a Hops {
+	type Item = &'a Hop;
+	type IntoIter = std::slice::Iter<'a, Hop>;
 
 	fn into_iter(self) -> Self::IntoIter {
 		self.iter()
 	}
 }
 
-impl<V: Copy> Encode<V> for OriginList
+impl<V: Copy> Encode<V> for Hops
 where
 	u64: Encode<V>,
-	Origin: Encode<V>,
+	Hop: Encode<V>,
 {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		(self.0.len() as u64).encode(w, version)?;
@@ -377,10 +375,10 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for OriginList
+impl<V: Copy> Decode<V> for Hops
 where
 	u64: Decode<V>,
-	Origin: Decode<V>,
+	Hop: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let count = u64::decode(r, version)? as usize;
@@ -391,7 +389,7 @@ where
 		// entering the model and being forwarded on to a receiver that must close on it.
 		let mut list = Self(Vec::with_capacity(count));
 		for _ in 0..count {
-			list.push(Origin::decode(r, version)?)?;
+			list.push(Hop::decode(r, version)?)?;
 		}
 		Ok(list)
 	}
@@ -456,7 +454,7 @@ pub(crate) const HANDOVER_HOLD: Duration = Duration::from_millis(500);
 /// on the same winner: the hops are forwarded unchanged, and the hash is
 /// build-stable. Mixing the name in spreads equal routes across different
 /// upstreams rather than funneling onto one.
-fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
+fn route_key(name: &Path, hops: &Hops) -> (usize, u64) {
 	(hops.len(), fnv_key(name, hops.iter().copied()))
 }
 
@@ -472,7 +470,7 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 /// chain to pick among *routes*, and [`FrontState::handover_allowed`] hashes a
 /// single relay's origin to pick among *relays*. Mixing the name in spreads
 /// equal candidates across different winners rather than funneling onto one.
-fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
+fn fnv_key(name: &Path, hops: impl IntoIterator<Item = Hop>) -> u64 {
 	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -480,8 +478,8 @@ fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
 	for &byte in name.as_str().as_bytes() {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
-	for origin in origins {
-		for &byte in &origin.id().to_le_bytes() {
+	for hop in hops {
+		for &byte in &hop.id().to_le_bytes() {
 			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 		}
 	}
@@ -599,7 +597,7 @@ struct AnnounceConsumerNotify {
 	/// [`Consumer::excluding`]). Every broadcast handed out registers an
 	/// [`ExclusionGuard`] for it, which is what tells the front it is exposed to that
 	/// peer even before they subscribe.
-	exclude: Option<Origin>,
+	exclude: Option<Hop>,
 }
 
 impl AnnounceConsumerNotify {
@@ -676,13 +674,13 @@ impl NotifyNode {
 /// front has already closed is inert.
 pub(crate) struct ExclusionGuard {
 	state: kio::Producer<FrontState>,
-	peer: Origin,
+	peer: Hop,
 }
 
 impl ExclusionGuard {
 	/// Register `peer` and return the guard that releases it, or `None` if the
 	/// front is closing (nothing left to keep off a route).
-	fn new(state: &kio::Producer<FrontState>, peer: Origin) -> Option<Arc<Self>> {
+	fn new(state: &kio::Producer<FrontState>, peer: Hop) -> Option<Arc<Self>> {
 		let mut s = state.write().ok()?;
 		if s.closed {
 			return None;
@@ -817,7 +815,7 @@ impl OriginNode {
 		}
 	}
 
-	fn resolve_broadcast(&self, rest: impl AsPath, exclude: Option<Origin>) -> Resolved {
+	fn resolve_broadcast(&self, rest: impl AsPath, exclude: Option<Hop>) -> Resolved {
 		let rest = rest.as_path();
 
 		if let Some((dir, rest)) = rest.next_part() {
@@ -1011,7 +1009,7 @@ pub struct Producer {
 	// Identity for this origin. Appended to broadcast hops when
 	// re-announcing so downstream relays can detect loops and prefer the
 	// shortest path.
-	info: Origin,
+	info: Hop,
 
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
@@ -1052,7 +1050,7 @@ pub struct Producer {
 }
 
 impl std::ops::Deref for Producer {
-	type Target = Origin;
+	type Target = Hop;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -1126,7 +1124,7 @@ impl Producer {
 	/// advertises no subscribe interest (its `allowed()` is empty, so the
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
-	pub(crate) fn empty(info: Origin) -> Self {
+	pub(crate) fn empty(info: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
@@ -1598,14 +1596,14 @@ struct FrontRoute {
 
 /// What a held re-parent is keyed by: the relay it would adopt.
 ///
-/// An anonymous relay ([`Origin::UNKNOWN`]) identifies nothing, so its route id
+/// An anonymous relay ([`Hop::UNKNOWN`]) identifies nothing, so its route id
 /// stands in: another anonymous route is another relay until proven otherwise,
 /// and a reconnecting anonymous relay restarts its wait, which is the price of
 /// withholding an identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HoldKey {
 	/// The target's announcing relay, when it declared an identity.
-	Relay(Origin),
+	Relay(Hop),
 	/// The target route itself, when its relay is anonymous.
 	Route(u64),
 }
@@ -1630,7 +1628,7 @@ struct FrontState {
 	/// Absolute path of the broadcast, mixed into the route tie-break hash.
 	path: PathOwned,
 	/// The local origin's identity, the other half of the handover key gate.
-	self_origin: Origin,
+	self_hop: Hop,
 	/// Content identity: the original publisher (first hop) shared by every
 	/// attached source, or `None` for a broadcast produced locally (no hops).
 	/// Fixed for the front's lifetime; a source with a different first hop is new
@@ -1638,7 +1636,7 @@ struct FrontState {
 	/// it, when offline) rather than joining it (see [`attach_source`]). This is
 	/// the same rule the session layer applies to a restart whose first hop
 	/// changed.
-	publisher: Option<Origin>,
+	publisher: Option<Hop>,
 	/// The re-parent currently held down: which relay it targets and when the
 	/// wait started. Keyed to the target relay, so a candidate flapping between
 	/// two routes to the same relay (a reconnect under a fresh route id
@@ -1664,7 +1662,7 @@ struct FrontState {
 	/// back (moq-transport carries no hop ids) may re-advertise the path to us before
 	/// it ever subscribes. That reflection is otherwise indistinguishable from a rival
 	/// publisher, and this is what tells [`attach_source`] apart.
-	excluded: HashMap<Origin, usize>,
+	excluded: HashMap<Hop, usize>,
 	/// Set when `excluded` gained or lost a peer without a reselect. The guards
 	/// register and release under locks that cannot re-run selection or sync
 	/// the front, so the front task observes this flag and does both: a peer
@@ -1713,7 +1711,7 @@ impl FrontState {
 	/// the candidate chain and is filtered here, at any cycle length. Taints are
 	/// ignored: this pins one requester to one source rather than serving the
 	/// shared front.
-	fn dispatch(&self, exclude: Option<Origin>) -> Option<u64> {
+	fn dispatch(&self, exclude: Option<Hop>) -> Option<u64> {
 		self.pick(
 			|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)),
 			Steer::Ignore,
@@ -1919,7 +1917,7 @@ impl FrontState {
 			.find(|r| r.id == id)
 			.and_then(|r| r.route.hops.iter().last().copied());
 		match relay {
-			Some(relay) if relay != Origin::UNKNOWN => HoldKey::Relay(relay),
+			Some(relay) if relay != Hop::UNKNOWN => HoldKey::Relay(relay),
 			_ => HoldKey::Route(id),
 		}
 	}
@@ -1935,7 +1933,7 @@ impl FrontState {
 	/// [`HANDOVER_HOLD`].
 	fn hold_deadline(&self, since: Instant) -> Option<Instant> {
 		let spread = (HANDOVER_HOLD / 2).as_millis() as u64;
-		let key = fnv_key(&self.path.as_path(), [self.self_origin]);
+		let key = fnv_key(&self.path.as_path(), [self.self_hop]);
 		since.checked_add(HANDOVER_HOLD + Duration::from_millis(key % spread.max(1)))
 	}
 
@@ -2004,7 +2002,7 @@ impl FrontState {
 		}
 
 		let theirs = (candidate.advertised.cold, fnv_key(&name, [peer]));
-		let ours = (incumbent.cost.cold, fnv_key(&name, [self.self_origin]));
+		let ours = (incumbent.cost.cold, fnv_key(&name, [self.self_hop]));
 		theirs < ours
 	}
 
@@ -2333,15 +2331,15 @@ struct AttachContext<'a> {
 
 /// Whether two hop entries prove the same endpoint.
 ///
-/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
+/// [`Hop::UNKNOWN`] identifies nothing: it is what a peer that declared no
 /// identity, or that does not speak the hops extension at all, contributes as a
 /// hop. Two such entries never match. As first hops, splicing the sources they
 /// name would cut one publisher's subscribers over to an unrelated publisher's
 /// content; as last hops, two anonymous relays would pass for one relay
 /// reconnecting and skip the handover safeguards. Every other id compares
 /// normally, including `None` for a locally produced broadcast with no hops.
-fn same_identity(a: Option<Origin>, b: Option<Origin>) -> bool {
-	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
+fn same_identity(a: Option<Hop>, b: Option<Hop>) -> bool {
+	if a == Some(Hop::UNKNOWN) || b == Some(Hop::UNKNOWN) {
 		return false;
 	}
 	a == b
@@ -2446,7 +2444,7 @@ fn attach_source(
 	let state = kio::Producer::new(FrontState {
 		pending: None,
 		path: ctx.full.clone(),
-		self_origin: ctx.origin.id,
+		self_hop: ctx.origin.id,
 		publisher,
 		next_route: 1,
 		excluded: HashMap::new(),
@@ -2947,7 +2945,7 @@ struct PendingBroadcast {
 /// [`Consumer::announced`]. Drop this handle (and every clone) to reject the
 /// requests still waiting to be served.
 pub struct Dynamic {
-	info: Origin,
+	hop: Hop,
 	root: PathOwned,
 	state: kio::Shared<OriginDynamicState>,
 }
@@ -2960,7 +2958,7 @@ impl Clone for Dynamic {
 		self.state.lock().requests.add_handler();
 
 		Self {
-			info: self.info,
+			hop: self.hop,
 			root: self.root.clone(),
 			state: self.state.clone(),
 		}
@@ -2968,15 +2966,15 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Origin, root: PathOwned, state: kio::Shared<OriginDynamicState>) -> Self {
+	fn new(hop: Hop, root: PathOwned, state: kio::Shared<OriginDynamicState>) -> Self {
 		state.lock().requests.add_handler();
 
-		Self { info, root, state }
+		Self { hop, root, state }
 	}
 
-	/// The origin this handler belongs to.
-	pub fn info(&self) -> &Origin {
-		&self.info
+	/// The id of the origin this handler belongs to.
+	pub fn hop(&self) -> Hop {
+		self.hop
 	}
 
 	/// Poll for the next requested broadcast, without blocking.
@@ -3298,7 +3296,7 @@ impl Consume<track::Consumer> for track::Consumer {
 #[derive(Clone)]
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
-	info: Origin,
+	info: Hop,
 	nodes: OriginNodes,
 
 	// A prefix that is automatically stripped from all paths.
@@ -3316,11 +3314,11 @@ pub struct Consumer {
 	// Data-plane split horizon: broadcasts resolved through this handle are
 	// served from a source whose hop chain excludes this origin (the requesting
 	// peer). `None` (the default) serves from the active source as usual.
-	exclude: Option<Origin>,
+	exclude: Option<Hop>,
 }
 
 impl std::ops::Deref for Consumer {
-	type Target = Origin;
+	type Target = Hop;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -3329,7 +3327,7 @@ impl std::ops::Deref for Consumer {
 
 impl Consumer {
 	fn new(
-		info: Origin,
+		info: Hop,
 		root: PathOwned,
 		nodes: OriginNodes,
 		dynamic: kio::Shared<OriginDynamicState>,
@@ -3349,7 +3347,7 @@ impl Consumer {
 	/// to a source whose hop chain excludes `peer`, matching what the announce
 	/// loop advertises to them. Sessions apply this once they learn the peer's
 	/// origin id.
-	pub(crate) fn excluding(mut self, peer: Origin) -> Self {
+	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
 	}
@@ -3672,7 +3670,7 @@ impl AnnounceConsumer {
 		root: PathOwned,
 		nodes: OriginNodes,
 		stats: stats::Session,
-		exclude: Option<Origin>,
+		exclude: Option<Hop>,
 		dynamic: &kio::Shared<OriginDynamicState>,
 	) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -3832,7 +3830,7 @@ impl ProduceTest for Info {
 }
 
 #[cfg(test)]
-impl ProduceTest for Origin {
+impl ProduceTest for Hop {
 	fn produce(self) -> Producer {
 		Info::new(self).produce()
 	}
@@ -3919,22 +3917,22 @@ mod tests {
 	/// deterministic instead of hinging on a random id winning a hash comparison.
 	/// Starts searching above the small ids the tests use in hop chains, so the
 	/// result never collides with a hop (a looping chain trips a debug_assert).
-	fn origin_keyed(name: &str, peer: Origin, above: bool) -> Origin {
+	fn origin_keyed(name: &str, peer: Hop, above: bool) -> Hop {
 		let name = Path::new(name);
 		let peer_key = fnv_key(&name, [peer]);
 		(100u64..)
-			.map(|id| Origin::new(id).unwrap())
+			.map(|id| Hop::new(id).unwrap())
 			.find(|origin| (fnv_key(&name, [*origin]) > peer_key) == above)
 			.unwrap()
 	}
 
 	/// A front table for reselect tests: routes get ids in order, the first is
 	/// the incumbent.
-	fn front_state(self_origin: Origin, routes: Vec<broadcast::Route>) -> FrontState {
+	fn front_state(self_hop: Hop, routes: Vec<broadcast::Route>) -> FrontState {
 		let source = broadcast::Info::new().produce().consume();
 		FrontState {
 			path: Path::new("test").to_owned(),
-			self_origin,
+			self_hop,
 			publisher: routes.first().and_then(|r| r.hops.iter().next().copied()),
 			next_route: routes.len() as u64,
 			excluded: HashMap::new(),
@@ -3965,11 +3963,11 @@ mod tests {
 	fn warm_route(hops: &[u64], cold: u64, link: u64) -> broadcast::Route {
 		let hops = hops
 			.iter()
-			.map(|id| Origin::new(*id).unwrap_or(Origin::UNKNOWN))
+			.map(|id| Hop::new(*id).unwrap_or(Hop::UNKNOWN))
 			.collect::<Vec<_>>();
 		let advertised = broadcast::Cost { warm: 0, cold };
 		let mut route = announce()
-			.with_hops(OriginList::try_from(hops).unwrap())
+			.with_hops(Hops::try_from(hops).unwrap())
 			.with_cost(advertised.charged(link));
 		route.advertised = advertised;
 		route
@@ -3978,7 +3976,7 @@ mod tests {
 	/// A route as a relay that is *not* carrying announces it: its accumulated cost
 	/// forwarded undiscounted, so it is a plain forwarder rather than a warm sibling
 	/// and never trips the adoption hold-down.
-	fn forwarder_route(hops: OriginList, cost: u64) -> broadcast::Route {
+	fn forwarder_route(hops: Hops, cost: u64) -> broadcast::Route {
 		let advertised = broadcast::Cost::new(cost);
 		let mut route = announce().with_hops(hops).with_cost(advertised);
 		route.advertised = advertised;
@@ -3986,13 +3984,13 @@ mod tests {
 	}
 
 	/// A warm relay one hop past the publisher, on the standard test link.
-	fn sibling_route(peer: Origin, cold: u64) -> broadcast::Route {
+	fn sibling_route(peer: Hop, cold: u64) -> broadcast::Route {
 		warm_route(&[90, peer.id()], cold, SIBLING_LINK)
 	}
 
 	/// A route as the upstream announces it: priced, one hop.
 	fn upstream_route(cost: u64) -> broadcast::Route {
-		let hops = OriginList::try_from(vec![Origin::new(90).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(90).unwrap()]).unwrap();
 		announce().with_hops(hops).with_cost(cost)
 	}
 
@@ -4002,7 +4000,7 @@ mod tests {
 	/// below us.
 	#[test]
 	fn test_carrying_gate_keys() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 
 		// We lose the key comparison: stay put while carrying, migrate when idle.
 		let mut lost = front_state(
@@ -4034,14 +4032,14 @@ mod tests {
 	/// cluster draft's "equal Hop IDs cannot be ordered").
 	#[test]
 	fn test_carrying_gate_anonymous_is_not_a_reconnect() {
-		let anon_hops = || OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::UNKNOWN]).unwrap();
+		let anon_hops = || Hops::try_from(vec![Hop::new(90).unwrap(), Hop::UNKNOWN]).unwrap();
 		let incumbent = || forwarder_route(anon_hops(), 10);
 		let candidate = || warm_route(&[90, 0], 10, SIBLING_LINK);
 
 		// Equal cold roots fall through to the hash of the declared ids, ours
 		// against the candidate's 0. Keyed to lose, we must stay put.
 		let mut state = front_state(
-			origin_keyed("test", Origin::UNKNOWN, false),
+			origin_keyed("test", Hop::UNKNOWN, false),
 			vec![incumbent(), candidate()],
 		);
 		state.reselect_now(true);
@@ -4052,7 +4050,7 @@ mod tests {
 		);
 
 		// Both sides anonymous: the ranks tie exactly, and a tie never moves.
-		let mut state = front_state(Origin::UNKNOWN, vec![incumbent(), candidate()]);
+		let mut state = front_state(Hop::UNKNOWN, vec![incumbent(), candidate()]);
 		state.reselect_now(true);
 		assert_eq!(state.active, Some(0), "two anonymous relays cannot be ordered");
 	}
@@ -4074,7 +4072,7 @@ mod tests {
 			.map(|i| {
 				let next = ids[(i + 1) % 3];
 				let mut view = front_state(
-					Origin::new(ids[i]).unwrap(),
+					Hop::new(ids[i]).unwrap(),
 					// Our own upstream has worsened to cold 10; the advertisement we
 					// still hold from the next relay says cold 1.
 					vec![upstream_route(10), warm_route(&[90, next], 1, 1)],
@@ -4104,10 +4102,10 @@ mod tests {
 
 		let moved: Vec<bool> = (0..3)
 			.map(|i| {
-				let next = Origin::new(ids[(i + 1) % 3]).unwrap();
-				let hops = OriginList::try_from(vec![Origin::new(90).unwrap(), next]).unwrap();
+				let next = Hop::new(ids[(i + 1) % 3]).unwrap();
+				let hops = Hops::try_from(vec![Hop::new(90).unwrap(), next]).unwrap();
 				let mut view = front_state(
-					Origin::new(ids[i]).unwrap(),
+					Hop::new(ids[i]).unwrap(),
 					vec![upstream_route(10), forwarder_route(hops, 1)],
 				);
 				view.reselect(true, now);
@@ -4125,7 +4123,7 @@ mod tests {
 	/// passed and the candidate is still preferred, the handover happens.
 	#[test]
 	fn test_handover_hold_expires() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let start = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
@@ -4162,7 +4160,7 @@ mod tests {
 	/// deadline every time rather than re-rolling it and drifting.
 	#[test]
 	fn test_handover_hold_spread_is_stable() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let build = || {
 			front_state(
@@ -4173,8 +4171,8 @@ mod tests {
 		assert_eq!(build().hold_deadline(now), build().hold_deadline(now));
 
 		// Different relays land on different instants, which is the point.
-		let a = front_state(Origin::new(11).unwrap(), vec![upstream_route(10)]);
-		let b = front_state(Origin::new(12).unwrap(), vec![upstream_route(10)]);
+		let a = front_state(Hop::new(11).unwrap(), vec![upstream_route(10)]);
+		let b = front_state(Hop::new(12).unwrap(), vec![upstream_route(10)]);
 		assert_ne!(a.hold_deadline(now), b.hold_deadline(now));
 	}
 
@@ -4184,7 +4182,7 @@ mod tests {
 	/// re-parent at once off prices that have not landed yet.
 	#[test]
 	fn test_handover_hold_covers_a_drain() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
@@ -4206,7 +4204,7 @@ mod tests {
 	/// moves that cannot close a loop, and repairs that must not wait, are exempt.
 	#[test]
 	fn test_handover_hold_ignores_moves_that_cannot_cycle() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let keyed = || origin_keyed("test", peer, false);
 
@@ -4234,7 +4232,7 @@ mod tests {
 	/// a live route sits in the table.
 	#[test]
 	fn test_handover_hold_exempts_an_unannounced_incumbent() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let offline = upstream_route(10).with_announce(false);
 		let mut state = front_state(origin_keyed("test", peer, false), vec![offline, sibling_route(peer, 4)]);
@@ -4254,7 +4252,7 @@ mod tests {
 	fn test_handover_hold_covers_anonymous_relays() {
 		let now = crate::model::clock::now();
 		let anon = |cold: u64| warm_route(&[90, 0], cold, SIBLING_LINK);
-		let mut state = front_state(Origin::new(7).unwrap(), vec![anon(10), anon(1)]);
+		let mut state = front_state(Hop::new(7).unwrap(), vec![anon(10), anon(1)]);
 
 		assert!(
 			state.reselect(true, now).is_some(),
@@ -4270,11 +4268,11 @@ mod tests {
 	#[test]
 	fn test_handover_hold_is_keyed_to_the_target() {
 		let start = crate::model::clock::now();
-		let relay_b = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(3).unwrap()]).unwrap();
-		let relay_c = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(4).unwrap()]).unwrap();
+		let relay_b = Hops::try_from(vec![Hop::new(90).unwrap(), Hop::new(3).unwrap()]).unwrap();
+		let relay_c = Hops::try_from(vec![Hop::new(90).unwrap(), Hop::new(4).unwrap()]).unwrap();
 
 		let mut state = front_state(
-			Origin::new(7).unwrap(),
+			Hop::new(7).unwrap(),
 			vec![upstream_route(10), forwarder_route(relay_b, 5)],
 		);
 		let deadline = state.reselect(true, start).expect("the hold must arm");
@@ -4320,7 +4318,7 @@ mod tests {
 	/// starts later rather than one that cannot happen.
 	#[test]
 	fn test_handover_hold_covers_an_idle_front() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
@@ -4337,10 +4335,10 @@ mod tests {
 	/// not necessarily a publisher that never re-parents.
 	#[test]
 	fn test_handover_hold_covers_an_opaque_one_hop_peer() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 		let opaque = announce()
-			.with_hops(OriginList::try_from(vec![peer]).unwrap())
+			.with_hops(Hops::try_from(vec![peer]).unwrap())
 			.with_cost(broadcast::Cost::UNKNOWN.charged(1));
 		let mut state = front_state(origin_keyed("test", peer, false), vec![upstream_route(10), opaque]);
 
@@ -4360,8 +4358,8 @@ mod tests {
 	/// its bytes take.
 	#[test]
 	fn test_a_tainted_incumbent_is_never_retained() {
-		let reader = Origin::new(5).unwrap();
-		let clean_peer = Origin::new(3).unwrap();
+		let reader = Hop::new(5).unwrap();
+		let clean_peer = Hop::new(3).unwrap();
 		let now = crate::model::clock::now();
 
 		// The incumbent runs through the reader and is cheaply rooted, so we outrank
@@ -4403,9 +4401,9 @@ mod tests {
 	/// and drops the very advertisement whose guard created the taint.
 	#[test]
 	fn test_taint_steer_keeps_the_announcement() {
-		let reader = Origin::new(5).unwrap();
+		let reader = Hop::new(5).unwrap();
 		let mut state = front_state(
-			Origin::new(7).unwrap(),
+			Hop::new(7).unwrap(),
 			vec![
 				warm_route(&[90, reader.id()], 1, 1),
 				upstream_route(10).with_announce(false),
@@ -4447,8 +4445,8 @@ mod tests {
 	/// left without a source.
 	#[test]
 	fn test_carrying_gate_symmetric_race() {
-		let a = Origin::new(1).unwrap();
-		let b = Origin::new(2).unwrap();
+		let a = Hop::new(1).unwrap();
+		let b = Hop::new(2).unwrap();
 
 		let mut a_view = front_state(a, vec![upstream_route(10), sibling_route(b, 10)]);
 		let mut b_view = front_state(b, vec![upstream_route(10), sibling_route(a, 10)]);
@@ -4469,7 +4467,7 @@ mod tests {
 	/// become the aggregation point either way the hash falls.
 	#[test]
 	fn test_carrying_gate_follows_the_cheaper_root() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 
 		for above in [false, true] {
 			let mut state = front_state(
@@ -4490,7 +4488,7 @@ mod tests {
 	/// however the hash falls. It is the peer that has to come to us.
 	#[test]
 	fn test_carrying_gate_rejects_the_pricier_root() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 
 		for above in [false, true] {
 			let mut state = front_state(
@@ -4511,7 +4509,7 @@ mod tests {
 	/// strictly above the relay we adopted and can never attract it back.
 	#[test]
 	fn test_carrying_gate_descends() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4534,7 +4532,7 @@ mod tests {
 	/// front on a route that no longer exists.
 	#[test]
 	fn test_carrying_gate_reverts_when_the_parent_goes() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4553,8 +4551,8 @@ mod tests {
 	/// cost existed.
 	#[test]
 	fn test_carrying_gate_unknown_cold_falls_back_to_the_hash() {
-		let a = Origin::new(1).unwrap();
-		let b = Origin::new(2).unwrap();
+		let a = Hop::new(1).unwrap();
+		let b = Hop::new(2).unwrap();
 		let unknown = broadcast::Cost::UNKNOWN.cold;
 
 		let mut a_view = front_state(a, vec![upstream_route(unknown), sibling_route(b, unknown)]);
@@ -4575,7 +4573,7 @@ mod tests {
 	/// peer that told us the least.
 	#[test]
 	fn test_carrying_gate_unknown_cold_ranks_last() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let unknown = broadcast::Cost::UNKNOWN.cold;
 
 		for above in [false, true] {
@@ -4617,7 +4615,7 @@ mod tests {
 			"hop count must favor the wrong one"
 		);
 
-		let mut state = front_state(Origin::new(7).unwrap(), vec![shallow, deep]);
+		let mut state = front_state(Hop::new(7).unwrap(), vec![shallow, deep]);
 		state.reselect_now(true);
 		assert_eq!(state.active, Some(1), "hop count bypassed the cheaper-rooted warm copy");
 	}
@@ -4628,7 +4626,7 @@ mod tests {
 	/// and even when we would lose the key comparison.
 	#[test]
 	fn test_carrying_switches_to_benign_routes() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let lost = origin_keyed("test", peer, false);
 
 		// A cheaper forwarder path: the relay advertised its accumulated cost.
@@ -4643,7 +4641,7 @@ mod tests {
 		);
 
 		// Directly from the original publisher: single-hop chain, advertised zero.
-		let direct = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+		let direct = announce().with_hops(Hops::try_from(vec![peer]).unwrap());
 		let mut state = front_state(lost, vec![upstream_route(10), direct]);
 		state.reselect_now(true);
 		assert_eq!(
@@ -4669,7 +4667,7 @@ mod tests {
 	/// (the upstream retracted) is displaced regardless of the key comparison.
 	#[test]
 	fn test_carrying_gate_ignores_unannounced_incumbent() {
-		let peer = Origin::new(3).unwrap();
+		let peer = Hop::new(3).unwrap();
 		let unannounced = upstream_route(10).with_announce(false);
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
@@ -4689,11 +4687,11 @@ mod tests {
 	/// of a sync target point at it.
 	#[test]
 	fn test_reflection_through_an_exposed_peer_cannot_take_over() {
-		let peer = Origin::new(42).unwrap();
-		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
-		let reflected = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+		let peer = Hop::new(42).unwrap();
+		let upstream = Hops::try_from(vec![Hop::new(7).unwrap()]).unwrap();
+		let reflected = announce().with_hops(Hops::try_from(vec![peer]).unwrap());
 
-		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+		let mut state = front_state(Hop::new(1).unwrap(), vec![announce().with_hops(upstream)]);
 
 		// Nobody is exposed yet: a different publisher is free to take the path.
 		assert!(!state.taints_a_reader(&reflected));
@@ -4708,12 +4706,12 @@ mod tests {
 	/// publisher reaching us through some *other* peer still takes the path over.
 	#[test]
 	fn test_rival_publisher_through_another_peer_still_takes_over() {
-		let peer = Origin::new(42).unwrap();
-		let elsewhere = Origin::new(43).unwrap();
-		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
-		let rival = announce().with_hops(OriginList::try_from(vec![Origin::UNKNOWN, elsewhere]).unwrap());
+		let peer = Hop::new(42).unwrap();
+		let elsewhere = Hop::new(43).unwrap();
+		let upstream = Hops::try_from(vec![Hop::new(7).unwrap()]).unwrap();
+		let rival = announce().with_hops(Hops::try_from(vec![Hop::UNKNOWN, elsewhere]).unwrap());
 
-		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+		let mut state = front_state(Hop::new(1).unwrap(), vec![announce().with_hops(upstream)]);
 		*state.excluded.entry(peer).or_default() += 1;
 
 		assert!(!state.taints_a_reader(&rival), "only the peer we feed is a reflection");
@@ -4725,19 +4723,19 @@ mod tests {
 	/// opaque link (`Client::with_cost`) is what restores the intended order.
 	#[test]
 	fn test_opaque_peer_understates_its_depth() {
-		let us = Origin::new(1).unwrap();
+		let us = Hop::new(1).unwrap();
 
 		// Our own upstream, honestly described: two hops, charged per link.
 		let direct = || {
 			announce()
-				.with_hops(OriginList::try_from(vec![Origin::new(7).unwrap(), Origin::new(8).unwrap()]).unwrap())
+				.with_hops(Hops::try_from(vec![Hop::new(7).unwrap(), Hop::new(8).unwrap()]).unwrap())
 				.with_cost(2)
 		};
 		// The same content reached through an opaque relay, which is actually further
 		// away but advertises no chain at all, so it lands as one unpriced hop.
 		let opaque = |cost| {
 			announce()
-				.with_hops(OriginList::try_from(vec![Origin::new(42).unwrap()]).unwrap())
+				.with_hops(Hops::try_from(vec![Hop::new(42).unwrap()]).unwrap())
 				.with_cost(cost)
 		};
 
@@ -4814,7 +4812,7 @@ mod tests {
 		let registry = Registry::new(Config::new());
 		let ctx = registry.tier(Tier::default()).session("acme");
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let ingress = origin.clone().with_stats(ctx.clone());
 		let egress = origin.consume().with_stats(ctx.clone());
 
@@ -4917,7 +4915,7 @@ mod tests {
 		let registry = Registry::new(Config::new());
 		let ctx = registry.tier(Tier::default()).session("acme");
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let ingress = origin.clone().with_stats(ctx.clone());
 		let egress = origin.consume().with_stats(ctx.clone());
 
@@ -4975,7 +4973,7 @@ mod tests {
 		let registry = Registry::new(Config::new());
 		let ctx = registry.tier(Tier::default()).session("acme");
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let ingress = origin.clone().with_stats(ctx.clone());
 		let egress = origin.consume().with_stats(ctx.clone());
 
@@ -5043,7 +5041,7 @@ mod tests {
 		let registry = Registry::new(Config::new());
 		let ctx = registry.tier(Tier::default()).session("acme");
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let ingress = origin.clone().with_stats(ctx.clone());
 		let egress = origin.consume().with_stats(ctx.clone());
 
@@ -5081,25 +5079,25 @@ mod tests {
 
 	#[test]
 	fn origin_rejects_reserved_ids() {
-		assert!(Origin::new(0).is_err());
-		assert!(Origin::new(1u64 << 62).is_err());
-		assert_eq!(Origin::new(1).unwrap().id(), 1);
+		assert!(Hop::new(0).is_err());
+		assert!(Hop::new(1u64 << 62).is_err());
+		assert_eq!(Hop::new(1).unwrap().id(), 1);
 
 		let mut zero = [0u8].as_slice();
 		assert_eq!(
-			Origin::decode(&mut zero, crate::lite::Version::Lite05).unwrap(),
-			Origin::UNKNOWN
+			Hop::decode(&mut zero, crate::lite::Version::Lite05).unwrap(),
+			Hop::UNKNOWN
 		);
 	}
 
 	#[test]
 	fn origin_list_push_fails_at_limit() {
-		let mut list = OriginList::new();
+		let mut list = Hops::new();
 		for _ in 0..MAX_HOPS {
-			list.push(Origin::random()).unwrap();
+			list.push(Hop::random()).unwrap();
 		}
 		assert_eq!(list.len(), MAX_HOPS);
-		assert_eq!(list.push(Origin::random()), Err(InvalidHop::TooMany));
+		assert_eq!(list.push(Hop::random()), Err(InvalidHop::TooMany));
 	}
 
 	/// A chain that revisits a hop looped, and every receiver of one must close the
@@ -5107,38 +5105,38 @@ mod tests {
 	/// rule each place that constructs a chain has to remember.
 	#[test]
 	fn origin_list_push_rejects_a_repeat() {
-		let seven = Origin::new(7).unwrap();
-		let mut list = OriginList::new();
+		let seven = Hop::new(7).unwrap();
+		let mut list = Hops::new();
 		list.push(seven).unwrap();
-		list.push(Origin::new(9).unwrap()).unwrap();
+		list.push(Hop::new(9).unwrap()).unwrap();
 
 		assert_eq!(list.push(seven), Err(InvalidHop::Duplicate));
 		assert_eq!(list.len(), 2, "a refused push must not grow the chain");
 
 		// 0 identifies nothing, so two unknown hops are two hops, not a loop.
-		list.push(Origin::UNKNOWN).unwrap();
-		list.push(Origin::UNKNOWN).unwrap();
+		list.push(Hop::UNKNOWN).unwrap();
+		list.push(Hop::UNKNOWN).unwrap();
 		assert_eq!(list.len(), 4);
 	}
 
 	#[test]
 	fn origin_list_replace_first() {
-		let mut list = OriginList::new();
+		let mut list = Hops::new();
 		for _ in 0..3 {
-			list.push(Origin::UNKNOWN).unwrap();
+			list.push(Hop::UNKNOWN).unwrap();
 		}
 
 		// Rewrites only the first placeholder, keeping the length the same.
-		assert!(list.replace_first(Origin::UNKNOWN, Origin::new(7).unwrap()).unwrap());
+		assert!(list.replace_first(Hop::UNKNOWN, Hop::new(7).unwrap()).unwrap());
 		assert_eq!(
 			list.as_slice(),
-			&[Origin::new(7).unwrap(), Origin::UNKNOWN, Origin::UNKNOWN]
+			&[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]
 		);
 
 		// No match leaves the list untouched.
 		assert!(
 			!list
-				.replace_first(Origin::new(99).unwrap(), Origin::new(8).unwrap())
+				.replace_first(Hop::new(99).unwrap(), Hop::new(8).unwrap())
 				.unwrap()
 		);
 		assert_eq!(list.len(), 3);
@@ -5146,51 +5144,51 @@ mod tests {
 		// Writing in an id the chain already carries would name it twice, which is the
 		// loop `push` refuses; the rewrite has to refuse it for the same reason.
 		assert_eq!(
-			list.replace_first(Origin::UNKNOWN, Origin::new(7).unwrap()),
+			list.replace_first(Hop::UNKNOWN, Hop::new(7).unwrap()),
 			Err(InvalidHop::Duplicate)
 		);
 
 		// A target that is not there changes nothing, so it cannot duplicate anything,
 		// however many times the replacement already appears.
 		assert_eq!(
-			list.replace_first(Origin::new(99).unwrap(), Origin::new(7).unwrap()),
+			list.replace_first(Hop::new(99).unwrap(), Hop::new(7).unwrap()),
 			Ok(false)
 		);
 
 		// Overwriting a slot with what it already holds is a no-op, not a duplicate: the
 		// entry being replaced is not a second occurrence of itself.
 		assert_eq!(
-			list.replace_first(Origin::new(7).unwrap(), Origin::new(7).unwrap()),
+			list.replace_first(Hop::new(7).unwrap(), Hop::new(7).unwrap()),
 			Ok(true)
 		);
 		assert_eq!(
 			list.as_slice(),
-			&[Origin::new(7).unwrap(), Origin::UNKNOWN, Origin::UNKNOWN]
+			&[Hop::new(7).unwrap(), Hop::UNKNOWN, Hop::UNKNOWN]
 		);
 	}
 
 	#[test]
 	fn origin_list_try_from_vec_enforces_limit() {
-		let under: Vec<Origin> = (0..MAX_HOPS).map(|_| Origin::random()).collect();
-		assert!(OriginList::try_from(under).is_ok());
+		let under: Vec<Hop> = (0..MAX_HOPS).map(|_| Hop::random()).collect();
+		assert!(Hops::try_from(under).is_ok());
 
-		let over: Vec<Origin> = (0..MAX_HOPS + 1).map(|_| Origin::random()).collect();
-		assert_eq!(OriginList::try_from(over), Err(InvalidHop::TooMany));
+		let over: Vec<Hop> = (0..MAX_HOPS + 1).map(|_| Hop::random()).collect();
+		assert_eq!(Hops::try_from(over), Err(InvalidHop::TooMany));
 
 		// The other wire rule, on the path that skips `push` entirely.
-		let seven = Origin::new(7).unwrap();
+		let seven = Hop::new(7).unwrap();
 		assert_eq!(
-			OriginList::try_from(vec![seven, Origin::new(9).unwrap(), seven]),
+			Hops::try_from(vec![seven, Hop::new(9).unwrap(), seven]),
 			Err(InvalidHop::Duplicate)
 		);
-		assert!(OriginList::try_from(vec![Origin::UNKNOWN, seven, Origin::UNKNOWN]).is_ok());
+		assert!(Hops::try_from(vec![Hop::UNKNOWN, seven, Hop::UNKNOWN]).is_ok());
 	}
 
 	/// Exact lookups and eligible announcements land synchronously in
 	/// `create_broadcast`: no runtime, no driver poll.
 	#[test]
 	fn test_create_visible_without_driver() {
-		let (origin, _driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, _driver) = Producer::new(Info::new(Hop::random()));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -5206,7 +5204,7 @@ mod tests {
 	async fn test_lifecycle_requires_driver() {
 		tokio::time::pause();
 
-		let (origin, driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, driver) = Producer::new(Info::new(Hop::random()));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -5235,12 +5233,12 @@ mod tests {
 	/// interpret a stamp from another clock as an expired hold.
 	#[test]
 	fn test_pre_run_handover_uses_driver_clock() {
-		let (origin, driver) = Producer::new(Info::new(Origin::new(7).unwrap()));
+		let (origin, driver) = Producer::new(Info::new(Hop::new(7).unwrap()));
 		let consumer = origin.consume();
-		let publisher = Origin::new(90).unwrap();
-		let peer = Origin::new(3).unwrap();
-		let incumbent_hops = OriginList::try_from(vec![publisher]).unwrap();
-		let candidate_hops = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let publisher = Hop::new(90).unwrap();
+		let peer = Hop::new(3).unwrap();
+		let incumbent_hops = Hops::try_from(vec![publisher]).unwrap();
+		let candidate_hops = Hops::try_from(vec![publisher, peer]).unwrap();
 
 		let _incumbent = origin
 			.create_broadcast("cam", announce().with_hops(incumbent_hops.clone()).with_cost(10))
@@ -5277,7 +5275,7 @@ mod tests {
 	async fn test_driver_drop_tears_down() {
 		tokio::time::pause();
 
-		let (origin, driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, driver) = Producer::new(Info::new(Hop::random()));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -5324,7 +5322,7 @@ mod tests {
 	async fn test_driver_drop_rejects_handed_out_requests() {
 		tokio::time::pause();
 
-		let (origin, driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, driver) = Producer::new(Info::new(Hop::random()));
 		let consumer = origin.consume();
 		let mut handler = origin.dynamic();
 
@@ -5345,7 +5343,7 @@ mod tests {
 	async fn test_driver_finishes_when_drained() {
 		tokio::time::pause();
 
-		let (origin, driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, driver) = Producer::new(Info::new(Hop::random()));
 		let driver = tokio::spawn(driver.run(crate::runtime::tokio_test::Tokio::<()>::new()));
 
 		let mut source = origin.create_broadcast("cam", announce()).unwrap();
@@ -5368,7 +5366,7 @@ mod tests {
 	async fn test_create_after_dead_source_is_fresh() {
 		tokio::time::pause();
 
-		let (origin, _driver) = Producer::new(Info::new(Origin::random()));
+		let (origin, _driver) = Producer::new(Info::new(Hop::random()));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -5392,7 +5390,7 @@ mod tests {
 	async fn test_announce() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let mut consumer1 = origin.consume().announced();
 		consumer1.assert_next_wait();
@@ -5449,7 +5447,7 @@ mod tests {
 	async fn test_duplicate() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -5489,14 +5487,14 @@ mod tests {
 	async fn test_route_failover() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
 		// Both routes share the first hop (the original publisher): only
 		// interchangeable content may join as a standby.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
 
 		// The first source announces the broadcast.
 		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
@@ -5564,12 +5562,12 @@ mod tests {
 	async fn test_route_failover_restores_every_track() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
 		// Both routes share the first hop: interchangeable content.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
 
 		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
@@ -5666,8 +5664,8 @@ mod tests {
 		producer.set_route(broadcast::Route::default()).unwrap();
 		assert!(consumer.route_changed().now_or_never().is_none());
 
-		let mut hops = OriginList::new();
-		hops.push(Origin::new(7).unwrap()).unwrap();
+		let mut hops = Hops::new();
+		hops.push(Hop::new(7).unwrap()).unwrap();
 		let route = broadcast::Route::new().with_hops(hops).with_cost(3);
 		producer.set_route(route.clone()).unwrap();
 		assert_eq!(consumer.route_changed().await.unwrap(), route);
@@ -5690,14 +5688,14 @@ mod tests {
 		// The takeover happens while a subscriber is live (carrying), so the local
 		// origin must win the handover key comparison against B's announcing hop
 		// (origin 3); a random id would flake on the hash.
-		let origin = Info::new(origin_keyed("test", Origin::new(3).unwrap(), true)).produce();
+		let origin = Info::new(origin_keyed("test", Hop::new(3).unwrap(), true)).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
 		// Both routes share the first hop (the original publisher): only
 		// interchangeable content may join as a standby.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
 
 		// A (shorter chain) wins at equal cost.
 		let mut source_a = origin
@@ -5773,12 +5771,12 @@ mod tests {
 	async fn test_completed_track_survives_route_churn() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
 		// Shared first hop, so B is a standby rather than a parked replacement.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
 
 		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
@@ -5819,10 +5817,10 @@ mod tests {
 	async fn test_refused_track_aborts_instantly() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
@@ -5847,13 +5845,13 @@ mod tests {
 	async fn test_stale_rejection_does_not_abort_a_handover() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		// The only route: dispatch parks on its pending info request.
 		let source_remote = origin
@@ -5891,13 +5889,13 @@ mod tests {
 	async fn test_route_handover() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
 		// Shared first hop, so the short route joins as an interchangeable source.
-		let hops_long = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
-		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_long = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
+		let hops_short = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 
 		let source_a = origin
 			.create_broadcast("test", announce().with_hops(hops_long))
@@ -5953,11 +5951,11 @@ mod tests {
 	/// unannounce propagates promptly and a re-create is a fresh broadcast.
 	#[tokio::test(start_paused = true)]
 	async fn test_route_unannounce_immediate() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let mut source = origin
 			.create_broadcast("test", announce().with_hops(hops.clone()))
 			.unwrap();
@@ -5989,11 +5987,11 @@ mod tests {
 	/// it behind a stale route.
 	#[tokio::test(start_paused = true)]
 	async fn test_route_detach_immediate() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin
 			.create_broadcast("test", announce().with_hops(hops.clone()))
 			.unwrap();
@@ -6036,10 +6034,10 @@ mod tests {
 	/// re-requesting the track (and its info) every linger.
 	#[tokio::test(start_paused = true)]
 	async fn test_idle_track_releases_without_respinning() {
-		let origin = Info::new(Origin::random()).produce();
+		let origin = Info::new(Hop::random()).produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
@@ -6100,10 +6098,10 @@ mod tests {
 	/// doesn't re-request the track, and its `TRACK_INFO`, for every group.
 	#[tokio::test(start_paused = true)]
 	async fn test_back_to_back_fetches_reuse_the_track() {
-		let origin = Info::new(Origin::random()).produce();
+		let origin = Info::new(Hop::random()).produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
@@ -6151,7 +6149,7 @@ mod tests {
 	async fn test_announce_toggle() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -6199,7 +6197,7 @@ mod tests {
 	async fn test_announce_beats_offline() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -6231,13 +6229,13 @@ mod tests {
 	async fn test_better_source_no_churn() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut announced = origin.consume().announced();
 
 		// `a` carries two hops; `b` reaches the same publisher in one, so `b`
 		// wins dispatch when it joins.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(3).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let _a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		settle().await;
 		let face = announced.assert_next_some("test");
@@ -6263,12 +6261,12 @@ mod tests {
 	async fn test_publisher_mismatch_replaces() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(2).unwrap()]).unwrap();
 
 		let mut source_a = origin
 			.create_broadcast("test", announce().with_hops(hops_a.clone()))
@@ -6306,12 +6304,12 @@ mod tests {
 	async fn test_displaced_publisher_reclaims_path_when_replacement_leaves() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(2).unwrap()]).unwrap();
 
 		// A announces and is live.
 		let mut source_a = origin
@@ -6357,12 +6355,12 @@ mod tests {
 	async fn test_reclaimed_publisher_can_still_replace_itself() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
-		let hops_c = OriginList::try_from(vec![Origin::new(3).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(2).unwrap()]).unwrap();
+		let hops_c = Hops::try_from(vec![Hop::new(3).unwrap()]).unwrap();
 
 		// Two sources sharing a publisher splice into one front.
 		let mut source_a1 = origin
@@ -6408,12 +6406,12 @@ mod tests {
 	async fn test_repricing_does_not_earn_a_takeover() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let hops_a = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![Hop::new(2).unwrap()]).unwrap();
 
 		let mut source_a = origin
 			.create_broadcast("test", announce().with_hops(hops_a.clone()).with_cost(5))
@@ -6457,11 +6455,11 @@ mod tests {
 	async fn test_reconnect_wins_over_stale_route() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let hops = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let hops = Hops::try_from(vec![publisher]).unwrap();
 
 		// The original session, still attached: its QUIC connection has not been
 		// declared dead yet.
@@ -6498,10 +6496,10 @@ mod tests {
 	async fn test_carrying_reconnect_switches_immediately() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 
 		let stale = origin
 			.create_broadcast("test", announce().with_hops(hops.clone()))
@@ -6544,12 +6542,12 @@ mod tests {
 	async fn test_offline_mismatch_never_evicts_a_live_front() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_live = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_cache = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let hops_live = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
+		let hops_cache = Hops::try_from(vec![Hop::new(2).unwrap()]).unwrap();
 
 		let mut live = origin
 			.create_broadcast("test", announce().with_hops(hops_live.clone()))
@@ -6601,14 +6599,14 @@ mod tests {
 	async fn test_dispatch_excludes_requester() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let peer = Origin::new(5).unwrap();
-		let publisher = Origin::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let publisher = Hop::new(1).unwrap();
 		// The route through the peer is cheaper, so it is the active source.
-		let tainted = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let clean = OriginList::try_from(vec![publisher]).unwrap();
+		let tainted = Hops::try_from(vec![publisher, peer]).unwrap();
+		let clean = Hops::try_from(vec![publisher]).unwrap();
 
 		let source_a = origin.create_broadcast("test", announce().with_hops(tainted)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
@@ -6651,13 +6649,13 @@ mod tests {
 	async fn test_reader_taint_triggers_reselect() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let clean = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let clean = Hops::try_from(vec![publisher]).unwrap();
 
 		// The via-peer route is cheaper, so it is the active source.
 		let _source_a = origin
@@ -6716,13 +6714,13 @@ mod tests {
 	async fn test_reader_taint_does_not_retract_the_announcement() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let clean = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let clean = Hops::try_from(vec![publisher]).unwrap();
 
 		let source_a = origin
 			.create_broadcast("test", announce().with_hops(via_peer.clone()))
@@ -6771,12 +6769,12 @@ mod tests {
 	async fn test_unknown_publishers_do_not_splice() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let unknown_a = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
-		let unknown_b = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+		let unknown_a = Hops::try_from(vec![Hop::UNKNOWN]).unwrap();
+		let unknown_b = Hops::try_from(vec![Hop::UNKNOWN]).unwrap();
 
 		let mut source_a = origin
 			.create_broadcast("test", announce().with_hops(unknown_a.clone()))
@@ -6819,13 +6817,13 @@ mod tests {
 	async fn test_known_publishers_still_splice() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let publisher = Origin::new(1).unwrap();
-		let hops_a = OriginList::try_from(vec![publisher]).unwrap();
-		let hops_b = OriginList::try_from(vec![publisher, Origin::new(3).unwrap()]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let hops_a = Hops::try_from(vec![publisher]).unwrap();
+		let hops_b = Hops::try_from(vec![publisher, Hop::new(3).unwrap()]).unwrap();
 
 		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		settle().await;
@@ -6851,13 +6849,13 @@ mod tests {
 	async fn test_standby_join_splices_live_subscriber() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		// Carrying via the peer, with a live subscriber mid-stream.
 		let source_remote = origin
@@ -6898,13 +6896,13 @@ mod tests {
 	async fn test_standby_with_a_partial_track_list_splits_per_track() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		// The incumbent carries both tracks, with live subscribers mid-stream.
 		let source_remote = origin
@@ -6979,13 +6977,13 @@ mod tests {
 	async fn test_standby_missing_track_keeps_incumbent() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		// Carrying via the peer, with a live subscriber mid-stream.
 		let source_remote = origin
@@ -7042,7 +7040,7 @@ mod tests {
 	async fn test_unservable_track_retried_by_a_later_request() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
 		let source = origin.create_broadcast("test", announce()).unwrap();
@@ -7076,10 +7074,10 @@ mod tests {
 	async fn test_track_dying_without_progress_aborts() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
@@ -7115,10 +7113,10 @@ mod tests {
 	async fn test_delivered_copy_death_survives_unrelated_wakes() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
@@ -7160,13 +7158,13 @@ mod tests {
 	async fn test_per_track_fallback_respects_exclusion() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		// The route through the peer has the track.
 		let source_tainted = origin
@@ -7203,13 +7201,13 @@ mod tests {
 	async fn test_exclusion_survives_failover_onto_a_tainted_route() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
 
 		let source_tainted = origin
 			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
@@ -7246,13 +7244,13 @@ mod tests {
 	async fn test_exclusion_holds_when_a_tainted_route_attaches_later() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let local = Hops::try_from(vec![publisher]).unwrap();
+		let via_peer = Hops::try_from(vec![publisher, peer]).unwrap();
 
 		// Only a clean route exists, so the peer legitimately gets the shared front.
 		// Priced above the route that arrives later, so the front genuinely prefers
@@ -7317,12 +7315,12 @@ mod tests {
 	async fn test_excluded_path_never_reaches_the_dynamic_handler() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut dynamic = origin.dynamic();
 
-		let peer = Origin::new(5).unwrap();
-		let tainted = OriginList::try_from(vec![Origin::new(1).unwrap(), peer]).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let tainted = Hops::try_from(vec![Hop::new(1).unwrap(), peer]).unwrap();
 		let _source = origin.create_broadcast("test", announce().with_hops(tainted)).unwrap();
 		settle().await;
 		settle().await;
@@ -7352,7 +7350,7 @@ mod tests {
 	async fn test_dynamic_broadcast_named_by_the_requested_path() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 
 		// A standalone broadcast, with no origin and no path of its own.
@@ -7391,7 +7389,7 @@ mod tests {
 	async fn test_rooted_cursor_names_broadcasts_relatively() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let _source = origin.create_broadcast("a/pub", announce()).unwrap();
 		settle().await;
 		settle().await;
@@ -7417,11 +7415,11 @@ mod tests {
 	async fn test_dispatch_all_tainted_unroutable() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 
-		let peer = Origin::new(5).unwrap();
-		let tainted = OriginList::try_from(vec![Origin::new(1).unwrap(), peer]).unwrap();
+		let peer = Hop::new(5).unwrap();
+		let tainted = Hops::try_from(vec![Hop::new(1).unwrap(), peer]).unwrap();
 		let _source = origin.create_broadcast("test", announce().with_hops(tainted)).unwrap();
 		settle().await;
 		settle().await;
@@ -7441,7 +7439,7 @@ mod tests {
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		let mut broadcast2 = origin.create_broadcast("test", announce()).unwrap();
@@ -7462,11 +7460,11 @@ mod tests {
 	async fn test_deterministic_tiebreak() {
 		tokio::time::pause();
 
-		fn hops(ids: &[u64]) -> OriginList {
-			OriginList::try_from(
+		fn hops(ids: &[u64]) -> Hops {
+			Hops::try_from(
 				ids.iter()
 					.copied()
-					.map(|id| Origin::new(id).unwrap())
+					.map(|id| Hop::new(id).unwrap())
 					.collect::<Vec<_>>(),
 			)
 			.unwrap()
@@ -7474,8 +7472,8 @@ mod tests {
 
 		// Resolve the advertised route for "test" after creating both sources in
 		// the given order.
-		async fn winner(first: &[u64], second: &[u64]) -> OriginList {
-			let origin = Origin::random().produce();
+		async fn winner(first: &[u64], second: &[u64]) -> Hops {
+			let origin = Hop::random().produce();
 			// Equal-cost forwarders: the ordering is what this test is about, so neither
 			// route is a warm sibling and the adoption hold-down never applies.
 			let _a = origin
@@ -7507,7 +7505,7 @@ mod tests {
 	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]
 	async fn test_many_announces() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let mut consumer = origin.consume().announced();
 		// Held for the duration: a dropped source unannounces immediately.
@@ -7525,7 +7523,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_many_announces_try() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let mut consumer = origin.consume().announced();
 		// Held for the duration: a dropped source unannounces immediately.
@@ -7542,7 +7540,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_basic() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Create a producer with root "/foo"
 		let foo_producer = origin.with_root("foo").expect("should create root");
@@ -7565,7 +7563,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_nested() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Create nested roots
 		let foo_producer = origin.with_root("foo").expect("should create foo root");
@@ -7589,7 +7587,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_scope_allows() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Create a producer that can only publish to "allowed" paths
 		let limited_producer = origin
@@ -7616,7 +7614,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_max_parts() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let at_limit = (0..Path::MAX_PARTS)
 			.map(|i| i.to_string())
@@ -7637,7 +7635,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_scope_empty() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Creating a producer with no allowed paths should return None
 		assert!(origin.scope(&[]).is_none());
@@ -7645,7 +7643,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_scope_filters() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let mut consumer = origin.consume().announced();
 
@@ -7675,7 +7673,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_scope_multiple_prefixes() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let _broadcast1 = origin.create_broadcast("foo/test", announce()).unwrap();
 		let _broadcast2 = origin.create_broadcast("bar/test", announce()).unwrap();
@@ -7697,7 +7695,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_and_publish_scope() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// User connects to /foo root
 		let foo_producer = origin.with_root("foo").expect("should create foo root");
@@ -7738,7 +7736,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_and_consume_scope() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Publish broadcasts
 		let _broadcast1 = origin.create_broadcast("foo/bar/test", announce()).unwrap();
@@ -7764,7 +7762,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_unauthorized() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// First limit the producer to specific paths
 		let limited_producer = origin
@@ -7783,7 +7781,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_wildcard_permission() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Producer with root access (empty string means wildcard)
 		let root_producer = origin.clone();
@@ -7804,7 +7802,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_broadcast_with_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let _broadcast1 = origin.create_broadcast("allowed/test", announce()).unwrap();
 		let _broadcast2 = origin.create_broadcast("notallowed/test", announce()).unwrap();
@@ -7836,7 +7834,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_nested_paths_with_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Create producer limited to "a/b/c"
 		let limited_producer = origin.scope(&["a/b/c".into()]).expect("should create limited producer");
@@ -7861,7 +7859,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_multiple_consumers_with_different_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Publish to different paths
 		let _broadcast1 = origin.create_broadcast("foo/test", announce()).unwrap();
@@ -7902,7 +7900,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// User with root "demo" allowed to subscribe to "worm-node" and "foobar"
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
@@ -7938,7 +7936,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_narrowing_scope() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// User with root "demo" allowed to subscribe to "worm-node" and "foobar"
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
@@ -7983,7 +7981,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_multiple_roots_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Producer with multiple allowed roots
 		let limited_producer = origin
@@ -8018,7 +8016,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_scope_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Producer with specific allowed paths
 		let limited_producer = origin
@@ -8043,7 +8041,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_narrowing_to_deeper_path() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Producer with broad permission
 		let limited_producer = origin.scope(&["org".into()]).expect("should create limited producer");
@@ -8084,7 +8082,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_with_non_matching_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Producer with specific allowed paths
 		let limited_producer = origin
@@ -8102,7 +8100,7 @@ mod tests {
 	// with_root panics when String has trailing slash (AsPath for String skips normalization)
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_consumer() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Use an owned String so the trailing slash is NOT normalized away.
 		let prefix = "some_prefix/".to_string();
@@ -8116,7 +8114,7 @@ mod tests {
 	// Same issue but for the producer side of with_root
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_producer() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Use an owned String so the trailing slash is NOT normalized away.
 		let prefix = "some_prefix/".to_string();
@@ -8134,7 +8132,7 @@ mod tests {
 	async fn test_with_root_trailing_slash_unannounce() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap().announced();
@@ -8153,7 +8151,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_maintains_access_with_wider_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Setup: user with root "demo" allowed to subscribe to specific paths
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
@@ -8199,7 +8197,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate_prefixes_deduped() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// scope with duplicate prefixes should work (deduped internally)
 		let producer = origin
@@ -8218,7 +8216,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_overlapping_prefixes_deduped() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// "demo" and "demo/foo". "demo/foo" is redundant, only "demo" should remain
 		let producer = origin
@@ -8238,7 +8236,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_overlapping_prefixes_no_duplicate_announcements() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		// Both "demo" and "demo/foo" are requested. Should only have one node
 		let producer = origin
@@ -8258,7 +8256,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_allowed_returns_deduped_prefixes() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let producer = origin
 			.scope(&["demo".into(), "demo/foo".into(), "anon".into()])
@@ -8270,7 +8268,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announced_broadcast_already_announced() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let _broadcast = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
@@ -8284,7 +8282,7 @@ mod tests {
 	async fn test_announced_broadcast_delayed() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let consumer = origin.consume();
 
@@ -8308,7 +8306,7 @@ mod tests {
 	async fn test_announced_broadcast_ignores_unrelated_paths() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let consumer = origin.consume();
 
@@ -8335,7 +8333,7 @@ mod tests {
 	async fn test_announced_broadcast_skips_nested_paths() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let consumer = origin.consume();
 
@@ -8360,7 +8358,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announced_broadcast_disallowed() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let limited = origin
 			.consume()
 			.scope(&["allowed".into()])
@@ -8374,7 +8372,7 @@ mod tests {
 	async fn test_announced_broadcast_scope_too_narrow() {
 		// Consumer's scope is narrower than the requested path: asking for `foo` on a consumer
 		// limited to `foo/specific` can never resolve. Must return None, not loop forever.
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let limited = origin
 			.consume()
 			.scope(&["foo/specific".into()])
@@ -8396,7 +8394,7 @@ mod tests {
 		// announce + unannounce that the cursor hasn't observed yet collapses to nothing.
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut announced = origin.consume().announced();
 
 		let mut broadcast = origin.create_broadcast("test", announce()).unwrap();
@@ -8414,7 +8412,7 @@ mod tests {
 		// to a single Announce of the latest broadcast.
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut announced = origin.consume().announced();
 
 		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
@@ -8434,7 +8432,7 @@ mod tests {
 		// as two deliveries so the cursor learns the origin changed.
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
@@ -8460,7 +8458,7 @@ mod tests {
 		// embedded announce was never observed.
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
@@ -8487,7 +8485,7 @@ mod tests {
 		// require that churn doesn't accumulate across iterations.
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut announced = origin.consume().announced();
 
 		for _ in 0..1000 {
@@ -8517,7 +8515,7 @@ mod tests {
 	// still receives the active backlog.
 	#[tokio::test]
 	async fn test_consumer_clone_is_side_effect_free() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 
 		let _broadcast1 = origin.create_broadcast("test1", announce()).unwrap();
 		let _broadcast2 = origin.create_broadcast("test2", announce()).unwrap();
@@ -8558,7 +8556,7 @@ mod tests {
 	// With no Dynamic handler, an unannounced path resolves to Unroutable.
 	#[tokio::test]
 	async fn dynamic_request_unroutable_without_handler() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		assert!(matches!(
 			consumer.request_broadcast("missing").await,
@@ -8570,7 +8568,7 @@ mod tests {
 	// never announced.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_served_not_announced() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8607,7 +8605,7 @@ mod tests {
 	// Concurrent requests for the same queued path coalesce onto one handler request.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_coalesces() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8634,7 +8632,7 @@ mod tests {
 	// instead of asking the handler again (no duplicate upstream subscription).
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_dedups_served() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8659,7 +8657,7 @@ mod tests {
 	// Once a served broadcast closes, its cache entry is stale, so the next request re-serves.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_reserves_after_close() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8685,7 +8683,7 @@ mod tests {
 	// unboundedly: the amortized GC on `accept` reclaims the stale entries left by closed ones.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_served_cache_bounded() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8713,7 +8711,7 @@ mod tests {
 	// coalesces onto the in-flight request instead of queuing a duplicate.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_coalesces_after_handoff() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8738,7 +8736,7 @@ mod tests {
 	// Dropping a handed-off request without accept/reject rejects every coalesced requester.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_dropped_after_handoff() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8755,7 +8753,7 @@ mod tests {
 	// Rejecting a request resolves the requester with the error.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_rejected() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8772,7 +8770,7 @@ mod tests {
 	// (a stale/clobbered entry would strand this request or panic the handler).
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_rerequest_after_reject() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8793,7 +8791,7 @@ mod tests {
 	// resolving Unroutable.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_handler_dropped() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8813,7 +8811,7 @@ mod tests {
 	// count to zero. The in-flight request must not be rejected as `Unroutable`.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_accept_after_handler_dropped() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8832,7 +8830,7 @@ mod tests {
 	// A published broadcast wins over the dynamic fallback; no request is queued.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_prefers_announced() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8853,7 +8851,7 @@ mod tests {
 	// Cloning a handler and dropping the clone must not flip the count to zero.
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_clone_keeps_alive() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
@@ -8894,7 +8892,7 @@ mod tests {
 
 		// Two hops beats one when the cheaper one is draining: the longer path is
 		// still the one that will still be there.
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(2).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap(), Hop::new(2).unwrap()]).unwrap();
 		let long = front(0, announce().with_hops(hops).with_cost(1));
 		assert!(route_order(&name, &draining) > route_order(&name, &long));
 	}
@@ -8904,7 +8902,7 @@ mod tests {
 	/// with nowhere else to go keeps being served by the draining route.
 	#[tokio::test(start_paused = true)]
 	async fn drain_migrates_best_route() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -8913,9 +8911,9 @@ mod tests {
 		// Two paths to the same content, so they share a first hop: a differing one
 		// would be a different publisher, and the front would park it as new content
 		// instead of attaching it as an alternate route.
-		let publisher = Origin::new(1).unwrap();
-		let hops_a = OriginList::try_from(vec![publisher, Origin::new(2).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![publisher, Origin::new(3).unwrap()]).unwrap();
+		let publisher = Hop::new(1).unwrap();
+		let hops_a = Hops::try_from(vec![publisher, Hop::new(2).unwrap()]).unwrap();
+		let hops_b = Hops::try_from(vec![publisher, Hop::new(3).unwrap()]).unwrap();
 
 		// The source that will drain, and the pricier live fallback.
 		let source_a = origin.create_broadcast(&path, announce().with_hops(hops_a)).unwrap();
@@ -8960,12 +8958,12 @@ mod tests {
 	/// worth having.
 	#[tokio::test(start_paused = true)]
 	async fn drain_still_serves_when_it_is_the_only_route() {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
 		let path = PathOwned::from("lonely");
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 		let source = origin.create_broadcast(&path, announce().with_hops(hops)).unwrap();
 		settle().await;
 		announced.assert_next_some("lonely");
@@ -9026,9 +9024,9 @@ mod tests {
 	#[test]
 	fn test_active_corpse_does_not_livelock_takeover() {
 		wedge_watchdog("active-corpse", 20, async {
-			let origin = Origin::random().produce();
+			let origin = Hop::random().produce();
 			let consumer = origin.consume();
-			let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+			let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 
 			// The healthy source: accepts the track and keeps the producer
 			// alive, so a later re-splice resolves synchronously from cache.
@@ -9097,7 +9095,7 @@ mod tests {
 			rng >> 33
 		};
 
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let consumer = origin.consume();
 		let names: Vec<Arc<str>> = (0..8).map(|i| Arc::from(format!("t{i}"))).collect();
 
@@ -9118,7 +9116,7 @@ mod tests {
 					if sources.len() >= 3 {
 						continue;
 					}
-					let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+					let hops = Hops::try_from(vec![Hop::new(1).unwrap()]).unwrap();
 					let route = announce().with_hops(hops).with_cost(next() % 4);
 					let Ok(source) = origin.create_broadcast("test", route) else {
 						continue;

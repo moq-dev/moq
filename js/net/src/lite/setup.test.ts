@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OriginSchema } from "../hop.ts";
+import { HopSchema } from "../hop.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
@@ -128,7 +128,7 @@ test("unknown probe level saturates to Increase", async () => {
 });
 
 test("SETUP with origin round-trips", async () => {
-	const origin = OriginSchema.parse(42n);
+	const origin = HopSchema.parse(42n);
 	const got = await roundTrip(new Setup({ origin }));
 	expect(got.origin).toBe(origin);
 });

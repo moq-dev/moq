@@ -225,7 +225,7 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init(config.quic.clone())?;
 
 	// Publish origin: the game session broadcast.
-	let publish_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let publish_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let default_game_prefix = format!("{}/game", config.prefix);
 	let default_viewer_prefix = format!("{}/viewer", config.prefix);
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
@@ -240,7 +240,7 @@ async fn run(config: &Config) -> Result<()> {
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
 	let viewer_path = format!("{viewer_prefix}/{name}");
-	let consume_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let consume_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")

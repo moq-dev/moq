@@ -54,7 +54,7 @@ impl TryFrom<MoqRoute> for moq_net::broadcast::Route {
 			.with_cost(route.cost)
 			.with_announce(route.announce);
 		for id in route.hops {
-			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			let origin = moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
 				.with_hop(origin)
 				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
@@ -170,7 +170,7 @@ impl MoqOriginProducer {
 	}
 
 	fn from_options(options: MoqOriginOptions) -> Self {
-		let mut info = moq_net::origin::Info::new(moq_net::Origin::random());
+		let mut info = moq_net::origin::Info::new(moq_net::Hop::random());
 		if let Some(capacity) = options.cache_capacity_bytes {
 			let config = moq_net::cache::Config::default()
 				.with_capacity(capacity)
@@ -209,14 +209,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = spawn(moq_net::Origin::random().into());
+		let shared = spawn(moq_net::Hop::random().into());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| spawn(moq_net::Origin::random().into()))
+			.unwrap_or_else(|| spawn(moq_net::Hop::random().into()))
 	};
 	(resolve(publish), resolve(consume))
 }

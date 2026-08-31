@@ -268,12 +268,12 @@ pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtim
 	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
-	self_origin: crate::Origin,
-	// The identity assigned to the peer by the caller (`Client::with_peer_origin`, or
+	self_hop: crate::Hop,
+	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
 	// the per-session default a server hands every request), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
-	peer_origin: Option<crate::Origin>,
+	peer_hop: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
 	version: Version,
@@ -290,17 +290,17 @@ where
 		session: S,
 		origin: origin::Consumer,
 		control: Control,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		version: Version,
 	) -> Self {
 		Self {
 			runtime,
 			session,
-			self_origin: *origin,
+			self_hop: *origin,
 			origin,
 			control,
-			peer_origin,
+			peer_hop,
 			peer_setup,
 			version,
 		}
@@ -340,7 +340,7 @@ where
 	/// and the announce loops read this peer's routes through.
 	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
 		match self.exclude(peer) {
-			crate::Origin::UNKNOWN => self.origin.clone(),
+			crate::Hop::UNKNOWN => self.origin.clone(),
 			exclude => self.origin.clone().excluding(exclude),
 		}
 	}
@@ -348,12 +348,12 @@ where
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (`Client::with_peer_origin` when dialing, `Request::with_peer_origin`
+	/// we assigned it (`Client::with_peer_hop` when dialing, `Request::with_peer_hop`
 	/// or a fresh per-session id when accepting), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
-	fn exclude(&self, peer: &cluster::Peer) -> crate::Origin {
-		peer.identity().or(self.peer_origin).unwrap_or(crate::Origin::UNKNOWN)
+	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
+		peer.identity().or(self.peer_hop).unwrap_or(crate::Hop::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one broadcast.
@@ -365,7 +365,7 @@ where
 		let routes = watch.broadcast.routes();
 		let exclude = self.exclude(peer);
 
-		for (route, serving) in crate::broadcast::advertisable_routes(&routes, self.self_origin, exclude) {
+		for (route, serving) in crate::broadcast::advertisable_routes(&routes, self.self_hop, exclude) {
 			if !peer.negotiated() {
 				return Advert::Plain;
 			}
@@ -375,7 +375,7 @@ where
 			let cost = crate::broadcast::outgoing_cost(&watch.demand, route, serving).warm;
 			// Our own Hop ID is always the last entry, so the peer reconstructs the full
 			// path. A chain with no room left is a loop in all but name; try the next route.
-			match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
+			match cluster::Advert::forward(&route.hops, cost, self.self_hop) {
 				Ok(advert) => return Advert::Cluster(advert),
 				Err(_) => continue,
 			}
@@ -1246,7 +1246,7 @@ where
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
 		let origin = match self.exclude(&peer) {
-			crate::Origin::UNKNOWN => origin,
+			crate::Hop::UNKNOWN => origin,
 			exclude => origin.excluding(exclude),
 		};
 
@@ -2051,14 +2051,14 @@ mod tests {
 	/// `from/us`, which does not. The producers are returned so the routes outlive
 	/// the assertions.
 	async fn echo_harness(
-		assigned: crate::Origin,
+		assigned: crate::Hop,
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
 		Vec<crate::broadcast::Producer>,
 	) {
-		let other = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let other = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -2072,7 +2072,7 @@ mod tests {
 			Version::Draft16,
 		);
 
-		let mut echoed_hops = crate::OriginList::new();
+		let mut echoed_hops = crate::Hops::new();
 		echoed_hops.push(assigned).unwrap();
 		let echoed = origin
 			.create_broadcast(
@@ -2083,7 +2083,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let mut local_hops = crate::OriginList::new();
+		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let local = origin
 			.create_broadcast(
@@ -2099,12 +2099,12 @@ mod tests {
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
-	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
+	/// (`Client::with_peer_hop`) is never advertised to that peer; it would only
 	/// echo the peer's own content back at it. A broadcast with an independent
 	/// route still is.
 	#[tokio::test(start_paused = true)]
 	async fn assigned_peer_origin_filters_echoed_announces() {
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 		let (publisher, consumer, _routes) = echo_harness(assigned).await;
 
 		let peer = cluster::Peer::default();
@@ -2124,12 +2124,12 @@ mod tests {
 	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_origin_falls_back_to_assigned() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let declared = crate::Origin::new(9).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
+		let declared = crate::Hop::new(9).unwrap();
 		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
 
 		let withheld = cluster::Peer {
-			origin: Some(crate::Origin::UNKNOWN),
+			origin: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		assert!(withheld.negotiated(), "the extension is on");
@@ -2152,8 +2152,8 @@ mod tests {
 	/// back.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_zero_chain_is_still_advertised_back() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -2167,8 +2167,8 @@ mod tests {
 		);
 
 		// The chain as ingress stores it: the peer named itself 0.
-		let mut hops = crate::OriginList::new();
-		hops.push(crate::Origin::UNKNOWN).unwrap();
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
 			.create_broadcast(
 				"from/peer",
@@ -2178,7 +2178,7 @@ mod tests {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::UNKNOWN),
+			origin: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		let echoed = consumer.get_broadcast("from/peer").unwrap();
@@ -2195,14 +2195,14 @@ mod tests {
 	/// spin on it forever.
 	#[tokio::test]
 	async fn linger_clears_when_the_advert_stops_being_discounted() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin
 			.clone()
 			.create_broadcast("cam", crate::broadcast::Route::announced())
 			.unwrap();
 
 		let mut watch = Watched::new(broadcast.consume());
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 
 		// Discounted (cost 0) and drained: the linger is running.
 		watch.set_sent(Advert::Cluster(cluster::Advert {
@@ -2241,9 +2241,9 @@ mod tests {
 	/// withdraw when the last one detaches.
 	#[tokio::test]
 	async fn namespace_follows_route_eligibility_changes() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let clean_publisher = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let clean_publisher = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -2259,7 +2259,7 @@ mod tests {
 		);
 
 		// The broadcast starts with only a route through the assigned peer.
-		let mut tainted_hops = crate::OriginList::new();
+		let mut tainted_hops = crate::Hops::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
 			.create_broadcast(
@@ -2285,7 +2285,7 @@ mod tests {
 
 		// A clean source splices in: no origin announce fires, only the route table
 		// changes. The namespace must now be advertised.
-		let mut clean_hops = crate::OriginList::new();
+		let mut clean_hops = crate::Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
 			.create_broadcast(
@@ -2342,7 +2342,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin
 			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2430,7 +2430,7 @@ mod tests {
 	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
@@ -2520,7 +2520,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _local = origin
 			.create_broadcast("local-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2568,7 +2568,7 @@ mod tests {
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin
 			.create_broadcast("cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2642,7 +2642,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let first = origin
 			.create_broadcast("first-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2724,14 +2724,14 @@ mod tests {
 	/// that can never happen: not a spin, but a session that never sleeps.
 	#[tokio::test(start_paused = true)]
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
 		// Every route flows through the peer's own identity, so split horizon says this
 		// must never be advertised back to it: `select` wants nothing, which is what the
 		// peer already holds.
-		let mut hops = crate::OriginList::new();
+		let mut hops = crate::Hops::new();
 		hops.push(assigned).unwrap();
 		let _echoed = origin
 			.create_broadcast(
@@ -2777,7 +2777,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2840,7 +2840,7 @@ mod tests {
 	async fn a_modern_withdrawal_is_the_fin_alone() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2895,7 +2895,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _first = origin
 			.create_broadcast("first-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2947,7 +2947,7 @@ mod tests {
 	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin
 			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -3014,7 +3014,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

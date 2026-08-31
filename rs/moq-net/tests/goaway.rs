@@ -8,12 +8,12 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::{Origin, Version, goaway::Goaway};
+use moq_net::{Hop, Version, goaway::Goaway};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::create_mock_session_pair;
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
-fn produce_origin(origin: Origin) -> moq_net::origin::Producer {
+fn produce_origin(origin: Hop) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(origin));
 	tokio::spawn(driver.run(support::harness::TokioRuntime::<()>::new()));
 	producer
@@ -317,7 +317,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let version: Version = "moq-lite-04".parse().unwrap();
 
 		// Server publishes a broadcast with one live track.
-		let pub_origin = produce_origin(Origin::random());
+		let pub_origin = produce_origin(Hop::random());
 		let mut broadcast = pub_origin
 			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
@@ -332,7 +332,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
-		let sub_origin = produce_origin(Origin::random());
+		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());
@@ -417,12 +417,12 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let pub_origin = produce_origin(Origin::random());
+		let pub_origin = produce_origin(Hop::random());
 		let _broadcast = pub_origin
 			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
 
-		let sub_origin = produce_origin(Origin::random());
+		let sub_origin = produce_origin(Hop::random());
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());

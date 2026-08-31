@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { type Origin, UNKNOWN_ORIGIN } from "../hop.ts";
+import { type Hop, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -120,7 +120,7 @@ export class Subscriber {
 
 	// Shared with the Publisher so callers can optionally filter out their
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
-	readonly origin: Origin;
+	readonly origin: Hop;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
 	// lite-05+, or implicit defaults on older drafts); group streams block on it
@@ -149,7 +149,7 @@ export class Subscriber {
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
-	 * @param origin - Origin id shared with the Publisher
+	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 *
@@ -158,7 +158,7 @@ export class Subscriber {
 	constructor(
 		quic: WebTransport,
 		version: Version,
-		origin: Origin,
+		origin: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
 	) {
@@ -214,14 +214,14 @@ export class Subscriber {
 			// Lite05+: the publisher reports its own origin id before any announces.
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the ignoreSelf loop check seeing the full chain.
-			let responderOrigin: Origin | undefined;
+			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
 				// A responder that withholds its identity sends the reserved 0. It names
 				// nobody, so folding it into a chain would stamp a placeholder that cannot
 				// close a loop or tell two publishers apart. Treat it as absent instead,
 				// which is the loop-blind route the draft describes.
-				responderOrigin = ok.origin === UNKNOWN_ORIGIN ? undefined : ok.origin;
+				responderOrigin = ok.origin === UNKNOWN_HOP ? undefined : ok.origin;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one
@@ -236,7 +236,7 @@ export class Subscriber {
 			// `publisher` is what lets a restart tell a route change (same publisher,
 			// subscriptions resume) from a replacement (a new generation took the path,
 			// nothing carries over).
-			type Advertisement = { publisher: Origin | undefined; live: boolean };
+			type Advertisement = { publisher: Hop | undefined; live: boolean };
 			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
@@ -285,7 +285,7 @@ export class Subscriber {
 				let suffix: Path.Valid;
 				let active: boolean;
 				// Present on active/restart; ended messages never carry hops worth checking.
-				let hops: Origin[] | undefined;
+				let hops: Hop[] | undefined;
 
 				switch (announce.status) {
 					case "active":
@@ -374,8 +374,8 @@ export class Subscriber {
 					// A publisher with no identity (an empty chain from a peer that withheld its
 					// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
 					// advertisements can be unrelated publishers. Mirrors the
-					// `publisher == Origin::UNKNOWN` arm of the Rust `restart_announce`.
-					const identified = publisher !== undefined && publisher !== UNKNOWN_ORIGIN;
+					// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
+					const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
 
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.

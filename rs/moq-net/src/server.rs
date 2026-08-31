@@ -83,7 +83,7 @@ impl Server {
 		session: R::Transport,
 		version: lite::Version,
 		client_setup: Option<lite::Setup>,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 	) -> Result<Session, Error>
 	where
 		R: crate::runtime::Runtime + 'static,
@@ -112,7 +112,7 @@ impl Server {
 			setup_stream: None,
 			publish,
 			subscribe,
-			peer_origin,
+			peer_hop,
 			version,
 			our_setup,
 			peer_setup: client_setup,
@@ -214,7 +214,7 @@ impl Server {
 			path,
 			role,
 			origin,
-			assigned_origin: crate::Origin::random(),
+			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -359,7 +359,7 @@ impl Server {
 			path,
 			role: None,
 			origin: None,
-			assigned_origin: crate::Origin::random(),
+			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -399,8 +399,8 @@ impl Server {
 				.declared
 				.cluster
 				.origin
-				.filter(|o| *o != crate::Origin::UNKNOWN),
-			assigned_origin: crate::Origin::random(),
+				.filter(|o| *o != crate::Hop::UNKNOWN),
+			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -424,11 +424,11 @@ impl Server {
 pub struct Request<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	path: Option<String>,
 	role: Option<Role>,
-	origin: Option<crate::Origin>,
+	origin: Option<crate::Hop>,
 	/// The identity this session's routes are stamped with when the peer declares none
 	/// on the wire. Fresh per request unless the caller overrides it
-	/// ([`Request::with_peer_origin`]).
-	assigned_origin: crate::Origin,
+	/// ([`Request::with_peer_hop`]).
+	assigned_hop: crate::Hop,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S, R>>,
 }
@@ -474,7 +474,7 @@ trait Paused<R: crate::runtime::Runtime>: MaybeSend + MaybeSync {
 		self: Box<Self>,
 		server: Server,
 		runtime: R,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 	) -> crate::util::MaybeSendBox<'static, Result<Session, Error>>;
 
 	/// Reject the handshake, closing the transport with `err`'s wire code.
@@ -502,7 +502,7 @@ where
 		self: Box<Self>,
 		server: Server,
 		runtime: R,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 	) -> crate::util::MaybeSendBox<'static, Result<Session, Error>> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
@@ -523,7 +523,7 @@ where
 				client: false,
 				publish,
 				subscribe,
-				peer_origin,
+				peer_hop,
 				// Only the dialing side prices a link.
 				cost: None,
 				version,
@@ -574,7 +574,7 @@ where
 		self: Box<Self>,
 		server: Server,
 		runtime: R,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 	) -> crate::util::MaybeSendBox<'static, Result<Session, Error>> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
@@ -615,7 +615,7 @@ where
 						setup_stream: Some(stream),
 						publish,
 						subscribe,
-						peer_origin,
+						peer_hop,
 						version: v,
 						our_setup: lite::Setup::default(),
 						peer_setup: None,
@@ -637,7 +637,7 @@ where
 						client: false,
 						publish,
 						subscribe,
-						peer_origin,
+						peer_hop,
 						cost: None,
 						version: v,
 						path: None,
@@ -694,7 +694,7 @@ where
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_origin(&self) -> Option<crate::Origin> {
+	pub fn peer_hop(&self) -> Option<crate::Hop> {
 		self.origin
 	}
 
@@ -715,7 +715,7 @@ where
 	/// per-session default.
 	///
 	/// Only for a peer whose identity the server has actually established, such as one
-	/// authenticated by mTLS or a token ([`crate::Client::with_peer_origin`] is the
+	/// authenticated by mTLS or a token ([`crate::Client::with_peer_hop`] is the
 	/// dialing-side equivalent). An identity the peer declares on the wire still wins.
 	///
 	/// Two sessions given the same origin are treated as one endpoint: routes learned
@@ -723,8 +723,8 @@ where
 	/// with the other's. That is the point when they really are one peer reconnecting or
 	/// running redundant links, and a bug otherwise. Derive it from the authenticated
 	/// identity, never from something coarser like the remote address.
-	pub fn with_peer_origin(mut self, origin: crate::Origin) -> Self {
-		self.assigned_origin = origin;
+	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+		self.assigned_hop = hop;
 		self
 	}
 
@@ -744,7 +744,7 @@ where
 	/// The session's protocol machine is handed to the runtime given to
 	/// [`Server::accept_request`], so there is nothing else to drive.
 	pub async fn ok(mut self) -> Result<Session, Error> {
-		let peer_origin = Some(self.assigned_origin);
+		let peer_hop = Some(self.assigned_hop);
 		let RequestInner {
 			server,
 			runtime,
@@ -752,13 +752,13 @@ where
 		} = self.inner.take().expect("request already responded");
 
 		match handshake {
-			Handshake::LiteBare { session, version } => server.start_lite(runtime, session, version, None, peer_origin),
+			Handshake::LiteBare { session, version } => server.start_lite(runtime, session, version, None, peer_hop),
 			Handshake::LiteSetup {
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_origin),
-			Handshake::Boxed(paused) => paused.ok(server, runtime, peer_origin).await,
+			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop),
+			Handshake::Boxed(paused) => paused.ok(server, runtime, peer_hop).await,
 		}
 	}
 
@@ -794,7 +794,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Drop for Re
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Origin;
+	use crate::Hop;
 	use crate::model::ProduceTest;
 	use std::{
 		collections::VecDeque,
@@ -947,7 +947,7 @@ mod tests {
 	}
 
 	/// Encode a lite-05 Setup Stream: the `DataType::Setup` tag then the SETUP message.
-	fn lite05_setup(path: Option<&str>, role: Option<Role>, origin: Option<Origin>) -> Vec<u8> {
+	fn lite05_setup(path: Option<&str>, role: Option<Role>, origin: Option<Hop>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
 		lite::DataType::Setup.encode(&mut buf, v).unwrap();
@@ -1087,19 +1087,19 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_peer_origin() {
-		let origin = Origin::new(42).unwrap();
+		let origin = Hop::new(42).unwrap();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(origin))]);
 		let request = Server::new()
 			.accept_request(crate::runtime::tokio_test::Tokio::new(), session)
 			.await
 			.unwrap();
-		assert_eq!(request.peer_origin(), Some(origin));
+		assert_eq!(request.peer_hop(), Some(origin));
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn anonymous_peer_origin_filters_routes_from_server_session() {
-		let other = Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(Origin::new(1).unwrap()).produce();
+		let other = Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -1109,7 +1109,7 @@ mod tests {
 			path: None,
 			role: None,
 			origin: None,
-			assigned_origin: Origin::random(),
+			assigned_hop: Hop::random(),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: crate::runtime::tokio_test::Tokio::new(),
@@ -1127,9 +1127,9 @@ mod tests {
 				})),
 			}),
 		};
-		let assigned = request.assigned_origin;
+		let assigned = request.assigned_hop;
 
-		let mut echoed_hops = crate::OriginList::new();
+		let mut echoed_hops = crate::Hops::new();
 		echoed_hops.push(assigned).unwrap();
 		let _echoed = origin
 			.create_broadcast(
@@ -1140,7 +1140,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let mut local_hops = crate::OriginList::new();
+		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let _local = origin
 			.create_broadcast(

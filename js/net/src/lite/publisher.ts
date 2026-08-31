@@ -2,7 +2,7 @@ import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason, StreamCode, toTransport } from "../error.ts";
 import type * as group from "../group.ts";
-import type { Origin } from "../hop.ts";
+import type { Hop } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -310,7 +310,7 @@ export class Publisher {
 	// can detect loops and prefer shorter paths. Created by Connection and
 	// shared with Subscriber, which can optionally use it to filter out its
 	// own announcements.
-	readonly origin: Origin;
+	readonly origin: Hop;
 
 	#quic: WebTransport;
 
@@ -335,12 +335,12 @@ export class Publisher {
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
-	 * @param origin - Origin id shared with the Subscriber
+	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin, publish?: OriginConsumer) {
+	constructor(quic: WebTransport, version: Version, origin: Hop, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;

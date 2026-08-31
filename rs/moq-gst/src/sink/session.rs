@@ -241,7 +241,7 @@ impl Session {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast(
 			&settings.broadcast,
 			moq_net::broadcast::Route::new().with_announce(true),

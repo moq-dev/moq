@@ -11,7 +11,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use moq_relay::{Config, PublicConfig, Relay};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 2;
@@ -135,7 +135,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	// ...and a raw-QUIC subscriber (moql, the native path).
 	let raw_url: url::Url = format!("moql://127.0.0.1:{port}/uring").parse().expect("parse url");
 
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -151,7 +151,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	// Several subscribers of each flavor, spread over the steered workers.
 	let mut subscribers = Vec::new();
 	for url in [&wt_url, &raw_url, &wt_url, &raw_url] {
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 		let announced = origin.consume().announced();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
 		subscribers.push((connection, announced));
@@ -293,7 +293,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	// unauthorized session establishes and is then closed, so merely
 	// connecting proves nothing.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -305,7 +305,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
-	let subscriber_origin = moq_tokio::origin::spawn(Origin::random());
+	let subscriber_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut announced = subscriber_origin.consume().announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
