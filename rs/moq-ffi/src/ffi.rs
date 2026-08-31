@@ -161,7 +161,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 	/// Cancel all current and future [Self::run] calls, causing them to return [MoqError::Cancelled].
 	pub fn cancel(&self) {
-		let _ = self.cancel.send(true);
+		self.cancel.send_replace(true);
 	}
 }
 
@@ -174,6 +174,7 @@ impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
 	use std::sync::Arc;
+	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::time::Duration;
 
 	use super::*;
@@ -204,5 +205,24 @@ mod tests {
 			.await
 			.expect("cancelled run retained the state")
 			.unwrap();
+	}
+
+	#[tokio::test]
+	async fn cancel_before_run_is_terminal() {
+		let task = Task::new(());
+		let called = Arc::new(AtomicBool::new(false));
+		let closure_called = called.clone();
+
+		task.cancel();
+		let error = task
+			.run(move |_state| {
+				closure_called.store(true, Ordering::SeqCst);
+				async { Ok(()) }
+			})
+			.await
+			.expect_err("run after cancel should fail");
+
+		assert!(matches!(error, MoqError::Cancelled));
+		assert!(!called.load(Ordering::SeqCst));
 	}
 }

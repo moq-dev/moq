@@ -140,9 +140,7 @@ async def test_route_updates_yields_current_changes_and_clean_end():
 
     async with consumer.route_updates() as routes:
         assert isinstance(routes, moq.RouteWatch)
-        assert await asyncio.wait_for(anext(routes), timeout=5.0) == moq.Route(
-            hops=[1], cost=10, announce=True
-        )
+        assert await asyncio.wait_for(anext(routes), timeout=5.0) == moq.Route(hops=[1], cost=10, announce=True)
 
         for expected in (
             moq.Route(hops=[1, 2], cost=5, announce=True),
