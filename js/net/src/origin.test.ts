@@ -594,8 +594,13 @@ test("a retracted route is retired even for a request nobody reads again", async
 
 	const older = new BroadcastProducer();
 	const newer = new BroadcastProducer();
-	const disposeOlder = origin.insertRoute(path, provider(older));
-	const disposeNewer = origin.insertRoute(path, provider(newer));
+	// Model a session provider faithfully: the session holds its own handle on the
+	// broadcast for its lifetime and lends out clones, so releasing a materialized
+	// front never closes the producer.
+	const keepOlder = older.consume();
+	const keepNewer = newer.consume();
+	const disposeOlder = origin.insertRoute(path, { consume: () => keepOlder.clone() });
+	const disposeNewer = origin.insertRoute(path, { consume: () => keepNewer.clone() });
 
 	const request = consumer.request(path);
 	// One read, then the holder goes quiet: a peek-only holder must not pin the route.
@@ -611,6 +616,8 @@ test("a retracted route is retired even for a request nobody reads again", async
 
 	request.close();
 	disposeOlder();
+	keepNewer.close();
+	keepOlder.close();
 	newer.close();
 	older.close();
 	origin.close();
