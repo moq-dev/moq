@@ -2740,11 +2740,15 @@ impl group::Expiry for GroupExpiry {
 						timestamp_raced = true;
 					}
 				}
-				for slot in state.lookup.values() {
+				for (_, slot) in state
+					.lookup
+					.range((std::ops::Bound::Excluded(self.sequence), std::ops::Bound::Unbounded))
+				{
 					let group = &slot.group;
+					if cap.is_some_and(|cap| group.sequence > cap) {
+						break;
+					}
 					if slot.visible
-						&& group.sequence > self.sequence
-						&& cap.is_none_or(|cap| group.sequence <= cap)
 						&& !group.is_aborted()
 						&& group.timestamp().is_none()
 						&& group.poll_timestamp(waiter).is_ready()
