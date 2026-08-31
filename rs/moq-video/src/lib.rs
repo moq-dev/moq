@@ -37,6 +37,8 @@
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
 //!   [`decode::Config::resize`].
+//! - [`convert`] downloads any [`Surface`] to owned, tightly packed RGBA pixels
+//!   for CPU image and UI toolkits, honoring native color metadata when present.
 //! - `render` draws a [`Frame`] on the GPU and hands back a `wgpu` texture to
 //!   present, importing a GPU frame's surface directly where the platform
 //!   allows and uploading I420 otherwise. Behind the non-default `render`
@@ -63,6 +65,7 @@
 
 #[cfg(feature = "capture")]
 pub mod capture;
+pub mod convert;
 pub mod decode;
 pub mod encode;
 #[cfg(feature = "render")]

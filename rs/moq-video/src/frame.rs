@@ -516,6 +516,20 @@ impl Surface {
 		}
 	}
 
+	/// Convert to owned, tightly packed RGBA8 pixels on the CPU.
+	///
+	/// Always available, whichever variant you hold. Native GPU surfaces are
+	/// downloaded first; CPU I420 is converted directly. The conversion honors
+	/// [`color`](Self::color) and otherwise falls back to [`Color::infer`].
+	pub fn into_rgba(self) -> Result<crate::convert::Rgba, Error> {
+		self.into_rgba_with(&crate::convert::Config::default())
+	}
+
+	/// Convert to owned RGBA8 pixels with explicit CPU conversion options.
+	pub fn into_rgba_with(self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
+		crate::convert::rgba(self, config)
+	}
+
 	/// The pixels as a CoreVideo pixel buffer, the mirror of
 	/// [`into_i420`](Self::into_i420) pointing the other way.
 	///
@@ -2392,6 +2406,23 @@ mod tests {
 		assert!(Surface::rgba(&ok, Size::new(0, 32)).is_err());
 	}
 
+	/// Software decoders may align each plane beyond its visible width. Padding
+	/// must not leak into the packed fallback or shift a later row.
+	#[test]
+	fn decoder_planes_discard_row_padding() {
+		let y = [
+			1, 2, 3, 4, 200, 201, 202, 5, 6, 7, 8, 203, 204, 205, 9, 10, 11, 12, 206, 207, 208, 13, 14, 15, 16, 209,
+			210, 211,
+		];
+		let u = [21, 22, 220, 221, 23, 24, 222, 223];
+		let v = [31, 32, 230, 231, 33, 34, 232, 233];
+
+		let frame = I420::from_planes(&y, &u, &v, 7, 4, 4, 4);
+		assert_eq!(frame.y(), &(1..=16).collect::<Vec<_>>());
+		assert_eq!(frame.u(), &[21, 22, 23, 24]);
+		assert_eq!(frame.v(), &[31, 32, 33, 34]);
+	}
+
 	/// The conversion picks its matrix by resolution, matching what a player
 	/// assumes for an untagged stream, and reports the one it used.
 	///
@@ -2562,6 +2593,21 @@ mod tests {
 		let scaled = source.resize_with(Size::new(160, 120), &config).unwrap();
 
 		assert!(matches!(scaled, Surface::I420(_)), "CPU resize stayed on the GPU");
+	}
+
+	/// The packed-pixel exit is total for a hardware surface and produces the
+	/// same image as its CPU representation, including padded CoreVideo rows.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn pixel_buffer_converts_to_rgba() {
+		let source = gradient_i420(322, 242);
+		let expected = Surface::I420(source.clone()).into_rgba().unwrap();
+		let actual = Surface::PixelBuffer(nv12_surface(&source)).into_rgba().unwrap();
+
+		assert_eq!(actual.width(), 322);
+		assert_eq!(actual.height(), 242);
+		assert_eq!(actual.stride(), 322 * 4);
+		assert_eq!(actual.data(), expected.data());
 	}
 
 	/// Upload a packed I420 test picture as NV12, including CoreVideo row

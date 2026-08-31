@@ -88,6 +88,9 @@ downloads it through I420 for you. Every frame carries a `Surface`, a
 zero-copy path for a representation you recognize, and fall back to
 `Surface::into_i420()`, which always works. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
+`Surface::into_rgba()` is the portable exit for CPU image and UI toolkits,
+returning owned, tightly packed RGBA8 pixels with the surface's color metadata
+applied.
 Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |

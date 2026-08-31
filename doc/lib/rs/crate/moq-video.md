@@ -164,6 +164,12 @@ failing retires itself after a few frames instead of paying for the attempt
 forever. Set `render::Config::zero_copy` to `false` to force the download path
 when comparing output or working around a driver.
 
+For an image or UI toolkit that needs packed pixels rather than YUV,
+`Surface::into_rgba()` is the total CPU rendering exit. It downloads native
+surfaces as needed, honors their color metadata, and returns an owned,
+tightly-packed RGBA8 image. Use `into_rgba_with()` to override the color space
+when the decoded bitstream did not carry it through to the platform surface.
+
 ## Rendering
 
 `render::Renderer` takes a `wgpu` device and queue and hands back a
