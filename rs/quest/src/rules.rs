@@ -24,12 +24,17 @@ const SIZES: [&str; 5] = ["XS", "S", "M", "L", "XL"];
 /// entries in `index` instead.
 const LIST_SECTIONS: [&str; 3] = ["Required", "Closes", "Related"];
 
+/// The permanent root questline; the one document nothing has to list.
 pub const ROOT: &str = "quest/README.md";
 
+/// One violation, addressed like a compiler diagnostic: `path:line: message`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
+	/// Repository-relative document the violation is in.
 	pub path: PathBuf,
+	/// 1-based line, when the violation has one; `None` for whole-file findings.
 	pub line: Option<usize>,
+	/// What is wrong, and often why the rule exists.
 	pub message: String,
 }
 

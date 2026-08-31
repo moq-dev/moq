@@ -27,24 +27,32 @@ pub enum Position {
 	Prose,
 }
 
+/// One Markdown link, located precisely enough to be a graph edge.
 #[derive(Clone, Debug)]
 pub struct Link {
+	/// 1-based source line, for findings.
 	pub line: usize,
 	/// The enclosing `## Heading`, or `None` above the first one.
 	pub section: Option<String>,
+	/// The destination exactly as written, fragment included.
 	pub target: String,
+	/// Where the link sits in its section; see [`Position`].
 	pub position: Position,
 }
 
+/// One `# ` or `## ` heading as the rules need to see it.
 #[derive(Clone, Debug)]
 pub struct Heading {
+	/// 1-based source line, for findings.
 	pub line: usize,
+	/// The rendered heading text, trimmed.
 	pub text: String,
 	/// The source really is `# Text` or `## Text` on its own line. Setext and
 	/// decorated headings render the same, but literal syntax is the contract.
 	pub literal: bool,
 }
 
+/// One parsed quest document: the structure the rules read, nothing else.
 #[derive(Clone, Debug)]
 pub struct Doc {
 	/// Repository-relative, e.g. `quest/m0/one.md`.
@@ -53,6 +61,7 @@ pub struct Doc {
 	pub title: Option<Heading>,
 	/// `## ` headings only. Deeper levels are free-form prose structure.
 	pub headings: Vec<Heading>,
+	/// Every link in the document, in source order.
 	pub links: Vec<Link>,
 	/// Sections holding at least one top-level list item, so a heading left
 	/// behind by its last entry can be told from one that still has entries.
@@ -60,10 +69,12 @@ pub struct Doc {
 }
 
 impl Doc {
+	/// Whether the document has this exact `## ` heading.
 	pub fn has(&self, heading: &str) -> bool {
 		self.headings.iter().any(|h| h.text == heading)
 	}
 
+	/// A questline is a `README.md`; everything else is an executable quest.
 	pub fn is_questline(&self) -> bool {
 		self.path.file_name().is_some_and(|n| n == "README.md")
 	}
@@ -80,11 +91,13 @@ impl Doc {
 		}
 	}
 
+	/// Read and parse `<root>/<path>`; `path` stays repository-relative.
 	pub fn parse(root: &Path, path: PathBuf) -> Result<Doc> {
 		let text = std::fs::read_to_string(root.join(&path)).with_context(|| format!("reading {}", path.display()))?;
 		Ok(Self::from_str(path, &text))
 	}
 
+	/// Parse already-loaded Markdown; this is the whole parser, `parse` just adds IO.
 	pub fn from_str(path: PathBuf, text: &str) -> Doc {
 		let lines = LineIndex::new(text);
 		let text_src = text;
