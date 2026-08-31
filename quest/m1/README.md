@@ -15,8 +15,9 @@ with the current dev tree before starting.
 
 ## Quests
 
-- [Plan: runtime](/quest/m1/plan-runtime.md) - refresh the thread-per-core epic to the remaining work via /plan-quest
-- [#2875](/quest/m1/2875-thread-per-core-relay-runtime-io-uring-quiche-ebpf.md) - Thread-per-core relay runtime: io-uring + quiche, eBPF connection steering, rename moq-native to moq-tokio
+- [Worker metrics](/quest/m1/uring-metrics.md) - per-worker io_uring counters at `/metrics`, so the runtime's own health is visible
+- [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
+- [qlog](/quest/m1/uring-qlog.md) - io_uring workers write qlog traces instead of refusing the setting
 - [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-native: bring the quiche backend to quinn/noq feature parity
 - [#3092](/quest/m1/3092-moq-sock-make-the-reuseport-groups-invariants.md) - moq-sock: make the reuseport group's invariants unrepresentable, not documented
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
