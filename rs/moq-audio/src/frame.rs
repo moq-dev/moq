@@ -3,7 +3,8 @@ use moq_net::Timestamp;
 
 /// One unit of raw PCM crossing the codec boundary: what
 /// [`encode::Producer::write`](crate::encode::Producer::write) takes and what
-/// [`decode::Consumer::read`](crate::decode::Consumer::read) returns.
+/// [`decode::Consumer::read`](crate::decode::Consumer::read) returns inside a
+/// [`Classified`](crate::Classified).
 ///
 /// Just a payload and a presentation timestamp. PCM layout (format / sample rate
 /// / channel count) is fixed by the producer or consumer at construction time,

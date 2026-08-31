@@ -16,7 +16,7 @@ use unsafe_libopus::{
 
 use crate::opus;
 use crate::pcm;
-use crate::{Error, Format};
+use crate::{Activity, Classified, Error, Format};
 
 /// libopus packet size ceiling per RFC 6716 §3.4.
 const MAX_PACKET_BYTES: usize = 4_000;
@@ -141,8 +141,9 @@ impl Config {
 ///
 /// Build one with [`Encoder::new`], feed full PCM frames via
 /// [`encode`](Self::encode), then pass the trailing partial frame to
-/// [`finish`](Self::finish). Publish every packet either call returns and apply
-/// the terminal [`Finish::discard_padding`] when the container supports it.
+/// [`finish`](Self::finish). Each packet includes its codec activity
+/// classification. Publish every packet either call returns and apply the
+/// terminal [`Finish::discard_padding`] when the container supports it.
 pub struct Encoder {
 	backend: Backend,
 	config: Config,
@@ -179,13 +180,13 @@ unsafe impl Send for Opus {}
 
 /// Packets emitted by [`Encoder::finish`] and the decoded padding at their end.
 pub struct Finish {
-	packets: Vec<Bytes>,
+	packets: Vec<Classified<Bytes>>,
 	discard_padding: usize,
 }
 
 impl Finish {
-	/// Encoded packets in decode order.
-	pub fn packets(&self) -> &[Bytes] {
+	/// Encoded packets and their activity in decode order.
+	pub fn packets(&self) -> &[Classified<Bytes>] {
 		&self.packets
 	}
 
@@ -194,8 +195,8 @@ impl Finish {
 		self.discard_padding
 	}
 
-	/// Consume the result and return its encoded packets.
-	pub fn into_packets(self) -> Vec<Bytes> {
+	/// Consume the result and return its classified encoded packets.
+	pub fn into_packets(self) -> Vec<Classified<Bytes>> {
 		self.packets
 	}
 }
@@ -426,7 +427,7 @@ impl Encoder {
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// [`Producer`](super::Producer) handles format conversion and resampling
 	/// before calling this; for direct use, the caller does the same.
-	pub fn encode(&mut self, pcm: &[f32]) -> Result<Bytes, Error> {
+	pub fn encode(&mut self, pcm: &[f32]) -> Result<Classified<Bytes>, Error> {
 		let expected = self.frame_size * self.codec_channels as usize;
 		if pcm.len() != expected {
 			return Err(Error::Misaligned {
@@ -434,7 +435,7 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		let packet = match &mut self.backend {
+		let encoded = match &mut self.backend {
 			Backend::Opus(opus) => {
 				// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
 				// are bounded by the lengths we pass.
@@ -450,18 +451,20 @@ impl Encoder {
 				if n < 0 {
 					return Err(crate::opus::error(n, "opus_encode_float"));
 				}
-				Bytes::copy_from_slice(&opus.scratch[..n as usize])
+				let payload = Bytes::copy_from_slice(&opus.scratch[..n as usize]);
+				let activity = crate::opus::activity(&payload, false);
+				Classified::new(payload, activity)
 			}
 			Backend::Pcm => {
 				let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
 				for sample in pcm {
 					payload.extend_from_slice(&sample.to_le_bytes());
 				}
-				payload.into()
+				Classified::new(payload.into(), Activity::Active)
 			}
 		};
 		self.started = true;
-		Ok(packet)
+		Ok(encoded)
 	}
 
 	/// Finish encoding, zero-padding `pcm` as the final partial frame and
@@ -630,6 +633,68 @@ mod tests {
 			(0.5..2.0).contains(&ratio),
 			"output energy ratio {ratio:.3} should be close to 1"
 		);
+	}
+
+	#[test]
+	fn opus_classification_covers_dtx_loss_and_recovery() {
+		let mut enc = Encoder::new(&Config {
+			dtx: true,
+			bitrate: Some(24_000),
+			..Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
+		.unwrap();
+		let mut dec = Decoder::new(&enc.catalog()).unwrap();
+		let active = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
+		let silence = vec![0.0; enc.frame_size()];
+
+		let packet = enc.encode(&active).unwrap();
+		assert_eq!(packet.activity, Activity::Active);
+		assert_eq!(dec.decode(&packet).unwrap().activity, Activity::Active);
+
+		let mut dtx = None;
+		for _ in 0..100 {
+			let packet = enc.encode(&silence).unwrap();
+			let decoded = dec.decode(&packet).unwrap();
+			assert_eq!(decoded.activity, packet.activity);
+			if packet.activity.is_dtx() {
+				dtx = Some(packet);
+				break;
+			}
+		}
+		let dtx = dtx.expect("silence should enter Opus DTX");
+		assert!(
+			(1..=2).contains(&dtx.len()),
+			"DTX comfort noise should be one or two bytes"
+		);
+		assert_eq!(
+			dec.decode(&[0xf8, 0xff]).unwrap().activity,
+			Activity::Dtx,
+			"a two-byte comfort-noise frame should remain DTX"
+		);
+
+		// An absent payload asks libopus for packet-loss concealment. The
+		// classification remains DTX until a normal packet exits that state.
+		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Dtx);
+
+		// A rejected packet must not mutate the state used to classify later loss.
+		assert!(matches!(dec.decode(&[0xff; 3]), Err(Error::Decode(_))));
+		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Dtx);
+
+		let mut recovered = false;
+		for _ in 0..10 {
+			let packet = enc.encode(&active).unwrap();
+			let decoded = dec.decode(&packet).unwrap();
+			assert_eq!(decoded.activity, packet.activity);
+			if packet.activity.is_active() {
+				recovered = true;
+				break;
+			}
+		}
+		assert!(recovered, "active audio should exit Opus DTX");
+		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Active);
 	}
 
 	#[test]
@@ -835,7 +900,7 @@ mod tests {
 		let packet = enc.encode(&input).unwrap();
 		let output = dec.decode(&packet).unwrap();
 
-		assert_eq!(output, input);
+		assert_eq!(output.value, input);
 	}
 
 	#[test]

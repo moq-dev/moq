@@ -26,7 +26,8 @@
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC
 //!   too, behind the default-on `aac` feature, since a broadcast that came in
-//!   through a gateway is AAC rather than one of the two codecs we encode.
+//!   through a gateway is AAC rather than one of the two codecs we encode. Each
+//!   returned [`Classified`] frame reports whether Opus carried active data or DTX.
 //! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
@@ -42,9 +43,11 @@
 //! expects. [`Frame`] is a thin owned buffer: a timestamp and a payload. PCM
 //! layout lives on the producer / consumer via [`encode::Input`] /
 //! [`decode::Config`], not on each frame, so callers can't drift between calls.
+//! [`Classified`] keeps Opus activity on each produced or consumed audio item.
 
 #[cfg(feature = "aac")]
 mod aac;
+mod activity;
 mod error;
 mod format;
 mod frame;
@@ -62,6 +65,7 @@ pub mod encode;
 #[cfg(feature = "playback")]
 pub mod playback;
 
+pub use activity::{Activity, Classified};
 pub use error::Error;
 pub use format::Format;
 pub use frame::Frame;

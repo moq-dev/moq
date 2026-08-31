@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::Error;
+use crate::{Activity, Error};
 
 /// Sample rates libopus runs at, ascending.
 const RATES: [u32; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
@@ -64,6 +64,19 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	error(code, "opus_decode_float")
 }
 
+/// Classify a packet libopus accepted, preserving DTX across packet loss.
+///
+/// libopus emits one or two bytes for DTX and comfort noise. An empty payload
+/// asks the decoder for packet-loss concealment, which remains DTX only when
+/// the last accepted packet entered DTX.
+pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
+	match packet.len() {
+		0 if in_dtx => Activity::Dtx,
+		1 | 2 => Activity::Dtx,
+		_ => Activity::Active,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -75,5 +88,14 @@ mod tests {
 		for &r in &RATES {
 			assert_eq!(pick_rate(r), r);
 		}
+	}
+
+	#[test]
+	fn activity_preserves_dtx_only_across_loss() {
+		assert_eq!(activity(&[0xf8], false), Activity::Dtx);
+		assert_eq!(activity(&[0xf8, 0xff], false), Activity::Dtx);
+		assert_eq!(activity(&[], true), Activity::Dtx);
+		assert_eq!(activity(&[], false), Activity::Active);
+		assert_eq!(activity(&[0xf8, 0xff, 0xfe], true), Activity::Active);
 	}
 }

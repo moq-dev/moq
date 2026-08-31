@@ -258,7 +258,11 @@ struct ConsumerInner {
 
 impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioFrame>, MoqError> {
-		Ok(self.consumer.read().await?.map(Into::into))
+		Ok(self
+			.consumer
+			.read()
+			.await?
+			.map(|classified| classified.into_inner().into()))
 	}
 }
 

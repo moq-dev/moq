@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(moq-audio)* expose Opus DTX classification on produced and consumed audio frames ([#2481](https://github.com/moq-dev/moq/issues/2481))
+
 ## [0.0.21](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.20...moq-audio-v0.0.21) - 2026-09-01
 
 ### Fixed

@@ -4,14 +4,14 @@ use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
 use crate::resample::{Resampler, remix, validate_channels};
-use crate::{Error, Frame};
+use crate::{Activity, Classified, Error, Frame};
 
 /// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
 /// declared by [`Config`].
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / channel count are fixed at construction, and
-/// [`read`](Self::read) returns plain [`Frame`]s.
+/// [`read`](Self::read) returns [`Classified`] [`Frame`]s.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
@@ -22,6 +22,8 @@ pub struct Consumer {
 	/// One past the last sample handed to the resampler, so the tail it is still
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
+	/// Activity of the packet that supplied the resampler's terminal tail.
+	tail_activity: Activity,
 	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
@@ -82,6 +84,7 @@ impl Consumer {
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
+			tail_activity: Activity::Active,
 			epoch: None,
 			frames_decoded: 0,
 			end: None,
@@ -107,8 +110,9 @@ impl Consumer {
 		self.resolved_channels
 	}
 
-	/// Read the next decoded PCM frame, or `None` when the track ends.
-	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	/// Read the next decoded PCM frame and its codec activity, or `None` when the
+	/// track ends.
+	pub async fn read(&mut self) -> Result<Option<Classified<Frame>>, Error> {
 		loop {
 			let mux_frame = self.track.read().await?;
 			self.apply_discontinuity()?;
@@ -126,7 +130,9 @@ impl Consumer {
 
 			let rate = self.decoder.sample_rate();
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
-			let mut decoded = self.decoder.decode(&mux_frame.payload)?;
+			let decoded = self.decoder.decode(&mux_frame.payload)?;
+			let activity = decoded.activity;
+			let mut decoded = decoded.into_inner();
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
@@ -164,8 +170,9 @@ impl Consumer {
 			};
 
 			self.tail = Some(advance(decoded_at, frames, rate)?);
+			self.tail_activity = activity;
 
-			return Ok(Some(self.frame(pcm, timestamp)?));
+			return Ok(Some(Classified::new(self.frame(pcm, timestamp)?, activity)));
 		}
 	}
 
@@ -182,6 +189,7 @@ impl Consumer {
 			resampler.reset();
 		}
 		self.tail = None;
+		self.tail_activity = Activity::Active;
 		self.epoch = None;
 		self.frames_decoded = 0;
 		self.end = None;
@@ -195,7 +203,7 @@ impl Consumer {
 	/// audio missing from the end of every resampled track. Flushing consumes the
 	/// resampler, which is what makes calling this on every later poll return
 	/// `None` rather than more tails.
-	fn flush(&mut self) -> Result<Option<Frame>, Error> {
+	fn flush(&mut self) -> Result<Option<Classified<Frame>>, Error> {
 		let (Some(resampler), Some(tail)) = (self.resampler.take(), self.tail) else {
 			return Ok(None);
 		};
@@ -208,7 +216,7 @@ impl Consumer {
 		}
 
 		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
-		Ok(Some(self.frame(pcm, timestamp)?))
+		Ok(Some(Classified::new(self.frame(pcm, timestamp)?, self.tail_activity)))
 	}
 
 	/// Where the output the resampler is about to hand back actually begins.
@@ -527,7 +535,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::ZERO,
-				payload: packet,
+				payload: packet.value,
 				keyframe: true,
 				duration: None,
 			})

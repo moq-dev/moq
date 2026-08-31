@@ -236,7 +236,7 @@ impl Audio {
 			};
 
 			// Hold the lock only to buffer the frame; release it before the callback.
-			let frame_id = State::lock().audio.frames.insert(frame)?;
+			let frame_id = State::lock().audio.frames.insert(frame.into_inner())?;
 			callback.call(Ok(frame_id));
 		}
 	}
