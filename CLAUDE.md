@@ -28,7 +28,7 @@ revision first and print base-to-current changes. Timing changes are information
 benchmark crashes, zero delivery, and invalid samples still fail the command. Relay
 CPU and RSS are included on Linux, where `moq-bench-host` can read `/proc`.
 
-`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. See [Workflow](#workflow) for how the base is resolved.
+`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. They also switch to it themselves once the changed-file list outgrows what a single argv/env string can hold (64 KiB, roughly 1500 paths), because the list is passed to each per-language recipe as one argument. See [Workflow](#workflow) for how the base is resolved.
 
 To force a base, `just check origin/dev` and `just fix origin/dev` take it positionally. `just test` can't: it's a module, so `just test origin/dev` looks for a *recipe* named `origin/dev`. Name the recipe to get past that: `just test default origin/dev`.
 

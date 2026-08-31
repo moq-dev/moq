@@ -28,6 +28,10 @@ mod relay 'demo/relay'
 mod sub 'demo/sub'
 mod web 'demo/web'
 
+# Byte budget for a changed-file list, sized so it survives being passed as a
+# single argv/env string on every hop of the dispatch. See `_changed`.
+changed_max := '65536'
+
 # Run the demo by default.
 default:
     just demo
@@ -47,10 +51,13 @@ install:
     cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
 
 # Reports the base it picked on stderr, so a surprising scope is traceable.
+#
+# LIMIT is the byte budget for the printed list, and exists as a parameter so
+# `_changed-test` can force the oversized path without a synthetic 30k-file diff.
 
-# Print the files this branch changed relative to BASE, one per line.
+# Print the files this branch changed relative to BASE, one per line, or `ALL`.
 [private]
-_changed $BASE:
+_changed $BASE $LIMIT=changed_max:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -79,10 +86,71 @@ _changed $BASE:
     echo "base: $base" >&2
 
     # Untracked files count too: a brand new crate or module is the whole change.
-    {
+    files=$({
     	git diff --name-only "$merge_base"
     	git ls-files --others --exclude-standard
-    } | sort -u
+    } | sort -u)
+
+    # Every hop of the dispatch takes this list as one argument, and just exports
+    # recipe parameters into the child's environment, so the whole list has to
+    # fit in a single execve string. Linux caps one string at MAX_ARG_STRLEN (32
+    # pages, 131072 bytes) however large ARG_MAX is, so past that each hop dies
+    # with E2BIG, which just reports as exit code 126 and no mention of the diff.
+    # A diff that large selects most of the workspace anyway, so say `ALL` and
+    # let the caller widen to the unscoped suite, which passes no list at all.
+    [[ "$LIMIT" =~ ^[0-9]+$ ]] || {
+    	echo "changed: LIMIT must be a byte count, got: $LIMIT" >&2
+    	exit 2
+    }
+    if ((${#files} > LIMIT)); then
+    	echo "changed: ${#files} bytes of paths exceeds the $LIMIT budget; selecting everything." >&2
+    	echo ALL
+    	exit 0
+    fi
+
+    # Guarded because a bare printf of an empty list prints a newline, and the
+    # callers test the result for emptiness to decide whether anything changed.
+    if [[ -n "$files" ]]; then
+    	printf '%s\n' "$files"
+    fi
+
+# Guards the thing that fails LOUDLY but unhelpfully: past the budget every
+# `just` hop dies with "Argument list too long" and exit 126, naming neither the
+# diff nor the recipe that could not receive it. Both halves matter -- a budget
+# that never trips scopes nothing, and one above what execve accepts still dies.
+
+# Check that an oversized diff widens to `ALL`, and that the budget fits in argv.
+[private]
+_changed-test $LIMIT=changed_max:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    fail() { echo "changed: _changed-test: $1" >&2; exit 1; }
+
+    # Any real diff is oversized against a one-byte budget, so this exercises the
+    # fallback without laying down a synthetic 30k-file corpus to trigger it.
+    [[ "$(just _changed "" 1)" == ALL ]] || fail "a diff over budget must print ALL"
+
+    # ...and it must still be able to say no, or the scoping is gone.
+    [[ "$(just _changed "" 100000000)" != ALL ]] || fail "a diff under budget must print the list"
+
+    # Linux caps a single argv/env string at MAX_ARG_STRLEN (32 pages), whatever
+    # ARG_MAX says, and the list travels as one string. Asserted rather than
+    # probed because this repo's CI is the Linux host and a dev box may be laxer.
+    ((LIMIT <= 131072)) || fail "budget $LIMIT exceeds Linux MAX_ARG_STRLEN"
+
+    # The budget still has to survive the hop it was sized for, which the two
+    # tests above cannot show: they never pass a list that big to anything.
+    payload=$(head -c "$LIMIT" /dev/zero | tr '\0' x)
+    [[ "$(just _echo "$payload" | wc -c)" -eq $((LIMIT + 1)) ]] \
+    	|| fail "a $LIMIT-byte list does not survive an argv hop"
+
+    echo "changed: budget ok"
+
+# Print an argument back, to measure what survives a `just` invocation.
+[private]
+_echo $VALUE:
+    @printf '%s\n' "$VALUE"
 
 # Tools every scope guards with `command -v`, so an incomplete local toolchain
 # checks less instead of failing. That trade is wrong in CI, where a skip is
@@ -149,6 +217,14 @@ check $BASE="":
     set -euo pipefail
 
     files=$(just _changed "$BASE")
+
+    # `_changed` says ALL when the list outgrew what argv can carry. The unscoped
+    # suite is the path that passes no list at all, so it is the one that works.
+    if [[ "$files" == ALL ]]; then
+    	just check-all
+    	exit 0
+    fi
+
     just _tools "$files"
 
     # The dispatch below lives in these two files, and neither matches any
@@ -267,6 +343,7 @@ _shell $ACTION:
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
+    just _changed-test
     bun install --frozen-lockfile
     bun remark . --quiet --frail
     just _shell check
@@ -284,6 +361,12 @@ fix $BASE="":
     set -euo pipefail
 
     files=$(just _changed "$BASE")
+
+    # Mirrors `check`: too long for argv means fix everything instead.
+    if [[ "$files" == ALL ]]; then
+    	just fix-all
+    	exit 0
+    fi
 
     if [[ -n "$files" ]]; then
     	just js fix "$files"

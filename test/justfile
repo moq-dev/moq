@@ -31,6 +31,13 @@ default $BASE="":
     set -euo pipefail
 
     files=$(just _changed "$BASE")
+
+    # Mirrors the root `check`: too long for argv means test everything instead.
+    if [[ "$files" == ALL ]]; then
+    	just all
+    	exit 0
+    fi
+
     just _tools "$files"
 
     # Mirrors the root `check`: the dispatch below lives in these two files and
