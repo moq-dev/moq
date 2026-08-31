@@ -91,19 +91,7 @@ _changed $BASE $LIMIT=changed_max:
     	git ls-files --others --exclude-standard
     } | sort -u)
 
-    # Every hop of the dispatch takes this list as one argument, and just exports
-    # recipe parameters into the child's environment, so the whole list has to
-    # fit in a single execve string. Linux caps one string at MAX_ARG_STRLEN (32
-    # pages, 131072 bytes) however large ARG_MAX is, so past that each hop dies
-    # with E2BIG, which just reports as exit code 126 and no mention of the diff.
-    # A diff that large selects most of the workspace anyway, so say `ALL` and
-    # let the caller widen to the unscoped suite, which passes no list at all.
-    [[ "$LIMIT" =~ ^[0-9]+$ ]] || {
-    	echo "changed: LIMIT must be a byte count, got: $LIMIT" >&2
-    	exit 2
-    }
-    if ((${#files} > LIMIT)); then
-    	echo "changed: ${#files} bytes of paths exceeds the $LIMIT budget; selecting everything." >&2
+    if [[ "$(just _changed-cap "${#files}" "$LIMIT")" == ALL ]]; then
     	echo ALL
     	exit 0
     fi
@@ -112,6 +100,36 @@ _changed $BASE $LIMIT=changed_max:
     # callers test the result for emptiness to decide whether anything changed.
     if [[ -n "$files" ]]; then
     	printf '%s\n' "$files"
+    fi
+
+# Every hop of the dispatch takes the changed-file list as one argument, and
+# just exports recipe parameters into the child's environment, so the whole list
+# has to fit in a single execve string. Linux caps one string at MAX_ARG_STRLEN
+# (32 pages, 131072 bytes) however large ARG_MAX is, so past that each hop dies
+# with E2BIG, which just reports as exit code 126 and no mention of the diff. A
+# diff that large selects most of the workspace anyway, so the callers widen to
+# the unscoped suite, which passes no list at all.
+#
+# Split out from `_changed` so the decision is a pure function of a byte count:
+# `_changed-test` drives it with synthetic sizes, rather than needing the working
+# tree to hold a diff of a particular size.
+
+# Print `ALL` when BYTES of paths is too much to pass through a single argument.
+[private]
+_changed-cap $BYTES $LIMIT=changed_max:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    for n in "$BYTES" "$LIMIT"; do
+    	[[ "$n" =~ ^[0-9]+$ ]] || {
+    		echo "changed: not a byte count: $n" >&2
+    		exit 2
+    	}
+    done
+
+    if ((BYTES > LIMIT)); then
+    	echo "changed: $BYTES bytes of paths exceeds the $LIMIT budget; selecting everything." >&2
+    	echo ALL
     fi
 
 # Guards the thing that fails LOUDLY but unhelpfully: past the budget every
@@ -127,23 +145,33 @@ _changed-test $LIMIT=changed_max:
 
     fail() { echo "changed: _changed-test: $1" >&2; exit 1; }
 
-    # Any real diff is oversized against a one-byte budget, so this exercises the
-    # fallback without laying down a synthetic 30k-file corpus to trigger it.
-    [[ "$(just _changed "" 1)" == ALL ]] || fail "a diff over budget must print ALL"
+    # Synthetic sizes rather than whatever the working tree happens to hold: a
+    # clean checkout has no diff at all, and `check-all` runs there (cache.yml
+    # warms the cache from `main`), so a test keyed on the real list would take
+    # down the one job allowed to write the shared Rust cache.
+    [[ "$(just _changed-cap 100 99)" == ALL ]] || fail "over budget must print ALL"
+    [[ -z "$(just _changed-cap 99 99)" ]] || fail "at budget must print nothing"
+    [[ -z "$(just _changed-cap 0 99)" ]] || fail "an empty diff must print nothing"
 
-    # ...and it must still be able to say no, or the scoping is gone.
-    [[ "$(just _changed "" 100000000)" != ALL ]] || fail "a diff under budget must print the list"
+    # A byte count is the whole input, so anything else is a caller bug, not a
+    # reason to silently scope to nothing.
+    ! just _changed-cap 1 not-a-number 2> /dev/null || fail "a bad budget must be rejected"
 
     # Linux caps a single argv/env string at MAX_ARG_STRLEN (32 pages), whatever
     # ARG_MAX says, and the list travels as one string. Asserted rather than
     # probed because this repo's CI is the Linux host and a dev box may be laxer.
     ((LIMIT <= 131072)) || fail "budget $LIMIT exceeds Linux MAX_ARG_STRLEN"
 
-    # The budget still has to survive the hop it was sized for, which the two
-    # tests above cannot show: they never pass a list that big to anything.
+    # The budget still has to survive the hop it was sized for, which the checks
+    # above cannot show: they never pass a list that big to anything.
     payload=$(head -c "$LIMIT" /dev/zero | tr '\0' x)
     [[ "$(just _echo "$payload" | wc -c)" -eq $((LIMIT + 1)) ]] \
     	|| fail "a $LIMIT-byte list does not survive an argv hop"
+
+    # End to end, but only when there is a diff to be oversized: see above.
+    if [[ -n "$(just _changed "" 100000000)" ]]; then
+    	[[ "$(just _changed "" 1)" == ALL ]] || fail "a diff over budget must print ALL"
+    fi
 
     echo "changed: budget ok"
 
