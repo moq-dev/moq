@@ -1043,10 +1043,20 @@ export class Subscriber {
 			const cursor = this.#cursor.peek();
 			const start = Math.max(cursor.start, this.#nextSequence);
 			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
-			const group = groups[0];
-			if (group && (cursor.end === undefined || group.sequence <= cursor.end)) {
+			// One anchor for the whole pass, so walking a backlog off stays linear.
+			const drift = this.#drift();
+
+			for (;;) {
+				const group = groups[0];
+				if (!group || (cursor.end !== undefined && group.sequence > cursor.end)) break;
 				groups.shift();
 				this.#nextSequence = group.sequence + 1;
+				// Every frame this group could still hold is past the budget, so keep
+				// scanning: one pass walks a whole backlog off rather than replaying it.
+				if (this.#isStale(group, drift)) {
+					group.close();
+					continue;
+				}
 				// One cursor: the frame helpers must not keep draining a group this
 				// read just moved past, or interleaved reads would run backwards.
 				if (this.#frameGroup && this.#frameGroup.sequence < group.sequence) {
@@ -1061,7 +1071,7 @@ export class Subscriber {
 			// A group parked above the cap stays deliverable even after a clean close
 			// (its frames remain buffered), so keep waiting for a cap raise. Only a
 			// drained track reports finished.
-			if (closed !== undefined && !group) return undefined;
+			if (closed !== undefined && !groups[0]) return undefined;
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
@@ -1181,9 +1191,12 @@ export class Subscriber {
  * Every group this returns has a higher sequence than the last, so a late arrival is
  * skipped rather than delivered out of turn.
  *
- * This cursor never drops a group it can already serve: a backlog is delivered as a
- * burst, in order, however old it is. `maxAge` instead bounds how long a group already
- * handed out may block, so a stalled group's pending frame read rejects once newer
+ * `maxAge` applies as this cursor reads, exactly as it does on the arrival cursor: a
+ * group is skipped once its reach, where its immediate successor begins, is that far
+ * behind the newest frame on the track. Nothing weaker convicts it, since the reach is
+ * the only proof that every frame it could still hold is past the budget, so a backlog
+ * inside the budget is still delivered whole, as a burst in order. The budget follows a
+ * group already handed out too: a stalled group's pending frame read rejects once newer
  * content has pulled that far ahead.
  */
 export class Ordered {
@@ -1252,8 +1265,10 @@ export class Ordered {
 	/**
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
-	 * Late arrivals (sequence at or below the last returned) are silently skipped. Honors
-	 * the bounds set by {@link startAt} and {@link endAt}.
+	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
+	 * group whose every frame is further behind the live edge than `maxAge` (the default of
+	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
+	 * {@link startAt} and {@link endAt}.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
@@ -1263,9 +1278,7 @@ export class Ordered {
 	 * Read the next frame across groups, in sequence order.
 	 *
 	 * Rides the same cursor as {@link nextGroup} and shares this handle's contract: a
-	 * buffered backlog is drained in full, however old it is, never discarded for age.
-	 * A consumer that wants only the freshest content should jump via {@link latest}
-	 * and {@link startAt} rather than expect frame reads to skip ahead.
+	 * buffered backlog is drained in full up to the point `maxAge` proves it useless.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
 	readFrame(): Promise<Frame | undefined> {

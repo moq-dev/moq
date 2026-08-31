@@ -281,10 +281,9 @@ test("the ordered handle carries datagrams", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(3);
 });
 
-// The arrival cursor writes a backlog off; the ordered cursor does not. A group already
-// buffered costs nothing to deliver, and dropping it would put a hole in the sequence a
-// decoder is reading. The budget bounds how long a *blocking* group may stall instead.
-test("the latency budget skips a buffered timeline only on the arrival cursor", async () => {
+// Both cursors write a backlog off: a buffered group is not free to deliver, since a
+// consumer reading one that is already too old plays it at 1x and never catches up.
+test("the latency budget skips a buffered timeline on either cursor", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
 	const arrival = producer.subscribe();
 	const ordered = producer.subscribe().ordered();
@@ -294,10 +293,13 @@ test("the latency budget skips a buffered timeline only on the arrival cursor", 
 	}
 
 	expect((await arrival.recvGroup())?.sequence).toBe(2);
-
-	expect((await ordered.nextGroup())?.sequence).toBe(0);
-	expect((await ordered.nextGroup())?.sequence).toBe(1);
 	expect((await ordered.nextGroup())?.sequence).toBe(2);
+
+	// The budget is the only gate: one that spans the backlog bursts it in order.
+	const replay = producer.subscribe({ maxAge: 30_000 }).ordered();
+	expect((await replay.nextGroup())?.sequence).toBe(0);
+	expect((await replay.nextGroup())?.sequence).toBe(1);
+	expect((await replay.nextGroup())?.sequence).toBe(2);
 });
 
 // An unstamped immediate successor leaves a group's reach unbounded: a later stamped
@@ -317,11 +319,12 @@ test("an unstamped immediate successor leaves reach unbounded", async () => {
 	expect((await track.recvGroup())?.sequence).toBe(2);
 });
 
-// The ordered frame helpers share the burst contract: a buffered backlog is drained
-// in full rather than discarded for age.
-test("ordered frame reads drain a stale backlog", async () => {
+// The ordered frame helpers ride the same cursor, so they see the same budget: a
+// backlog inside it is drained in full, and what is past it is skipped.
+test("ordered frame reads follow the budget", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
-	const ordered = producer.subscribe().ordered();
+	const ordered = producer.subscribe({ maxAge: 5000 }).ordered();
+	const live = producer.subscribe().ordered();
 
 	for (const timestamp of [0, 1000, 2000]) {
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
@@ -330,6 +333,8 @@ test("ordered frame reads drain a stale backlog", async () => {
 	expect(await ordered.readString()).toBe("0");
 	expect(await ordered.readString()).toBe("1000");
 	expect(await ordered.readString()).toBe("2000");
+
+	expect(await live.readString()).toBe("2000");
 });
 
 // Interleaving nextGroup with the frame helpers is still one cursor: a nextGroup that
@@ -465,6 +470,31 @@ test("a named start is a floor, not a request", async () => {
 	// calls everything older stale.
 	const named = producer.subscribe({ startGroup: 1 });
 	expect((await named.recvGroup())?.sequence).toBe(4);
+});
+
+test("the ordered cursor sheds a stale backlog", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: 30_000 });
+	for (const timestamp of [0, 1000, 2000, 3000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	// The whole backlog is already buffered, so no read ever blocks on it: without the
+	// budget here the cursor would replay four seconds of history at 1x and stay behind.
+	const live = producer.subscribe().ordered();
+	expect((await live.nextGroup())?.sequence).toBe(3);
+
+	// Only what is provably too old goes. Group 0 reaches 1s, a full 2s behind the 3s
+	// edge; group 1 reaches 2s and could still present inside a 1.5s budget.
+	const bounded = producer.subscribe({ maxAge: 1500 }).ordered();
+	expect((await bounded.nextGroup())?.sequence).toBe(1);
+	expect((await bounded.nextGroup())?.sequence).toBe(2);
+	expect((await bounded.nextGroup())?.sequence).toBe(3);
+
+	// A budget spanning the history still bursts it in full, gap-free.
+	const replay = producer.subscribe({ maxAge: 30_000 }).ordered();
+	for (const sequence of [0, 1, 2, 3]) {
+		expect((await replay.nextGroup())?.sequence).toBe(sequence);
+	}
 });
 
 test("the budget is clamped to the publisher's window", async () => {

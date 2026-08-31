@@ -1774,9 +1774,9 @@ impl Subscriber {
 	/// Poll for the next group with a higher sequence than any previously
 	/// returned, skipping late arrivals, across the segments.
 	///
-	/// Mirrors [`track::Ordered`]: segments are seeked rather than read, no group is
-	/// discarded for age, and [`Subscription::max_age`] only bounds how long a
-	/// handed-out group's reads may block. See [`Self::poll_seek`].
+	/// Mirrors [`track::Ordered`]: segments are seeked rather than read, and each
+	/// segment's own cursor applies [`Subscription::max_age`] as it seeks, so a group
+	/// the budget has convicted is stepped over here too. See [`Self::poll_seek`].
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let floor = self.next_sequence.max(self.min_sequence);
 		let Some(group) = ready!(self.poll_seek(floor, self.end_sequence, true, waiter))? else {
@@ -2687,11 +2687,11 @@ mod test {
 		assert_eq!(next(&mut sub), 2);
 	}
 
-	/// The spliced sequence path inherits the [`track::Ordered`] contract: a backlog
-	/// the drift budget would discard on the arrival path is still delivered whole,
-	/// in order, exactly as a plain track's sequence cursor delivers it.
+	/// The spliced sequence path inherits the [`track::Ordered`] contract: the drift
+	/// budget applies as it reads, and a backlog inside the budget still crosses a
+	/// takeover boundary whole, exactly as a plain track's sequence cursor delivers it.
 	#[tokio::test]
-	async fn next_group_bursts_a_stale_backlog_like_a_plain_track() {
+	async fn next_group_sheds_a_stale_backlog_like_a_plain_track() {
 		// Groups spaced 10s apart on the media timeline, so with the default (zero)
 		// max age budget every group behind the newest one's reach is stale.
 		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
@@ -2710,9 +2710,9 @@ mod test {
 				.map(|group| group.sequence)
 		})
 		.collect();
-		assert_eq!(baseline, vec![0, 1, 2, 3], "a plain sequence cursor bursts the backlog");
+		assert_eq!(baseline, vec![3], "a plain sequence cursor sheds the backlog");
 
-		// The arrival path on the same content discards the backlog instead.
+		// The arrival path on the same content lands in the same place.
 		let mut arrival = plain.subscribe(None);
 		assert_eq!(
 			arrival.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
@@ -2740,10 +2740,35 @@ mod test {
 				.map(|group| group.sequence)
 		})
 		.collect();
-		assert_eq!(
-			spliced, baseline,
-			"spliced and plain sequence cursors deliver the same backlog"
-		);
+
+		// Group 1 survives where the plain cursor drops it: each segment measures drift
+		// against its own boundary, since a segment cannot serve content past it, and
+		// group 1 is the newest thing segment A has. The sequence path inherits that
+		// from the arrival path rather than inventing its own anchor, so the two agree.
+		assert_eq!(spliced, vec![1, 3], "each segment is judged within its own boundary");
+
+		let mut arrival = producer.consume().subscribe(None);
+		let arrival: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| arrival.poll_recv_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(arrival, spliced, "both spliced cursors shed the same backlog");
+
+		// A budget spanning the history bursts it in full across the boundary.
+		let mut replay = producer
+			.consume()
+			.subscribe(Subscription::default().with_max_age(Duration::from_secs(60)));
+		let replayed: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| replay.poll_next_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
 	}
 
 	#[tokio::test]
