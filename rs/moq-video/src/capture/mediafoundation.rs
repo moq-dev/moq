@@ -60,7 +60,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 				width: camera.width,
 				height: camera.height,
 				framerate: camera.framerate,
-				device: camera.device_name.clone(),
+				label: camera.device_name.clone(),
 			};
 			Ok((camera, geometry))
 		},
@@ -73,7 +73,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		None,
 		Box::new(guard),
 	))

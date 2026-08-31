@@ -2,10 +2,11 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), screen ->
-//!   xdg-desktop-portal + PipeWire (RGB -> CPU I420, `pipewire` feature).
+//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), X11 display and
+//!   window -> X11, Wayland display -> xdg-desktop-portal + PipeWire
+//!   (`pipewire` feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
-//!   DXGI Desktop Duplication (BGRA -> CPU I420).
+//!   DXGI Desktop Duplication, window -> GDI (BGRA -> CPU I420).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -13,6 +14,8 @@ use std::sync::Arc;
 
 use crate::Error;
 use crate::frame::Surface;
+
+const MAX_FRAMERATE: u32 = 1_000_000;
 
 mod channel;
 use channel::FrameChannel;
@@ -144,10 +147,11 @@ pub struct Display {
 	pub id: String,
 	/// Human-readable name, e.g. "Display 1".
 	pub name: String,
-	/// Width in the platform's desktop coordinate space. This is points on
-	/// macOS and desktop pixels on Windows.
+	/// Width in the platform's desktop coordinate space: points on macOS and
+	/// desktop pixels on Windows and X11.
 	pub width: u32,
-	/// Height in the platform's desktop coordinate space.
+	/// Height in the platform's desktop coordinate space: points on macOS and
+	/// desktop pixels on Windows and X11.
 	pub height: u32,
 }
 
@@ -167,10 +171,11 @@ pub struct Window {
 	pub title: String,
 	/// The name of the application owning the window.
 	pub app: String,
-	/// Width in points, i.e. the logical size, which is what capture defaults to.
-	/// A window on a 2x retina display reports half its native pixel width.
+	/// Width in platform window coordinates: points on macOS and pixels on
+	/// Windows and X11.
 	pub width: u32,
-	/// Height in points. See [`width`](Self::width).
+	/// Height in platform window coordinates: points on macOS and pixels on
+	/// Windows and X11.
 	pub height: u32,
 }
 
@@ -211,7 +216,7 @@ pub struct Config {
 	pub width: Option<u32>,
 	/// Preferred output height in pixels.
 	pub height: Option<u32>,
-	/// Preferred frame rate in frames per second.
+	/// Preferred frame rate in frames per second, from 1 through 1,000,000.
 	pub framerate: Option<u32>,
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
@@ -244,7 +249,7 @@ pub struct Stream {
 	height: u32,
 	framerate: Option<u32>,
 	color: Option<crate::Color>,
-	device: String,
+	label: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
 	pending: Option<Surface>,
@@ -260,7 +265,7 @@ impl Stream {
 		width: u32,
 		height: u32,
 		framerate: Option<u32>,
-		device: String,
+		label: String,
 		pending: Option<Surface>,
 		backend: Keepalive,
 	) -> Self {
@@ -271,14 +276,17 @@ impl Stream {
 			height,
 			framerate,
 			color,
-			device,
+			label,
 			pending,
 			_backend: backend,
 		}
 	}
 
-	/// Await the next frame, or `None` once the source ends. Cancel-safe: drop
-	/// the future to stop reading and release the device.
+	/// Await the next frame, or `None` once the source ends.
+	///
+	/// Dropping this future cancels only the pending read. Dropping the stream
+	/// releases the capture source. A geometry change returns
+	/// [`Error::SourceChanged`], after which the stream must be reopened.
 	pub async fn read(&mut self) -> Result<Option<Surface>, Error> {
 		if let Some(frame) = self.pending.take() {
 			return Ok(Some(frame));
@@ -306,14 +314,15 @@ impl Stream {
 		self.color
 	}
 
-	/// Platform source identifier selected by the backend.
-	pub fn device(&self) -> &str {
-		&self.device
+	/// Human-readable label for the selected capture source.
+	pub fn label(&self) -> &str {
+		&self.label
 	}
 }
 
 /// Open the capture source described by `config`.
 pub async fn open(config: &Config) -> Result<Stream, Error> {
+	validate(config)?;
 	match &config.source {
 		Source::Camera(device) => {
 			let _ = device;
@@ -394,6 +403,13 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 	}
 }
 
+fn validate(config: &Config) -> Result<(), Error> {
+	match config.framerate {
+		Some(value) if value == 0 || value > MAX_FRAMERATE => Err(Error::InvalidFramerate(value)),
+		_ => Ok(()),
+	}
+}
+
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
@@ -417,7 +433,8 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 /// List the available displays and the identifiers [`Source::Display`] accepts.
 ///
 /// On Wayland the xdg-desktop-portal picker owns display selection, so there is
-/// no list or stable identifier to expose. X11 displays have stable ids.
+/// no portal list or stable identifier to expose. When XWayland is available,
+/// its native displays are listed with stable X11 ids.
 pub async fn displays() -> Result<Vec<Display>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -479,4 +496,25 @@ where
 	tokio::task::spawn_blocking(f)
 		.await
 		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn validates_framerate_range() {
+		let mut config = Config::default();
+		assert!(validate(&config).is_ok());
+
+		config.framerate = Some(1);
+		assert!(validate(&config).is_ok());
+		config.framerate = Some(MAX_FRAMERATE);
+		assert!(validate(&config).is_ok());
+
+		config.framerate = Some(0);
+		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(0))));
+		config.framerate = Some(MAX_FRAMERATE + 1);
+		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(value)) if value == MAX_FRAMERATE + 1));
+	}
 }

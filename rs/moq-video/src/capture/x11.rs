@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::xfixes::{ConnectionExt as _, GetCursorImageReply};
 use x11rb::protocol::xproto::{
-	AtomEnum, ConnectionExt as _, Drawable, ImageFormat, ImageOrder, MapState, Window as XWindow,
+	AtomEnum, ConnectionExt as _, Drawable, ImageFormat, ImageOrder, MapState, VisualClass, Window as XWindow,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -26,13 +27,28 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// Whether a display selector belongs to X11. A desktop without Wayland also
 /// selects X11 by default, making it the no-portal fallback.
 pub(super) fn selected(selector: Option<&str>) -> bool {
-	selector.is_some_and(|selector| selector.starts_with("x11:")) || std::env::var_os("WAYLAND_DISPLAY").is_none()
+	selects_x11(selector, std::env::var_os("WAYLAND_DISPLAY").is_some())
+}
+
+fn selects_x11(selector: Option<&str>, wayland: bool) -> bool {
+	selector.is_some_and(|selector| selector.starts_with("x11:")) || !wayland
+}
+
+fn available() -> bool {
+	is_available(
+		std::env::var_os("WAYLAND_DISPLAY").is_some(),
+		std::env::var_os("DISPLAY").is_some(),
+	)
+}
+
+fn is_available(wayland: bool, x11: bool) -> bool {
+	x11 || !wayland
 }
 
 pub(super) fn displays() -> Result<Vec<Display>, Error> {
-	if !selected(None) {
+	if !available() {
 		return Err(Error::Unsupported(
-			"listing displays on Wayland; the desktop portal owns selection".to_string(),
+			"listing displays on Wayland without XWayland; the desktop portal owns selection".to_string(),
 		));
 	}
 	let (connection, screen) = connect()?;
@@ -51,19 +67,18 @@ pub(super) fn displays() -> Result<Vec<Display>, Error> {
 }
 
 pub(super) fn windows() -> Result<Vec<Window>, Error> {
-	if !selected(None) {
+	if !available() {
 		return Err(Error::Unsupported(
-			"listing windows on Wayland; the desktop portal does not expose them".to_string(),
+			"listing windows on Wayland without XWayland; the desktop portal does not expose them".to_string(),
 		));
 	}
 	let (connection, screen) = connect()?;
 	let root = connection.setup().roots[screen].root;
-	let tree = connection.query_tree(root).map_err(codec)?.reply().map_err(codec)?;
 	let name_atom = intern(&connection, b"_NET_WM_NAME")?;
 	let utf8_atom = intern(&connection, b"UTF8_STRING")?;
 
 	let mut result = Vec::new();
-	for id in tree.children {
+	for id in client_windows(&connection, root)? {
 		let attributes = match connection.get_window_attributes(id).map_err(codec)?.reply() {
 			Ok(attributes) if attributes.map_state == MapState::VIEWABLE => attributes,
 			_ => continue,
@@ -99,14 +114,15 @@ pub(super) async fn open_display(config: &Config, selector: Option<&str>) -> Res
 			"screen capture on Wayland without the `pipewire` feature".to_string(),
 		));
 	}
-	open(config, Target::Display(parse_selector(selector, "x11:")?)).await
+	let selector = selector.map(|selector| parse_selector(selector, "x11:")).transpose()?;
+	open(config, Target::Display(selector)).await
 }
 
 pub(super) async fn open_window(config: &Config, selector: &str) -> Result<Stream, Error> {
 	if !selected(Some(selector)) {
 		return Err(Error::Unsupported("window capture on Wayland".to_string()));
 	}
-	let id = parse_selector(Some(selector), "x11:")?;
+	let id = parse_selector(selector, "x11:")?;
 	open(config, Target::Window(id)).await
 }
 
@@ -121,7 +137,7 @@ async fn open(config: &Config, target: Target) -> Result<Stream, Error> {
 				width: capture.width,
 				height: capture.height,
 				framerate: Some(capture.framerate),
-				device: capture.name.clone(),
+				label: capture.name.clone(),
 			};
 			Ok((capture, geometry))
 		},
@@ -134,7 +150,7 @@ async fn open(config: &Config, target: Target) -> Result<Stream, Error> {
 		geometry.width,
 		geometry.height,
 		geometry.framerate,
-		geometry.device,
+		geometry.label,
 		None,
 		Box::new(guard),
 	))
@@ -142,7 +158,7 @@ async fn open(config: &Config, target: Target) -> Result<Stream, Error> {
 
 #[derive(Clone, Copy)]
 enum Target {
-	Display(usize),
+	Display(Option<usize>),
 	Window(usize),
 }
 
@@ -158,30 +174,48 @@ struct Capture {
 	interval: Duration,
 	next: Instant,
 	name: String,
+	root: XWindow,
+	cursor: bool,
+	display: Option<DisplayTarget>,
 }
 
 impl Capture {
 	fn open(config: &Config, target: Target) -> Result<Self, Error> {
 		let (connection, screen_index) = connect()?;
-		let screen = &connection.setup().roots[screen_index];
-		let (drawable, x, y, width, height, name) = match target {
-			Target::Display(index) => {
-				let monitor = monitors(&connection, screen.root)?
-					.into_iter()
-					.nth(index)
-					.ok_or_else(|| Error::SourceUnavailable(format!("no X11 display at index {index}")))?;
+		let (root, root_depth, root_visual) = {
+			let screen = &connection.setup().roots[screen_index];
+			(screen.root, screen.root_depth, screen.root_visual)
+		};
+		let (drawable, x, y, width, height, depth, visual, name, display) = match target {
+			Target::Display(selector) => {
+				let monitors = monitors(&connection, root)?;
+				let index = select_monitor(&monitors, selector)
+					.ok_or_else(|| Error::SourceUnavailable(format!("no X11 display at index {selector:?}")))?;
+				let monitor = &monitors[index];
 				(
-					screen.root,
+					root,
 					monitor.x,
 					monitor.y,
 					monitor.width,
 					monitor.height,
+					root_depth,
+					root_visual,
 					format!("x11:{index}"),
+					Some(DisplayTarget {
+						selector,
+						index,
+						monitor: monitor.clone(),
+					}),
 				)
 			}
 			Target::Window(id) => {
 				let drawable =
 					u32::try_from(id).map_err(|_| Error::SourceUnavailable(format!("invalid X11 window id {id}")))?;
+				let attributes = connection
+					.get_window_attributes(drawable)
+					.map_err(source)?
+					.reply()
+					.map_err(source)?;
 				let geometry = connection
 					.get_geometry(drawable)
 					.map_err(source)?
@@ -193,7 +227,10 @@ impl Capture {
 					0,
 					geometry.width.into(),
 					geometry.height.into(),
+					geometry.depth,
+					attributes.visual,
 					format!("x11:{id}"),
+					None,
 				)
 			}
 		};
@@ -202,9 +239,15 @@ impl Capture {
 		if width == 0 || height == 0 {
 			return Err(Error::SourceUnavailable(format!("{name} has no capturable area")));
 		}
-		let format = PixelFormat::new(connection.setup(), screen.root_depth, screen.root_visual)?;
+		let format = PixelFormat::new(connection.setup(), depth, visual)?;
 		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
 		let interval = Duration::from_micros(1_000_000 / u64::from(framerate));
+		let cursor = config.cursor
+			&& connection
+				.xfixes_query_version(5, 0)
+				.ok()
+				.and_then(|cookie| cookie.reply().ok())
+				.is_some();
 		Ok(Self {
 			connection,
 			drawable,
@@ -217,6 +260,9 @@ impl Capture {
 			interval,
 			next: Instant::now(),
 			name,
+			root,
+			cursor,
+			display,
 		})
 	}
 
@@ -226,6 +272,30 @@ impl Capture {
 			std::thread::sleep(self.next - now);
 		}
 		self.next = Instant::now() + self.interval;
+		if let Some(display) = &self.display {
+			let monitors = monitors(&self.connection, self.root)?;
+			if !display.matches(&monitors) {
+				return Err(Error::SourceChanged(format!(
+					"{} geometry or monitor layout changed",
+					self.name
+				)));
+			}
+		} else {
+			let geometry = self
+				.connection
+				.get_geometry(self.drawable)
+				.map_err(source)?
+				.reply()
+				.map_err(source)?;
+			let width = u32::from(geometry.width) & !1;
+			let height = u32::from(geometry.height) & !1;
+			if (width, height) != (self.width, self.height) {
+				return Err(Error::SourceChanged(format!(
+					"{} resized from {}x{} to {width}x{height}",
+					self.name, self.width, self.height
+				)));
+			}
+		}
 
 		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
@@ -244,17 +314,67 @@ impl Capture {
 			.map_err(source)?
 			.reply()
 			.map_err(source)?;
-		let rgb = self.format.rgb(&image.data, self.width, self.height)?;
+		let mut rgb = self.format.rgb(&image.data, self.width, self.height)?;
+		if self.cursor
+			&& let Some(cursor) = self
+				.connection
+				.xfixes_get_cursor_image()
+				.ok()
+				.and_then(|cookie| cookie.reply().ok())
+		{
+			let (x, y) = self.origin()?;
+			blend_cursor(&mut rgb, self.width, self.height, x, y, &cursor);
+		}
 		Ok(Some(Surface::I420(I420::from_rgb(&rgb, self.width, self.height)?)))
+	}
+
+	fn origin(&self) -> Result<(i32, i32), Error> {
+		if self.drawable == self.root {
+			return Ok((self.x.into(), self.y.into()));
+		}
+		let translated = self
+			.connection
+			.translate_coordinates(self.drawable, self.root, self.x, self.y)
+			.map_err(source)?
+			.reply()
+			.map_err(source)?;
+		Ok((translated.dst_x.into(), translated.dst_y.into()))
 	}
 }
 
+struct DisplayTarget {
+	selector: Option<usize>,
+	index: usize,
+	monitor: Monitor,
+}
+
+impl DisplayTarget {
+	fn matches(&self, monitors: &[Monitor]) -> bool {
+		let Some(index) = select_monitor(monitors, self.selector) else {
+			return false;
+		};
+		index == self.index
+			&& monitors
+				.get(index)
+				.is_some_and(|monitor| self.monitor.same_region(monitor))
+	}
+}
+
+#[derive(Clone)]
 struct Monitor {
 	x: i16,
 	y: i16,
 	width: u32,
 	height: u32,
 	name: String,
+	primary: bool,
+}
+
+impl Monitor {
+	fn same_region(&self, other: &Self) -> bool {
+		(self.x, self.y, self.width, self.height, &self.name)
+			== (other.x, other.y, other.width, other.height, &other.name)
+	}
 }
 
 fn monitors(connection: &RustConnection, root: XWindow) -> Result<Vec<Monitor>, Error> {
@@ -275,6 +395,7 @@ fn monitors(connection: &RustConnection, root: XWindow) -> Result<Vec<Monitor>, 
 				width: monitor.width.into(),
 				height: monitor.height.into(),
 				name,
+				primary: monitor.primary,
 			});
 		}
 		if !result.is_empty() {
@@ -289,7 +410,81 @@ fn monitors(connection: &RustConnection, root: XWindow) -> Result<Vec<Monitor>, 
 		width: geometry.width.into(),
 		height: geometry.height.into(),
 		name: "X11 display".to_string(),
+		primary: true,
 	}])
+}
+
+fn select_monitor(monitors: &[Monitor], selector: Option<usize>) -> Option<usize> {
+	selector
+		.filter(|index| *index < monitors.len())
+		.or_else(|| {
+			selector
+				.is_none()
+				.then(|| monitors.iter().position(|monitor| monitor.primary))
+				.flatten()
+		})
+		.or_else(|| selector.is_none().then_some(0).filter(|_| !monitors.is_empty()))
+}
+
+fn client_windows(connection: &RustConnection, root: XWindow) -> Result<Vec<XWindow>, Error> {
+	let clients_atom = intern(connection, b"_NET_CLIENT_LIST")?;
+	let clients = connection
+		.get_property(false, root, clients_atom, AtomEnum::WINDOW, 0, u32::MAX)
+		.map_err(codec)?
+		.reply()
+		.map_err(codec)?
+		.value32()
+		.map(|windows| windows.collect::<Vec<_>>())
+		.unwrap_or_default();
+	if !clients.is_empty() {
+		return Ok(clients);
+	}
+
+	let mut windows = Vec::new();
+	let mut pending = connection
+		.query_tree(root)
+		.map_err(codec)?
+		.reply()
+		.map_err(codec)?
+		.children;
+	while let Some(window) = pending.pop() {
+		windows.push(window);
+		if let Ok(cookie) = connection.query_tree(window)
+			&& let Ok(tree) = cookie.reply()
+		{
+			pending.extend(tree.children);
+		}
+	}
+	Ok(windows)
+}
+
+fn blend_cursor(rgb: &mut [u8], width: u32, height: u32, origin_x: i32, origin_y: i32, cursor: &GetCursorImageReply) {
+	let cursor_x = i32::from(cursor.x) - i32::from(cursor.xhot);
+	let cursor_y = i32::from(cursor.y) - i32::from(cursor.yhot);
+	for (index, pixel) in cursor.cursor_image.iter().copied().enumerate() {
+		let x = cursor_x + (index % usize::from(cursor.width)) as i32 - origin_x;
+		let y = cursor_y + (index / usize::from(cursor.width)) as i32 - origin_y;
+		if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+			continue;
+		}
+		let alpha = (pixel >> 24) as u8;
+		if alpha == 0 {
+			continue;
+		}
+		let offset = (y as usize * width as usize + x as usize) * 3;
+		let source = [
+			((pixel >> 16) & 0xff) as u8,
+			((pixel >> 8) & 0xff) as u8,
+			(pixel & 0xff) as u8,
+		];
+		for (target, source) in rgb[offset..offset + 3].iter_mut().zip(source) {
+			*target = source.saturating_add(blend_background(*target, alpha));
+		}
+	}
+}
+
+fn blend_background(value: u8, alpha: u8) -> u8 {
+	((u16::from(value) * u16::from(255 - alpha) + 127) / 255) as u8
 }
 
 struct PixelFormat {
@@ -310,6 +505,12 @@ impl PixelFormat {
 			.flat_map(|depth| &depth.visuals)
 			.find(|visual| visual.visual_id == visual_id)
 			.ok_or_else(|| Error::Codec(anyhow::anyhow!("X11 root visual is missing")))?;
+		if visual.class != VisualClass::TRUE_COLOR {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"unsupported X11 visual class: {:?}",
+				visual.class
+			)));
+		}
 		let format = setup
 			.pixmap_formats
 			.iter()
@@ -327,7 +528,7 @@ impl PixelFormat {
 
 	fn rgb(&self, data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
 		let pixel_bytes = usize::from(self.bits_per_pixel.div_ceil(8));
-		if !(3..=4).contains(&pixel_bytes) {
+		if !(2..=4).contains(&pixel_bytes) {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"unsupported X11 pixel depth: {} bits per pixel",
 				self.bits_per_pixel
@@ -388,13 +589,12 @@ fn connect() -> Result<(RustConnection, usize), Error> {
 	x11rb::connect(None).map_err(|error| Error::SourceUnavailable(format!("X11 display: {error}")))
 }
 
-fn parse_selector(selector: Option<&str>, prefix: &str) -> Result<usize, Error> {
+fn parse_selector(selector: &str, prefix: &str) -> Result<usize, Error> {
 	selector
-		.unwrap_or("0")
 		.strip_prefix(prefix)
-		.unwrap_or(selector.unwrap_or("0"))
+		.unwrap_or(selector)
 		.parse()
-		.map_err(|_| Error::SourceUnavailable(format!("invalid X11 selector {:?}", selector.unwrap_or("0"))))
+		.map_err(|_| Error::SourceUnavailable(format!("invalid X11 selector {selector:?}")))
 }
 
 fn intern(connection: &RustConnection, name: &[u8]) -> Result<u32, Error> {
@@ -421,4 +621,87 @@ fn codec(error: impl std::fmt::Display) -> Error {
 
 fn source(error: impl std::fmt::Display) -> Error {
 	Error::SourceUnavailable(format!("X11 source: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn monitor(primary: bool) -> Monitor {
+		Monitor {
+			x: 0,
+			y: 0,
+			width: 1920,
+			height: 1080,
+			name: String::new(),
+			primary,
+		}
+	}
+
+	#[test]
+	fn default_display_uses_primary_monitor() {
+		let monitors = [monitor(false), monitor(true), monitor(false)];
+		assert_eq!(select_monitor(&monitors, None), Some(1));
+		assert_eq!(select_monitor(&monitors, Some(0)), Some(0));
+	}
+
+	#[test]
+	fn display_target_detects_geometry_and_selection_changes() {
+		let initial = [monitor(true), monitor(false)];
+		let target = DisplayTarget {
+			selector: None,
+			index: 0,
+			monitor: initial[0].clone(),
+		};
+		assert!(target.matches(&initial));
+
+		let mut resized = initial.clone();
+		resized[0].width = 1280;
+		assert!(!target.matches(&resized));
+
+		let mut primary_changed = initial;
+		primary_changed[0].primary = false;
+		primary_changed[1].primary = true;
+		assert!(!target.matches(&primary_changed));
+	}
+
+	#[test]
+	fn xwayland_is_available_without_becoming_the_default() {
+		assert!(is_available(true, true));
+		assert!(!selects_x11(None, true));
+		assert!(selects_x11(Some("x11:0"), true));
+	}
+
+	#[test]
+	fn cursor_is_cropped_and_alpha_blended() {
+		let mut rgb = vec![100; 2 * 2 * 3];
+		let cursor = GetCursorImageReply {
+			x: 1,
+			y: 1,
+			width: 3,
+			height: 1,
+			xhot: 1,
+			yhot: 0,
+			cursor_image: vec![0, 0x8080_0000, 0xff00_00ff],
+			..Default::default()
+		};
+		blend_cursor(&mut rgb, 2, 2, 1, 0, &cursor);
+		assert_eq!(&rgb[..3], &[100; 3]);
+		assert_eq!(&rgb[6..9], &[178, 50, 50]);
+		assert_eq!(&rgb[9..12], &[0, 0, 255]);
+	}
+
+	#[test]
+	fn rgb_decodes_sixteen_bit_true_color() {
+		let format = PixelFormat {
+			byte_order: ImageOrder::LSB_FIRST,
+			bits_per_pixel: 16,
+			scanline_pad: 32,
+			red_mask: 0xf800,
+			green_mask: 0x07e0,
+			blue_mask: 0x001f,
+		};
+		let rgb = format.rgb(&[0x00, 0xf8, 0xe0, 0x07], 2, 1).unwrap();
+		assert_eq!(rgb, [255, 0, 0, 0, 255, 0]);
+	}
 }

@@ -25,7 +25,7 @@ Four role modules, symmetric on both ends of the wire:
 
 | Module | Does | Platform |
 | --- | --- | --- |
-| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + PipeWire (Linux), Media Foundation + DXGI (Windows) |
+| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI/GDI (Windows) |
 | `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, openh264 |
 | `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, openh264 |
 | `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
@@ -70,7 +70,7 @@ cargo add moq-video --features render,pipewire
 | `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`) |
 | `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
 | `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
-| `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal and DMA-BUF |
+| `pipewire` | no | Wayland screen capture via xdg-desktop-portal and DMA-BUF |
 
 `--no-default-features` gives a codec-only build that still encodes and decodes
 H.264 with openh264 but omits native capture and the Linux GPU dependencies. A

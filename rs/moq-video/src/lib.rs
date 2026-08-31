@@ -54,9 +54,10 @@
 //! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a codec
 //! implementation. [`encode::Encoder`] takes a [`Frame`],
 //! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
-//! hardware decoded), and [`capture::Stream`] returns a [`Surface`]. So swapping or bumping any backend crate is not a breaking change
-//! for consumers. Config structs are `#[non_exhaustive]`: build them via
-//! `default()`/`new()` and set fields, so new options stay additive.
+//! hardware decoded), and [`capture::Stream`] returns a [`Surface`]. So swapping
+//! or bumping any backend crate is not a breaking change for consumers. Config
+//! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
+//! fields, so new options stay additive.
 //!
 //! The one deliberate exception is [`Surface`], the enum behind every frame.
 //! Its variants name platform representations (`CVPixelBuffer`, Direct3D11,

@@ -177,9 +177,10 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
-    "Win32_Storage_Xps",
     "Win32_System_Ole",
+    "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

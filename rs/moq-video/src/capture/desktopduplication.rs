@@ -88,7 +88,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 				width: cap.width,
 				height: cap.height,
 				framerate: Some(cap.framerate),
-				device: cap.device_name.clone(),
+				label: cap.device_name.clone(),
 			};
 			Ok((cap, geometry))
 		},
@@ -101,7 +101,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		None,
 		Box::new(guard),
 	))
@@ -196,8 +196,10 @@ impl Duplicator {
 	/// Rebuild the duplication after `DXGI_ERROR_ACCESS_LOST` (e.g. a resolution
 	/// change or a fullscreen exclusive app grabbing/releasing the output).
 	fn reduplicate(&mut self) -> Result<(), Error> {
-		self.dupl = duplicate(&self.output, &self.device)
-			.map_err(|error| Error::SourceUnavailable(format!("{}: {error}", self.device_name)))?;
+		self.dupl = duplicate(&self.output, &self.device).map_err(|error| match error {
+			Error::PermissionDenied(_) => error,
+			error => Error::SourceUnavailable(format!("{}: {error}", self.device_name)),
+		})?;
 		self.staging = None;
 		Ok(())
 	}

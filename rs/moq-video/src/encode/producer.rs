@@ -420,6 +420,21 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
+#[cfg(feature = "capture")]
+enum CaptureEvent<T> {
+	Value(T),
+	Changed(String),
+}
+
+#[cfg(feature = "capture")]
+fn capture_event<T>(result: Result<T, Error>) -> Result<CaptureEvent<T>, Error> {
+	match result {
+		Ok(value) => Ok(CaptureEvent::Value(value)),
+		Err(Error::SourceChanged(reason)) => Ok(CaptureEvent::Changed(reason)),
+		Err(err) => Err(err),
+	}
+}
+
 /// Async capture/encode loop. Opens the camera while at least one viewer is
 /// watching and releases it when the last one leaves.
 ///
@@ -464,7 +479,7 @@ async fn capture_loop<E: CatalogExt>(
 		// Force an IDR on the first frame of each (re)open so a viewer subscribing
 		// after an idle gap can start decoding immediately.
 		let mut force_keyframe = true;
-		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
+		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// Rate control is per encoder: this one opened at the configured bitrate,
 		// so the policy's ceiling is that rate and the target starts there. A
@@ -475,7 +490,7 @@ async fn capture_loop<E: CatalogExt>(
 			.clone()
 			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
 
-		loop {
+		let changed = loop {
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
@@ -486,7 +501,7 @@ async fn capture_loop<E: CatalogExt>(
 						log_track_ended(err);
 						return Ok(());
 					}
-					break; // no viewers: release the camera, then wait for one
+					break None; // no viewers: release the camera, then wait for one
 				}
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
@@ -494,10 +509,14 @@ async fn capture_loop<E: CatalogExt>(
 					apply_estimate(&mut encoder, &mut rate, estimate).await;
 					continue;
 				}
-				frame = camera.read() => frame?,
+				frame = camera.read() => capture_event(frame)?,
 			};
 
-			let Some(surface) = frame else { break }; // device stopped producing frames
+			let surface = match frame {
+				CaptureEvent::Value(Some(surface)) => surface,
+				CaptureEvent::Value(None) => break None,
+				CaptureEvent::Changed(reason) => break Some(reason),
+			};
 
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
@@ -507,13 +526,17 @@ async fn capture_loop<E: CatalogExt>(
 				force_keyframe = false;
 			}
 			producer.publish(&encoder.encode(frame).await?)?;
-		}
+		};
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
 		drop(encoder);
 		capture_stopped(producer)?;
-		tracing::info!("no viewers: released camera");
+		if let Some(reason) = changed {
+			tracing::info!(%reason, "capture source changed; reopening");
+		} else {
+			tracing::info!("capture stopped; released source");
+		}
 	}
 }
 
@@ -523,6 +546,19 @@ mod tests {
 
 	use super::*;
 	use crate::encode::{Config, Encoder};
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn only_source_changes_reopen_capture() {
+		assert!(matches!(
+			capture_event::<()>(Err(Error::SourceChanged("resized".to_string()))),
+			Ok(CaptureEvent::Changed(reason)) if reason == "resized"
+		));
+		assert!(matches!(
+			capture_event::<()>(Err(Error::SourceUnavailable("closed".to_string()))),
+			Err(Error::SourceUnavailable(reason)) if reason == "closed"
+		));
+	}
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a real
 	/// [`Producer`], returning the catalog rendition's track name and config.
@@ -614,6 +650,31 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![1, 0, 1]);
+	}
+
+	#[tokio::test]
+	async fn source_resize_updates_the_published_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut initial = Config::new(320, 240, 30);
+		initial.kind = encoder::Kind::Software;
+		let mut producer = Producer::new(broadcast, catalog.clone(), initial.probe().await.unwrap()).unwrap();
+
+		for (timestamp, config) in [(0, initial), (33_333, Config::new(640, 360, 30))] {
+			let mut config = config;
+			config.kind = encoder::Kind::Software;
+			let mut encoder = Encoder::new(&config).unwrap();
+			encoder.keyframe();
+			let rgba = vec![0x80u8; usize::try_from(config.width * config.height * 4).unwrap()];
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			capture_stopped(&mut producer).unwrap();
+		}
+
+		let (_, rendition) = rendition(&catalog).expect("the resized rendition should be published");
+		assert_eq!(rendition.coded_width, Some(640));
+		assert_eq!(rendition.coded_height, Some(360));
 	}
 
 	/// Regression: a caller's container selection has to survive the config -> hint conversion.

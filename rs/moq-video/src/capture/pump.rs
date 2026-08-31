@@ -26,7 +26,7 @@ pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: Option<u32>,
-	pub device: String,
+	pub label: String,
 }
 
 /// Stops and joins the pump thread on drop, releasing the device.

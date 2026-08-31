@@ -158,7 +158,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		Some(first),
 		Box::new(guard),
 	))
@@ -836,6 +836,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 							Some(tx) => drop(tx.send(Err(e))),
 							None => {
 								tracing::warn!(error = %e, "unsupported pipewire video color space");
+								state.terminal = Some(e);
 								if let Some(mainloop) = mainloop.upgrade() {
 									mainloop.quit();
 								}
@@ -856,7 +857,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						width,
 						height,
 						framerate,
-						device: format!("pipewire:{node_id}"),
+						label: format!("pipewire:{node_id}"),
 					}));
 				} else if format_requires_restart(state.geometry, state.color, width, height, color) {
 					// The encoder's geometry and VUI are fixed when it opens. End the
@@ -1035,6 +1036,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				// means the producer forced an unsupported buffer representation.
 				let Some(bytes) = data.data() else {
 					tracing::warn!("pipewire buffer is not CPU-mapped; stopping capture");
+					state.terminal = Some(Error::SourceUnavailable(
+						"PipeWire buffer is not CPU-mapped".to_string(),
+					));
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
 					}
@@ -1055,6 +1059,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					Err(e) => {
 						// Persistent (bad format), not per-frame; stop rather than spam.
 						tracing::warn!(error = %e, "screen frame conversion failed; stopping capture");
+						state.terminal = Some(e);
 						if let Some(mainloop) = mainloop.upgrade() {
 							mainloop.quit();
 						}
@@ -1948,7 +1953,11 @@ mod tests {
 		assert!(stream.height() >= 2 && stream.height().is_multiple_of(2), "bad height");
 
 		for i in 0..5 {
-			let frame = stream.read().await.unwrap_or_else(|| panic!("no frame {i}"));
+			let frame = stream
+				.read()
+				.await
+				.unwrap_or_else(|error| panic!("read frame {i}: {error}"))
+				.unwrap_or_else(|| panic!("no frame {i}"));
 			assert_eq!(frame.width(), stream.width());
 			assert_eq!(frame.height(), stream.height());
 		}

@@ -29,9 +29,12 @@ pub enum Error {
 	#[error("capture source unavailable: {0}")]
 	SourceUnavailable(String),
 
-	/// The configured framerate was zero (would divide by zero / produce a
-	/// degenerate codec time base).
-	#[error("invalid framerate: {0} (must be non-zero)")]
+	/// The capture source changed geometry and must be reopened.
+	#[error("capture source changed: {0}")]
+	SourceChanged(String),
+
+	/// The configured framerate is outside the supported range.
+	#[error("invalid framerate: {0} (must be between 1 and 1,000,000)")]
 	InvalidFramerate(u32),
 
 	/// This encoder can't change its bitrate once open, so it can't follow a

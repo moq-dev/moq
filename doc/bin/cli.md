@@ -346,7 +346,7 @@ Microphones:
 ```
 
 ```bash
-# A single window, followed as it moves and resizes (macOS only):
+# Capture a single window (macOS, Windows, or X11):
 moq --client-connect https://relay.example.com/anon --broadcast win.hang \
     import capture --window 39193 --no-audio
 
@@ -385,8 +385,11 @@ cargo build --release -p moq-cli --no-default-features \
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
 Linux, Media Foundation on Windows). `--display` captures a screen instead:
 ScreenCaptureKit on macOS, DXGI Desktop Duplication on Windows, and
-xdg-desktop-portal + PipeWire on Linux (Wayland and X11), where the desktop's
-picker dialog chooses the screen (so the display id is ignored there).
+xdg-desktop-portal + PipeWire on Wayland, where the desktop's picker dialog
+chooses the screen (so the display id is ignored). X11 uses native capture and
+the listed `x11:<index>` monitor id. XWayland windows and monitors are listed
+with the same native ids, while an unqualified `--display` still uses the
+Wayland portal.
 `--window` works on macOS, Windows, and X11. `--app` is macOS-only, and
 `--no-cursor` applies to all three screen-source forms.
 On macOS these capture at the logical resolution, i.e. what the screen looks like
