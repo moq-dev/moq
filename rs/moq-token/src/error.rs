@@ -1,3 +1,20 @@
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them keep the actionable half in `source()` and nothing but a category in
+/// `Display`, so a plain `to_string()` would drop the only detail worth reporting.
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
 /// Errors related to key configuration and cryptographic operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -112,7 +129,7 @@ macro_rules! from_message {
 		$(
 			impl From<$ty> for Error {
 				fn from(err: $ty) -> Self {
-					Self::$variant(err.to_string())
+					Self::$variant(message(err))
 				}
 			}
 		)*
@@ -137,3 +154,23 @@ from_message! {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A dependency that reports only a category in `Display` and keeps the real cause in
+	/// `source()` (reqwest is the one that matters here) must not lose it on conversion.
+	#[test]
+	fn message_flattens_the_source_chain() {
+		#[derive(Debug, thiserror::Error)]
+		#[error("inner")]
+		struct Inner;
+
+		#[derive(Debug, thiserror::Error)]
+		#[error("outer")]
+		struct Outer(#[source] Inner);
+
+		assert_eq!(message(Outer(Inner)), "outer: inner");
+	}
+}

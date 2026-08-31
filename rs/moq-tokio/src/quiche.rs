@@ -181,7 +181,6 @@ impl crate::failover::Aggregate for Error {
 
 crate::error::from_message! {
 	web_transport_quiche::ez::ConnectionError => Connection,
-	web_transport_quiche::ServerError => Accept,
 }
 
 impl From<web_transport_quiche::ClientError> for Error {

@@ -123,11 +123,30 @@ pub enum Error {
 	Opus(#[from] crate::codec::opus::Error),
 }
 
-// Flattened to its message so webm-iterable stays out of this crate's public API.
+// Flattened to its message so webm-iterable stays out of this crate's public API. The chain
+// matters here: `TagWriterError::WriteError` displays only "Error writing to destination." and
+// keeps the `io::Error` saying whether the disk filled or the pipe broke in `source()`.
 impl From<webm_iterable::errors::TagWriterError> for Error {
 	fn from(err: webm_iterable::errors::TagWriterError) -> Self {
-		Error::MatroskaWrite(err.to_string())
+		Error::MatroskaWrite(crate::error::message(err))
 	}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod error_tests {
+	use super::*;
+
+	/// `TagWriterError::WriteError` displays only "Error writing to destination.", so the
+	/// `io::Error` naming the actual failure has to come through the source chain or an export
+	/// failure is undiagnosable.
+	#[test]
+	fn matroska_write_keeps_the_io_cause() {
+		let source = std::io::Error::new(std::io::ErrorKind::StorageFull, "no space left on device");
+		let err = Error::from(webm_iterable::errors::TagWriterError::WriteError { source });
+
+		let message = err.to_string();
+		assert!(message.contains("no space left on device"), "{message}");
+	}
+}

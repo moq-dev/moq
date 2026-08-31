@@ -89,11 +89,6 @@ impl Error {
 	}
 }
 
-crate::error::from_message! {
-	tungstenite::Error => WebSocketConnect,
-	http::header::InvalidHeaderValue => ProtocolHeader,
-}
-
 type Result<T> = std::result::Result<T, Error>;
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time

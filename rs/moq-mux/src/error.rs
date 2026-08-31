@@ -1,3 +1,20 @@
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them keep the actionable half in `source()` and nothing but a category in
+/// `Display`, so a plain `to_string()` would drop the only detail worth reporting.
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
 /// Errors from moq-mux operations.
 ///
 /// Most variants are delegations to underlying layers: [`moq_net::Error`] for
@@ -201,7 +218,7 @@ impl From<mp4_atom::Error> for Error {
 // Flattened to its message so `url` stays out of this crate's public API.
 impl From<url::ParseError> for Error {
 	fn from(err: url::ParseError) -> Self {
-		Error::Url(err.to_string())
+		Error::Url(message(err))
 	}
 }
 
