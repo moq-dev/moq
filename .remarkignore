@@ -12,3 +12,6 @@ pkg/
 # doc/.vitepress/drafts.ts.
 drafts/draft-*.md
 doc/draft/
+
+# Quests use a constrained Markdown dialect checked by the quest validator.
+quest/

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Quest"
+  short_description: "Scope and publish a repository quest"
+  default_prompt: "Use $plan-quest to scope and publish a repository quest."

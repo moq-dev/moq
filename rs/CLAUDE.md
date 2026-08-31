@@ -42,6 +42,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
 - `moq-token` (lib): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. No clap, no anyhow: the command surface lives a layer up.
 - `moq-token-cli` (lib+bin, `moq-token`): the generate/sign/verify commands, as `moq_token_cli::Args`. The `moq-token` binary flattens it and `moq token` (moq-cli) nests it, so there's one implementation and two entry points. It's a lib so moq-cli can reuse it without pulling clap and anyhow into the `moq-token` library's API.
+- `quest` (lib+bin): validates the interlinked Markdown plans under `quest/`, including links, questline indexes, allowed headings, and acyclic blockers.
 
 **Bindings**
 
