@@ -743,7 +743,9 @@ struct TableCursor {
 	state: kio::Producer<OriginConsumerState>,
 	/// The last delivered best route per presented (absolute) prefix, for change
 	/// detection: `(entry id, hops, cost)`.
-	current: HashMap<PathOwned, (u64, RouteMeta)>,
+	// entry id, metadata, and whether the entry could serve requests: the last
+	// is part of the dedupe key (see `sync_cursor`) but never leaves the model.
+	current: HashMap<PathOwned, (u64, RouteMeta, bool)>,
 }
 
 impl TableCursor {
@@ -1303,6 +1305,7 @@ impl Producer {
 		Ok(Announcement {
 			shared: self.shared.clone(),
 			ids,
+			prefix: route.prefix,
 			_guard: guard,
 		})
 	}
@@ -1413,6 +1416,10 @@ pub struct Announcement {
 	/// The table entries this announcement created: one per allowed root the
 	/// requested prefix intersected.
 	ids: Vec<u64>,
+	/// The prefix as the caller announced it (relative to the producer's root),
+	/// pinned for the announcement's lifetime; [`update`](Self::update) rejects
+	/// any other so metadata can't silently land under the old prefix.
+	prefix: PathOwned,
 	/// Ingress announce stats guard, held for the announcement's lifetime.
 	_guard: stats::Announce,
 }
@@ -1422,9 +1429,14 @@ impl Announcement {
 	///
 	/// Consumers observe another active update for the same prefix; sessions
 	/// forward it as a restart, so route churn never looks like new content.
-	/// `route.prefix` must match the announced prefix; it cannot be changed here
-	/// (drop and re-announce instead).
+	/// `route.prefix` must match the announced prefix and returns
+	/// [`Error::NotFound`] otherwise: the prefix cannot be changed here (drop and
+	/// re-announce instead), and silently applying the metadata under the old
+	/// prefix would let the caller believe the new one is advertised.
 	pub fn update(&self, route: Route) -> Result<(), Error> {
+		if route.prefix != self.prefix {
+			return Err(Error::NotFound);
+		}
 		let mut shared = self.shared.lock();
 		if shared.closed {
 			return Err(Error::Closed);
@@ -2378,11 +2390,18 @@ impl OriginState {
 		match best {
 			Some(entry) => {
 				let meta = (entry.hops.clone(), entry.cost);
-				match cursor.current.insert(presented.clone(), (entry.id, meta.clone())) {
-					// Unchanged metadata: nothing the consumer could act on, even if
-					// the winning entry itself changed (a reconnect under an
-					// identical route is invisible, which is the point).
-					Some((_, prev)) if prev == meta => {}
+				let served = entry.server.is_some();
+				match cursor
+					.current
+					.insert(presented.clone(), (entry.id, meta.clone(), served))
+				{
+					// Unchanged metadata and servability: nothing the consumer could
+					// act on, even if the winning entry itself changed (a reconnect
+					// under an identical route is invisible, which is the point). A
+					// servability flip is delivered: a request that failed Unroutable
+					// under an advertise-only route retries on the update, and hiding
+					// it would park that waiter forever.
+					Some((_, prev, prev_served)) if prev == meta && prev_served == served => {}
 					_ => {
 						if let Ok(mut state) = cursor.state.write() {
 							state.apply_announce(relative, meta);
@@ -2391,7 +2410,7 @@ impl OriginState {
 				}
 			}
 			None => {
-				if let Some((_, last)) = cursor.current.remove(presented)
+				if let Some((_, last, _)) = cursor.current.remove(presented)
 					&& let Ok(mut state) = cursor.state.write()
 				{
 					state.apply_unannounce(relative, last);
@@ -3619,6 +3638,21 @@ mod tests {
 		announcement.update(Route::new("room").with_cost(9)).unwrap();
 		let route = announced.assert_next_active("room");
 		assert_eq!(route.cost, Cost::new(9));
+	}
+
+	#[tokio::test]
+	async fn update_rejects_a_mismatched_prefix() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+
+		let announcement = producer.announce(Route::new("room")).unwrap();
+		announced.assert_next_active("room");
+
+		// The prefix is pinned at announce time: metadata under any other prefix
+		// is refused instead of silently landing under the old one.
+		let err = announcement.update(Route::new("lobby").with_cost(9)).unwrap_err();
+		assert!(matches!(err, Error::NotFound), "got {err:?}");
+		announced.assert_next_wait();
 	}
 
 	#[tokio::test]

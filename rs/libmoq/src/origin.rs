@@ -166,15 +166,40 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `biased` so a pending close always wins over a ready announcement.
-		tokio::select! {
-			biased;
-			_ = &mut close => return Ok(()),
-			found = consumer.routed(path.as_str()) => {
-				found.ok_or(Error::BroadcastNotFound)?;
+		// Watch the path's coverage so an Unroutable resolution waits for the route
+		// table to change instead of surfacing as a spurious terminal failure: the
+		// covering route can retract between the wait and the resolution (failover
+		// churn), or cover the path while nothing serves it yet.
+		let scoped = consumer.with_root(path.as_str()).ok_or(Error::BroadcastNotFound)?;
+		let mut announced = scoped.announced();
+		let broadcast = loop {
+			// `biased` so a pending close always wins over a ready announcement.
+			tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				found = consumer.routed(path.as_str()) => {
+					found.ok_or(Error::BroadcastNotFound)?;
+				}
+			};
+			match consumer.request_broadcast(path.as_str()).await {
+				Ok(broadcast) => break broadcast,
+				// Ride out the churn: retry once the coverage changes (the cursor
+				// replays the current coverage first, so at most one extra attempt
+				// runs before this genuinely blocks).
+				Err(moq_net::Error::Unroutable) => {
+					tokio::select! {
+						biased;
+						_ = &mut close => return Ok(()),
+						update = announced.next() => {
+							if update.is_none() {
+								return Err(Error::BroadcastNotFound);
+							}
+						}
+					}
+				}
+				Err(err) => return Err(err.into()),
 			}
 		};
-		let broadcast = consumer.request_broadcast(path.as_str()).await?;
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
 		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;

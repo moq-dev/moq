@@ -124,11 +124,30 @@ struct AnnouncedBroadcast {
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		if self.origin.routed(&self.path).await.is_none() {
-			return Err(MoqError::Closed);
+		// Watch the path's coverage so an Unroutable resolution waits for the route
+		// table to change instead of surfacing as a spurious terminal failure. The
+		// wait and the resolution are two steps, so the covering route can retract
+		// between them (failover churn), and a route can also cover the path while
+		// nothing serves it yet (an advertise-only announce racing its handler).
+		let scoped = self.origin.with_root(&self.path).ok_or(MoqError::Unauthorized)?;
+		let mut announced = scoped.announced();
+		loop {
+			if self.origin.routed(&self.path).await.is_none() {
+				return Err(MoqError::Closed);
+			}
+			match self.origin.request_broadcast(&self.path).await {
+				Ok(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone()))),
+				// Ride out the churn: retry once the coverage changes (the cursor
+				// replays the current coverage first, so at most one extra attempt
+				// runs before this genuinely blocks).
+				Err(moq_net::Error::Unroutable) => {
+					if announced.next().await.is_none() {
+						return Err(MoqError::Closed);
+					}
+				}
+				Err(err) => return Err(err.into()),
+			}
 		}
-		let broadcast = self.origin.request_broadcast(&self.path).await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone())))
 	}
 }
 

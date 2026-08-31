@@ -1009,6 +1009,42 @@ fn audio_rejects_bad_init_bytes() {
 	);
 }
 
+/// A route can cover the awaited path while nothing serves it (an advertise-only
+/// announce with no fallback), and it can retract before the resolution lands.
+/// That churn must keep the wait alive rather than surface as a spurious
+/// Unroutable; the wait resolves once something real serves the path.
+#[tokio::test]
+async fn announced_broadcast_survives_an_unservable_route() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	// Advertise-only: covers the path, serves nothing (and no dynamic fallback).
+	let route = origin
+		.announce(MoqRoute {
+			prefix: "live".into(),
+			hops: Vec::new(),
+			cost: 0,
+		})
+		.unwrap();
+
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let pending = tokio::spawn(async move { announced.available().await });
+
+	// Give the wait time to observe the unservable coverage; it must ride it out.
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(!pending.is_finished(), "an unservable route must not resolve the wait");
+
+	// The cover retracts (failover churn), then the real broadcast lands.
+	route.cancel();
+	let broadcast = origin.create_broadcast("live".into()).unwrap();
+	tokio::time::timeout(TIMEOUT, pending)
+		.await
+		.expect("timed out waiting for the real broadcast")
+		.expect("task")
+		.expect("resolves once something serves the path");
+	broadcast.finish().unwrap();
+}
+
 #[tokio::test]
 async fn create_broadcast_announces() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
