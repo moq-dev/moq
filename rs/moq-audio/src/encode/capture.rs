@@ -31,6 +31,8 @@ const RETRY_MAX: Duration = Duration::from_secs(4);
 /// If an active device fails, it is dropped and reopened behind the same track
 /// with capped jittered backoff. A default microphone is resolved again on every
 /// attempt, and recovery stops as soon as the track becomes unused.
+/// Transient failures during initial format discovery use the same retry policy
+/// before the catalog track is registered.
 ///
 /// Frames are stamped from `clock`, so passing the same [`Clock`](moq_mux::Clock)
 /// to a concurrent video publish keeps the two tracks aligned. Returns when the
@@ -42,7 +44,8 @@ pub async fn publish_capture(
 	encode: Options,
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
-	let (sample_rate, channels) = capture::format(&capture).await?;
+	let mut supervisor = Supervisor::default();
+	let (sample_rate, channels) = supervisor.discover(&mut DeviceSource { config: &capture }).await?;
 	let input = Input {
 		format: Format::F32,
 		sample_rate,
@@ -64,7 +67,7 @@ pub async fn publish_capture(
 		producer: &mut producer,
 		clock: &clock,
 	};
-	let result = Supervisor::default().run(&mut source, &mut demand, &mut output).await;
+	let result = supervisor.run(&mut source, &mut demand, &mut output).await;
 
 	// Best-effort clean close: flush the trailing sub-frame and finalize the
 	// track. Runs only when the loop ends on its own; a Ctrl+C cancels the future
@@ -80,6 +83,7 @@ pub async fn publish_capture(
 trait CaptureSource {
 	type Stream;
 
+	async fn format(&mut self) -> Result<(u32, u32), capture::Failure>;
 	async fn open(&mut self) -> Result<Self::Stream, capture::Failure>;
 	async fn read(&mut self, stream: &mut Self::Stream) -> Result<Option<capture::Samples>, capture::Failure>;
 }
@@ -90,6 +94,10 @@ struct DeviceSource<'a> {
 
 impl CaptureSource for DeviceSource<'_> {
 	type Stream = capture::Stream;
+
+	async fn format(&mut self) -> Result<(u32, u32), capture::Failure> {
+		capture::format(self.config).await
+	}
 
 	async fn open(&mut self) -> Result<Self::Stream, capture::Failure> {
 		capture::open(self.config).await
@@ -184,6 +192,24 @@ impl Supervisor {
 		let wait = (self.jitter)(self.next);
 		self.next = (self.next * 2).min(RETRY_MAX);
 		wait
+	}
+
+	/// Discover the source format, retrying failures that can clear when the
+	/// device or host state changes.
+	async fn discover<S: CaptureSource>(&mut self, source: &mut S) -> Result<(u32, u32), Error> {
+		loop {
+			let failure = match source.format().await {
+				Ok(format) => {
+					self.reset();
+					return Ok(format);
+				}
+				Err(failure) if failure.is_retryable() => failure.into_error(),
+				Err(failure) => return Err(failure.into_error()),
+			};
+
+			tracing::warn!(error = %failure, "audio capture format unavailable");
+			tokio::time::sleep(self.advance()).await;
+		}
 	}
 
 	/// Open the source while a listener is subscribed, release it when the last
@@ -355,7 +381,15 @@ mod tests {
 		Stream(MockStream),
 	}
 
+	enum Discovery {
+		Error(&'static str),
+		Fatal(&'static str),
+		Format(u32, u32),
+	}
+
 	struct MockSource {
+		formats: VecDeque<Discovery>,
+		format_attempts: Arc<AtomicUsize>,
 		opens: VecDeque<Open>,
 		attempts: Arc<AtomicUsize>,
 		fallback_error: bool,
@@ -363,6 +397,16 @@ mod tests {
 
 	impl CaptureSource for MockSource {
 		type Stream = MockStream;
+
+		async fn format(&mut self) -> Result<(u32, u32), capture::Failure> {
+			self.format_attempts.fetch_add(1, Ordering::SeqCst);
+			match self.formats.pop_front() {
+				Some(Discovery::Error(message)) => Err(capture::Failure::retry(Error::Capture(message.into()))),
+				Some(Discovery::Fatal(message)) => Err(capture::Failure::fatal(Error::Capture(message.into()))),
+				Some(Discovery::Format(sample_rate, channels)) => Ok((sample_rate, channels)),
+				None => std::future::pending().await,
+			}
+		}
 
 		async fn open(&mut self) -> Result<Self::Stream, capture::Failure> {
 			self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -438,10 +482,49 @@ mod tests {
 
 	fn source(opens: impl IntoIterator<Item = Open>, fallback_error: bool) -> MockSource {
 		MockSource {
+			formats: [Discovery::Format(48_000, 2)].into_iter().collect(),
+			format_attempts: Arc::new(AtomicUsize::new(0)),
 			opens: opens.into_iter().collect(),
 			attempts: Arc::new(AtomicUsize::new(0)),
 			fallback_error,
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn initial_discovery_retries_a_missing_device() {
+		let mut source = source([], false);
+		source.formats = [
+			Discovery::Error("no default input device"),
+			Discovery::Format(48_000, 2),
+		]
+		.into_iter()
+		.collect();
+		let attempts = source.format_attempts.clone();
+		let mut supervisor = Supervisor::exact();
+		let future = supervisor.discover(&mut source);
+		tokio::pin!(future);
+
+		poll_pending(future.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+		tokio::time::advance(Duration::from_millis(500)).await;
+
+		assert_eq!(future.await.unwrap(), (48_000, 2));
+		assert_eq!(attempts.load(Ordering::SeqCst), 2);
+	}
+
+	#[tokio::test]
+	async fn initial_discovery_returns_a_permanent_failure() {
+		let mut source = source([], false);
+		source.formats = [Discovery::Fatal("permission denied")].into_iter().collect();
+		let attempts = source.format_attempts.clone();
+
+		let err = Supervisor::exact()
+			.discover(&mut source)
+			.await
+			.expect_err("permanent discovery failure was ignored");
+
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+		assert!(matches!(err, Error::Capture(message) if message == "permission denied"));
 	}
 
 	fn demand(value: bool) -> (kio::Producer<bool>, MockDemand) {

@@ -162,24 +162,25 @@ impl Stream {
 
 /// The format `config` will capture at, without opening the device, so the
 /// catalog can be populated before anything turns on.
-pub(crate) async fn format(config: &Config) -> Result<(u32, u32), Error> {
+pub(crate) async fn format(config: &Config) -> Result<(u32, u32), Failure> {
 	match &config.source {
 		Source::Microphone(device) => {
 			let (device, config) = (device.clone(), config.clone());
 			// cpal enumerates devices with blocking host I/O, so keep it off the
 			// runtime's worker threads.
-			blocking(move || {
-				let (_, _, stream_config) = resolve(device.as_deref(), &config).map_err(Failure::into_error)?;
+			tokio::task::spawn_blocking(move || {
+				let (_, _, stream_config) = resolve(device.as_deref(), &config)?;
 				Ok((stream_config.sample_rate, stream_config.channels as u32))
 			})
 			.await
+			.map_err(|err| Failure::fatal(Error::Capture(format!("audio host thread failed: {err}"))))?
 		}
 		#[cfg(target_os = "macos")]
 		Source::System => Ok(screencapture::SystemAudio::format(config.sample_rate, config.channels)),
 		#[cfg(not(target_os = "macos"))]
-		Source::System => Err(Error::Unsupported(
+		Source::System => Err(Failure::fatal(Error::Unsupported(
 			"system audio capture is only supported on macOS".into(),
-		)),
+		))),
 	}
 }
 
