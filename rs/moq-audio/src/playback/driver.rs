@@ -10,7 +10,9 @@ use std::collections::VecDeque;
 #[cfg(feature = "aec")]
 use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -323,8 +325,9 @@ fn attach_reference(reference: &mut crate::aec::Reference, mixer: &SyncSender<mi
 
 /// What the driver thread waits on.
 ///
-/// Not a queue of messages. Everything but a switch coalesces into a flag, so
-/// the mailbox derives one of these from whatever state is pending.
+/// Not a queue of messages. Only a switch carries a payload; everything else
+/// coalesces into a flag, so the mailbox derives one of these from whatever is
+/// pending.
 enum Work {
 	/// Move to another output device, or back to the system default with `None`.
 	Switch {
@@ -342,19 +345,6 @@ enum Work {
 	Shutdown,
 }
 
-/// The driver's mailbox.
-///
-/// A mutex and a condvar rather than a channel, because the only unbounded
-/// thing a channel would buy us is a queue of duplicate notifications. Flags
-/// collapse a flood into one wake for free, and the lock is what makes a wake
-/// impossible to lose: a sender marks its flag under the lock, and the driver
-/// re-checks every flag under the same lock before it goes back to waiting.
-#[derive(Default)]
-struct Mailbox {
-	pending: Mutex<Pending>,
-	woken: Condvar,
-}
-
 /// A caller waiting to be moved to another output device.
 struct Switch {
 	/// The device to open, or the system default with `None`.
@@ -364,20 +354,49 @@ struct Switch {
 	reply: tokio::sync::oneshot::Sender<Result<(), Error>>,
 }
 
+/// The driver's mailbox, split by who is allowed to write which half.
+///
+/// cpal's error callback is not a normal thread. On CoreAudio it *is* the
+/// render callback, and JACK, PipeWire, WASAPI and AAudio all raise it from
+/// their process threads; cpal hands those paths `try_emit_error` precisely so
+/// they never block. So everything reachable from a failure report is an atomic
+/// plus [`Thread::unpark`], which allocates nothing and cannot wait on another
+/// thread. Only a switch takes a lock, and no callback ever raises one.
+///
+/// `unpark` is also what makes a wake impossible to lose. It leaves a permit
+/// behind, so a signal raised between the driver's last check and its `park`
+/// makes that `park` return at once rather than sleeping through it.
 #[derive(Default)]
-struct Pending {
-	/// Callers waiting on a device switch, capped at [`DRIVER_QUEUE`].
-	switches: VecDeque<Switch>,
-	/// The live stream's error callback has recorded something.
-	failed: bool,
-	/// A sink was added or dropped, or the mixer refused a registration.
-	sync: bool,
-	/// The last handle is gone. Latched: nothing un-shuts-down a driver.
-	shutdown: bool,
+struct Mailbox {
+	/// Callers waiting on a device switch.
+	switches: Mutex<Switches>,
+	signals: Signals,
+	/// The driver thread, so a sender can wake it. Registered before the driver
+	/// can park, so a signal raised before it lands is still caught by the
+	/// first check rather than slept through.
+	driver: OnceLock<Thread>,
+}
+
+#[derive(Default)]
+struct Switches {
+	/// Capped at [`DRIVER_QUEUE`].
+	waiting: VecDeque<Switch>,
+	/// Latched under this lock together with the drain in
+	/// [`Commands::shutdown`], so a switch cannot slip into a queue the driver
+	/// has already stopped serving.
+	closed: bool,
+}
+
+#[derive(Default)]
+struct Signals {
+	/// Written from cpal's error callback, which is why this is an atomic.
+	failed: AtomicBool,
+	sync: AtomicBool,
+	shutdown: AtomicBool,
 }
 
 /// The sending half of the driver's mailbox.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(super) struct Commands {
 	mailbox: Arc<Mailbox>,
 }
@@ -393,45 +412,61 @@ impl Commands {
 		device: Option<String>,
 		reply: tokio::sync::oneshot::Sender<Result<(), Error>>,
 	) -> Result<(), Error> {
-		let mut pending = self.mailbox.pending.lock().unwrap();
+		let mut switches = self.mailbox.switches.lock().unwrap();
 
-		if pending.shutdown {
+		if switches.closed {
 			return Err(Error::Playback("the playback thread stopped".into()));
-		} else if pending.switches.len() >= DRIVER_QUEUE {
+		} else if switches.waiting.len() >= DRIVER_QUEUE {
 			return Err(Error::Playback("the playback thread is busy".into()));
 		}
 
-		pending.switches.push_back(Switch { device, reply });
-		drop(pending);
+		switches.waiting.push_back(Switch { device, reply });
+		drop(switches);
 
-		self.mailbox.woken.notify_one();
+		self.mailbox.wake();
 		Ok(())
 	}
 
 	/// Ask the driver to collect retired sinks and retry anything the mixer's
 	/// command queue was too full to take.
 	pub(super) fn sync(&self) {
-		self.mailbox.pending.lock().unwrap().sync = true;
-		self.mailbox.woken.notify_one();
+		self.mailbox.signals.sync.store(true, Ordering::Release);
+		self.mailbox.wake();
 	}
 
-	/// Stop the driver. Reliable however saturated the switch queue is, since
-	/// this is a flag rather than something that needs a slot.
+	/// Stop the driver. A flag rather than a queued message, so saturation
+	/// cannot delay or drop it.
 	pub(super) fn shutdown(&self) {
-		let mut pending = self.mailbox.pending.lock().unwrap();
-		pending.shutdown = true;
-		// The driver stops serving these, so drop the replies here. Otherwise a
-		// caller waits out the process on a switch that will never be answered.
-		pending.switches.clear();
-		drop(pending);
+		self.mailbox.signals.shutdown.store(true, Ordering::Release);
 
-		self.mailbox.woken.notify_one();
+		// Answer everyone still waiting. The driver stops serving these, so
+		// dropping the replies here is what tells those callers the thread is
+		// gone instead of leaving them parked forever.
+		let mut switches = self.mailbox.switches.lock().unwrap();
+		switches.closed = true;
+		switches.waiting.clear();
+		drop(switches);
+
+		self.mailbox.wake();
 	}
 
 	/// Tell the driver its live stream has failures waiting.
+	///
+	/// Reached from cpal's error callback, so this must stay lock-free.
 	fn failed(&self) {
-		self.mailbox.pending.lock().unwrap().failed = true;
-		self.mailbox.woken.notify_one();
+		self.mailbox.signals.failed.store(true, Ordering::Release);
+		self.mailbox.wake();
+	}
+}
+
+impl Mailbox {
+	/// Wake the driver, or leave a permit if it has not parked yet.
+	///
+	/// Lock-free and allocation-free: safe to call from an audio callback.
+	fn wake(&self) {
+		if let Some(driver) = self.driver.get() {
+			driver.unpark();
+		}
 	}
 }
 
@@ -441,38 +476,51 @@ pub(super) struct Requests {
 }
 
 impl Requests {
+	/// Let senders wake this thread.
+	///
+	/// Called before the driver can park. A signal raised before this lands
+	/// wakes nobody, which is harmless only because the wait below always
+	/// re-checks every signal before parking.
+	fn attach(&self) {
+		let _ = self.mailbox.driver.set(std::thread::current());
+	}
+
 	/// Block until there is something to do, or until `deadline` passes.
 	///
 	/// Shutdown wins over everything: once the last handle is gone there is no
 	/// point opening a device. Nothing is stranded by that, since a shutdown
 	/// answers the switches it overtakes and refuses any that follow.
 	fn wait(&self, deadline: Option<Instant>) -> Work {
-		let mut pending = self.mailbox.pending.lock().unwrap();
+		let signals = &self.mailbox.signals;
 
 		loop {
-			if pending.shutdown {
+			if signals.shutdown.load(Ordering::Acquire) {
 				return Work::Shutdown;
-			} else if let Some(Switch { device, reply }) = pending.switches.pop_front() {
+			} else if let Some(Switch { device, reply }) = self.mailbox.switches.lock().unwrap().waiting.pop_front() {
 				return Work::Switch { device, reply };
-			} else if std::mem::take(&mut pending.failed) {
+			} else if signals.failed.swap(false, Ordering::AcqRel) {
 				return Work::Failed;
-			} else if std::mem::take(&mut pending.sync) {
+			} else if signals.sync.swap(false, Ordering::AcqRel) {
 				return Work::Sync;
 			}
 
+			// Nothing pending. A sender that raced the checks above either
+			// unparked us already, leaving a permit that returns from the park
+			// below at once, or has yet to signal and will unpark us after it
+			// does. Either way the loop re-checks before sleeping again.
 			let Some(at) = deadline else {
-				pending = self.mailbox.woken.wait(pending).unwrap();
+				std::thread::park();
 				continue;
 			};
 
 			// Real work outranks the backoff, so the deadline is only reported
-			// once the loop above has found nothing else to do.
+			// once the checks above have found nothing else to do.
 			let wait = at.saturating_duration_since(Instant::now());
 			if wait.is_zero() {
 				return Work::Retry;
 			}
 
-			pending = self.mailbox.woken.wait_timeout(pending, wait).unwrap().0;
+			std::thread::park_timeout(wait);
 		}
 	}
 }
@@ -488,50 +536,108 @@ pub(super) fn channel() -> (Commands, Requests) {
 	)
 }
 
+/// Unclassified error kinds worth naming in a log, indexed by the code
+/// [`Failures::last`] holds. Zero means nothing recorded.
+///
+/// A code rather than the `cpal::Error` itself: the error owns a message, so
+/// keeping one would mean freeing the previous one on the audio thread.
+const UNCLASSIFIED: [cpal::ErrorKind; 9] = [
+	cpal::ErrorKind::DeviceBusy,
+	cpal::ErrorKind::HostUnavailable,
+	cpal::ErrorKind::InvalidInput,
+	cpal::ErrorKind::PermissionDenied,
+	cpal::ErrorKind::ResourceExhausted,
+	cpal::ErrorKind::UnsupportedConfig,
+	cpal::ErrorKind::UnsupportedOperation,
+	cpal::ErrorKind::BackendError,
+	cpal::ErrorKind::Other,
+];
+
+fn code(kind: cpal::ErrorKind) -> u8 {
+	// `ErrorKind` is `#[non_exhaustive]`, so a kind added upstream simply has no
+	// code and logs as the count alone.
+	UNCLASSIFIED.iter().position(|k| *k == kind).map_or(0, |i| i as u8 + 1)
+}
+
+fn named(code: u8) -> Option<cpal::ErrorKind> {
+	UNCLASSIFIED.get(usize::from(code.checked_sub(1)?)).copied()
+}
+
 /// Failures the live stream has reported since the driver last looked.
 ///
-/// Fixed size: the counters saturate at the limits that act on them and only
-/// the most recent unclassified error is kept, so a flood costs no more storage
-/// than a single failure. Replacing a stream replaces this state, so a retired
-/// callback can only write somewhere the driver never reads again.
+/// Every field is an atomic because cpal's error callback writes them from the
+/// audio thread. Fixed size too: the counters saturate at the limits that act
+/// on them and only the latest unclassified kind is kept, so a storm costs no
+/// more storage than one failure. Replacing a stream replaces this state, so a
+/// retired callback can only write somewhere the driver never reads again.
 #[derive(Default)]
 struct Failures {
+	unavailable: AtomicBool,
+	invalidated: AtomicBool,
+	changed: AtomicBool,
+	realtime_denied: AtomicBool,
+	xruns: AtomicU32,
+	unclassified: AtomicU32,
+	last: AtomicU8,
+}
+
+impl Failures {
+	fn record(&self, kind: cpal::ErrorKind) {
+		match kind {
+			cpal::ErrorKind::DeviceNotAvailable => self.unavailable.store(true, Ordering::Release),
+			cpal::ErrorKind::StreamInvalidated => self.invalidated.store(true, Ordering::Release),
+			cpal::ErrorKind::DeviceChanged => self.changed.store(true, Ordering::Release),
+			cpal::ErrorKind::RealtimeDenied => self.realtime_denied.store(true, Ordering::Release),
+			cpal::ErrorKind::Xrun => increment(&self.xruns, UNDERRUN_LIMIT + 1),
+			_ => {
+				increment(&self.unclassified, ERROR_LIMIT);
+				self.last.store(code(kind), Ordering::Release);
+			}
+		}
+	}
+
+	fn take(&self) -> FailureBatch {
+		FailureBatch {
+			unavailable: self.unavailable.swap(false, Ordering::AcqRel),
+			invalidated: self.invalidated.swap(false, Ordering::AcqRel),
+			changed: self.changed.swap(false, Ordering::AcqRel),
+			realtime_denied: self.realtime_denied.swap(false, Ordering::AcqRel),
+			xruns: self.xruns.swap(0, Ordering::AcqRel),
+			unclassified: self.unclassified.swap(0, Ordering::AcqRel),
+			last: named(self.last.swap(0, Ordering::AcqRel)),
+		}
+	}
+}
+
+fn increment(counter: &AtomicU32, limit: u32) {
+	let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+		Some(current.saturating_add(1).min(limit))
+	});
+}
+
+struct FailureBatch {
 	unavailable: bool,
 	invalidated: bool,
 	changed: bool,
 	realtime_denied: bool,
 	xruns: u32,
 	unclassified: u32,
-	/// The most recent unclassified error, so the warning names something.
-	last: Option<cpal::Error>,
+	last: Option<cpal::ErrorKind>,
 }
 
-impl Failures {
-	fn record(&mut self, error: cpal::Error) {
-		match error.kind() {
-			cpal::ErrorKind::DeviceNotAvailable => self.unavailable = true,
-			cpal::ErrorKind::StreamInvalidated => self.invalidated = true,
-			cpal::ErrorKind::DeviceChanged => self.changed = true,
-			cpal::ErrorKind::RealtimeDenied => self.realtime_denied = true,
-			cpal::ErrorKind::Xrun => self.xruns = self.xruns.saturating_add(1).min(UNDERRUN_LIMIT + 1),
-			_ => {
-				self.unclassified = self.unclassified.saturating_add(1).min(ERROR_LIMIT);
-				self.last = Some(error);
-			}
-		}
-	}
-}
-
-/// Handed to one stream's error callback, which is a plain thread rather than
-/// the audio callback, so taking a lock here is fine.
+/// Handed to one stream's error callback.
 struct FailureReporter {
-	failures: Arc<Mutex<Failures>>,
+	failures: Arc<Failures>,
 	commands: Commands,
 }
 
 impl FailureReporter {
-	fn report(&self, error: cpal::Error) {
-		self.failures.lock().unwrap().record(error);
+	/// Record a failure and wake the driver.
+	///
+	/// cpal raises this from the audio thread on most backends, so nothing here
+	/// may allocate, lock, or block.
+	fn report(&self, error: &cpal::Error) {
+		self.failures.record(error.kind());
 		self.commands.failed();
 	}
 }
@@ -562,6 +668,8 @@ pub(super) fn run(
 		unclassified: 0,
 		window: Instant::now(),
 	};
+
+	requests.attach();
 
 	let first = driver.start();
 	let started = first.is_ok();
@@ -606,7 +714,7 @@ struct Driver {
 	retired: Option<Receiver<mixer::Retired>>,
 	/// Failure state for the live stream only. Replaced with the stream, so a
 	/// retired callback's writes are never read.
-	failures: Option<Arc<Mutex<Failures>>>,
+	failures: Option<Arc<Failures>>,
 	/// Delay before reopening a device that would not start, doubling per failure.
 	retry: Duration,
 	/// When a failed start may be retried, and what the command wait times out
@@ -647,7 +755,7 @@ impl Driver {
 		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
 		let mixer = Mixer::new(rx, retired_tx, rate, channels);
 
-		let failures = Arc::new(Mutex::new(Failures::default()));
+		let failures = Arc::new(Failures::default());
 		let reporter = FailureReporter {
 			failures: failures.clone(),
 			commands: self.commands.clone(),
@@ -718,7 +826,7 @@ impl Driver {
 					}
 				},
 				move |error| {
-					failures.report(error);
+					failures.report(&error);
 				},
 				None,
 			)
@@ -791,7 +899,7 @@ impl Driver {
 	/// Whether the failures the live stream has reported require a rebuild.
 	fn should_restart(&mut self) -> bool {
 		let Some(failures) = &self.failures else { return false };
-		let failures = std::mem::take(&mut *failures.lock().unwrap());
+		let failures = failures.take();
 		self.roll_window();
 
 		// cpal documents both as survivable: the stream keeps running and needs
@@ -814,8 +922,8 @@ impl Driver {
 			return true;
 		}
 
-		if let Some(err) = &failures.last {
-			tracing::warn!(%err, count = failures.unclassified, "audio output error");
+		if let Some(kind) = failures.last {
+			tracing::warn!(%kind, count = failures.unclassified, "audio output error");
 		}
 		self.unclassified = self.unclassified.saturating_add(failures.unclassified);
 		if self.unclassified >= ERROR_LIMIT {
@@ -974,11 +1082,11 @@ mod tests {
 	}
 
 	/// Every notification class has fixed storage however hard it is hit, and a
-	/// flood collapses into the single wake the driver acts on.
+	/// flood collapses into one wake per class.
 	#[test]
 	fn notification_floods_are_coalesced() {
 		let (commands, requests) = channel();
-		let failures = Arc::new(Mutex::new(Failures::default()));
+		let failures = Arc::new(Failures::default());
 		let reporter = FailureReporter {
 			failures: failures.clone(),
 			commands: commands.clone(),
@@ -994,22 +1102,47 @@ mod tests {
 				cpal::ErrorKind::Xrun,
 				cpal::ErrorKind::BackendError,
 			] {
-				reporter.report(cpal::Error::new(kind));
+				reporter.report(&cpal::Error::new(kind));
 			}
 		}
 
-		assert!(requests.mailbox.pending.lock().unwrap().switches.is_empty());
+		assert!(requests.mailbox.switches.lock().unwrap().waiting.is_empty());
 		assert!(matches!(poll(&requests), Some(Work::Failed)));
 		assert!(matches!(poll(&requests), Some(Work::Sync)));
 		assert!(poll(&requests).is_none(), "a flood outlived its coalesced wakes");
 
-		let failures = std::mem::take(&mut *failures.lock().unwrap());
+		let failures = failures.take();
 		assert!(failures.unavailable);
 		assert!(failures.invalidated);
 		assert!(failures.changed);
 		assert!(failures.realtime_denied);
 		assert_eq!(failures.xruns, UNDERRUN_LIMIT + 1);
 		assert_eq!(failures.unclassified, ERROR_LIMIT);
+		assert_eq!(failures.last, Some(cpal::ErrorKind::BackendError));
+	}
+
+	/// cpal raises the error callback from the audio thread on most backends, so
+	/// a report must never wait on a lock another thread is holding. Reporting
+	/// while the switch queue is locked would deadlock the audio thread if the
+	/// failure path touched it.
+	#[test]
+	fn reporting_a_failure_never_waits_on_the_mailbox() {
+		let (commands, requests) = channel();
+		let failures = Arc::new(Failures::default());
+		let reporter = FailureReporter {
+			failures: failures.clone(),
+			commands: commands.clone(),
+		};
+
+		// Held for the whole report. If the failure path took this lock, the
+		// audio thread would be stuck here until another thread let go.
+		let held = requests.mailbox.switches.lock().unwrap();
+		reporter.report(&cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable));
+		commands.sync();
+		drop(held);
+
+		assert!(failures.take().unavailable, "the failure never landed");
+		assert!(requests.mailbox.signals.sync.load(Ordering::Acquire));
 	}
 
 	/// A switch either takes one of the fixed slots or reports overload before
@@ -1058,10 +1191,7 @@ mod tests {
 		let responses: Vec<_> = (0..DRIVER_QUEUE).map(|_| queue_switch(&commands)).collect();
 
 		drop(handle);
-		assert!(
-			matches!(poll(&requests), Some(Work::Shutdown)),
-			"saturation lost shutdown"
-		);
+		assert!(matches!(poll(&requests), Some(Work::Shutdown)), "saturation lost shutdown");
 
 		// The driver returns rather than serving the backlog, so every waiting
 		// caller learns the thread stopped instead of hanging on its reply.
@@ -1073,17 +1203,19 @@ mod tests {
 		assert!(matches!(error, Error::Playback(message) if message.contains("stopped")));
 	}
 
-	/// A driver blocked with nothing queued has to be woken by the next
+	/// A driver parked with nothing pending has to be woken by the next
 	/// notification, whatever else raced with it. Losing this wake stranded a
 	/// sink registration, or the shutdown that closes the device.
 	#[test]
-	fn a_blocked_driver_is_woken() {
+	fn a_parked_driver_is_woken() {
 		let (commands, requests) = channel();
 		let (sent, arrived) = std::sync::mpsc::channel();
 
 		let waker = commands.clone();
 		let driver = std::thread::spawn(move || {
-			// Deadlines rather than a plain block, so a lost wake fails the test
+			requests.attach();
+
+			// Deadlines rather than a plain park, so a lost wake fails the test
 			// instead of hanging it.
 			let woken = matches!(requests.wait(Some(Instant::now() + PATIENCE)), Work::Sync);
 			sent.send(()).unwrap();
@@ -1100,7 +1232,7 @@ mod tests {
 			(woken, stopped)
 		});
 
-		// Let the driver reach `wait` with an empty mailbox, then race a flood
+		// Let the driver reach `park` with an empty mailbox, then race a flood
 		// of notifications against it.
 		std::thread::sleep(Duration::from_millis(10));
 		std::thread::scope(|s| {
@@ -1117,14 +1249,32 @@ mod tests {
 		assert!(stopped, "a shutdown never woke the driver");
 	}
 
+	/// A signal raised before the driver registers itself wakes nobody, so the
+	/// first check has to find it rather than parking through it.
+	#[test]
+	fn a_signal_racing_startup_is_not_slept_through() {
+		let (commands, requests) = channel();
+		commands.sync();
+
+		let driver = std::thread::spawn(move || {
+			requests.attach();
+			requests.wait(Some(Instant::now() + PATIENCE))
+		});
+
+		assert!(
+			matches!(driver.join().unwrap(), Work::Sync),
+			"a signal raised before attach was slept through"
+		);
+	}
+
 	/// A stream that has already been replaced can still report an error. Acting
 	/// on it tears down the healthy stream that replaced it.
 	#[test]
 	fn ignores_errors_from_a_replaced_stream() {
 		let w = wired(8);
 		let (commands, _requests) = channel();
-		let stale = Arc::new(Mutex::new(Failures::default()));
-		let current = Arc::new(Mutex::new(Failures::default()));
+		let stale = Arc::new(Failures::default());
+		let current = Arc::new(Failures::default());
 		let stale_reporter = FailureReporter {
 			failures: stale,
 			commands: commands.clone(),
@@ -1145,10 +1295,10 @@ mod tests {
 		};
 
 		let lost = cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable);
-		stale_reporter.report(lost.clone());
+		stale_reporter.report(&lost);
 		assert!(!driver.should_restart(), "acted on a retired stream's error");
 
-		current.lock().unwrap().record(lost);
+		current.record(lost.kind());
 		assert!(driver.should_restart(), "ignored the live stream's error");
 	}
 }
