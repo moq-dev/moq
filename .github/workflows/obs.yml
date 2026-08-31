@@ -98,4 +98,4 @@ jobs:
       - name: Build
         run: nix develop --command env -u RUSTC_WRAPPER just obs ci
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx

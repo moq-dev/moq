@@ -102,13 +102,13 @@ jobs:
       - name: Check
         run: nix develop --command env -u RUSTC_WRAPPER just check-all
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx
           MOQ_STRICT: 1
 
       - name: Test
         if: ${{ !cancelled() }}
         run: nix develop --command env -u RUSTC_WRAPPER just test all
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci

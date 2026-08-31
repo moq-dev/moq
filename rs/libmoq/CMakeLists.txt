@@ -41,11 +41,11 @@ if(BUILD_RUST_LIB)
     set(RUST_LIB "${RUST_DIR}/${LIB_PREFIX}moq${LIB_SUFFIX}")
     set(RUST_HEADER "${RUST_TARGET_DIR}/include/moq.h")
 
-    # Same MOQ_CARGO knob the justfiles read, so CI's cache wrapper reaches the
+    # Same RUST_CARGO knob the justfiles read, so CI's cache wrapper reaches the
     # one Rust compile this plugin actually pays for. Without it the env var is
     # set on the job and silently ignored here.
-    if(DEFINED ENV{MOQ_CARGO})
-        set(CARGO_COMMAND "$ENV{MOQ_CARGO}")
+    if(DEFINED ENV{RUST_CARGO})
+        set(CARGO_COMMAND "$ENV{RUST_CARGO}")
     else()
         set(CARGO_COMMAND "cargo")
     endif()

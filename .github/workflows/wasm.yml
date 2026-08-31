@@ -104,4 +104,4 @@ jobs:
         run: nix develop --command env -u RUSTC_WRAPPER just test wasm
         shell: bash -leo pipefail {0}
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx

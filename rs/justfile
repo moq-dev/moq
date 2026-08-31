@@ -17,7 +17,7 @@ set working-directory := '..'
 # `fix`/`wasm-fix` run `cargo fix`, which drops rustc wrappers. `fuzz` puts
 # nightly on PATH so a bare cargo/rustc resolve to it, and the sanitizer flags
 # are what break if anything else sits in front.
-cargo_compile := env_var_or_default("MOQ_CARGO", "cargo")
+cargo_compile := env_var_or_default("RUST_CARGO", "cargo")
 
 default:
     just check

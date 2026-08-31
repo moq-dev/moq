@@ -76,7 +76,7 @@ jobs:
       - name: Check
         run: nix develop --command env -u RUSTC_WRAPPER just check
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx
           MOQ_STRICT: 1
 
   test:
@@ -120,6 +120,6 @@ jobs:
       - name: Test
         run: nix develop --command env -u RUSTC_WRAPPER just test
         env:
-          MOQ_CARGO: mbx
+          RUST_CARGO: mbx
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci
