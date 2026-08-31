@@ -95,7 +95,6 @@ Hop IDs SHOULD be unique among the endpoints an advertisement can traverse.
 An endpoint MAY generate one randomly, since collisions across a 64-bit space are unlikely, or use a stable configured identifier that survives restarts.
 
 Loop detection and origin identification compare Hop IDs for equality, so two endpoints sharing a Hop ID are indistinguishable.
-Redundant publishers producing interchangeable content MAY share one deliberately, so a receiver treats their paths as failover options for the same content ({{selection}}).
 
 ## The Reserved Hop ID 0 {#zero}
 **0 means "no identity"** and is reserved.
@@ -104,7 +103,7 @@ It is used for an endpoint that did not negotiate this extension, and an endpoin
 Because any number of endpoints can be 0, it identifies nothing, which constrains all three uses:
 
 - **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself, and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. A receiver MUST NOT treat two such advertisements as interchangeable ({{selection}}). Updating one advertisement is not two ({{updating}}).
+- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. Updating one advertisement is not two ({{updating}}).
 - **Filtering**: a peer that declared 0 declared no identity, so there is nothing on the wire to filter that session on. A receiver MAY assign one ({{assigned}}), which covers what it attributes to that session itself but not an advertisement that arrived carrying its own HOP_PATH.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
@@ -119,10 +118,10 @@ An advertisement that arrives carrying its own HOP_PATH names the sender there, 
 So an assigned ID governs the advertisements a receiver attributed itself, and a peer that both declares 0 and sends its own HOP_PATH keeps the consequences in {{zero}}.
 
 An assigned ID MUST NOT be shared between peers not known to be the same endpoint.
-Sharing one makes their content interchangeable ({{selection}}) and suppresses each one's advertisements to the other, so two unrelated publishers would be spliced into one and starve each other of routes.
+Sharing one suppresses each one's advertisements to the other, so two unrelated publishers would starve each other of routes.
 
 How an endpoint scopes the ID follows from what it can establish about the peer.
-One it authenticated, or one it dialed and therefore chose, SHOULD get a single stable ID, which additionally lets reconnects and redundant sessions be recognized as the same content ({{selection}}); assigning per connection there would make one peer look like several.
+One it authenticated, or one it dialed and therefore chose, SHOULD get a single stable ID; assigning per connection there would make one peer look like several.
 An endpoint accepting an anonymous session can establish nothing and cannot correlate it with any other, so it SHOULD assign a distinct ID per session: less than an identity, but enough to keep routes it attributed to that session from being advertised back to it, which is the loop 0 cannot prevent.
 
 An assigned ID is indistinguishable on the wire from a declared one, so it identifies the peer to everyone the receiver forwards to; a peer that declared 0 for anonymity did not ask for that.
@@ -208,11 +207,7 @@ A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 In {{moqt}} an advertisement lives for the lifetime of its stream, so an update on a *new* stream would leave two streams claiming one namespace and let the superseded one retract its replacement.
 An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
 
-Replacement is atomic, so a receiver MUST NOT tear down subscriptions or drop cached state merely because an update arrived.
-What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed, a different publisher has taken over and they do not carry over.
-
-This is the one comparison 0 ({{zero}}) does not decide: it identifies nothing, but there is one advertisement here and the stream carrying it is the continuity.
-An endpoint whose publisher did change MUST withdraw the advertisement (NAMESPACE_DONE or PUBLISH_NAMESPACE_DONE) and advertise again rather than update in place.
+An update is metadata only: it re-prices or re-routes the advertisement and carries no content claim, so a receiver MUST NOT tear down subscriptions or drop cached state merely because one arrived.
 
 The expected case is a ROUTE_COST-only change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -221,8 +216,8 @@ The expected case is a ROUTE_COST-only change, which is how a relay signals that
 A receiver holding advertisements for the same namespace over several sessions SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy such as measured RTT instead.
 
-Two advertisements whose HOP_PATH begins with the same non-zero Hop ID share a publisher and carry interchangeable content, so a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor.
-If the first entries differ, or either is 0, they are distinct publishers reusing a namespace: a receiver MUST NOT treat them as interchangeable and SHOULD treat the later as replacing the earlier.
+An advertisement carries no content identity: nothing promises that two paths to one namespace serve interchangeable bytes.
+A receiver MUST NOT splice an active subscription across sessions; when the serving session's advertisement goes away, subscriptions through it end, and the receiver re-subscribes through the best remaining path.
 
 A publisher MUST NOT advertise a path whose HOP_PATH contains the Hop ID that peer declared.
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
