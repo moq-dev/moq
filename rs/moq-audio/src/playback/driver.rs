@@ -7,10 +7,10 @@
 //! straight to the mixer.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(feature = "aec")]
 use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -485,43 +485,76 @@ impl Requests {
 		let _ = self.mailbox.driver.set(std::thread::current());
 	}
 
-	/// Block until there is something to do, or until `deadline` passes.
+	/// Whatever is pending right now, or `None` if the driver would have to wait.
 	///
-	/// Shutdown wins over everything: once the last handle is gone there is no
-	/// point opening a device. Nothing is stranded by that, since a shutdown
-	/// answers the switches it overtakes and refuses any that follow.
-	fn wait(&self, deadline: Option<Instant>) -> Work {
+	/// The order here is the driver's whole priority policy, in one place so a
+	/// probe and a blocking wait cannot disagree about it.
+	fn poll(&self, deadline: Option<Instant>) -> Option<Work> {
 		let signals = &self.mailbox.signals;
 
+		// Shutdown wins over everything: once the last handle is gone there is
+		// no point opening a device. Nothing is stranded by that, since a
+		// shutdown answers the switches it overtakes and refuses any that follow.
+		if signals.shutdown.load(Ordering::Acquire) {
+			return Some(Work::Shutdown);
+		}
+
+		// Ahead of the retry: a switch reopens the device itself, which is what
+		// the retry was waiting to do anyway. Switches are capped and
+		// caller-driven, so they cannot crowd it out.
+		if let Some(Switch { device, reply }) = self.mailbox.switches.lock().unwrap().waiting.pop_front() {
+			return Some(Work::Switch { device, reply });
+		}
+
+		// A due retry outranks the signals below, which re-arm themselves.
+		// Serving those first would let steady sink churn keep a dead device
+		// from ever being reopened.
+		if deadline.is_some_and(|at| Instant::now() >= at) {
+			return Some(Work::Retry);
+		}
+
+		if signals.failed.swap(false, Ordering::AcqRel) {
+			return Some(Work::Failed);
+		}
+		if signals.sync.swap(false, Ordering::AcqRel) {
+			return Some(Work::Sync);
+		}
+
+		None
+	}
+
+	/// Block until there is something to do, or until `deadline` passes.
+	fn wait(&self, deadline: Option<Instant>) -> Work {
 		loop {
-			if signals.shutdown.load(Ordering::Acquire) {
-				return Work::Shutdown;
-			} else if let Some(Switch { device, reply }) = self.mailbox.switches.lock().unwrap().waiting.pop_front() {
-				return Work::Switch { device, reply };
-			} else if signals.failed.swap(false, Ordering::AcqRel) {
-				return Work::Failed;
-			} else if signals.sync.swap(false, Ordering::AcqRel) {
-				return Work::Sync;
+			if let Some(work) = self.poll(deadline) {
+				return work;
 			}
 
-			// Nothing pending. A sender that raced the checks above either
+			// Nothing pending. A sender that raced the poll above either
 			// unparked us already, leaving a permit that returns from the park
 			// below at once, or has yet to signal and will unpark us after it
-			// does. Either way the loop re-checks before sleeping again.
-			let Some(at) = deadline else {
-				std::thread::park();
-				continue;
-			};
-
-			// Real work outranks the backoff, so the deadline is only reported
-			// once the checks above have found nothing else to do.
-			let wait = at.saturating_duration_since(Instant::now());
-			if wait.is_zero() {
-				return Work::Retry;
+			// does. Either way the loop polls again before sleeping, so an
+			// early wake costs a lap rather than a spurious retry.
+			match deadline {
+				Some(at) => std::thread::park_timeout(at.saturating_duration_since(Instant::now())),
+				None => std::thread::park(),
 			}
-
-			std::thread::park_timeout(wait);
 		}
+	}
+}
+
+/// Closing the mailbox behind a driver that is gone, so a caller gets the
+/// stopped error instead of awaiting a reply nobody is left to send.
+///
+/// Covers an unexpected exit as much as an orderly one: only [`Commands::shutdown`]
+/// closes the queue on the way out, and a driver that unwound never called it.
+impl Drop for Requests {
+	fn drop(&mut self) {
+		// The driver may have unwound while holding this, and a panic inside a
+		// drop would abort.
+		let mut switches = self.mailbox.switches.lock().unwrap_or_else(|err| err.into_inner());
+		switches.closed = true;
+		switches.waiting.clear();
 	}
 }
 
@@ -588,9 +621,11 @@ impl Failures {
 			cpal::ErrorKind::StreamInvalidated => self.invalidated.store(true, Ordering::Release),
 			cpal::ErrorKind::DeviceChanged => self.changed.store(true, Ordering::Release),
 			cpal::ErrorKind::RealtimeDenied => self.realtime_denied.store(true, Ordering::Release),
-			cpal::ErrorKind::Xrun => increment(&self.xruns, UNDERRUN_LIMIT + 1),
+			cpal::ErrorKind::Xrun => {
+				self.xruns.fetch_add(1, Ordering::AcqRel);
+			}
 			_ => {
-				increment(&self.unclassified, ERROR_LIMIT);
+				self.unclassified.fetch_add(1, Ordering::AcqRel);
 				self.last.store(code(kind), Ordering::Release);
 			}
 		}
@@ -602,17 +637,14 @@ impl Failures {
 			invalidated: self.invalidated.swap(false, Ordering::AcqRel),
 			changed: self.changed.swap(false, Ordering::AcqRel),
 			realtime_denied: self.realtime_denied.swap(false, Ordering::AcqRel),
-			xruns: self.xruns.swap(0, Ordering::AcqRel),
-			unclassified: self.unclassified.swap(0, Ordering::AcqRel),
+			// Clamped here rather than on the way in: `fetch_add` is one
+			// instruction, where a saturating compare-exchange loop could spin
+			// on the audio thread.
+			xruns: self.xruns.swap(0, Ordering::AcqRel).min(UNDERRUN_LIMIT + 1),
+			unclassified: self.unclassified.swap(0, Ordering::AcqRel).min(ERROR_LIMIT),
 			last: named(self.last.swap(0, Ordering::AcqRel)),
 		}
 	}
-}
-
-fn increment(counter: &AtomicU32, limit: u32) {
-	let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-		Some(current.saturating_add(1).min(limit))
-	});
 }
 
 struct FailureBatch {
@@ -984,14 +1016,6 @@ mod tests {
 	/// test that waits this out.
 	const PATIENCE: Duration = Duration::from_secs(5);
 
-	/// What the driver would find without blocking, or `None` if it would wait.
-	fn poll(driver: &Requests) -> Option<Work> {
-		match driver.wait(Some(Instant::now())) {
-			Work::Retry => None,
-			work => Some(work),
-		}
-	}
-
 	fn queue_switch(commands: &Commands) -> tokio::sync::oneshot::Receiver<Result<(), Error>> {
 		let (reply, response) = tokio::sync::oneshot::channel();
 		commands.switch(None, reply).unwrap();
@@ -1033,13 +1057,13 @@ mod tests {
 
 		let sink = engine.sink(Input::default()).unwrap();
 		assert!(
-			matches!(poll(&w.driver), Some(Work::Sync)),
+			matches!(w.driver.poll(None), Some(Work::Sync)),
 			"adding a sink did not wake the driver"
 		);
 
 		drop(sink);
 		assert!(
-			matches!(poll(&w.driver), Some(Work::Sync)),
+			matches!(w.driver.poll(None), Some(Work::Sync)),
 			"dropping a sink did not wake the driver"
 		);
 	}
@@ -1107,9 +1131,9 @@ mod tests {
 		}
 
 		assert!(requests.mailbox.switches.lock().unwrap().waiting.is_empty());
-		assert!(matches!(poll(&requests), Some(Work::Failed)));
-		assert!(matches!(poll(&requests), Some(Work::Sync)));
-		assert!(poll(&requests).is_none(), "a flood outlived its coalesced wakes");
+		assert!(matches!(requests.poll(None), Some(Work::Failed)));
+		assert!(matches!(requests.poll(None), Some(Work::Sync)));
+		assert!(requests.poll(None).is_none(), "a flood outlived its coalesced wakes");
 
 		let failures = failures.take();
 		assert!(failures.unavailable);
@@ -1157,7 +1181,7 @@ mod tests {
 		assert!(matches!(error, Error::Playback(message) if message.contains("busy")));
 
 		for response in responses {
-			let Some(Work::Switch { reply, .. }) = poll(&requests) else {
+			let Some(Work::Switch { reply, .. }) = requests.poll(None) else {
 				panic!("a switch went missing");
 			};
 			reply.send(Ok(())).unwrap();
@@ -1175,9 +1199,12 @@ mod tests {
 		commands.sync();
 
 		for _ in 0..DRIVER_QUEUE {
-			assert!(matches!(poll(&requests), Some(Work::Switch { .. })));
+			assert!(matches!(requests.poll(None), Some(Work::Switch { .. })));
 		}
-		assert!(matches!(poll(&requests), Some(Work::Sync)), "saturation lost a sync");
+		assert!(
+			matches!(requests.poll(None), Some(Work::Sync)),
+			"saturation lost a sync"
+		);
 	}
 
 	/// The last handle must stop a saturated driver rather than leaking the
@@ -1191,7 +1218,10 @@ mod tests {
 		let responses: Vec<_> = (0..DRIVER_QUEUE).map(|_| queue_switch(&commands)).collect();
 
 		drop(handle);
-		assert!(matches!(poll(&requests), Some(Work::Shutdown)), "saturation lost shutdown");
+		assert!(
+			matches!(requests.poll(None), Some(Work::Shutdown)),
+			"saturation lost shutdown"
+		);
 
 		// The driver returns rather than serving the backlog, so every waiting
 		// caller learns the thread stopped instead of hanging on its reply.
@@ -1265,6 +1295,63 @@ mod tests {
 			matches!(driver.join().unwrap(), Work::Sync),
 			"a signal raised before attach was slept through"
 		);
+	}
+
+	/// A device that failed to open has to get its retry even while sinks churn.
+	/// Sync and failure re-arm themselves, so serving them first would leave
+	/// playback down for as long as the churn lasted.
+	#[test]
+	fn a_due_retry_outranks_reasserted_signals() {
+		let (commands, requests) = channel();
+		let due = Instant::now();
+
+		for _ in 0..8 {
+			commands.sync();
+			assert!(
+				matches!(requests.wait(Some(due)), Work::Retry),
+				"steady sink churn starved the device retry"
+			);
+		}
+	}
+
+	/// An early wake costs a lap, not a retry: the deadline is what decides,
+	/// not the fact that the park returned.
+	#[test]
+	fn an_early_wake_does_not_fake_a_retry() {
+		let (commands, requests) = channel();
+
+		let waker = commands.clone();
+		let driver = std::thread::spawn(move || {
+			requests.attach();
+			// A deadline far enough out that only the unpark below can end the
+			// park, so a Retry here would mean the deadline was misread.
+			requests.wait(Some(Instant::now() + PATIENCE))
+		});
+
+		std::thread::sleep(Duration::from_millis(10));
+		waker.sync();
+
+		assert!(
+			matches!(driver.join().unwrap(), Work::Sync),
+			"an early wake was reported as a retry"
+		);
+	}
+
+	/// A driver that unwinds takes the mailbox down with it. Without that, a
+	/// switch is queued for a receiver that no longer exists and its caller
+	/// awaits a reply forever.
+	#[test]
+	fn losing_the_driver_releases_switch_callers() {
+		let (commands, requests) = channel();
+		let queued = queue_switch(&commands);
+
+		drop(requests);
+
+		assert!(queued.blocking_recv().is_err(), "a queued switch outlived its driver");
+
+		let (reply, _response) = tokio::sync::oneshot::channel();
+		let error = commands.switch(None, reply).unwrap_err();
+		assert!(matches!(error, Error::Playback(message) if message.contains("stopped")));
 	}
 
 	/// A stream that has already been replaced can still report an error. Acting
