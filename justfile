@@ -3,7 +3,7 @@
 
 set unstable
 
-# CI sets this to `mbx`; local recipes keep using Cargo directly.
+# Plain `cargo` unless set; CI sets it to `mbx`. See rs/justfile for the rule.
 cargo_compile := env_var_or_default("MOQ_CARGO", "cargo")
 
 # Per-language modules. Language-specific recipes live in their own justfiles.
