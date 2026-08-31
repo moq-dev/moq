@@ -1,0 +1,35 @@
+# m3: prototypes
+
+## Goal
+
+Experiments, spikes, hardware validation, and measured go/no-go verdicts.
+A written-down abandonment is a valid outcome for everything here.
+
+## Plan
+
+Nothing in this milestone blocks a release. Promote a quest into m2 when
+its verdict lands and the follow-on work becomes concrete.
+
+## Quests
+
+- [Plan: iroh upstreaming](/quest/m3/plan-iroh-upstreaming.md) - slim the iroh-live upstreaming epic to its surviving leaves via /plan-quest
+- [#2481](/quest/m3/2481-merge-iroh-lives-native-media-stack-into-moq-video-moq.md) - Merge iroh-live's native media stack into moq-video/moq-audio (upstreaming plan)
+- [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
+- [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
+- [Plan: Dart bindings](/quest/m3/plan-dart-bindings.md) - run the uniffi-dart spike and let its verdict gate the rest via /plan-quest
+- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - Dart/Flutter bindings via UniFFI
+- [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - choose the custom-QUIC foundation by scored measurement
+- [#3203](/quest/m3/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
+- [#3205](/quest/m3/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
+- [Quiche GCC](/quest/m3/quiche-gcc.md) - a measured verdict on delay-based congestion control for media egress
+- [Quiche FEC](/quest/m3/quiche-fec.md) - a measured verdict on transport-level FEC vs retransmission
+- [SEI delivery](/quest/m3/sei-delivery.md) - prove a sidecar can reach a live stitcher before video; a no-go keeps SEI in-band
+- [#697](/quest/m3/697-conferencing-demo.md) - Conferencing Demo
+- [#703](/quest/m3/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
+- [#823](/quest/m3/823-svc-support.md) - SVC support?
+- [#1838](/quest/m3/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - TR 101 290 monitoring: requirements (broadcast/contribution health metrics)
+- [Teleoperation](/quest/m3/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
+- [SIP media stack](/quest/m3/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
+- [Carrier voice](/quest/m3/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
+- [LiveKit WebRTC bridge](/quest/m3/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
+- [Vision worker](/quest/m3/processor-vision.md) - a documented customer-run vision worker proves the processor contract

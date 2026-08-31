@@ -1,4 +1,4 @@
-# [M] moq-video: capture negotiates twice, so a window resize between the probe and the first…
+# [M] moq-video: capture negotiates twice, so a window resize between the probe and the first subscriber strands consumers that fixed on the first snapshot
 
 ## Goal
 

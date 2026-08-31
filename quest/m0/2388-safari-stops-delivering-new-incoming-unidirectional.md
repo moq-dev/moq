@@ -1,4 +1,4 @@
-# [L] Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one…
+# [L] Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one stream per group exhausts that in about two minutes of playback
 
 ## Goal
 

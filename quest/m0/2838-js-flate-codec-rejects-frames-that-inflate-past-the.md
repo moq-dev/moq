@@ -1,4 +1,4 @@
-# [M] js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test…
+# [M] js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test load
 
 ## Goal
 

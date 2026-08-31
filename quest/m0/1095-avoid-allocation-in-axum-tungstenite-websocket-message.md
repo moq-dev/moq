@@ -1,4 +1,4 @@
-# [S] Avoid allocation in axum/tungstenite WebSocket message conversion
+# [XS] Avoid allocation in axum/tungstenite WebSocket message conversion
 
 ## Goal
 
@@ -7,9 +7,9 @@ within the issue's stated scope and boundaries.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Still real on main, and now trivial: the lockfile resolves a single
+tungstenite 0.29 and both Binary variants wrap bytes::Bytes, so the
+conversion can be zero-copy without a version dance.
 
 ### Issue context
 

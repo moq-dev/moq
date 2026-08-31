@@ -1,4 +1,4 @@
-# [M] js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the…
+# [M] js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the first
 
 ## Goal
 

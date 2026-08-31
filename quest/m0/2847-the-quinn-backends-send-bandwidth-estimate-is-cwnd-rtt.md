@@ -72,6 +72,3 @@ Fix chain, cheapest first:
 
 - [#2847](https://github.com/moq-dev/moq/issues/2847) - close this issue when the quest finishes
 
-## Related
-
-- [#2815: Divide the connection bandwidth estimate among concurrent encoders](/quest/m0/2815-divide-the-connection-bandwidth-estimate-among-concurrent.md) - related open work

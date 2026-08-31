@@ -50,7 +50,7 @@ Current decisions, open questions, or implementation guidance.
 
 ## Closes
 
-- [#701](https://github.com/moq-dev/moq.pro/issues/701) - close this issue when the quest finishes
+- [#701](https://github.com/moq-dev/moq/issues/701) - close this issue when the quest finishes
 
 ## Related
 

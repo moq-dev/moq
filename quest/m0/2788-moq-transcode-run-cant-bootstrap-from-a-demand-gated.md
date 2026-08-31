@@ -1,4 +1,4 @@
-# [M] moq-transcode: run() can't bootstrap from a demand-gated source that doesn't advertise its…
+# [M] moq-transcode: run() can't bootstrap from a demand-gated source that doesn't advertise its geometry
 
 ## Goal
 

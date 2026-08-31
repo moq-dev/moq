@@ -1,4 +1,4 @@
-# [M] moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that…
+# [M] moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that wait
 
 ## Goal
 
@@ -7,9 +7,9 @@ within the issue's stated scope and boundaries.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Rescoped during the 2026-08 grooming: implement item 1 only, a crisp PUBLISH
+rejection at every supported draft version. Item 2 (working-group advocacy) is
+not repository work and is dropped from this quest.
 
 ### Issue context
 

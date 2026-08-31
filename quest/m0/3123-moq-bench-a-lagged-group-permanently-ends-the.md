@@ -1,4 +1,4 @@
-# [M] moq-bench: a lagged group permanently ends the subscription, so offered load silently decays…
+# [M] moq-bench: a lagged group permanently ends the subscription, so offered load silently decays mid-run
 
 ## Goal
 

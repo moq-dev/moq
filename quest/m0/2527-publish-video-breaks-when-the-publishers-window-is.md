@@ -1,4 +1,4 @@
-# [L] Publish video breaks when the publisher's window is minimized, on every browser using the…
+# [L] Publish video breaks when the publisher's window is minimized, on every browser using the MediaStreamTrackProcessor polyfill
 
 ## Goal
 

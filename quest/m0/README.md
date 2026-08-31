@@ -1,181 +1,44 @@
-# m0: open issue backlog
+# m0: bug fixes
 
 ## Goal
 
-Resolve every public issue represented here while keeping issue discussion on
-GitHub and durable implementation plans beside the code.
+Defects in what main ships today: crashes, races, protocol violations,
+wrong output, security gaps, and the missing tests that let them through.
 
 ## Plan
 
-Each entry is an independently completable quest. The list starts in GitHub's
-newest-first order because no explicit issue priority exists. Re-rank entries as
-priorities are decided, split oversized quests before implementation, and delete
-each quest in the PR that completes or abandons it.
+Fix on main. Security and credential exposure lead; user-visible breakage
+next; hardening, tooling, and test debt close the list. Each fix lands with a
+regression test per Root Cause First.
 
 ## Quests
 
-- [#3221](/quest/m0/3221-config-stop-cli-defaults-from-clobbering-toml-values.md) - config: stop CLI defaults from clobbering TOML values
-- [#3208](/quest/m0/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - Make 2.5 ms Opus frame durations work across bindings
-- [#3207](/quest/m0/3207-send-valid-publish-done-statuses-for-every-supported-ietf.md) - Send valid PUBLISH_DONE statuses for every supported IETF draft
-- [#3205](/quest/m0/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
-- [#3204](/quest/m0/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [#3203](/quest/m0/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
-- [#3202](/quest/m0/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
-- [#3201](/quest/m0/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - moq-uring: use SENDMSG_ZC for large UDP GSO trains
-- [#3200](/quest/m0/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
-- [#3199](/quest/m0/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
-- [#3193](/quest/m0/3193-expose-a-cancellable-route-watch-api-in-python.md) - Expose a cancellable route watch API in Python
-- [#3190](/quest/m0/3190-align-origin-broadcast-creation-naming-across-language.md) - Align origin broadcast creation naming across language bindings
-- [#3189](/quest/m0/3189-add-uniffi-defaults-to-caller-constructed-configuration.md) - Add UniFFI defaults to caller-constructed configuration records
-- [#3188](/quest/m0/3188-make-every-blocking-go-operation-cancellable-with-context.md) - Make every blocking Go operation cancellable with context.Context
-- [#3187](/quest/m0/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
-- [#3174](/quest/m0/3174-js-publish-audio-encoder-processes-the-first-frame-before.md) - js/publish: Audio Encoder processes the first frame before applying mute or volume
-- [#3173](/quest/m0/3173-moq-uring-worker-drop-submits-an-uncancelled-receive-and.md) - moq-uring: Worker drop submits an uncancelled receive and stalls for 3.2 seconds
-- [#3172](/quest/m0/3172-js-net-a-terminal-reload-failure-can-reconnect-after.md) - js/net: a terminal Reload failure can reconnect after closed rejects
-- [#3171](/quest/m0/3171-js-publish-fanout-with-a-zero-queue-spins-forever.md) - js/publish: Fanout with a zero queue spins forever
-- [#3165](/quest/m0/3165-moq-audio-bound-and-coalesce-playback-driver-commands.md) - moq-audio: bound and coalesce playback driver commands
-- [#3164](/quest/m0/3164-moq-audio-remove-heap-activity-and-blocking-locks-from.md) - moq-audio: remove heap activity and blocking locks from the capture callback
-- [#3161](/quest/m0/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - Retention should reclaim idle open groups now that expiry is timestamp-only
-- [#3160](/quest/m0/3160-moq-tokio-a-noq-only-build-fails-on-three-unrelated.md) - moq-tokio: a noq-only build fails on three unrelated errors, because no crypto provider is selected
-- [#3141](/quest/m0/3141-uring-a-close-can-be-lost-when-the-worker-is-torn-down.md) - uring: a close can be lost when the worker is torn down before its send completes
-- [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
-- [#3137](/quest/m0/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
-- [#3129](/quest/m0/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
-- [#3126](/quest/m0/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
-- [#3124](/quest/m0/3124-moq-tokio-the-quiche-backend-cannot-serve-per-core.md) - moq-tokio: the quiche backend cannot serve per-core workers, so io_uring has no matched control to be measured against
-- [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group permanently ends the subscription, so offered load silently decays mid-run
-- [#3122](/quest/m0/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
-- [#3120](/quest/m0/3120-moq-uring-the-connection-driver-self-wakes-after-every.md) - moq-uring: the connection driver self-wakes after every GSO train, re-walking every ready stream per turn
-- [#3119](/quest/m0/3119-moq-uring-p50-latency-collapses-at-high-connections-per.md) - moq-uring: p50 latency collapses at high connections per worker; the UDP pools are fixed at 64 tx / 16 rx and the relay never scales them
-- [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: the publication has no generation, so a flush after EOS cannot restart it
-- [#3112](/quest/m0/3112-moq-relay-io-uring-listener-cannot-authenticate-mtls-peers.md) - moq-relay: io_uring listener cannot authenticate mTLS peers
-- [#3111](/quest/m0/3111-moq-uring-unmap-err-reports-unmappable-http-3-codes-as.md) - moq-uring: unmap_err reports unmappable HTTP/3 codes as MoQ application errors
-- [#3107](/quest/m0/3107-moq-relay-certificate-sha256-is-empty-when-io-uring-owns.md) - moq-relay: /certificate.sha256 is empty when io_uring owns QUIC
-- [#3100](/quest/m0/3100-dart-flutter-bindings-via-uniffi.md) - Dart/Flutter bindings via UniFFI
-- [#3094](/quest/m0/3094-ci-cargo-doc-collides-on-target-doc-moq-between-libmoq.md) - CI: cargo doc collides on target/doc/moq between libmoq and moq-cli
-- [#3092](/quest/m0/3092-moq-sock-make-the-reuseport-groups-invariants.md) - moq-sock: make the reuseport group's invariants unrepresentable, not documented
 - [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass --auth-api-mode, so proxy grants can't refuse or scope them
-- [#3086](/quest/m0/3086-refactor-net-make-group-delivery-order-a-handle-and-move.md) - refactor(net): make group delivery order a handle, and move timestamp-based skipping into moq-net
-- [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - fix(watch): audio ring truncate can race the worklet reader for one quantum
-- [#3076](/quest/m0/3076-moq-relay-publish-is-unimplemented-by-design-make-the.md) - moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that wait
-- [#3072](/quest/m0/3072-js-net-a-lite-announce-ok-with-hop-id-0-is-rejected-but.md) - js/net: a lite ANNOUNCE_OK with Hop ID 0 is rejected, but the draft permits it
-- [#3060](/quest/m0/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - moq-net: ban Hop ID 0 from hop chains
-- [#3058](/quest/m0/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by closing it
-- [#3056](/quest/m0/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: video decoder captures the rewind generation at output time, not submit time
-- [#3051](/quest/m0/3051-config-merge-empty-lists-lose-to-the-environment-and-the.md) - Config merge: empty lists lose to the environment, and the file outranks it
-- [#3049](/quest/m0/3049-moq-net-outbound-hop-path-construction-is-never-validated.md) - moq-net: outbound HOP_PATH construction is never validated
-- [#3046](/quest/m0/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - Fold moq-token into moq token via a Usage executable view
-- [#3023](/quest/m0/3023-payloadprocessor-for-encryption-signing.md) - PayloadProcessor for encryption/signing
-- [#3021](/quest/m0/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst: anchor generated media timelines to wall clock
-- [#3002](/quest/m0/3002-no-test-drives-a-late-group-through-the-ietf-dispatch-loop.md) - No test drives a late group through the IETF dispatch loop
-- [#3001](/quest/m0/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - IETF stream resets send moq-lite error codes, so routine events read as INTERNAL_ERROR
-- [#3000](/quest/m0/3000-track-teardown-on-poll-unused-is-not-atomic-against-a.md) - Track teardown on poll_unused is not atomic against a consumer reattaching
-- [#2999](/quest/m0/2999-js-net-cannot-send-a-stream-reset-code-so-every.md) - js/net cannot send a stream reset code, so every cancellation reads as INTERNAL_ERROR
-- [#2991](/quest/m0/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
-- [#2985](/quest/m0/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
-- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: nothing in the decode or playback path models a media gap
-- [#2980](/quest/m0/2980-moq-relay-nothing-guards-the-socket-capturing-acceptor.md) - moq-relay: nothing guards the socket-capturing acceptor being installed on a listener
-- [#2979](/quest/m0/2979-moq-tokio-does-not-compile-with-no-default-features-and.md) - moq-tokio does not compile with --no-default-features, and workspace feature unification hides it
-- [#2964](/quest/m0/2964-quic-workers-dropping-one-split-server-resizes-the.md) - QUIC workers: dropping one split() Server resizes the reuseport group
-- [#2934](/quest/m0/2934-export-ts-re-emits-a-stored-tdt-on-the-30-s-slot-grid-the.md) - export ts re-emits a stored TDT on the 30 s slot grid: the clock arrives ~14 s late, and below that rate it steps a receiver backwards
-- [#2933](/quest/m0/2933-moq-ffi-moqroute-round-trip-erases-a-routes-cold-cost.md) - moq-ffi: MoqRoute round-trip erases a route's cold cost
-- [#2924](/quest/m0/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
-- [#2907](/quest/m0/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - Bind the browser through moq-ffi/UniFFI instead of a second hand-written wasm API
-- [#2895](/quest/m0/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
-- [#2893](/quest/m0/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
-- [#2892](/quest/m0/2892-js-net-enforce-the-subscriber-latency-budget.md) - js/net: enforce the subscriber latency budget
-- [#2875](/quest/m0/2875-thread-per-core-relay-runtime-io-uring-quiche-ebpf.md) - Thread-per-core relay runtime: io-uring + quiche, eBPF connection steering, rename moq-native to moq-tokio
-- [#2873](/quest/m0/2873-moq-net-enumerate-and-resolve-historical-broadcast.md) - moq-net: enumerate and resolve historical broadcast generations by path and epoch
-- [#2870](/quest/m0/2870-moq-hls-a-named-sibling-rendition-is-pinned-too-late-to.md) - moq-hls: a named sibling rendition is pinned too late to survive a same-path republish
-- [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
-- [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
-- [#2859](/quest/m0/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
-- [#2858](/quest/m0/2858-transcode-ladders-encode-every-live-rung-at-full-bitrate.md) - Transcode ladders encode every live rung at full bitrate over one connection
-- [#2857](/quest/m0/2857-bindings-cant-reach-encoder-rate-control-so-every-non.md) - Bindings can't reach encoder rate control, so every non-Rust publisher ignores congestion
-- [#2853](/quest/m0/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
-- [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: give Reader a synchronous decode so the publisher need not read controls ahead
-- [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
-- [#2848](/quest/m0/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation
-- [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
-- [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test load
-- [#2835](/quest/m0/2835-moq-wasm-bind-track-dynamic-so-a-browser-publisher-can.md) - moq-wasm: bind track::Dynamic so a browser publisher can serve cache-miss fetches
-- [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls the SI table cadence until the media clock catches up
-- [#2829](/quest/m0/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one broadcast render the same media in different orders
-- [#2822](/quest/m0/2822-moq-wasm-bind-the-datagram-path-append-datagram-recv.md) - moq-wasm: bind the datagram path (append_datagram / recv_datagram)
-- [#2819](/quest/m0/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
-- [#2815](/quest/m0/2815-divide-the-connection-bandwidth-estimate-among-concurrent.md) - Divide the connection bandwidth estimate among concurrent encoders
-- [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
-- [#2812](/quest/m0/2812-watch-has-audio-stutter-on-ios-on-https-moq-dev-watch.md) - Watch has Audio stutter on iOS on https://moq.dev/watch/
-- [#2808](/quest/m0/2808-js-net-publisher-bounds-snapshot-is-not-atomic-with-the.md) - js/net: publisher bounds snapshot is not atomic with the group pop (residual race)
-- [#2807](/quest/m0/2807-js-net-a-frame-precise-raised-start-floor-is-not-honored.md) - js/net: a frame-precise raised start floor is not honored for a group already in hand
-- [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the first
-- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-video: capture negotiates twice, so a window resize between the probe and the first subscriber strands consumers that fixed on the first snapshot
-- [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync is silent - no log, no counter, no downstream signal
-- [#2788](/quest/m0/2788-moq-transcode-run-cant-bootstrap-from-a-demand-gated.md) - moq-transcode: run() can't bootstrap from a demand-gated source that doesn't advertise its geometry
-- [#2779](/quest/m0/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same broadcast emit streams that can never be compared
-- [#2774](/quest/m0/2774-collapse-reload-and-shared-into-one-connection-class.md) - Collapse Reload and Shared into one Connection class
-- [#2756](/quest/m0/2756-origin-announce-only-entries-advertise-on-demand-content.md) - origin: announce-only entries, advertise on-demand content without instantiating broadcasts
-- [#2735](/quest/m0/2735-hang-opt-in-viewer-feedback-broadcasts-sampled-per-viewer.md) - hang: opt-in viewer feedback broadcasts (sampled per-viewer QoS)
-- [#2734](/quest/m0/2734-hang-publisher-reported-stats-track-catalog-stats-section.md) - hang: publisher-reported stats track (catalog stats section)
-- [#2733](/quest/m0/2733-moq-net-stats-per-subscription-send-backlog-queued-vs.md) - moq-net stats: per-subscription send backlog (queued vs delivered) + skip counters
-- [#2714](/quest/m0/2714-per-subscriber-path-predicate-for-originconsumer-0-1-x.md) - Per-subscriber path predicate for OriginConsumer (0.1.x) / AnnounceConsumer (0.2.x)
-- [#2709](/quest/m0/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - per-broadcast bandwidth estimates and reservation
-- [#2708](/quest/m0/2708-origin-open-the-announce-interest-lazily-on-first-consumer.md) - origin: open the announce interest lazily, on first consumer
-- [#2696](/quest/m0/2696-re-evaluate-the-client-server-split-in-cli-arguments.md) - Re-evaluate the client/server split in CLI arguments
-- [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority
-- [#2628](/quest/m0/2628-every-moq-watch-dials-its-own-session-reuse-one.md) - Every <moq-watch> dials its own session: reuse one WebTransport connection per relay URL and keep it alive briefly while detached
-- [#2627](/quest/m0/2627-the-moq-watch-re-insertion-grace-is-one-microtask-a.md) - The <moq-watch> re-insertion grace is one microtask: a detach spanning any yield closes and redials the WebTransport session
-- [#2624](/quest/m0/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - moq-native: GOAWAY redirect guard classifies hosts by name, not by resolved address
-- [#2610](/quest/m0/2610-dynamic-announcements-broadcast-epochs-and-ended-vod.md) - Dynamic announcements, broadcast epochs, and ended (VOD) broadcasts
-- [#2609](/quest/m0/2609-moq-ffi-expose-moq-natives-reconnect-bindings-get-a-one.md) - moq-ffi: expose moq-native's reconnect - bindings get a one-shot session that stalls silently
-- [#2532](/quest/m0/2532-publish-files-by-demuxing-and-decoding-them-not-by.md) - Publish files by demuxing and decoding them, not by capturing a MediaStreamTrack
-- [#2527](/quest/m0/2527-publish-video-breaks-when-the-publishers-window-is.md) - Publish video breaks when the publisher's window is minimized, on every browser using the MediaStreamTrackProcessor polyfill
-- [#2517](/quest/m0/2517-net-splice-route-and-connection-changes-within-an-active.md) - net: splice route and connection changes within an active group
-- [#2481](/quest/m0/2481-merge-iroh-lives-native-media-stack-into-moq-video-moq.md) - Merge iroh-live's native media stack into moq-video/moq-audio (upstreaming plan)
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect() logs on every connection at the wrong level and prints the JWT in the URL
-- [#2401](/quest/m0/2401-publisher-tab-reload-strands-watchers-on-the-stale.md) - Publisher tab reload strands watchers on the stale broadcast: ROUTE_LINGER (5s) expires before a real re-publish reconnects
-- [#2388](/quest/m0/2388-safari-stops-delivering-new-incoming-unidirectional.md) - Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one stream per group exhausts that in about two minutes of playback
-- [#2318](/quest/m0/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range controls, typed errors)
-- [#2296](/quest/m0/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-native: bring the quiche backend to quinn/noq feature parity
-- [#2284](/quest/m0/2284-moq-net-keyframe-request-pli-equivalent-for-fast-tune-in.md) - moq-net: keyframe request (PLI equivalent) for fast tune-in
-- [#2282](/quest/m0/2282-moq-audio-echo-cancellation-agc-noise-suppression-for.md) - moq-audio: echo cancellation / AGC / noise suppression for native capture
-- [#2281](/quest/m0/2281-moq-cli-generic-broadcast-recording-and-paced-replay-all.md) - moq-cli: generic broadcast recording and paced replay (all tracks + catalog)
-- [#2280](/quest/m0/2280-hang-caption-and-subtitle-text-tracks.md) - hang: caption and subtitle text tracks
-- [#2279](/quest/m0/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: typed SCTE-35 / ad cue signaling (carried opaquely today, unreadable by players)
-- [#2278](/quest/m0/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - watch: absolute wall-clock latency target for synchronized playback across viewers
-- [#2277](/quest/m0/2277-hang-end-to-end-encryption-per-broadcast-key-relay.md) - hang: end-to-end encryption (per-broadcast key, relay carries opaque payloads)
-- [#2276](/quest/m0/2276-moq-native-enable-quic-multipath-for-bonded-contribution.md) - moq-native: enable QUIC multipath for bonded contribution (noq already implements it)
-- [#2275](/quest/m0/2275-dvr-rewind-and-time-shift-a-live-broadcast-timeline-fetch.md) - DVR: rewind and time-shift a live broadcast (timeline + FETCH exist, durable storage doesn't)
-- [#2272](/quest/m0/2272-moq-cli-remaining-work-for-capture-and-playback-window.md) - moq-cli: remaining work for capture and playback (window/app capture, device enumeration, native player)
-- [#2248](/quest/m0/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
-- [#2217](/quest/m0/2217-moq-ffi-preserve-active-restart-ended-announcement.md) - moq-ffi: preserve Active/Restart/Ended announcement lifecycle (AI review)
-- [#2216](/quest/m0/2216-js-net-expose-typed-announcement-status-instead-of-active.md) - js/net: expose typed announcement status instead of active boolean (AI review)
-- [#2155](/quest/m0/2155-js-net-full-subscription-model-ordered-stale-range-and.md) - js/net: full Subscription model (ordered/stale/range) and Subscriber.update()
-- [#2153](/quest/m0/2153-go-moq-wrapper-catch-up-stats-hops-tls-options-media-on.md) - go/moq: wrapper catch-up (stats, hops, TLS options, media-on-track)
-- [#2152](/quest/m0/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
-- [#2147](/quest/m0/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
-- [#2143](/quest/m0/2143-moq-ffi-0-2-27-moqmediaconsumer-returns-moqframe.md) - moq-ffi 0.2.27+: MoqMediaConsumer returns MoqFrame.timestampUs=0 for all frames after timeline-track migration (PR #2109)
-- [#2075](/quest/m0/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - Mirror catalog reservation gating in @moq/hang (js/hang)
+- [#3207](/quest/m0/3207-send-valid-publish-done-statuses-for-every-supported-ietf.md) - Send valid PUBLISH_DONE statuses for every supported IETF draft
+- [#3076](/quest/m0/3076-moq-relay-publish-is-unimplemented-by-design-make-the.md) - moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that…
+- [#2388](/quest/m0/2388-safari-stops-delivering-new-incoming-unidirectional.md) - Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one…
+- [#2527](/quest/m0/2527-publish-video-breaks-when-the-publishers-window-is.md) - Publish video breaks when the publisher's window is minimized, on every browser using the…
+- [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
+- [#2788](/quest/m0/2788-moq-transcode-run-cant-bootstrap-from-a-demand-gated.md) - moq-transcode: run() can't bootstrap from a demand-gated source that doesn't advertise its…
+- [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
+- [#2812](/quest/m0/2812-watch-has-audio-stutter-on-ios-on-https-moq-dev-watch.md) - Watch has Audio stutter on iOS on https://moq.dev/watch/
+- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: nothing in the decode or playback path models a media gap
+- [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - fix(watch): audio ring truncate can race the worklet reader for one quantum
+- [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls the SI table cadence until the media clock catches up
+- [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the…
+- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-video: capture negotiates twice, so a window resize between the probe and the first…
+- [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
+- [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
+- [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
+- [H.265 suffix SEI ownership](/quest/m0/h265-suffix.md) - suffix SEI stays with the access unit it follows, including at EOF
+- [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority
+- [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: give Reader a synchronous decode so the publisher need not read controls ahead
+- [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group permanently ends the subscription, so offered load silently decays…
+- [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test…
+- [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: the publication has no generation, so a flush after EOS cannot restart it
+- [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync is silent - no log, no counter, no downstream signal
+- [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
+- [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Test open-GOP H.264 tune-in end to end (leading-picture handling)
-- [#1838](/quest/m0/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - TR 101 290 monitoring: requirements (broadcast/contribution health metrics)
-- [#1837](/quest/m0/1837-moq-video-remaining-work-codecs-platforms-decode-hw.md) - moq-video: remaining work (codecs, platforms, decode, HW validation)
-- [#1384](/quest/m0/1384-moq-signals-improvements.md) - @moq/signals improvements
-- [#1310](/quest/m0/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
-- [#1238](/quest/m0/1238-default-to-enabled-true.md) - Default to enabled: true
 - [#1095](/quest/m0/1095-avoid-allocation-in-axum-tungstenite-websocket-message.md) - Avoid allocation in axum/tungstenite WebSocket message conversion
-- [#1073](/quest/m0/1073-make-origin-lifecycle-caller-driven.md) - Make Origin lifecycle caller-driven
-- [#1059](/quest/m0/1059-init-tracks-for-cmaf.md) - Init tracks for CMAF
-- [#980](/quest/m0/980-add-support-for-dual-sockets-ipv4-ipv6.md) - Add support for dual-sockets (IPv4 + IPv6)
-- [#933](/quest/m0/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - Video rotation metadata not propagated from mobile camera publish to watch renderer
-- [#863](/quest/m0/863-hls-playlist-tracks.md) - HLS Playlist Tracks
-- [#823](/quest/m0/823-svc-support.md) - SVC support?
-- [#816](/quest/m0/816-expose-transportconfig.md) - Expose TransportConfig
-- [#744](/quest/m0/744-obs-hook-up-track-bitrate.md) - OBS: Hook up track bitrate
-- [#709](/quest/m0/709-automatic-letsencrypt-support.md) - Automatic LetsEncrypt support
-- [#703](/quest/m0/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
-- [#700](/quest/m0/700-native-and-mobile-support.md) - Native and Mobile Support
-- [#699](/quest/m0/699-better-prioritize-ties.md) - Better prioritize ties
-- [#697](/quest/m0/697-conferencing-demo.md) - Conferencing Demo
-- [#686](/quest/m0/686-fix-bbr.md) - Fix BBR
-- [#685](/quest/m0/685-moq-relay-simultaneously-serve-hls-dash-and-hang.md) - moq-relay: Simultaneously serve HLS, DASH, and HANG
-- [#679](/quest/m0/679-multi-threaded-udp-receiver.md) - Multi-threaded UDP Receiver

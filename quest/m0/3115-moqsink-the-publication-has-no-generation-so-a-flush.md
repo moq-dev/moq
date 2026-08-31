@@ -7,9 +7,9 @@ within the issue's stated scope and boundaries.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Rescoped during the 2026-08 grooming: items 2 and 3 landed on main via #2998
+(Completion/CompletionHandle) and #3104. What remains is item 1: give the
+publication a generation so an element-wide flush after EOS can restart it.
 
 ### Issue context
 

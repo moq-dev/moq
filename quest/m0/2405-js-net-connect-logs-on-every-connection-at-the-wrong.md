@@ -7,9 +7,10 @@ within the issue's stated scope and boundaries.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Rescoped during the 2026-08 grooming: the WebTransport line already logs at
+debug level. What remains: redact the JWT from every logged URL (connect.ts
+still prints the ?jwt= query, at console.warn on the WebSocket path) and
+DEV-gate the remaining connect logs. Treat this as a credential-leak fix.
 
 ### Issue context
 
