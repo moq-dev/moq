@@ -151,44 +151,6 @@ impl MoqBroadcastConsumer {
 	}
 }
 
-/// A watch over a broadcast's route. Created by `MoqBroadcastConsumer::route_updates`.
-#[derive(uniffi::Object)]
-pub struct MoqRouteWatch {
-	task: Task<RouteWatch>,
-}
-
-struct RouteWatch {
-	inner: moq_net::broadcast::Consumer,
-}
-
-impl RouteWatch {
-	async fn next(&mut self) -> Result<Option<MoqRoute>, MoqError> {
-		match self.inner.route_changed().await {
-			Ok(route) => Ok(Some(route.into())),
-			// A broadcast has no abort; Dropped (every producer gone) is its clean end.
-			Err(moq_net::Error::Dropped) => Ok(None),
-			Err(e) => Err(e.into()),
-		}
-	}
-}
-
-#[uniffi::export]
-impl MoqRouteWatch {
-	/// Wait for the next route: the current one on the first call, then each change.
-	///
-	/// Returns `None` once the broadcast ends (every producer gone).
-	pub async fn next(&self) -> Result<Option<MoqRoute>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
-	}
-
-	/// Cancel all current and future `next()` calls.
-	///
-	/// Terminal: the subscription is released here, not when the handle is.
-	pub fn cancel(&self) {
-		self.task.cancel();
-	}
-}
-
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
 	task: Task<Catalog>,
@@ -229,23 +191,6 @@ impl Media {
 
 #[uniffi::export]
 impl MoqBroadcastConsumer {
-	/// The route the broadcast currently takes to reach this origin.
-	pub fn route(&self) -> MoqRoute {
-		self.inner.route().into()
-	}
-
-	/// Watch the broadcast's route for changes.
-	///
-	/// The returned watch yields the current route first, then every update
-	/// (e.g. an upstream failover), so a loop observes the full history from now.
-	pub fn route_updates(&self) -> Arc<MoqRouteWatch> {
-		Arc::new(MoqRouteWatch {
-			task: Task::new(RouteWatch {
-				inner: self.inner.clone(),
-			}),
-		})
-	}
-
 	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names

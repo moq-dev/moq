@@ -30,6 +30,8 @@ pub struct Publisher {
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// The route advertising the path; dropping it retracts.
+	_announcement: moq_net::origin::Announcement,
 }
 
 impl Publisher {
@@ -39,7 +41,8 @@ impl Publisher {
 	/// `max_age` is the retention declared on the media tracks the importer mints: how
 	/// long relays keep a non-latest group fetchable, or `None` for hang's own default.
 	pub fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> Result<Self> {
-		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
+		let mut broadcast = origin.create_broadcast(path)?;
+		let announcement = origin.announce(moq_net::origin::Route::new(path))?;
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default())
 			.with_max_age(max_age);
@@ -51,6 +54,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			_announcement: announcement,
 		})
 	}
 
@@ -107,7 +111,7 @@ impl Subscriber {
 		// Confirm the broadcast is in scope and wait for it to be announced (out-of-scope /
 		// origin-closed -> `None`). The export re-resolves it (and any referenced sibling
 		// broadcast, via the catalog `broadcast` field) through the origin.
-		if origin.announced_broadcast(path).await.is_none() {
+		if origin.routed(path).await.is_none() {
 			return Ok(None);
 		}
 
@@ -206,7 +210,9 @@ mod tests {
 		ts.extend_from_slice(&psi_packet(0x0100, &pmt(0x0101)));
 		publisher.feed(Bytes::from(ts)).unwrap();
 
-		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
+		let consumer = origin.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
@@ -217,10 +223,12 @@ mod tests {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(&origin, "ingest", None).unwrap();
 
-		let broadcast = timeout(Duration::from_secs(5), origin.consume().announced_broadcast("ingest"))
+		let consumer = origin.consume();
+		timeout(Duration::from_secs(5), consumer.routed("ingest"))
 			.await
 			.expect("announce timed out")
 			.expect("the ingest broadcast is announced");
+		let broadcast = consumer.request_broadcast("ingest").await.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

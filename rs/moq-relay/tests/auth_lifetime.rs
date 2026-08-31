@@ -176,8 +176,7 @@ fn room_url(scheme: &str, port: u16, key: &Key, claims: &moq_token::Claims) -> u
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -199,7 +198,8 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("publisher connect failed");
 
 	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let sub_session = tokio::time::timeout(
 		TIMEOUT,
 		client()
@@ -212,12 +212,16 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	assert_eq!(update.route.prefix.as_str(), "test");
+	assert!(update.active, "expected announce, got retraction");
+	let bc = sub_consumer
+		.request_broadcast("test")
+		.await
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

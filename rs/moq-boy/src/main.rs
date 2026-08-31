@@ -233,19 +233,17 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Create the broadcast on the publish origin; the live route announces it.
 	let broadcast_path = format!("{game_prefix}/{name}");
-	let mut broadcast = publish_origin
-		.create_broadcast(&broadcast_path, moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = publish_origin.publish_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
 	let viewer_path = format!("{viewer_prefix}/{name}");
 	let consume_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-	let mut viewer_consumer = consume_origin
+	let viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")
-		.consume()
-		.announced();
+		.consume();
 
 	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
 
@@ -300,7 +298,7 @@ async fn run(config: &Config) -> Result<()> {
 			Err(join) => Err(join.into()),
 		},
 		res = reconnect.closed() => res.map_err(Into::into),
-		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
+		res = input::handle_viewers(&viewer_consumer, &cmd_tx) => res,
 	};
 
 	// Cleanly close the broadcast so subscribers see a normal end rather than

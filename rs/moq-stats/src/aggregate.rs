@@ -102,7 +102,7 @@ impl Consumer {
 	pub fn traffic(&self, tier: &Tier, role: Role) -> TrafficConsumer {
 		let name = traffic_track(tier, role, self.config.compression);
 		TrafficConsumer {
-			inner: Merged::new(self.origin.announced(), &self.config, name),
+			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
 
@@ -110,7 +110,7 @@ impl Consumer {
 	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
 		let name = sessions_track(tier, self.config.compression);
 		SessionsConsumer {
-			inner: Merged::new(self.origin.announced(), &self.config, name),
+			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
 }
@@ -163,6 +163,8 @@ impl Mergeable for Presence {
 
 /// One node's subscription to the merged track.
 enum Reader<V: Mergeable> {
+	/// Resolving the announced path into a broadcast.
+	Resolving(Pending<origin::Requesting>),
 	/// Awaiting the subscription handshake.
 	Subscribing(Pending<Subscribing>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
@@ -182,6 +184,8 @@ struct Node<V: Mergeable> {
 
 /// Watches a group's node announces and folds one track across all of them.
 struct Merged<V: Mergeable> {
+	/// Resolves announced node paths into broadcasts.
+	origin: origin::Consumer,
 	announce: moq_net::announce::Consumer,
 	prefix: PathOwned,
 	depth: usize,
@@ -193,9 +197,10 @@ struct Merged<V: Mergeable> {
 }
 
 impl<V: Mergeable> Merged<V> {
-	fn new(announce: moq_net::announce::Consumer, config: &Config, name: String) -> Self {
+	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
-			announce,
+			announce: origin.announced(),
+			origin,
 			prefix: config.prefix.clone(),
 			depth: config.depth,
 			name,
@@ -237,32 +242,26 @@ impl<V: Mergeable> Merged<V> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a drop or a replacement of a node that had a value does).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let moq_net::announce::Update { path, broadcast } = update;
+		let path = update.route.prefix.clone();
 		let absolute = self.announce.absolute(&path).to_owned();
 
-		// Only fold node-category broadcasts; skip sibling categories a producer
-		// may publish under the same prefix.
+		// Only fold node-category routes; skip sibling categories a producer
+		// may publish under the same prefix. A route names a prefix, and node
+		// broadcasts are announced at their exact path by convention.
 		if parse_node_path(&self.prefix, self.depth, &absolute).is_none() {
 			return false;
 		}
 
-		match broadcast {
-			Some(broadcast) => match broadcast.track(&self.name) {
-				Ok(track) => {
-					let node = Node {
-						reader: Reader::Subscribing(track.subscribe(None)),
-						last: None,
-					};
-					// A replacement (failover) drops the old value until the new
-					// subscription catches up.
-					self.nodes.insert(absolute, node).is_some_and(|old| old.last.is_some())
-				}
-				Err(err) => {
-					tracing::debug!(?err, node = %absolute, name = %self.name, "stats: node missing track");
-					self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
-				}
-			},
-			None => self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some()),
+		if update.active {
+			let node = Node {
+				reader: Reader::Resolving(self.origin.request_broadcast(&path)),
+				last: None,
+			};
+			// A replacement (failover) drops the old value until the new
+			// subscription catches up.
+			self.nodes.insert(absolute, node).is_some_and(|old| old.last.is_some())
+		} else {
+			self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
 		}
 	}
 
@@ -291,6 +290,22 @@ fn advance<V: Mergeable>(
 	let mut changed = false;
 	loop {
 		match &mut node.reader {
+			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
+				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
+					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Err(err) => {
+						tracing::debug!(?err, name, "stats: node missing track");
+						node.reader = Reader::Ended;
+						return changed;
+					}
+				},
+				Poll::Ready(Err(err)) => {
+					tracing::debug!(?err, name, "stats: node broadcast unresolvable");
+					node.reader = Reader::Ended;
+					return changed;
+				}
+				Poll::Pending => return changed,
+			},
 			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(subscriber)) => {
 					node.reader =
@@ -372,6 +387,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
+		route: origin::Announcement,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
@@ -387,17 +403,13 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let mut source = feed_origin
-			.create_broadcast(path, broadcast::Route::announced())
-			.expect("create_broadcast");
+		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
+		let route = feed_origin.announce(origin::Route::new(path)).expect("announce");
 		let mut track = source.create_track("video", None).expect("create_track");
 
-		// Let the origin's source watcher attach and announce.
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
-		let consumer = broadcast.expect("active");
+		let update = announced.next().await.expect("announce");
+		assert!(update.active);
+		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -408,6 +420,7 @@ mod tests {
 
 		Feed {
 			announced,
+			route,
 			source,
 			consumer,
 			sub,

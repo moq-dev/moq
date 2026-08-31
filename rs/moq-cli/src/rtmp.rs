@@ -131,7 +131,7 @@ pub async fn connect_export(
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
 	// the FLV export re-resolves it (and any referenced sibling broadcast) through the origin.
 	origin
-		.announced_broadcast(&name)
+		.routed(&name)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 

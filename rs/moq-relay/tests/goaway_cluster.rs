@@ -183,8 +183,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn(Origin::random());
-		let mut broadcast = upstream_origin
-			.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut broadcast, _announce_broadcast) = upstream_origin.publish_broadcast("cam")
 			.expect("create broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 
@@ -212,10 +211,11 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		// ── downstream consumer on the cluster origin ───────────────────
 		let consumer = cluster.origin.consume();
-		let bc = consumer
-			.announced_broadcast("cam")
+		consumer
+			.routed("cam")
 			.await
 			.expect("broadcast announced through sibling A");
+		let bc = consumer.request_broadcast("cam").await.expect("broadcast resolves");
 		let mut sub = bc
 			.track("video")
 			.expect("track handle")
@@ -239,7 +239,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// unannounce the path.
 		let mut announcements = cluster.origin.consume().announced();
 		let first = announcements.next().await.expect("initial announce");
-		assert_eq!(first.path.as_str(), "cam");
+		assert_eq!(first.route.prefix.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
 		session_a
@@ -370,8 +370,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = top_origin
-		.create_broadcast("diamond", moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = top_origin.publish_broadcast("diamond")
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
@@ -442,12 +441,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let first = within("broadcast announced through the MID-A leg", announcements.next())
 		.await
 		.expect("origin closed before the announce");
-	assert_eq!(first.path.as_str(), "diamond");
+	assert_eq!(first.route.prefix.as_str(), "diamond");
 
-	let bc = within(
-		"broadcast resolves on the subscriber origin",
-		sub_origin.consume().announced_broadcast("diamond"),
-	)
+	let bc = within("broadcast resolves on the subscriber origin", async {
+		let consumer = sub_origin.consume();
+		consumer.routed("diamond").await?;
+		consumer.request_broadcast("diamond").await.ok()
+	})
 	.await
 	.expect("broadcast announced");
 	// The age budget is what makes the completeness check below meaningful: this test
@@ -623,8 +623,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = upstream_origin
-		.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = upstream_origin.publish_broadcast("cam")
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
@@ -648,10 +647,11 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 		.expect("accept channel closed");
 
 	// Downstream consumer sees group 0 through the first session.
-	let bc = within(
-		"broadcast announced",
-		cluster.origin.consume().announced_broadcast("cam"),
-	)
+	let bc = within("broadcast announced", async {
+		let consumer = cluster.origin.consume();
+		consumer.routed("cam").await?;
+		consumer.request_broadcast("cam").await.ok()
+	})
 	.await
 	.expect("broadcast announced");
 	let mut sub = within("subscribe", async {

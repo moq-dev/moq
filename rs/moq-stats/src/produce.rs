@@ -615,6 +615,8 @@ impl<T: Serialize + Default> TrackFamily<T> {
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
 	broadcast: broadcast::Producer,
+	/// The route advertising this group's broadcast; dropping it retracts.
+	_announcement: origin::Announcement,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// tier track no drain has created yet parks (served next tick) instead of
 	/// being rejected `NotFound` on the spot.
@@ -633,10 +635,17 @@ struct GroupPublisher {
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
 		let advertised = advertised_path(prefix, group, node);
-		let mut broadcast = match origin.create_broadcast(&advertised, broadcast::Route::new().with_announce(true)) {
+		let mut broadcast = match origin.create_broadcast(&advertised) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
+				return None;
+			}
+		};
+		let announcement = match origin.announce(origin::Route::new(&advertised)) {
+			Ok(announcement) => announcement,
+			Err(err) => {
+				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats announce");
 				return None;
 			}
 		};
@@ -674,6 +683,7 @@ impl GroupPublisher {
 
 		Some(Self {
 			broadcast,
+			_announcement: announcement,
 			dynamic,
 			requested: HashSet::new(),
 			traffic,
@@ -911,6 +921,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
+		route: origin::Announcement,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
@@ -936,18 +947,13 @@ mod tests {
 		let egress = origin.consume().with_stats(ctx);
 
 		let mut announced = egress.announced();
-		let mut source = origin
-			.create_broadcast(path, broadcast::Route::announced())
-			.expect("create_broadcast");
+		let mut source = origin.create_broadcast(path).expect("create_broadcast");
+		let route = origin.announce(origin::Route::new(path)).expect("announce");
 		let mut producer = source.create_track("video", None).expect("create_track");
 
-		// Let the origin's source watcher attach and announce (paused time advances
-		// instantly and yields to the spawned tasks).
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
-		let consumer = broadcast.expect("active");
+		let update = announced.next().await.expect("announce");
+		assert!(update.active);
+		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -976,6 +982,7 @@ mod tests {
 
 		Feed {
 			announced,
+			route,
 			source,
 			consumer,
 			sub,
@@ -986,8 +993,14 @@ mod tests {
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let announce::Update { path, broadcast } = consumer.next().await.expect("expected announce");
-		(path.as_str().to_string(), broadcast.expect("active"))
+		let update = consumer.next().await.expect("expected announce");
+		assert!(update.active);
+		let broadcast = origin
+			.consume()
+			.request_broadcast(&update.route.prefix)
+			.await
+			.expect("resolve");
+		(update.route.prefix.as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.

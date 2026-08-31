@@ -1422,8 +1422,7 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 
 		let origin = crate::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test")
 			.expect("create broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
@@ -1460,7 +1459,8 @@ mod tests {
 
 		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
 		let subscriber = crate::origin::spawn(moq_net::Origin::random());
-		let mut announced = subscriber.consume().announced();
+		let consumer = subscriber.consume();
+		let mut announced = consumer.announced();
 		let client = crate::connect::Config::default()
 			.init(Default::default())
 			.expect("client init")
@@ -1476,8 +1476,9 @@ mod tests {
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
-		assert_eq!(update.path.as_str(), "test");
-		let broadcast = update.broadcast.expect("expected an announce");
+		assert_eq!(update.route.prefix.as_str(), "test");
+		assert!(update.active);
+		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 
 		let mut track = broadcast
 			.track("video")

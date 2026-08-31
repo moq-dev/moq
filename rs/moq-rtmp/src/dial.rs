@@ -464,13 +464,18 @@ struct Publisher {
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// The route advertising the path; dropping it retracts.
+	_announcement: moq_net::origin::Announcement,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
 		let mut broadcast = origin
-			.create_broadcast(path, broadcast::Route::new().with_announce(true))
+			.create_broadcast(path)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
+		let announcement = origin
+			.announce(moq_net::origin::Route::new(path))
+			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be announced: {err}"))?;
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
@@ -481,6 +486,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			_announcement: announcement,
 		})
 	}
 
@@ -536,9 +542,7 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = server_origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let (mut broadcast, _announcement) = server_origin.publish_broadcast("live/cam0").unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -568,10 +572,11 @@ mod tests {
 		});
 
 		// The republished broadcast should show up in the client's origin.
-		let broadcast = tokio::time::timeout(Duration::from_secs(5), announced.announced_broadcast("pulled/cam0"))
+		tokio::time::timeout(Duration::from_secs(5), announced.routed("pulled/cam0"))
 			.await
 			.expect("client republish timed out")
 			.expect("broadcast announced in client origin");
+		let broadcast = announced.request_broadcast("pulled/cam0").await.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

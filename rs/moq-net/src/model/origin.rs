@@ -1184,6 +1184,22 @@ impl Producer {
 		Ok(source)
 	}
 
+	/// Create a broadcast at `path` and announce the exact path as a route: the
+	/// common publisher pattern, combining [`Self::create_broadcast`] and
+	/// [`Self::announce`]. Announcing each broadcast's exact path is the
+	/// convention that lets subscribers enumerate broadcasts from routes.
+	///
+	/// Finish (or drop) the producer to close the broadcast; drop the
+	/// announcement to retract the route. The two are independent, so a
+	/// broadcast can outlive its advertisement (serving cached content by exact
+	/// path) or be retracted while still being written.
+	pub fn publish_broadcast(&self, path: impl AsPath) -> Result<(broadcast::Producer, Announcement), Error> {
+		let path = path.as_path();
+		let broadcast = self.create_broadcast(&path)?;
+		let announcement = self.announce(Route::new(&path))?;
+		Ok((broadcast, announcement))
+	}
+
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's identity (cache pool included) and ingress attribution, but
 	/// is *not* inserted into the broadcast tree. Sessions answer

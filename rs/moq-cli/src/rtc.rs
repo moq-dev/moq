@@ -86,9 +86,9 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import).
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let name = &target.name;
-	let producer = target
+	let (producer, _announcement) = target
 		.origin
-		.create_broadcast(name, moq_net::broadcast::Route::new().with_announce(true))
+		.publish_broadcast(name)
 		.context("failed to create broadcast")?;
 
 	tracing::info!(%url, %name, "WHEP client pulling");
@@ -105,7 +105,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
 	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
 	origin
-		.announced_broadcast(&name)
+		.routed(&name)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 

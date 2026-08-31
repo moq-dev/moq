@@ -22,24 +22,23 @@ pub fn spawn(info: impl Into<moq_net::origin::Info>) -> moq_net::origin::Produce
 mod tests {
 	use super::*;
 
-	/// The spawned driver runs the origin's lifecycle: an announced broadcast
-	/// reaches a consumer, and finishing it unannounces.
+	/// The spawned driver runs the origin's lifecycle: an announced route
+	/// reaches a consumer, and dropping the announcement retracts it.
 	#[tokio::test]
 	async fn spawn_drives_the_origin() {
 		let origin = spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let mut announced = origin.consume().announced();
 
-		let mut broadcast = origin
-			.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("create broadcast");
+		let (mut broadcast, announcement) = origin.publish_broadcast("cam").expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");
-		assert_eq!(update.path.as_str(), "cam");
-		assert!(update.broadcast.is_some());
+		assert_eq!(update.route.prefix.as_str(), "cam");
+		assert!(update.active);
 
 		broadcast.finish();
-		let update = announced.next().await.expect("unannounce");
-		assert!(update.broadcast.is_none());
+		drop(announcement);
+		let update = announced.next().await.expect("retraction");
+		assert!(!update.active);
 	}
 
 	/// Outside a runtime the spawn has nowhere to run the driver: it panics

@@ -48,8 +48,7 @@ pub async fn import(
 	playlist: String,
 	max_age: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
-	let mut producer = origin
-		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
+	let (mut producer, _announce_producer) = origin.publish_broadcast(&name)
 		.context("failed to create broadcast")?;
 
 	// Create catalog tracks before the broadcast becomes visible so a subscriber

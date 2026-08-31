@@ -65,6 +65,8 @@ struct AcceptedSession {
 	// WHIP only: a clone of the ingest broadcast, so a deliberate DELETE can
 	// finish() it: a clean end instead of an abort error.
 	broadcast: Option<moq_net::broadcast::Producer>,
+	// WHIP only: the route advertising the broadcast; dropping it retracts.
+	announcement: Option<moq_net::origin::Announcement>,
 }
 
 impl AcceptedSession {

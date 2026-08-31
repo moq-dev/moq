@@ -1117,8 +1117,8 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 		let path = unsafe { ffi::parse_str(path, path_len)? };
 
 		let mut state = State::lock();
-		let broadcast = state.origin.publish(origin, path)?;
-		state.publish.create(broadcast)
+		let (broadcast, origin, path, announcement) = state.origin.publish(origin, path)?;
+		state.publish.create(broadcast, origin, path, announcement)
 	})
 }
 

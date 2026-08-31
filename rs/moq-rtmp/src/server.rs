@@ -678,9 +678,9 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			broadcast = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.announced_broadcast(&path)) => {
-				match broadcast {
-					Ok(broadcast) => broadcast,
+			routed = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.routed(&path)) => {
+				match routed {
+					Ok(routed) => routed,
 					Err(_) => {
 						tracing::debug!(peer = %self.peer, %path, "play broadcast resolve timed out");
 						return self.reject("stream not found").await;
@@ -688,8 +688,12 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Some(broadcast) = broadcast else {
+		if broadcast.is_none() {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
+			return self.reject("stream not found").await;
+		}
+		let Ok(broadcast) = origin.request_broadcast(&path).await else {
+			tracing::debug!(peer = %self.peer, %path, "play broadcast unroutable");
 			return self.reject("stream not found").await;
 		};
 
@@ -1244,13 +1248,16 @@ struct Publisher {
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// The route advertising the path; dropping it retracts.
+	_announcement: moq_net::origin::Announcement,
 }
 
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
-		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
+		let mut broadcast = origin.create_broadcast(path)?;
+		let announcement = origin.announce(moq_net::origin::Route::new(path))?;
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
@@ -1262,6 +1269,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			_announcement: announcement,
 		})
 	}
 
@@ -1590,7 +1598,9 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
-		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
+		let consumer = origin.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
@@ -1617,9 +1627,7 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let (mut broadcast, _announcement) = origin.publish_broadcast("live/cam0").unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -1666,9 +1674,7 @@ mod tests {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let (mut broadcast, _announcement) = origin.publish_broadcast("live/cam0").unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -1789,9 +1795,7 @@ mod tests {
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let (mut broadcast, _announcement) = origin.publish_broadcast("live/cam0").unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();

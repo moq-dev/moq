@@ -105,8 +105,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -129,7 +128,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -171,14 +171,16 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_tokio::moq_net::announce::Update { path, broadcast: bc } =
-		tokio::time::timeout(TIMEOUT, announcements.next())
-			.await
-			.expect("announce timed out")
-			.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(update.route.prefix.as_str(), "test");
+	assert!(update.active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc
 		.track("video")
@@ -467,8 +469,7 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test")
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -506,7 +507,8 @@ async fn iroh_connect() {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 
 	// Create client iroh endpoint
 	let mut client_iroh_config = EndpointConfig::default();
@@ -556,14 +558,16 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_tokio::moq_net::announce::Update { path, broadcast: bc } =
-		tokio::time::timeout(TIMEOUT, announcements.next())
-			.await
-			.expect("announce timed out")
-			.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(update.route.prefix.as_str(), "test");
+	assert!(update.active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc
 		.track("video")

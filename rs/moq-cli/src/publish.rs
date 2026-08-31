@@ -503,8 +503,7 @@ mod tests {
 	async fn manufacture_input() -> Vec<u8> {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("cli", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("cli")
 			.unwrap();
 		settle().await;
 		let mut catalog =
@@ -595,8 +594,7 @@ mod tests {
 		// streams land in the broadcast instead of being dropped by the media-only path.
 		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let broadcast = origin
-			.create_broadcast("cli", moq_net::broadcast::Route::new().with_announce(true))
+		let (broadcast, _announce_broadcast) = origin.publish_broadcast("cli")
 			.unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, None).unwrap();

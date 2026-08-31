@@ -967,8 +967,7 @@ mod tests {
 		let parked = tokio::time::timeout(Duration::from_secs(60), &mut waiting).await;
 		assert!(parked.is_err(), "expected to still be waiting on the announcement");
 
-		let _broadcast = origin
-			.create_broadcast("room.hang", moq_net::broadcast::Route::new().with_announce(true))
+		let (_broadcast, _announce__broadcast) = origin.publish_broadcast("room.hang")
 			.unwrap();
 		waiting.await.unwrap();
 	}

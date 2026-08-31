@@ -263,8 +263,7 @@ mod tests {
 	#[tokio::test]
 	async fn no_override_targets_catalog_broadcast() {
 		let origin = produce_origin();
-		let _producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+		let (_producer, _announce__producer) = origin.publish_broadcast("a/pub")
 			.unwrap();
 		settle().await;
 
@@ -287,8 +286,7 @@ mod tests {
 	#[tokio::test]
 	async fn subscribe_track_resolves_catalog_broadcast() {
 		let origin = produce_origin();
-		let mut producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut producer, _announce_producer) = origin.publish_broadcast("a/pub")
 			.unwrap();
 		// The track must exist for the subscription to resolve (SUBSCRIBE_OK).
 		let _video = producer.create_track("video", None).unwrap();
@@ -304,8 +302,7 @@ mod tests {
 	#[tokio::test]
 	async fn self_reference_targets_catalog_broadcast() {
 		let origin = produce_origin();
-		let mut producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut producer, _announce_producer) = origin.publish_broadcast("a/pub")
 			.unwrap();
 		let _video = producer.create_track("video", None).unwrap();
 		settle().await;
@@ -324,14 +321,12 @@ mod tests {
 	async fn escaping_reference_is_rejected() {
 		let origin = produce_origin();
 
-		let mut catalog = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut catalog, _announce_catalog) = origin.publish_broadcast("a/pub")
 			.unwrap();
 		let _catalog_video = catalog.create_track("video", None).unwrap();
 
 		// The broadcast an escaping reference would land on if it clamped at the root.
-		let mut clamped = origin
-			.create_broadcast("elsewhere", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut clamped, _announce_clamped) = origin.publish_broadcast("elsewhere")
 			.unwrap();
 		let _clamped_video = clamped.create_track("video", None).unwrap();
 		settle().await;
@@ -413,12 +408,10 @@ mod tests {
 	async fn subscribe_track_resolves_referenced_broadcast() {
 		let origin = produce_origin();
 
-		let _catalog = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+		let (_catalog, _announce__catalog) = origin.publish_broadcast("a/pub")
 			.unwrap();
 
-		let mut referenced = origin
-			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut referenced, _announce_referenced) = origin.publish_broadcast("a/source")
 			.unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
@@ -437,15 +430,10 @@ mod tests {
 	async fn dot_resolves_output_parent() {
 		let origin = produce_origin();
 
-		let _catalog = origin
-			.create_broadcast(
-				"a/source/transcode",
-				moq_net::broadcast::Route::new().with_announce(true),
-			)
+		let (_catalog, _announce__catalog) = origin.publish_broadcast("a/source/transcode")
 			.unwrap();
 
-		let mut referenced = origin
-			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut referenced, _announce_referenced) = origin.publish_broadcast("a/source")
 			.unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
@@ -462,12 +450,10 @@ mod tests {
 	async fn dot_resolves_one_segment_catalog_to_root() {
 		let origin = produce_origin();
 
-		let _catalog = origin
-			.create_broadcast("top", moq_net::broadcast::Route::new().with_announce(true))
+		let (_catalog, _announce__catalog) = origin.publish_broadcast("top")
 			.unwrap();
 
-		let mut root = origin
-			.create_broadcast("", moq_net::broadcast::Route::new().with_announce(true))
+		let (mut root, _announce_root) = origin.publish_broadcast("")
 			.unwrap();
 		let _video = root.create_track("video", None).unwrap();
 		settle().await;

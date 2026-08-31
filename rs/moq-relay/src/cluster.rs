@@ -991,13 +991,14 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		let self_registration: Option<moq_net::broadcast::Producer> = if gossip {
+		// A pure route: the path itself is the advertisement, no broadcast behind it.
+		let self_registration: Option<moq_net::origin::Announcement> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
-			let broadcast = self
+			let announcement = self
 				.origin
-				.create_broadcast(&path, moq_net::broadcast::Route::new().with_announce(true))
+				.announce(moq_net::origin::Route::new(&path))
 				.expect(".internal/origins is within the relay origin's root");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
@@ -1012,7 +1013,7 @@ impl Cluster {
 				});
 			}
 
-			Some(broadcast)
+			Some(announcement)
 		} else {
 			None
 		};
@@ -1034,11 +1035,8 @@ impl Cluster {
 			}
 		}
 
-		// Deliberate shutdown: finish the registration rather than dropping it, so
-		// there is no dropped-without-finish warning.
-		if let Some(mut registration) = self_registration {
-			registration.finish();
-		}
+		// Deliberate shutdown: dropping the registration retracts the route.
+		drop(self_registration);
 		Ok(())
 	}
 
@@ -1067,7 +1065,8 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some(moq_net::announce::Update { path: relative, broadcast }) = ann else { return; };
+					let Some(update) = ann else { return; };
+					let relative = &update.route.prefix;
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -1084,8 +1083,8 @@ impl Cluster {
 						continue;
 					}
 					let advertisement = relative.as_str().to_owned();
-					match broadcast {
-						Some(_) => {
+					match update.active {
+						true => {
 							let target = live.announce(advertisement, target);
 							let mut spawn = |target: DialTarget| {
 								tracing::info!(peer = %target.key, "discovered cluster peer; dialing");
@@ -1096,7 +1095,7 @@ impl Cluster {
 								tracing::debug!(peer = %key, "reannounce within sweep window; keeping dial");
 							}
 						}
-						None => match live.unannounce(&advertisement, &target.key) {
+						false => match live.unannounce(&advertisement, &target.key) {
 							GossipUpdate::Current(target) => {
 								let mut spawn = |target: DialTarget| {
 									tracing::info!(peer = %target.key, "cluster peer advertisement changed; redialing");
@@ -1642,13 +1641,12 @@ mod tests {
 		let cluster = cluster.with_stats(stats);
 
 		let path = moq_net::Path::new(".stats").join("node").join("test");
-		let broadcast = tokio::time::timeout(
-			std::time::Duration::from_secs(5),
-			cluster.origin.consume().announced_broadcast(&path),
-		)
-		.await
-		.expect("stats broadcast announced within 5s")
-		.expect("stats broadcast present");
+		let consumer = cluster.origin.consume();
+		tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
+			.await
+			.expect("stats broadcast announced within 5s")
+			.expect("stats broadcast present");
+		let broadcast = consumer.request_broadcast(&path).await.expect("stats broadcast resolves");
 
 		// Several publish intervals (1s each by default) after the handle went out
 		// of scope, the task is still running and its broadcast still open. The
@@ -1656,11 +1654,7 @@ mod tests {
 		// `announced_broadcast` waits forever, which must read as a failure rather
 		// than a hung test.
 		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-		let still_live = tokio::time::timeout(
-			std::time::Duration::from_secs(2),
-			cluster.origin.consume().announced_broadcast(&path),
-		)
-		.await;
+		let still_live = tokio::time::timeout(std::time::Duration::from_secs(2), consumer.routed(&path)).await;
 		assert!(
 			matches!(still_live, Ok(Some(_))),
 			"stats broadcast unannounced after the producer handle was dropped: \
@@ -2147,11 +2141,10 @@ mod tests {
 		// Give the runtime a moment to execute the synchronous setup work.
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-		// The self-registration broadcast must be visible on the origin.
-		let moq_net::announce::Update { path, broadcast } =
-			watcher.try_next().expect("self-registration must be published");
-		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(broadcast.is_some());
+		// The self-registration route must be visible on the origin.
+		let update = watcher.try_next().expect("self-registration must be published");
+		assert_eq!(update.route.prefix.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert!(update.active);
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to

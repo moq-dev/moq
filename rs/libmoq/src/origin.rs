@@ -78,7 +78,7 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let moq_net::announce::Update { path, broadcast } = tokio::select! {
+			let update = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
@@ -88,11 +88,10 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			// Only Active carries a broadcast; Ended does not.
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((path.to_string(), broadcast.is_some()))?;
+				.insert((update.route.prefix.to_string(), update.active))?;
 			callback.call(announced_id);
 		}
 	}
@@ -168,11 +167,14 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// `biased` so a pending close always wins over a ready announcement.
-		let broadcast = tokio::select! {
+		tokio::select! {
 			biased;
 			_ = &mut close => return Ok(()),
-			found = consumer.announced_broadcast(path.as_str()) => found.ok_or(Error::BroadcastNotFound)?,
+			found = consumer.routed(path.as_str()) => {
+				found.ok_or(Error::BroadcastNotFound)?;
+			}
 		};
+		let broadcast = consumer.request_broadcast(path.as_str()).await?;
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
 		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
@@ -246,12 +248,27 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Create a live broadcast at `path` on an origin, returning its producer.
+	/// Create a live broadcast at `path` on an origin, announcing the exact path.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn publish<P: moq_net::AsPath>(&self, origin: Id, path: P) -> Result<moq_net::broadcast::Producer, Error> {
+	#[allow(clippy::type_complexity)]
+	pub fn publish<P: moq_net::AsPath>(
+		&self,
+		origin: Id,
+		path: P,
+	) -> Result<
+		(
+			moq_net::broadcast::Producer,
+			moq_net::origin::Producer,
+			moq_net::PathOwned,
+			moq_net::origin::Announcement,
+		),
+		Error,
+	> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		Ok(origin.create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?)
+		let path = path.as_path().to_owned();
+		let (broadcast, announcement) = origin.publish_broadcast(&path)?;
+		Ok((broadcast, origin.clone(), path, announcement))
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

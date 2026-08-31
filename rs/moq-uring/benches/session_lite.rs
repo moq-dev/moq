@@ -147,8 +147,7 @@ mod linux {
 				});
 			});
 
-			let mut broadcast = pub_origin
-				.create_broadcast("bench", moq_net::broadcast::Route::new().with_announce(true))
+			let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("bench")
 				.expect("create broadcast");
 			let mut track = broadcast.create_track("data", None).expect("create track");
 

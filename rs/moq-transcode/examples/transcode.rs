@@ -82,8 +82,7 @@ async fn main() -> anyhow::Result<()> {
 	// publishes the rungs and nothing else.
 	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
-	let output = publish
-		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
+	let (output, _announce_output) = publish.publish_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

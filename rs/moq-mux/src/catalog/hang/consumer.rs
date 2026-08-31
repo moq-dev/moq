@@ -160,7 +160,7 @@ mod test {
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
 		let mut broadcast = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new())
+			.create_broadcast("a/pub")
 			.expect("broadcast should create");
 		let mut track = broadcast
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())

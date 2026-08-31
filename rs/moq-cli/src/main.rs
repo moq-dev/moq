@@ -473,8 +473,7 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let broadcast = origin
-			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
+		let (broadcast, _announce_broadcast) = origin.publish_broadcast(&name)
 			.context("failed to create broadcast")?;
 		local = Some(Publish::new(broadcast, &format, max_age)?);
 	} else {
@@ -519,8 +518,7 @@ fn spawn_import(
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let broadcast = origin
-					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
+				let (broadcast, _announce_broadcast) = origin.publish_broadcast(&name)
 					.context("failed to create broadcast")?;
 				local = Some(Publish::capture(broadcast, &capture, bandwidth, max_age)?);
 			}
@@ -609,7 +607,7 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
 	// e.g. "./source") through the origin.
 	consumer
-		.announced_broadcast(&name)
+		.routed(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 

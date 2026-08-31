@@ -169,13 +169,15 @@ impl Nodes {
 		let mut scanned = Announced::default();
 
 		while let Some(update) = announced.try_next() {
-			// The origin delivers a re-announce as unannounce-then-announce, so an
-			// unannounce can land mid-drain. Skip it rather than end the scan, which
+			// A retraction can land mid-drain (a re-announce is a metadata update,
+			// not a retract-and-announce). Skip it rather than end the scan, which
 			// would drop every node still queued behind it.
-			let Some(broadcast) = update.broadcast else { continue };
+			if !update.active {
+				continue;
+			}
 
-			let key = canonical_announced_node(update.path.as_str());
-			let route = broadcast.route();
+			let key = canonical_announced_node(update.route.prefix.as_str());
+			let route = update.route;
 			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
 			// An advertisement with no hops never crossed a link, so it is our own.
 			let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
@@ -282,7 +284,7 @@ mod tests {
 		node: &str,
 		hops: &[u64],
 		cost: u64,
-	) -> broadcast::Producer {
+	) -> moq_net::origin::Announcement {
 		let hops = OriginList::try_from(
 			hops.iter()
 				.map(|id| Origin::new(*id).expect("valid test origin"))
@@ -290,15 +292,11 @@ mod tests {
 		)
 		.unwrap();
 		let path = moq_net::Path::new(MESH_PREFIX).join(node);
-		let broadcast = origin
-			.create_broadcast(&path, broadcast::Route::announced().with_hops(hops).with_cost(cost))
+		let announcement = origin
+			.announce(moq_net::origin::Route::new(&path).with_hops(hops).with_cost(cost))
 			.unwrap();
-		origin
-			.consume()
-			.announced_broadcast(&path)
-			.await
-			.expect("test node announced");
-		broadcast
+		origin.consume().routed(&path).await.expect("test node announced");
+		announcement
 	}
 
 	#[tokio::test]
@@ -386,13 +384,10 @@ mod tests {
 		// bare unannounce ahead of relay-b's still-pending announce.
 		let first_update = announced.try_next().expect("replayed announce");
 		assert_eq!(
-			canonical_announced_node(first_update.path.as_str()),
+			canonical_announced_node(first_update.route.prefix.as_str()),
 			"https://relay-a.example/"
 		);
-		first.finish();
-		// The origin retires a finished source on a spawned task; time is paused, so
-		// this advances the clock instantly.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		drop(first);
 
 		let scanned = nodes.scan_announced(&mut announced);
 		assert!(
