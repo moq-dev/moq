@@ -934,10 +934,20 @@ impl Driver {
 		let failures = failures.take();
 		self.roll_window();
 
+		// Count everything before deciding anything. One batch can hold errors
+		// that arrived before a fatal one, and those still belong to the
+		// escalation window: dropping them lets a stream that keeps failing
+		// after the rebuild sit dead longer than it otherwise would.
+		self.underruns = self.underruns.saturating_add(failures.xruns);
+		self.unclassified = self.unclassified.saturating_add(failures.unclassified);
+
 		// cpal documents both as survivable: the stream keeps running and needs
 		// no rebuild.
 		if failures.changed || failures.realtime_denied {
 			tracing::debug!("audio output changed underneath us");
+		}
+		if let Some(kind) = failures.last {
+			tracing::warn!(%kind, count = failures.unclassified, "audio output error");
 		}
 
 		if failures.unavailable || failures.invalidated {
@@ -947,17 +957,12 @@ impl Driver {
 
 		// One underrun is a glitch, not a broken device. Only a sustained run
 		// of them is worth interrupting playback to fix.
-		self.underruns = self.underruns.saturating_add(failures.xruns);
 		if self.underruns > UNDERRUN_LIMIT {
 			self.underruns = 0;
 			tracing::warn!("restarting audio output after repeated underruns");
 			return true;
 		}
 
-		if let Some(kind) = failures.last {
-			tracing::warn!(%kind, count = failures.unclassified, "audio output error");
-		}
-		self.unclassified = self.unclassified.saturating_add(failures.unclassified);
 		if self.unclassified >= ERROR_LIMIT {
 			self.unclassified = 0;
 			tracing::warn!("restarting audio output after repeated unclassified errors");
@@ -1352,6 +1357,45 @@ mod tests {
 		let (reply, _response) = tokio::sync::oneshot::channel();
 		let error = commands.switch(None, reply).unwrap_err();
 		assert!(matches!(error, Error::Playback(message) if message.contains("stopped")));
+	}
+
+	/// Errors that arrive before a fatal one in the same batch still count.
+	/// Coalescing must not reset the escalation window that a stream failing
+	/// again after the rebuild depends on.
+	#[test]
+	fn a_fatal_batch_keeps_the_counts_that_preceded_it() {
+		let (commands, _requests) = channel();
+		let failures = Arc::new(Failures::default());
+
+		let mut driver = Driver {
+			shared: Arc::new(Shared::default()),
+			commands,
+			device: None,
+			stream: None,
+			retired: None,
+			failures: Some(failures.clone()),
+			retry: RETRY_MIN,
+			retry_at: None,
+			underruns: 0,
+			unclassified: 0,
+			window: Instant::now(),
+		};
+
+		// Two survivable errors, then the fatal one, all in one batch.
+		failures.record(cpal::ErrorKind::BackendError);
+		failures.record(cpal::ErrorKind::BackendError);
+		failures.record(cpal::ErrorKind::DeviceNotAvailable);
+		assert!(driver.should_restart(), "a lost device did not restart the stream");
+
+		// The replacement fails once more. That is the third unclassified error
+		// in the window, so it has to escalate rather than start over.
+		let replacement = Arc::new(Failures::default());
+		driver.failures = Some(replacement.clone());
+		replacement.record(cpal::ErrorKind::BackendError);
+		assert!(
+			driver.should_restart(),
+			"the fatal restart threw away the errors before it"
+		);
 	}
 
 	/// A stream that has already been replaced can still report an error. Acting
