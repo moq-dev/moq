@@ -843,3 +843,59 @@ describe("packed state", () => {
 		});
 	}
 });
+
+describe("re-anchor store ordering", () => {
+	// `insert` publishes the new state word and only then clears WRITE. A reader resuming between
+	// those two stores would otherwise pair the fresh epoch with the previous timeline's WRITE, so
+	// its exchange succeeds and it publishes a cursor past the new WRITE. Driving the writer's two
+	// stores by hand is the only way to pause between them.
+	it("does not let a read pair the new epoch with the old WRITE", () => {
+		const init = allocSharedRingBuffer(1, 64, 1000, true);
+		const main = new SharedRingBuffer(init);
+		main.setLatency(16);
+
+		const worklet = new SharedRingBuffer(init);
+		const out = [new Float32Array(16)];
+		for (let t = 0; t < 2000; t += 16) {
+			insert(main, 10_000 + t, 16, { channels: 1, value: 1 });
+			worklet.read(out);
+		}
+		insert(main, 12_000, 32, { channels: 1, value: 1 });
+
+		const state = new BigInt64Array(init.state);
+		let halfway = false;
+		const realLoad = Atomics.load;
+		const atomics = Atomics as { load: unknown };
+		atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
+			const value = realLoad(arr as Int32Array, idx);
+			if (!halfway) {
+				halfway = true;
+				// The first half of a re-anchor: new epoch and a zeroed cursor, WRITE untouched.
+				const epoch = (Number(realLoad(state, 0) >> 32n) | 0) + 1;
+				Atomics.store(state, 0, BigInt(epoch >>> 0) << 32n);
+			}
+			return value;
+		};
+
+		out[0].fill(-1);
+		let result = 0;
+		try {
+			result = worklet.read(out);
+		} finally {
+			atomics.load = realLoad;
+		}
+
+		// The read raced a rebase, so it must publish nothing and render nothing.
+		expect(result).toBe(0);
+		expect(out[0].some((sample) => sample === 1)).toBe(false);
+
+		// Now finish the re-anchor and play the next utterance through.
+		Atomics.store(new Int32Array(init.control), 0, 0);
+		let played = 0;
+		for (let i = 0; i < 20; i++) {
+			insert(main, 30_000 + i * 16, 16, { channels: 1, value: 2 });
+			played += worklet.read(out);
+		}
+		expect(played).toBe(320);
+	});
+});

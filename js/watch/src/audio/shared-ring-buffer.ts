@@ -283,10 +283,14 @@ export class SharedRingBuffer {
 	 * AudioWorklet only. Returns the number of samples read.
 	 */
 	read(output: Float32Array[]): number {
+		// Sample the word before admission, not after. A re-anchor publishes the new state and
+		// only then clears WRITE, so a reader admitted in between would pair a fresh epoch with
+		// the previous timeline's WRITE and its exchange would succeed. Taken first, a reader
+		// admitted before the rebase still holds the old word and its exchange fails, while one
+		// arriving after sees the STALLED that `reset` raised and never starts.
+		const state = Atomics.load(this.#state, 0);
 		if (Atomics.load(this.#control, STALLED) === 1) return 0;
 
-		// The whole word, so the publish below can tell whether this is still the same timeline.
-		const state = Atomics.load(this.#state, 0);
 		let read = readOf(state);
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
