@@ -588,13 +588,23 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill> {
 	const reader = new Reader(stream, undefined, V20);
 	const objects: { group: number; id: number; payload: string }[] = [];
-	let requestId: bigint | undefined;
 	let group = 0;
 	let id = 0;
-	try {
-		expect(await reader.u53()).toBe(FetchHeader.type);
-		requestId = (await FetchHeader.decode(reader, V20)).requestId;
 
+	// Guarded on its own, so the assertion below lands outside every catch. Folding it into
+	// the object loop's would report a wrong stream type as a publisher reset, and the tests
+	// that only assert `reset` would pass on a malformed header.
+	let header: { type: number; requestId: bigint } | undefined;
+	try {
+		const type = await reader.u53();
+		header = { type, requestId: (await FetchHeader.decode(reader, V20)).requestId };
+	} catch {
+		return { objects, reset: true };
+	}
+	expect(header.type).toBe(FetchHeader.type);
+	const requestId = header.requestId;
+
+	try {
 		while (!(await reader.done())) {
 			const flags = await reader.u53();
 			if (flags & 0x08) group = await reader.u53();

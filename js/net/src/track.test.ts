@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Producer as GroupProducer } from "./group.ts";
+import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
@@ -442,6 +442,28 @@ test("largest names the newest frame written", async () => {
 	// Reading a group does not move the edge: it is what the track produced, not what is left.
 	await subscriber.recvGroup();
 	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
+
+	producer.close();
+});
+
+// A subscriber that arrives after the frames were written reads mirrors, and a mirror only
+// replays what is still buffered. Once a group has evicted from its front, a replay-local
+// count would put the edge below the frames actually written.
+test("largest survives a mirror replay of an evicted group", async () => {
+	const producer = new TrackProducer("test").accept();
+
+	// Overflow the group's frame cap so the front is evicted, which is the only case where
+	// the replayed frames and the frames ever written disagree.
+	const written = MAX_GROUP_FRAMES + 5;
+	const group = producer.appendGroup();
+	for (let i = 0; i < written; i++) {
+		group.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.now() });
+	}
+	group.close();
+
+	// Subscribing now replays the retained window into a fresh sink.
+	const late = producer.subscribe();
+	expect(late.largest()).toEqual({ group: 0, frame: written - 1 });
 
 	producer.close();
 });
