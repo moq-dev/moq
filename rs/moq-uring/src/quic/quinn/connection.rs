@@ -9,7 +9,7 @@ use bytes::Bytes;
 use quinn_proto::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
-use super::super::{Error, SEGMENT, TRAINS_PER_TURN};
+use super::super::{Error, SEGMENT};
 use super::endpoint;
 use crate::{Handle, udp};
 
@@ -716,16 +716,14 @@ impl Driver {
 		state.fail(Error::App { code, reason });
 	}
 
-	/// Stage up to [`TRAINS_PER_TURN`] GSO trains, then yield so another
-	/// connection sharing the socket gets a chance at the transmit pool.
+	/// Stage one GSO train, then yield so another connection sharing the
+	/// socket gets a chance at the transmit pool.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		for _ in 0..TRAINS_PER_TURN {
-			match self.flush_one(waiter) {
-				Poll::Ready(Ok(())) => {}
-				Poll::Ready(Err(err)) => return Poll::Ready(err),
-				// Backpressure, or nothing left to stage.
-				Poll::Pending => return Poll::Pending,
-			}
+		match self.flush_one(waiter) {
+			Poll::Ready(Ok(())) => {}
+			Poll::Ready(Err(err)) => return Poll::Ready(err),
+			// Backpressure, or nothing left to stage.
+			Poll::Pending => return Poll::Pending,
 		}
 		// Requeue behind the other ready tasks. If quinn is drained, the next
 		// poll costs one empty acquire and then parks normally.
@@ -733,8 +731,8 @@ impl Driver {
 		Poll::Pending
 	}
 
-	/// Stage one GSO train. Ignores quinn's pacing hint; the congestion
-	/// controller still bounds each train.
+	/// Fill one transmit buffer and stage it. Ignores quinn's pacing hint;
+	/// the congestion controller still bounds each train.
 	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut tx = match self.socket.poll_acquire(waiter) {
 			Poll::Ready(Ok(tx)) => tx,
