@@ -306,6 +306,25 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
+			// Walk the cursor over missing sequences below the first arrived group.
+			// Groups race on independent QUIC streams (newer ones at higher priority),
+			// so a buffered higher sequence proves nothing: the missing one may be
+			// merely late, and there is no way to tell that from an eviction. The
+			// latency budget is the gate: everything a missing group could still
+			// present is bounded by where the next stamped group begins. A finished
+			// track closes the gap outright, since no new group can arrive. That proof
+			// covers only sequences that never arrived: finishing the track ends new
+			// groups, not the frames still flowing on ones already open, so arrived
+			// groups are settled below by their own FIN, abort, or the budget.
+			if let Some(front_sequence) = self.pending.front().map(|g| g.sequence)
+				&& front_sequence > self.current
+				&& let Some((_, next_start)) = next_group
+				&& (finished || max_timestamp.saturating_sub(next_start) >= self.latency)
+			{
+				self.current = front_sequence;
+				continue;
+			}
+
 			let should_skip = if let Some((_, next_start)) = next_group {
 				if let Some(oldest) = oldest_timestamp {
 					// Current group is blocking. Skip if newer groups have pulled past
@@ -316,16 +335,10 @@ impl<F: Container> Consumer<F> {
 					let covered = current_end.is_some_and(|end| end >= next_start);
 					over_latency || covered
 				} else {
-					// The current group can't produce a timestamp: either it's missing
-					// entirely, or it's arrived but frameless. Groups race on independent
-					// QUIC streams (newer ones at higher priority), so a buffered higher
-					// sequence proves nothing: the missing one may be merely late, and
-					// there is no way to tell that from an eviction. The latency budget is
-					// the only gate: everything the missing group could still present is
-					// bounded by where the next group begins, so skip once the newest
-					// content is a full budget past that point. A finished track can
-					// never deliver it, so skip immediately.
-					finished || max_timestamp.saturating_sub(next_start) >= self.latency
+					// The current group has arrived but has no frame yet. Its content
+					// is bounded by where the next stamped group begins the same way a
+					// missing one's is, so give it the same budget before giving up.
+					max_timestamp.saturating_sub(next_start) >= self.latency
 				}
 			} else {
 				false
@@ -531,6 +544,13 @@ impl<F: Container> Consumer<F> {
 	/// like [`with_latency`](Self::with_latency).
 	pub fn set_latency(&mut self, latency: std::time::Duration) {
 		self.latency = latency.min(self.track.info().latency_max);
+		// The transport enforces the same budget on the subscription itself, so a
+		// tolerance set here has to reach it: otherwise moq-net skips the very groups
+		// this consumer was told to wait for, before they ever get here. The
+		// subscription keeps the requested value verbatim; the publisher applies its
+		// own window to the aggregate.
+		let subscription = self.track.subscription().with_latency_max(latency);
+		let _ = self.track.update(subscription);
 	}
 }
 
@@ -1961,6 +1981,9 @@ mod tests {
 		finisher.await.unwrap();
 	}
 
+	/// An arrived group with no frames yet is settled only by its own FIN, abort, or the
+	/// latency budget, never by the track finishing: the track boundary ends new groups,
+	/// not the frames still flowing on open ones. Here the budget expires it.
 	#[tokio::test]
 	async fn startup_skips_groups_without_data() {
 		tokio::time::pause();
@@ -1970,19 +1993,77 @@ mod tests {
 
 		let _group5 = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
 		write_group(&mut track, 7, &[ts(210_000)]);
+
+		// Group 5 is open and within budget: its frames may still arrive, so wait.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"an open frameless group within budget must be waited for"
+		);
+
+		// Group 9 pushes the newest content a full budget past what group 5 could still
+		// present (bounded by group 7's start), expiring it.
+		write_group(&mut track, 9, &[ts(800_000)]);
 		track.finish().unwrap();
 
-		let frames = tokio::time::timeout(Duration::from_millis(500), async {
-			let mut frames = Vec::new();
-			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
-			}
-			frames
-		})
-		.await
-		.expect("should not hang");
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![210_000, 800_000], "the expired frameless group is skipped");
+	}
 
-		assert!(!frames.is_empty());
+	/// Track completion is not group completion: a group already open when the track
+	/// finishes can still receive frames, so it must not be skipped as if it were a
+	/// missing sequence. Its late frames are delivered when they land within budget.
+	#[tokio::test]
+	async fn finished_track_waits_for_an_open_head_group() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		// Group 0's stream is open but its frames lose the race; the track boundary
+		// arrives before them.
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the open head group is within budget and must be waited for"
+		);
+
+		// Its frames land moments later, well within the 500ms budget.
+		Container::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		group0.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![0, 100_000], "the open group's late frames are delivered");
+	}
+
+	/// The latency tolerance reaches the wire subscription, so moq-net doesn't skip the
+	/// very groups this consumer was told to wait for before they get here.
+	#[tokio::test]
+	async fn with_latency_updates_the_wire_budget() {
+		let track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let _consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(250));
+
+		let aggregate = track.subscription().expect("a live subscriber");
+		assert_eq!(aggregate.latency_max, Duration::from_millis(250));
 	}
 
 	#[tokio::test]
