@@ -168,7 +168,7 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
 - **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
-- **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame. On `moqt-20`, which replaced the joining fetch with a fill, we ask for the current group as a fill so playback starts on a group boundary. We serve an incoming fill as ordinary subgroups rather than opening a fetch stream, so a backfill never blocks the live edge behind it, and we accept a fill fetch stream from a peer that opens one, limited to the single group we asked for.
+- **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame. On `moqt-20`, which replaced the joining fetch with a fill, we ask for the current group directly with a relative Location Filter and request no fill, so a group is never split across two streams. We serve a fill a peer asks us for as ordinary subgroups rather than opening a fetch stream, so a backfill never blocks the live edge behind it. We do not read an incoming fetch stream: having requested no fill, one would duplicate a group the subscription is already delivering.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.

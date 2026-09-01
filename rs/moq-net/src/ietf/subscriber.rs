@@ -3615,8 +3615,9 @@ mod tests {
 /// subscription splits a single group across two streams: the fill carries the head, the
 /// subscription the tail, and the two cannot be reassembled into one group here. Asking
 /// for the current group directly keeps a group whole and on one stream, which is what
-/// moq-lite is built around. We still serve a fill a peer asks us for, and still read one
-/// a peer sends us.
+/// moq-lite is built around. We still serve a fill a peer asks us for; we do not read one,
+/// since having requested none, an incoming fetch stream would duplicate a group the
+/// subscription is already delivering.
 fn subscribe_filter(start: Option<u64>, end: Option<u64>, version: Version) -> Filter {
 	if !Filter::is_draft20(version) {
 		return Filter::NextObject;
