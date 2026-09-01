@@ -342,7 +342,7 @@ Applications:
   com.apple.Safari  Safari
 
 Microphones:
-  * MacBook Pro Microphone
+  * coreaudio:BuiltInMicrophoneDevice  MacBook Pro Microphone
 ```
 
 ```bash

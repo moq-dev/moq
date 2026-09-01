@@ -458,6 +458,9 @@ impl Microphone {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
 	/// Opaque identifier: pass to [`Source::Microphone`].
+	///
+	/// This is cpal's `host:device` id, so it is stable across restarts and
+	/// unique even when two inputs share a [`name`](Self::name).
 	pub id: String,
 	/// Human-readable name, e.g. "MacBook Pro Microphone".
 	pub name: String,
@@ -481,10 +484,19 @@ pub async fn devices() -> Result<Vec<Device>, Error> {
 fn list() -> Result<Vec<Device>, Error> {
 	let host = cpal::default_host();
 	let default = host.default_input_device().and_then(|device| device.id().ok());
-	host.input_devices()
+	Ok(host
+		.input_devices()
 		.map_err(capture_err)?
-		.map(|device| describe(&device, default.as_ref()).map_err(capture_err))
-		.collect()
+		// A device being reconfigured can fail `id`/`description` on its own, so
+		// skip it rather than losing every other input from the listing.
+		.filter_map(|device| match describe(&device, default.as_ref()) {
+			Ok(device) => Some(device),
+			Err(err) => {
+				tracing::debug!(error = %err, "skipping an input device that could not be described");
+				None
+			}
+		})
+		.collect())
 }
 
 /// Run blocking cpal host I/O off the runtime's worker threads.
@@ -506,10 +518,18 @@ fn resolve(
 	let host = cpal::default_host();
 	let default = host.default_input_device().and_then(|device| device.id().ok());
 	let device = match selector {
-		Some(id) => {
-			let id = id.parse().map_err(Failure::cpal)?;
-			host.device_by_id(&id)
-				.ok_or_else(|| Failure::retry(Error::Device(format!("input device {id:?} not found"))))?
+		// `Host::device_by_id` searches outputs too, so match against the inputs
+		// ourselves: an output id must not resolve as a microphone.
+		Some(selector) => {
+			let wanted: cpal::DeviceId = selector.parse().map_err(|err| {
+				Failure::fatal(Error::Device(format!(
+					"{selector:?} is not an input device id; run `devices` to list them: {err}"
+				)))
+			})?;
+			host.input_devices()
+				.map_err(Failure::cpal)?
+				.find(|device| device.id().ok().as_ref() == Some(&wanted))
+				.ok_or_else(|| Failure::retry(Error::Device(format!("input device {selector:?} not found"))))?
 		}
 		None => host
 			.default_input_device()

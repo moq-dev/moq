@@ -81,9 +81,9 @@ local.run_until(async move {
             status = ?state.status(),
             device = ?state.device(),
             failure = ?state.failure(),
-            level = ?state.level(),
         );
     }
+    let level = microphone.level(); // rms/peak, for a local meter
 
     publish.await??;
     Ok(())
@@ -95,9 +95,10 @@ The native capture driver is not `Send`, so await it directly or use a
 shorthand when no controls are needed. Transient input failures retry with
 capped backoff. Terminal failures leave the track registered in
 `Status::Failed`; `start` retries, while `replace` selects another device without
-changing the identity subscribers already know. `State::level` is measured
+changing the identity subscribers already know. `Publication::level` is measured
 after AEC and other capture processing, so it is suitable for a local meter or
-active-speaker input.
+active-speaker input. It rides its own channel rather than `State`, because it
+changes every buffer and `changed` reports lifecycle transitions only.
 
 `encode::Producer` takes PCM you supply instead. Either way the codec is
 `encode::Codec`: Opus (the default) or uncompressed PCM, which trades bandwidth

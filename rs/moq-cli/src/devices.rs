@@ -81,9 +81,7 @@ pub async fn run() -> anyhow::Result<()> {
 			for device in devices {
 				// The default is what `--microphone` picks when omitted, so mark it.
 				let marker = if device.default { "*" } else { " " };
-				// cpal has no id beyond the name, so printing both would repeat
-				// itself; the id is the column `--microphone` takes.
-				writeln!(out, "  {marker} {}", device.id).unwrap();
+				writeln!(out, "  {marker} {}  {}", device.id, device.name).unwrap();
 			}
 		},
 	);
