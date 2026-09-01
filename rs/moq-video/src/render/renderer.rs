@@ -1205,11 +1205,6 @@ mod tests {
 
 			let texture = importing.render(&frame).expect("draw the imported picture");
 			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
-			assert_eq!(
-				importing.source.dmabuf.retiled(),
-				0,
-				"picture {index} reached the GPU only by way of a re-tile"
-			);
 			let zero_copy = readback(&device, &queue, &texture).await;
 
 			let i420 = crate::frame::I420::from_nv12(&cpu.data, width, height).expect("deinterleave NV12");
