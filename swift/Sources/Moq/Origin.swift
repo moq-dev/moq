@@ -37,7 +37,7 @@ public final class OriginProducer: Sendable {
         BroadcastProducer(try ffi.createBroadcast(path: path))
     }
 
-    /// Advertise a route: a claim that paths under `route.prefix` can be served.
+    /// Advertise a route: a claim that paths under `prefix` can be served.
     ///
     /// Hold the returned `Announce` for as long as the route should stay
     /// advertised. Announcing is independent of `createBroadcast(path:)`:

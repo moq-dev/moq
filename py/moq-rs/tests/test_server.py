@@ -250,7 +250,6 @@ async def test_broadcast_route_over_wire():
                     assert announcement.path == "with-route"
                     assert announcement.active
                     route = announcement.route
-                    assert route.prefix == "with-route"
                     assert all(isinstance(h, int) for h in route.hops)
                     # A route crossing at least one session carries a non-empty hop chain.
                     assert len(route.hops) >= 1
