@@ -12,6 +12,23 @@ dev's reshaped announce/origin surface only; the 0.1.x backport half is
 dropped unless a maintenance branch appears. See also the pattern-scoped
 origin work at /quest/m2/path-patterns/origin.md.
 
+### After prefix routes
+
+A per-path predicate does not mean what it did when this was filed.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) made `announced()` yield
+covering prefixes rather than broadcast paths, so a predicate applied to the
+announce stream is deciding about a *set*: a route at `room/` carries every
+path under it, including the ones a deafen rule wants blocked, and blocking the
+whole prefix hides paths the subscriber may use. The filter also cannot be the
+enforcement point on its own, because `request_broadcast` resolves against the
+route table directly.
+
+So this needs the enforcement boundary settled before an API: a predicate over
+announcements (discovery), a predicate at resolution (access), or the
+pattern-scoped consumer in
+[origin](/quest/m2/path-patterns/origin.md). The reporter's requirement, which a
+forked client cannot bypass, points away from a discovery-time filter.
+
 ### Issue context
 
 Hi @kixelated 👋

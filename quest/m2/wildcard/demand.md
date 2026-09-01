@@ -1,4 +1,4 @@
-# [M] Demand
+# [S] Demand
 
 ## Goal
 
@@ -9,24 +9,25 @@ player never demands what it hides.
 
 ## Plan
 
-The gate is JS-only. `js/watch/src/broadcast.ts` resolves
-a catalog reference in `#relativeTarget`, and its `#isPathAnnounced` check
-drops any rendition whose broadcast has no EXACT-path announcement:
-`#runFiltered` removes it from `out.catalog`, so rendition selection never sees
-it and nothing ever subscribes. The Rust side needs nothing here:
-`moq-mux::Source` resolves references through `request_broadcast`, which
-[resolve](/quest/m2/wildcard/resolve.md) teaches to consult the wildcard table.
+The gate is JS-only, and it is already half fixed.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) made `#isPathAnnounced` in
+`js/watch/src/broadcast.ts` prefix-aware: it holds the set of announced
+prefixes and accepts any that covers the path, so a route at `room/` already
+makes `room/alice/cam.hang` selectable without naming it. What it cannot do is
+match a pattern, since it tests with `Path.hasPrefix`.
+
+So the remaining work is narrow: teach the JS client the wildcard
+advertisement (`js/net`'s announce handling, mirroring what
+[advertise](/quest/m2/wildcard/advertise.md) does in moq-net) and make the
+covering test use the shared pattern matching rather than prefix containment.
+Withdrawal of the last covering wildcard hides the rendition again, the same
+reactive shape announcements have today.
 
 Do not simply delete the gate. It exists so the player does not subscribe to
 absent broadcasts and so renditions appear and disappear reactively with
-announcements, and `moq-lite`'s own convention (await `announced_broadcast`,
-then `request_broadcast` downstream) exists because a blind request races the
-first announce handshake. Instead, teach the JS client the wildcard
-advertisement (`js/net`'s announce handling, mirroring what
-[advertise](/quest/m2/wildcard/advertise.md) does in moq-net) and make `#isPathAnnounced` count a
-pattern covering the path as available. Withdrawal of the last covering
-wildcard hides the rendition again, the same reactive shape announcements have
-today.
+announcements. The Rust side needs nothing here: `moq-mux::Source` resolves
+references through `request_broadcast`, which
+[resolve](/quest/m2/wildcard/resolve.md) teaches to consult patterns.
 
 Two existing soft spots to not reintroduce: the first evaluation runs before
 the announcement stream has populated, briefly hiding cross-broadcast

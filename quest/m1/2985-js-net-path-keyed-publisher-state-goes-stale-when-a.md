@@ -11,6 +11,22 @@ Use the public issue's scope, implementation notes, and acceptance criteria
 below as the starting plan. Reconcile paths and assumptions with the current
 tree before implementation.
 
+### After prefix routes
+
+The remedy this quest points at no longer exists.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) removed `Epoch` from
+`draft-lcurley-moq-lite` as spec-only and never implemented, and retired
+`draft-lcurley-moq-broadcast`. So "#2610 specs exactly this as the broadcast
+epoch" is now a dead pointer, and TRACK_INFO epoch-keying is not coming from
+there.
+
+The three `js/net` sites are unaffected and still stale on a republish. What
+changes is what they can key on: [Route resume
+identity](/quest/m0/route-resume.md) restores per-path identity from the
+winning route's first hop, which is the identity the Rust side will use to
+decide whether a republish is the same publisher. Settle whether these sites
+key on that or on something JS-local before implementing.
+
 ### Issue context
 
 #### Problem

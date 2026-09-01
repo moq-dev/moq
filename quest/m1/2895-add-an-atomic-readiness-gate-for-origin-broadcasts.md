@@ -11,6 +11,22 @@ Use the public issue's scope, implementation notes, and acceptance criteria
 below as the starting plan. Reconcile paths and assumptions with the current
 tree before implementation.
 
+### After prefix routes
+
+Half of the stated problem is gone.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) made
+`origin::Producer::create_broadcast` stop announcing: the blessed order is
+create, populate, announce, and `announce` is a separate call returning a guard.
+So a broadcast is no longer announced before its tracks exist, and
+`broadcast::Route::announce = false` (which the issue correctly says is not a
+readiness gate) does not exist either.
+
+What remains is the exact-path half: `create_broadcast` still makes the source
+visible to `request_broadcast` immediately, so a concurrent consumer can find a
+broadcast whose tracks and `broadcast::Dynamic` handler are not installed yet.
+Re-scope to that, and weigh it against the convention now being sufficient for
+the announced path.
+
 ### Issue context
 
 #### Problem

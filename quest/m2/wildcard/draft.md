@@ -13,6 +13,16 @@ route cost appears in both.
 
 What the text has to settle:
 
+- **Whether a pattern is a new message or the existing prefix field.**
+  [moq#3225](https://github.com/moq-dev/moq/pull/3225) reinterpreted the
+  announce suffix as a route prefix without changing a byte, so a pattern could
+  ride ANNOUNCE_START's existing field rather than arriving as its own message.
+  That is the smaller wire change and reuses retraction and repricing for free,
+  but an older lite-06 build reads `**` as a literal segment and silently
+  mis-covers rather than failing, where an unknown message type at least fails
+  loudly. Settle this explicitly, and say which failure mode is preferred; the
+  staged decode-tolerance rollout in
+  [Advertise](/quest/m2/wildcard/advertise.md) is required either way.
 - The message itself: a path pattern in its string form, the hop list, and ONE
   cost varint, retracted and replaced through the same id-referencing forms
   ANNOUNCE_END and ANNOUNCE_UPDATE already use. The pattern is the
@@ -29,16 +39,16 @@ What the text has to settle:
   varint rather than `Cost`'s warm/cold pair: the halves
   differ only when the sender is carrying the broadcast, and a wildcard carries
   nothing, so a second field would be provably equal to the first.
-- `Epoch` has no meaning for a wildcard, because there is no generation of
-  content at a pattern. Say so explicitly rather than leaving a field a
-  receiver might splice on.
 - Remove the `Ended` flag from ANNOUNCE_REQUEST in the same lite-06 edit. It is
   unimplemented everywhere, and its one stated use, enumerating available
   recordings, is per-recording announce state, the fleet-wide growth
   wildcards exist to stop. A client that must distinguish recording
   generations reads them from the catalog the archive serves, not from
   announcements.
-- Selection is two rules, in order. First, when several patterns match one
+- Selection is two rules, in order, and the first is already the draft's rule
+  for literal prefixes: the most specific covering claim is consulted before
+  cost. State that a pattern participates in that same specificity ordering
+  rather than in a rule of its own. When several patterns match one
   path, only the tier selected by the matcher's shared structural specificity
   is consulted, with equal-specificity patterns forming one
   pool. A refusal from that tier never falls through to a less specific

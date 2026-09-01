@@ -7,26 +7,21 @@ matching wildcard.
 
 ## Plan
 
-`lite::publisher::recv_subscribe` already falls back to
-`Consumer::request_broadcast`, which drains an `origin::Dynamic` handler that
-nothing installs, so the serving half looks done. Do NOT build on it as it
-stands. Its request queue is keyed by absolute path alone, so requests from
-consumers with different `exclude` origins coalesce onto one entry; a `Request`
-carries the path and nothing else, no requester identity, hop list, or cost; and
-every live handler drains one shared FIFO, so installing one handler per
-received wildcard means whichever polls first wins rather than whichever the
-cost ranks. `request_broadcast`'s own comment names the consequence: "a handler
-resolves paths with no route chain to check, so falling through would let it
-route around the split horizon and rebuild the loop."
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) built the table this quest
+was going to need. `Consumer::request_broadcast` resolves a local broadcast
+first, then `best_server`, which filters routes to those covering the path,
+drops any whose hop chain contains the requester's excluded hop, keeps the
+longest covering prefix, and orders the survivors by `route_order`. The winning
+session serves the request on demand, and `ServeState.served` caches the result
+per path so repeat requests share one upstream subscription. The old
+`origin::Dynamic` objection (one shared FIFO, no requester identity, no route
+chain to check) no longer applies, because that is not the path a route takes.
 
-So wildcard lookup is a first-class origin routing table, sitting beside the
-announce tree and consulted by the same resolution path that already returns
-`Found`/`Excluded`/`Missing`. It holds each wildcard's pattern, hop list, and
-accumulated cost, and resolution takes the requester's
-excluded origin as an argument the way `resolve_broadcast` already does.
-Candidates whose hop list contains the requester are filtered BEFORE selection,
-so an out-of-band request can never be served back through the peer that made
-it.
+So this quest extends a working table rather than standing one up: teach the
+route entries to hold a pattern instead of only a literal prefix, and teach
+selection the tiering and pooling below. Keep the exclusion filter where it is,
+applied before selection, so an out-of-band request can never be served back
+through the peer that made it.
 
 Among the survivors, only the tier selected by the matcher's shared structural
 specificity is consulted, with equal-specificity patterns forming one pool. A
@@ -54,9 +49,9 @@ arriving later lands on that same node, competes on cost at one front, and the
 front's ordinary route change moves consumers at a group boundary. A
 cache-only answer would strand every bound consumer on the wildcard
 subscription with nothing able to migrate or stop it. When the concrete claim
-is a DIFFERENT publisher, migrating its consumers additionally needs
-[Epoch](/quest/m2/wildcard/epoch.md); this quest's obligation is the route
-install that makes both possible. Repeat requests for one path
+is a DIFFERENT publisher, its consumers end and resubscribe rather than
+splicing, per [Route resume identity](/quest/m0/route-resume.md); this quest's
+obligation is the route install that makes selection between them possible. Repeat requests for one path
 share that one route, keyed to survive the exclusion filter rather than
 handing one peer's answer to another.
 
@@ -80,8 +75,9 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - Two requesters with different excluded origins do not receive each other's
   resolved broadcast.
 - A concrete announcement from the SAME publisher takes over from the wildcard
-  route at a group boundary, without announcement churn; the cross-publisher
-  case needs `Epoch` and belongs with [Epoch](/quest/m2/wildcard/epoch.md).
+  route at a group boundary, without announcement churn; a concrete claim from a
+  DIFFERENT publisher ends the wildcard-served subscription instead of splicing
+  into it.
 - A FETCH for an unannounced archived path resolves through the catch-all the
   same way a subscribe does.
 - A capacity refusal re-resolves onto another advertiser exactly once, and a
@@ -101,3 +97,5 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 ## Required
 
 - [Advertise](/quest/m2/wildcard/advertise.md)
+- [Route resume identity](/quest/m0/route-resume.md) - a wildcard-served
+  subscription must resume or end correctly when a concrete claim arrives

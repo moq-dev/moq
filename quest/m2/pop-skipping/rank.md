@@ -2,9 +2,78 @@
 
 ## Goal
 
-Rank warm relay candidates by cold cost before hop count. Carry cold cost
-beside marginal cost on Lite06 WIP, prefer the lower cold cost ahead of hop
-count where marginal cost ties, make adoption descend `(cold cost,
-per-broadcast relay hash)`, and hold a re-parent onto another relay long
-enough for the costs it rests on to land, with asymmetric, equal-rank,
-transitive, simultaneous-handover, stale-ring, and group-boundary tests.
+A relay adopts another relay's warm copy only when that relay is strictly
+closer to the publisher, so a PoP converges on one aggregation point instead of
+a coin flip, and no two relays can adopt each other.
+
+## Plan
+
+Once [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) lands, two
+relays carrying one broadcast both advertise it warm and tie: warm cost cannot
+separate them, and only the deterministic hash would, so the aggregation root is
+picked at random. In the `sjc0 -> dal0 -> iad0` topology that lets SJC (two
+links from IAD) win over DAL (one link), and the cluster carries the extra
+backhaul it was supposed to remove.
+
+Break that tie on cold cost, which is the relay's own distance to the publisher
+with warm discounts removed and is already on the wire and already ranked below
+warm in `route_order`. Adoption descends `(cold cost, hash(broadcast path, relay
+hop id))`: lower cold wins, equal cold takes the lower hash, and a relay keeps
+its own upstream rather than adopting a peer that ranks above it. Including the
+broadcast path in the hash spreads ownership instead of making one relay win
+every broadcast. A relay advertises its *own* rank, not that of a parent it
+adopted, so every warm edge descends and cycles cannot form.
+
+Adopting a parent adds that link to the adopter's cold cost, so it can only rank
+above its parent afterwards. That is what makes descent automatic, and it is why
+no link may be priced free.
+
+### The hold, and why it is not optional
+
+Cold is a value each relay reports about itself, so a report still crossing the
+mesh can be lower than what its sender would say now. Rings of relays can each
+rank a stale neighbour below themselves and all let go at once, leaving the
+broadcast with no source. Rising costs are the whole hazard; if costs only fell,
+a stale value would only make a peer look worse than it is. A GOAWAY prices a
+route at the ceiling while neighbours still remember it cheap, so the trigger is
+a rolling restart, not an exotic race.
+
+Hold a re-parent onto another relay long enough for the costs it rests on to
+land, and re-evaluate when the hold expires rather than committing to the
+decision that armed it. The sizing rule is "longer than an announcement crosses
+the mesh", plus a stable per-relay spread so a PoP does not reconsider on one
+instant. The hold covers only trading a working upstream for a better one:
+an idle relay is pulling nothing, a one-hop chain is the publisher itself, and
+leaving a drained or vanished route stays immediate.
+
+### Identity
+
+Adoption is a statement about a specific peer, so it needs to know which peer it
+adopted and when that changed. [Route resume
+identity](/quest/m0/route-resume.md) supplies that from the route's first hop,
+including that `Hop::UNKNOWN` matches nothing: two anonymous relays must not
+pass for one relay reconnecting and skip the gate.
+
+Update `drafts/draft-lcurley-moq-lite.md` in the same change, restoring the
+adoption-rank rule that [Lite draft routing
+text](/quest/m0/lite-draft-routing.md) removes.
+
+### Tests
+
+The asymmetric chain (DAL outranks SJC regardless of hash), the equal-cost race
+(exactly the lower hash keeps its upstream while the other adopts it), a
+three-node transitive tree, simultaneous updates, a ring of relays each holding
+a stale cheaper report (which must not leave the broadcast sourceless), route
+loss and reversion, and an unknown-cold peer losing to a known cheap one in both
+hash directions. A live track must migrate only at a group boundary and must not
+see announcement churn.
+
+Write every gate test over both hash directions, or it proves nothing beyond a
+lucky hash.
+
+## Required
+
+- [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) - there is nothing
+  to rank until two relays can both advertise one broadcast as warm
+- [Route resume identity](/quest/m0/route-resume.md) - adoption is decided
+  against the peer identity this restores

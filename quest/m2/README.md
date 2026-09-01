@@ -48,7 +48,6 @@ dashboards, fleet rollout) stay downstream.
 - [#2907](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - Bind the browser through moq-ffi/UniFFI instead of a second hand-written wasm API
 - [#2822](/quest/m2/2822-moq-wasm-bind-the-datagram-path-append-datagram-recv.md) - moq-wasm: bind the datagram path (append_datagram / recv_datagram)
 - [#2835](/quest/m2/2835-moq-wasm-bind-track-dynamic-so-a-browser-publisher-can.md) - moq-wasm: bind track::Dynamic so a browser publisher can serve cache-miss fetches
-- [#3193](/quest/m2/3193-expose-a-cancellable-route-watch-api-in-python.md) - Expose a cancellable route watch API in Python
 - [#3189](/quest/m2/3189-add-uniffi-defaults-to-caller-constructed-configuration.md) - Add UniFFI defaults to caller-constructed configuration records
 - [Cluster flags](/quest/m2/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
 - [#3058](/quest/m2/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by closing it

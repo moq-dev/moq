@@ -2,12 +2,14 @@
 
 ## Goal
 
-Defects in what main ships today: crashes, races, protocol violations,
-wrong output, security gaps, and the missing tests that let them through.
+Defects in what main or dev ships today: crashes, races, protocol violations,
+wrong output, security gaps, regressions an unreleased change introduced, and
+the missing tests that let them through.
 
 ## Plan
 
-Fix on main. Security and credential exposure lead; user-visible breakage
+Fix where the defect is, which is usually main; a quest says so when it is dev.
+Security and credential exposure lead; user-visible breakage
 next; hardening, tooling, and test debt close the list. Each fix lands with a
 regression test per Root Cause First.
 
@@ -15,6 +17,7 @@ regression test per Root Cause First.
 
 - [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass --auth-api-mode, so proxy grants can't refuse or scope them
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect() logs on every connection at the wrong level and prints the JWT in the URL
+- [Route resume identity](/quest/m0/route-resume.md) - a failing route ends the subscription instead of resuming through the next one, since announcements became prefix routes
 - [Dart leaks](/quest/m0/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [#3207](/quest/m0/3207-send-valid-publish-done-statuses-for-every-supported-ietf.md) - Send valid PUBLISH_DONE statuses for every supported IETF draft
 - [#3076](/quest/m0/3076-moq-relay-publish-is-unimplemented-by-design-make-the.md) - moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that wait
@@ -41,5 +44,6 @@ regression test per Root Cause First.
 - [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync is silent - no log, no counter, no downstream signal
 - [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
 - [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
+- [Lite draft routing text](/quest/m0/lite-draft-routing.md) - the draft specifies a warm discount and adoption rank no implementation has
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Test open-GOP H.264 tune-in end to end (leading-picture handling)
 - [#1095](/quest/m0/1095-avoid-allocation-in-axum-tungstenite-websocket-message.md) - Avoid allocation in axum/tungstenite WebSocket message conversion

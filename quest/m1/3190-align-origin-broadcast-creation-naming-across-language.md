@@ -11,6 +11,21 @@ Use the public issue's scope, implementation notes, and acceptance criteria
 below as the starting plan. Reconcile paths and assumptions with the current
 tree before implementation.
 
+### After prefix routes
+
+This is now a semantics divergence, not only a naming one.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) made Rust's
+`origin::Producer::create_broadcast` stop announcing, while the FFI's
+`create_broadcast` still announces the exact path on the caller's behalf (it
+calls `announce(path, Default::default())` and hands back the guard), so
+wrappers keep announcing by convention. Two surfaces now share one name and do
+different things.
+
+Settle that before the rename: either the FFI's auto-announce becomes explicit
+in the wrappers too, or the fused operation keeps a distinct name of its own.
+Renaming both to `create_broadcast` without deciding hides the difference behind
+matching spelling, which is worse than the inconsistency it fixes.
+
 ### Issue context
 
 #### Problem

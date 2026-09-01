@@ -7,9 +7,14 @@ resolving one into a subscription.
 
 ## Plan
 
-Following the draft, the message goes in `rs/moq-net/src/lite/announce.rs`
-alongside `AnnounceBroadcast`, gated on the lite-06 version check the route
-cost already uses so older peers neither send nor receive it.
+Following the draft, this goes in `rs/moq-net/src/lite/announce.rs` alongside
+`AnnounceBroadcast`, gated on the lite-06 version check the route cost already
+uses so older peers neither send nor receive it.
+
+[Draft](/quest/m2/wildcard/draft.md) settles whether a pattern rides the
+existing announce messages' prefix field or arrives as a message of its own.
+Either way the skew hazard below applies, and either way the decode side lands
+first.
 
 That gate is NOT sufficient on its own. `moq-lite-06-wip` is one ALPN with no
 sub-version, and `AnnounceBroadcast::decode` rejects an unknown message type
@@ -24,11 +29,15 @@ wildcards but does not emit them: that is what a rollout actually deploys
 first. Testing against a receiver built before the message existed only
 re-demonstrates that it drops the stream, which is why emission has to wait.
 
-The state belongs in `rs/moq-net/src/model/origin.rs` beside the announce tree
-rather than inside it: a wildcard is not a node, it covers paths that mostly
-do not exist. Keep it in a flat structure keyed by the pattern, matched by the
-shared matcher [Matcher](/quest/m2/path-patterns/matcher.md) provides, and
-the set is small (one entry per advertiser per service, not per broadcast).
+The state has a home already. Since
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) a route is a flat
+`RouteEntry` keyed by an opaque `origin::Prefix`, deliberately built as the
+extension point a pattern type slots into: matching is segment-wise
+intersection in one place, so a pattern extends `Prefix` internally without
+touching `Route` or any signature. Teach `Prefix` the dialect the shared
+[Matcher](/quest/m2/path-patterns/matcher.md) provides rather than adding a
+parallel table beside it. The set stays small either way (one entry per
+advertiser per service, not per broadcast).
 
 A wildcard forwards like an announcement: accumulate the sending peer's declared
 link cost onto its single varint (`Cost::charged` adds to both halves of a
@@ -45,20 +54,22 @@ clamped, so a misconfigured worker fails loudly instead of quietly advertising
 less than it thinks. The same exact containment handles literal-headed and
 leading-star patterns without a special authorization rule.
 
-Wildcards are visible to subscribers, so `announced` must surface them as a
-DISTINCT event rather than as an available broadcast: a pattern names no
-content, and presenting one as a broadcast would have consumers subscribe to
-the pattern itself. Scope and rebase each one per subscriber with the matcher's
-exact set-valued operation. Aggregate duplicate advertisers of one pattern into a
-single presented entry whose withdrawal fires only when the last advertiser
-leaves. That aggregation has no other owner, so it belongs here.
+Wildcards are visible to subscribers, and #3225 already made that safe: an
+announcement is a covering claim, `Consumer::announced` yields
+`announce::Update { prefix, route, active }`, and it never yields a
+`broadcast::Consumer`. So a pattern needs no distinct event kind; it is another
+covering claim in the stream consumers already read, and no consumer can
+mistake one for a broadcast. Scope and rebase each per subscriber with the
+matcher's exact set-valued operation. Aggregate duplicate advertisers of one
+pattern into a single presented entry whose withdrawal fires only when the last
+advertiser leaves. That aggregation has no other owner, so it belongs here.
 
 Tests: encode/decode round trip and the version gate, cost accumulation across
 two hops, reflected-wildcard drop, per-subscriber exclusion, retraction, scope
-refusal, root and descendant residuals from a `**` rebase, and the distinct
-wildcard event itself: never presented as an
-available broadcast, duplicates aggregated into one entry, withdrawal firing
-only when the last advertiser leaves.
+refusal, root and descendant residuals from a `**` rebase, duplicates
+aggregated into one entry, and withdrawal firing only when the last advertiser
+leaves. Cover that a pattern and a literal prefix coexist in one route table
+and that a literal-only deployment behaves exactly as it does today.
 
 ## Required
 

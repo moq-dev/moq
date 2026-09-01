@@ -11,6 +11,28 @@ Use the public issue's scope, implementation notes, and acceptance criteria
 below as the starting plan. Reconcile paths and assumptions with the current
 tree before implementation.
 
+### After prefix routes
+
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) deleted both APIs the
+issue names. `MoqBroadcastConsumer::route_updates` and
+`MoqBroadcastProducer::set_route` are gone; a broadcast no longer carries a
+route at all.
+
+The bug survived the move. `MoqOriginProducer::announce(prefix, MoqRoute)` is
+the input, `MoqAnnouncement.route` is the output, and the two conversions are
+unchanged: `From<origin::Route>` reports `route.cost.warm` and drops `cold`,
+while `TryFrom<MoqRoute>` calls `with_cost(u64)`, which sets both halves. So
+observing a route through `announced()` and re-announcing it still rewrites a
+truthful `{warm: 0, cold: N}` into `{warm: 0, cold: 0}`, claiming to be the
+publisher.
+
+The severity argument in the issue no longer holds either: it rested on
+`FrontState::handover_allowed` only consulting cold at two or more hops, and
+that gate was deleted with the rest of the handover machinery. Cold is still
+ranked on by `route_order`, so an understated cold still wins ties it should
+lose. Re-read the options below against `announce`/`announced` rather than
+`set_route`/`route_updates`.
+
 ### Issue context
 
 Found by the Codex reviewer during [#2925](https://github.com/moq-dev/moq/pull/2925), which splits the route cost into `broadcast::Cost { warm, cold }`. Filing rather than fixing in that PR because it is a public-API decision spanning five language bindings.

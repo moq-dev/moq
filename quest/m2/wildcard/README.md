@@ -38,28 +38,35 @@ would have to start working (a cold transcoder)"
 same exact containment check. [#2925](https://github.com/moq-dev/moq/pull/2925)
 has since replaced `RouteCost` with `Cost { warm, cold }`.
 
-Matching, by contrast, is prefix-only everywhere today. The pattern matcher is
-not this questline's to build: path authorization adopts the same dialect first,
-and its [Matcher](/quest/m2/path-patterns/matcher.md) quest delivers the shared
-matching, containment, and rebasing that [Advertise](/quest/m2/wildcard/advertise.md) now requires.
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
+this. An announcement is now a route over a path *prefix*, `origin::Prefix` is
+an opaque newtype built explicitly as the extension point a pattern type slots
+into, and matching is segment-wise intersection in one place. So the wire, the
+model, and every binding already speak in covering claims rather than in
+per-broadcast announcements.
 
-Two things look built and are not:
+The routing table exists too, which it did not when this questline was written.
+`Consumer::request_broadcast` resolves a local broadcast first, then
+`best_server`: the longest covering prefix, filtered by the requester's excluded
+hop, ordered by `route_order`, served on demand by the session that announced it
+and cached per prefix in `ServeState.served`. That is the split-horizon-safe
+lookup the old `origin::Dynamic` could not provide, and it is what
+[Resolve](/quest/m2/wildcard/resolve.md) now extends rather than replaces.
 
-1. **A routing table.** `origin::Dynamic` (`rs/moq-net/src/model/origin.rs`)
-   serves an unannounced path on demand and `lite::publisher::recv_subscribe`
-   already falls back to it. It is not usable here. Its queue is keyed by path
-   alone, so requests from peers with different `exclude` origins coalesce onto
-   one entry; a `Request` carries no requester identity, hop list, or cost; and
-   every live handler drains one shared FIFO, so N wildcards cannot be ranked.
-   `request_broadcast` says so itself: "a handler resolves paths with no route
-   chain to check, so falling through would let it route around the split
-   horizon and rebuild the loop."
-2. **Announcement `Epoch`.** [#2611](https://github.com/moq-dev/moq/pull/2611)
-   specced it into lite-06 and [#1920](https://github.com/moq-dev/moq/pull/1920)
-   had earlier removed the one that used to exist in code, so it is specified and
-   unimplemented. It is absent from `dev` too, whose `AnnounceBroadcast::Active`
-   carries `{ suffix, hops, cost }` and no epoch. `broadcast.rs`'s `route_epoch`
-   is an unrelated route-change counter. [Epoch](/quest/m2/wildcard/epoch.md) owns closing that gap.
+Matching, by contrast, is prefix-only. The pattern matcher is not this
+questline's to build: path authorization adopts the same dialect first, and its
+[Matcher](/quest/m2/path-patterns/matcher.md) quest delivers the shared
+matching, containment, and rebasing that
+[Advertise](/quest/m2/wildcard/advertise.md) requires.
+
+What is genuinely missing, beyond patterns themselves, is content identity.
+Announcement `Epoch` was specified into lite-06 by
+[#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
+removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
+with it. [Route resume identity](/quest/m0/route-resume.md) restores per-path
+identity from the route's first hop as a failover regression fix, and this
+questline builds its collision handling on that rather than on a generation
+field.
 
 ### Decisions
 
@@ -69,9 +76,12 @@ Two things look built and are not:
   shared matcher, so nothing resembles a second grammar. Exact set-valued
   rebasing preserves every match inside a rooted view, including both the root
   and deeper residuals when `**` consumes zero or more segments.
-- **Most specific pattern wins, and its refusal is final.** When several
-  patterns match one path, only the tier selected by the matcher's shared
-  structural specificity is consulted; equal-specificity patterns
+- **Most specific pattern wins, and its refusal is final.** This is the rule
+  routing already follows: `best_server` filters to the longest covering prefix
+  before it compares cost, and the lite draft says the same, matching
+  longest-prefix-match wherever it appears. When several patterns match one
+  path, only the tier selected by the matcher's shared structural specificity is
+  consulted; equal-specificity patterns
   form one pool that cost and the request hash order. A terminal refusal from
   the winning tier IS the answer and never falls through to a less specific
   pattern, so a transcoder refusing a path does not leak the request to the
@@ -148,20 +158,18 @@ Two things look built and are not:
   permanent, so a new refusal mode surfaces instead of quietly joining a retry
   loop. No negative cache either way; rate limiting stays with the advertiser
   and the per-project auth gate.
-- **A double claim is settled by the service's `Epoch` contract.** Two relays can
-  hash one path to different workers before either concrete announcement
-  propagates, and both concrete announcements land at the SAME literal path.
-  Deterministic services such as transcode, and external processors whose
-  configured workers are interchangeable, derive one epoch from the source
-  generation so a relay may splice between them. Session-local services such as
-  transcription allocate distinct globally ordered epochs, so the higher
-  generation wins and consumers reset rather than splice. Wildcard routing does
-  not invent a lease or choose between those media contracts. This is why
-  [Epoch](/quest/m2/wildcard/epoch.md) is required by any service that can
-  produce colliding concrete claims, including transcode, transcription, and
-  external processors. A service that derives output identity from the source
-  requires a resolved nonzero source epoch; zero is unspecified and must refuse
-  derived work rather than splice across an ambiguous restart.
+- **A double claim is settled by route identity, not by a lease.** Two relays
+  can hash one path to different workers before either concrete announcement
+  propagates, and both land at the SAME literal path. Whichever route wins
+  selection serves it, and a consumer moves between them only when the winner's
+  identity is preserved, per [Route resume
+  identity](/quest/m0/route-resume.md); two distinct workers are two identities,
+  so the loser's subscribers end and resubscribe rather than being spliced onto
+  another worker's frames mid-group. Wildcard routing invents neither a lease
+  nor a generation. This is weaker than the retired `Epoch` design, which could
+  declare two workers' output interchangeable and splice between them; a service
+  that needs that guarantee has to carry it in its own media contract, not in
+  routing.
 - **The spec home is moq-lite core, mirrored in moq-cluster**, following how
   route cost landed. moq-lite-06 is still WIP, so this goes into it rather than
   opening an 07.
@@ -191,7 +199,7 @@ overlay, because prefix-only matching needs the variable part of a path
 trailing. That overlay was not a view transform: `pid/foo` and
 `.transcode/pid/foo` are separate tree leaves with separate broadcast fronts,
 so it had to build a logical front across roots that re-owned route selection,
-epoch identity, the split-horizon guard, and splicing. The suffix pattern
+content identity, the split-horizon guard, and splicing. The suffix pattern
 deletes all of it while keeping what the mirror bought:
 
 - **The grant needs no transform.** The customer addresses
@@ -208,8 +216,8 @@ deletes all of it while keeping what the mirror bought:
   removes project discovery entirely.
 - **Takeover is single-front.** A worker's concrete announcement lands at the
   literal path the wildcard served, so wildcard-versus-concrete and
-  worker-versus-worker collisions are ordinary route selection plus `Epoch`
-  splicing at one tree node, not a cross-root front.
+  worker-versus-worker collisions are ordinary route selection at one tree node,
+  not a cross-root front.
 
 What the mirror bought and this deliberately gives up: a customer holding
 `publish: ["pid/"]` CAN publish `foo.hang/transcode.pro` themselves, competing
@@ -238,9 +246,6 @@ than announce state.
 - [Demand](/quest/m2/wildcard/demand.md) - the browser player subscribes to a
   catalog-referenced broadcast a wildcard covers, breaking the lazy-rendition
   deadlock
-- [Epoch](/quest/m2/wildcard/epoch.md) - implement moq-lite-06's announcement
-  `Epoch`, so two publishers colliding on one path resolve instead of both
-  serving
 
 ## Related
 
@@ -250,3 +255,5 @@ than announce state.
   pattern, and its catalog names the generations a wildcard cannot
 - [pop-skipping](/quest/m2/pop-skipping/README.md) - it owns the route cost and
   the rank hash this reuses
+- [Route resume identity](/quest/m0/route-resume.md) - the per-path identity two
+  colliding advertisers are settled by
