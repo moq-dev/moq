@@ -229,6 +229,17 @@ impl<F: Container> Consumer<F> {
 			}
 		}
 
+		// Reap aborted groups the cursor hasn't reached: nothing below settles them
+		// (the read arm only handles the front at the cursor, and neither the skip
+		// target scan nor the empty-group check counts an abort), so one left ahead
+		// of a sequence gap would park the consumer forever. Buffered frames read
+		// before the abort stay deliverable, so such a group is kept; the front at
+		// the cursor keeps the eviction fast path in the read arm below.
+		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
+		let current = self.current;
+		self.pending
+			.retain_mut(|group| group.sequence <= current || !group.buffered.is_empty() || !group.poll_aborted(waiter));
+
 		loop {
 			// A newer group whose timestamps jumped backwards means the publisher reneged
 			// the buffered tail. Record the boundary and resume from the new epoch, then restart.
@@ -2035,6 +2046,36 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![210_000, 800_000], "the expired frameless group is skipped");
+	}
+
+	/// An aborted frameless group beyond a sequence gap is reaped rather than parked on
+	/// forever: nothing else settles a group the cursor hasn't reached, so a finished
+	/// track would otherwise never report its end.
+	#[tokio::test]
+	async fn aborted_frameless_group_after_a_gap_ends_the_track() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		// Sequence 0 never arrives; sequence 1's stream opens but never carries a frame.
+		let group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		track.finish().unwrap();
+
+		// While group 1 is open its frames may still come, so the consumer waits.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"an open frameless group must be waited for"
+		);
+
+		// The abort (an eviction) settles it, and the finished track ends cleanly.
+		group1.abort(moq_net::Error::Old).unwrap();
+		let end = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+			.await
+			.expect("an aborted frameless group must not park the consumer");
+		assert!(end.unwrap().is_none(), "the track ends cleanly");
 	}
 
 	/// Track completion is not group completion: a group already open when the track
