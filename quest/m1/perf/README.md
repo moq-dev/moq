@@ -39,7 +39,6 @@ measured and scoped to the quiche backend we ship today.
 
 ## Quests
 
-- [Frame send](/quest/m1/perf/frame-send.md) - a frame reaches quiche as zero-copy appends instead of two copying stream_send calls
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [Cache shard](/quest/m1/perf/cache-shard.md) - stop hammering one process-global cache line from every worker
