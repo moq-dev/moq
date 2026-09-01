@@ -164,14 +164,19 @@ pub struct MoqDatagram {
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
+	#[uniffi(default = None)]
 	pub coded: Option<MoqDimensions>,
 	/// The display aspect ratio.
+	#[uniffi(default = None)]
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum bitrate in bits per second.
+	#[uniffi(default = None)]
 	pub bitrate: Option<u64>,
 	/// The frame rate in frames per second.
+	#[uniffi(default = None)]
 	pub framerate: Option<f64>,
 	/// Whether the decoder should optimize for latency.
+	#[uniffi(default = None)]
 	pub optimize_for_latency: Option<bool>,
 }
 

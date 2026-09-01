@@ -593,8 +593,16 @@ mod tests {
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = broadcast.create_track("video", catalog.track_info()).unwrap();
-		let consumer = track.subscribe(None);
+		// The synthetic clock jumps ten seconds. Keep every fixture group readable until the
+		// assertion instead of letting the default five-second publisher window evict the marker.
+		let replay = std::time::Duration::from_secs(11);
+		let track = broadcast
+			.create_track(
+				"video",
+				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
+			)
+			.unwrap();
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(replay));
 
 		let mut config = Config::new(320, 240, 30);
 		config.kind = encoder::Kind::Software;
