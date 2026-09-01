@@ -457,11 +457,10 @@ mod tests {
 /// Its presence is what asks for one. The value is a nested parameter scope describing the
 /// fill, of which the Location Filter is the part we act on.
 ///
-/// The draft delivers a fill on a separate unidirectional fetch stream. We deliver it as
-/// ordinary live subgroups instead, by lowering the subscription's floor to the start of
-/// the fill range, which avoids the head-of-line blocking a fetch stream imposes on
-/// everything queued behind it. The subscriber receives every Object it asked for, just
-/// never on the stream the draft says to watch.
+/// Fills are unsupported. This parses so a peer asking for one does not have its session
+/// torn down over an unknown parameter, but nothing is served in response: a fetch is
+/// capped at Largest Object, so it cannot deliver a group that is still being written, and
+/// answering on ordinary subgroups instead would look like support without being it.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
 	/// The range to fill. [`Filter::Unfiltered`] means the whole track up to Largest Object.

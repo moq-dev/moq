@@ -192,6 +192,8 @@ export class SetupOptions {
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
+/// SUBGROUP_DELIVERY_TIMEOUT, alongside the per-object one above.
+const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
 const MSG_PARAM_EXPIRES = 0x08n;
 const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
@@ -218,6 +220,7 @@ type MessageLocation = { groupId: bigint; objectId: bigint };
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {
 		case MSG_PARAM_DELIVERY_TIMEOUT:
+		case MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT:
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
 		case MSG_PARAM_ROUTE_COST:

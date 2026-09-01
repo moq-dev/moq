@@ -93,7 +93,9 @@ impl Message for Subscribe<'_> {
 			}
 			_ => {
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
 					0x04 => rendezvous_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
@@ -439,6 +441,8 @@ impl Message for SubscribeUpdate {
 				let request_id = RequestId::decode(r, version)?;
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
@@ -463,6 +467,8 @@ impl Message for SubscribeUpdate {
 					let _required_request_id_delta = u64::decode(r, version)?;
 				}
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
@@ -727,6 +733,27 @@ mod tests {
 		let decoded: Unsubscribe = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(999));
+	}
+
+	/// Every parameter the draft lets a message carry has to parse, even the ones we act on
+	/// nowhere: an unlisted key fails the whole message, which tears the session down
+	/// instead of letting the request reach its answer.
+	#[test]
+	fn subscribe_accepts_the_delivery_timeouts() -> Result<(), EncodeError> {
+		for version in [Version::Draft19, Version::Draft20] {
+			let mut body = Vec::new();
+			RequestId(1).encode(&mut body, version)?;
+			encode_namespace(&mut body, &crate::Path::new("broadcast"), version)?;
+			"video".encode(&mut body, version)?;
+			encode_params!(&mut body, version,
+				0x02 => 5000u64,
+				0x06 => 9000u64,
+			);
+
+			let mut buf = bytes::Bytes::from(body);
+			Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+		}
+		Ok(())
 	}
 
 	/// The opt-out has to reach the wire, or a subscriber that asked for no Track

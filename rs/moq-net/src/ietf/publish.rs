@@ -305,6 +305,7 @@ impl Message for Publish<'_> {
 				decode_params!(r, version,
 					0x02 => object_delivery_timeout: Option<u64>,
 					0x06 => subgroup_delivery_timeout: Option<u64>,
+					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
