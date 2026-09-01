@@ -216,7 +216,7 @@ impl Endpoint {
 		}
 		let mut quiche_config = super::client_config(config)?;
 		let scid = self.inner.cid();
-		let conn = quiche::connect(
+		let conn = quiche::connect_with_buffer_factory::<super::BytesFactory>(
 			Some(&config.server_name),
 			&quiche::ConnectionId::from_ref(&scid),
 			self.inner.local,
@@ -368,7 +368,7 @@ impl Inner {
 		let mut conn = {
 			let mut accepting = self.accepting.borrow_mut();
 			let accepting = accepting.as_mut().expect("checked above");
-			match quiche::accept(
+			match quiche::accept_with_buf_factory::<super::BytesFactory>(
 				&quiche::ConnectionId::from_ref(&scid),
 				None,
 				self.local,
@@ -446,7 +446,7 @@ impl Inner {
 	/// Register `conn`, spawn its driver, and arrange its teardown.
 	fn launch(
 		self: &Rc<Self>,
-		conn: quiche::Connection,
+		conn: super::RawConnection,
 		ids: ConnectionIds,
 		keep_alive: Option<std::time::Duration>,
 	) -> (connection::Shared, usize) {

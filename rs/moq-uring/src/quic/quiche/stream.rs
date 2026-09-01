@@ -7,7 +7,7 @@
 
 use std::task::{Context, Poll};
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use super::{Error, Shared};
 
@@ -106,6 +106,46 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			Err(quiche::Error::StreamStopped(code)) => Poll::Ready(Err(Error::Stop(code))),
 			Err(err) => Poll::Ready(Err(err.into())),
 		}
+	}
+
+	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if self.fin || self.reset {
+			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
+		}
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+
+		let mut conn = self.shared.conn.borrow_mut();
+		let capacity = match conn.stream_capacity(self.id) {
+			Ok(capacity) => capacity,
+			// A locally allocated stream only exists in quiche after its first
+			// write. Create it with an empty append so capacity can be checked
+			// before taking ownership from `buf`.
+			Err(quiche::Error::InvalidStreamState(_)) => {
+				conn.stream_send_zc(self.id, Bytes::new(), false)?;
+				conn.stream_capacity(self.id)?
+			}
+			Err(quiche::Error::StreamStopped(code)) => return Poll::Ready(Err(Error::Stop(code))),
+			Err(err) => return Poll::Ready(Err(err.into())),
+		};
+
+		if capacity == 0 && buf.has_remaining() {
+			drop(conn);
+			self.shared.park_writable(self.id, waiter);
+			return Poll::Pending;
+		}
+
+		let chunk = buf.copy_to_bytes(capacity.min(buf.remaining()));
+		let expected = chunk.len();
+		let (written, remainder) = conn.stream_send_zc(self.id, chunk, false)?;
+		debug_assert_eq!(written, expected, "capacity changed while the connection was borrowed");
+		debug_assert!(remainder.as_ref().is_none_or(Bytes::is_empty));
+		drop(conn);
+
+		self.shared.kick();
+		Poll::Ready(Ok(written))
 	}
 
 	fn set_priority(&mut self, order: u8) {

@@ -840,6 +840,24 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		}
 	}
 
+	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		if self.finishing {
+			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
+		}
+		while !self.prefix.is_empty() {
+			ready!(web_transport_trait::poll::SendStream::poll_write_buf(
+				&mut self.inner,
+				cx,
+				&mut self.prefix
+			))
+			.map_err(|err| self.map(err))?;
+		}
+		match web_transport_trait::poll::SendStream::poll_write_buf(&mut self.inner, cx, buf) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
 	fn set_priority(&mut self, order: u8) {
 		web_transport_trait::poll::SendStream::set_priority(&mut self.inner, order);
 	}
