@@ -51,6 +51,9 @@ pub use endpoint::Endpoint;
 /// stride GRO coalesces with.
 pub(crate) const SEGMENT: usize = 1350;
 
+/// Maximum GSO trains one connection stages before yielding to its peers.
+pub(crate) const TRAINS_PER_TURN: usize = 2;
+
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
 ///

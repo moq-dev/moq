@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 
+use super::super::TRAINS_PER_TURN;
 use super::{Error, SEGMENT};
 use crate::{Handle, udp};
 
@@ -775,59 +776,59 @@ impl Driver {
 		}
 	}
 
-	/// Stage at most one GSO train, then yield so another connection sharing the
-	/// socket gets a chance at the transmit pool. Ignores quiche's pacing hint;
-	/// the congestion controller still bounds each train.
+	/// Stage a bounded number of GSO trains, then yield to other connections.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		let mut tx = match self.socket.poll_acquire(waiter) {
-			Poll::Ready(Ok(tx)) => tx,
-			Poll::Ready(Err(err)) => return Poll::Ready(Error::Io(err.to_string())),
-			// Backpressure: a completed send re-polls us.
-			Poll::Pending => return Poll::Pending,
-		};
+		for _ in 0..TRAINS_PER_TURN {
+			let mut tx = match self.socket.poll_acquire(waiter) {
+				Poll::Ready(Ok(tx)) => tx,
+				Poll::Ready(Err(err)) => return Poll::Ready(Error::Io(err.to_string())),
+				// Backpressure: a completed send re-polls us.
+				Poll::Pending => return Poll::Pending,
+			};
 
-		let mut filled = 0;
-		let mut dest = None;
-		// One train, one destination, so a packet left over from the last one
-		// leads this one.
-		if let Some((to, packet)) = self.carry.take() {
-			tx[..packet.len()].copy_from_slice(&packet);
-			filled = packet.len();
-			dest = Some(to);
-		}
-		// A short packet must ride last in a GSO send, so a short carry goes
-		// out alone.
-		if filled == 0 || filled == SEGMENT {
-			let mut conn = self.shared.conn.borrow_mut();
-			// Pack uniform SEGMENT-sized packets back to back; a short packet
-			// ends the train (it must ride last in a GSO send).
-			while filled + SEGMENT <= tx.len() && filled / SEGMENT < TRAIN_SEGMENTS {
-				match conn.send(&mut tx[filled..filled + SEGMENT]) {
-					Ok((n, info)) => {
-						// Path validation and NAT rebinding make quiche alternate
-						// destinations; this packet must lead another train.
-						if dest.is_some_and(|to| to != info.to) {
-							self.carry = Some((info.to, tx[filled..filled + n].to_vec()));
-							break;
+			let mut filled = 0;
+			let mut dest = None;
+			// One train, one destination, so a packet left over from the last one
+			// leads this one.
+			if let Some((to, packet)) = self.carry.take() {
+				tx[..packet.len()].copy_from_slice(&packet);
+				filled = packet.len();
+				dest = Some(to);
+			}
+			// A short packet must ride last in a GSO send, so a short carry goes
+			// out alone.
+			if filled == 0 || filled == SEGMENT {
+				let mut conn = self.shared.conn.borrow_mut();
+				// Pack uniform SEGMENT-sized packets back to back; a short packet
+				// ends the train (it must ride last in a GSO send).
+				while filled + SEGMENT <= tx.len() && filled / SEGMENT < TRAIN_SEGMENTS {
+					match conn.send(&mut tx[filled..filled + SEGMENT]) {
+						Ok((n, info)) => {
+							// Path validation and NAT rebinding make quiche alternate
+							// destinations; this packet must lead another train.
+							if dest.is_some_and(|to| to != info.to) {
+								self.carry = Some((info.to, tx[filled..filled + n].to_vec()));
+								break;
+							}
+							dest = Some(info.to);
+							filled += n;
+							if n < SEGMENT {
+								break;
+							}
 						}
-						dest = Some(info.to);
-						filled += n;
-						if n < SEGMENT {
-							break;
-						}
+						Err(quiche::Error::Done) => break,
+						Err(err) => return Poll::Ready(err.into()),
 					}
-					Err(quiche::Error::Done) => break,
-					Err(err) => return Poll::Ready(err.into()),
 				}
 			}
-		}
 
-		let Some(to) = dest else {
-			// Nothing to send; the buffer returns to the pool on drop.
-			return Poll::Pending;
-		};
-		if let Err(err) = tx.send(filled, to, SEGMENT) {
-			return Poll::Ready(Error::Io(err.to_string()));
+			let Some(to) = dest else {
+				// Nothing to send; the buffer returns to the pool on drop.
+				return Poll::Pending;
+			};
+			if let Err(err) = tx.send(filled, to, SEGMENT) {
+				return Poll::Ready(Error::Io(err.to_string()));
+			}
 		}
 		// Requeue behind the other ready tasks. If quiche is drained, the next
 		// poll costs one empty acquire and then parks normally.

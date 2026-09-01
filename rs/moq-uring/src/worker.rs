@@ -66,6 +66,8 @@ pub struct Worker {
 	shared: Rc<Shared>,
 	tasks: kio::Tasks<Task>,
 	park: kio::Park,
+	/// Reused while copying CQEs out of the ring before dispatch.
+	cqes: Vec<Cqe>,
 	/// Whether the park-word `FUTEX_WAIT` SQE is in flight.
 	futex_armed: bool,
 }
@@ -120,6 +122,7 @@ impl Worker {
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
+			cqes: Vec::new(),
 			futex_armed: false,
 		})
 	}
@@ -180,30 +183,39 @@ impl Worker {
 			// Copy the completions out so dispatch can borrow the ring (to
 			// re-arm receives, push cancels, and so on). Completions spilled
 			// by `Shared::push` predate the CQ's, so they dispatch first.
-			let cqes: Vec<Cqe> = {
+			let mut cqes = std::mem::take(&mut self.cqes);
+			cqes.clear();
+			{
 				let mut ring = self.shared.ring.borrow_mut();
 				let mut spill = self.shared.spill.borrow_mut();
 				let limit = deadline.map_or(usize::MAX, |_| TEARDOWN_CQE_BATCH);
 				let spilled = spill.len().min(limit);
-				let mut cqes: Vec<_> = spill.drain(..spilled).collect();
+				cqes.extend(spill.drain(..spilled));
 				cqes.extend(ring.completion().take(limit - spilled).map(|entry| Cqe {
 					user_data: entry.user_data(),
 					result: entry.result(),
 					flags: entry.flags(),
 				}));
-				cqes
-			};
+			}
 			if cqes.is_empty() {
+				self.cqes = cqes;
 				return Ok(());
 			}
-			if !self.dispatch_batch(cqes, deadline, Instant::now) {
+			let dispatched = self.dispatch_batch(cqes.drain(..), deadline, Instant::now);
+			self.cqes = cqes;
+			if !dispatched {
 				return Ok(());
 			}
 		}
 	}
 
 	/// Dispatch a completion batch while its teardown budget remains.
-	fn dispatch_batch(&mut self, cqes: Vec<Cqe>, deadline: Option<Instant>, mut now: impl FnMut() -> Instant) -> bool {
+	fn dispatch_batch(
+		&mut self,
+		cqes: impl IntoIterator<Item = Cqe>,
+		deadline: Option<Instant>,
+		mut now: impl FnMut() -> Instant,
+	) -> bool {
 		for cqe in cqes {
 			if deadline.is_some_and(|deadline| now() >= deadline) {
 				// Drop this batch's remaining CQEs. Worker::drop will leak their

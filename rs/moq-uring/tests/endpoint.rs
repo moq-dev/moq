@@ -13,7 +13,7 @@ mod support;
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
@@ -536,9 +536,15 @@ fn connections_share_one_tx_buffer_fairly() {
 				.expect("second client socket");
 			let mut second_config = dial_config(server);
 			second_config.transport.idle_timeout = Duration::from_millis(500);
+			let started = Instant::now();
 			let second = quic::client::connect(&handle, second_sock, &second_config).await;
+			let elapsed = started.elapsed();
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
+			assert!(
+				elapsed < Duration::from_millis(500),
+				"second handshake took {elapsed:?}"
+			);
 			let accepted = endpoint.accept().await.expect("second accepted connection");
 			drop((second, accepted));
 		})
