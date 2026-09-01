@@ -2444,7 +2444,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					// whatever the write pipeline is blocked on. The rank is re-read as
 					// a send order when handled, since the two conventions are inverted.
 					while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
-						writer.set_priority(u8::MAX - rank);
+						writer.set_priority(PriorityHandle::send_order_of(rank));
 					}
 					let seen = self.ctx.track_priority_seen;
 					// A dropped producer just disables this arm, like the queue arm above.
@@ -2456,7 +2456,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					}) {
 						self.ctx.track_priority_seen = value;
-						writer.set_priority(self.priority.set_track(value));
+						let rank = self.priority.set_track(value);
+						writer.set_priority(PriorityHandle::send_order_of(rank));
 					}
 
 					let outcome = 'serve: {

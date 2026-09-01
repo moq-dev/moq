@@ -2,6 +2,8 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
+// Compiled straight from source so the queue stays private to `lite`; a `pub` re-export
+// just for the bench would widen the crate's surface.
 #[path = "../src/lite/priority.rs"]
 #[allow(dead_code)]
 mod priority;
