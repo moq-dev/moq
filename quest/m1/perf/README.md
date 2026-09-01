@@ -51,7 +51,6 @@ measured and scoped to the quiche backend we ship today.
 - [#3201](/quest/m1/perf/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - moq-uring: use SENDMSG_ZC for large UDP GSO trains
 - [#3202](/quest/m1/perf/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
 - [#3204](/quest/m1/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [Priority queue](/quest/m1/perf/priority-queue.md) - inserting into a busy send queue stops doing a channel write per shifted entry
 - [Session micro](/quest/m1/perf/session-micro.md) - per-datagram route lookups and per-chunk stats bumps get amortized
 - [tokio local](/quest/m1/perf/tokio-local.md) - moq-tokio's pinned workers accept !Send futures like the io_uring workers do
 - [#3203](/quest/m1/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling

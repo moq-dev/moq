@@ -48,11 +48,7 @@ fn bench_remove_overflow(c: &mut Criterion) {
 	let mut group = c.benchmark_group("priority_queue_remove_overflow");
 	for depth in OVERFLOW_DEPTHS {
 		group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
-			b.iter_batched_ref(
-				|| overflow(depth),
-				|handles| drop(handles.pop()),
-				BatchSize::SmallInput,
-			);
+			b.iter_batched_ref(|| overflow(depth), |handles| drop(handles.pop()), BatchSize::SmallInput);
 		});
 	}
 	group.finish();
