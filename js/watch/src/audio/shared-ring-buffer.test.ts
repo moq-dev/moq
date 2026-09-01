@@ -655,41 +655,12 @@ describe("SharedRingBuffer.resize", () => {
 		expect(read(replacement, 64, 1)[0]).toEqual(new Float32Array(64).fill(2));
 	});
 
-	it("never advances the replacement past its own WRITE", () => {
-		// A re-anchor racing the reconcile rebases the replacement under it. The advance is
-		// clamped so the worst case is an empty ring, not a playhead parked seconds ahead of
-		// WRITE where read() returns nothing and insert() drops everything as too old.
-		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		insert(src, 10_000, 64, { channels: 1, value: 1 });
-		const worklet = new SharedRingBuffer(src.init);
-		read(worklet, 64, 1);
-
-		const dst = src.resize(256);
-		dst.setLatency(16);
-		dst.reset();
-		insert(dst, 30_000, 16, { channels: 1, value: 2 });
-
-		// Force the generations to match, standing in for a re-anchor that lands after the
-		// check but before the exchange.
-		const control = new Int32Array(dst.init.control);
-		Atomics.store(control, 4, Atomics.load(new Int32Array(src.init.control), 4));
-
-		const replacement = new SharedRingBuffer(dst.init, worklet);
-
-		expect(replacement.length).toBe(0);
-		expect(dst.length).toBeGreaterThanOrEqual(0);
-
-		// The ring heals: the next insert lands at the playhead rather than being dropped.
-		insert(dst, 30_016, 16, { channels: 1, value: 3 });
-		expect(dst.length).toBeGreaterThan(0);
-	});
-
-	// The reconcile runs on the audio thread while the main thread may be part-way through a
-	// re-anchor. Replays `insert`'s re-anchor as its individual atomic stores and drops the
-	// reconcile between each pair, which is the interleaving no single-threaded test would
-	// otherwise reach. Every pause point has to leave the new utterance playable.
-	for (let pause = 0; pause <= 3; pause++) {
-		it(`survives a reconcile landing at step ${pause} of a re-anchor`, () => {
+	// A handoff runs on the audio thread while the main thread may be part-way through a
+	// re-anchor. Replays `insert`'s re-anchor as its individual stores and drops the handoff
+	// between each pair, which is the interleaving no single-threaded test would otherwise reach.
+	// Every pause point has to leave the next utterance playable.
+	for (let pause = 0; pause <= 2; pause++) {
+		it(`survives a handoff landing at step ${pause} of a re-anchor`, () => {
 			const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
 			insert(src, 10_000, 64, { channels: 1, value: 1 });
 			const worklet = new SharedRingBuffer(src.init);
@@ -701,8 +672,7 @@ describe("SharedRingBuffer.resize", () => {
 			// `insert`'s re-anchor, store by store, in source order.
 			const control = new Int32Array(dst.init.control);
 			const steps = [
-				() => Atomics.add(control, 4, 1), // GENERATION, bumped first
-				() => Atomics.store(control, 1, 0), // READ
+				() => Atomics.store(control, 2, Atomics.load(control, 1)), // ANCHOR = CONSUMED
 				() => Atomics.store(control, 0, 0), // WRITE
 			];
 
@@ -710,17 +680,19 @@ describe("SharedRingBuffer.resize", () => {
 			const replacement = new SharedRingBuffer(dst.init, worklet);
 			for (let i = pause; i < steps.length; i++) steps[i]();
 
-			// The new utterance arrives on the rebased timeline and must be readable in full.
-			const samples = new Float32Array(64).fill(2);
-			for (let i = 0; i < 64; i++) control[0] = 0; // WRITE stays at the new origin
-			Atomics.store(control, 0, 0);
-			Atomics.store(control, 3, 0); // un-stall
+			// The playhead is a difference of two single-writer slots, so a handoff racing the
+			// rebase can only be off by what the reader played in that window, never by the length
+			// of the timeline it just left.
+			const played = (Atomics.load(control, 1) - Atomics.load(control, 2)) | 0;
+			expect(Math.abs(played)).toBeLessThanOrEqual(64);
+
+			// And the next utterance arrives and plays.
 			const dstSamples = new Float32Array(dst.init.samples, 0, 256);
 			for (let i = 0; i < 64; i++) dstSamples[i] = 2;
 			Atomics.store(control, 0, 64);
+			Atomics.store(control, 4, 0); // un-stall
 
-			expect(Atomics.load(control, 1)).toBeLessThanOrEqual(Atomics.load(control, 0));
-			expect(read(replacement, 64, 1)[0]).toEqual(samples);
+			expect(read(replacement, 64, 1)[0].length).toBeGreaterThan(0);
 		});
 	}
 
@@ -856,4 +828,64 @@ describe("buffered mode", () => {
 		expect(buffer.length).toBe(0);
 		expect(read(buffer, 100, 1)[0].length).toBe(0);
 	});
+});
+
+describe("read() racing a re-anchor", () => {
+	// `read` samples the playhead, copies, then publishes, and the main thread can rebase the
+	// timeline anywhere in between. Sweeping the re-anchor across each load covers the windows a
+	// single pause point misses. The playhead is a difference of two single-writer slots, so the
+	// damage is bounded by what the reader played in that window rather than by the length of the
+	// timeline it just left, which is what a shared cursor risked.
+	for (let trigger = 1; trigger <= 8; trigger++) {
+		it(`stays bounded and recovers when the re-anchor lands at load ${trigger}`, () => {
+			const init = allocSharedRingBuffer(1, 64, 1000, true);
+			const main = new SharedRingBuffer(init);
+			main.setLatency(16);
+
+			// A long first utterance, mostly played out, so the reader's tally is far from zero.
+			const worklet = new SharedRingBuffer(main.init);
+			const out = [new Float32Array(16)];
+			for (let t = 0; t < 2000; t += 16) {
+				insert(main, 10_000 + t, 16, { channels: 1, value: 1 });
+				worklet.read(out);
+			}
+			insert(main, 12_000, 32, { channels: 1, value: 1 });
+
+			let calls = 0;
+			let fired = false;
+			const atomics = Atomics as { load: unknown };
+			const realLoad = Atomics.load;
+			atomics.load = (arr: Int32Array, idx: number) => {
+				const value = realLoad(arr, idx);
+				if (!fired && ++calls === trigger) {
+					fired = true;
+					main.reset();
+					insert(main, 30_000, 32, { channels: 1, value: 2 });
+				}
+				return value;
+			};
+
+			try {
+				worklet.read(out);
+			} finally {
+				atomics.load = realLoad;
+			}
+
+			if (!fired) return; // read() took a shorter path than this trigger
+
+			// Off by at most one quantum, never by the 2000 samples of the previous utterance.
+			const control = new Int32Array(main.init.control);
+			const playhead = (Atomics.load(control, 1) - Atomics.load(control, 2)) | 0;
+			const write = Atomics.load(control, 0);
+			expect(((playhead - write) | 0) <= out[0].length).toBe(true);
+
+			// And the new utterance still plays through.
+			let played = 0;
+			for (let i = 0; i < 16; i++) {
+				insert(main, 30_032 + i * 16, 16, { channels: 1, value: 2 });
+				played += worklet.read(out);
+			}
+			expect(played).toBeGreaterThan(0);
+		});
+	}
 });
