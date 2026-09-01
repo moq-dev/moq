@@ -31,4 +31,5 @@ place to hold it.
 
 ## Required
 
+- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - the generated runtime this fixes does not exist in the tree yet
 - A `kixelated/uniffi-dart` release fixing both leaks in the generated runtime

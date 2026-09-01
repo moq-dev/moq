@@ -15,6 +15,7 @@ its verdict lands and the follow-on work becomes concrete.
 - [Embedded video](/quest/m3/video-embedded.md) - V4L2 M2M codecs and EGL import, so moq-video works on a Pi
 - [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
+- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - Dart/Flutter bindings via UniFFI
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
 - [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - choose the custom-QUIC foundation by scored measurement
 - [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
