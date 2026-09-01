@@ -64,16 +64,7 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	error(code, "opus_decode_float")
 }
 
-/// Classify a packet libopus accepted, preserving DTX across packet loss.
-///
-/// Comfort noise is the one thing an Opus packet says about itself by size: a
-/// frame that codes silence is the TOC byte plus at most a two-byte SID
-/// payload, where real audio is tens of bytes even at the lowest bitrates. So a
-/// packet is DTX when every coded frame in it is that small, which covers the
-/// one-byte entry packet, the periodic multi-byte SID refresh, and the
-/// multi-frame refresh a 40 or 60 ms configuration emits. Reading the framing
-/// rather than the payload keeps this working for senders whose libopus build
-/// differs from ours.
+/// Classify a packet a decoder accepted, preserving DTX across packet loss.
 ///
 /// An empty payload asks the decoder for packet-loss concealment, which says
 /// nothing about the audio: carry `in_dtx` from the last real packet through it.
@@ -82,7 +73,7 @@ pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 		return if in_dtx { Activity::Dtx } else { Activity::Active };
 	}
 
-	if is_comfort_noise(packet) {
+	if is_comfort_noise(packet, in_dtx) {
 		Activity::Dtx
 	} else {
 		Activity::Active
@@ -92,18 +83,54 @@ pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 /// The largest coded frame that is still comfort noise rather than audio.
 const SID_BYTES: i16 = 2;
 
-/// Whether every coded frame in an accepted packet is comfort noise, ignoring
-/// any padding the sender added.
-fn is_comfort_noise(packet: &[u8]) -> bool {
-	let Ok(len) = i32::try_from(packet.len()) else {
+/// Whether an accepted packet's framing looks like comfort noise.
+///
+/// libopus codes silence as frames that are empty or a two-byte SID payload,
+/// where audio fills every frame with tens of bytes. Once DTX is established it
+/// also emits a periodic refresh that can carry a larger payload in one frame
+/// and leave the others empty, so an empty frame beside that one still means
+/// silence rather than a return to audio.
+///
+/// This reads the framing rather than the payload bytes, so it does not assume
+/// the sender's libopus emits the same SID as ours. It cannot be exact: a
+/// sender below libopus's `3 * frame_rate * 8` bps floor emits a bare TOC for
+/// audio too, and nothing on the wire distinguishes that from silence. Only the
+/// encoder can tell the difference, via `OPUS_GET_IN_DTX`.
+pub(crate) fn is_comfort_noise(packet: &[u8], in_dtx: bool) -> bool {
+	let Some((sizes, count)) = frame_sizes(packet) else {
 		return false;
 	};
+	let Some(sizes) = sizes.get(..count) else {
+		return false;
+	};
+	if sizes.is_empty() {
+		return false;
+	}
+
+	sizes.iter().all(|&size| size <= SID_BYTES) || (in_dtx && sizes.contains(&0))
+}
+
+/// Whether the packet codes nothing at all: a bare TOC with every frame empty.
+///
+/// Ambiguous on its own. libopus emits this both while withholding silence and,
+/// below its `3 * frame_rate * 8` bps floor, for loud audio it has no room to
+/// code. Only `OPUS_GET_IN_DTX` separates the two, so a decoder cannot.
+pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
+	match frame_sizes(packet).and_then(|(sizes, count)| sizes.get(..count).map(<[i16]>::to_vec)) {
+		Some(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
+		None => false,
+	}
+}
+
+/// Sizes of the coded frames in an accepted packet, with padding parsed off.
+fn frame_sizes(packet: &[u8]) -> Option<([i16; 48], usize)> {
+	let len = i32::try_from(packet.len()).ok()?;
 
 	// An Opus packet holds at most 48 frames (RFC 6716 section 3.2.5).
 	let mut sizes = [0i16; 48];
-	// SAFETY: `sizes` has libopus's maximum frame count. Passing null for the TOC
-	// and frame pointers asks it to skip them, which it checks for; only `size` is
-	// required. Padding is parsed off rather than counted.
+	// SAFETY: `sizes` has libopus's maximum frame count, and it bounds the count
+	// it writes by that. Passing null for the TOC and frame pointers asks it to
+	// skip them, which it checks for; only `size` is required.
 	let count = unsafe {
 		unsafe_libopus::opus_packet_parse(
 			packet.as_ptr(),
@@ -115,10 +142,16 @@ fn is_comfort_noise(packet: &[u8]) -> bool {
 		)
 	};
 
-	match usize::try_from(count).ok().and_then(|count| sizes.get(..count)) {
-		Some(sizes) if !sizes.is_empty() => sizes.iter().all(|&size| size <= SID_BYTES),
-		_ => false,
-	}
+	Some((sizes, usize::try_from(count).ok()?))
+}
+
+/// The coded frame sizes of an accepted packet, so tests can assert on the
+/// framing libopus actually produced rather than on a hand-built packet.
+#[cfg(test)]
+pub(crate) fn frame_sizes_for_test(packet: &[u8]) -> Vec<i16> {
+	frame_sizes(packet)
+		.and_then(|(sizes, count)| sizes.get(..count).map(<[i16]>::to_vec))
+		.unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -136,13 +169,13 @@ mod tests {
 
 	#[test]
 	fn activity_reads_the_opus_framing() {
+		// A bare TOC, and the two-byte SID refresh libopus emits at 20 ms.
 		assert_eq!(activity(&[0xf8], false), Activity::Dtx);
 		assert_eq!(activity(&[0xf8, 0xff], false), Activity::Dtx);
+		assert_eq!(activity(&[0xf8, 0xff, 0xfe], false), Activity::Dtx);
+		// Loss carries the last real packet's classification.
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
-		// A SID refresh is comfort noise whatever the last packet was.
-		assert_eq!(activity(&[0xf8, 0xff, 0xfe], false), Activity::Dtx);
-		assert_eq!(activity(&[0xf8, 0xff, 0xfe], true), Activity::Dtx);
 	}
 
 	/// Another sender's comfort noise is not byte-for-byte ours, so only the

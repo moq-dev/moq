@@ -25,13 +25,11 @@ pub struct Consumer {
 	/// One past the last sample handed to the resampler, so the tail it is still
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
-	/// Codec activity spans still represented by buffered resampler output.
+	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
-	/// Activity of the last span the resampler output ran past, which is what the
-	/// filter's trailing rounding samples belong to.
+	/// Activity of the last span the output ran past, for the rounding samples the
+	/// filter leaves beyond the final input boundary.
 	trailing: Activity,
-	/// Resampled frames split at activity boundaries and waiting to be returned.
-	pending: VecDeque<Frame>,
 	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
@@ -99,7 +97,6 @@ impl Consumer {
 			tail: None,
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
-			pending: VecDeque::new(),
 			epoch: None,
 			frames_decoded: 0,
 			end: None,
@@ -128,14 +125,11 @@ impl Consumer {
 	/// Read the next decoded PCM frame, or `None` when the track ends.
 	///
 	/// [`Frame::activity`] reports whether the samples came from real audio or
-	/// Opus comfort noise. When resampling, a frame is cut short so it never spans
-	/// a change: the boundary stays on the source packet that carried it.
+	/// Opus comfort noise. It describes where the frame begins, so a resampled
+	/// frame that straddles a change carries the activity its first sample came
+	/// from and the next frame carries the new one.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
-			if let Some(frame) = self.pending.pop_front() {
-				return Ok(Some(frame));
-			}
-
 			let mux_frame = self.track.read().await?;
 			self.apply_discontinuity()?;
 			let Some(mux_frame) = mux_frame else {
@@ -194,15 +188,19 @@ impl Consumer {
 			let decoded_end = advance(decoded_at, frames, rate)?;
 			self.tail = Some(decoded_end);
 
-			if self.resampler.is_some() {
+			// The resampler hands back samples it was holding from earlier packets,
+			// so what comes out starts before the packet that filled its chunk. Track
+			// where each packet's activity ends and label the output by where it
+			// actually begins, not by the packet just submitted.
+			let activity = if self.resampler.is_some() {
 				self.spans.push_back(ActivitySpan {
 					end: decoded_end,
 					activity,
 				});
-				let split = self.split(pcm, timestamp)?;
-				self.pending.extend(split);
-				continue;
-			}
+				self.activity_at(timestamp)
+			} else {
+				activity
+			};
 
 			return Ok(Some(self.frame(pcm, timestamp, activity)?));
 		}
@@ -223,7 +221,6 @@ impl Consumer {
 		self.tail = None;
 		self.spans.clear();
 		self.trailing = Activity::Active;
-		self.pending.clear();
 		self.epoch = None;
 		self.frames_decoded = 0;
 		self.end = None;
@@ -244,50 +241,24 @@ impl Consumer {
 
 		let pending = resampler.pending_frames();
 		let skipped = resampler.skipped();
-		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
 		let pcm = resampler.flush()?;
-		let split = self.split(pcm, timestamp)?;
-		self.pending.extend(split);
-		Ok(self.pending.pop_front())
-	}
-
-	/// Split resampler output at the codec activity boundaries it spans.
-	///
-	/// A chunk starts with samples the resampler was still holding from earlier
-	/// packets, so it can straddle a change that the packet just submitted knows
-	/// nothing about. Cut it where the spans say the change happened instead.
-	fn split(&mut self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Vec<Frame>, Error> {
-		let channels = self.decoder.channel_count().max(1) as usize;
-		let total = pcm.len() / channels;
-		let end = advance(timestamp, total, self.resolved_sample_rate)?;
-		let mut offset = 0;
-		let mut split = Vec::new();
-
-		while offset < total {
-			let cursor = advance(timestamp, offset, self.resolved_sample_rate)?;
-			while let Some(span) = self.spans.front().filter(|span| span.end <= cursor) {
-				self.trailing = span.activity;
-				self.spans.pop_front();
-			}
-
-			// Only a span with another queued behind it is a real split point. The
-			// last one runs to the end of the output, since the sinc filter leaves a
-			// rounding frame or two past the final input boundary and those belong to
-			// the audio they came from rather than to a synthetic active span.
-			let (activity, next) = match self.spans.front() {
-				Some(span) if self.spans.len() > 1 => (
-					span.activity,
-					frames_between(timestamp, span.end.min(end), self.resolved_sample_rate)?.clamp(offset + 1, total),
-				),
-				Some(span) => (span.activity, total),
-				None => (self.trailing, total),
-			};
-
-			split.push(self.frame(pcm[offset * channels..next * channels].to_vec(), cursor, activity)?);
-			offset = next;
+		if pcm.is_empty() {
+			return Ok(None);
 		}
 
-		Ok(split)
+		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
+		let activity = self.activity_at(timestamp);
+		Ok(Some(self.frame(pcm, timestamp, activity)?))
+	}
+
+	/// The codec activity covering `timestamp`, dropping the spans it has passed.
+	fn activity_at(&mut self, timestamp: moq_net::Timestamp) -> Activity {
+		while let Some(span) = self.spans.front().filter(|span| span.end <= timestamp) {
+			self.trailing = span.activity;
+			self.spans.pop_front();
+		}
+
+		self.spans.front().map_or(self.trailing, |span| span.activity)
 	}
 
 	/// Where the output the resampler is about to hand back actually begins.
@@ -527,7 +498,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn resampling_splits_frames_at_activity_boundaries() {
+	async fn resampling_keeps_the_activity_boundary_on_its_source() {
 		let mut encoder = Encoder::new(&crate::encode::Config {
 			dtx: true,
 			bitrate: Some(24_000),
@@ -586,8 +557,19 @@ mod tests {
 			}
 		}
 		let actual = actual.expect("consumer should report Opus DTX");
-		let error = actual.as_micros().abs_diff(expected.as_micros());
-		assert!(error < 100, "activity boundary moved by {error} us during resampling");
+
+		// Each frame carries the activity its first sample came from, so the label
+		// can lag its source by up to the frame it lands in, but it must never lead
+		// it: leading means samples that are still active got labelled DTX. That is
+		// what labelling by the packet most recently submitted does, since the
+		// resampler is handing back audio from before that packet. It puts the
+		// boundary a chunk early instead of a fraction of a chunk late.
+		let delay = actual.as_micros() as i128 - expected.as_micros() as i128;
+		let chunk_us = 20_000i128;
+		assert!(
+			(0..chunk_us).contains(&delay),
+			"DTX label landed {delay} us from its source, outside [0, {chunk_us})"
+		);
 	}
 
 	#[tokio::test]
