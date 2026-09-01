@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/moq-dev/moq/compare/moq-video-v0.0.20...moq-video-v0.0.21) - 2026-09-01
+
+### Added
+
+- *(video)* complete native screen capture ([#3244](https://github.com/moq-dev/moq/pull/3244))
+- *(video)* add packed RGBA surface exit ([#3236](https://github.com/moq-dev/moq/pull/3236))
+
+### Fixed
+
+- *(moq-video)* mark capture idle gaps ([#3214](https://github.com/moq-dev/moq/pull/3214))
+
+### Other
+
+- *(video)* exercise PipeWire DMA-BUF rendering ([#3228](https://github.com/moq-dev/moq/pull/3228))
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.0.20](https://github.com/moq-dev/moq/compare/moq-video-v0.0.19...moq-video-v0.0.20) - 2026-08-26
 
 ### Added

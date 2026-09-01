@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.12](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.11...moq-hls-v0.4.12) - 2026-09-01
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.4.11](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.10...moq-hls-v0.4.11) - 2026-08-26
 
 ### Other

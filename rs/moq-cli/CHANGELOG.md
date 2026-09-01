@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.15](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.14...moq-cli-v0.9.15) - 2026-09-01
+
+### Added
+
+- *(video)* complete native screen capture ([#3244](https://github.com/moq-dev/moq/pull/3244))
+
+### Fixed
+
+- *(cli)* serve TCP and Unix listeners without QUIC ([#3149](https://github.com/moq-dev/moq/pull/3149))
+- accept the reserved unknown Hop ID, and stop the cargo doc collision ([#3113](https://github.com/moq-dev/moq/pull/3113))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.9.14](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.13...moq-cli-v0.9.14) - 2026-08-26
 
 ### Other

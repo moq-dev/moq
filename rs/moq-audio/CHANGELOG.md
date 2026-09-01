@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.20...moq-audio-v0.0.21) - 2026-09-01
+
+### Fixed
+
+- *(moq-audio)* keep capture callbacks realtime-safe ([#3245](https://github.com/moq-dev/moq/pull/3245))
+- *(moq-audio)* bound playback driver commands ([#3170](https://github.com/moq-dev/moq/pull/3170))
+- *(audio)* recover microphone capture after device errors ([#3179](https://github.com/moq-dev/moq/pull/3179))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.0.20](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.19...moq-audio-v0.0.20) - 2026-08-26
 
 ### Other

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.0.3...moq-nvenc-v0.0.4) - 2026-09-01
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.0.3](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.0.2...moq-nvenc-v0.0.3) - 2026-07-25
 
 ### Other
