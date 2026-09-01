@@ -28,6 +28,18 @@ export interface Frame {
 	timestamp: Timestamp;
 }
 
+/** Options for a sequence-aware frame read. */
+export interface ReadOptions {
+	/**
+	 * The lowest sequence number the caller wants; defaults to the whole group.
+	 *
+	 * Frames below it are discarded instead of returned, and frames evicted below it are not
+	 * a gap: the read resumes at the next retained frame rather than throwing {@link Lagged}.
+	 * An eviction at or above it still throws, because the caller asked for that frame.
+	 */
+	from?: number;
+}
+
 /** Immutable group metadata. */
 export interface Info {
 	/** Sequence number of this group within its track. */
@@ -52,9 +64,16 @@ class GroupState {
 	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
-	// Frames evicted from the front by the cache cap. A reader that had not consumed
-	// them has a gap, so its next read throws Lagged rather than skipping silently.
-	offset = 0;
+	// Absolute sequence of the frame at the front of `frames`, advanced by a read and by an
+	// eviction alike: the sequence the next read returns.
+	start = 0;
+
+	// One past the newest frame the cache cap evicted before it could be read, or 0 when
+	// none was. A read that wanted a frame below it has a gap, so it throws Lagged rather
+	// than skipping silently; a read that starts above it never asked for the missing
+	// frames, so it proceeds.
+	evicted = 0;
+
 	cacheBytes = 0;
 
 	constructor(sequence: number) {
@@ -73,7 +92,8 @@ function appendFrame(state: GroupState, frame: Frame) {
 			const evicted = frames.shift();
 			if (!evicted) break;
 			state.cacheBytes -= evicted.payload.byteLength;
-			state.offset++;
+			state.start++;
+			state.evicted = state.start;
 		}
 	});
 
@@ -126,7 +146,8 @@ export class Producer {
 	mirror(): Consumer {
 		const dst = new GroupState(this.sequence);
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
-		dst.offset = this.#state.offset;
+		dst.start = this.#state.start;
+		dst.evicted = this.#state.evicted;
 		// The replay only covers what is still buffered, so the count has to come from the
 		// source: it is what names a frame's absolute sequence, and what a publisher reads
 		// to resolve the live edge.
@@ -263,7 +284,7 @@ export class Consumer {
 		if (!frame) return undefined;
 
 		this.#state.cacheBytes -= frame.payload.byteLength;
-		return { sequence: this.#state.total.peek() - frames.length - 1, frame };
+		return { sequence: this.#state.start++, frame };
 	}
 
 	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
@@ -278,7 +299,7 @@ export class Consumer {
 
 	/** True if frames were evicted from the front of this group before being read. */
 	get skipped(): boolean {
-		return this.#state.offset > 0;
+		return this.#state.evicted > 0;
 	}
 
 	/**
@@ -325,7 +346,7 @@ export class Consumer {
 	 */
 	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
-			if (this.#state.offset > 0) throw new Lagged();
+			if (this.#state.evicted > 0) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
 			if (read) return read.frame;
@@ -342,12 +363,17 @@ export class Consumer {
 	 * Reads the next frame along with its sequence number within the group.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
-	async readFrameSequence(): Promise<({ sequence: number } & Frame) | undefined> {
+	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
+		const from = options?.from ?? 0;
+
 		for (;;) {
-			if (this.#state.offset > 0) throw new Lagged();
+			if (this.#state.evicted > from) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
-			if (read) return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+			if (read) {
+				if (read.sequence < from) continue;
+				return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+			}
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;

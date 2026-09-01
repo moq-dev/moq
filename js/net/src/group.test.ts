@@ -88,6 +88,34 @@ test("reading a group whose frames were evicted throws Lagged", async () => {
 	expect(consumer.readFrame()).rejects.toBeInstanceOf(Lagged);
 });
 
+test("a read that starts above the eviction window skips the gap instead of throwing", async () => {
+	const { producer, consumer } = pair(0);
+
+	// Overflow the frame cap without reading, evicting frames 0 through `extra - 1`.
+	const extra = 100;
+	for (let i = 0; i < MAX_GROUP_FRAMES + extra; i++) {
+		producer.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
+	}
+
+	// `extra - 1` was the last frame evicted, so a reader that wanted it still has a gap; one
+	// above it is the lowest start that stays clear. Both are taken before the reads below,
+	// which drain the buffer a consume() handle shares with the producer.
+	const lagged = producer.mirror();
+	const clear = producer.mirror();
+
+	// Nothing at or above `from` was evicted, so the reader lost nothing it asked for and the
+	// frames below it are dropped rather than returned.
+	const from = 200;
+	expect(await consumer.readFrameSequence({ from })).toMatchObject({
+		sequence: from,
+		payload: new Uint8Array([from & 0xff]),
+	});
+	expect(await consumer.readFrameSequence({ from })).toMatchObject({ sequence: from + 1 });
+
+	await expect(lagged.readFrameSequence({ from: extra - 1 })).rejects.toBeInstanceOf(Lagged);
+	await expect(clear.readFrameSequence({ from: extra })).resolves.toMatchObject({ sequence: extra });
+});
+
 test("a group with no eviction reads every frame without error", async () => {
 	const { producer, consumer } = pair(0);
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { error } from "../error.ts";
+import { MAX_GROUP_FRAMES } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -735,6 +736,53 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 			sequence: 0,
 			firstObject: false,
 			objects: [{ id: 2, payload: "0.2" }],
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A group that outgrows its cache evicts its own front, which used to fail the serving loop
+ * and forfeit every remaining object in it. A Next Object subscriber joins above the evicted
+ * prefix, so nothing it asked for was lost and the live tail is still served.
+ */
+test("draft-20: an open group that outgrew its cache still serves the live tail", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Past the frame cap, so the oldest objects are gone before anyone subscribes.
+	const group = track.appendGroup();
+	const published = MAX_GROUP_FRAMES + 10;
+	for (let i = 0; i < published; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+		}),
+	);
+
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(published - 1) });
+
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${published}`), timestamp: Timestamp.now() });
+		group.close();
+
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("the subscription never served the live tail");
+		expect(await readGroup(live)).toEqual({
+			sequence: 0,
+			// The join is mid-group, so the stream does not start at the group's first object.
+			firstObject: false,
+			objects: [{ id: published, payload: `0.${published}` }],
 		});
 	} finally {
 		fx.close();
