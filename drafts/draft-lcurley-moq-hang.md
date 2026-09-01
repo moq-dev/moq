@@ -354,7 +354,7 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
-  "timeline": Timeline | undefined,
+  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -368,7 +368,7 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
-  "timeline": Timeline | undefined,
+  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -418,7 +418,8 @@ The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
 ### broadcast and timeline {#data-shared}
-The `broadcast` ({{field-broadcast}}) and `timeline` ({{field-timeline}}) fields carry the same meaning here as they do for a media rendition.
+The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+The `timeline` field advertises a companion timeline track indexing this track's groups, with the same schema as the catalog's root `timeline` field ({{timeline-catalog}}).
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
