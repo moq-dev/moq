@@ -593,8 +593,14 @@ mod tests {
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = broadcast.create_track("video", catalog.track_info()).unwrap();
-		let consumer = track.subscribe(None);
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		// The test walks the finished track after the fact, so it needs a subscriber that tolerates
+		// a backlog. The default budget is `Duration::ZERO`, which sheds the empty marker the moment
+		// the resumed group stamps its reach; a live consumer takes it as the edge instead.
+		let subscription = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(60));
+		let consumer = track.subscribe(subscription);
 
 		let mut config = Config::new(320, 240, 30);
 		config.kind = encoder::Kind::Software;
