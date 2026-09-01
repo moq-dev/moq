@@ -306,7 +306,11 @@ impl Capture {
 		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
 			u16::try_from(self.height).map_err(|_| Error::Codec(anyhow::anyhow!("X11 height is too large")))?;
-		let image = self
+		// The geometry check above and this request are separate round trips, so
+		// an interactive resize lands between them often enough to matter. The
+		// stale rectangle then fails the request, which is an ordinary transition
+		// rather than a lost source.
+		let image = match self
 			.connection
 			.get_image(
 				ImageFormat::Z_PIXMAP,
@@ -319,7 +323,10 @@ impl Capture {
 			)
 			.map_err(source)?
 			.reply()
-			.map_err(source)?;
+		{
+			Ok(image) => image,
+			Err(error) => return self.changed_or_lost(error),
+		};
 		let mut rgb = self.format.rgb(&image.data, self.width, self.height)?;
 		if self.cursor
 			&& let Some(cursor) = self
@@ -332,6 +339,22 @@ impl Capture {
 			blend_cursor(&mut rgb, self.width, self.height, x, y, &cursor);
 		}
 		Ok(Some(Surface::I420(I420::from_rgb(&rgb, self.width, self.height)?)))
+	}
+
+	/// Classify a failed read: a drawable that still answers changed under us and
+	/// the caller should reopen, while one that is gone is terminal.
+	fn changed_or_lost(&self, error: impl std::fmt::Display) -> Result<Option<Surface>, Error> {
+		let alive = self
+			.connection
+			.get_geometry(self.drawable)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.is_some();
+		if !alive {
+			return Err(Error::SourceUnavailable(format!("X11 source: {error}")));
+		}
+		tracing::info!(source = %self.name, %error, "X11 source changed mid-frame; ending capture");
+		Ok(None)
 	}
 
 	fn origin(&self) -> Result<(i32, i32), Error> {
