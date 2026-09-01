@@ -62,3 +62,5 @@ dashboards, fleet rollout) stay downstream.
 - [Windows capture parity](/quest/m2/capture-windows.md) - window, app, system-audio and cursor capture on Windows
 - [Linux capture parity](/quest/m2/capture-linux.md) - window capture, system audio, and a chosen display through the portal
 - [Capture ergonomics](/quest/m2/capture-ergonomics.md) - region capture, audio mixing, and validating format overrides
+- [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
+- [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends

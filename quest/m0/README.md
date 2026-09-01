@@ -28,6 +28,10 @@ regression test per Root Cause First.
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - fix(watch): audio ring truncate can race the worklet reader for one quantum
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls the SI table cadence until the media clock catches up
 - [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the first
+- [Windows window capture](/quest/m0/windows-window-capture-blank.md) - Windows window capture returns black pixels for GPU-composited windows
+- [Capture device loss](/quest/m0/capture-device-loss.md) - an AVFoundation camera that disappears parks the reader forever
+- [X11 window identity](/quest/m0/x11-window-identity.md) - a reused X11 window id can publish an unrelated window
+- [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - a minimized or resizing window ends capture instead of riding it out
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-video: capture negotiates twice, so a window resize between the probe and the first subscriber strands consumers that fixed on the first snapshot
 - [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
 - [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
