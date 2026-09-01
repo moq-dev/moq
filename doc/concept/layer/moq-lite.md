@@ -172,6 +172,7 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.
+- **Group granularity**: A subscription starts and ends on a group. A `moq-transport` Location Filter can narrow a range to an object, but we widen it back to whole groups, so a filter that starts or ends mid-group gets the entire group.
 - **No pausing**: Unsubscribe if you don't want a track.
 - **No binary names**: Uses UTF-8 strings instead of arrays of byte arrays.
 

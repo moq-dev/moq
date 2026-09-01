@@ -1386,6 +1386,43 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });
 
+// FIRST_OBJECT says the stream carries the subgroup from its first published object. It is
+// the only signal that a group arrived with its head missing, so the value has to survive
+// decode rather than being stripped along with the bit.
+test("group flags round-trip firstObject", async () => {
+	const makeGroup = (firstObject: boolean) =>
+		new Group({
+			trackAlias: 7n,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				hasEnd: true,
+				hasPriority: true,
+				firstObject,
+			},
+		});
+
+	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+		for (const firstObject of [true, false]) {
+			const encoded = await encodeVersioned(makeGroup(firstObject), version);
+			const decoded = await decodeVersioned(encoded, Group.decode, version);
+			expect(decoded.flags.firstObject).toBe(firstObject);
+		}
+	}
+
+	// The bit arrived in draft-18. Earlier drafts carry no such signal, so a group there is
+	// taken at its word rather than read as starting partway through.
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17]) {
+		const encoded = await encodeVersioned(makeGroup(false), version);
+		const decoded = await decodeVersioned(encoded, Group.decode, version);
+		expect(decoded.flags.firstObject).toBe(true);
+	}
+});
+
 test("Frame object time: draft-16 starts delta property types", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,

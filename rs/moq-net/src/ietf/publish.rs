@@ -297,11 +297,32 @@ impl Message for Publish<'_> {
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
 				// peer that still sends it doesn't have its session torn down over a hint.
+				//
+				// Draft-20 moved the subscription parameters into PUBLISH, so they have to
+				// parse here even though reverse publishing is unsupported: an unlisted
+				// parameter fails the whole message, which would kill the session instead of
+				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
+					0x02 => object_delivery_timeout: Option<u64>,
+					0x06 => subgroup_delivery_timeout: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
+
+				// The values are dropped: we refuse the PUBLISH itself, so the subscription
+				// settings it proposes never take effect. They still have to be consumed.
+				let subscription_params = [
+					object_delivery_timeout.is_some(),
+					subgroup_delivery_timeout.is_some(),
+					subscriber_priority.is_some(),
+					filter.is_some(),
+				];
+				if subscription_params.contains(&true) && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
 				let mut properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 
@@ -451,6 +472,45 @@ impl Message for PublishError<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Draft-20 moved the subscription parameters into PUBLISH. We refuse the request
+	/// itself, but the message still has to parse: an unlisted parameter fails the whole
+	/// decode, which kills the session instead of letting the peer get its refusal.
+	#[test]
+	fn publish_accepts_the_relocated_subscription_parameters() -> Result<(), EncodeError> {
+		let mut body = Vec::new();
+		RequestId(1).encode(&mut body, Version::Draft20).unwrap();
+		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft20).unwrap();
+		"video".encode(&mut body, Version::Draft20).unwrap();
+		1u64.encode(&mut body, Version::Draft20).unwrap(); // track alias
+
+		// SUBSCRIBER_PRIORITY then LOCATION_FILTER, delta encoded from 0.
+		encode_params!(&mut body, Version::Draft20,
+			0x20 => 128u8,
+			0x21 => Filter::NextObject,
+		);
+		Properties::default().encode(&mut body, Version::Draft20).unwrap();
+
+		let mut buf = bytes::Bytes::from(body);
+		Publish::decode_msg(&mut buf, Version::Draft20).expect("draft-20 PUBLISH parameters must parse");
+		Ok(())
+	}
+
+	/// They arrived in draft-20, so an earlier peer sending one is still a violation.
+	#[test]
+	fn older_drafts_reject_the_relocated_parameters() -> Result<(), EncodeError> {
+		let mut body = Vec::new();
+		RequestId(1).encode(&mut body, Version::Draft19).unwrap();
+		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft19).unwrap();
+		"video".encode(&mut body, Version::Draft19).unwrap();
+		1u64.encode(&mut body, Version::Draft19).unwrap();
+		encode_params!(&mut body, Version::Draft19, 0x20 => 128u8);
+		Properties::default().encode(&mut body, Version::Draft19).unwrap();
+
+		let mut buf = bytes::Bytes::from(body);
+		assert!(Publish::decode_msg(&mut buf, Version::Draft19).is_err());
+		Ok(())
+	}
 	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
