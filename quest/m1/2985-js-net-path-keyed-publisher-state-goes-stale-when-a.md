@@ -20,12 +20,20 @@ The remedy this quest points at no longer exists.
 epoch" is now a dead pointer, and TRACK_INFO epoch-keying is not coming from
 there.
 
-The three `js/net` sites are unaffected and still stale on a republish. What
-changes is what they can key on: [Route resume
-identity](/quest/m0/route-resume.md) restores per-path identity from the
-winning route's first hop, which is the identity the Rust side will use to
-decide whether a republish is the same publisher. Settle whether these sites
-key on that or on something JS-local before implementing.
+Two of the three sites are also already fixed on `dev`, by keying on the routing
+front rather than on the path:
+
+- `lite/publisher.ts`'s `runAnnounce` holds `Map<Path.Valid,
+  broadcast.Consumer>` and diffs on the front, so a republish emits
+  ended-then-active instead of nothing.
+- `ietf/publisher.ts` records the front each refusal was about in `offered`, so
+  a republish at the same path clears the refusal.
+
+What remains is the third: `#resolveTrackInfo` caches on
+`` `${broadcast}\0${track}` `` with no generation, so a republish serves the old
+track's `TRACK_INFO`. Rescope to that one cache. It is local state with a local
+fix (invalidate on the front change the other two sites already observe), and it
+needs no wire-level identity, so do not block it on the Rust side.
 
 ### Issue context
 

@@ -79,12 +79,16 @@ underneath it.
   broader route the content is still reachable through takes over. This
   replaces the draft's ceiling-exemption paragraph, which was written when the
   discount rode a single per-broadcast advertisement.
-- **Adoption needs identity, which is now an m0 regression fix.** A relay
-  adopting another relay's copy has to know which relay it adopted and notice
-  when that changes. `FrontState.publisher` and `same_identity` supplied that
-  and were deleted with the front. [Route resume
-  identity](/quest/m0/route-resume.md) restores it as a failover fix, and
-  everything here builds on it rather than re-deriving it.
+- **Adoption and resume need different identities.** Adoption keys on the
+  *last* hop of a route, the peer that advertised it and the parent a relay
+  would be adopting; resuming a subscription keys on the *first* hop, who
+  produced the content, which alternate routes to one publisher deliberately
+  share. The pre-#3225 front kept both (`FrontState.publisher` for the first,
+  `handover_allowed` and the hold for the last), with `same_identity` comparing
+  either and refusing `Hop::UNKNOWN` on both. [Route resume
+  identity](/quest/m0/route-resume.md) restores that comparison rule and the
+  publisher half as a failover fix; [Rank](/quest/m2/pop-skipping/rank.md) owns
+  the carrier half rather than reusing the wrong one.
 - The operator hand-authors one undirected base graph. Same-PoP connectivity is
   unconditional, not a self-edge operators must remember. The radius-two closure
   and shortest base-graph distance are derived and validated.
@@ -150,7 +154,7 @@ wire version and the two directional costs of one bidirectional session.
 
 ## Related
 
-- [Route resume identity](/quest/m0/route-resume.md) - supplies the per-path identity adoption is decided against
+- [Route resume identity](/quest/m0/route-resume.md) - supplies the identity comparison rule adoption reuses on a different hop
 - [drain](/quest/m2/drain/README.md) - a second relay per PoP makes the same-PoP link price and its connection cardinality operationally important
 - [wildcard](/quest/m2/wildcard/README.md) - it reuses this questline's route cost, and needs a cluster on Lite06
 - [relay-memory](/quest/m2/relay-memory/README.md) - a denser mesh multiplies whatever a non-selected route costs

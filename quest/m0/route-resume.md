@@ -72,8 +72,9 @@ metadata-only reprice changes nothing visible.
 
 ## Related
 
-- [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) - warm adoption
-  needs the same identity to know which relay it is adopting
+- [Rank](/quest/m2/pop-skipping/rank.md) - reuses this comparison rule on the
+  route's *last* hop, since adopting a parent is about the adjacent relay rather
+  than about who produced the content
 - [Resolve](/quest/m2/wildcard/resolve.md) - two publishers colliding at one
   literal path resolve through this identity
 - [plan-hls-identity](/quest/m2/plan-hls-identity.md) - the media-generation

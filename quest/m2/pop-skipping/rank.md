@@ -46,13 +46,28 @@ instant. The hold covers only trading a working upstream for a better one:
 an idle relay is pulling nothing, a one-hop chain is the publisher itself, and
 leaving a drained or vanished route stays immediate.
 
-### Identity
+### Two identities, not one
 
-Adoption is a statement about a specific peer, so it needs to know which peer it
-adopted and when that changed. [Route resume
-identity](/quest/m0/route-resume.md) supplies that from the route's first hop,
-including that `Hop::UNKNOWN` matches nothing: two anonymous relays must not
-pass for one relay reconnecting and skip the gate.
+Adoption is a statement about the adjacent relay, and that is a different
+identity from the one [Route resume identity](/quest/m0/route-resume.md)
+restores. The pre-#3225 front kept both, because they answer different
+questions:
+
+- The **first** hop is who produced the content. Alternate routes to one
+  publisher deliberately share it, which is what makes them spliceable, and it
+  is what route-resume keys on.
+- The **last** hop is the peer that advertised the route: the parent a relay
+  would be adopting. `handover_allowed` and the hold both keyed on it, and the
+  rank hash was taken over it (`fnv_key(name, [peer])`).
+
+Use the last hop here. Keying adoption on the first hop would make every carrier
+of one broadcast look like the same peer, so a changed parent would go
+undetected and two relays could adopt each other, which is the failure the hold
+exists to prevent.
+
+What this quest reuses from route-resume is the comparison rule rather than the
+field: `Hop::UNKNOWN` identifies nobody and never matches itself, so two
+anonymous relays must not pass for one relay reconnecting and skip the gate.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same change, restoring the
 adoption-rank rule that [Lite draft routing
@@ -75,5 +90,5 @@ lucky hash.
 
 - [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) - there is nothing
   to rank until two relays can both advertise one broadcast as warm
-- [Route resume identity](/quest/m0/route-resume.md) - adoption is decided
-  against the peer identity this restores
+- [Route resume identity](/quest/m0/route-resume.md) - supplies the identity
+  comparison rule, and the publisher half of it
