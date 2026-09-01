@@ -3628,11 +3628,17 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 	match track.peek_latest() {
 		Some(group) if group.sequence == latest => {
 			let count = group.frame_count() as u64;
+			let largest = match count.checked_sub(1) {
+				Some(object) => Some(Location { group: latest, object }),
+				// A group with no frames yet has no objects, so the largest sits in an
+				// earlier group. Walk back through the cache to find it, or a peer that
+				// subscribes in the instant between a group's creation and its first
+				// frame is told the track is empty and gets no fill.
+				None => largest_before(track, latest),
+			};
 			LiveEdge {
 				latest: Some(latest),
-				// A group with no frames yet has no objects; the largest then sits in an
-				// earlier group we do not walk back to, so nothing is advertised.
-				largest: count.checked_sub(1).map(|object| Location { group: latest, object }),
+				largest,
 				next: Some(Location {
 					group: latest,
 					object: count,
@@ -3647,6 +3653,23 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 				object: 0,
 			}),
 		},
+	}
+}
+
+/// The last object before `sequence`: the nearest earlier cached group that has started a
+/// frame. The walk only continues over empty groups, which exist for at most the instant
+/// between a group's creation and its first frame, and a cache miss ends it with nothing.
+fn largest_before(track: &track::Consumer, sequence: u64) -> Option<Location> {
+	let mut sequence = sequence;
+	loop {
+		sequence = sequence.checked_sub(1)?;
+		let group = track.peek_group(sequence)?;
+		if let Some(object) = (group.frame_count() as u64).checked_sub(1) {
+			return Some(Location {
+				group: sequence,
+				object,
+			});
+		}
 	}
 }
 
@@ -3949,6 +3972,31 @@ mod range_tests {
 			subscribe_range(&msg, LiveEdge::default(), Version::Draft20),
 			ServeRange::default()
 		);
+	}
+
+	/// A group created but not yet written has no objects, so the largest sits in the
+	/// group before it. Losing it would tell a fill-requesting peer the track is empty.
+	#[tokio::test]
+	async fn an_empty_newest_group_walks_back_for_the_largest() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for _ in 0..3 {
+			first
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+		first.finish().unwrap();
+		let _open = track.create_group(group::Info { sequence: 1 }).unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(1));
+		assert_eq!(
+			edge.largest,
+			Some(Location { group: 0, object: 2 }),
+			"the largest object is the previous group's last frame"
+		);
+		// The next object is still the new group's start: nothing exists between the two.
+		assert_eq!(edge.next, Some(Location { group: 1, object: 0 }));
 	}
 
 	/// Both ends carry through, object bounds included, so the boundary groups can be

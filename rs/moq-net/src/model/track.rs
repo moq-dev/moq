@@ -441,19 +441,6 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Find a cached group by sequence; an aborted (evicted) group is a miss, so a
-	/// fetch re-fetches it. Synchronous, never blocks. Test hook for `peek_group`;
-	/// the real fetch path is [`Self::poll_fetch_cached`], which also refreshes the
-	/// group.
-	#[cfg(test)]
-	fn cached_group(&self, sequence: u64) -> Option<group::Consumer> {
-		let slot = self.lookup.get(&sequence)?;
-		if slot.group.is_aborted() {
-			return None;
-		}
-		Some(slot.group.consume())
-	}
-
 	/// The publisher's latency window, or `None` while the info is unknown (an
 	/// unaccepted [`Request`]). Bounds the aggregate subscription; see [`clamp_combined`].
 	fn latency_bound(&self) -> Option<Duration> {
@@ -1735,16 +1722,34 @@ impl Consumer {
 		})
 	}
 
-	// Peek at a cached group by sequence without blocking, or `None` if it isn't in the
-	// cache. A test hook for asserting cache state; the library reads
-	// `TrackState::cached_group` directly, and callers want `fetch_group`.
-	#[cfg(test)]
+	/// The newest group, when it is already cached: resolved synchronously, without
+	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
+	/// resolve Largest Object; a group that is not immediately available reads as no edge.
+	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let sequence = state.read().max_sequence?;
+				self.peek_group(sequence)
+			}
+			ConsumerKind::Spliced(resume) => resume.peek_latest(),
+		}
+	}
+
+	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
+	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
+	/// group alive over one a subscriber actually read; an aborted (evicted) group is a
+	/// miss.
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
 		match &self.inner {
-			ConsumerKind::Plain(state) => state.read().cached_group(sequence),
-			// Spliced tracks have no cache of their own; peek the newest segment
-			// via `fetch_group` instead.
-			ConsumerKind::Spliced(_) => None,
+			ConsumerKind::Plain(state) => {
+				let state = state.read();
+				let slot = state.lookup.get(&sequence)?;
+				if slot.group.is_aborted() {
+					return None;
+				}
+				Some(slot.group.consume())
+			}
+			ConsumerKind::Spliced(resume) => resume.peek_group(sequence),
 		}
 	}
 
@@ -1755,23 +1760,6 @@ impl Consumer {
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
 	///
-	/// The newest group, when it is already cached: resolved synchronously, without
-	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
-	/// resolve Largest Object; a group that is not immediately available reads as no edge.
-	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
-		match &self.inner {
-			ConsumerKind::Plain(state) => {
-				let state = state.read();
-				let sequence = state.max_sequence?;
-				match state.poll_fetch_cached(sequence) {
-					Poll::Ready(Ok(group)) => Some(group),
-					_ => None,
-				}
-			}
-			ConsumerKind::Spliced(resume) => resume.peek_latest(),
-		}
-	}
-
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
 	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed. Concurrent fetches for the same sequence coalesce onto one
