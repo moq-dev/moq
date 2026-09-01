@@ -54,29 +54,20 @@ jobs:
         # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}.2.34 -p moq-token-cli
 
-      - name: Package bare binary
-        shell: bash
-        run: |
-          version="${{ steps.parse.outputs.version }}"
-          target="${{ matrix.target }}"
-          name="moq-token-cli-v${version}-${target}"
-          mkdir -p dist
-          cp "target/${target}/release/moq-token" "dist/${name}"
-
-      - name: Package tarball (Homebrew)
+      - name: Package release assets
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="moq-token-cli-v${VERSION}-${TARGET}"
-          mkdir -p "dist/${name}/bin"
-          cp "target/${TARGET}/release/moq-token" "dist/${name}/bin/moq-token"
-          cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
-          if [[ -f rs/moq-token-cli/README.md ]]; then
-            cp rs/moq-token-cli/README.md "dist/${name}/"
-          fi
-          (cd dist && tar -czvf "${name}.tar.gz" "${name}" && rm -rf "${name}")
+          ./rs/scripts/package-binary.sh \
+            --crate moq-token-cli \
+            --bin moq-token \
+            --binary "target/${TARGET}/release/moq-token" \
+            --bare \
+            --version "$VERSION" \
+            --target "$TARGET" \
+            --output dist
 
       - name: Package .deb (Ubuntu 22.04 toolchain)
         shell: bash
