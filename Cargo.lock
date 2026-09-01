@@ -4699,6 +4699,7 @@ dependencies = [
  "humantime",
  "moq-net",
  "moq-tokio",
+ "moq-uring",
  "procfs 0.18.0",
  "rand 0.10.2",
  "rustls",

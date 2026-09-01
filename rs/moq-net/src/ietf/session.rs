@@ -725,6 +725,9 @@ where
 	}
 
 	match kind {
+		// We never request a fill, so a fetch stream answers a request we did not make. Its
+		// objects would duplicate a group the live subscription is already delivering, and
+		// two producers for one sequence is a `Duplicate` error, so refuse the stream.
 		FetchHeader::TYPE => Err(Error::Unsupported),
 		_ => Err(Error::UnexpectedStream),
 	}

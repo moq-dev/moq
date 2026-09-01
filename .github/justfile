@@ -7,3 +7,4 @@ set fallback
 check:
     @if command -v actionlint >/dev/null 2>&1; then actionlint; fi
     {{ source_directory() }}/scripts/alert.sh check-coverage
+    @if command -v rustc >/dev/null 2>&1; then {{ source_directory() }}/scripts/package-binary.test.sh; fi

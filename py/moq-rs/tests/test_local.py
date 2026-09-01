@@ -893,7 +893,7 @@ def test_optional_binding_records_use_none_defaults():
     assert encoder.channels is None
     assert encoder.bitrate is None
 
-    decoder = moq.AudioDecoderOutput(format=moq.AudioFormat.F32)
+    decoder = moq.AudioDecoderOutput(format=moq.AudioSampleFormat.F32)
     assert decoder.sample_rate is None
     assert decoder.channels is None
-    assert decoder.latency_max_ms is None
+    assert decoder.max_age_ms is None

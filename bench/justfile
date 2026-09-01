@@ -1,0 +1,19 @@
+#!/usr/bin/env just --justfile
+
+set working-directory := '..'
+
+# Benchmark the current tree, or compare it with a commit.
+compare $BASE="":
+    #!/usr/bin/env bash
+    exec bench/run.sh "$BASE"
+
+# Compare the shared Tokio runtime with independent Tokio and io_uring workers.
+runtime $ROUNDS="3" $WORKERS="":
+    #!/usr/bin/env bash
+    MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" \
+        exec bench/run.sh --runtime
+
+# Compile every binary and feature used by the repository-level harness.
+check:
+    cargo check --locked --package moq-relay --package moq-bench \
+        --features moq-relay/io-uring-quinn

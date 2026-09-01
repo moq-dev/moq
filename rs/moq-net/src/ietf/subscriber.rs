@@ -8,7 +8,7 @@ use crate::{
 	Error, Path, PathOwned, SessionError, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
-	ietf::{self, Control, FilterType, GroupOrder, RequestId},
+	ietf::{self, Control, Filter, GroupOrder, RequestId},
 	origin, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
@@ -1505,6 +1505,13 @@ where
 		broadcast: &Path<'_>,
 		track: &track::Producer,
 	) -> Result<(), Error> {
+		let subscription = track.subscription();
+		let filter = subscribe_filter(
+			subscription.as_ref().and_then(|s| s.start),
+			subscription.as_ref().and_then(|s| s.end),
+			self.version,
+		);
+
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
@@ -1514,7 +1521,9 @@ where
 				track_name: track.name().into(),
 				subscriber_priority: super::priority::to_wire(track.subscription().map(|s| s.priority).unwrap_or(0)),
 				group_order: GroupOrder::Descending,
-				filter_type: FilterType::LargestObject,
+				filter,
+				fill: None,
+				properties_wanted: true,
 			})
 			.await?;
 		Ok(())
@@ -1632,6 +1641,7 @@ struct GroupIngest {
 	has_end: bool,
 	timescale: Option<Timescale>,
 	version: Version,
+	prior_object: Option<u64>,
 	phase: IngestPhase,
 }
 
@@ -1659,6 +1669,7 @@ impl GroupIngest {
 			has_end: group.flags.has_end,
 			timescale,
 			version,
+			prior_object: None,
 			phase: IngestPhase::Delta,
 		}
 	}
@@ -1679,10 +1690,7 @@ impl GroupIngest {
 					let Some(id_delta) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
-					if id_delta != 0 {
-						tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-						return Poll::Ready(Err(Error::Unsupported));
-					}
+					self.prior_object = Some(next_object_id(self.prior_object, id_delta)?);
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
 						false => IngestPhase::Size { timestamp: None },
@@ -2183,7 +2191,7 @@ mod tests {
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_a_subscription_stops_the_publisher() {
-		for version in [Version::Draft16, Version::Draft19] {
+		for version in [Version::Draft16, Version::Draft20] {
 			let log = cancel_a_subscription(version).await;
 			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
 			// routine unsubscribe would read to the publisher as a fault on our side.
@@ -2490,7 +2498,7 @@ mod tests {
 	/// fallback, so a reset here means the cancellation never landed.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_does_not_reset_away_the_unsubscribe() {
-		for version in [Version::Draft16, Version::Draft19] {
+		for version in [Version::Draft16, Version::Draft20] {
 			let log = cancel_a_subscription(version).await;
 			assert!(
 				log.resets().is_empty(),
@@ -2515,6 +2523,7 @@ mod tests {
 						_ => None,
 					},
 					track_alias: 7,
+					largest: None,
 					properties: Default::default(),
 				})
 				.await
@@ -3611,5 +3620,171 @@ mod tests {
 			1,
 			"the decline reaches the peer as NOT_SUPPORTED"
 		);
+	}
+}
+
+/// The Location Filter that expresses a moq-lite subscription's group range.
+///
+/// moq-lite joins a track at the *start* of the current group, which is a decodable point,
+/// and draft-20's relative form is the first that can name it without knowing Largest
+/// Object. Earlier drafts have no such spelling, so they keep asking for the next Object
+/// and joining mid-group, exactly as they always did.
+///
+/// No fill is requested. The draft's own current-group join is Next Object plus a
+/// `StartGroup=1` fill, which splits the group across two streams: the fill carries the
+/// head on a fetch stream and the subscription the tail. Reassembling those into the one
+/// group producer the model expects means buffering the live tail until the fill
+/// finishes, which this subscriber does not do yet. Relative(1) instead asks for the
+/// whole group on the subscription: our own publisher replays it from the cache since it
+/// is inside the requested range, while a strict publisher only delivers from the next
+/// published object, whose mid-group stream [`next_object_id`] then drops, degrading the
+/// join to the next group boundary. Since we never request a fill, an incoming fetch
+/// stream answers no request of ours and is refused; the publisher side does serve fills
+/// (see `publisher::run_fill`).
+fn subscribe_filter(start: Option<track::Position>, end: Option<track::Position>, version: Version) -> Filter {
+	if !Filter::is_draft20(version) {
+		return Filter::NextObject;
+	}
+
+	match start {
+		// One group back from the next group is the current one.
+		None => Filter::Relative(1),
+		// An absolute {0, 0} with no end is defined as unfiltered, so it spells itself.
+		Some(start) if start == track::Position::group(0) && end.is_none() => Filter::Unfiltered,
+		Some(start) => Filter::Absolute {
+			start: ietf::Location {
+				group: start.group,
+				object: start.frame,
+			},
+			end: end.and_then(|end| {
+				if end.frame == 0 {
+					Some(ietf::EndLocation {
+						group: end.group.checked_sub(1)?,
+						object: None,
+					})
+				} else {
+					Some(ietf::EndLocation {
+						group: end.group,
+						object: Some(end.frame - 1),
+					})
+				}
+			}),
+		},
+	}
+}
+
+/// The absolute Object ID for a subgroup object, given the prior one and its delta.
+///
+/// The first object's delta is its absolute Object ID; every later one is the prior ID plus
+/// the delta plus one. moq-lite groups start at object 0 and never skip one, so anything
+/// else is refused: a group that starts partway through has a hole at the front, and a gap
+/// in the middle would renumber every frame after it. Checked against the ID rather than
+/// the header's FIRST_OBJECT bit, which is only the publisher's claim.
+fn next_object_id(prior: Option<u64>, delta: u64) -> Result<u64, Error> {
+	let object = match prior {
+		None => delta,
+		Some(prior) => prior
+			.checked_add(delta)
+			.and_then(|id| id.checked_add(1))
+			.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?,
+	};
+
+	let expected = prior.map_or(0, |prior| prior.saturating_add(1));
+	if object != expected {
+		tracing::warn!(object, expected, "object IDs must start at 0 and increment by 1");
+		return Err(Error::Unsupported);
+	}
+
+	Ok(object)
+}
+
+#[cfg(test)]
+mod object_id_tests {
+	use super::*;
+
+	/// A zero delta throughout is a group numbered from 0 with no gaps, which is the only
+	/// shape moq-lite can represent.
+	#[test]
+	fn accepts_sequential_ids_from_zero() {
+		let mut prior = None;
+		for expected in 0..4 {
+			let object = next_object_id(prior, 0).expect("sequential");
+			assert_eq!(object, expected);
+			prior = Some(object);
+		}
+	}
+
+	/// The first object's delta is its absolute Object ID, so a non-zero one means the
+	/// group starts partway through and has a hole at the front.
+	#[test]
+	fn rejects_a_group_that_does_not_start_at_zero() {
+		assert!(matches!(next_object_id(None, 6), Err(Error::Unsupported)));
+	}
+
+	/// A later delta skips objects, which would renumber every frame after it.
+	#[test]
+	fn rejects_a_gap() {
+		assert!(matches!(next_object_id(Some(0), 1), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(Some(3), 9), Err(Error::Unsupported)));
+	}
+
+	/// The running ID is bounded, and the draft makes an overflow a protocol violation
+	/// rather than something to wrap.
+	#[test]
+	fn rejects_an_overflow() {
+		assert!(next_object_id(Some(u64::MAX), 0).is_err());
+	}
+}
+
+#[cfg(test)]
+mod filter_tests {
+	use super::*;
+
+	/// The live join: one group back from the next group is the current one, which is a
+	/// decodable start. No fill, so the group is never split across two streams.
+	#[test]
+	fn live_asks_for_the_current_group() {
+		assert_eq!(subscribe_filter(None, None, Version::Draft20), Filter::Relative(1));
+	}
+
+	#[test]
+	fn a_past_start_is_absolute() {
+		assert_eq!(
+			subscribe_filter(
+				Some(track::Position::group(7)),
+				track::Position::after_group(9),
+				Version::Draft20,
+			),
+			Filter::Absolute {
+				start: ietf::Location { group: 7, object: 0 },
+				end: Some(ietf::EndLocation { group: 9, object: None }),
+			}
+		);
+	}
+
+	/// The whole track has a spelling of its own: an absent filter is unrestricted.
+	#[test]
+	fn the_whole_track_is_unfiltered() {
+		assert_eq!(
+			subscribe_filter(Some(track::Position::group(0)), None, Version::Draft20),
+			Filter::Unfiltered
+		);
+	}
+
+	/// Earlier drafts cannot name a group relative to a live edge they have not learned,
+	/// so they keep asking for exactly what they always did.
+	#[test]
+	fn older_drafts_ask_for_the_next_object() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft19] {
+			assert_eq!(
+				subscribe_filter(
+					Some(track::Position::group(7)),
+					track::Position::after_group(9),
+					version
+				),
+				Filter::NextObject,
+				"{version}"
+			);
+		}
 	}
 }

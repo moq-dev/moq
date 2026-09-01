@@ -777,7 +777,7 @@ fn millis(duration: std::time::Duration) -> u64 {
 pub struct moq_client_config {
 	/// Protocol versions to offer during the handshake, most preferred first.
 	/// NULL/0 offers everything this build supports. Names are spelled the way
-	/// the CLI spells them (`moq-lite-05`, `moq-transport-19`); [moq_versions]
+	/// the CLI spells them (`moq-lite-05`, `moq-transport-20`); [moq_versions]
 	/// lists what is on offer.
 	pub versions: *const moq_string,
 	pub versions_len: usize,

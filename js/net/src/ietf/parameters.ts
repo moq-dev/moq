@@ -192,6 +192,8 @@ export class SetupOptions {
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
+/// SUBGROUP_DELIVERY_TIMEOUT, alongside the per-object one above.
+const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
 const MSG_PARAM_EXPIRES = 0x08n;
 const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
@@ -204,6 +206,11 @@ const MSG_PARAM_ROUTE_COST = 0x40b58n;
 // Bytes parameter IDs (odd)
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
+/// FILL_PARAMETERS, draft-20's request for a backfill.
+const MSG_PARAM_FILL_PARAMETERS = 0x23n;
+/// INCLUDE_PROPERTIES, draft-20's opt-out from Track Properties. Its own section calls the
+/// value a uint8, but 0x35 is odd, so the Key-Value-Pair rule length prefixes it.
+const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
 
@@ -213,6 +220,7 @@ type MessageLocation = { groupId: bigint; objectId: bigint };
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {
 		case MSG_PARAM_DELIVERY_TIMEOUT:
+		case MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT:
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
 		case MSG_PARAM_ROUTE_COST:
@@ -226,6 +234,8 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_LARGEST_OBJECT:
 			return "location";
 		case MSG_PARAM_SUBSCRIPTION_FILTER:
+		case MSG_PARAM_FILL_PARAMETERS:
+		case MSG_PARAM_INCLUDE_PROPERTIES:
 		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
@@ -336,15 +346,42 @@ export class Parameters {
 		this.#locations.set(MSG_PARAM_LARGEST_OBJECT, { ...v });
 	}
 
-	get subscriptionFilter(): number | undefined {
-		const data = this.bytes.get(MSG_PARAM_SUBSCRIPTION_FILTER);
-		if (!data || data.length === 0) return undefined;
-		// Filter type is a varint — for our purposes, the first byte suffices
-		return data[0];
+	/**
+	 * LOCATION_FILTER, as its raw parameter value.
+	 *
+	 * Raw because the encoding is version dependent: a Filter Type tag through draft-19, a
+	 * list of up to four varints from draft-20 on. See `filter.ts`.
+	 */
+	get subscriptionFilter(): Uint8Array | undefined {
+		return this.bytes.get(MSG_PARAM_SUBSCRIPTION_FILTER);
 	}
 
-	set subscriptionFilter(v: number) {
-		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, new Uint8Array([v]));
+	set subscriptionFilter(v: Uint8Array) {
+		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, v);
+	}
+
+	/** FILL_PARAMETERS: the draft-20 backfill request, as its raw parameter value. */
+	get fillParameters(): Uint8Array | undefined {
+		return this.bytes.get(MSG_PARAM_FILL_PARAMETERS);
+	}
+
+	set fillParameters(v: Uint8Array) {
+		this.bytes.set(MSG_PARAM_FILL_PARAMETERS, v);
+	}
+
+	/** INCLUDE_PROPERTIES: whether the peer wants Track Properties on the response. */
+	get includeProperties(): boolean | undefined {
+		const data = this.bytes.get(MSG_PARAM_INCLUDE_PROPERTIES);
+		if (!data) return undefined;
+		// The draft allows exactly 0 or 1; anything else is a protocol violation.
+		if (data.length !== 1 || data[0] > 1) {
+			throw new Error(`invalid INCLUDE_PROPERTIES value: ${data.join(",")}`);
+		}
+		return data[0] === 1;
+	}
+
+	set includeProperties(v: boolean) {
+		this.bytes.set(MSG_PARAM_INCLUDE_PROPERTIES, new Uint8Array([v ? 1 : 0]));
 	}
 
 	/** HOP_PATH: the hop chain an advertisement traversed, as its raw parameter value. */
@@ -445,8 +482,13 @@ export class Parameters {
 						const location = this.#locations.get(key);
 						if (location === undefined)
 							throw new Error(`invalid Location message parameter: ${key.toString()}`);
-						await w.u62(location.groupId);
-						await w.u62(location.objectId);
+						// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it
+						// a Length on every draft: two varints inside the value.
+						const group = Varint.encodeLeadingOnes(location.groupId);
+						const object = Varint.encodeLeadingOnes(location.objectId);
+						await w.u53(group.length + object.length);
+						await w.write(group);
+						await w.write(object);
 						break;
 					}
 					case "bytes": {
@@ -518,8 +560,14 @@ export class Parameters {
 					params.vars.set(id, (await r.bool()) ? 1n : 0n);
 					break;
 				case "location": {
-					const groupId = await r.u62();
-					const objectId = await r.u62();
+					// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it a
+					// Length on every draft: two varints inside the value.
+					const size = await r.u53();
+					const [groupId, objectData] = Varint.decodeLeadingOnes(await r.read(size));
+					const [objectId, trailing] = Varint.decodeLeadingOnes(objectData);
+					if (trailing.length !== 0) {
+						throw new Error("trailing bytes in message parameter Location");
+					}
 					params.#locations.set(id, { groupId, objectId });
 					break;
 				}

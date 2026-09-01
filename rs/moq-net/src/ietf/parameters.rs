@@ -5,8 +5,8 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::coding::*;
 
+use super::Location;
 use super::Version;
-use super::{FilterType, Location};
 
 const MAX_PARAMS: u64 = 64;
 /// Maximum byte value length in Key-Value-Pairs per spec Section 1.4.3.
@@ -299,73 +299,37 @@ impl Param for u64 {
 	}
 }
 
-impl Param for Location {
-	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				// Length-prefixed bytes containing two QUIC varints
-				let mut buf = Vec::new();
-				self.group.encode(&mut buf, Version::Draft15)?;
-				self.object.encode(&mut buf, Version::Draft15)?;
-				buf.encode(w, version)?;
-				Ok(())
-			}
-			_ => {
-				self.group.encode(w, version)?;
-				self.object.encode(w, version)?;
-				Ok(())
-			}
-		}
-	}
-
-	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				// Length-prefixed bytes containing two QUIC varints
-				let data = Vec::<u8>::decode(r, version)?;
-				let mut buf = bytes::Bytes::from(data);
-				let group = u64::decode(&mut buf, Version::Draft15)?;
-				let object = u64::decode(&mut buf, Version::Draft15)?;
-				if buf.has_remaining() {
-					return Err(DecodeError::TrailingBytes);
-				}
-				Ok(Location { group, object })
-			}
-			_ => {
-				let group = u64::decode(r, version)?;
-				let object = u64::decode(r, version)?;
-				Ok(Location { group, object })
-			}
-		}
+/// The varint format inside a length-prefixed Location value: the drafts before 17 pin it
+/// to the draft-15 encoding, matching the other length-prefixed parameters.
+fn location_inner_version(version: Version) -> Version {
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
+		_ => version,
 	}
 }
 
-impl Param for FilterType {
+impl Param for Location {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		// LARGEST_OBJECT (0x09) is an odd type, so the Key-Value-Pair rule gives it a
+		// Length on every draft: two varints inside a length-prefixed value.
+		let sv = location_inner_version(version);
 		let mut buf = Vec::new();
-		// Use version-specific varint encoding for the inner value.
-		// Fixes draft-17 interop: inner varints now use leading-ones, not QUIC.
-		let sv = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
-			_ => version,
-		};
-		self.encode(&mut buf, sv)?;
+		self.group.encode(&mut buf, sv)?;
+		self.object.encode(&mut buf, sv)?;
 		buf.encode(w, version)?;
 		Ok(())
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let sv = location_inner_version(version);
 		let data = Vec::<u8>::decode(r, version)?;
 		let mut buf = bytes::Bytes::from(data);
-		let sv = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
-			_ => version,
-		};
-		let filter = FilterType::decode(&mut buf, sv)?;
+		let group = u64::decode(&mut buf, sv)?;
+		let object = u64::decode(&mut buf, sv)?;
 		if buf.has_remaining() {
 			return Err(DecodeError::TrailingBytes);
 		}
-		Ok(filter)
+		Ok(Location { group, object })
 	}
 }
 
@@ -526,6 +490,7 @@ macro_rules! decode_params {
 
 #[cfg(test)]
 mod tests {
+	use super::super::Filter;
 	use super::*;
 	use bytes::{Buf, Bytes, BytesMut};
 
@@ -721,11 +686,15 @@ mod tests {
 			group: 255,
 			object: 128,
 		};
+		// 0x09 is odd, so the Key-Value-Pair rule gives the value a Length on every
+		// draft; only the inner varint format differs (QUIC-style before draft-17,
+		// leading-ones after).
 		for (version, expected) in [
 			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
-			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft17, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft18, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft19, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft20, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = BytesMut::new();
 			encode_params!(&mut buf, version, 0x09 => location.clone());
@@ -737,14 +706,14 @@ mod tests {
 				Ok(value)
 			})()
 			.expect("fixed Location vector should decode");
-			assert_eq!(decoded, Some(location.clone()), "{version}");
+			assert_eq!(decoded, Some(location), "{version}");
 			assert!(!encoded.has_remaining(), "{version}");
 		}
 		Ok(())
 	}
 
 	#[test]
-	fn test_param_filter_type_all_versions() {
+	fn test_param_filter_all_versions() {
 		for version in [
 			Version::Draft14,
 			Version::Draft15,
@@ -755,12 +724,12 @@ mod tests {
 			round_trip_params(
 				version,
 				|w, v| {
-					encode_params!(w, v, 0x21 => FilterType::LargestObject);
+					encode_params!(w, v, 0x21 => Filter::NextObject);
 					Ok(())
 				},
 				|r, v| {
-					decode_params!(r, v, 0x21 => val: Option<FilterType>);
-					assert_eq!(val, Some(FilterType::LargestObject));
+					decode_params!(r, v, 0x21 => val: Option<Filter>);
+					assert_eq!(val, Some(Filter::NextObject));
 					Ok(())
 				},
 			);
@@ -782,7 +751,7 @@ mod tests {
 					encode_params!(w, v,
 						0x10 => true,
 						0x20 => 200u8,
-						0x21 => FilterType::LargestObject,
+						0x21 => Filter::NextObject,
 						0x22 => 2u8,
 					);
 					Ok(())
@@ -791,12 +760,12 @@ mod tests {
 					decode_params!(r, v,
 						0x10 => forward: Option<bool>,
 						0x20 => sub_pri: Option<u8>,
-						0x21 => filter: Option<FilterType>,
+						0x21 => filter: Option<Filter>,
 						0x22 => group_order: Option<u8>,
 					);
 					assert_eq!(forward, Some(true));
 					assert_eq!(sub_pri, Some(200));
-					assert_eq!(filter, Some(FilterType::LargestObject));
+					assert_eq!(filter, Some(Filter::NextObject));
 					assert_eq!(group_order, Some(2));
 					Ok(())
 				},

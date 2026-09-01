@@ -143,6 +143,14 @@ export interface GroupFlags {
 	// v15: whether priority is present in the header.
 	// When false (0x30 base), priority inherits from the control message.
 	hasPriority: boolean;
+	/**
+	 * Whether this stream carries the subgroup from its first published object.
+	 *
+	 * A subgroup that starts partway through has a hole at the front, which moq-lite cannot
+	 * represent. Always true on the drafts that predate the FIRST_OBJECT bit (before
+	 * draft-18), where there is no such signal to read.
+	 */
+	firstObject: boolean;
 }
 
 /**
@@ -195,7 +203,7 @@ export class Group {
 		if (this.flags.hasEnd) {
 			id |= 0x08;
 		}
-		if (hasFirstObjectBit(version)) {
+		if (this.flags.firstObject && hasFirstObjectBit(version)) {
 			id |= FIRST_OBJECT_BIT;
 		}
 		await w.u53(id);
@@ -211,8 +219,12 @@ export class Group {
 
 	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
 		const raw = await r.u53();
-		// Strip the draft-18 FIRST_OBJECT bit before the range check.
-		const id = hasFirstObjectBit(version) ? raw & ~FIRST_OBJECT_BIT : raw;
+		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
+		// it is the only signal that a subgroup starts partway through. Drafts that predate
+		// it carry no such signal, so they are taken at their word.
+		const legacy = !hasFirstObjectBit(version);
+		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
+		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
 		let hasPriority: boolean;
 		let baseId: number;
@@ -232,6 +244,7 @@ export class Group {
 			hasSubgroup: (baseId & 0x04) !== 0,
 			hasEnd: (baseId & 0x08) !== 0,
 			hasPriority,
+			firstObject,
 		};
 
 		const trackAlias = await r.u62();
@@ -286,9 +299,13 @@ export class Frame {
 		timescale: Timescale | undefined,
 		version = r.version,
 	): Promise<Frame> {
+		// The first object's delta is its absolute Object ID; every later one is the prior ID
+		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
+		// a sequential group is a zero delta throughout, and any other value means the group
+		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = await r.u53();
 		if (delta !== 0) {
-			throw new Error(`object ID delta is not supported: ${delta}`);
+			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
 		}
 
 		let timestamp: Timestamp | undefined;

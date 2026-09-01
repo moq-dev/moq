@@ -1299,6 +1299,18 @@ impl Consumer {
 		}
 	}
 
+	/// The number of frames written so far (completed plus any in-flight), independent of
+	/// how many this consumer has read. The final total once the group is finished.
+	pub fn frame_count(&self) -> usize {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => {
+				let state = plain.state.read();
+				state.fin.unwrap_or(state.next_index)
+			}
+			ConsumerKind::Spliced(spliced) => spliced.frame_count(),
+		}
+	}
+
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
 		kio::wait(|waiter| self.poll_next_frame(waiter)).await

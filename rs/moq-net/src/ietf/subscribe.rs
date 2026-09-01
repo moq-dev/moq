@@ -2,12 +2,10 @@
 
 use std::borrow::Cow;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-
 use crate::{
 	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Parameters, Properties, RequestId},
+	ietf::{Fill, Filter, GroupOrder, Location, Param, Parameters, Properties, RequestId},
 };
 
 use super::Message;
@@ -15,26 +13,28 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
-#[repr(u64)]
-pub enum FilterType {
-	NextGroup = 0x01,
-	#[default]
-	LargestObject = 0x2,
-	AbsoluteStart = 0x3,
-	AbsoluteRange = 0x4,
-}
+/// The INCLUDE_PROPERTIES parameter (0x35), draft-20's opt-out from Track Properties.
+///
+/// Length prefixed despite holding a single byte. The Key-Value-Pair rule keys the framing
+/// off the parameter id's parity and 0x35 is odd, so a Length is present even though the
+/// parameter's own section calls the value a uint8. Parity is what the generic parser uses
+/// to skip a parameter it does not know, so following the prose instead would desync every
+/// parameter after this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IncludeProperties(pub bool);
 
-impl Encode<Version> for FilterType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		u64::from(*self).encode(w, version)?;
-		Ok(())
+impl Param for IncludeProperties {
+	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		vec![u8::from(self.0)].encode(w, version)
 	}
-}
 
-impl Decode<Version> for FilterType {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
+	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match Vec::<u8>::decode(r, version)?[..] {
+			// The draft allows exactly 0 or 1; anything else is a protocol violation.
+			[0] => Ok(Self(false)),
+			[1] => Ok(Self(true)),
+			_ => Err(DecodeError::InvalidValue),
+		}
 	}
 }
 
@@ -47,7 +47,12 @@ pub struct Subscribe<'a> {
 	pub track_name: Cow<'a, str>,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
-	pub filter_type: FilterType,
+	/// Which Objects the subscription delivers.
+	pub filter: Filter,
+	/// The draft-20 backfill request, if the subscriber asked for one.
+	pub fill: Option<Fill>,
+	/// Whether the subscriber wants Track Properties on the response (draft-20).
+	pub properties_wanted: bool,
 }
 
 impl Message for Subscribe<'_> {
@@ -71,17 +76,7 @@ impl Message for Subscribe<'_> {
 					return Err(DecodeError::Unsupported);
 				}
 
-				let filter_type = FilterType::decode(r, version)?;
-				match filter_type {
-					FilterType::AbsoluteStart => {
-						let _start = Location::decode(r, version)?;
-					}
-					FilterType::AbsoluteRange => {
-						let _start = Location::decode(r, version)?;
-						let _end_group = u64::decode(r, version)?;
-					}
-					FilterType::NextGroup | FilterType::LargestObject => {}
-				};
+				let filter = Filter::decode(r, version)?;
 
 				let _params = Parameters::decode(r, version)?;
 
@@ -91,17 +86,33 @@ impl Message for Subscribe<'_> {
 					track_name,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
+					fill: None,
+					properties_wanted: true,
 				})
 			}
 			_ => {
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
 					0x04 => rendezvous_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter_type: Option<FilterType>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
+					0x23 => fill: Option<Fill>,
+					0x35 => include_properties: Option<IncludeProperties>,
 				);
+
+				// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions. An unknown
+				// message parameter is a protocol violation, so they stay rejected on the
+				// drafts that predate them rather than being quietly tolerated.
+				if (fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
+
+				// Defaults to 1, so an absent parameter means the subscriber wants them.
+				let properties_wanted = include_properties.is_none_or(|p| p.0);
 
 				// RENDEZVOUS_TIMEOUT arrived in draft-17; 0x04 means MAX_CACHE_DURATION in
 				// draft-15, which is a publisher parameter with no business in a SUBSCRIBE.
@@ -121,7 +132,8 @@ impl Message for Subscribe<'_> {
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
+				// An absent LOCATION_FILTER means the subscription is unfiltered.
+				let filter = filter.unwrap_or(Filter::Unfiltered);
 
 				Ok(Self {
 					request_id,
@@ -129,7 +141,9 @@ impl Message for Subscribe<'_> {
 					track_name,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
+					fill,
+					properties_wanted,
 				})
 			}
 		}
@@ -149,24 +163,28 @@ impl Message for Subscribe<'_> {
 				self.group_order.encode(w, version)?;
 				true.encode(w, version)?; // forward
 
-				// Decoding keeps the filter type but drops the Location an absolute filter
-				// carries after it, so there is nothing left to write. Refuse rather than
-				// emit a truncated SUBSCRIBE whose next field the peer would read as that
-				// Location. Reachable from a peer's own message, so it is an error, not an
-				// assertion.
-				if matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange) {
-					return Err(EncodeError::Unsupported);
-				}
-
-				self.filter_type.encode(w, version)?;
+				self.filter.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
+				// FILL_PARAMETERS arrived in draft-20. Sending it to an older peer would be an
+				// unknown parameter, which is a protocol violation, so it is dropped instead.
+				// A subscriber there simply joins mid-group, which is what it did all along.
+				let fill = self.fill.filter(|_| Filter::is_draft20(version));
+
+				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes. It
+				// arrived in draft-20, and an older peer would read it as an unknown
+				// parameter, which is a protocol violation.
+				let include_properties =
+					(!self.properties_wanted && Filter::is_draft20(version)).then_some(IncludeProperties(false));
+
 				encode_params!(w, version,
 					0x10 => true,
 					0x20 => self.subscriber_priority,
-					0x21 => self.filter_type,
+					0x21 => self.filter,
 					0x22 => self.group_order,
+					0x23 => fill,
+					0x35 => include_properties,
 				);
 			}
 		}
@@ -180,6 +198,14 @@ impl Message for Subscribe<'_> {
 pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
+
+	/// The largest Location in the track (LARGEST_OBJECT, 0x09), which the spec requires
+	/// once the track has content. It is what a subscriber sizes a fill against.
+	///
+	/// Encoded on draft-20 only: the parameter is legal on earlier drafts too, but peers
+	/// built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
+	/// session, so emitting it there would break existing deployments over a hint.
+	pub largest: Option<Location>,
 
 	/// Metadata about the track, sent as Track Properties (draft-17+).
 	pub properties: Properties,
@@ -219,7 +245,11 @@ impl Message for SubscribeOk {
 					_ => None,
 				};
 
+				// See the field doc for why LARGEST_OBJECT stays draft-20 only.
+				let largest = self.largest.filter(|_| Filter::is_draft20(version));
+
 				encode_params!(w, version,
+					0x09 => largest,
 					0x22 => group_order,
 				);
 
@@ -259,31 +289,29 @@ impl Message for SubscribeOk {
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
 				// peer that still sends it doesn't have its session torn down over a hint.
-				let group_order = match version {
-					Version::Draft15 | Version::Draft16 => {
-						// LARGEST_OBJECT is required here once the track has content, but
-						// the session model does not currently expose the location.
-						decode_params!(r, version,
-							0x09 => _largest_location: Option<Location>,
-							0x22 => group_order: Option<GroupOrder>,
-						);
-						group_order
-					}
-					_ => {
-						decode_params!(r, version,
-							0x22 => group_order: Option<GroupOrder>,
-						);
-						group_order
-					}
-				};
+				// LARGEST_OBJECT is required on every draft once the track has content, so
+				// rejecting it would tear down a session over a parameter compliant
+				// publishers must send.
+				decode_params!(r, version,
+					0x09 => largest: Option<Location>,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
+
+				return Ok(Self {
+					request_id,
+					track_alias,
+					largest,
+					properties,
+				});
 			}
 		}
 
 		Ok(Self {
 			request_id,
 			track_alias,
+			largest: None,
 			properties,
 		})
 	}
@@ -375,7 +403,7 @@ impl Message for SubscribeUpdate {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => FilterType::LargestObject,
+					0x21 => Filter::NextObject,
 				);
 			}
 			_ => {
@@ -391,7 +419,7 @@ impl Message for SubscribeUpdate {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => FilterType::LargestObject,
+					0x21 => Filter::NextObject,
 				);
 			}
 		}
@@ -423,9 +451,11 @@ impl Message for SubscribeUpdate {
 				let request_id = RequestId::decode(r, version)?;
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter_type: Option<FilterType>,
+					0x21 => _filter: Option<Filter>,
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
@@ -447,10 +477,19 @@ impl Message for SubscribeUpdate {
 					let _required_request_id_delta = u64::decode(r, version)?;
 				}
 				decode_params!(r, version,
+					0x02 => _object_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter_type: Option<FilterType>,
+					0x21 => _filter: Option<Filter>,
+					0x23 => fill: Option<Fill>,
 				);
+
+				// FILL_PARAMETERS is a draft-20 addition, so an earlier peer sending one is
+				// still the protocol violation it was.
+				if fill.is_some() && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let forward = forward.unwrap_or(true);
@@ -492,7 +531,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -512,7 +553,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -549,7 +592,7 @@ mod tests {
 	/// SUBSCRIBE.
 	#[test]
 	fn rendezvous_timeout_is_accepted_and_ignored() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			for millis in [0, 5000] {
 				let encoded = subscribe_with_rendezvous(millis, version);
 				let msg: Subscribe = decode_message(&encoded, version)
@@ -600,10 +643,12 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			// The reader has to be able to see a 0x04, or its absence below proves nothing.
 			assert_eq!(
 				first_param_key(&subscribe_with_rendezvous(5000, version), version),
@@ -627,7 +672,9 @@ mod tests {
 			track_name: "audio".into(),
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -641,6 +688,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -659,7 +707,45 @@ mod tests {
 
 			assert_eq!(decoded.request_id, Some(RequestId(4)));
 			assert_eq!(decoded.track_alias, 4);
+			assert_eq!(decoded.largest, Some(Location { group: 5, object: 0 }), "{version}");
 		}
+	}
+
+	/// LARGEST_OBJECT is required in SUBSCRIBE_OK once the track has content, so a
+	/// draft-17+ decoder must accept it rather than tearing down the session over a
+	/// parameter compliant publishers have to send. The empty Track Properties block
+	/// follows the parameters.
+	#[test]
+	fn test_subscribe_ok_accepts_largest_object_draft17_on() {
+		let payload = [0x04, 0x01, 0x09, 0x02, 0x05, 0x00];
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
+			let decoded: SubscribeOk = decode_message(&payload, version).unwrap();
+
+			assert_eq!(decoded.request_id, None, "{version}");
+			assert_eq!(decoded.track_alias, 4, "{version}");
+			assert_eq!(decoded.largest, Some(Location { group: 5, object: 0 }), "{version}");
+		}
+	}
+
+	/// The encoder emits LARGEST_OBJECT on draft-20 only: it is legal earlier, but peers
+	/// built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
+	/// session.
+	#[test]
+	fn test_subscribe_ok_largest_object_round_trips_on_draft20_only() {
+		let msg = SubscribeOk {
+			request_id: None,
+			track_alias: 7,
+			largest: Some(Location { group: 9, object: 3 }),
+			properties: Properties::default(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft20);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft20).unwrap();
+		assert_eq!(decoded.largest, Some(Location { group: 9, object: 3 }));
+
+		let encoded = encode_message(&msg, Version::Draft19);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft19).unwrap();
+		assert_eq!(decoded.largest, None, "draft-19 must not carry the parameter");
 	}
 
 	#[test]
@@ -667,6 +753,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -705,8 +792,57 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(999));
 	}
 
+	/// Every parameter the draft lets a message carry has to parse, even the ones we act on
+	/// nowhere: an unlisted key fails the whole message, which tears the session down
+	/// instead of letting the request reach its answer.
 	#[test]
-	fn test_subscribe_rejects_invalid_filter_type() {
+	fn subscribe_accepts_the_delivery_timeouts() -> Result<(), EncodeError> {
+		for version in [Version::Draft19, Version::Draft20] {
+			let mut body = Vec::new();
+			RequestId(1).encode(&mut body, version)?;
+			encode_namespace(&mut body, &crate::Path::new("broadcast"), version)?;
+			"video".encode(&mut body, version)?;
+			encode_params!(&mut body, version,
+				0x02 => 5000u64,
+				0x06 => 9000u64,
+			);
+
+			let mut buf = bytes::Bytes::from(body);
+			Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+		}
+		Ok(())
+	}
+
+	/// The opt-out has to reach the wire, or a subscriber that asked for no Track
+	/// Properties decodes back as wanting them.
+	#[test]
+	fn include_properties_round_trips() {
+		for (wanted, version) in [
+			(false, Version::Draft20),
+			(true, Version::Draft20),
+			// Older drafts have no such parameter, so the opt-out is dropped rather than
+			// sent as one they would treat as a protocol violation.
+			(true, Version::Draft19),
+		] {
+			let msg = Subscribe {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new("broadcast"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: wanted,
+			};
+
+			let encoded = encode_message(&msg, version);
+			let decoded: Subscribe = decode_message(&encoded, version).unwrap();
+			assert_eq!(decoded.properties_wanted, wanted, "{version}");
+		}
+	}
+
+	#[test]
+	fn test_subscribe_rejects_invalid_filter() {
 		#[rustfmt::skip]
 		let invalid_bytes = vec![
 			0x01, // subscribe_id
@@ -789,7 +925,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -806,6 +944,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -844,7 +983,9 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -861,6 +1002,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -880,6 +1022,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties {
 				timescale: None,
 				group_order: Some(GroupOrder::Descending),
@@ -906,6 +1049,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(7)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties {
 				timescale: None,
 				group_order: Some(GroupOrder::Descending),

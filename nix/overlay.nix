@@ -258,9 +258,10 @@ let
   };
 
   # CI checks run via `just check` (clippy / doc) and `just test` (nextest), not
-  # through crane/`nix flake check`. CI selects mbx with MOQ_CARGO, while local
-  # commands default to plain Cargo. Which compiler cache backs those runs is a
-  # workflow concern (`.github/actions/rust-cache`), not configured here.
+  # through crane/`nix flake check`. CI and local commands default to plain
+  # Cargo; local development can select a compatible wrapper with RUST_CARGO.
+  # Which compiler cache backs CI is a workflow concern
+  # (`.github/actions/rust-cache`), not configured here.
   # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
   # crane checks were introduced to fix doesn't recur.
   # Release artifacts still build via crane `buildPackage` below.

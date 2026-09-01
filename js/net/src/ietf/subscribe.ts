@@ -1,6 +1,7 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
+import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
@@ -55,7 +56,17 @@ export class Subscribe {
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = true;
-			params.subscriptionFilter = 0x2; // LargestObject
+			// moq-lite joins a track at the start of the current group, which is a decodable
+			// point, and draft-20's relative form is the first that can name it without
+			// knowing Largest Object. No fill is requested: the fill's fetch stream and the
+			// live subscription split the group across two streams, and this subscriber does
+			// not reassemble them into one group yet. A lenient publisher (like ours)
+			// replays the whole in-range group on the subscription instead; a strict one
+			// only delivers from the next published object, and that mid-group stream is
+			// dropped, degrading the join to the next group boundary.
+			params.subscriptionFilter = Filter.isDraft20(version)
+				? Filter.encode({ kind: "relative", groups: 1n }, version)
+				: Filter.encode({ kind: "nextObject" }, version);
 			await params.encode(w, version);
 		}
 	}
@@ -117,9 +128,15 @@ export class Subscribe {
 			throw new Error(`unsupported forward value: ${forward}`);
 		}
 
-		const filterType = params.subscriptionFilter ?? 0x2;
-		if (filterType !== 0x1 && filterType !== 0x2) {
-			throw new Error(`unsupported filter type: ${filterType}`);
+		// Parsed to reject a malformed filter, then dropped: this side always serves from
+		// the live edge, so the range does not change what it sends.
+		const filter = params.subscriptionFilter;
+		if (filter !== undefined) {
+			Filter.decode(filter, version);
+		}
+		const fill = params.fillParameters;
+		if (fill !== undefined) {
+			Filter.decodeFill(fill, version);
 		}
 
 		return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });

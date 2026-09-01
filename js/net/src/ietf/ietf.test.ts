@@ -87,7 +87,7 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 		0xff, // QUIC varint 255
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x20, // SUBSCRIBER_PRIORITY
@@ -100,7 +100,10 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 	}
 });
 
-test("Message Parameters: Location loses its length prefix in draft 17", async () => {
+test("Message Parameters: Location keeps its length prefix on every draft", async () => {
+	// 0x09 is odd, so the Key-Value-Pair rule gives the value a Length on every draft;
+	// only the inner varint format differs (QUIC-style before draft-17, leading-ones
+	// after). These bytes are pinned against the Rust codec's wire vectors.
 	const params = new Parameters();
 	params.largest = { groupId: 255n, objectId: 128n };
 
@@ -114,10 +117,11 @@ test("Message Parameters: Location loses its length prefix in draft 17", async (
 		0x80, // QUIC varint 128
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
+			0x04, // byte-string length
 			0x80,
 			0xff, // leading-ones varint 255
 			0x80,
@@ -158,7 +162,7 @@ test("Message Parameters: Location preserves full uint64 values in draft 17", as
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -1366,6 +1370,7 @@ test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
 				hasSubgroupObject: false,
 				hasEnd: true,
 				hasPriority: true,
+				firstObject: true,
 			},
 		});
 
@@ -1394,6 +1399,7 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 		hasSubgroupObject: false,
 		hasEnd: true,
 		hasPriority: true,
+		firstObject: true,
 	};
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
 	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });
@@ -1417,6 +1423,43 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });
 
+// FIRST_OBJECT says the stream carries the subgroup from its first published object. It is
+// the only signal that a group arrived with its head missing, so the value has to survive
+// decode rather than being stripped along with the bit.
+test("group flags round-trip firstObject", async () => {
+	const makeGroup = (firstObject: boolean) =>
+		new Group({
+			trackAlias: 7n,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				hasEnd: true,
+				hasPriority: true,
+				firstObject,
+			},
+		});
+
+	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+		for (const firstObject of [true, false]) {
+			const encoded = await encodeVersioned(makeGroup(firstObject), version);
+			const decoded = await decodeVersioned(encoded, Group.decode, version);
+			expect(decoded.flags.firstObject).toBe(firstObject);
+		}
+	}
+
+	// The bit arrived in draft-18. Earlier drafts carry no such signal, so a group there is
+	// taken at its word rather than read as starting partway through.
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17]) {
+		const encoded = await encodeVersioned(makeGroup(false), version);
+		const decoded = await decodeVersioned(encoded, Group.decode, version);
+		expect(decoded.flags.firstObject).toBe(true);
+	}
+});
+
 test("Frame object time: draft-16 starts delta property types", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
@@ -1424,6 +1467,7 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 		hasSubgroupObject: false,
 		hasEnd: true,
 		hasPriority: true,
+		firstObject: true,
 	};
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
 	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });

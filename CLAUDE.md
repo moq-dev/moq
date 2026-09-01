@@ -18,6 +18,7 @@ nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
 nix develop --command just bench        # Benchmark the current tree
 nix develop --command just bench BASE   # Compare BASE with the current tree
+nix develop --command just bench-runtime  # Compare relay runtime topologies
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
@@ -36,7 +37,7 @@ To force a base, `just check origin/dev` and `just fix origin/dev` take it posit
 
 The Rust build cache is written by `main` and read by pull requests, never the other way around (`.github/workflows/cache.yml`). Actions scopes cache reads to the current branch plus the default branch, so a PR-only workflow can never leave anything a *later* PR can restore, while each entry is gigabytes against a 10 GB repository budget. That is why `main` is the single writer, and why the PR jobs must stay restore-only even though the cache action already refuses to publish from a pull request. Don't add a second target-directory cache on top: it spends the same budget twice and hides whether the first one restored anything.
 
-Every job goes through `.github/actions/rust-cache`, which owns the one copy of the action pin and reads the toolchain out of `rust-toolchain.toml`. The toolchain keys the cache, so that read is what keeps a bump from restoring artifacts built by a different rustc. CI also sets `RUST_CARGO=mbx`, which routes the compiling recipes through mr boxington. It defaults to plain Cargo, so setting it locally is also how you swap a `target/` per worktree for mbx's shared store. `rs/justfile` documents the three recipes that deliberately ignore it.
+The main Rust check, test, OBS, and WASM jobs go through `.github/actions/rust-cache`, which owns their Swatinem action pin and cache policy. CI uses plain Cargo and restores the `target/` cache warmed by `main`; pull requests never write cache entries. Compiling recipes also accept `RUST_CARGO`, so local development can swap a `target/` per worktree for a compatible shared-store wrapper such as mr boxington. `rs/justfile` documents the three recipes that deliberately ignore it.
 
 `MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the required set into an up-front precondition (`_tools` in the root justfile). Required is per scope, mirroring what the diff actually dispatches, so a docs-only PR doesn't have to have gradle.
 
@@ -70,6 +71,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 Top-level layout only. Per-crate and per-package detail lives in the nested guides (see [Per-Directory Guides](#per-directory-guides)), which sit next to the code and don't rot here.
 
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
+- `/bench/` - Repository-level benchmark orchestration, workload fixtures, and methodology. Rust benchmark binaries and microbenchmarks stay under `/rs/`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. `just check` type-checks it via `just obs compile`, which needs headers rather than an obs-deps download, and obs.yml links it on Linux for `cpp/obs/` and `rs/libmoq/` PRs. Still manual, like `just rs macos`: `just obs build` (a loadable plugin, and the only path on macOS/Windows) and `just obs test` (`cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer). See `doc/bin/obs.md`.

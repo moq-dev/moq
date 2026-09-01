@@ -27,12 +27,20 @@ name = "moq-bench-host"
 path = "src/host.rs"
 doc = false
 
+# io_uring capability probe used before the runtime benchmark matrix.
+[[bin]]
+name = "moq-bench-uring-check"
+path = "src/uring.rs"
+required-features = ["uring"]
+doc = false
+
 [features]
 default = ["quinn", "websocket"]
 iroh = ["moq-tokio/iroh"]
 noq = ["moq-tokio/noq"]
 quinn = ["moq-tokio/quinn"]
 quiche = ["moq-tokio/quiche"]
+uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]
@@ -51,6 +59,7 @@ usage = { workspace = true, features = ["completions"] }
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
+moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 
 [dev-dependencies]

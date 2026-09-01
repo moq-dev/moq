@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, Parameters, Properties, RequestId,
+		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -137,7 +137,10 @@ impl PublishDoneStatus {
 			| Version::Draft16
 			| Version::Draft17
 			| Version::Draft18
-			| Version::Draft19 => match self {
+			| Version::Draft19
+			// Draft-20 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
+			// emitted, and left the rest of the registry alone.
+			| Version::Draft20 => match self {
 				Self::InternalError => 0x0,
 				Self::TrackEnded => 0x2,
 			},
@@ -294,11 +297,33 @@ impl Message for Publish<'_> {
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
 				// peer that still sends it doesn't have its session torn down over a hint.
+				//
+				// Draft-20 moved the subscription parameters into PUBLISH, so they have to
+				// parse here even though reverse publishing is unsupported: an unlisted
+				// parameter fails the whole message, which would kill the session instead of
+				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
+					0x02 => object_delivery_timeout: Option<u64>,
+					0x06 => subgroup_delivery_timeout: Option<u64>,
+					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
+
+				// The values are dropped: we refuse the PUBLISH itself, so the subscription
+				// settings it proposes never take effect. They still have to be consumed.
+				let subscription_params = [
+					object_delivery_timeout.is_some(),
+					subgroup_delivery_timeout.is_some(),
+					subscriber_priority.is_some(),
+					filter.is_some(),
+				];
+				if subscription_params.contains(&true) && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
 				let mut properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 
@@ -324,7 +349,7 @@ pub struct PublishOk {
 	pub forward: bool,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
-	pub filter_type: FilterType,
+	pub filter: Filter,
 	// pub parameters: Parameters,
 }
 
@@ -347,19 +372,18 @@ impl Message for PublishOk {
 				self.group_order.encode(w, version)?;
 				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
 				// decode, so encoding one would truncate the message.
-				if !matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup) {
-					return Err(EncodeError::Unsupported);
-				}
-
-				self.filter_type.encode(w, version)?;
+				self.filter.encode(w, version)?;
 				// no parameters
 				0u8.encode(w, version)?;
 			}
+			// Draft-20 moved the subscription parameters out of PUBLISH_OK; they belong to
+			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
+			_ if Filter::is_draft20(version) => encode_params!(w, version,),
 			_ => {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => self.filter_type,
+					0x21 => self.filter,
 					0x22 => self.group_order,
 				);
 			}
@@ -380,17 +404,7 @@ impl Message for PublishOk {
 				let forward = bool::decode(r, version)?;
 				let subscriber_priority = u8::decode(r, version)?;
 				let group_order = GroupOrder::decode(r, version)?;
-				let filter_type = FilterType::decode(r, version)?;
-				match filter_type {
-					FilterType::AbsoluteStart => {
-						let _start = Location::decode(r, version)?;
-					}
-					FilterType::AbsoluteRange => {
-						let _start = Location::decode(r, version)?;
-						let _end_group = u64::decode(r, version)?;
-					}
-					FilterType::NextGroup | FilterType::LargestObject => {}
-				};
+				let filter = Filter::decode(r, version)?;
 
 				// no parameters
 				let _params = Parameters::decode(r, version)?;
@@ -400,28 +414,28 @@ impl Message for PublishOk {
 					forward,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
 				})
 			}
 			_ => {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter_type: Option<FilterType>,
+					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
 
 				let forward = forward.unwrap_or(true);
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
+				let filter = filter.unwrap_or(Filter::Unfiltered);
 
 				Ok(Self {
 					request_id,
 					forward,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter,
 				})
 			}
 		}
@@ -459,6 +473,45 @@ impl Message for PublishError<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Draft-20 moved the subscription parameters into PUBLISH. We refuse the request
+	/// itself, but the message still has to parse: an unlisted parameter fails the whole
+	/// decode, which kills the session instead of letting the peer get its refusal.
+	#[test]
+	fn publish_accepts_the_relocated_subscription_parameters() -> Result<(), EncodeError> {
+		let mut body = Vec::new();
+		RequestId(1).encode(&mut body, Version::Draft20).unwrap();
+		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft20).unwrap();
+		"video".encode(&mut body, Version::Draft20).unwrap();
+		1u64.encode(&mut body, Version::Draft20).unwrap(); // track alias
+
+		// SUBSCRIBER_PRIORITY then LOCATION_FILTER, delta encoded from 0.
+		encode_params!(&mut body, Version::Draft20,
+			0x20 => 128u8,
+			0x21 => Filter::NextObject,
+		);
+		Properties::default().encode(&mut body, Version::Draft20).unwrap();
+
+		let mut buf = bytes::Bytes::from(body);
+		Publish::decode_msg(&mut buf, Version::Draft20).expect("draft-20 PUBLISH parameters must parse");
+		Ok(())
+	}
+
+	/// They arrived in draft-20, so an earlier peer sending one is still a violation.
+	#[test]
+	fn older_drafts_reject_the_relocated_parameters() -> Result<(), EncodeError> {
+		let mut body = Vec::new();
+		RequestId(1).encode(&mut body, Version::Draft19).unwrap();
+		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft19).unwrap();
+		"video".encode(&mut body, Version::Draft19).unwrap();
+		1u64.encode(&mut body, Version::Draft19).unwrap();
+		encode_params!(&mut body, Version::Draft19, 0x20 => 128u8);
+		Properties::default().encode(&mut body, Version::Draft19).unwrap();
+
+		let mut buf = bytes::Bytes::from(body);
+		assert!(Publish::decode_msg(&mut buf, Version::Draft19).is_err());
+		Ok(())
+	}
 	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
@@ -531,7 +584,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -549,7 +602,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -593,7 +646,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -762,7 +815,7 @@ mod tests {
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter: Filter::NextObject,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

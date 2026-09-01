@@ -42,4 +42,3 @@ regression test per Root Cause First.
 - [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
 - [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Test open-GOP H.264 tune-in end to end (leading-picture handling)
-- [#1095](/quest/m0/1095-avoid-allocation-in-axum-tungstenite-websocket-message.md) - Avoid allocation in axum/tungstenite WebSocket message conversion

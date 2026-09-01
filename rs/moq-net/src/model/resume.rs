@@ -529,6 +529,27 @@ impl Consumer {
 	pub(crate) fn resume_position(&self) -> Option<Position> {
 		self.state.read().resume_position()
 	}
+
+	/// The newest segment's newest cached group, resolved synchronously; see
+	/// [`track::Consumer::peek_latest`].
+	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.peek_latest()
+	}
+
+	/// A cached group by sequence from the newest segment; see
+	/// [`track::Consumer::peek_group`].
+	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.peek_group(sequence)
+	}
+
+	/// The nearest cached group below `sequence` in the newest segment; see
+	/// [`track::Consumer::peek_before`].
+	pub(crate) fn peek_before(&self, sequence: u64) -> Option<group::Consumer> {
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.peek_before(sequence)
+	}
 }
 
 /// The pollable state of a [`Consumer::fetch_group`]; awaited via the
@@ -766,6 +787,17 @@ impl Group {
 			dead: None,
 			stale_stats: Default::default(),
 		}
+	}
+
+	/// The number of frames known on the current route copy, never below this
+	/// logical cursor's position.
+	pub(crate) fn frame_count(&self) -> usize {
+		let count = self
+			.current
+			.as_ref()
+			.map_or(self.index, |current| current.group.frame_count() as u64)
+			.max(self.index);
+		usize::try_from(count).unwrap_or(usize::MAX)
 	}
 
 	/// Attribute expiry for route-specific copies behind this logical group.

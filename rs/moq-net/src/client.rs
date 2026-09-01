@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
 	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
@@ -240,6 +240,39 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
+			Some(ALPN_20) => {
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft20))
+					.ok_or(Error::Version)?;
+
+				// Draft-17+: SETUP is exchanged by the connection driver.
+				let (protocol, goaway) = ietf::start(ietf::Config {
+					runtime: runtime.clone(),
+					session: session.clone(),
+					setup: None,
+					request_id_max: None,
+					client: true,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_hop: self.peer_hop,
+					cost: self.cost,
+					version: ietf::Version::Draft20,
+					path: self.setup_path.clone(),
+					peer_setup_stream: None,
+					peer_declared: None,
+				})?;
+
+				tracing::debug!(version = ?v, "connected");
+				return Ok(Session::spawn(
+					runtime,
+					session,
+					v,
+					None,
+					crate::runtime::Protocol::Ietf(protocol),
+					goaway,
+				));
+			}
 			Some(ALPN_19) => {
 				let v = self
 					.versions

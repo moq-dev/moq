@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
-	"github.com/moq-dev/moq-go/moq"
+	"moq.dev/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 func TestErrorSentinels(t *testing.T) {
@@ -37,6 +37,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
 		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(), moq.ErrInvalidRoute},
+		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(), moq.ErrUnresolvableBroadcast},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(), moq.ErrLog},
 	}
