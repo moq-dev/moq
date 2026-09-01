@@ -190,7 +190,13 @@ export class SharedRingBuffer {
 			const write = Atomics.load(this.#control, WRITE);
 
 			const target = ((candidate - write) | 0) > 0 ? write : candidate;
-			if (((target - current) | 0) <= 0) return current;
+			if (((target - current) | 0) <= 0) {
+				// `current` and `write` are separate loads. A re-anchor between them pairs an old
+				// cursor with a rebased bound, which reads as "already ahead" and would report an
+				// advance nobody made, so confirm the timeline held before believing it.
+				if (Atomics.load(this.#control, GENERATION) !== generation) return undefined;
+				return current;
+			}
 
 			if (Atomics.compareExchange(this.#control, READ, current, target) !== current) continue;
 
@@ -340,7 +346,13 @@ export class SharedRingBuffer {
 		// Commit through the same guard: a re-anchor while we were copying means these samples
 		// belong to a playhead that no longer exists, so drop the quantum rather than publish a
 		// stale cursor. A quantum of silence is what `truncate` already trades for the same reason.
-		if (this.#advanceRead((read + count) | 0, generation) === undefined) return 0;
+		if (this.#advanceRead((read + count) | 0, generation) === undefined) {
+			// The copy above already filled `output`, and the worklet takes the return value as an
+			// underflow count rather than clearing what it was handed. Silence it here or the
+			// dropped quantum plays anyway.
+			for (let channel = 0; channel < this.channels; channel++) output[channel].fill(0, 0, count);
+			return 0;
+		}
 
 		return count;
 	}

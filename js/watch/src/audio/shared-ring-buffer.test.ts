@@ -893,7 +893,12 @@ describe("read() racing a re-anchor", () => {
 			};
 
 			try {
-				worklet.read(out);
+				// The raced read must discard its quantum: not just report zero, but leave no
+				// old-timeline samples in the buffer it was handed, since the worklet renders
+				// whatever is there regardless of the count it gets back.
+				out[0].fill(-1);
+				expect(worklet.read(out)).toBe(0);
+				expect(out[0].some((sample) => sample !== 0 && sample !== -1)).toBe(false);
 			} finally {
 				atomics.compareExchange = realExchange;
 			}
@@ -911,6 +916,86 @@ describe("read() racing a re-anchor", () => {
 			let played = 0;
 			for (let i = 0; i < 8; i++) played += worklet.read(out);
 			expect(played).toBeGreaterThan(0);
+		});
+	}
+});
+
+describe("read() rejecting a raced quantum", () => {
+	// `#advanceRead` loads GENERATION, READ and WRITE separately, so a re-anchor can land between
+	// any pair of them. Sweeping the trigger across every load inside read() covers the windows a
+	// single fixed pause point misses, notably an old READ paired with a rebased WRITE, which
+	// reads as "already ahead" and would report an advance nobody made.
+	for (let trigger = 1; trigger <= 12; trigger++) {
+		it(`never renders old-timeline samples when the re-anchor lands at load ${trigger}`, () => {
+			const init = allocSharedRingBuffer(1, 64, 1000, true);
+			const main = new SharedRingBuffer(init);
+			main.setLatency(16);
+
+			const worklet = new SharedRingBuffer(main.init);
+			const out = [new Float32Array(16)];
+			for (let t = 0; t < 2000; t += 16) {
+				insert(main, 10_000 + t, 16, { channels: 1, value: 1 });
+				worklet.read(out);
+			}
+			insert(main, 12_000, 32, { channels: 1, value: 1 });
+
+			// Whether the read had already published its advance when the re-anchor landed. Firing
+			// after that point is a legitimate ordering: the quantum was valid when it committed.
+			let committed = false;
+			let firedAfterCommit = false;
+			// The generation `read` snapshotted (its first GENERATION load), against the one in
+			// force just before the re-anchor. Equal means the read is working on the timeline the
+			// re-anchor is about to replace.
+			let snapshot: number | undefined;
+			let generationAtFire = -1;
+			let calls = 0;
+			let fired = false;
+
+			const atomics = Atomics as { load: unknown; compareExchange: unknown };
+			const realLoad = Atomics.load;
+			const realExchange = Atomics.compareExchange;
+
+			atomics.compareExchange = (arr: Int32Array, idx: number, expected: number, replacement: number) => {
+				const witnessed = realExchange(arr, idx, expected, replacement);
+				if (idx === 1 && witnessed === expected) committed = true;
+				return witnessed;
+			};
+			const control = new Int32Array(main.init.control);
+			atomics.load = (arr: Int32Array, idx: number) => {
+				const value = realLoad(arr, idx);
+				if (idx === 4 && snapshot === undefined) snapshot = value;
+				if (!fired && ++calls === trigger) {
+					fired = true;
+					firedAfterCommit = committed;
+					generationAtFire = realLoad(control, 4);
+					main.reset();
+					insert(main, 30_000, 32, { channels: 1, value: 2 });
+				}
+				return value;
+			};
+
+			out[0].fill(-1);
+			let result = 0;
+			try {
+				result = worklet.read(out);
+			} finally {
+				atomics.load = realLoad;
+				atomics.compareExchange = realExchange;
+			}
+
+			if (!fired) return; // read() took a shorter path than this trigger
+
+			// A re-anchor that beat the commit, on the timeline the read had already snapshotted,
+			// invalidates the quantum: it has to be reported as nothing read and scrubbed from the
+			// buffer the worklet renders. Firing before the snapshot means the read simply picked
+			// up the new timeline, and firing after the commit means the quantum was already valid.
+			if (!firedAfterCommit && snapshot === generationAtFire) {
+				expect(result).toBe(0);
+				expect(out[0].some((sample) => sample === 1)).toBe(false);
+			}
+
+			// Either way the ring stays usable for the new utterance.
+			expect((Atomics.load(control, 0) - Atomics.load(control, 1)) | 0).toBeGreaterThanOrEqual(0);
 		});
 	}
 });
