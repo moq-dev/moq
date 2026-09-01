@@ -35,8 +35,8 @@ every broader route, so a drain that only repriced would keep attracting the
 subscribers it is trying to move. Dropping the claim lets the broader route the
 content is still reachable through take over. Update
 `drafts/draft-lcurley-moq-lite.md` in the same change: this replaces the
-ceiling-exemption paragraph that [Lite draft routing
-text](/quest/m0/lite-draft-routing.md) removes, and it is a behavior change the
+ceiling-exemption paragraph that
+[moq#3278](https://github.com/moq-dev/moq/pull/3278) removed, and it is a behavior change the
 draft has to carry.
 
 Make both Lite and IETF publishers advertise from one warmth signal, so a

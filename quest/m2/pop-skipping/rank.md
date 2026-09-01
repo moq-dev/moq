@@ -70,8 +70,8 @@ field: `Hop::UNKNOWN` identifies nobody and never matches itself, so two
 anonymous relays must not pass for one relay reconnecting and skip the gate.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same change, restoring the
-adoption-rank rule that [Lite draft routing
-text](/quest/m0/lite-draft-routing.md) removes.
+adoption-rank rule that
+[moq#3278](https://github.com/moq-dev/moq/pull/3278) removed.
 
 ### Tests
 

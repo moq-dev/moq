@@ -64,9 +64,9 @@ Announcement `Epoch` was specified into lite-06 by
 [#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
 removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
 with it. [Route resume identity](/quest/m0/route-resume.md) restores per-path
-identity from the route's first hop as a failover regression fix, and this
-questline builds its collision handling on that rather than on a generation
-field.
+identity from the route's first hop, reversing #3225's no-splice rule, and
+this questline builds its collision handling on that rather than on a
+generation field.
 
 ### Decisions
 
@@ -101,16 +101,23 @@ field.
   same way. Cost orders the pool first, which keeps work local and makes a
   distant advertiser the overflow rather than an equal peer.
 - **A wildcard is priced, not special-cased.** Within a tier, route selection
-  stays one comparison on one metric; there is no "concrete beats wildcard"
-  rule beside it. What makes a running transcode win is that its announcement
-  is seeded live while a standby wildcard is seeded high (`with_cost(1000)` is
-  the existing convention for a production-cost seed). The seed has a floor: it
-  MUST exceed the maximum accumulated topology cost a bounded hop list can
-  reach (`MAX_HOPS` is 32 and the planned link costs are 1/3/5, so the ceiling is 160), or a nearby
-  standby outranks a distant running transcode and the mesh starts a second
-  encode of a stream it is already serving. That floor replaces the ad-hoc
-  standby bias the moq.pro (downstream) transcode worker carries today, and it
-  is the same stride discipline
+  stays one comparison on one metric. Concrete-versus-wildcard is not decided
+  by price at all: a concrete claim is maximally specific, so "most specific
+  wins" above already shadows every pattern behind it at any cost. The
+  accepted consequence follows from that rule's finality: a live session's
+  concrete claim shadows a healthy wildcard pool even when its service is
+  broken, its terminal refusal does not fall through, and the shadow lasts
+  exactly as long as the claiming session that carries it.
+  The seed still has a floor, because standby and running claims of equal
+  specificity do meet: a standby concrete claim (`with_cost(1000)` is the
+  existing per-broadcast convention) shares a tier with a running publisher's
+  concrete announcement and with warm-advertise's exact-path warm routes. The
+  floor MUST exceed the maximum accumulated topology cost a bounded hop list
+  can reach (`MAX_HOPS` is 32 and the planned link costs are 1/3/5, so the
+  ceiling is 160), or a nearby standby outranks a distant running copy and the
+  mesh starts a second encode of a stream it is already serving. That floor
+  replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
+  carries today, and it is the same stride discipline
   [pop-skipping](/quest/m2/pop-skipping/README.md) states for provider
   economics.
 - **One cost varint, not the pair.** `Cost` is `{ warm, cold }` because a relay
