@@ -702,6 +702,17 @@ impl Producer {
 		state.partial = None;
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
+		// Completing the frame is a write access like any chunk, and the only one the
+		// payload is guaranteed to get: the wire ingest defers its chunk notifications
+		// to the poll boundary, so a tail that arrives and completes in one turn never
+		// reaches [`Self::frame_notify`]. Without this, a group whose payload streamed
+		// in across an idle gap would expire the instant it finished.
+		state.charge.record_write();
+		drop(state);
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt and age idle content out.
+		self.cache.settle();
 		Ok(())
 	}
 
@@ -2227,7 +2238,7 @@ mod test {
 		let mut consumer = producer.consume();
 		let mut frame = producer
 			.create_frame_owned(frame::Info {
-				size: 6,
+				size: 9,
 				timestamp: Timestamp::ZERO,
 			})
 			.unwrap();
@@ -2237,6 +2248,8 @@ mod test {
 		let waiter = kio::Waiter::new(counter.clone().into());
 		assert!(reader.poll_read_chunk(&waiter).is_pending());
 
+		// Two chunks in one poll turn: the reader is parked and cannot observe either
+		// until the turn yields, so neither write wakes it.
 		frame.write(Bytes::from_static(b"foo")).unwrap();
 		frame.write(Bytes::from_static(b"bar")).unwrap();
 		assert_eq!(counter.0.load(Ordering::SeqCst), 0);
@@ -2247,6 +2260,19 @@ mod test {
 			panic!("coalesced chunks were not ready after the boundary notification");
 		};
 		assert_eq!(chunk, Bytes::from_static(b"foobar"));
+
+		// The ingest loops call `notify` wherever they yield, including turns that read
+		// nothing. An empty boundary must not take the group lock or wake anyone.
+		assert!(reader.poll_read_chunk(&waiter).is_pending());
+		frame.notify();
+		assert_eq!(counter.0.load(Ordering::SeqCst), 1, "an empty boundary woke a consumer");
+
+		// The next turn's chunk wakes the reader again: coalescing defers a wake to the
+		// boundary, it doesn't drop one.
+		frame.write(Bytes::from_static(b"baz")).unwrap();
+		frame.notify();
+		assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+
 		frame.finish().unwrap();
 	}
 

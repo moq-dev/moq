@@ -4345,6 +4345,42 @@ mod test {
 		);
 	}
 
+	/// The wire ingest coalesces its chunk wakes to the poll boundary, so a payload
+	/// whose tail arrives all at once completes without a single `frame_notify`.
+	/// Committing is itself a write access: a group that just finished a frame must
+	/// not be expired by the next track write on its stale frame-open stamp.
+	#[tokio::test]
+	async fn coalesced_frame_completion_keeps_the_group_alive() {
+		let mut producer = track_producer("test", None);
+		let mut straggler = producer.create_group(0u64.into()).unwrap();
+		// The live edge moves on, so the straggler is demoted and expirable.
+		producer.create_group(1u64.into()).unwrap().finish().unwrap();
+
+		let mut frame = straggler
+			.create_frame_owned(frame::Info {
+				size: 3,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+
+		// The sender stalls past the retention window, then the whole payload lands in
+		// one poll turn: the loop never returns `Pending`, so `notify` is never reached
+		// and `finish` is the only write the charge sees.
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
+		frame.write(bytes::Bytes::from_static(b"abc")).unwrap();
+		frame.finish().unwrap();
+		straggler.finish().unwrap();
+
+		// A new group runs the expiry scan.
+		producer.create_group(2u64.into()).unwrap().finish().unwrap();
+
+		let state = producer.state.read();
+		assert!(
+			state.lookup.contains_key(&0),
+			"a group whose frame just completed must not expire"
+		);
+	}
+
 	/// Re-offering a parked group (once the cap rises) is a delivery: it restarts
 	/// the expiry clock so the subscriber gets to read what it was just handed.
 	#[tokio::test]

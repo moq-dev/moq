@@ -849,23 +849,21 @@ impl FrameIngest {
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
-					let mut wrote = false;
 					let failed = loop {
 						if frame.remaining() == 0 {
 							break None;
 						}
 						match reader.poll_read_chunk(&mut cx, frame.remaining()) {
+							// Every chunk the transport had buffered is written by now, so
+							// this is the boundary the coalesced wake is owed at.
 							Poll::Pending => {
-								if wrote {
-									frame.notify();
-								}
+								frame.notify();
 								return Poll::Pending;
 							}
 							Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
 								if let Err(err) = frame.write(chunk) {
 									break Some(err);
 								}
-								wrote = true;
 							}
 							Poll::Ready(Ok(_)) => break Some(Error::WrongSize),
 							Poll::Ready(Err(err)) => break Some(err),
