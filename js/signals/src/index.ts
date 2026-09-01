@@ -8,6 +8,9 @@
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
 
+/** Placeholder for a teardown slot that was cancelled while it was being drained. */
+const noop: Dispose = () => {};
+
 type Subscriber<T> = (value: T) => void;
 
 // @ts-ignore - Some environments don't recognize import.meta.env
@@ -683,10 +686,17 @@ export class Effect {
 
 		return () => {
 			effect.close();
+
 			// Drop our disposer from the parent so repeated run()/dispose() cycles don't pile up.
 			const disposers = this.#dispose;
 			const index = disposers?.indexOf(dispose) ?? -1;
-			if (index !== -1) disposers?.splice(index, 1);
+			if (disposers === undefined || index === -1) return;
+
+			// Removing shifts every later entry down, which would step an active drain's cursor
+			// straight over a cleanup that has not run yet. Blank the slot while one is running
+			// and let the drain skip it; the list is cleared when that drain finishes anyway.
+			if (this.#draining === disposers) disposers[index] = noop;
+			else disposers.splice(index, 1);
 		};
 	}
 

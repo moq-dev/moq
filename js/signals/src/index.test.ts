@@ -395,6 +395,33 @@ describe("Effect", () => {
 		}
 	});
 
+	test("cancelling a nested run during teardown does not skip the next cleanup", async () => {
+		// The disposer `run` hands back removes itself from the parent. Doing that by splicing
+		// shifts every later entry down, stepping the drain's cursor over a cleanup that has not
+		// run yet, so it never fires and leaks whatever it owned.
+		const sig = new Signal(0);
+		const ran: string[] = [];
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			const dispose = inner.run(() => {});
+			inner.cleanup(() => {
+				ran.push("middle");
+				dispose();
+			});
+			inner.cleanup(() => ran.push("last"));
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(ran).toEqual(["middle", "last"]);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {
 		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
 		// after that point used to register teardown against the NEXT run: the resource it owned
