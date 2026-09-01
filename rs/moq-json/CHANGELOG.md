@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-json-v0.3.7...moq-json-v0.3.8) - 2026-09-01
+
+### Other
+
+- *(rs)* simplify poll propagation ([#3307](https://github.com/moq-dev/moq/pull/3307))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-json-v0.3.6...moq-json-v0.3.7) - 2026-09-01
 
 ### Added
