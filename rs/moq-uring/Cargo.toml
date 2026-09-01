@@ -84,7 +84,3 @@ harness = false
 [[bench]]
 name = "session_lite"
 harness = false
-
-[[bench]]
-name = "allocations"
-harness = false

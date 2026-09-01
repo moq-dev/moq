@@ -716,55 +716,67 @@ impl Driver {
 		state.fail(Error::App { code, reason });
 	}
 
-	/// Stage a bounded number of GSO trains, then yield to other connections.
+	/// Stage up to [`TRAINS_PER_TURN`] GSO trains, then yield so another
+	/// connection sharing the socket gets a chance at the transmit pool.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		for _ in 0..TRAINS_PER_TURN {
-			let mut tx = match self.socket.poll_acquire(waiter) {
-				Poll::Ready(Ok(tx)) => tx,
-				Poll::Ready(Err(err)) => return Poll::Ready(Error::Io(err.to_string())),
-				// Backpressure: a completed send re-polls us.
-				Poll::Pending => {
-					self.blocked = true;
-					return Poll::Pending;
-				}
-			};
-			self.blocked = false;
-
-			let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
-			if segments == 0 {
-				return Poll::Ready(Error::Io(format!(
-					"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-					tx.len()
-				)));
+			match self.flush_one(waiter) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(err)) => return Poll::Ready(err),
+				// Backpressure, or nothing left to stage.
+				Poll::Pending => return Poll::Pending,
 			}
-
-			self.scratch.clear();
-			let transmit =
-				match self
-					.shared
-					.conn
-					.borrow_mut()
-					.poll_transmit(Instant::now(), segments, &mut self.scratch)
-				{
-					Some(transmit) => transmit,
-					// Nothing to send; the buffer returns to the pool on drop.
-					None => return Poll::Pending,
-				};
-
-			tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
-			// A lone datagram is its own segment size, and the socket's GSO
-			// stride has to match what quinn actually packed.
-			let segment = transmit.segment_size.unwrap_or(transmit.size);
-			if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
-				return Poll::Ready(Error::Io(err.to_string()));
-			}
-			// A flush frees datagram-send queue space.
-			self.shared.state.borrow_mut().datagram_send_waiters.wake();
 		}
 		// Requeue behind the other ready tasks. If quinn is drained, the next
 		// poll costs one empty acquire and then parks normally.
 		waiter.waker().wake_by_ref();
 		Poll::Pending
+	}
+
+	/// Stage one GSO train. Ignores quinn's pacing hint; the congestion
+	/// controller still bounds each train.
+	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut tx = match self.socket.poll_acquire(waiter) {
+			Poll::Ready(Ok(tx)) => tx,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::Io(err.to_string()))),
+			// Backpressure: a completed send re-polls us.
+			Poll::Pending => {
+				self.blocked = true;
+				return Poll::Pending;
+			}
+		};
+		self.blocked = false;
+
+		let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
+		if segments == 0 {
+			return Poll::Ready(Err(Error::Io(format!(
+				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
+				tx.len()
+			))));
+		}
+
+		self.scratch.clear();
+		let transmit = match self
+			.shared
+			.conn
+			.borrow_mut()
+			.poll_transmit(Instant::now(), segments, &mut self.scratch)
+		{
+			Some(transmit) => transmit,
+			// Nothing to send; the buffer returns to the pool on drop.
+			None => return Poll::Pending,
+		};
+
+		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
+		// A lone datagram is its own segment size, and the socket's GSO
+		// stride has to match what quinn actually packed.
+		let segment = transmit.segment_size.unwrap_or(transmit.size);
+		if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
+			return Poll::Ready(Err(Error::Io(err.to_string())));
+		}
+		// A flush frees datagram-send queue space.
+		self.shared.state.borrow_mut().datagram_send_waiters.wake();
+		Poll::Ready(Ok(()))
 	}
 }
 

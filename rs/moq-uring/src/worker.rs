@@ -183,45 +183,36 @@ impl Worker {
 			// Copy the completions out so dispatch can borrow the ring (to
 			// re-arm receives, push cancels, and so on). Completions spilled
 			// by `Shared::push` predate the CQ's, so they dispatch first.
-			let mut cqes = std::mem::take(&mut self.cqes);
-			cqes.clear();
+			self.cqes.clear();
 			{
 				let mut ring = self.shared.ring.borrow_mut();
 				let mut spill = self.shared.spill.borrow_mut();
 				let limit = deadline.map_or(usize::MAX, |_| TEARDOWN_CQE_BATCH);
 				let spilled = spill.len().min(limit);
-				cqes.extend(spill.drain(..spilled));
-				cqes.extend(ring.completion().take(limit - spilled).map(|entry| Cqe {
-					user_data: entry.user_data(),
-					result: entry.result(),
-					flags: entry.flags(),
-				}));
+				self.cqes.extend(spill.drain(..spilled));
+				self.cqes
+					.extend(ring.completion().take(limit - spilled).map(|entry| Cqe {
+						user_data: entry.user_data(),
+						result: entry.result(),
+						flags: entry.flags(),
+					}));
 			}
-			if cqes.is_empty() {
-				self.cqes = cqes;
-				return Ok(());
-			}
-			let dispatched = self.dispatch_batch(cqes.drain(..), deadline, Instant::now);
-			self.cqes = cqes;
-			if !dispatched {
+			if self.cqes.is_empty() || !self.dispatch_batch(deadline, Instant::now) {
 				return Ok(());
 			}
 		}
 	}
 
-	/// Dispatch a completion batch while its teardown budget remains.
-	fn dispatch_batch(
-		&mut self,
-		cqes: impl IntoIterator<Item = Cqe>,
-		deadline: Option<Instant>,
-		mut now: impl FnMut() -> Instant,
-	) -> bool {
-		for cqe in cqes {
+	/// Dispatch the collected batch in `self.cqes` while its teardown budget
+	/// remains.
+	fn dispatch_batch(&mut self, deadline: Option<Instant>, mut now: impl FnMut() -> Instant) -> bool {
+		for index in 0..self.cqes.len() {
 			if deadline.is_some_and(|deadline| now() >= deadline) {
 				// Drop this batch's remaining CQEs. Worker::drop will leak their
 				// op state, which is safe even if the kernel already finished it.
 				return false;
 			}
+			let cqe = self.cqes[index];
 			self.dispatch(cqe);
 		}
 		true
@@ -709,11 +700,10 @@ mod tests {
 		let deadline = before + Duration::from_millis(1);
 		let mut now = [before, deadline].into_iter();
 
-		assert!(
-			!worker.dispatch_batch(vec![cqe(first), cqe(second)], Some(deadline), || {
-				now.next().expect("one deadline check per completion")
-			})
-		);
+		worker.cqes = vec![cqe(first), cqe(second)];
+		assert!(!worker.dispatch_batch(Some(deadline), || {
+			now.next().expect("one deadline check per completion")
+		}));
 		assert!(!worker.shared.ops.borrow().contains(first as usize));
 		assert!(worker.shared.ops.borrow().contains(second as usize));
 		worker.shared.ops.borrow_mut().remove(second as usize);
