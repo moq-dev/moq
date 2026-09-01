@@ -13,8 +13,8 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::create_mock_session_pair;
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
-fn produce_origin(origin: Hop) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(origin));
+fn produce_origin(hop: Hop) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(hop));
 	tokio::spawn(driver.run(support::harness::TokioRuntime::<()>::new()));
 	producer
 }

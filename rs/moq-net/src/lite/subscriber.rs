@@ -2048,7 +2048,7 @@ mod tests {
 	/// assigned it (`Client::with_peer_hop`), so every session dialing the same
 	/// relay yields one recognizable hop instead of a random id per connection.
 	#[tokio::test]
-	async fn assigned_peer_origin_attributes_announces() {
+	async fn assigned_peer_hop_attributes_announces() {
 		let session = SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
@@ -2093,7 +2093,7 @@ mod tests {
 	/// gets an identity, and whether two of its sessions share it, is the caller's
 	/// policy, and a minted id here would be indistinguishable from a declared one.
 	#[tokio::test]
-	async fn absent_peer_origin_stamps_unknown() {
+	async fn absent_peer_hop_stamps_unknown() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 
 		let mut announced = Announced::default();

@@ -1082,18 +1082,18 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn accept_request_reads_lite05_peer_origin() {
-		let origin = Hop::new(42).unwrap();
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(origin))]);
+	async fn accept_request_reads_lite05_peer_hop() {
+		let hop = Hop::new(42).unwrap();
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(hop))]);
 		let request = Server::new()
 			.accept_request(crate::runtime::tokio_test::Tokio::new(), session)
 			.await
 			.unwrap();
-		assert_eq!(request.peer_hop(), Some(origin));
+		assert_eq!(request.peer_hop(), Some(hop));
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn anonymous_peer_origin_filters_routes_from_server_session() {
+	async fn anonymous_peer_hop_filters_routes_from_server_session() {
 		let other = Hop::new(778).unwrap();
 		let origin = crate::origin::Info::new(Hop::new(1).unwrap()).produce();
 

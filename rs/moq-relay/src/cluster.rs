@@ -676,7 +676,7 @@ impl Cluster {
 		let info = origin::Info::new(id);
 		let origin = moq_tokio::origin::spawn(info.clone());
 		let nodes = crate::nodes::Nodes::new(origin.clone());
-		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
+		tracing::info!(hop_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,

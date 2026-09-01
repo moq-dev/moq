@@ -2626,7 +2626,7 @@ mod tests {
 	/// resolve to one recognizable route, and a reconnect splices rather than
 	/// replacing.
 	#[tokio::test]
-	async fn assigned_peer_origin_attributes_announces() {
+	async fn assigned_peer_hop_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 

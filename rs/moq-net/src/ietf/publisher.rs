@@ -2103,7 +2103,7 @@ mod tests {
 	/// echo the peer's own content back at it. A broadcast with an independent
 	/// route still is.
 	#[tokio::test(start_paused = true)]
-	async fn assigned_peer_origin_filters_echoed_announces() {
+	async fn assigned_peer_hop_filters_echoed_announces() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let (publisher, consumer, _routes) = echo_harness(assigned).await;
 
@@ -2123,7 +2123,7 @@ mod tests {
 	/// assigned identity is a state this peer class cannot reach; see
 	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
-	async fn withheld_peer_origin_falls_back_to_assigned() {
+	async fn withheld_peer_hop_falls_back_to_assigned() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let declared = crate::Hop::new(9).unwrap();
 		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
