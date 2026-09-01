@@ -47,7 +47,13 @@ dev:
 # Benchmark the current tree, or compare it with a commit: `just bench origin/main`.
 bench $BASE="":
     #!/usr/bin/env bash
-    exec rs/scripts/bench.sh "$BASE"
+    exec just --justfile bench/justfile compare "$BASE"
+
+# Compare one multi-threaded Tokio runtime with the same number of independent
+# Tokio/epoll and io_uring workers. Defaults to every logical CPU.
+bench-runtime $ROUNDS="3" $WORKERS="":
+    #!/usr/bin/env bash
+    exec just --justfile bench/justfile runtime "$ROUNDS" "$WORKERS"
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
@@ -236,7 +242,7 @@ _tools $FILES="":
 
     # `_check-common` runs on every invocation, so its tools are unconditional.
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
-    scoped '^(quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
+    scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
@@ -300,6 +306,9 @@ check $BASE="":
     if [[ -n "$files" ]]; then
         just js check "$files"
         just rs check-changed "$files"
+        if echo "$files" | grep -q '^bench/'; then
+            just --justfile bench/justfile check
+        fi
         # Quest documents form one graph, so validate the whole living tree when
         # either a quest or its validator changes.
         if echo "$files" | grep -qE '^(quest/|rs/quest/)'; then
@@ -341,6 +350,7 @@ check-all *args:
     just js check
     just rs check --workspace {{ args }}
     just rs tokio-features
+    just --justfile bench/justfile check
     cargo run --quiet --locked --package quest -- check
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm

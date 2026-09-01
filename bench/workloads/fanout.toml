@@ -1,0 +1,5 @@
+connections = 65
+fanout = "fanout"
+fps = 10
+frame_size = 400
+group_size = 0

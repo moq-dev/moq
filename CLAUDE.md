@@ -18,6 +18,7 @@ nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
 nix develop --command just bench        # Benchmark the current tree
 nix develop --command just bench BASE   # Compare BASE with the current tree
+nix develop --command just bench-runtime  # Compare relay runtime topologies
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
@@ -70,6 +71,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 Top-level layout only. Per-crate and per-package detail lives in the nested guides (see [Per-Directory Guides](#per-directory-guides)), which sit next to the code and don't rot here.
 
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
+- `/bench/` - Repository-level benchmark orchestration, workload fixtures, and methodology. Rust benchmark binaries and microbenchmarks stay under `/rs/`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. `just check` type-checks it via `just obs compile`, which needs headers rather than an obs-deps download, and obs.yml links it on Linux for `cpp/obs/` and `rs/libmoq/` PRs. Still manual, like `just rs macos`: `just obs build` (a loadable plugin, and the only path on macOS/Windows) and `just obs test` (`cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer). See `doc/bin/obs.md`.

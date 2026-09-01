@@ -3,10 +3,38 @@ set -euo pipefail
 
 # Runs every Criterion target plus two local relay workloads. With a base commit,
 # Criterion compares matching cases directly and the relay summary prints the
-# base/current delta. The current load generator drives both relay binaries so a
-# generator change cannot make the two sides different workloads.
+# base/current delta. `--runtime` instead compares one multi-threaded Tokio
+# runtime with the same number of independent Tokio/epoll and io_uring workers
+# on the current tree. The current load generator drives every relay so the
+# workloads stay identical.
 
-BASE=${1:-}
+MODE=${1:-}
+case $MODE in
+    --runtime)
+        BASE=
+        RUNTIME_ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+        RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
+        if [[ -z $RUNTIME_WORKERS ]]; then
+            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
+            if ((RUNTIME_WORKERS > 256)); then
+                RUNTIME_WORKERS=256
+            fi
+        fi
+        if [[ ! $RUNTIME_ROUNDS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_ROUNDS < 1)); then
+            printf 'runtime benchmark rounds must be a positive integer, got %q\n' "$RUNTIME_ROUNDS" >&2
+            exit 1
+        fi
+        if [[ ! $RUNTIME_WORKERS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_WORKERS < 1 || 10#$RUNTIME_WORKERS > 256)); then
+            printf 'runtime benchmark workers must be an integer from 1 to 256, got %q\n' "$RUNTIME_WORKERS" >&2
+            exit 1
+        fi
+        RUNTIME_ROUNDS=$((10#$RUNTIME_ROUNDS))
+        RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
+        ;;
+    *)
+        BASE=$MODE
+        ;;
+esac
 ROOT=$(git rev-parse --show-toplevel)
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
@@ -195,229 +223,8 @@ report_set_changes() {
     fi
 }
 
-relay_config() {
-    local path=$1
-    local port=$2
-    printf '%s\n' \
-        '[log]' \
-        'level = "warn"' \
-        '' \
-        '[server]' \
-        "bind = \"127.0.0.1:$port\"" \
-        'tls.generate = ["localhost"]' \
-        '' \
-        '[web.http]' \
-        "listen = \"127.0.0.1:$port\"" \
-        '' \
-        '[auth]' \
-        'public = ""' >"$path"
-}
-
-start_relay() {
-    local relay=$1
-    local directory=$2
-    local attempt port config log
-
-    for attempt in {1..5}; do
-        port=$((40000 + (RANDOM % 20000)))
-        config=$directory/relay-$attempt.toml
-        log=$directory/relay-$attempt.log
-        relay_config "$config" "$port"
-
-        RUST_LOG=warn "$relay" "$config" >"$log" 2>&1 &
-        RELAY_PID=$!
-
-        for _ in {1..100}; do
-            if ! kill -0 "$RELAY_PID" 2>/dev/null; then
-                wait "$RELAY_PID" 2>/dev/null || true
-                RELAY_PID=
-                break
-            fi
-            if (: <>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-                RELAY_PORT=$port
-                return 0
-            fi
-            sleep 0.1
-        done
-
-        if [[ -n $RELAY_PID ]]; then
-            kill "$RELAY_PID" 2>/dev/null || true
-            wait "$RELAY_PID" 2>/dev/null || true
-            RELAY_PID=
-        fi
-    done
-
-    printf 'relay failed to start:\n' >&2
-    cat "$log" >&2
-    return 1
-}
-
-stop_relay() {
-    if [[ -z $RELAY_PID ]]; then
-        return 0
-    fi
-
-    local status=0
-    local signaled=false
-    if kill -0 "$RELAY_PID" 2>/dev/null && kill "$RELAY_PID" 2>/dev/null; then
-        signaled=true
-    fi
-    wait "$RELAY_PID" 2>/dev/null || status=$?
-    RELAY_PID=
-
-    if [[ $signaled == true ]] && ((status == 0 || status == 143)); then
-        return 0
-    fi
-
-    printf 'relay exited during workload (status %d)\n' "$status" >&2
-    return 1
-}
-
-summarize_load() {
-    local stats=$1
-    local output=$2
-    local workload=$3
-
-    jq -s --arg workload "$workload" '
-		if length < 2 then error("load benchmark produced fewer than two samples") else . end
-		| .[-1] as $last
-		| ($last.timestamp_ms - 5000) as $floor
-		| map(select(.timestamp_ms >= $floor))
-		| .[0] as $first
-		| .[-1] as $last
-		| (($last.timestamp_ms - $first.timestamp_ms) / 1000) as $seconds
-		| if $seconds <= 0 then error("load benchmark time did not advance")
-		elif $last.frames_recv <= $first.frames_recv then error("load benchmark delivered zero frames")
-		elif $last.bytes_sent < $first.bytes_sent or $last.bytes_recv < $first.bytes_recv
-			then error("load benchmark counters moved backwards")
-		elif $last.groups_present > $last.groups_expected then error("load benchmark group counts are invalid")
-		elif $last.latency_p50_ms == null or $last.latency_p99_ms == null
-			or $last.latency_p50_ms < 0 or $last.latency_p99_ms < $last.latency_p50_ms
-			then error("load benchmark latency sample is invalid")
-		else {
-			workload: $workload,
-			send_mbps: (($last.bytes_sent - $first.bytes_sent) * 8 / $seconds / 1000000),
-			recv_mbps: (($last.bytes_recv - $first.bytes_recv) * 8 / $seconds / 1000000),
-			send_fps: (($last.frames_sent - $first.frames_sent) / $seconds),
-			recv_fps: (($last.frames_recv - $first.frames_recv) / $seconds),
-			loss_pct: (if $last.groups_expected == 0 then 0 else
-				(($last.groups_expected - $last.groups_present) * 100 / $last.groups_expected)
-			end),
-			latency_p50_ms: $last.latency_p50_ms,
-			latency_p99_ms: $last.latency_p99_ms
-		}
-		end
-	' "$stats" >"$output"
-}
-
-add_host_summary() {
-    local host=$1
-    local summary=$2
-    local enriched=$summary.enriched
-
-    jq -s '
-		if length < 2 then error("host benchmark produced fewer than two samples") else . end
-		| .[-1] as $last
-		| ($last.timestamp_ms - 5000) as $floor
-		| map(select(.timestamp_ms >= $floor)) as $window
-		| $window[0] as $first
-		| $window[-1] as $last
-		| (($last.timestamp_ms - $first.timestamp_ms) / 1000) as $seconds
-		| if $seconds <= 0 then error("host benchmark time did not advance")
-		elif $last.cpu_user < $first.cpu_user or $last.cpu_system < $first.cpu_system
-			then error("host benchmark counters moved backwards")
-		else {
-			cpu_cores: ((($last.cpu_user + $last.cpu_system) - ($first.cpu_user + $first.cpu_system)) / $seconds),
-			rss_bytes: ($window | map(.rss_bytes) | max)
-		}
-		end
-	' "$host" | jq -s '.[0] * .[1]' "$summary" - >"$enriched"
-    mv "$enriched" "$summary"
-}
-
-run_workload() {
-    local label=$1
-    local relay=$2
-    local workload=$3
-    local directory=$RUN/relay/$label/$workload
-    local stats=$directory/load.jsonl
-    local host=$directory/host.jsonl
-    local summary=$directory/summary.json
-    local -a shape
-
-    mkdir -p "$directory"
-    start_relay "$relay" "$directory"
-
-    if [[ $(uname -s) == Linux ]]; then
-        "$HOST_BIN" --pid "$RELAY_PID" --interval 500ms --duration 10s --output "$host" \
-            >"$directory/host.log" 2>&1 &
-        HOST_PID=$!
-    fi
-
-    case $workload in
-        video)
-            shape=(
-                --connections 16
-                --broadcasts 1
-                --subscribe 2
-                --fps 30
-                --frame-size 1200
-                --group-size 59
-            )
-            ;;
-        fanout)
-            shape=(
-                --connections 65
-                --fanout fanout
-                --fps 10
-                --frame-size 400
-                --group-size 0
-            )
-            ;;
-        *)
-            printf 'unknown relay workload: %s\n' "$workload" >&2
-            return 1
-            ;;
-    esac
-
-    if ! "$LOAD_BIN" \
-        --connect "https://localhost:$RELAY_PORT" \
-        --connect-tls-insecure \
-        --name "bench-$label-$workload" \
-        --startup 2s \
-        --duration 10s \
-        --report 500ms \
-        --output "$stats" \
-        "${shape[@]}" >"$directory/load.log" 2>&1; then
-        printf 'load benchmark failed: %s/%s\n' "$label" "$workload" >&2
-        cat "$directory/load.log" >&2
-        return 1
-    fi
-
-    if [[ -n $HOST_PID ]]; then
-        if ! wait "$HOST_PID"; then
-            printf 'host benchmark failed: %s/%s\n' "$label" "$workload" >&2
-            cat "$directory/host.log" >&2
-            HOST_PID=
-            return 1
-        fi
-        HOST_PID=
-    fi
-    stop_relay
-
-    summarize_load "$stats" "$summary" "$workload"
-    if [[ -s $host ]]; then
-        add_host_summary "$host" "$summary"
-    fi
-}
-
-run_relay_suite() {
-    local label=$1
-    local relay=$2
-    printf '\nRelay workloads: %s\n' "$label"
-    run_workload "$label" "$relay" video
-    run_workload "$label" "$relay" fanout
-}
+# shellcheck source=bench/relay.sh
+source "$ROOT/bench/relay.sh"
 
 print_current_relay() {
     printf '\n%-10s %11s %11s %10s %10s %9s %9s %10s %10s\n' \
@@ -472,9 +279,160 @@ print_relay_comparison() {
     done
 }
 
+aggregate_runtime() {
+    local runtime=$1
+    local workload=$2
+    local output=$RUN/relay/$runtime/$workload.json
+    local -a samples=("$RUN"/relay/"$runtime"/round-*/"$workload"/summary.json)
+
+    jq -s --arg runtime "$runtime" --arg workload "$workload" '
+		def median:
+			sort as $values
+			| ($values | length) as $count
+			| if $count % 2 == 1 then $values[($count / 2 | floor)]
+			  else (($values[$count / 2 - 1] + $values[$count / 2]) / 2)
+			  end;
+		{
+			runtime: $runtime,
+			workload: $workload,
+			samples: length,
+			recv_mbps: (map(.recv_mbps) | median),
+			latency_p99_ms: (map(.latency_p99_ms) | median),
+			loss_pct: (map(.loss_pct) | median),
+			cpu_user_cores: (map(.cpu_user_cores) | median),
+			cpu_system_cores: (map(.cpu_system_cores) | median),
+			cpu_cores: (map(.cpu_cores) | median),
+			ctx_voluntary_s: (map(.ctx_voluntary_s) | median),
+			ctx_involuntary_s: (map(.ctx_involuntary_s) | median),
+			rss_bytes: (map(.rss_bytes) | median),
+			threads: (map(.threads) | median)
+		}
+	' "${samples[@]}" >"$output"
+}
+
+print_runtime_comparison() {
+    local workload runtime
+
+    for workload in video fanout video-heavy fanout-heavy; do
+        for runtime in tokio-shared tokio-workers io-uring-workers; do
+            aggregate_runtime "$runtime" "$workload"
+        done
+    done
+
+    printf '\nRuntime comparison (%d workers, median of %d rounds)\n' "$RUNTIME_WORKERS" "$RUNTIME_ROUNDS"
+    printf 'tokio-shared uses %d runtime threads; worker modes use %d data threads plus one control thread.\n' \
+        "$RUNTIME_WORKERS" "$RUNTIME_WORKERS"
+    printf '%-13s %-16s %10s %8s %7s %8s %8s %9s %9s %9s %9s %7s\n' \
+        workload runtime recv-Mbps p99-ms loss-% CPU user-CPU sys-CPU vol-ctx/s invol/s RSS-MiB threads
+    for workload in video fanout video-heavy fanout-heavy; do
+        for runtime in tokio-shared tokio-workers io-uring-workers; do
+            jq -r '[
+				.workload,
+				.runtime,
+				.recv_mbps,
+				.latency_p99_ms,
+				.loss_pct,
+				.cpu_cores,
+				.cpu_user_cores,
+				.cpu_system_cores,
+				.ctx_voluntary_s,
+				.ctx_involuntary_s,
+				(.rss_bytes / 1048576),
+				.threads
+			] | @tsv' "$RUN/relay/$runtime/$workload.json" |
+                while IFS=$'\t' read -r name mode recv p99 loss cpu user system voluntary involuntary rss threads; do
+                    printf '%-13s %-16s %10.3f %8.1f %7.3f %8.3f %8.3f %9.3f %9.1f %9.1f %9.1f %7.1f\n' \
+                        "$name" "$mode" "$recv" "$p99" "$loss" "$cpu" "$user" "$system" \
+                        "$voluntary" "$involuntary" "$rss" "$threads"
+                done
+        done
+    done
+
+    printf '\nMedian deltas (negative CPU means the second mode used less)\n'
+    printf '%-13s %-29s %12s %12s %12s\n' workload comparison CPU p99-ms sys-CPU
+    for workload in video fanout video-heavy fanout-heavy; do
+        jq -r -s '
+			def change($before; $after):
+				if $before == 0 then "n/a" else
+					((($after / $before - 1) * 10000 | round) / 100 | tostring) + "%"
+				end;
+			def comparison($before; $after):
+				[
+					$after.workload,
+					($before.runtime + " -> " + $after.runtime),
+					change($before.cpu_cores; $after.cpu_cores),
+					change($before.latency_p99_ms; $after.latency_p99_ms),
+					change($before.cpu_system_cores; $after.cpu_system_cores)
+				] | @tsv;
+			comparison(.[0]; .[1]), comparison(.[2]; .[3])
+		' "$RUN/relay/tokio-shared/$workload.json" "$RUN/relay/tokio-workers/$workload.json" \
+            "$RUN/relay/tokio-workers/$workload.json" "$RUN/relay/io-uring-workers/$workload.json" |
+            while IFS=$'\t' read -r name comparison cpu p99 system; do
+                printf '%-13s %-29s %12s %12s %12s\n' "$name" "$comparison" "$cpu" "$p99" "$system"
+            done
+    done
+}
+
+run_runtime_comparison() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
+        return 1
+    fi
+    if ! command -v openssl >/dev/null; then
+        printf 'runtime comparison needs openssl to generate its temporary certificate\n' >&2
+        return 1
+    fi
+
+    umask 077
+    printf '[req]\ndistinguished_name = req_dn\n[req_dn]\n' >"$RUN/openssl.cnf"
+    if ! OPENSSL_CONF=$RUN/openssl.cnf \
+        openssl req -x509 -sha256 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -days 1 -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost' \
+        -keyout "$RUN/localhost.key" -out "$RUN/localhost.crt" >"$RUN/openssl.log" 2>&1; then
+        printf 'failed to generate the temporary benchmark certificate:\n' >&2
+        cat "$RUN/openssl.log" >&2
+        return 1
+    fi
+
+    printf 'Building one relay binary with the Tokio and io_uring Quinn paths...\n'
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
+        -p moq-relay -p moq-bench \
+        --features moq-relay/io-uring-quinn,moq-bench/uring
+    LOAD_BIN=$CURRENT_TARGET/release/moq-bench
+    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+
+    printf 'Checking io_uring support...\n'
+    if ! "$CURRENT_TARGET/release/moq-bench-uring-check"; then
+        printf 'runtime comparison needs Linux 6.12+ with io_uring permitted by the host\n' >&2
+        return 1
+    fi
+
+    local -a runtimes=(tokio-shared tokio-workers io-uring-workers)
+    local round workload offset index runtime
+    for workload in video fanout video-heavy fanout-heavy; do
+        printf '\nRelay runtime workload: %s\n' "$workload"
+        for ((round = 1; round <= RUNTIME_ROUNDS; round++)); do
+            # Rotate the order so thermal drift and other time-dependent noise do
+            # not consistently favor the same runtime.
+            offset=$(((round - 1) % ${#runtimes[@]}))
+            for ((index = 0; index < ${#runtimes[@]}; index++)); do
+                runtime=${runtimes[$(((index + offset) % ${#runtimes[@]}))]}
+                printf '  round %d/%d: %s\n' "$round" "$RUNTIME_ROUNDS" "$runtime"
+                run_workload "$runtime/round-$round" "$CURRENT_TARGET/release/moq-relay" \
+                    "$workload" "$runtime" "$RUNTIME_WORKERS"
+            done
+        done
+    done
+
+    print_runtime_comparison
+}
+
 cd "$ROOT"
 
-if [[ -n $BASE ]]; then
+if [[ $MODE == --runtime ]]; then
+    run_runtime_comparison
+    exit 0
+elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
     WORKTREE=$RUN/base
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT" >/dev/null
