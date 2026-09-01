@@ -147,7 +147,10 @@ mod linux {
 				});
 			});
 
-			let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("bench").expect("create broadcast");
+			let mut broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
+			let _announce_broadcast = pub_origin
+				.announce("bench", Default::default())
+				.expect("create broadcast");
 			let mut track = broadcast.create_track("data", None).expect("create track");
 
 			let certs = support::certs().expect("certificates");

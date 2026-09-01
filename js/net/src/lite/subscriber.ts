@@ -257,7 +257,7 @@ export class Subscriber {
 						}
 						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path: suffix, active: true });
+						announced.append({ prefix: suffix, active: true });
 					}
 					break;
 				}
@@ -348,7 +348,7 @@ export class Subscriber {
 					if (!previous?.live) return;
 					this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${path} active=false`);
-					announced.append({ path: suffix, active: false });
+					announced.append({ prefix: suffix, active: false });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -404,7 +404,7 @@ export class Subscriber {
 				}
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ path: suffix, active: true });
+				announced.append({ prefix: suffix, active: true });
 			}
 
 			announced.close();

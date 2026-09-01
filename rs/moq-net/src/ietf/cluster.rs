@@ -178,8 +178,9 @@ impl Advert {
 			warm: self.cost,
 			..crate::origin::Cost::UNKNOWN
 		};
-		// The prefix is stamped where the advertisement attaches (the namespace).
-		crate::origin::Route::new("")
+		// The prefix travels separately: it is stamped where the advertisement
+		// attaches (the namespace).
+		crate::origin::Route::default()
 			.with_hops(self.hops.hops().clone())
 			.with_cost(advertised.charged(link_cost))
 	}

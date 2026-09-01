@@ -125,7 +125,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let (mut broadcast, announcement) = match publish.publish_broadcast(&path) {
+		let mut broadcast = match publish.create_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
@@ -136,6 +136,13 @@ pub async fn run(ctx: Connection) {
 			Ok(track) => track,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create track");
+				continue;
+			}
+		};
+		let announcement = match publish.announce(&path, Default::default()) {
+			Ok(announcement) => announcement,
+			Err(err) => {
+				tracing::error!(connection, %err, "failed to announce broadcast");
 				continue;
 			}
 		};
@@ -337,7 +344,7 @@ async fn subscribe(
 				if !update.active {
 					continue;
 				}
-				let path = update.route.prefix.as_str().to_string();
+				let path = update.prefix.as_path().as_str().to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
@@ -364,7 +371,7 @@ async fn subscribe(
 		if !update.active {
 			continue;
 		}
-		let path = update.route.prefix.as_str().to_string();
+		let path = update.prefix.as_path().as_str().to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
@@ -697,17 +704,21 @@ mod tests {
 		let origin = moq_tokio::origin::spawn(Origin::random());
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let (_internal, _announce_internal) = origin.publish_broadcast(".stats/node/host").unwrap();
+		let _internal = origin.create_broadcast(".stats/node/host").unwrap();
+		let _announce_internal = origin.announce(".stats/node/host", Default::default()).unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let (_previous, _announce_previous) = origin.publish_broadcast("bench/previous/0/0").unwrap();
+		let _previous = origin.create_broadcast("bench/previous/0/0").unwrap();
+		let _announce_previous = origin.announce("bench/previous/0/0", Default::default()).unwrap();
 
-		let (_own, _announce_own) = origin.publish_broadcast("bench/current/9/9").unwrap();
+		let _own = origin.create_broadcast("bench/current/9/9").unwrap();
+		let _announce_own = origin.announce("bench/current/9/9", Default::default()).unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let (mut peer, _announce_peer) = origin.publish_broadcast("bench/current/0/0").unwrap();
+		let mut peer = origin.create_broadcast("bench/current/0/0").unwrap();
+		let _announce_peer = origin.announce("bench/current/0/0", Default::default()).unwrap();
 		let mut track = peer.create_track(TRACK, None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
@@ -733,7 +744,8 @@ mod tests {
 		let consume = origin.consume();
 		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
 
-		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("bench/run/chat").unwrap();
+		let mut broadcast = origin.create_broadcast("bench/run/chat").unwrap();
+		let _announce_broadcast = origin.announce("bench/run/chat", Default::default()).unwrap();
 		let mut track = broadcast.create_track(TRACK, None).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();

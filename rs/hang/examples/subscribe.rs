@@ -44,8 +44,8 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	// Wait for a route to be announced, then resolve the broadcast at its path.
 	// The convention is that a publisher announces each broadcast's exact path.
 	let update = consumer.announced().next().await.context("origin closed")?;
-	anyhow::ensure!(update.active, "route retracted: {}", update.route.prefix);
-	let path = update.route.prefix;
+	anyhow::ensure!(update.active, "route retracted: {}", update.prefix);
+	let path = update.prefix.as_path().to_owned();
 
 	tracing::info!(%path, "broadcast announced");
 	let broadcast = consumer.request_broadcast(&path).await?;

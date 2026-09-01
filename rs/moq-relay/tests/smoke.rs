@@ -177,7 +177,10 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -217,7 +220,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = update.route.prefix.clone();
+	let path = update.prefix.as_path().to_owned();
 	assert!(update.active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
@@ -374,7 +377,10 @@ async fn relay_websocket_root_path_upgrades() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -407,7 +413,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = update.route.prefix.clone();
+	let path = update.prefix.as_path().to_owned();
 	assert!(update.active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -445,7 +451,8 @@ async fn two_publish_only_clients_coexist() {
 
 	// ── two publish-only publishers, each serving a distinct broadcast ──
 	let pub_a = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast_a, _announce_broadcast_a) = pub_a.publish_broadcast("alpha").expect("create broadcast a");
+	let mut broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
+	let _announce_broadcast_a = pub_a.announce("alpha", Default::default()).expect("create broadcast a");
 	let mut track_a = broadcast_a.create_track("video", None).expect("create track a");
 	track_a
 		.append_group()
@@ -454,7 +461,8 @@ async fn two_publish_only_clients_coexist() {
 		.expect("write frame a");
 
 	let pub_b = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast_b, _announce_broadcast_b) = pub_b.publish_broadcast("beta").expect("create broadcast b");
+	let mut broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
+	let _announce_broadcast_b = pub_b.announce("beta", Default::default()).expect("create broadcast b");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track b");
 	track_b
 		.append_group()
@@ -494,7 +502,7 @@ async fn two_publish_only_clients_coexist() {
 			.expect("announcement timeout")
 			.expect("origin closed");
 		if update.active {
-			seen.insert(update.route.prefix.as_str().to_owned());
+			seen.insert(update.prefix.as_path().as_str().to_owned());
 		}
 	}
 	assert!(
@@ -600,7 +608,10 @@ async fn internal_tcp_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -638,7 +649,7 @@ async fn internal_tcp_round_trip() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = update.route.prefix.clone();
+	let path = update.prefix.as_path().to_owned();
 	assert!(update.active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -717,7 +728,10 @@ async fn internal_unix_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -753,7 +767,7 @@ async fn internal_unix_round_trip() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.route.prefix.as_str(), "test");
+	assert_eq!(update.prefix.as_path().as_str(), "test");
 	assert!(update.active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -808,7 +822,10 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut bc, _announce_bc) = pub_origin.publish_broadcast(broadcast).expect("create broadcast");
+	let mut bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
+	let _announce_bc = pub_origin
+		.announce(broadcast, Default::default())
+		.expect("create broadcast");
 	let mut track = bc.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -835,7 +852,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = update.route.prefix;
+	let path = update.prefix.as_path().to_owned();
 
 	drop(track);
 	drop(bc);

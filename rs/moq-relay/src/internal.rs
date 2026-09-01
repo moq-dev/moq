@@ -587,14 +587,16 @@ mod tests {
 		let pub_origin = moq_tokio::origin::spawn(Origin::random());
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
-		let (mut pub_source, _announce_pub_source) = pub_origin.publish_broadcast("demo/x").unwrap();
+		let mut pub_source = pub_origin.create_broadcast("demo/x").unwrap();
+		let _announce_pub_source = pub_origin.announce("demo/x", Default::default()).unwrap();
 		let mut pub_track = pub_source.create_track("video", None).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
 		let sub_origin = moq_tokio::origin::spawn(Origin::random()).with_stats(regional_ctx.clone());
-		let (mut sub_source, _announce_sub_source) = sub_origin.publish_broadcast("demo/x").unwrap();
+		let mut sub_source = sub_origin.create_broadcast("demo/x").unwrap();
+		let _announce_sub_source = sub_origin.announce("demo/x", Default::default()).unwrap();
 		let mut sub_track = sub_source.create_track("audio", None).unwrap();
 
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -604,7 +606,7 @@ mod tests {
 		// egress bytes out of the default-tier broadcast.
 		let update = announced.next().await.unwrap();
 		assert!(update.active);
-		let bc = egress.request_broadcast(&update.route.prefix).await.unwrap();
+		let bc = egress.request_broadcast(update.prefix.as_path()).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();

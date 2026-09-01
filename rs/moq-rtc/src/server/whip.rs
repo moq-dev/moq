@@ -103,7 +103,7 @@ pub async fn accept(
 		.create_broadcast(&broadcast)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
 	let announcement = publisher
-		.announce(moq_net::origin::Route::new(&broadcast))
+		.announce(&broadcast, moq_net::origin::Route::default())
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to announce broadcast: {err}")))?;
 
 	let handle = producer.clone();

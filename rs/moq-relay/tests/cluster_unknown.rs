@@ -67,7 +67,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 
 struct Publisher {
 	_broadcast: moq_net::broadcast::Producer,
-	_announcement: moq_net::origin::Announcement,
+	_announcement: moq_net::announce::Producer,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -84,7 +84,8 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, announcement) = origin.publish_broadcast(PATH).expect("create broadcast");
+	let mut broadcast = origin.create_broadcast(PATH).expect("create broadcast");
+	let announcement = origin.announce(PATH, Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
@@ -193,7 +194,7 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
 	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.route.prefix.as_str().to_string(), update.active));
+		updates.push((update.prefix.as_path().as_str().to_string(), update.active));
 	}
 	updates
 }

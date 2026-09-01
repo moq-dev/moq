@@ -176,7 +176,10 @@ fn room_url(scheme: &str, port: u16, key: &Key, claims: &moq_token::Claims) -> u
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = pub_origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -215,7 +218,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.route.prefix.as_str(), "test");
+	assert_eq!(update.prefix.as_path().as_str(), "test");
 	assert!(update.active, "expected announce, got retraction");
 	let bc = sub_consumer
 		.request_broadcast("test")

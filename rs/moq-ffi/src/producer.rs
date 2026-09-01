@@ -83,7 +83,7 @@ pub(crate) struct AnnounceState {
 	pub(crate) origin: moq_net::origin::Producer,
 	pub(crate) path: moq_net::PathOwned,
 	/// The live advertisement, absent while unannounced.
-	pub(crate) announcement: Option<moq_net::origin::Announcement>,
+	pub(crate) announcement: Option<moq_net::announce::Producer>,
 }
 
 /// A whole-frame importer for one codec track.
@@ -271,8 +271,8 @@ impl MoqBroadcastProducer {
 			let announce_state = state.announce.as_mut().ok_or(MoqError::Closed)?;
 			match (announce, announce_state.announcement.is_some()) {
 				(true, false) => {
-					let route = moq_net::origin::Route::new(&announce_state.path);
-					announce_state.announcement = Some(announce_state.origin.announce(route)?);
+					let route = moq_net::origin::Route::default();
+					announce_state.announcement = Some(announce_state.origin.announce(&announce_state.path, route)?);
 				}
 				(false, true) => announce_state.announcement = None,
 				_ => {}

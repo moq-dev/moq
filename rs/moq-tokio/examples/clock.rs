@@ -63,10 +63,13 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let (mut broadcast, _announce_broadcast) = origin
-				.publish_broadcast(&config.broadcast)
+			let mut broadcast = origin
+				.create_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
+			let _announce_broadcast = origin
+				.announce(&config.broadcast, Default::default())
+				.context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 
 			let reconnect = client.with_publisher(&origin).connect(url);
@@ -104,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 				tokio::select! {
 					Some(update) = announced.next() => match update.active {
 						true => {
-							let path = update.route.prefix;
+							let path = update.prefix.as_path().to_owned();
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let broadcast = consumer.request_broadcast(&path).await?;
 							let track = broadcast
@@ -112,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 							clock = Some(Subscriber::new(track));
 						}
 						false => {
-							tracing::warn!(broadcast = %update.route.prefix, "broadcast is offline, waiting...");
+							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),

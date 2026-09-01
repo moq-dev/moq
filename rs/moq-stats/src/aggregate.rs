@@ -242,7 +242,7 @@ impl<V: Mergeable> Merged<V> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a drop or a replacement of a node that had a value does).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let path = update.route.prefix.clone();
+		let path = update.prefix.as_path().to_owned();
 		let absolute = self.announce.absolute(&path).to_owned();
 
 		// Only fold node-category routes; skip sibling categories a producer
@@ -387,7 +387,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
-		route: origin::Announcement,
+		route: announce::Producer,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
@@ -404,7 +404,7 @@ mod tests {
 
 		let mut announced = egress.announced();
 		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
-		let route = feed_origin.announce(origin::Route::new(path)).expect("announce");
+		let route = feed_origin.announce(path, origin::Route::default()).expect("announce");
 		let mut track = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");

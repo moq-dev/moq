@@ -42,8 +42,8 @@ public final class OriginProducer: Sendable {
     /// Hold the returned `Announce` for as long as the route should stay
     /// advertised. Announcing is independent of `createBroadcast(path:)`:
     /// announce one short prefix and serve requests beneath it with `dynamic()`.
-    public func announce(route: Route) throws -> Announce {
-        Announce(try ffi.announce(route: route))
+    public func announce(prefix: String, route: Route = Route()) throws -> Announce {
+        Announce(try ffi.announce(prefix: prefix, route: route))
     }
 }
 

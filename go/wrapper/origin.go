@@ -55,8 +55,8 @@ func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error
 // served. Hold the returned Announce for as long as the route should stay
 // advertised. Announcing is independent of CreateBroadcast: announce one short
 // prefix and serve requests beneath it with Dynamic.
-func (o *OriginProducer) Announce(route Route) (*Announce, error) {
-	inner, err := o.inner.Announce(route)
+func (o *OriginProducer) Announce(prefix string, route Route) (*Announce, error) {
+	inner, err := o.inner.Announce(prefix, route)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func (a *Announcement) Active() bool {
 	return a.inner.Active()
 }
 
-// Route is the announced route: its prefix, relay hops, and cost.
+// Route is the route serving the prefix: its relay hops and cost.
 func (a *Announcement) Route() Route {
 	return a.inner.Route()
 }

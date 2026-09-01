@@ -390,7 +390,7 @@ Announcements arrive over the session after it connects, so `request_broadcast` 
 
 An announcement is a route, not a broadcast: a claim that paths under `announcement.path` can be served. By convention a publisher announces each broadcast's exact path, so iterating announcements still enumerates broadcasts; it is up to you to resolve one with `request_broadcast`. Each route carries `route.hops`, the chain of relay origin ids (as `list[int]`) the announcement passed through to reach you, oldest first, and `route.cost`, the advertised preference (lower wins). A repeated announcement for the same path is a metadata update; `announcement.active` is `False` when the route was retracted.
 
-A publisher can also announce a route directly, covering a whole prefix without creating a broadcast per path: `producer.announce("live/")` (or a full `moq.Route`) returns a handle that keeps the route advertised until cancelled, with `update()` to re-price it. Pair it with `producer.dynamic()` to serve whatever paths are requested beneath the prefix.
+A publisher can also announce a route directly, covering a whole prefix without creating a broadcast per path: `producer.announce("live/")` returns a handle that keeps the route advertised until cancelled, with `update()` to re-price its hops and cost (pass a `moq.Route` as the second argument to set them up front). Pair it with `producer.dynamic()` to serve whatever paths are requested beneath the prefix.
 
 ## Examples
 

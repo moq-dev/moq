@@ -60,11 +60,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 				if (event.active) {
 					// A same-prefix re-announce supersedes: retract the old route first.
-					inserted.get(event.path)?.();
-					inserted.set(event.path, origin.insertRoute(event.path, conn));
+					inserted.get(event.prefix)?.();
+					inserted.set(event.prefix, origin.announce(event.prefix, conn));
 				} else {
-					const dispose = inserted.get(event.path);
-					inserted.delete(event.path);
+					const dispose = inserted.get(event.prefix);
+					inserted.delete(event.prefix);
 					dispose?.();
 				}
 			}

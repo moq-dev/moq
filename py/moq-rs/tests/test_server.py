@@ -272,7 +272,7 @@ async def test_route_update_observes_restart():
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        announce = origin.announce(moq.Route(prefix="routed", hops=[42]))
+        announce = origin.announce("routed", moq.Route(hops=[42]))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -289,7 +289,7 @@ async def test_route_update_observes_restart():
                 assert 77 not in first.route.hops
 
                 # The publisher advertises a longer chain: an in-place update.
-                announce.update(moq.Route(prefix="routed", hops=[42, 77]))
+                announce.update(moq.Route(hops=[42, 77]))
                 updated = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
                 assert updated.path == "routed"
                 assert updated.active

@@ -225,7 +225,7 @@ pub(crate) struct Session {
 	/// pad streaming threads stop feeding a dead session without consulting the element.
 	completion: CompletionHandle,
 	/// The route advertising the broadcast; dropping it retracts.
-	_announcement: moq_net::origin::Announcement,
+	_announcement: moq_net::announce::Producer,
 }
 
 impl Session {
@@ -245,7 +245,7 @@ impl Session {
 
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut broadcast = origin.create_broadcast(&settings.broadcast)?;
-		let announcement = origin.announce(moq_net::origin::Route::new(&settings.broadcast))?;
+		let announcement = origin.announce(&settings.broadcast, moq_net::origin::Route::default())?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let status = Arc::new(Status::default());

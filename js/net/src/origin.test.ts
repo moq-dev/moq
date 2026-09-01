@@ -173,16 +173,16 @@ test("announced streams the table with prefix-relative paths", async () => {
 	const announced = consumer.announced(Path.from("room"));
 
 	// The initial state arrives first.
-	expect(await announced.next()).toEqual({ path: Path.from("a"), active: true });
+	expect(await announced.next()).toEqual({ prefix: Path.from("a"), active: true });
 
 	// Additions under the prefix stream in; paths outside it are invisible.
 	const b = origin.publish(Path.from("room/b"));
 	origin.publish(Path.from("lobby/c"));
-	expect(await announced.next()).toEqual({ path: Path.from("b"), active: true });
+	expect(await announced.next()).toEqual({ prefix: Path.from("b"), active: true });
 
 	// Removals retract.
 	b.close();
-	expect(await announced.next()).toEqual({ path: Path.from("b"), active: false });
+	expect(await announced.next()).toEqual({ prefix: Path.from("b"), active: false });
 
 	// The stream ends when the origin closes.
 	origin.close();
@@ -198,7 +198,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Stand in for a session's discovered broadcast.
 	const upstream = new BroadcastProducer();
-	const dispose = origin.insertRoute(path, provider(upstream));
+	const dispose = origin.announce(path, provider(upstream));
 
 	const handle = routed(consumer, path);
 	expect(handle).toBeDefined();
@@ -206,10 +206,10 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.announced();
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	dispose();
-	expect(await announced.next()).toEqual({ path, active: false });
+	expect(await announced.next()).toEqual({ prefix: path, active: false });
 	expect(consumer.routes(path)).toBe(false);
 
 	announced.close();
@@ -224,7 +224,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	const upstream = new BroadcastProducer();
 	upstream.createTrack("remote-track");
-	const dispose = origin.insertRoute(path, provider(upstream));
+	const dispose = origin.announce(path, provider(upstream));
 
 	const local = origin.publish(path);
 	local.createTrack("local-track");
@@ -238,7 +238,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.announced();
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -258,7 +258,7 @@ test("the publisher-facing table excludes remote entries", async () => {
 
 	origin.publish(Path.from("mine"));
 	const upstream = new BroadcastProducer();
-	origin.insertRoute(Path.from("theirs"), provider(upstream));
+	origin.announce(Path.from("theirs"), provider(upstream));
 
 	// What a session announces to a peer: local only, so a shared origin cannot echo.
 	const table = consumer.broadcasts.peek();
@@ -274,7 +274,7 @@ test("inserting into a closed origin routes nothing", async () => {
 	origin.close();
 
 	const upstream = new BroadcastProducer();
-	const dispose = origin.insertRoute(Path.from("late"), provider(upstream));
+	const dispose = origin.announce(Path.from("late"), provider(upstream));
 	dispose();
 
 	// Nothing was materialized, so the provider's broadcast is untouched.
@@ -354,18 +354,18 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	// one goes away, so the route must fail over rather than black-hole.
 	const older = new BroadcastProducer();
 	older.createTrack("chat");
-	const disposeOlder = origin.insertRoute(path, provider(older));
+	const disposeOlder = origin.announce(path, provider(older));
 
 	const newer = new BroadcastProducer();
-	const disposeNewer = origin.insertRoute(path, provider(newer));
+	const disposeNewer = origin.announce(path, provider(newer));
 
 	const announced = consumer.announced();
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	// The newer session dies: consumers see a retract then the promoted fallback.
 	disposeNewer();
-	expect(await announced.next()).toEqual({ path, active: false });
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: false });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	const handle = routed(consumer, path);
 	const track = handle?.subscribe("chat");
@@ -431,7 +431,7 @@ test("requests never appear in announced or the table", async () => {
 
 	const announced = consumer.announced();
 	origin.publish(Path.from("real"));
-	expect(await announced.next()).toEqual({ path: Path.from("real"), active: true });
+	expect(await announced.next()).toEqual({ prefix: Path.from("real"), active: true });
 
 	announced.close();
 	request.close();
@@ -445,12 +445,12 @@ test("a republish retracts then re-announces the path", async () => {
 
 	origin.publish(path);
 	const announced = consumer.announced();
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	// A new broadcast takes the path: consumers must let go of the superseded one.
 	origin.publish(path);
-	expect(await announced.next()).toEqual({ path, active: false });
-	expect(await announced.next()).toEqual({ path, active: true });
+	expect(await announced.next()).toEqual({ prefix: path, active: false });
+	expect(await announced.next()).toEqual({ prefix: path, active: true });
 
 	announced.close();
 	origin.close();
@@ -477,7 +477,7 @@ test("a routed path needs no blind answer", async () => {
 	// What a serving session scans: a request on a path the table routes resolves to that
 	// route, so answering it blind would park a handle nothing reads.
 	const upstream = new BroadcastProducer();
-	const dispose = origin.insertRoute(path, provider(upstream));
+	const dispose = origin.announce(path, provider(upstream));
 
 	const request = consumer.request(path);
 	expect(origin.routes(path)).toBe(true);
@@ -599,8 +599,8 @@ test("a retracted route is retired even for a request nobody reads again", async
 	// front never closes the producer.
 	const keepOlder = older.consume();
 	const keepNewer = newer.consume();
-	const disposeOlder = origin.insertRoute(path, { consume: () => keepOlder.clone() });
-	const disposeNewer = origin.insertRoute(path, { consume: () => keepNewer.clone() });
+	const disposeOlder = origin.announce(path, { consume: () => keepOlder.clone() });
+	const disposeNewer = origin.announce(path, { consume: () => keepNewer.clone() });
 
 	const request = consumer.request(path);
 	// One read, then the holder goes quiet: a peek-only holder must not pin the route.
@@ -750,7 +750,7 @@ test("a seeded route still notifies when it retracts", async () => {
 	// its first value. A silent seed leaves the pre-seed value as the baseline the next
 	// change is compared against, which makes this retraction look like no change at all.
 	const upstream = new BroadcastProducer();
-	const dispose = origin.insertRoute(path, provider(upstream));
+	const dispose = origin.announce(path, provider(upstream));
 
 	const request = origin.consume().request(path);
 	expect(request.active.peek()).toBeDefined();

@@ -91,7 +91,7 @@ impl Origin {
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((update.route.prefix.to_string(), update.active))?;
+				.insert((update.prefix.to_string(), update.active))?;
 			callback.call(announced_id);
 		}
 	}
@@ -286,13 +286,14 @@ impl Origin {
 			moq_net::broadcast::Producer,
 			moq_net::origin::Producer,
 			moq_net::PathOwned,
-			moq_net::origin::Announcement,
+			moq_net::announce::Producer,
 		),
 		Error,
 	> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		let path = path.as_path().to_owned();
-		let (broadcast, announcement) = origin.publish_broadcast(&path)?;
+		let broadcast = origin.create_broadcast(&path)?;
+		let announcement = origin.announce(&path, Default::default())?;
 		Ok((broadcast, origin.clone(), path, announcement))
 	}
 

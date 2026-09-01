@@ -21,7 +21,7 @@ struct Broadcast {
 	origin: moq_net::origin::Producer,
 	path: moq_net::PathOwned,
 	/// The live route advertisement, absent while unannounced.
-	announcement: Option<moq_net::origin::Announcement>,
+	announcement: Option<moq_net::announce::Producer>,
 	catalog: moq_mux::catalog::Producer<Extra>,
 	video: BTreeMap<String, Rendition<Extra, hang::catalog::VideoConfig>>,
 	audio: BTreeMap<String, Rendition<Extra, hang::catalog::AudioConfig>>,
@@ -83,7 +83,7 @@ impl Publish {
 		mut broadcast: moq_net::broadcast::Producer,
 		origin: moq_net::origin::Producer,
 		path: moq_net::PathOwned,
-		announcement: moq_net::origin::Announcement,
+		announcement: moq_net::announce::Producer,
 	) -> Result<Id, Error> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
@@ -106,8 +106,8 @@ impl Publish {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		match (announce, broadcast.announcement.is_some()) {
 			(true, false) => {
-				let route = moq_net::origin::Route::new(&broadcast.path);
-				broadcast.announcement = Some(broadcast.origin.announce(route)?);
+				let route = moq_net::origin::Route::default();
+				broadcast.announcement = Some(broadcast.origin.announce(&broadcast.path, route)?);
 			}
 			(false, true) => broadcast.announcement = None,
 			_ => {}

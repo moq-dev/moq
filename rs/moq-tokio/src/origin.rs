@@ -29,10 +29,11 @@ mod tests {
 		let origin = spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let mut announced = origin.consume().announced();
 
-		let (mut broadcast, announcement) = origin.publish_broadcast("cam").expect("create broadcast");
+		let mut broadcast = origin.create_broadcast("cam").expect("create broadcast");
+		let announcement = origin.announce("cam", Default::default()).expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");
-		assert_eq!(update.route.prefix.as_str(), "cam");
+		assert_eq!(update.prefix.as_path().as_str(), "cam");
 		assert!(update.active);
 
 		broadcast.finish();

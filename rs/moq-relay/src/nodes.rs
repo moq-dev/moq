@@ -176,7 +176,7 @@ impl Nodes {
 				continue;
 			}
 
-			let key = canonical_announced_node(update.route.prefix.as_str());
+			let key = canonical_announced_node(update.prefix.as_path().as_str());
 			let route = update.route;
 			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
 			// An advertisement with no hops never crossed a link, so it is our own.
@@ -284,7 +284,7 @@ mod tests {
 		node: &str,
 		hops: &[u64],
 		cost: u64,
-	) -> moq_net::origin::Announcement {
+	) -> moq_net::announce::Producer {
 		let hops = OriginList::try_from(
 			hops.iter()
 				.map(|id| Origin::new(*id).expect("valid test origin"))
@@ -293,7 +293,7 @@ mod tests {
 		.unwrap();
 		let path = moq_net::Path::new(MESH_PREFIX).join(node);
 		let announcement = origin
-			.announce(moq_net::origin::Route::new(&path).with_hops(hops).with_cost(cost))
+			.announce(&path, moq_net::origin::Route::default().with_hops(hops).with_cost(cost))
 			.unwrap();
 		origin.consume().routed(&path).await.expect("test node announced");
 		announcement
@@ -384,7 +384,7 @@ mod tests {
 		// bare unannounce ahead of relay-b's still-pending announce.
 		let first_update = announced.try_next().expect("replayed announce");
 		assert_eq!(
-			canonical_announced_node(first_update.route.prefix.as_str()),
+			canonical_announced_node(first_update.prefix.as_path().as_str()),
 			"https://relay-a.example/"
 		);
 		drop(first);

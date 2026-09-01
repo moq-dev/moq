@@ -192,8 +192,8 @@ export class Broadcast {
 				if (!entry) break;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (entry.active) active.add(entry.path);
-					else active.delete(entry.path);
+					if (entry.active) active.add(entry.prefix);
+					else active.delete(entry.prefix);
 				});
 			}
 		});

@@ -594,9 +594,9 @@ impl AnnounceRun {
 	}
 
 	/// The suffix an update travels under on this stream.
-	fn suffix(&self, route: &crate::origin::Route) -> crate::PathOwned {
-		route
-			.prefix
+	fn suffix(&self, prefix: &crate::origin::Prefix) -> crate::PathOwned {
+		prefix
+			.as_path()
 			.strip_prefix(&self.prefix)
 			.expect("origin returned invalid prefix")
 			.to_owned()
@@ -683,8 +683,8 @@ impl AnnounceRun {
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
-					let suffix = self.suffix(&update.route);
-					let absolute = origin.absolute(&update.route.prefix).to_owned();
+					let suffix = self.suffix(&update.prefix);
+					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
 
 					if update.active {
 						if self.outgoing(&update.route, &absolute.as_path()).is_none() {
@@ -711,8 +711,8 @@ impl AnnounceRun {
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, OriginList, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
-					let suffix = self.suffix(&update.route);
-					let absolute = origin.absolute(&update.route.prefix).to_owned();
+					let suffix = self.suffix(&update.prefix);
+					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
 
 					if update.active {
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute.as_path()) else {
@@ -792,8 +792,8 @@ impl AnnounceRun {
 				continue;
 			};
 
-			let suffix = self.suffix(&update.route);
-			let absolute = origin.absolute(&update.route.prefix).to_owned();
+			let suffix = self.suffix(&update.prefix);
+			let absolute = origin.absolute(update.prefix.as_path()).to_owned();
 
 			if !update.active {
 				self.retract(stream, suffix, &absolute.as_path())?;
@@ -1708,7 +1708,7 @@ mod announce_test {
 		/// route under it, which would end the announce loop.
 		origin: origin::Producer,
 		/// The initial announcement; drop to retract, update to restart.
-		announcement: crate::origin::Announcement,
+		announcement: crate::announce::Producer,
 		wire: Wire,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
@@ -1731,7 +1731,10 @@ mod announce_test {
 	async fn harness() -> Harness {
 		let origin = Origin::new(1).unwrap().produce();
 		let announcement = origin
-			.announce(crate::origin::Route::new("cam").with_hops(pub_hops()).with_cost(7))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+			)
 			.unwrap();
 
 		let log = Log::default();
@@ -1775,7 +1778,7 @@ mod announce_test {
 
 		let late = h
 			.origin
-			.announce(crate::origin::Route::new("mic").with_hops(pub_hops()))
+			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -1799,7 +1802,7 @@ mod announce_test {
 		let mut h = harness().await;
 
 		h.announcement
-			.update(crate::origin::Route::new("cam").with_hops(pub_hops()).with_cost(3))
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -1817,7 +1820,7 @@ mod announce_test {
 	async fn identical_update_is_quiet() {
 		let h = harness().await;
 		h.announcement
-			.update(crate::origin::Route::new("cam").with_hops(pub_hops()).with_cost(7))
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(7))
 			.unwrap();
 		settle().await;
 		h.assert_idle();
@@ -1832,10 +1835,10 @@ mod announce_test {
 
 		let tainted = OriginList::try_from(vec![peer]).unwrap();
 		let _tainted = origin
-			.announce(crate::origin::Route::new("echoed").with_hops(tainted))
+			.announce("echoed", crate::origin::Route::default().with_hops(tainted))
 			.unwrap();
 		let _clean = origin
-			.announce(crate::origin::Route::new("local").with_hops(pub_hops()))
+			.announce("local", crate::origin::Route::default().with_hops(pub_hops()))
 			.unwrap();
 
 		let log = Log::default();
@@ -1867,7 +1870,7 @@ mod announce_test {
 		let mut h = harness().await;
 		h.announcement
 			.update(
-				crate::origin::Route::new("cam")
+				crate::origin::Route::default()
 					.with_hops(pub_hops())
 					.with_cost(u64::MAX),
 			)
@@ -3003,13 +3006,13 @@ mod tests {
 		let mut echoed_hops = OriginList::new();
 		echoed_hops.push(assigned).unwrap();
 		let (_echoed, _echoed_server) = origin
-			.announce_served(crate::origin::Route::new("echoed").with_hops(echoed_hops))
+			.announce_served("echoed", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
 		let mut local_hops = OriginList::new();
 		local_hops.push(upstream).unwrap();
 		let (_local, _local_server) = origin
-			.announce_served(crate::origin::Route::new("local").with_hops(local_hops))
+			.announce_served("local", crate::origin::Route::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -3053,13 +3056,13 @@ mod tests {
 		let mut tainted_hops = OriginList::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
-			.announce(crate::origin::Route::new("echoed").with_hops(tainted_hops))
+			.announce("echoed", crate::origin::Route::default().with_hops(tainted_hops))
 			.unwrap();
 
 		let mut clean_hops = OriginList::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let _clean = origin
-			.announce(crate::origin::Route::new("local").with_hops(clean_hops))
+			.announce("local", crate::origin::Route::default().with_hops(clean_hops))
 			.unwrap();
 
 		let gate = kio::Producer::new(true);

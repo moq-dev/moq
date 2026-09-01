@@ -1019,13 +1019,7 @@ async fn announced_broadcast_survives_an_unservable_route() {
 	let consumer = origin.consume();
 
 	// Advertise-only: covers the path, serves nothing (and no dynamic fallback).
-	let route = origin
-		.announce(MoqRoute {
-			prefix: "live".into(),
-			hops: Vec::new(),
-			cost: 0,
-		})
-		.unwrap();
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
 
 	let announced = consumer.announced_broadcast("live".into()).unwrap();
 	let pending = tokio::spawn(async move { announced.available().await });

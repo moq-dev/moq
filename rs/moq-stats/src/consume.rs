@@ -138,7 +138,7 @@ mod tests {
 		track: track::Producer,
 		sub: track::Subscriber,
 		_announced: announce::Consumer,
-		_route: origin::Announcement,
+		_route: announce::Producer,
 		_source: broadcast::Producer,
 		_ctx: moq_net::stats::Session,
 	}
@@ -162,7 +162,7 @@ mod tests {
 
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).unwrap();
-		let route = feed_origin.announce(origin::Route::new(path)).unwrap();
+		let route = feed_origin.announce(path, origin::Route::default()).unwrap();
 		let track = source.clone().create_track("video", None).unwrap();
 
 		let update = announced.next().await.expect("announce");
@@ -187,7 +187,7 @@ mod tests {
 		assert!(update.active);
 		origin
 			.consume()
-			.request_broadcast(&update.route.prefix)
+			.request_broadcast(update.prefix.as_path())
 			.await
 			.expect("resolve")
 	}

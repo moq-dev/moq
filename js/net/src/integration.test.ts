@@ -65,14 +65,14 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	const announced = client.announced();
 	const entry = await announced.next();
 	if (!entry) throw new Error("expected entry");
-	expect(entry.path).toBe("test" as Path.Valid);
+	expect(entry.prefix).toBe("test" as Path.Valid);
 	expect(entry.active).toBe(true);
 
 	// Prefix-scoped discovery returns paths relative to the requested prefix.
 	const prefixed = client.announced(Path.from("root"));
 	const prefixedEntry = await prefixed.next();
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
-	expect(prefixedEntry.path).toBe("child" as Path.Valid);
+	expect(prefixedEntry.prefix).toBe("child" as Path.Valid);
 	expect(prefixedEntry.active).toBe(true);
 
 	// Client consumes the broadcast and subscribes to a track
@@ -245,28 +245,28 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	const announced = client.announced();
 	let entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
-	expect(entry.path).toBe("first" as Path.Valid);
+	expect(entry.prefix).toBe("first" as Path.Valid);
 	expect(entry.active).toBe(true);
 
 	// A live announce.
 	const second = origin.publish(Path.from("second"));
 	entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.active).toBe(true);
 
 	// Unannounce: retracted by announce id on the wire.
 	second.close();
 	entry = await announced.next();
 	if (!entry) throw new Error("expected unannounce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.active).toBe(false);
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = origin.publish(Path.from("second"));
 	entry = await announced.next();
 	if (!entry) throw new Error("expected re-announce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.active).toBe(true);
 
 	// Cleanup
@@ -1340,7 +1340,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
-	expect(await announced.next()).toEqual({ path: Path.from("test"), active: true });
+	expect(await announced.next()).toEqual({ prefix: Path.from("test"), active: true });
 
 	// Consuming through the origin reaches the wire.
 	const remote = routed(reader, Path.from("test"));
@@ -1350,7 +1350,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
-	expect(await announced.next()).toEqual({ path: Path.from("test"), active: false });
+	expect(await announced.next()).toEqual({ prefix: Path.from("test"), active: false });
 	await until(() => !reader.routes(Path.from("test")));
 
 	await serving;

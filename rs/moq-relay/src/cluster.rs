@@ -992,13 +992,13 @@ impl Cluster {
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
 		// A pure route: the path itself is the advertisement, no broadcast behind it.
-		let self_registration: Option<moq_net::origin::Announcement> = if gossip {
+		let self_registration: Option<moq_net::announce::Producer> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
 			let announcement = self
 				.origin
-				.announce(moq_net::origin::Route::new(&path))
+				.announce(&path, moq_net::origin::Route::default())
 				.expect(".internal/origins is within the relay origin's root");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
@@ -1066,7 +1066,7 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
-					let relative = &update.route.prefix;
+					let relative = update.prefix.as_path();
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -2147,7 +2147,7 @@ mod tests {
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
 		assert_eq!(
-			update.route.prefix.as_str(),
+			update.prefix.as_path().as_str(),
 			".internal/origins/rendezvous.example.com:4443"
 		);
 		assert!(update.active);

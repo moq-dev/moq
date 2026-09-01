@@ -689,7 +689,7 @@ async fn serve_announced(
 
 	while let Some(update) = announced.try_next() {
 		if update.active {
-			broadcasts.push(update.route.prefix);
+			broadcasts.push(update.prefix);
 		}
 	}
 

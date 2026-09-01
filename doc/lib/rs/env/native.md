@@ -90,10 +90,12 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
-// Publish the broadcast and announce its exact path as a route; dropping the
-// announcement retracts it while the broadcast itself stays reachable by path.
-let (mut broadcast, _announcement) = origin.publish_broadcast("")?;
+let mut broadcast = origin.create_broadcast("")?;
 // ... add catalog and tracks to the broadcast ...
+// Then announce the exact path as a route, so the advertisement lands with the
+// tracks in place. Dropping the announcement retracts the route while the
+// broadcast itself stays reachable by path.
+let _announcement = origin.announce("", Default::default())?;
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.

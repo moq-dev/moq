@@ -491,23 +491,58 @@ impl From<u64> for Cost {
 	}
 }
 
-/// A path-prefix route: an advertisement that content under [`prefix`](Self::prefix)
-/// can be served, and how preferable the path there is.
+/// What a route covers: a path prefix, matched per segment.
 ///
-/// This is what an origin announces ([`Producer::announce`]) and what
-/// [`Consumer::announced`] yields. A route claims capability, not inventory: it says
-/// paths under the prefix are servable, never that any specific broadcast exists.
-/// The common convention is that a publisher announces each broadcast's exact path
-/// as its own route, so subscribers can enumerate broadcasts; a service instead
-/// announces one short prefix and answers whatever is requested beneath it.
+/// `room/` covers `room/alice` (and `room/` itself), but a prefix is never half a
+/// segment. Opaque so coverage can grow richer matching (wildcard patterns)
+/// without a breaking change: construct one from a path and ask it questions.
+/// Anything path-like converts into one, so `announce("room/", route)` reads
+/// naturally.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Prefix(PathOwned);
+
+impl Prefix {
+	/// A prefix covering `path` and every path beneath it.
+	pub fn new(prefix: impl AsPath) -> Self {
+		Self(prefix.as_path().to_owned())
+	}
+
+	/// Whether this prefix covers `path`: it is a segment-wise prefix of it,
+	/// including the exact path itself.
+	pub fn covers(&self, path: impl AsPath) -> bool {
+		path.as_path().has_prefix(&self.0)
+	}
+
+	/// The prefix as a path, e.g. to display, compare, or join.
+	pub fn as_path(&self) -> Path<'_> {
+		self.0.as_path()
+	}
+}
+
+impl<T: AsPath> From<T> for Prefix {
+	fn from(prefix: T) -> Self {
+		Self::new(prefix)
+	}
+}
+
+impl std::fmt::Display for Prefix {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		self.0.fmt(f)
+	}
+}
+
+/// The path a route took through the mesh and what using it costs.
+///
+/// The metadata half of an advertisement: [`Producer::announce`] pairs it with
+/// the [`Prefix`] it covers, and [`Consumer::announced`] yields both. A route
+/// claims capability, not inventory: it says paths under its prefix are
+/// servable, never that any specific broadcast exists. The common convention is
+/// that a publisher announces each broadcast's exact path, so subscribers can
+/// enumerate broadcasts; a service instead announces one short prefix and
+/// answers whatever is requested beneath it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
-	/// The path prefix this route covers, relative to the handle it is announced or
-	/// observed on. Matching is per path segment: `room/` covers `room/alice` but a
-	/// prefix is never half a segment.
-	pub prefix: PathOwned,
-
 	/// The chain of origins the route has traversed, oldest first. Each relay
 	/// appends its own [`crate::Origin`] when forwarding; used for loop detection
 	/// and as the selection tie-break.
@@ -520,14 +555,6 @@ pub struct Route {
 }
 
 impl Route {
-	/// A direct route covering `prefix`: no hops, best cost.
-	pub fn new(prefix: impl AsPath) -> Self {
-		Self {
-			prefix: prefix.as_path().to_owned(),
-			..Self::default()
-		}
-	}
-
 	/// Append a hop to the chain, oldest first.
 	///
 	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
@@ -684,8 +711,8 @@ impl OriginConsumerState {
 			}
 		};
 		Some(AnnounceUpdate {
+			prefix: Prefix(path),
 			route: Route {
-				prefix: path,
 				hops: meta.0,
 				cost: meta.1,
 			},
@@ -939,19 +966,21 @@ impl Default for OriginNodes {
 
 /// A route announcement or retraction, delivered by [`AnnounceConsumer`].
 ///
-/// An announcement carries no broadcast: it advertises that content under the
-/// route's prefix is servable. Resolve a specific path with
+/// An announcement carries no broadcast: it advertises that content under
+/// [`prefix`](Self::prefix) is servable. Resolve a specific path with
 /// [`Consumer::request_broadcast`]; the application decides which paths name
 /// broadcasts.
 #[derive(Clone, Debug)]
 pub struct AnnounceUpdate {
-	/// The route, its prefix relative to the consuming cursor's root. A route
+	/// What the route covers, relative to the consuming cursor's root. A route
 	/// announced above the cursor's scope is clamped to that scope, which is the
 	/// exact set of covered paths the cursor may see.
+	pub prefix: Prefix,
+	/// The route serving the prefix. On a retraction this carries its last
+	/// advertised metadata.
 	pub route: Route,
-	/// `false` when the route was retracted; the route then carries its last
-	/// advertised metadata. A repeated `true` for the same prefix is a metadata
-	/// update (new hops or cost), delivered in place.
+	/// `false` when the route was retracted. A repeated `true` for the same
+	/// prefix is a metadata update (new hops or cost), delivered in place.
 	pub active: bool,
 }
 
@@ -1185,22 +1214,6 @@ impl Producer {
 		Ok(source)
 	}
 
-	/// Create a broadcast at `path` and announce the exact path as a route: the
-	/// common publisher pattern, combining [`Self::create_broadcast`] and
-	/// [`Self::announce`]. Announcing each broadcast's exact path is the
-	/// convention that lets subscribers enumerate broadcasts from routes.
-	///
-	/// Finish (or drop) the producer to close the broadcast; drop the
-	/// announcement to retract the route. The two are independent, so a
-	/// broadcast can outlive its advertisement (serving cached content by exact
-	/// path) or be retracted while still being written.
-	pub fn publish_broadcast(&self, path: impl AsPath) -> Result<(broadcast::Producer, Announcement), Error> {
-		let path = path.as_path();
-		let broadcast = self.create_broadcast(&path)?;
-		let announcement = self.announce(Route::new(&path))?;
-		Ok((broadcast, announcement))
-	}
-
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's identity (cache pool included) and ingress attribution, but
 	/// is *not* inserted into the broadcast tree. Sessions answer
@@ -1218,38 +1231,48 @@ impl Producer {
 		.with_stats(ingress)
 	}
 
-	/// Advertise a route: a claim that paths under [`Route::prefix`] can be served.
+	/// Advertise a route: a claim that paths under `prefix` can be served.
 	///
-	/// The route is visible to [`Consumer::announced`] and forwarded by sessions
-	/// until the returned [`Announcement`] is dropped. Announcing is independent of
-	/// [`Self::create_broadcast`]: announce each broadcast's exact path so
-	/// subscribers can enumerate broadcasts, or announce one short prefix and serve
-	/// requests beneath it via [`Self::dynamic`].
+	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
+	/// sessions until the returned [`AnnounceProducer`] is dropped. Announcing is
+	/// independent of [`Self::create_broadcast`], and the right order is
+	/// create-populate-announce: announce each broadcast's exact path once its
+	/// tracks exist so subscribers can enumerate broadcasts, or announce one short
+	/// prefix and serve requests beneath it via [`Self::dynamic`].
 	///
 	/// The prefix is clamped to the intersection with this producer's allowed
 	/// scope, so a broad route announced through a narrow token advertises exactly
 	/// what the token may serve. Fails with [`Error::Unauthorized`] when they are
 	/// disjoint, and [`Error::Closed`] once the origin's [`Driver`] has been
 	/// dropped.
-	pub fn announce(&self, route: Route) -> Result<Announcement, Error> {
-		self.announce_inner(route, None)
+	pub fn announce(&self, prefix: impl Into<Prefix>, route: Route) -> Result<AnnounceProducer, Error> {
+		self.announce_inner(prefix.into(), route, None)
 	}
 
 	/// [`Self::announce`], plus a request queue: a consumer resolving a path under
 	/// this route is handed to the returned server to materialize on demand.
 	/// Sessions use this for the routes a peer announces to them.
-	pub(crate) fn announce_served(&self, route: Route) -> Result<(Announcement, RouteServer), Error> {
+	pub(crate) fn announce_served(
+		&self,
+		prefix: impl Into<Prefix>,
+		route: Route,
+	) -> Result<(AnnounceProducer, RouteServer), Error> {
 		let serve = kio::Shared::<ServeState>::default();
 		serve.lock().requests.add_handler();
 		let server = RouteServer {
 			root: self.root.clone(),
 			state: serve.clone(),
 		};
-		let announcement = self.announce_inner(route, Some(serve))?;
+		let announcement = self.announce_inner(prefix.into(), route, Some(serve))?;
 		Ok((announcement, server))
 	}
 
-	fn announce_inner(&self, route: Route, server: Option<kio::Shared<ServeState>>) -> Result<Announcement, Error> {
+	fn announce_inner(
+		&self,
+		prefix: Prefix,
+		route: Route,
+		server: Option<kio::Shared<ServeState>>,
+	) -> Result<AnnounceProducer, Error> {
 		debug_assert!(
 			!route.hops.contains(&self.info),
 			"announce called with a looping hop chain",
@@ -1261,7 +1284,7 @@ impl Producer {
 		// the set of covered paths this producer may claim. One entry per
 		// intersecting root (a broad route through a multi-prefix token covers each
 		// of them).
-		let requested = self.root.join(&route.prefix).to_owned();
+		let requested = self.root.join(prefix.as_path()).to_owned();
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
@@ -1302,10 +1325,9 @@ impl Producer {
 		// Ingress announce guard: held for the announcement's lifetime.
 		let guard = self.stats.ingress(&requested).announce();
 
-		Ok(Announcement {
+		Ok(AnnounceProducer {
 			shared: self.shared.clone(),
 			ids,
-			prefix: route.prefix,
 			_guard: guard,
 		})
 	}
@@ -1359,15 +1381,6 @@ impl Producer {
 		)
 	}
 
-	/// Handle to the announcement stream for this producer's subtree.
-	///
-	/// Symmetric counterpart to [`Self::consume`]; call
-	/// [`AnnounceProducer::consume`] to get an [`AnnounceConsumer`] that
-	/// receives announce / unannounce events.
-	pub fn announces(&self) -> AnnounceProducer {
-		AnnounceProducer::new(self.root.clone(), self.nodes.clone(), self.shared.clone())
-	}
-
 	/// Returns a new Producer that automatically strips out the provided prefix.
 	///
 	/// Returns None if the provided root is not authorized; when [`Self::scope`]
@@ -1406,44 +1419,37 @@ impl Producer {
 	}
 }
 
-/// A live route advertisement, from [`Producer::announce`].
+/// The write half of an advertisement, from [`Producer::announce`]: a live
+/// claim that paths under a [`Prefix`] can be served.
 ///
-/// Dropping it retracts the route: [`Consumer::announced`] observes the
-/// retraction and sessions withdraw it from their peers.
-#[must_use = "dropping an Announcement retracts the route"]
-pub struct Announcement {
+/// Hold it for as long as the route should stay advertised and
+/// [`update`](Self::update) it to re-price; dropping it retracts the route, which
+/// [`AnnounceConsumer`]s observe and sessions withdraw from their peers.
+#[must_use = "dropping an announce::Producer retracts the route"]
+pub struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
-	/// The table entries this announcement created: one per allowed root the
+	/// The table entries this advertisement created: one per allowed root the
 	/// requested prefix intersected.
 	ids: Vec<u64>,
-	/// The prefix as the caller announced it (relative to the producer's root),
-	/// pinned for the announcement's lifetime; [`update`](Self::update) rejects
-	/// any other so metadata can't silently land under the old prefix.
-	prefix: PathOwned,
-	/// Ingress announce stats guard, held for the announcement's lifetime.
+	/// Ingress announce stats guard, held for the advertisement's lifetime.
 	_guard: stats::Announce,
 }
 
-impl Announcement {
-	/// Re-price the route in place: replace its hops and cost, keeping the prefix.
+impl AnnounceProducer {
+	/// Re-price the route in place: replace its hops and cost.
 	///
 	/// Consumers observe another active update for the same prefix; sessions
-	/// forward it as a restart, so route churn never looks like new content.
-	/// `route.prefix` must match the announced prefix and returns
-	/// [`Error::NotFound`] otherwise: the prefix cannot be changed here (drop and
-	/// re-announce instead), and silently applying the metadata under the old
-	/// prefix would let the caller believe the new one is advertised.
+	/// forward it as a restart, so route churn never looks like new content. The
+	/// prefix is fixed at announce time and a [`Route`] cannot name one: to move
+	/// an advertisement, drop this and announce again. Fails with
+	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
 	pub fn update(&self, route: Route) -> Result<(), Error> {
-		if route.prefix != self.prefix {
-			return Err(Error::NotFound);
-		}
 		let mut shared = self.shared.lock();
 		if shared.closed {
 			return Err(Error::Closed);
 		}
 		for id in &self.ids {
-			// The prefix is fixed at announce time (each entry keeps its clamped
-			// one); only the metadata moves.
+			// Each entry keeps its clamped prefix; only the metadata moves.
 			let Some(entry) = shared.routes.iter_mut().find(|entry| entry.id == *id) else {
 				continue;
 			};
@@ -1456,7 +1462,7 @@ impl Announcement {
 	}
 }
 
-impl Drop for Announcement {
+impl Drop for AnnounceProducer {
 	fn drop(&mut self) {
 		let mut shared = self.shared.lock();
 		for id in &self.ids {
@@ -3043,7 +3049,7 @@ impl Consumer {
 		let mut announced = consumer.untagged().announced();
 		loop {
 			let update = announced.next().await?;
-			if update.active && update.route.prefix.as_path() == path {
+			if update.active && update.prefix.as_path() == path {
 				return Some(update.route);
 			}
 		}
@@ -3209,54 +3215,9 @@ impl Consumer {
 	}
 }
 
-/// Handle to the announcement stream for a scope.
-///
-/// Symmetric counterpart of [`AnnounceConsumer`]. Cheap to clone; call
-/// [`Self::consume`] to obtain an [`AnnounceConsumer`] that receives events.
-#[derive(Clone)]
-pub struct AnnounceProducer {
-	nodes: OriginNodes,
-	root: PathOwned,
-	shared: kio::Shared<OriginState>,
-}
-
-impl AnnounceProducer {
-	fn new(root: PathOwned, nodes: OriginNodes, shared: kio::Shared<OriginState>) -> Self {
-		Self { nodes, root, shared }
-	}
-
-	/// Subscribe to route announcements for this scope.
-	///
-	/// Allocates a per-cursor coalescing buffer and replays the currently announced
-	/// routes as initial updates. Drop the returned [`AnnounceConsumer`] to
-	/// unregister.
-	pub fn consume(&self) -> AnnounceConsumer {
-		// Untagged: `AnnounceProducer` is used for internal announce plumbing, not
-		// egress attribution (which flows through `origin::Consumer::announced`).
-		let allowed = self
-			.nodes
-			.nodes
-			.iter()
-			.map(|(allowed, _)| self.root.join(allowed).to_owned())
-			.collect();
-		AnnounceConsumer::new(
-			self.root.clone(),
-			allowed,
-			stats::Session::default(),
-			None,
-			&self.shared,
-		)
-	}
-
-	/// Returns the prefix that is automatically stripped from announced paths.
-	pub fn root(&self) -> &Path<'_> {
-		&self.root
-	}
-}
-
 /// Receives route announcements for a scope.
 ///
-/// Created by [`Consumer::announced`] or [`AnnounceProducer::consume`].
+/// Created by [`Consumer::announced`].
 /// Drop to unregister.
 pub struct AnnounceConsumer {
 	id: ConsumerId,
@@ -3321,7 +3282,7 @@ impl AnnounceConsumer {
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, update: AnnounceUpdate) -> AnnounceUpdate {
-		let absolute = self.root.join(&update.route.prefix).to_owned();
+		let absolute = self.root.join(update.prefix.as_path()).to_owned();
 		if update.active {
 			let scope = self.stats.egress(&absolute);
 			self.guards.entry(absolute).or_insert_with(|| scope.announce());
@@ -3414,7 +3375,7 @@ impl AnnounceConsumer {
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.route.prefix, expected, "wrong prefix");
+		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
 		assert!(update.active, "should be an active route");
 		update.route
 	}
@@ -3423,7 +3384,7 @@ impl AnnounceConsumer {
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.try_next().expect("no next");
-		assert_eq!(update.route.prefix, expected, "wrong prefix");
+		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
 		assert!(update.active, "should be an active route");
 		update.route
 	}
@@ -3432,13 +3393,13 @@ impl AnnounceConsumer {
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.route.prefix, expected, "wrong prefix");
+		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
 		assert!(!update.active, "should be a retraction");
 	}
 
 	pub fn assert_next_wait(&mut self) {
 		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {:?}", res.map(|u| u.route.prefix));
+			panic!("next should block: got {:?}", res.map(|u| u.prefix));
 		}
 	}
 }
@@ -3509,7 +3470,7 @@ mod tests {
 		let mut announced = consumer.announced();
 		announced.assert_next_wait();
 
-		let announcement = producer.announce(Route::new("room/alice")).unwrap();
+		let announcement = producer.announce("room/alice", Route::default()).unwrap();
 		let route = announced.assert_next_active("room/alice");
 		assert!(route.hops.is_empty());
 		assert_eq!(route.cost, Cost::default());
@@ -3523,8 +3484,8 @@ mod tests {
 	#[tokio::test]
 	async fn announce_replays_to_late_cursor() {
 		let producer = origin(1).produce();
-		let _a = producer.announce(Route::new("room/alice")).unwrap();
-		let _b = producer.announce(Route::new("room/bob")).unwrap();
+		let _a = producer.announce("room/alice", Route::default()).unwrap();
+		let _b = producer.announce("room/bob", Route::default()).unwrap();
 
 		let mut announced = producer.consume().announced();
 		// BTreeMap order: lexicographic by prefix.
@@ -3539,18 +3500,21 @@ mod tests {
 		let scoped = producer.scope(&[Path::new("room")]).unwrap();
 
 		// A broad claim through a narrow scope advertises only the intersection.
-		let _a = scoped.announce(Route::new("")).unwrap();
+		let _a = scoped.announce("", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
 		announced.assert_next_active("room");
 
 		// Disjoint prefixes cannot be claimed at all.
-		assert!(matches!(scoped.announce(Route::new("other")), Err(Error::Unauthorized)));
+		assert!(matches!(
+			scoped.announce("other", Route::default()),
+			Err(Error::Unauthorized)
+		));
 	}
 
 	#[tokio::test]
 	async fn cursor_clamps_above_its_scope() {
 		let producer = origin(1).produce();
-		let _a = producer.announce(Route::new("")).unwrap();
+		let _a = producer.announce("", Route::default()).unwrap();
 
 		let consumer = producer.consume().scope(&[Path::new("room")]).unwrap();
 		let mut announced = consumer.announced();
@@ -3560,7 +3524,7 @@ mod tests {
 	#[tokio::test]
 	async fn cursor_root_strips_prefix() {
 		let producer = origin(1).produce();
-		let _a = producer.announce(Route::new("room/alice")).unwrap();
+		let _a = producer.announce("room/alice", Route::default()).unwrap();
 
 		let consumer = producer.consume().with_root("room").unwrap();
 		let mut announced = consumer.announced();
@@ -3573,14 +3537,14 @@ mod tests {
 		let mut announced = producer.consume().announced();
 
 		let expensive = producer
-			.announce(Route::new("room").with_hops(hops(&[10])).with_cost(5))
+			.announce("room", Route::default().with_hops(hops(&[10])).with_cost(5))
 			.unwrap();
 		let route = announced.assert_next_active("room");
 		assert_eq!(route.cost, Cost::new(5));
 
 		// A cheaper route for the same prefix takes over in place.
 		let cheap = producer
-			.announce(Route::new("room").with_hops(hops(&[20])).with_cost(1))
+			.announce("room", Route::default().with_hops(hops(&[20])).with_cost(1))
 			.unwrap();
 		let route = announced.assert_next_active("room");
 		assert_eq!(route.cost, Cost::new(1));
@@ -3600,14 +3564,18 @@ mod tests {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
-		let old = producer.announce(Route::new("room").with_hops(hops(&[10]))).unwrap();
+		let old = producer
+			.announce("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
 		let first = announced.assert_next_active("room");
 		assert_eq!(first.hops.as_slice(), hops(&[10]).as_slice());
 
 		// An identical route from a fresh announcement (a reconnect) changes
 		// nothing a consumer could act on, so nothing is delivered; new requests
 		// still prefer the newest entry.
-		let _new = producer.announce(Route::new("room").with_hops(hops(&[10]))).unwrap();
+		let _new = producer
+			.announce("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
 		announced.assert_next_wait();
 
 		// Retracting the stale twin leaves the fresh one standing, still quietly.
@@ -3618,7 +3586,9 @@ mod tests {
 	#[tokio::test]
 	async fn exclude_hides_routes_through_the_peer() {
 		let producer = origin(1).produce();
-		let _a = producer.announce(Route::new("room").with_hops(hops(&[7]))).unwrap();
+		let _a = producer
+			.announce("room", Route::default().with_hops(hops(&[7])))
+			.unwrap();
 
 		let mut hidden = producer.consume().excluding(origin(7)).announced();
 		hidden.assert_next_wait();
@@ -3632,27 +3602,12 @@ mod tests {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
-		let announcement = producer.announce(Route::new("room")).unwrap();
+		let announcement = producer.announce("room", Route::default()).unwrap();
 		announced.assert_next_active("room");
 
-		announcement.update(Route::new("room").with_cost(9)).unwrap();
+		announcement.update(Route::default().with_cost(9)).unwrap();
 		let route = announced.assert_next_active("room");
 		assert_eq!(route.cost, Cost::new(9));
-	}
-
-	#[tokio::test]
-	async fn update_rejects_a_mismatched_prefix() {
-		let producer = origin(1).produce();
-		let mut announced = producer.consume().announced();
-
-		let announcement = producer.announce(Route::new("room")).unwrap();
-		announced.assert_next_active("room");
-
-		// The prefix is pinned at announce time: metadata under any other prefix
-		// is refused instead of silently landing under the old one.
-		let err = announcement.update(Route::new("lobby").with_cost(9)).unwrap_err();
-		assert!(matches!(err, Error::NotFound), "got {err:?}");
-		announced.assert_next_wait();
 	}
 
 	#[tokio::test]
@@ -3692,7 +3647,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let (_announcement, mut server) = producer.announce_served(Route::new("room")).unwrap();
+		let (_announcement, mut server) = producer.announce_served("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		let request = match server.poll_requested_broadcast(&kio::Waiter::noop()) {
@@ -3721,7 +3676,7 @@ mod tests {
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let (_announcement, mut server) = producer.announce_served(Route::new("room")).unwrap();
+		let (_announcement, mut server) = producer.announce_served("room", Route::default()).unwrap();
 
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
@@ -3745,7 +3700,7 @@ mod tests {
 	async fn retract_rejects_pending_requests() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let (announcement, server) = producer.announce_served(Route::new("room")).unwrap();
+		let (announcement, server) = producer.announce_served("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		drop(announcement);
@@ -3768,7 +3723,7 @@ mod tests {
 	async fn split_horizon_skips_routes_through_the_requester() {
 		let producer = origin(1).produce();
 		let (_announcement, _server) = producer
-			.announce_served(Route::new("room").with_hops(hops(&[7])))
+			.announce_served("room", Route::default().with_hops(hops(&[7])))
 			.unwrap();
 
 		// The requester's own bytes must not be served back to it.
@@ -3792,10 +3747,10 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let (_broad, mut broad_server) = producer.announce_served(Route::new("")).unwrap();
+		let (_broad, mut broad_server) = producer.announce_served("", Route::default()).unwrap();
 		// A narrow advertise-only claim: requests under it must NOT route to the
 		// broad server; they fall through to the (absent) fallback handler.
-		let _narrow = producer.announce(Route::new(".dash")).unwrap();
+		let _narrow = producer.announce(".dash", Route::default()).unwrap();
 
 		let err = consumer
 			.request_broadcast(".dash/pid")
@@ -3838,18 +3793,16 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		// A covering prefix resolves the wait, clamped to the requested path.
-		let _a = producer.announce(Route::new("room").with_cost(3)).unwrap();
+		let _a = producer.announce("room", Route::default().with_cost(3)).unwrap();
 		let route = fut.now_or_never().expect("covered").expect("routed");
-		assert_eq!(route.prefix.as_str(), "room/alice");
 		assert_eq!(route.cost, Cost::new(3));
 
 		// Already covered: resolves immediately.
-		let route = consumer
+		consumer
 			.routed("room/alice/cam")
 			.now_or_never()
 			.expect("covered")
 			.expect("routed");
-		assert_eq!(route.prefix.as_str(), "room/alice/cam");
 	}
 
 	#[tokio::test]
@@ -3858,24 +3811,23 @@ mod tests {
 		let consumer = producer.consume();
 
 		// A deeper route does not cover the shorter path.
-		let _deep = producer.announce(Route::new("room/alice/cam")).unwrap();
+		let _deep = producer.announce("room/alice/cam", Route::default()).unwrap();
 		let mut fut = consumer.routed("room/alice").boxed();
 		assert!((&mut fut).now_or_never().is_none());
 
-		let _exact = producer.announce(Route::new("room/alice")).unwrap();
-		let route = fut.now_or_never().expect("covered").expect("routed");
-		assert_eq!(route.prefix.as_str(), "room/alice");
+		let _exact = producer.announce("room/alice", Route::default()).unwrap();
+		fut.now_or_never().expect("covered").expect("routed");
 	}
 
 	#[tokio::test]
 	async fn teardown_ends_everything() {
 		let (producer, driver) = Producer::new(Info::new(origin(1)));
 		let consumer = producer.consume();
-		let _announcement = producer.announce(Route::new("room")).unwrap();
+		let _announcement = producer.announce("room", Route::default()).unwrap();
 		let mut announced = consumer.announced();
 		announced.assert_next_active("room");
 
-		let (_a2, _server) = producer.announce_served(Route::new("served")).unwrap();
+		let (_a2, _server) = producer.announce_served("served", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("served/path");
 
 		drop(driver);
@@ -3886,7 +3838,7 @@ mod tests {
 
 		// Pending requests reject; new work refuses.
 		assert!(pending.now_or_never().expect("rejected").is_err());
-		assert!(matches!(producer.announce(Route::new("x")), Err(Error::Closed)));
+		assert!(matches!(producer.announce("x", Route::default()), Err(Error::Closed)));
 		assert!(matches!(producer.create_broadcast("x"), Err(Error::Closed)));
 		let err = consumer
 			.request_broadcast("y")
@@ -3936,7 +3888,7 @@ mod tests {
 	#[tokio::test]
 	async fn multiple_scopes_present_a_broad_route_at_each() {
 		let producer = origin(1).produce();
-		let _a = producer.announce(Route::new("")).unwrap();
+		let _a = producer.announce("", Route::default()).unwrap();
 
 		let consumer = producer
 			.consume()

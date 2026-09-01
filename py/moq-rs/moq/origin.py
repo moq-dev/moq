@@ -48,7 +48,7 @@ class Announcement:
 
     @property
     def route(self) -> Route:
-        """The announced route: its prefix, relay hops, and cost."""
+        """The route serving the prefix: its relay hops and cost."""
         return self._inner.route()
 
 
@@ -69,7 +69,10 @@ class Announce:
         self.cancel()
 
     def update(self, route: Route) -> None:
-        """Re-price the route in place: replace its hops and cost."""
+        """Re-price the route in place: replace its hops and cost.
+
+        The prefix is fixed at announce time; announce again to move it.
+        """
         self._inner.update(route)
 
     def cancel(self) -> None:
@@ -244,14 +247,12 @@ class OriginProducer:
         """
         return BroadcastProducer._from_inner(self._inner.create_broadcast(path))
 
-    def announce(self, route: Route | str) -> Announce:
-        """Advertise a route: a claim that paths under its prefix can be served.
+    def announce(self, prefix: str, route: Route | None = None) -> Announce:
+        """Advertise a route: a claim that paths under ``prefix`` can be served.
 
-        Pass a :class:`Route` (or a bare prefix string) and hold the returned
-        :class:`Announce` for as long as the route should stay advertised.
+        Hold the returned :class:`Announce` for as long as the route should stay
+        advertised; ``route`` carries the optional metadata (relay hops and cost).
         Announcing is independent of :meth:`create_broadcast`: announce one short
         prefix and serve requests beneath it with :meth:`dynamic`.
         """
-        if isinstance(route, str):
-            route = Route(prefix=route)
-        return Announce(self._inner.announce(route))
+        return Announce(self._inner.announce(prefix, route if route is not None else Route()))

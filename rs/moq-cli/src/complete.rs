@@ -486,7 +486,7 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		let mut until = deadline;
 		while let Ok(Some(update)) = timeout_at(until, announced.next()).await {
 			until = deadline.min(Instant::now() + SETTLE);
-			let path = update.route.prefix.to_string();
+			let path = update.prefix.to_string();
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
 			if path.is_empty() {
@@ -773,7 +773,8 @@ mod tests {
 	#[tokio::test]
 	async fn the_environment_cannot_ask_for_a_moq_side() {
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (_alpha, _announce_alpha) = origin.publish_broadcast("alpha").expect("alpha");
+		let _alpha = origin.create_broadcast("alpha").expect("alpha");
+		let _announce_alpha = origin.announce("alpha", Default::default()).expect("alpha");
 		let connect = relay(&origin);
 
 		// The same reachable relay, named only by the environment.
@@ -867,8 +868,10 @@ mod tests {
 	async fn a_relay_on_the_line_answers_broadcast() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (_alpha, _announce_alpha) = origin.publish_broadcast("alpha").expect("alpha");
-		let (_nested, _announce_nested) = origin.publish_broadcast("room/beta").expect("beta");
+		let _alpha = origin.create_broadcast("alpha").expect("alpha");
+		let _announce_alpha = origin.announce("alpha", Default::default()).expect("alpha");
+		let _nested = origin.create_broadcast("room/beta").expect("beta");
+		let _announce_nested = origin.announce("room/beta", Default::default()).expect("beta");
 
 		let connect = relay(&origin);
 		let found = complete(&format!("moq {connect} --broadcast ")).await;
@@ -895,7 +898,8 @@ mod tests {
 		// one fails loudly instead of matching by luck.
 		let mut keep = Vec::new();
 		for (path, video, audio) in [("wanted", "hd", "stereo"), ("other", "sd", "mono")] {
-			let (mut broadcast, announcement) = origin.publish_broadcast(path).expect("broadcast");
+			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
+			let announcement = origin.announce(path, Default::default()).expect("broadcast");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
 			let mut edit = catalog.lock();
 			edit.video.renditions.insert(
@@ -935,7 +939,8 @@ mod tests {
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("room").expect("broadcast");
+		let mut broadcast = origin.create_broadcast("room").expect("broadcast");
+		let _announce_broadcast = origin.announce("room", Default::default()).expect("broadcast");
 
 		let mut track = broadcast
 			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())

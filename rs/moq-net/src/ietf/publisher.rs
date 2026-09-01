@@ -1231,7 +1231,7 @@ where
 					return stream.writer.closed().await;
 				}
 				NamespaceEvent::Update(Some(update)) => {
-					let path = update.route.prefix.clone();
+					let path = update.prefix.as_path().to_owned();
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid prefix")
@@ -1908,7 +1908,7 @@ mod tests {
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
-		Vec<crate::origin::Announcement>,
+		Vec<crate::announce::Producer>,
 	) {
 		let other = crate::Origin::new(778).unwrap();
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
@@ -1928,13 +1928,13 @@ mod tests {
 		let mut echoed_hops = crate::OriginList::new();
 		echoed_hops.push(assigned).unwrap();
 		let echoed = origin
-			.announce(crate::origin::Route::new("from/peer").with_hops(echoed_hops))
+			.announce("from/peer", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
 		let mut local_hops = crate::OriginList::new();
 		local_hops.push(other).unwrap();
 		let local = origin
-			.announce(crate::origin::Route::new("from/us").with_hops(local_hops))
+			.announce("from/us", crate::origin::Route::default().with_hops(local_hops))
 			.unwrap();
 
 		(publisher, consumer, vec![echoed, local])
@@ -2013,7 +2013,7 @@ mod tests {
 		let mut hops = crate::OriginList::new();
 		hops.push(crate::Origin::UNKNOWN).unwrap();
 		let _echoed = origin
-			.announce(crate::origin::Route::new("from/peer").with_hops(hops))
+			.announce("from/peer", crate::origin::Route::default().with_hops(hops))
 			.unwrap();
 
 		let peer = cluster::Peer {
@@ -2057,7 +2057,10 @@ mod tests {
 		let mut tainted_hops = crate::OriginList::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
-			.announce(crate::origin::Route::new("route-flip-cam").with_hops(tainted_hops))
+			.announce(
+				"route-flip-cam",
+				crate::origin::Route::default().with_hops(tainted_hops),
+			)
 			.unwrap();
 		settle().await;
 
@@ -2078,7 +2081,7 @@ mod tests {
 		let mut clean_hops = crate::OriginList::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
-			.announce(crate::origin::Route::new("route-flip-cam").with_hops(clean_hops))
+			.announce("route-flip-cam", crate::origin::Route::default().with_hops(clean_hops))
 			.unwrap();
 		settle().await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -2130,7 +2133,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin.announce(crate::origin::Route::new("lonely-cam")).unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
@@ -2219,7 +2222,7 @@ mod tests {
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
-		let early = origin.announce(crate::origin::Route::new("early-cam")).unwrap();
+		let early = origin.announce("early-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE (the peer stays quiet after);
@@ -2260,7 +2263,7 @@ mod tests {
 		);
 
 		// A later announce reaches the same subscription.
-		let _late = origin.announce(crate::origin::Route::new("late-cam")).unwrap();
+		let _late = origin.announce("late-cam", crate::origin::Route::default()).unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			if occurrences(&log, b"late-cam") >= 1 {
@@ -2302,7 +2305,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _local = origin.announce(crate::origin::Route::new("local-cam")).unwrap();
+		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// The only stream is the PUBLISH_NAMESPACE request we open ourselves.
@@ -2348,7 +2351,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin.announce(crate::origin::Route::new("cam")).unwrap();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
@@ -2420,7 +2423,7 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let first = origin.announce(crate::origin::Route::new("first-cam")).unwrap();
+		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Open: the peer still has credit for the first advertisement, and answers it.
@@ -2455,7 +2458,7 @@ mod tests {
 
 		// Credit runs out, and a second namespace wants a stream we cannot get.
 		set_gate(&gate, false);
-		let _second = origin.announce(crate::origin::Route::new("second-cam")).unwrap();
+		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Retiring the first frees a slot and needs no new stream, so the loop has to reach
@@ -2520,7 +2523,7 @@ mod tests {
 		// The state a refused or failed offer leaves behind: the peer holds nothing, and
 		// the loop is coming back to it on a timer.
 		let suffix: crate::PathOwned = crate::Path::new("from/peer").to_owned();
-		let mut watch = Watched::new(crate::origin::Route::new("from/peer").with_hops(hops));
+		let mut watch = Watched::new(crate::origin::Route::default().with_hops(hops));
 		watch.deferred = true;
 
 		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests(None));
@@ -2542,7 +2545,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let cam = origin.announce(crate::origin::Route::new("solo-cam")).unwrap();
+		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Refused with a wait far longer than any backoff the loop would take on its own.
@@ -2574,7 +2577,7 @@ mod tests {
 		// A cheaper second route makes the advertisement worth re-pricing, which is a
 		// path back into the reconciliation that does not go through the retry timer.
 		let _standby = origin
-			.announce(crate::origin::Route::new("solo-cam").with_cost(0))
+			.announce("solo-cam", crate::origin::Route::default().with_cost(0))
 			.unwrap();
 
 		for _ in 0..100 {
@@ -2603,7 +2606,7 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let cam = origin.announce(crate::origin::Route::new("solo-cam")).unwrap();
+		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		let session =
@@ -2656,8 +2659,8 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _first = origin.announce(crate::origin::Route::new("first-cam")).unwrap();
-		let _second = origin.announce(crate::origin::Route::new("second-cam")).unwrap();
+		let _first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
+		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Every stream opens and then goes silent: an exhausted script parks rather than
@@ -2704,7 +2707,7 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin.announce(crate::origin::Route::new("lonely-cam")).unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
 		// Closed from the start: the peer has granted nothing.

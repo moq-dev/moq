@@ -1422,7 +1422,8 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 
 		let origin = crate::origin::spawn(moq_net::Origin::random());
-		let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test").expect("create broadcast");
+		let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+		let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
@@ -1475,7 +1476,7 @@ mod tests {
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
-		assert_eq!(update.route.prefix.as_str(), "test");
+		assert_eq!(update.prefix.as_path().as_str(), "test");
 		assert!(update.active);
 		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 

@@ -186,7 +186,7 @@ struct BroadcastState {
 	route: crate::origin::Route,
 
 	// The live advertisement; dropping it retracts the route.
-	announcement: crate::origin::Announcement,
+	announcement: crate::announce::Producer,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -345,7 +345,7 @@ where
 		let mut hops = crate::OriginList::new();
 		hops.push(self.session_origin)
 			.expect("an empty hop chain has room for one entry");
-		crate::origin::Route::new("")
+		crate::origin::Route::default()
 			.with_hops(hops)
 			// A peer with no Cluster extension advertises no cost at all, so its cold
 			// path is unknown rather than free.
@@ -1039,7 +1039,6 @@ where
 	/// beneath it materialize on demand.
 	fn attach(&self, state: &mut State, path: PathOwned, advert: Advertised) -> Result<(), Error> {
 		let Advertised { mut route } = advert;
-		route.prefix = path.clone();
 
 		// A namespace published after the peer's GOAWAY starts out draining, so
 		// a late arrival on a dying connection can't take over as primary.
@@ -1058,7 +1057,7 @@ where
 			}
 			Entry::Vacant(entry) => {
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let (announcement, server) = self.origin.announce_served(route.clone())?;
+				let (announcement, server) = self.origin.announce_served(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
@@ -2681,7 +2680,7 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce(crate::origin::Route::new("room/host").with_hops(upstream.clone()))
+			.announce("room/host", crate::origin::Route::default().with_hops(upstream.clone()))
 			.unwrap();
 		announced.assert_next_active("room/host");
 		let _advertised = publishing.assert_next_active("room/host");
@@ -3147,7 +3146,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 
 		let first = Advertised {
-			route: crate::origin::Route::new("")
+			route: crate::origin::Route::default()
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
@@ -3156,7 +3155,7 @@ mod tests {
 
 		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: crate::origin::Route::new("")
+			route: crate::origin::Route::default()
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};

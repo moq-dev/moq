@@ -164,14 +164,14 @@ export class Shared {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.path);
-						else active.delete(entry.path);
+						if (entry.active) active.add(entry.prefix);
+						else active.delete(entry.prefix);
 						producer.append(entry);
 					}
 				} finally {
 					if (!closed) {
 						for (const path of active) {
-							producer.append({ path, active: false });
+							producer.append({ prefix: path, active: false });
 						}
 					}
 				}

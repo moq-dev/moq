@@ -136,7 +136,8 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let raw_url: url::Url = format!("moql://127.0.0.1:{port}/uring").parse().expect("parse url");
 
 	let origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -161,7 +162,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
-		assert_eq!(update.route.prefix.as_str(), "test");
+		assert_eq!(update.prefix.as_path().as_str(), "test");
 		assert!(update.active, "expected announce, got retraction");
 		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 			.await
@@ -297,7 +298,8 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	// connecting proves nothing.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn(Origin::random());
-	let (mut broadcast, _announce_broadcast) = origin.publish_broadcast("test").expect("create broadcast");
+	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -315,7 +317,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.route.prefix.as_str(), "test");
+	assert_eq!(update.prefix.as_path().as_str(), "test");
 	assert!(update.active, "expected announce, got retraction");
 	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 		.await

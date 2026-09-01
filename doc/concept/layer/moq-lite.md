@@ -61,7 +61,7 @@ Transports that don't carry a request URI (native QUIC, or qmux over TCP/TLS) al
 `moq-lite` optionally supports live discovery via announcements.
 
 An announcement is a **route**: a claim that broadcasts under a path prefix can be served.
-Depending on the language, there's an `announce(route)` method on the publishing side and an `announced(prefix: Path)` method on the session.
+Depending on the language, there's an `announce(prefix)` method on the publishing side and an `announced(prefix)` method on the session.
 The latter asks the peer for every route that intersects the prefix, plus any future updates.
 
 By convention a publisher announces each broadcast's exact path, so subscribers can enumerate broadcasts by iterating routes.

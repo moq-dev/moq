@@ -190,7 +190,7 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const path = Net.Path.join(prefix, entry.path);
+			const path = Net.Path.join(prefix, entry.prefix);
 			// Only `.hang` broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang")) continue;

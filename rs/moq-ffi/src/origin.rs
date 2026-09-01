@@ -22,9 +22,6 @@ pub struct MoqOriginOptions {
 /// answers whatever is requested beneath it.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqRoute {
-	/// The path prefix this route covers. Matching is per path segment.
-	#[uniffi(default = "")]
-	pub prefix: String,
 	/// Origin ids of the relay hops the route traversed, oldest first.
 	#[uniffi(default = [])]
 	pub hops: Vec<u64>,
@@ -38,7 +35,6 @@ pub struct MoqRoute {
 impl From<moq_net::origin::Route> for MoqRoute {
 	fn from(route: moq_net::origin::Route) -> Self {
 		Self {
-			prefix: route.prefix.to_string(),
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			// The relay mesh prices a route twice (see `origin::Cost`); an
 			// application only ever wants what pulling it costs today.
@@ -51,7 +47,7 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let mut out = moq_net::origin::Route::new(route.prefix.as_str()).with_cost(route.cost);
+		let mut out = moq_net::origin::Route::default().with_cost(route.cost);
 		for id in route.hops {
 			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
@@ -108,6 +104,7 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnouncement {
+				prefix: update.prefix.as_path().to_string(),
 				route: update.route.into(),
 				active: update.active,
 			}))),
@@ -158,6 +155,7 @@ impl AnnouncedBroadcast {
 /// covered). The application decides which paths name broadcasts.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncement {
+	prefix: String,
 	route: MoqRoute,
 	active: bool,
 }
@@ -167,7 +165,7 @@ pub struct MoqAnnouncement {
 /// The route stays advertised until `cancel` is called or the handle drops.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounce {
-	inner: std::sync::Mutex<Option<moq_net::origin::Announcement>>,
+	inner: std::sync::Mutex<Option<moq_net::announce::Producer>>,
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -282,7 +280,8 @@ impl MoqOriginProducer {
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
-		let (broadcast, announcement) = self.inner.publish_broadcast(path.as_str())?;
+		let broadcast = self.inner.create_broadcast(path.as_str())?;
+		let announcement = self.inner.announce(path.as_str(), Default::default())?;
 		Ok(Arc::new(MoqBroadcastProducer::from_inner_announced(
 			broadcast,
 			Some(crate::producer::AnnounceState {
@@ -293,16 +292,16 @@ impl MoqOriginProducer {
 		)?))
 	}
 
-	/// Advertise a route: a claim that paths under `route.prefix` can be served.
+	/// Advertise a route: a claim that paths under `prefix` can be served.
 	///
 	/// The route is visible to subscribers until the returned handle is cancelled
 	/// (or dropped). Announcing is independent of `create_broadcast`: announce one
 	/// short prefix and serve requests beneath it with [`Self::dynamic`], or
 	/// advertise extra exact paths.
-	pub fn announce(&self, route: MoqRoute) -> Result<Arc<MoqAnnounce>, MoqError> {
+	pub fn announce(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqAnnounce>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
-		let announcement = self.inner.announce(route)?;
+		let announcement = self.inner.announce(prefix.as_str(), route)?;
 		Ok(Arc::new(MoqAnnounce {
 			inner: std::sync::Mutex::new(Some(announcement)),
 		}))
@@ -469,12 +468,12 @@ impl MoqAnnounced {
 
 #[uniffi::export]
 impl MoqAnnouncement {
-	/// The announced route's prefix, relative to the `announced` call's prefix.
+	/// The covered prefix, relative to the `announced` call's prefix.
 	pub fn path(&self) -> String {
-		self.route.prefix.clone()
+		self.prefix.clone()
 	}
 
-	/// The announced route: its prefix, hops, and cost.
+	/// The route serving the prefix: its hops and cost.
 	pub fn route(&self) -> MoqRoute {
 		self.route.clone()
 	}

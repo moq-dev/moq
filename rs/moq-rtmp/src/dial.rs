@@ -465,7 +465,7 @@ struct Publisher {
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
 	// The route advertising the path; dropping it retracts.
-	_announcement: moq_net::origin::Announcement,
+	_announcement: moq_net::announce::Producer,
 }
 
 impl Publisher {
@@ -474,7 +474,7 @@ impl Publisher {
 			.create_broadcast(path)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let announcement = origin
-			.announce(moq_net::origin::Route::new(path))
+			.announce(path, moq_net::origin::Route::default())
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be announced: {err}"))?;
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
@@ -542,7 +542,8 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let (mut broadcast, _announcement) = server_origin.publish_broadcast("live/cam0").unwrap();
+		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
+		let _announcement = server_origin.announce("live/cam0", Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();

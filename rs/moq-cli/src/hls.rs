@@ -48,12 +48,15 @@ pub async fn import(
 	playlist: String,
 	max_age: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
-	let (mut producer, _announce_producer) = origin.publish_broadcast(&name).context("failed to create broadcast")?;
+	let mut producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
-	// Create catalog tracks before the broadcast becomes visible so a subscriber
-	// can consume the catalog as soon as it observes the announcement.
+	// Create catalog tracks before announcing so a subscriber can consume the
+	// catalog as soon as it observes the announcement.
 	let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
+	let _announcement = origin
+		.announce(&name, Default::default())
+		.context("failed to announce broadcast")?;
 
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 

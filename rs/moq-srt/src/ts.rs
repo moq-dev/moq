@@ -31,7 +31,7 @@ pub struct Publisher {
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
 	// The route advertising the path; dropping it retracts.
-	_announcement: moq_net::origin::Announcement,
+	_announcement: moq_net::announce::Producer,
 }
 
 impl Publisher {
@@ -42,7 +42,7 @@ impl Publisher {
 	/// long relays keep a non-latest group fetchable, or `None` for hang's own default.
 	pub fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> Result<Self> {
 		let mut broadcast = origin.create_broadcast(path)?;
-		let announcement = origin.announce(moq_net::origin::Route::new(path))?;
+		let announcement = origin.announce(path, moq_net::origin::Route::default())?;
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default())
 			.with_max_age(max_age);

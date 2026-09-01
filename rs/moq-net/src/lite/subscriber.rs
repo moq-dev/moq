@@ -322,8 +322,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// resolve through this session on demand. An error means the prefix is
 		// disjoint from our scope, so don't serve it. Reflections are already
 		// filtered above.
-		let route = self.announced_route(path.clone(), hops, cost, link_cost);
-		let Ok((announcement, server)) = self.origin.announce_served(route.clone()) else {
+		let route = self.announced_route(hops, cost, link_cost);
+		let Ok((announcement, server)) = self.origin.announce_served(&path, route.clone()) else {
 			return Ok(false);
 		};
 
@@ -340,12 +340,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// not win selection, however good the path it advertises looks.
 	fn announced_route(
 		&self,
-		prefix: PathOwned,
 		hops: crate::OriginList,
 		cost: crate::origin::Cost,
 		link_cost: u64,
 	) -> crate::origin::Route {
-		let mut route = crate::origin::Route::new(prefix)
+		let mut route = crate::origin::Route::default()
 			.with_hops(hops)
 			.with_cost(cost.charged(link_cost));
 
@@ -400,7 +399,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
-		let metadata = self.announced_route(path.clone(), hops, cost, link_cost);
+		let metadata = self.announced_route(hops, cost, link_cost);
 
 		// A restart is a metadata update: the route keeps its prefix (and its
 		// served paths) and re-prices in place. In-flight tracks keep flowing.
@@ -409,7 +408,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(true);
 		}
 
-		let Ok((announcement, server)) = self.origin.announce_served(metadata.clone()) else {
+		let Ok((announcement, server)) = self.origin.announce_served(&path, metadata.clone()) else {
 			announced.declined(path);
 			return Ok(false);
 		};
@@ -2367,7 +2366,7 @@ struct AnnouncedRoute {
 	/// The route as last announced (post-charge), so a drain can re-price it
 	/// without recomputing the chain.
 	route: crate::origin::Route,
-	announcement: origin::Announcement,
+	announcement: crate::announce::Producer,
 	server: crate::model::RouteServer,
 	/// One minted source per requested path, finished on a clean retraction and
 	/// aborted (via drop) when the session dies.
@@ -2377,7 +2376,11 @@ struct AnnouncedRoute {
 }
 
 impl AnnouncedRoute {
-	fn new(route: crate::origin::Route, announcement: origin::Announcement, server: crate::model::RouteServer) -> Self {
+	fn new(
+		route: crate::origin::Route,
+		announcement: crate::announce::Producer,
+		server: crate::model::RouteServer,
+	) -> Self {
 		Self {
 			route,
 			announcement,

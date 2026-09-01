@@ -320,7 +320,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let pub_origin = produce_origin(Origin::random());
 		let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		let _announce = pub_origin
-			.announce(moq_net::origin::Route::new("test"))
+			.announce("test", moq_net::origin::Route::default())
 			.expect("announce");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		// A second track with content ready, so the gated subscribe below would
@@ -419,7 +419,7 @@ async fn goaway_drains_routes(version: Version) {
 		let pub_origin = produce_origin(Origin::random());
 		let _broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		let _announce = pub_origin
-			.announce(moq_net::origin::Route::new("test"))
+			.announce("test", moq_net::origin::Route::default())
 			.expect("announce");
 
 		let sub_origin = produce_origin(Origin::random());
@@ -447,7 +447,7 @@ async fn goaway_drains_routes(version: Version) {
 		loop {
 			let update = announced.next().await.expect("update");
 			if update.active
-				&& update.route.prefix.as_str() == "test"
+				&& update.prefix.as_path().as_str() == "test"
 				&& update.route.cost == moq_net::origin::Cost::DRAIN
 			{
 				break;

@@ -258,19 +258,25 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Insert a route announced by a session: a claim that paths under `prefix` can be
-	 * served through `provider`.
+	 * Advertise a route: a claim that paths under `prefix` can be served through
+	 * `provider`.
 	 *
-	 * The newest insertion becomes the provider requests resolve through; earlier ones
-	 * are kept as fallbacks and promoted when it goes away, so overlapping sessions
-	 * covering the same prefix fail over instead of black-holing it. The returned
-	 * dispose retracts this route (whichever position it holds); call it when the
-	 * announcement ends or the session dies. Inserting into a closed origin retracts
-	 * nothing.
+	 * This is how sessions land the routes a peer announces, and how an application
+	 * serves a whole subtree without publishing each path: announce one short prefix
+	 * and hand back a broadcast from `provider.consume(path)` for whatever is
+	 * requested beneath it. Announcing each broadcast's exact path is the convention
+	 * that lets subscribers enumerate broadcasts ({@link publish} does that half).
 	 *
-	 * @internal
+	 * The newest announcement becomes the provider requests resolve through; earlier
+	 * ones are kept as fallbacks and promoted when it goes away, so overlapping
+	 * sessions covering the same prefix fail over instead of black-holing it. The
+	 * returned dispose retracts this route (whichever position it holds); call it
+	 * when the advertisement ends or the session dies. Announcing into a closed
+	 * origin retracts nothing.
+	 *
+	 * @public
 	 */
-	insertRoute(prefix: Path.Valid, provider: RouteProvider): Dispose {
+	announce(prefix: Path.Valid, provider: RouteProvider): Dispose {
 		let closed = false;
 		this.#state.remote.mutate((routes) => {
 			if (!routes) {
@@ -737,10 +743,10 @@ export class Consumer {
 				}
 
 				for (const [path, front] of active) {
-					if (next.get(path) !== front) producer.append({ path, active: false });
+					if (next.get(path) !== front) producer.append({ prefix: path, active: false });
 				}
 				for (const [path, front] of next) {
-					if (active.get(path) !== front) producer.append({ path, active: true });
+					if (active.get(path) !== front) producer.append({ prefix: path, active: true });
 				}
 				active = next;
 

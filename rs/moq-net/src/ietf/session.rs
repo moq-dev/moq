@@ -1028,7 +1028,7 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin.announce(crate::origin::Route::new("solo-cam")).unwrap();
+		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);

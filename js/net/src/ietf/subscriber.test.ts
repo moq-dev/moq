@@ -82,7 +82,7 @@ test("an unsolicited announcement lands", async () => {
 	);
 
 	const next = await announced.next();
-	expect(next?.path).toBe(Path.from("surprise"));
+	expect(next?.prefix).toBe(Path.from("surprise"));
 	expect(next?.active).toBe(true);
 
 	// The handler holds the request open until the peer drops it, and withdraws the
@@ -91,7 +91,7 @@ test("an unsolicited announcement lands", async () => {
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
 	peer.close();
 	await handler;
-	expect(await announced.next()).toMatchObject({ path: Path.from("surprise"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), active: false });
 });
 
 /**
@@ -124,7 +124,7 @@ async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Clust
  */
 async function syncInline(stream: Stream, announced: announce.Consumer, cluster?: Cluster.Advert): Promise<void> {
 	await inlineNamespace(stream, Path.from("sentinel"), cluster);
-	expect(await announced.next()).toMatchObject({ path: Path.from("sentinel"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("sentinel"), active: true });
 }
 
 /**
@@ -149,7 +149,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("both") }),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ path: Path.from("both"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), active: true });
 
 	await inlineNamespace(subscription, Path.from("both"));
 	await syncInline(subscription, announced);
@@ -185,7 +185,7 @@ test("an announcement ends once its last source does", async () => {
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("both") }),
 		request,
 	);
-	expect(await announced.next()).toMatchObject({ path: Path.from("both"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), active: true });
 
 	await inlineNamespace(subscription, Path.from("both"));
 	await syncInline(subscription, announced);
@@ -199,7 +199,7 @@ test("an announcement ends once its last source does", async () => {
 	await subscription.writer.u53(SubscribeNamespaceEntryDone.id);
 	await new SubscribeNamespaceEntryDone({ suffix: Path.from("both") }).encode(subscription.writer, VERSION);
 
-	expect(await announced.next()).toMatchObject({ path: Path.from("both"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("both"), active: false });
 });
 
 /**
@@ -220,13 +220,13 @@ test("a subscription that dies releases what it advertised", async () => {
 	await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(streamA, Path.from("orphan"));
-	expect(await doomed.next()).toMatchObject({ path: Path.from("orphan"), active: true });
-	expect(await survivor.next()).toMatchObject({ path: Path.from("orphan"), active: true });
+	expect(await doomed.next()).toMatchObject({ prefix: Path.from("orphan"), active: true });
+	expect(await survivor.next()).toMatchObject({ prefix: Path.from("orphan"), active: true });
 
 	// The stream that advertised it goes away without a NAMESPACE_DONE.
 	streamA.writer.close();
 
-	expect(await survivor.next()).toMatchObject({ path: Path.from("orphan"), active: false });
+	expect(await survivor.next()).toMatchObject({ prefix: Path.from("orphan"), active: false });
 });
 
 /**
@@ -248,7 +248,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("twice") }),
 		first,
 	);
-	expect(await announced.next()).toMatchObject({ path: Path.from("twice"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), active: true });
 
 	// The same namespace again, on its own request.
 	const second = await Stream.open(pair.server, { version: Version.DRAFT_15 });
@@ -263,7 +263,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 	peer.close();
 	await handler;
 
-	expect(await announced.next()).toMatchObject({ path: Path.from("twice"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("twice"), active: false });
 });
 
 /**
@@ -322,7 +322,7 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 		second,
 	);
 
-	expect(await announced.next()).toMatchObject({ path: Path.from("raced"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), active: true });
 	await two;
 
 	// Only one reference was taken, so the surviving request ending retracts the path.
@@ -331,7 +331,7 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 	peer.close();
 	await one;
 
-	expect(await announced.next()).toMatchObject({ path: Path.from("raced"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("raced"), active: false });
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
@@ -370,10 +370,10 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), active: true });
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [SELF, PEER], cost: 0n });
-	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), active: false });
 });
 
 /** The same rule on the other kind of advertisement, which is a request we can refuse. */
@@ -450,7 +450,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert([PEER]), request);
-	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: true });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), active: true });
 
 	// The peer re-parents the namespace onto a route that runs back through us.
 	const peer = await nextStream(pair.client);
@@ -458,7 +458,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	await peer.writer.u53(PublishNamespace.id);
 	await advert([SELF, PEER]).encode(peer.writer, VERSION);
 
-	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: false });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), active: false });
 
 	peer.close();
 	await handler;

@@ -616,7 +616,7 @@ impl<T: Serialize + Default> TrackFamily<T> {
 struct GroupPublisher {
 	broadcast: broadcast::Producer,
 	/// The route advertising this group's broadcast; dropping it retracts.
-	_announcement: origin::Announcement,
+	_announcement: moq_net::announce::Producer,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// tier track no drain has created yet parks (served next tick) instead of
 	/// being rejected `NotFound` on the spot.
@@ -642,7 +642,7 @@ impl GroupPublisher {
 				return None;
 			}
 		};
-		let announcement = match origin.announce(origin::Route::new(&advertised)) {
+		let announcement = match origin.announce(&advertised, origin::Route::default()) {
 			Ok(announcement) => announcement,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats announce");
@@ -921,7 +921,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
-		route: origin::Announcement,
+		route: announce::Producer,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
@@ -948,7 +948,7 @@ mod tests {
 
 		let mut announced = egress.announced();
 		let mut source = origin.create_broadcast(path).expect("create_broadcast");
-		let route = origin.announce(origin::Route::new(path)).expect("announce");
+		let route = origin.announce(path, origin::Route::default()).expect("announce");
 		let mut producer = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
@@ -997,10 +997,10 @@ mod tests {
 		assert!(update.active);
 		let broadcast = origin
 			.consume()
-			.request_broadcast(&update.route.prefix)
+			.request_broadcast(update.prefix.as_path())
 			.await
 			.expect("resolve");
-		(update.route.prefix.as_str().to_string(), broadcast)
+		(update.prefix.as_path().as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.

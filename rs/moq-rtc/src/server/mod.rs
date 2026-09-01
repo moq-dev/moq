@@ -67,7 +67,7 @@ struct AcceptedSession {
 	broadcast: Option<moq_net::broadcast::Producer>,
 	// WHIP only: the route advertising the broadcast; dropping it retracts.
 	// Held for the session's lifetime, released (retracting) when it ends.
-	_announcement: Option<moq_net::origin::Announcement>,
+	_announcement: Option<moq_net::announce::Producer>,
 }
 
 impl AcceptedSession {

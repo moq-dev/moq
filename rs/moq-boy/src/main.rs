@@ -233,9 +233,12 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Create the broadcast on the publish origin; the live route announces it.
 	let broadcast_path = format!("{game_prefix}/{name}");
-	let (mut broadcast, _announce_broadcast) = publish_origin
-		.publish_broadcast(&broadcast_path)
+	let mut broadcast = publish_origin
+		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
+	let _announce_broadcast = publish_origin
+		.announce(&broadcast_path, Default::default())
+		.context("failed to announce broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
