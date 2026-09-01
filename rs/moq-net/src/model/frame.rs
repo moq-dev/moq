@@ -331,7 +331,6 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 		} else {
 			self.buf.append(chunk.as_ref());
 		}
-		self.group.borrow_mut().frame_notify();
 		Ok(())
 	}
 
@@ -420,7 +419,9 @@ impl<'a> Producer<'a> {
 	///
 	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
 	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.0.write(chunk)
+		self.0.write(chunk)?;
+		self.0.group.frame_notify();
+		Ok(())
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
@@ -474,9 +475,19 @@ impl ProducerOwned {
 		self.0.remaining()
 	}
 
-	/// Write a chunk of data to the frame.
-	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+	/// Write a transport chunk without waking consumers yet.
+	///
+	/// The wire ingest loops drain every chunk ready in one poll turn, then call
+	/// [`Self::notify`] before yielding. Consumers cannot run during that turn, so
+	/// one wake at its boundary preserves streaming latency while amortizing the
+	/// group lock and cache clock read.
+	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.0.write(chunk)
+	}
+
+	/// Publish transport chunks written since the previous poll boundary.
+	pub(crate) fn notify(&mut self) {
+		self.0.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.

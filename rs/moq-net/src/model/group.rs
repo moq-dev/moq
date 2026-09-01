@@ -2207,6 +2207,49 @@ mod test {
 		assert_eq!(chunk, Some(Bytes::from_static(b"foo")));
 	}
 
+	/// Transport ingest may coalesce writes that happen in one poll turn because a
+	/// consumer cannot run until that turn yields. The boundary notification must
+	/// publish every chunk and wake a parked live-edge reader exactly once.
+	#[test]
+	fn coalesced_chunk_writes_wake_once_at_poll_boundary() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::task::Wake;
+
+		struct CountWaker(AtomicUsize);
+
+		impl Wake for CountWaker {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut consumer = producer.consume();
+		let mut frame = producer
+			.create_frame_owned(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		let mut reader = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		let counter = Arc::new(CountWaker(AtomicUsize::new(0)));
+		let waiter = kio::Waiter::new(counter.clone().into());
+		assert!(reader.poll_read_chunk(&waiter).is_pending());
+
+		frame.write(Bytes::from_static(b"foo")).unwrap();
+		frame.write(Bytes::from_static(b"bar")).unwrap();
+		assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+		frame.notify();
+		assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+		let Poll::Ready(Ok(Some(chunk))) = reader.poll_read_chunk(&waiter) else {
+			panic!("coalesced chunks were not ready after the boundary notification");
+		};
+		assert_eq!(chunk, Bytes::from_static(b"foobar"));
+		frame.finish().unwrap();
+	}
+
 	/// A frame whose timestamp is at a different scale is converted to the group's
 	/// scale by `create_frame`.
 	#[test]
