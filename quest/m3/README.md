@@ -12,8 +12,7 @@ its verdict lands and the follow-on work becomes concrete.
 
 ## Quests
 
-- [Plan: iroh upstreaming](/quest/m3/plan-iroh-upstreaming.md) - slim the iroh-live upstreaming epic to its surviving leaves via /plan-quest
-- [#2481](/quest/m3/2481-merge-iroh-lives-native-media-stack-into-moq-video-moq.md) - Merge iroh-live's native media stack into moq-video/moq-audio (upstreaming plan)
+- [Embedded video](/quest/m3/video-embedded.md) - V4L2 M2M codecs and EGL import, so moq-video works on a Pi
 - [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines

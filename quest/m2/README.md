@@ -39,7 +39,8 @@ dashboards, fleet rollout) stay downstream.
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [iOS capture](/quest/m2/video-ios.md) - moq-video captures the camera and screen on iOS, reusing the VideoToolbox backend
 - [Android capture](/quest/m2/video-android.md) - Camera2, MediaProjection and MediaCodec, a whole NDK/JNI backend family
-- [VAAPI encode gaps](/quest/m2/video-vaapi.md) - HEVC encode and dlopen loading, both gated on a moq-dev/vaapi release
+- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, a decoder we do not have, and dlopen loading, all gated on a moq-dev/vaapi release
+- [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
 - [#3164](/quest/m2/3164-moq-audio-remove-heap-activity-and-blocking-locks-from.md) - moq-audio: remove heap activity and blocking locks from the capture callback
 - [#3165](/quest/m2/3165-moq-audio-bound-and-coalesce-playback-driver-commands.md) - moq-audio: bound and coalesce playback driver commands
