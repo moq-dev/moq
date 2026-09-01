@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { error } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -476,8 +477,14 @@ interface ServedFill {
 	requestId?: bigint;
 	/** Each object's group, absolute id, and payload. */
 	objects: { group: number; id: number; payload: string }[];
-	/** Whether the publisher reset the stream instead of finishing it. */
-	reset: boolean;
+	/**
+	 * The error the stream ended with, when the publisher reset it instead of finishing.
+	 *
+	 * Carried rather than reduced to a flag so a test can assert *why* the publisher gave
+	 * up: a reset arrives here as the reason the publisher chose, so a decoder failure in
+	 * this helper cannot pass for one.
+	 */
+	reset?: Error;
 }
 
 /**
@@ -592,14 +599,13 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
 	let id = 0;
 
 	// Guarded on its own, so the assertion below lands outside every catch. Folding it into
-	// the object loop's would report a wrong stream type as a publisher reset, and the tests
-	// that only assert `reset` would pass on a malformed header.
+	// the object loop's would report a wrong stream type as a publisher reset.
 	let header: { type: number; requestId: bigint } | undefined;
 	try {
 		const type = await reader.u53();
 		header = { type, requestId: (await FetchHeader.decode(reader, V20)).requestId };
-	} catch {
-		return { objects, reset: true };
+	} catch (err) {
+		return { objects, reset: error(err) };
 	}
 	expect(header.type).toBe(FetchHeader.type);
 	const requestId = header.requestId;
@@ -618,11 +624,11 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
 			const payload = await reader.read(await reader.u53());
 			objects.push({ group, id, payload: new TextDecoder().decode(payload) });
 		}
-	} catch {
-		return { requestId, objects, reset: true };
+	} catch (err) {
+		return { requestId, objects, reset: error(err) };
 	}
 
-	return { requestId, objects, reset: false };
+	return { requestId, objects, reset: undefined };
 }
 
 /**
@@ -713,7 +719,7 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 				{ group: 0, id: 0, payload: "0.0" },
 				{ group: 0, id: 1, payload: "0.1" },
 			],
-			reset: false,
+			reset: undefined,
 		});
 
 		// Everything past the snapshot belongs to the subscription, not the fill.
@@ -758,8 +764,9 @@ test("draft-20: a fill spanning several groups resets its stream", async () => {
 	try {
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("a refused fill still owes the subscriber a reset stream");
+		// The reason the publisher chose, so a decode failure in readFill cannot pass for it.
 		const served = await readFill(fill);
-		expect(served.reset).toBe(true);
+		expect(served.reset?.message).toContain("several groups");
 		expect(served.objects).toEqual([]);
 	} finally {
 		fx.close();
