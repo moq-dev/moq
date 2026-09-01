@@ -857,3 +857,60 @@ describe("buffered mode", () => {
 		expect(read(buffer, 100, 1)[0].length).toBe(0);
 	});
 });
+
+describe("read() racing a re-anchor", () => {
+	// `buffered` picks which advance inside read() the re-anchor races: the latency skip only
+	// runs in non-buffered mode, so buffered mode leaves the final commit as the only one.
+	for (const buffered of [false, true]) {
+		it(`stays usable when a re-anchor races the ${buffered ? "commit" : "latency skip"}`, () => {
+			const init = allocSharedRingBuffer(1, 64, 1000, buffered);
+			const main = new SharedRingBuffer(init);
+			main.setLatency(16);
+
+			// A long first utterance, mostly played out, so READ sits far from zero.
+			const worklet = new SharedRingBuffer(main.init);
+			const out = [new Float32Array(16)];
+			for (let t = 0; t < 2000; t += 16) {
+				insert(main, 10_000 + t, 16, { channels: 1, value: 1 });
+				worklet.read(out);
+			}
+
+			// Leave something buffered so the final read reaches its commit.
+			insert(main, 12_000, 32, { channels: 1, value: 1 });
+
+			// The read has snapshotted READ/WRITE by the time it compare-exchanges, so firing the
+			// re-anchor here is exactly the window: the commit lands on the rebased timeline.
+			let fired = false;
+			const atomics = Atomics as { compareExchange: unknown };
+			const realExchange = Atomics.compareExchange;
+			atomics.compareExchange = (arr: Int32Array, idx: number, expected: number, replacement: number) => {
+				if (!fired) {
+					fired = true;
+					main.reset();
+					insert(main, 30_000, 32, { channels: 1, value: 2 });
+				}
+				return realExchange(arr, idx, expected, replacement);
+			};
+
+			try {
+				worklet.read(out);
+			} finally {
+				atomics.compareExchange = realExchange;
+			}
+
+			expect(fired).toBe(true);
+
+			// The new utterance must still be playable: READ cannot be left beyond WRITE.
+			const control = new Int32Array(main.init.control);
+			const read = Atomics.load(control, 1);
+			const write = Atomics.load(control, 0);
+			expect((write - read) | 0).toBeGreaterThanOrEqual(0);
+
+			// And it must actually come back out.
+			insert(main, 30_032, 32, { channels: 1, value: 2 });
+			let played = 0;
+			for (let i = 0; i < 8; i++) played += worklet.read(out);
+			expect(played).toBeGreaterThan(0);
+		});
+	}
+});

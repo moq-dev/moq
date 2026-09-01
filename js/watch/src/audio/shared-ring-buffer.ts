@@ -157,13 +157,10 @@ export class SharedRingBuffer {
 	#reconcile(source: SharedRingBuffer): void {
 		if (source.channels !== this.channels || source.rate !== this.rate) return;
 
-		const candidate = Atomics.load(source.#control, READ);
+		const generation = Atomics.load(this.#control, GENERATION);
+		if (Atomics.load(source.#control, GENERATION) !== generation) return;
 
-		for (;;) {
-			const generation = Atomics.load(this.#control, GENERATION);
-			if (Atomics.load(source.#control, GENERATION) !== generation) return;
-			if (this.#advanceRead(candidate, generation)) return;
-		}
+		this.#advanceRead(Atomics.load(source.#control, READ), generation);
 	}
 
 	/**
@@ -185,20 +182,25 @@ export class SharedRingBuffer {
 	 * What survives is bounded: READ at most at WRITE, which is the empty ring `truncate`
 	 * already documents, costing a quantum of silence that heals on the next insert.
 	 */
-	#advanceRead(candidate: number, generation: number): boolean {
-		const current = Atomics.load(this.#control, READ);
-		const write = Atomics.load(this.#control, WRITE);
+	#advanceRead(candidate: number, generation: number): number | undefined {
+		for (;;) {
+			if (Atomics.load(this.#control, GENERATION) !== generation) return undefined;
 
-		const target = ((candidate - write) | 0) > 0 ? write : candidate;
-		if (((target - current) | 0) <= 0) return true;
+			const current = Atomics.load(this.#control, READ);
+			const write = Atomics.load(this.#control, WRITE);
 
-		if (Atomics.compareExchange(this.#control, READ, current, target) !== current) return false;
+			const target = ((candidate - write) | 0) > 0 ? write : candidate;
+			if (((target - current) | 0) <= 0) return current;
 
-		if (Atomics.load(this.#control, GENERATION) !== generation) {
-			Atomics.compareExchange(this.#control, READ, target, current);
+			if (Atomics.compareExchange(this.#control, READ, current, target) !== current) continue;
+
+			if (Atomics.load(this.#control, GENERATION) !== generation) {
+				Atomics.compareExchange(this.#control, READ, target, current);
+				return undefined;
+			}
+
+			return target;
 		}
-
-		return true;
 	}
 
 	/**
@@ -301,6 +303,12 @@ export class SharedRingBuffer {
 	read(output: Float32Array[]): number {
 		if (Atomics.load(this.#control, STALLED) === 1) return 0;
 
+		// The timeline this read belongs to. STALLED is only checked on entry, so a reset plus a
+		// re-anchoring insert can rebase the cursors while this read is still copying. Everything
+		// below derives from the snapshot taken here, and committing any of it afterwards would
+		// park the playhead against an anchor that no longer exists.
+		const generation = Atomics.load(this.#control, GENERATION);
+
 		let read = Atomics.load(this.#control, READ);
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
@@ -311,7 +319,9 @@ export class SharedRingBuffer {
 		const buffered = (write - read) | 0;
 		if (!this.buffered && latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
-			read = casAdvance(this.#control, READ, skipTo);
+			const skipped = this.#advanceRead(skipTo, generation);
+			if (skipped === undefined) return 0;
+			read = skipped;
 		}
 
 		const available = (write - read) | 0;
@@ -327,8 +337,10 @@ export class SharedRingBuffer {
 			}
 		}
 
-		// Advance READ via CAS so a concurrent writer overflow can't be undone.
-		casAdvance(this.#control, READ, (read + count) | 0);
+		// Commit through the same guard: a re-anchor while we were copying means these samples
+		// belong to a playhead that no longer exists, so drop the quantum rather than publish a
+		// stale cursor. A quantum of silence is what `truncate` already trades for the same reason.
+		if (this.#advanceRead((read + count) | 0, generation) === undefined) return 0;
 
 		return count;
 	}
