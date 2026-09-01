@@ -101,7 +101,9 @@ test("draft-19 cannot bound the end object", () => {
 test("fill skips a length-prefixed range filter", () => {
 	// count=2, 0x26 len=3 AABBCC, delta 1 -> 0x27 len=1 DD
 	const encoded = new Uint8Array([0x02, 0x26, 0x03, 0xaa, 0xbb, 0xcc, 0x01, 0x01, 0xdd]);
-	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "unfiltered" });
+	// No LOCATION_FILTER, so the fill inherits the subscription's; a Range Filter's presence
+	// is what makes the publisher refuse it.
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: undefined, rangeFilters: true });
 });
 
 test("rejects too many fields", () => {
@@ -111,20 +113,23 @@ test("rejects too many fields", () => {
 // The canonical current-group join: an empty subscription filter paired with a fill that
 // starts one group back.
 test("fill encodes the current group join", () => {
-	const encoded = Filter.encodeFill({ kind: "relative", groups: 1n }, NEW);
+	const encoded = Filter.encodeFill({ filter: { kind: "relative", groups: 1n }, rangeFilters: false }, NEW);
 	// count=1, type=0x21, len=1, StartGroup=1
 	expect([...encoded]).toEqual([0x01, 0x21, 0x01, 0x01]);
-	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "relative", groups: 1n });
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
 test("fill round trips", () => {
-	const filters: Filter.Filter[] = [
-		{ kind: "unfiltered" },
-		{ kind: "relative", groups: 3n },
-		{ kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n },
+	const fills: Filter.Fill[] = [
+		// An omitted filter inherits the subscription's, which is a different request from an
+		// explicit unfiltered one.
+		{ filter: undefined, rangeFilters: false },
+		{ filter: { kind: "unfiltered" }, rangeFilters: false },
+		{ filter: { kind: "relative", groups: 3n }, rangeFilters: false },
+		{ filter: { kind: "absolute", startGroup: 4n, startObject: 0n, endGroup: 9n }, rangeFilters: false },
 	];
-	for (const filter of filters) {
-		expect(Filter.decodeFill(Filter.encodeFill(filter, NEW), NEW)).toEqual(filter);
+	for (const fill of fills) {
+		expect(Filter.decodeFill(Filter.encodeFill(fill, NEW), NEW)).toEqual(fill);
 	}
 });
 
@@ -154,11 +159,11 @@ test("draft-20 uses leading-ones varints above 63", () => {
 test("fill skips a uint8 parameter whose value has a leading one", () => {
 	// count=2, 0x20 (uint8) = 0x80, delta 1 -> 0x21 len=1 StartGroup=1
 	const encoded = new Uint8Array([0x02, 0x20, 0x80, 0x01, 0x01, 0x01]);
-	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "relative", groups: 1n });
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
 });
 
 test("fill skips allowed parameters it ignores", () => {
 	// count=2, 0x20 (even, one varint) = 42, delta 1 -> 0x21 (odd, length prefixed)
 	const encoded = new Uint8Array([0x02, 0x20, 0x2a, 0x01, 0x01, 0x02]);
-	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "relative", groups: 2n });
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 2n }, rangeFilters: false });
 });

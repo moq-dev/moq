@@ -1077,7 +1077,7 @@ test("SubscribeOk v18: no requestId", async () => {
 // preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property, which shares the
 // number 0x22 in the separate property registry.
 test("SubscribeOk v18: group order is a track property, not a parameter", async () => {
-	const msg = new Subscribe.SubscribeOk({ trackAlias: 42n });
+	const msg = new Subscribe.SubscribeOk({ trackAlias: 42n, properties: { groupOrder: 0x02 } });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
 	expect(Array.from(encoded)).toEqual([
@@ -1125,7 +1125,7 @@ test("SubscribeOk v18: rejects a zero group order property", async () => {
 // Draft-15 is the one version that takes it as a message parameter, and has no track
 // properties to put it in.
 test("SubscribeOk v15: group order is a message parameter", async () => {
-	const msg = new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n });
+	const msg = new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n, properties: { groupOrder: 0x02 } });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	expect(Array.from(encoded)).toEqual([

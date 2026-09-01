@@ -5,11 +5,15 @@ import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
+import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
-import { Frame, Group as GroupMessage } from "./object.ts";
+import { FetchHeader } from "./fetch.ts";
+import * as Filter from "./filter.ts";
+import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire } from "./priority.ts";
+import * as Properties from "./properties.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -21,7 +25,7 @@ import {
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
-import { Version } from "./version.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -68,7 +72,34 @@ interface RunGroup {
 	/** The track's advertised timescale, applied to every frame timestamp. */
 	timescale: Timescale;
 
+	/** The objects of this group the subscription's filter selects. */
+	slice: GroupSlice;
+
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+}
+
+/** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
+interface RunFill {
+	/** The subscription's request ID, which the fetch stream names. */
+	requestId: bigint;
+
+	/** The subscriber's delivery priority, applied to the fetch stream. */
+	priority: number;
+
+	/** The range the fill resolved to. */
+	fill: FillServe;
+
+	/** The broadcast to read the cached group from. */
+	broadcast: broadcast.Producer;
+
+	/** The track the fill belongs to. */
+	trackName: string;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
 }
 
@@ -173,12 +204,36 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.trackName, { priority: fromWire(msg.subscriberPriority) });
+		const priority = fromWire(msg.subscriberPriority);
+		const track = broadcast.subscribe(msg.trackName, { priority });
 
 		try {
-			// Declaring the timescale is what opts the track into timestamps; every object
-			// Timestamp below is in these units.
 			const timescale = (await track.info()).timescale;
+
+			// The filter and any fill are relative to the live edge, so snapshot it once: the
+			// fill ends exactly where a Next Object subscription begins, which is what lets
+			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
+			// group with no gap and no overlap.
+			const edge = liveEdge(track);
+			const range = subscribeRange(msg, edge, version);
+
+			// The wire request tells an upstream what we need; the cursor is what actually
+			// trims this subscriber, since the producer fans every cached group out to every
+			// sink regardless. An absent start joins at the latest group, which is what
+			// moq-lite means by joining a live track.
+			track.update({
+				priority,
+				startGroup: range.start && Number(range.start.group),
+				endGroup: range.end && Number(range.end.group),
+			});
+			const startGroup = range.start ? Number(range.start.group) : track.latest();
+			if (startGroup !== undefined) track.startAt(startGroup);
+			track.endAt(range.end && Number(range.end.group));
+
+			// A fill reads the group cache through its own consumer, independent of the
+			// subscription's cursor.
+			const fill =
+				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -188,7 +243,17 @@ export class Publisher {
 						? msg.requestId
 						: undefined,
 				trackAlias: msg.requestId,
-				timescale,
+				// Required once the track has content; a fill-requesting subscriber sizes its
+				// backfill against this.
+				largest: edge.largest && { groupId: edge.largest.group, objectId: edge.largest.object },
+				properties: msg.propertiesWanted
+					? // Declaring the timescale is what opts the track into timestamps; every
+						// object Timestamp below is in these units. We serve the newest group
+						// first, matching moq-lite.
+						{ timescale, groupOrder: Properties.DESCENDING }
+					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
+						// the track opts out of timestamps for this subscriber.
+						{},
 			});
 			await ok.encode(stream.writer, version);
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
@@ -214,13 +279,33 @@ export class Publisher {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup({ requestId: msg.requestId, group, timescale, unsubscribed });
+					void this.#runGroup({
+						requestId: msg.requestId,
+						group,
+						timescale,
+						slice: groupSlice(range, group.sequence),
+						unsubscribed,
+					});
 				}
 			})();
 
+			// The fill (when one was requested) runs alongside on its own fetch stream; its
+			// failures reset that stream and never touch the subscription.
+			const filling = fill
+				? this.#runFill({
+						requestId: msg.requestId,
+						priority,
+						fill,
+						broadcast,
+						trackName: msg.trackName,
+						timescale,
+						unsubscribed,
+					})
+				: Promise.resolve();
+
 			let publishError: Error | undefined;
 			try {
-				await Promise.race([serving, stream.reader.closed]);
+				await Promise.race([Promise.all([serving, filling]), stream.reader.closed]);
 			} catch (err: unknown) {
 				publishError = error(err);
 			}
@@ -265,7 +350,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, unsubscribed } = options;
+		const { requestId, group, timescale, slice, unsubscribed } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -292,19 +377,35 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: true,
 					hasPriority: true,
-					firstObject: true,
+					// Only honest when the stream really starts at the group's first object;
+					// a trimmed head starts partway through.
+					firstObject: slice.skip === 0,
 				},
 			});
 
 			await header.encode(stream, this.#session.version);
 
 			try {
+				// The first written object goes on the wire as its absolute id, so a trimmed
+				// head shows the true numbering rather than a silently renumbered group.
+				let first = true;
+				let next = 0;
+
 				for (;;) {
-					const frame = await Promise.race([group.readFrame(), stream.closed]);
+					// The filter ends inside this group: everything at `until` and beyond is
+					// outside the requested range, so stop without waiting for the group's end.
+					if (slice.until !== undefined && next >= slice.until) break;
+
+					const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
 					if (!frame) break;
+					next = frame.sequence + 1;
+					if (slice.until !== undefined && frame.sequence >= slice.until) break;
+					if (frame.sequence < slice.skip) continue;
 
 					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
-					await obj.encode(stream, header.flags, timescale, this.#session.version);
+					const delta = first ? frame.sequence : 0;
+					first = false;
+					await obj.encode(stream, header.flags, timescale, this.#session.version, delta);
 				}
 
 				stream.close();
@@ -313,6 +414,111 @@ export class Publisher {
 			}
 		} finally {
 			group.close();
+		}
+	}
+
+	/**
+	 * Serve a draft-20 fill on its own fetch stream: the requested range, read from the
+	 * group cache, capped at the Largest Object snapshot.
+	 *
+	 * A fill is a promise once requested. An empty range opens no stream, but a range we
+	 * cannot serve still opens one and resets it right after the FETCH_HEADER, the draft's
+	 * fill-failure signal. Nothing here touches the subscription either way.
+	 */
+	async #runFill(options: RunFill) {
+		const { requestId, fill, timescale, unsubscribed } = options;
+		if (fill.kind === "empty") return;
+
+		const version = this.#session.version;
+		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version });
+		if (!stream) {
+			console.debug(`fill stream failed to open: fill=${requestId}`);
+			return;
+		}
+
+		try {
+			await stream.u53(FetchHeader.type);
+			await new FetchHeader({ requestId }).encode(stream, version);
+
+			if (fill.kind !== "group") {
+				throw new Error("a fill spanning several groups is not supported");
+			}
+
+			const group = await this.#fetchFill(options, fill.sequence);
+			try {
+				await this.#writeFillGroup(stream, group, fill, timescale);
+			} finally {
+				group.close();
+			}
+
+			stream.close();
+			console.debug(`fill complete: fill=${requestId}`);
+		} catch (err: unknown) {
+			const e = error(err);
+			console.debug(`fill failed, resetting its stream: fill=${requestId} error=${reason(e)}`);
+			stream.reset(e);
+		}
+	}
+
+	/**
+	 * Read the fill's group out of the broadcast's cache.
+	 *
+	 * The group is at or below the Largest Object snapshot, so this resolves right away.
+	 * The race only covers the subscriber leaving in that window, and closes the group the
+	 * fetch hands back afterwards so its subscription is not left behind.
+	 */
+	async #fetchFill(options: RunFill, sequence: bigint): Promise<group.Consumer> {
+		let left = false;
+		const pending = options.broadcast.fetchGroup(options.trackName, Number(sequence), {
+			priority: options.priority,
+		});
+		void pending.then(
+			(group) => {
+				if (left) group.close();
+			},
+			() => undefined,
+		);
+
+		const group = await Promise.race([
+			pending,
+			options.unsubscribed.then(() => {
+				left = true;
+				return undefined;
+			}),
+		]);
+		if (!group) throw new Error("unsubscribed before the fill's group resolved");
+		return group;
+	}
+
+	/**
+	 * Write one cached group's frames as draft-20 fetch objects.
+	 *
+	 * The cap is the Largest Object snapshot: the group may keep growing, but everything
+	 * past the snapshot belongs to the subscription, not the fill.
+	 */
+	async #writeFillGroup(stream: Writer, group: group.Consumer, fill: FillGroup, timescale: Timescale) {
+		let first = true;
+		let next = 0n;
+
+		for (;;) {
+			// The group may keep growing, but everything at `until` and beyond belongs to the
+			// subscription, so stop without waiting for the group's end.
+			if (fill.until !== undefined && next >= fill.until) break;
+
+			const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
+			if (!frame) break;
+			next = BigInt(frame.sequence) + 1n;
+			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
+			if (BigInt(frame.sequence) < fill.skip) continue;
+
+			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
+			await obj.encode(
+				stream,
+				{ group: Number(fill.sequence), object: frame.sequence, first },
+				timescale,
+				this.#session.version,
+			);
+			first = false;
 		}
 	}
 
@@ -718,4 +924,221 @@ export class Publisher {
 			return undefined;
 		});
 	}
+}
+
+/** A `{group, object}` position, in the Location Filter's own units. */
+interface Location {
+	/** The group's sequence number. */
+	group: bigint;
+	/** The object's id within that group. */
+	object: bigint;
+}
+
+/** Where a range ends, inclusive. An absent `object` includes the whole end group. */
+interface EndLocation {
+	/** The last group to serve. */
+	group: bigint;
+	/** The last object within it, or the whole group when absent. */
+	object?: bigint;
+}
+
+/**
+ * The live edge a SUBSCRIBE resolves against, snapshotted once so the subscription floor,
+ * the fill cap, and the advertised LARGEST_OBJECT all agree on where it is.
+ */
+interface LiveEdge {
+	/** The newest group sequence, absent before any group exists. */
+	latest?: bigint;
+
+	/**
+	 * The precise Largest Object. Absent when the track has no readable frame, in which case
+	 * nothing is advertised and no fill is servable.
+	 */
+	largest?: Location;
+
+	/**
+	 * One past the Largest Object, which is where a Next Object subscription begins. With no
+	 * readable object anywhere this falls back to the newest group's start, which excludes
+	 * nothing the cache can still name.
+	 */
+	next?: Location;
+}
+
+/** The Locations a SUBSCRIBE's Location Filter selects, resolved against the live edge. */
+interface ServeRange {
+	/** The first Location to serve, or the start of the latest group when absent. */
+	start?: Location;
+
+	/**
+	 * Where the range ends, inclusive, or open ended when absent. The subscription stays open
+	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
+	 */
+	end?: EndLocation;
+}
+
+/** The slice of one group a subscription's {@link ServeRange} selects. */
+interface GroupSlice {
+	/** Objects dropped from the front; also the first written object's absolute id. */
+	skip: number;
+
+	/** One past the last object to write, when the filter ends inside this group. */
+	until?: number;
+}
+
+/** A fill resolved to a single group of the cache. */
+interface FillGroup {
+	kind: "group";
+	/** The group to serve. */
+	sequence: bigint;
+	/** Objects dropped from the front. */
+	skip: bigint;
+	/** One past the last object to write, capping the fill at the Largest Object snapshot. */
+	until?: bigint;
+}
+
+/** What a draft-20 fill request resolves to. */
+type FillServe =
+	/** The range is empty, so no fetch stream is opened at all. */
+	| { kind: "empty" }
+	| FillGroup
+	/**
+	 * A range spanning several groups, which we do not serve: multi-group fetch
+	 * serialization depends on a negotiated group order we do not implement, so the stream is
+	 * reset instead, the draft's fill-failure signal.
+	 */
+	| { kind: "unsupported" };
+
+/** `a - b`, saturating at zero the way the draft's unsigned arithmetic does. */
+function saturatingSub(a: bigint, b: bigint): bigint {
+	return a > b ? a - b : 0n;
+}
+
+/** Snapshot the live edge of a track. */
+function liveEdge(track: track.Subscriber): LiveEdge {
+	const latest = track.latest();
+	if (latest === undefined) return {};
+
+	const largest = track.largest();
+	if (!largest) return { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
+
+	const group = BigInt(largest.group);
+	const object = BigInt(largest.frame);
+	return { latest: BigInt(latest), largest: { group, object }, next: { group, object: object + 1n } };
+}
+
+/**
+ * Resolve a SUBSCRIBE's Location Filter into the range to serve.
+ *
+ * Only draft-20 is honored. Earlier drafts have a Filter Type tag whose absolute forms we
+ * never served, and starting to interpret them now would change what an existing peer
+ * receives; draft-20 is also the first version whose relative forms can name a past group
+ * without the subscriber knowing Largest Object.
+ */
+function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): ServeRange {
+	if (!Filter.isDraft20(version)) {
+		if (msg.filter.kind !== "nextObject" && msg.filter.kind !== "unfiltered") {
+			console.warn(`filter not supported before draft-20, ignoring: ${msg.filter.kind}`);
+		}
+		return {};
+	}
+
+	return filterRange(msg.filter, edge);
+}
+
+/** The Locations a single Location Filter selects, resolved against the live edge. */
+function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
+	switch (filter.kind) {
+		// No restriction. moq-lite starts at the beginning of the latest group, which is the
+		// join point it is built around; a subscription passes objects as they are published,
+		// so an absent filter is not a request to replay history.
+		case "unfiltered":
+			return {};
+		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already
+		// published head of the current group, is outside the requested range, so the join is
+		// mid-group by construction. The draft pairs this with a fill when the subscriber
+		// wants the head; see {@link Publisher.runFill}.
+		case "nextObject":
+			return { start: edge.next };
+		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one.
+		// Counted from `Largest.Group`, which sits below the newest group while that group has
+		// no objects yet; only with no largest at all does the newest group stand in for it.
+		case "relative": {
+			const base = edge.largest?.group ?? edge.latest;
+			if (base === undefined) return {};
+			return { start: { group: saturatingSub(base + 1n, filter.groups), object: 0n } };
+		}
+		case "absolute":
+			return {
+				start: { group: filter.startGroup, object: filter.startObject },
+				end: filter.endGroup === undefined ? undefined : { group: filter.endGroup, object: filter.endObject },
+			};
+	}
+}
+
+/**
+ * Trim a group to the filter's object bounds, so nothing outside the requested range is
+ * sent. Interior groups are served whole.
+ */
+function groupSlice(range: ServeRange, sequence: number): GroupSlice {
+	const at = BigInt(sequence);
+	return {
+		skip: range.start?.group === at ? Number(range.start.object) : 0,
+		until: range.end?.group === at && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
+	};
+}
+
+/**
+ * Resolve a fill request using the Fetch rules: relative to Largest Object and never
+ * extending beyond it. An omitted Location Filter inherits the subscription's.
+ */
+function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Location): FillServe {
+	// A Range Filter narrows which objects pass, which we do not implement; serving the
+	// unfiltered range instead would deliver objects the peer excluded, so refuse it.
+	if (fill.rangeFilters) return { kind: "unsupported" };
+	const filter = fill.filter ?? subscription;
+
+	// Nothing published (or no precise edge to cap at) means no fill is servable; an empty
+	// range opens no stream.
+	if (!largest) return { kind: "empty" };
+
+	let start: Location;
+	switch (filter.kind) {
+		// A Fetch without a filter is the whole track up to Largest Object.
+		case "unfiltered":
+			start = { group: 0n, object: 0n };
+			break;
+		// One past the edge, which for a Fetch is always empty.
+		case "nextObject":
+			return { kind: "empty" };
+		case "relative":
+			start = { group: saturatingSub(largest.group + 1n, filter.groups), object: 0n };
+			break;
+		case "absolute":
+			start = { group: filter.startGroup, object: filter.startObject };
+			break;
+	}
+
+	// Cap the requested end at Largest Object.
+	let end: EndLocation = { group: largest.group, object: largest.object };
+	if (filter.kind === "absolute" && filter.endGroup !== undefined) {
+		const below =
+			filter.endGroup < largest.group ||
+			(filter.endGroup === largest.group && filter.endObject !== undefined && filter.endObject < largest.object);
+		if (below) end = { group: filter.endGroup, object: filter.endObject };
+	}
+
+	if (
+		start.group > end.group ||
+		(start.group === end.group && end.object !== undefined && end.object < start.object)
+	) {
+		return { kind: "empty" };
+	}
+	if (start.group !== end.group) return { kind: "unsupported" };
+
+	return {
+		kind: "group",
+		sequence: start.group,
+		skip: start.object,
+		until: end.object === undefined ? undefined : end.object + 1n,
+	};
 }

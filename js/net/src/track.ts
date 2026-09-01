@@ -33,6 +33,14 @@ type BufferedDatagram = { datagram: Datagram; time: number };
  */
 const MAX_DATAGRAM_BYTES = 65535;
 
+/** A position within a track: a group's sequence and a frame's index inside it. */
+export interface Location {
+	/** The group's sequence number within the track. */
+	group: number;
+	/** The frame's index within that group. */
+	frame: number;
+}
+
 /**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
@@ -686,6 +694,29 @@ export class Subscriber {
 	/** Return the latest group sequence observed on this track, if any. */
 	latest(): number | undefined {
 		return this.#state.latest;
+	}
+
+	/**
+	 * The newest frame this track has produced, or `undefined` while it has none.
+	 *
+	 * Read from the groups buffered for this subscriber, so nothing is consumed. A newest
+	 * group that has no frames yet falls back to the newest older group that does. It
+	 * reads as `undefined` once the newest group has been evicted or received: what is
+	 * left can no longer say where the edge is.
+	 */
+	largest(): Location | undefined {
+		const latest = this.#state.latest;
+		if (latest === undefined) return undefined;
+
+		const groups = this.#state.groups.peek();
+		const newest = groups[groups.length - 1];
+		if (!newest || newest.sequence !== latest) return undefined;
+
+		for (let i = groups.length - 1; i >= 0; i--) {
+			const count = groups[i].frameCount;
+			if (count > 0) return { group: groups[i].sequence, frame: count - 1 };
+		}
+		return undefined;
 	}
 
 	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */

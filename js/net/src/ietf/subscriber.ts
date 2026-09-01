@@ -21,7 +21,7 @@ import {
 	PublishNamespaceOk,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
 	SubscribeNamespace,
@@ -583,6 +583,13 @@ export class Subscriber {
 			trackNamespace: broadcast,
 			trackName: request.name,
 			subscriberPriority: toWire(request.priority),
+			// No fill is requested: the fill's fetch stream and the live subscription split
+			// the group across two streams, and this subscriber does not reassemble them into
+			// one group yet. A lenient publisher (like ours) replays the whole in-range group
+			// on the subscription instead; a strict one only delivers from the next published
+			// object, and that mid-group stream is dropped, degrading the join to the next
+			// group boundary.
+			filter: joinFilter(version),
 		});
 		await msg.encode(state.stream.writer, version);
 		state.sent = true;
@@ -615,8 +622,9 @@ export class Subscriber {
 
 		try {
 			this.#aliases.set(ok.trackAlias, producer, { broadcast, name: request.name });
-			if (ok.timescale !== undefined) {
-				this.#timescales.set(ok.trackAlias, ok.timescale);
+			const timescale = ok.properties.timescale;
+			if (timescale !== undefined) {
+				this.#timescales.set(ok.trackAlias, timescale);
 			}
 		} catch (err) {
 			// Only one alias naming two different tracks is the session's problem. A publisher

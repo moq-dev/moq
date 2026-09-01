@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -206,10 +207,62 @@ function decodeTag(data: Uint8Array, version: IetfVersion): Filter {
 	}
 }
 
+/**
+ * Read the tagged filter draft-14 carries inline in a SUBSCRIBE body, where the fields
+ * following the tag have no length to delimit them.
+ *
+ * Every tag is read, including the absolute forms we do not serve. Rejecting one would tear
+ * the session down over a filter the draft lets a subscriber send; what we do with it is
+ * decided when the range is resolved.
+ */
+export async function decodeInline(r: Reader): Promise<Filter> {
+	const tag = await r.u62();
+	switch (tag) {
+		case TAG_NEXT_GROUP:
+			return { kind: "relative", groups: 0n };
+		case TAG_LARGEST_OBJECT:
+			return { kind: "nextObject" };
+		case TAG_ABSOLUTE_START:
+			return { kind: "absolute", startGroup: await r.u62(), startObject: await r.u62() };
+		case TAG_ABSOLUTE_RANGE: {
+			const startGroup = await r.u62();
+			const startObject = await r.u62();
+			const delta = await r.u62();
+			return { kind: "absolute", startGroup, startObject, endGroup: startGroup + delta };
+		}
+		default:
+			throw new Error(`unsupported filter type: ${tag}`);
+	}
+}
+
 function expectEmpty(rest: Uint8Array): void {
 	if (rest.length !== 0) {
 		throw new Error("trailing bytes in LOCATION_FILTER");
 	}
+}
+
+/**
+ * A draft-20 fill: the backfill a subscriber asks for alongside its subscription.
+ *
+ * The publisher serves one whose range resolves to a single group, straight from the group
+ * cache on a fetch stream. That covers the draft's own current-group join (a Next Object
+ * subscription plus a `StartGroup=1` fill). Anything wider is refused by resetting the
+ * fetch stream, the draft's fill-failure signal.
+ */
+export interface Fill {
+	/**
+	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
+	 * the subscription's own filter; `unfiltered` (a zero length filter) means the whole
+	 * track up to Largest Object.
+	 */
+	filter?: Filter;
+
+	/**
+	 * Whether the scope carried a Range Filter (0x25-0x28). Those narrow which objects pass,
+	 * which we do not implement, and serving the unfiltered range instead would deliver
+	 * objects the peer excluded. Never encoded; we send no range filters.
+	 */
+	rangeFilters: boolean;
 }
 
 /** LOCATION_FILTER, the only parameter we act on inside a fill. */
@@ -250,21 +303,22 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  *
  * The value is a nested parameter scope, encoded like a message's parameters.
  */
-export function encodeFill(filter: Filter, version: IetfVersion): Uint8Array {
-	if (filter.kind === "unfiltered") {
-		// An empty scope fills the whole track up to Largest Object.
+export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
+	// An omitted filter inherits the subscription's, so the scope is empty. An explicit
+	// unfiltered still encodes, as a zero length filter meaning the whole track.
+	if (fill.filter === undefined) {
 		return varint(0n, version);
 	}
 	return concat([
 		varint(1n, version),
 		// The first type in a scope is not delta encoded, so this is the raw id.
 		varint(FILL_LOCATION_FILTER, version),
-		encodeLengthPrefixed(encode(filter, version), version),
+		encodeLengthPrefixed(encode(fill.filter, version), version),
 	]);
 }
 
 /** Decode FILL_PARAMETERS, returning the range it asks to fill. */
-export function decodeFill(data: Uint8Array, version: IetfVersion): Filter {
+export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	const [count, afterCount] = unvarint(data, version);
 	if (count > 64n) {
 		throw new Error("too many parameters in FILL_PARAMETERS");
@@ -272,6 +326,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Filter {
 
 	let rest = afterCount;
 	let filter: Filter | undefined;
+	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
 		const [delta, afterType] = unvarint(rest, version);
@@ -283,6 +338,10 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Filter {
 		if (framing === undefined) {
 			throw new Error(`parameter ${key} is not allowed inside FILL_PARAMETERS`);
 		}
+
+		// A Range Filter changes which objects the fill may contain, so its presence is
+		// recorded even though its value is not interpreted.
+		rangeFilters ||= key >= 0x25n && key <= 0x28n;
 
 		// The rest are parameters we do not act on, but their bytes still have to be
 		// consumed or the remaining keys desync.
@@ -315,7 +374,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Filter {
 		throw new Error("trailing bytes in FILL_PARAMETERS");
 	}
 
-	return filter ?? { kind: "unfiltered" };
+	return { filter, rangeFilters };
 }
 
 function encodeLengthPrefixed(value: Uint8Array, version: IetfVersion): Uint8Array {

@@ -127,6 +127,10 @@ export class Producer {
 		const dst = new GroupState(this.sequence);
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.offset = this.#state.offset;
+		// The replay only covers what is still buffered, so the count has to come from the
+		// source: it is what names a frame's absolute sequence, and what a publisher reads
+		// to resolve the live edge.
+		dst.total.set(this.#state.total.peek());
 
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
@@ -275,6 +279,16 @@ export class Consumer {
 	/** True if frames were evicted from the front of this group before being read. */
 	get skipped(): boolean {
 		return this.#state.offset > 0;
+	}
+
+	/**
+	 * How many frames the group has held, including any already read or evicted.
+	 *
+	 * It is also the next frame's sequence number, so `frameCount - 1` names the newest
+	 * frame written so far. A publisher snapshots it to resolve the track's live edge.
+	 */
+	get frameCount(): number {
+		return this.#state.total.peek();
 	}
 
 	/**

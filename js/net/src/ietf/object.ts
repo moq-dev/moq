@@ -268,9 +268,14 @@ export class Frame {
 		this.timestamp = timestamp;
 	}
 
-	/** Encode this frame using the group flags and negotiated IETF version. */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version): Promise<void> {
-		await w.u53(0); // id_delta = 0
+	/**
+	 * Encode this frame using the group flags and negotiated IETF version.
+	 *
+	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
+	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
+	 */
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
+		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
 			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
@@ -337,5 +342,65 @@ export class Frame {
 		}
 
 		throw new Error(`Unsupported object status: ${status}`);
+	}
+}
+
+// Serialization Flags for a fetch object: the two low bits encode the subgroup (00 =
+// subgroup zero), then one presence bit per field.
+const FETCH_OBJECT_ID = 0x04;
+const FETCH_GROUP_ID = 0x08;
+const FETCH_PRIORITY = 0x10;
+const FETCH_PROPERTIES = 0x20;
+
+/** Where a {@link FetchFrame} sits in the track, and whether it opens the stream. */
+export interface FetchPosition {
+	/** The group's sequence number. */
+	group: number;
+	/** The object's id within that group. */
+	object: number;
+	/** Whether this is the stream's first object, which is what carries the absolute ids. */
+	first: boolean;
+}
+
+/**
+ * A moq-transport object inside a fetch stream, which a publisher writes to serve a fill.
+ *
+ * The first object carries its absolute Group and Object IDs plus the priority; every later
+ * one inherits them and increments the Object ID, so only the properties and the payload go
+ * on the wire. A fetch object has no status field: a zero payload length is simply an empty
+ * object.
+ */
+export class FetchFrame {
+	/** The object payload. */
+	payload: Uint8Array;
+	/** The presentation timestamp carried in object properties, when present. */
+	timestamp?: Timestamp;
+
+	constructor({ payload, timestamp }: { payload: Uint8Array; timestamp?: Timestamp }) {
+		this.payload = payload;
+		this.timestamp = timestamp;
+	}
+
+	/** Encode this object at `position`, stamping it in the track's timescale. */
+	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
+		if (position.first) {
+			// Include the priority too: "same as the prior object" has no prior to refer to.
+			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | FETCH_PROPERTIES);
+			await w.u53(position.group);
+			await w.u53(position.object);
+			await w.u8(0);
+		} else {
+			// Same group and priority; the Object ID is the prior one plus one.
+			await w.u53(FETCH_PROPERTIES);
+		}
+
+		const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
+		await w.u53(extensions.byteLength);
+		await w.write(extensions);
+
+		await w.u53(this.payload.byteLength);
+		if (this.payload.byteLength > 0) {
+			await w.write(this.payload);
+		}
 	}
 }

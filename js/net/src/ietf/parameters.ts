@@ -215,7 +215,8 @@ const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 const MSG_PARAM_HOP_PATH = 0x40b57n;
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
-type MessageLocation = { groupId: bigint; objectId: bigint };
+/** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
+export type MessageLocation = { groupId: bigint; objectId: bigint };
 
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {

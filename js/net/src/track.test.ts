@@ -414,3 +414,34 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 
 	expect(await track.readString()).toBe("hello");
 }, 2000);
+
+// The IETF publisher resolves Largest Object from this, so it has to name a frame, not just
+// a group: a filter is applied down to the object.
+test("largest names the newest frame written", async () => {
+	const producer = new TrackProducer("test").accept();
+	const subscriber = producer.subscribe();
+
+	// Nothing published yet.
+	expect(subscriber.largest()).toBeUndefined();
+
+	const first = producer.appendGroup();
+	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
+	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+	first.close();
+
+	// A group with no frames yet has no object of its own, so the edge stays in the group
+	// before it rather than reading as an empty track.
+	const second = producer.appendGroup();
+	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+
+	second.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.now() });
+	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
+	second.close();
+
+	// Reading a group does not move the edge: it is what the track produced, not what is left.
+	await subscriber.recvGroup();
+	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
+
+	producer.close();
+});
