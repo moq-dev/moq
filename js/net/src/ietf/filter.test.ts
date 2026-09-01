@@ -137,6 +137,26 @@ test("fill rejects a disallowed parameter", () => {
 
 // An allowed parameter we ignore still has to be consumed, or the keys after it desync.
 // Parity decides how many bytes that is.
+// Draft-17 replaced QUIC's varint with a leading-1-bits one. They agree below 64, so a
+// wrong codec is invisible until group or object ids grow past that, and then Rust and JS
+// stop understanding each other's filters.
+test("draft-20 uses leading-ones varints above 63", () => {
+	// 128 is 0x80_80 with leading ones, and 0x40_80 with the QUIC form.
+	expect([...Filter.encode({ kind: "relative", groups: 128n }, NEW)]).toEqual([0x80, 0x80]);
+	expect(roundTrip({ kind: "relative", groups: 128n }, NEW)).toEqual({ kind: "relative", groups: 128n });
+
+	const wide: Filter.Filter = { kind: "absolute", startGroup: 300n, startObject: 64n };
+	expect(roundTrip(wide, NEW)).toEqual({ ...wide, endGroup: undefined, endObject: undefined });
+});
+
+// A uint8 parameter is one raw byte, so a priority of 128 or more would be read as a
+// multi-byte varint prefix and swallow the parameter after it.
+test("fill skips a uint8 parameter whose value has a leading one", () => {
+	// count=2, 0x20 (uint8) = 0x80, delta 1 -> 0x21 len=1 StartGroup=1
+	const encoded = new Uint8Array([0x02, 0x20, 0x80, 0x01, 0x01, 0x01]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "relative", groups: 1n });
+});
+
 test("fill skips allowed parameters it ignores", () => {
 	// count=2, 0x20 (even, one varint) = 42, delta 1 -> 0x21 (odd, length prefixed)
 	const encoded = new Uint8Array([0x02, 0x20, 0x2a, 0x01, 0x01, 0x02]);

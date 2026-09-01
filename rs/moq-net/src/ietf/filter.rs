@@ -318,6 +318,21 @@ mod tests {
 		);
 	}
 
+	/// Draft-17 replaced QUIC's varint with a leading-1-bits one. They agree below 64, so a
+	/// wrong codec stays invisible until group or object ids grow past that.
+	#[test]
+	fn draft20_uses_leading_ones_varints_above_63() {
+		// 128 is 0x80_80 with leading ones, and 0x40_80 with the QUIC form.
+		assert_eq!(value(Filter::Relative(128), NEW), vec![0x80, 0x80]);
+		assert_eq!(round_trip(Filter::Relative(128), NEW), Filter::Relative(128));
+
+		let wide = Filter::Absolute {
+			start: Location { group: 300, object: 64 },
+			end: None,
+		};
+		assert_eq!(round_trip(wide, NEW), wide);
+	}
+
 	/// The current group is what moq-lite means by joining a track, and draft-20 is the
 	/// first version that can name it without knowing Largest Object.
 	#[test]
@@ -452,6 +467,17 @@ mod tests {
 	}
 }
 
+/// How a parameter inside a FILL_PARAMETERS scope frames its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Framing {
+	/// A single raw byte, which is what the draft's `uint8` parameters are.
+	Byte,
+	/// A variable-length integer.
+	Varint,
+	/// A length prefix followed by that many bytes.
+	Bytes,
+}
+
 /// The FILL_PARAMETERS parameter (0x23), draft-20's request for a backfill.
 ///
 /// Its presence is what asks for one. The value is a nested parameter scope describing the
@@ -471,23 +497,24 @@ impl Fill {
 	/// LOCATION_FILTER, the only nested parameter that changes what we deliver.
 	const LOCATION_FILTER: u64 = 0x21;
 
-	/// The parameters the draft allows inside FILL_PARAMETERS, and whether each carries a
-	/// length prefix. Anything absent from this table is a protocol violation rather than
-	/// something to skip.
+	/// The parameters the draft allows inside FILL_PARAMETERS, and how each frames its
+	/// value. Anything absent from this table is a protocol violation rather than something
+	/// to skip.
 	///
-	/// The Key-Value-Pair rule keys the framing off the id's parity, but the Range Filters
-	/// (0x25-0x28) are written with an explicit `Length` field despite two of them having
-	/// even ids. Their own definition wins, so the framing is tabulated here rather than
-	/// derived: reading 0x26 or 0x28 as a bare varint would desync every parameter after it.
-	const ALLOWED: &'static [(u64, bool)] = &[
-		(0x0A, false), // FILL_TIMEOUT, a varint
-		(0x20, false), // SUBSCRIBER_PRIORITY, a uint8 varint
-		(Self::LOCATION_FILTER, true),
-		(0x22, false), // GROUP_ORDER, a uint8 varint
-		(0x25, true),  // SUBGROUP_FILTER
-		(0x26, true),  // OBJECTID_FILTER, length prefixed despite an even id
-		(0x27, true),  // PRIORITY_FILTER
-		(0x28, true),  // OBJECT_PROPERTY_FILTER, likewise
+	/// The framing is tabulated rather than derived, because neither shortcut is right. The
+	/// Key-Value-Pair rule keys it off the id's parity, but the Range Filters (0x25-0x28)
+	/// carry an explicit `Length` despite two of them having even ids. And a `uint8`
+	/// parameter is one raw byte rather than a varint, so reading it as one misparses any
+	/// value with a leading 1-bit. Either mistake desyncs every parameter after it.
+	const ALLOWED: &'static [(u64, Framing)] = &[
+		(0x0A, Framing::Varint), // FILL_TIMEOUT
+		(0x20, Framing::Byte),   // SUBSCRIBER_PRIORITY, a uint8
+		(Self::LOCATION_FILTER, Framing::Bytes),
+		(0x22, Framing::Byte),  // GROUP_ORDER, a uint8
+		(0x25, Framing::Bytes), // SUBGROUP_FILTER
+		(0x26, Framing::Bytes), // OBJECTID_FILTER, length prefixed despite an even id
+		(0x27, Framing::Bytes), // PRIORITY_FILTER
+		(0x28, Framing::Bytes), // OBJECT_PROPERTY_FILTER, likewise
 	];
 }
 
@@ -530,7 +557,7 @@ impl Param for Fill {
 			};
 			prev = key;
 
-			let Some((_, length_prefixed)) = Self::ALLOWED.iter().find(|(id, _)| *id == key) else {
+			let Some((_, framing)) = Self::ALLOWED.iter().find(|(id, _)| *id == key) else {
 				return Err(DecodeError::InvalidValue);
 			};
 
@@ -544,12 +571,15 @@ impl Param for Fill {
 
 			// The rest are parameters we do not act on, but their bytes still have to be
 			// consumed or the remaining keys desync.
-			match length_prefixed {
-				true => {
+			match framing {
+				Framing::Bytes => {
 					Vec::<u8>::decode(&mut buf, version)?;
 				}
-				false => {
+				Framing::Varint => {
 					u64::decode(&mut buf, version)?;
+				}
+				Framing::Byte => {
+					u8::decode(&mut buf, version)?;
 				}
 			}
 		}
@@ -622,6 +652,24 @@ mod fill_tests {
 		value.encode(&mut buf, NEW).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
 		assert!(Fill::param_decode(&mut bytes, NEW).is_err());
+	}
+
+	/// A uint8 parameter is one raw byte, so a priority of 128 or more would be read as a
+	/// multi-byte varint prefix and swallow the parameter after it.
+	#[test]
+	fn skips_a_uint8_whose_value_has_a_leading_one() {
+		let mut value = Vec::new();
+		2u64.encode(&mut value, NEW).unwrap();
+		0x20u64.encode(&mut value, NEW).unwrap(); // SUBSCRIBER_PRIORITY
+		0x80u8.encode(&mut value, NEW).unwrap(); // a raw byte, not a varint
+		1u64.encode(&mut value, NEW).unwrap(); // delta to 0x21
+		Filter::Relative(1).param_encode(&mut value, NEW).unwrap();
+
+		let mut buf = Vec::new();
+		value.encode(&mut buf, NEW).unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
+		assert_eq!(fill.filter, Filter::Relative(1));
 	}
 
 	/// An allowed parameter we ignore still has to be consumed, or the keys after it
