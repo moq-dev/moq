@@ -3610,8 +3610,8 @@ struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
 	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet, or a spliced track
-	/// between segments), in which case nothing is advertised and no fill is servable.
+	/// group's frames cannot be read right now, in which case nothing is advertised and
+	/// no fill is servable.
 	largest: Option<Location>,
 	/// One past the Largest Object, which is where a Next Object subscription begins.
 	/// When the edge is imprecise this falls back to the next group boundary: never below
@@ -3669,10 +3669,13 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 }
 
 /// The last object below `sequence`: the nearest earlier cached group that has started a
-/// frame, walked in cache order so legal gaps in the group numbering are crossed. Empty
-/// groups exist for at most the instant between creation and first frame, so the walk is
-/// one step in practice. A group evicted from the cache is not visible, which is fine:
-/// Largest Object is the track from this publisher's perspective, and that is the cache.
+/// frame, walked in cache order so legal gaps in the group numbering are crossed and a
+/// spliced track's older segments are reached. Empty groups exist for at most the instant
+/// between creation and first frame, so within a segment the walk is one step in
+/// practice; a takeover is what makes it more. A group evicted from the cache is not
+/// visible, which is fine: Largest Object is the track from this publisher's perspective,
+/// and that is the cache. The newest group is never evicted, so the walk always has a
+/// floor to stop at.
 fn largest_before(track: &track::Consumer, sequence: u64) -> Option<Location> {
 	let mut sequence = sequence;
 	loop {
@@ -4061,6 +4064,73 @@ mod range_tests {
 		assert_eq!(edge.latest, Some(2));
 		assert_eq!(edge.largest, Some(Location { group: 0, object: 0 }));
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
+	}
+
+	/// Build a spliced track: `old` serving up to the boundary, `new` from it on.
+	fn spliced(boundary: u64) -> (track::Producer, track::Producer, track::Consumer) {
+		let broadcast = std::sync::Arc::new(crate::broadcast::Info::default());
+		let old = track::Producer::new(broadcast.clone(), "video", None);
+		let new = track::Producer::new(broadcast, "video", None);
+
+		let mut resume = crate::model::resume::Producer::new();
+		resume.takeover(old.consume()).unwrap();
+		resume.switch(new.consume(), boundary).unwrap();
+
+		(old, new, track::Consumer::spliced("video".into(), resume.consume()))
+	}
+
+	fn write_frames(group: &mut group::Producer, count: usize) {
+		for _ in 0..count {
+			group
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+	}
+
+	/// A takeover splices a fresh track in above the old one. Resolving the edge against
+	/// the newest segment alone reads the whole logical track as empty, and unlike an
+	/// empty newest group that lasts an instant, this lasts the entire failover window.
+	#[tokio::test]
+	async fn an_empty_spliced_segment_keeps_the_previous_edge() {
+		let (mut old, _new, track) = spliced(1);
+
+		let mut group = old.create_group(group::Info { sequence: 0 }).unwrap();
+		write_frames(&mut group, 3);
+		group.finish().unwrap();
+
+		// The new route serves from group 1 onward but hasn't produced anything yet.
+		let edge = live_edge(&track);
+		assert_eq!(edge.latest, Some(0));
+		assert_eq!(
+			edge.largest,
+			Some(Location { group: 0, object: 2 }),
+			"the previous segment's edge survives the takeover"
+		);
+		assert_eq!(edge.next, Some(Location { group: 0, object: 3 }));
+	}
+
+	/// The walkback itself has to cross the boundary: the new route's first group exists
+	/// but has no objects yet, so the largest sits in the segment below it.
+	#[tokio::test]
+	async fn the_walkback_crosses_a_spliced_segment() {
+		let (mut old, mut new, track) = spliced(1);
+
+		let mut group = old.create_group(group::Info { sequence: 0 }).unwrap();
+		write_frames(&mut group, 3);
+		group.finish().unwrap();
+
+		// Created on the new route, not yet written: the instant the walkback exists for,
+		// except the earlier group is in another segment.
+		let _open = new.create_group(group::Info { sequence: 1 }).unwrap();
+
+		let edge = live_edge(&track);
+		assert_eq!(edge.latest, Some(1));
+		assert_eq!(
+			edge.largest,
+			Some(Location { group: 0, object: 2 }),
+			"the walk crosses into the previous segment"
+		);
+		assert_eq!(edge.next, Some(Location { group: 0, object: 3 }));
 	}
 
 	/// Both ends carry through, object bounds included, so the boundary groups can be
