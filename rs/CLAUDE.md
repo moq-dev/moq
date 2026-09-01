@@ -74,7 +74,7 @@ Two ways to drive things, both backed by `kio`:
 
 Sessions are caller-driven: `Client::connect` / `Server::accept` return a `(Session, Driver)` pair; nothing is spawned behind the caller's back. The `Session` is the handle, with the library's usual refcount lifecycle (clones share the connection, transport closes when the last clone drops, `abort(err)` closes explicitly). The `Driver` is the future running the protocol work: spawn it, await it in place, or step `Driver::poll(&kio::Waiter)` from another poll function. The invariant that keeps close-on-last-drop honest: **the `Driver` holds no `Session` clone**, so handing it to an executor never keeps the session alive (`moq-net/src/session.rs`). moq-native's `connect`/`ok` spawn the driver on tokio and return the plain `moq_net::Session`.
 
-Follow the root `poll_*` conventions: collapse `Poll::Pending => Poll::Pending` with `ready!(...)`, and prefer `Ok(x?)` over `.map_err(Into::into)` so a fallible poll reads `let v = ready!(inner.poll_next(cx))?;`. Representative `ready!` sites: `moq-mux/src/container/consumer.rs`, `moq-net/src/model/group.rs`.
+Follow the root `poll_*` conventions: use `ready!(...)` instead of matching `Poll::Pending => return Poll::Pending`. Both `Result<T, E>` and `Poll<Result<T, E>>` support `?` in a function returning `Poll<Result<_, _>>`; use `ready!(poll())?` when pending returns from the function, or `match poll()?` when pending needs a local arm. Prefer `Ok(x?)` over `.map_err(Into::into)`. Representative sites: `moq-mux/src/container/source.rs`, `moq-mux/src/container/ts/export.rs`.
 
 ## Version matching
 

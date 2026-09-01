@@ -1932,18 +1932,16 @@ fn poll_recv_next(
 ) -> Poll<Result<Recv, Error>> {
 	{
 		let mut groups_finished = false;
-		match track.poll_recv_group(waiter) {
-			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
-			Poll::Ready(Ok(None)) => groups_finished = true,
-			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+		match track.poll_recv_group(waiter)? {
+			Poll::Ready(Some(group)) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(None) => groups_finished = true,
 			Poll::Pending => {}
 		}
 		if datagrams {
-			match track.poll_recv_datagram(waiter) {
-				Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
+			match track.poll_recv_datagram(waiter)? {
+				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
 				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
-				Poll::Ready(Ok(None)) => {}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(None) => {}
 				Poll::Pending => {}
 			}
 		}

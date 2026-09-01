@@ -442,7 +442,7 @@ impl Consumer {
 	/// serving session may not have accepted it yet).
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<track::Info>> {
 		// Wait for the first segment (or a terminal state), then poll its info.
-		let track = match self.state.poll(waiter, |state| {
+		let track = match ready!(self.state.poll(waiter, |state| {
 			if state.abort.is_some() || !state.segments.is_empty() {
 				Poll::Ready(
 					state
@@ -453,15 +453,14 @@ impl Consumer {
 			} else {
 				Poll::Pending
 			}
-		}) {
-			Poll::Ready(Ok(res)) => res?,
-			Poll::Ready(Err(state)) => match (&state.abort, state.segments.first()) {
+		})) {
+			Ok(res) => res?,
+			Err(state) => match (&state.abort, state.segments.first()) {
 				(Some(err), _) => return Poll::Ready(Err(err.clone())),
 				(None, Some(segment)) => segment.track.clone(),
 				// Closed without ever getting a segment: nothing will resolve this.
 				(None, None) => return Poll::Ready(Err(Error::Dropped)),
 			},
-			Poll::Pending => return Poll::Pending,
 		};
 
 		track.info().poll_ok(waiter)
@@ -865,8 +864,8 @@ impl Subscriber {
 	/// error). Never consumes groups, so terminal-state pollers can share it.
 	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
-			match pending.poll_ok(waiter) {
-				Poll::Ready(Ok(mut sub)) => {
+			match ready!(pending.poll_ok(waiter)) {
+				Ok(mut sub) => {
 					// Enforce the floor on the read cursor, and re-slice demand in
 					// case a boundary moved while the subscription was pending. The
 					// upper bounds (segment boundary and `end_at` cap) are enforced by
@@ -877,8 +876,7 @@ impl Subscriber {
 					seg.sub = SubState::Active(sub);
 				}
 				// The underlying track was rejected or closed: stall, not error.
-				Poll::Ready(Err(_)) => seg.sub = SubState::Done(None),
-				Poll::Pending => return Poll::Pending,
+				Err(_) => seg.sub = SubState::Done(None),
 			}
 		}
 		Poll::Ready(())
@@ -897,8 +895,8 @@ impl Subscriber {
 				SubState::Pending(_) => {
 					ready!(Self::poll_activate(seg, prefs, min_sequence, waiter));
 				}
-				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
-					Poll::Ready(Ok(Some(group))) => {
+				SubState::Active(sub) => match ready!(sub.poll_recv_group(waiter)) {
+					Ok(Some(group)) => {
 						// `start_at` already floors the cursor; enforce the cap here since
 						// arrival-order reads don't honor `end_at`.
 						if let Some(end) = seg.end
@@ -908,7 +906,7 @@ impl Subscriber {
 						}
 						return Poll::Ready(Some(group));
 					}
-					Poll::Ready(Ok(None)) => {
+					Ok(None) => {
 						let count = sub.poll_finished(waiter).map(|res| res.ok());
 						let count = match count {
 							Poll::Ready(count) => count,
@@ -919,11 +917,10 @@ impl Subscriber {
 					}
 					// A dead segment stalls the logical track rather than erroring;
 					// the next switch resumes it.
-					Poll::Ready(Err(_)) => {
+					Err(_) => {
 						seg.sub = SubState::Done(None);
 						return Poll::Ready(None);
 					}
-					Poll::Pending => return Poll::Pending,
 				},
 				SubState::Done(_) => return Poll::Ready(None),
 			}
@@ -1060,14 +1057,13 @@ impl Subscriber {
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		loop {
 			if let Some(group) = &mut self.reading {
-				match group.poll_read_frame(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
+				match ready!(group.poll_read_frame(waiter)) {
+					Ok(Some(frame)) => {
 						self.reading = None;
 						return Poll::Ready(Ok(Some(frame)));
 					}
 					// An empty or broken group is skipped like a gap.
-					Poll::Ready(_) => self.reading = None,
-					Poll::Pending => return Poll::Pending,
+					_ => self.reading = None,
 				}
 				continue;
 			}
@@ -1097,13 +1093,10 @@ impl Subscriber {
 		if let Some(seg) = self.segments.last_mut() {
 			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter).is_pending() {
 				pending_activation = true;
-			} else if let SubState::Active(sub) = &mut seg.sub {
-				match sub.poll_recv_datagram(waiter) {
-					Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Some(datagram))),
-					// Terminal states fall through to the logical checks below.
-					Poll::Ready(_) => {}
-					Poll::Pending => return Poll::Pending,
-				}
+			} else if let SubState::Active(sub) = &mut seg.sub
+				&& let Ok(Some(datagram)) = ready!(sub.poll_recv_datagram(waiter))
+			{
+				return Poll::Ready(Ok(Some(datagram)));
 			}
 		}
 

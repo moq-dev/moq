@@ -390,10 +390,8 @@ impl<F: Container> Consumer<F> {
 				let mut discontinuities = 0;
 				if self.rewind.live_edge.is_some() {
 					for group in self.pending.iter_mut().take(new_idx) {
-						match group.poll_empty(waiter) {
-							Poll::Ready(true) => discontinuities += 1,
-							Poll::Ready(false) => {}
-							Poll::Pending => return Poll::Pending,
+						if ready!(group.poll_empty(waiter)) {
+							discontinuities += 1;
 						}
 					}
 				}

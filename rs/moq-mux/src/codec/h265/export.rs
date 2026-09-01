@@ -5,7 +5,7 @@
 //! hvcC) source and emits a raw Annex-B elementary stream. Timestamps are
 //! dropped.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -88,8 +88,8 @@ impl<S: Stream> Export<S> {
 				return Poll::Pending;
 			};
 
-			match track.source.poll_read(waiter) {
-				Poll::Ready(Ok(Some(frame))) => {
+			match ready!(track.source.poll_read(waiter))? {
+				Some(frame) => {
 					let bytes = match &track.convert {
 						None => frame.payload,
 						Some(convert) => {
@@ -102,12 +102,10 @@ impl<S: Stream> Export<S> {
 					}
 					return Poll::Ready(Ok(Some(bytes)));
 				}
-				Poll::Ready(Ok(None)) => {
+				None => {
 					self.track = None;
 					continue;
 				}
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-				Poll::Pending => return Poll::Pending,
 			}
 		}
 	}

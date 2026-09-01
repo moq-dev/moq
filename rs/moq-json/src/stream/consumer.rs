@@ -1,6 +1,6 @@
 //! Consuming an ordered log from a track: a [`Decoder`] plus the track it reads from.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use serde::de::DeserializeOwned;
 
@@ -45,26 +45,24 @@ impl<T: DeserializeOwned> Consumer<T> {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
 		loop {
 			let Some(group) = &mut self.group else {
-				match self.track.poll_next_group(waiter)? {
-					Poll::Ready(Some(group)) => {
+				match ready!(self.track.poll_next_group(waiter)?) {
+					Some(group) => {
 						// Each group is its own compressed stream, so the window starts cold.
 						self.decoder.reset();
 						self.group = Some(group);
 						continue;
 					}
-					Poll::Ready(None) => return Poll::Ready(Ok(None)),
-					Poll::Pending => return Poll::Pending,
+					None => return Poll::Ready(Ok(None)),
 				}
 			};
 
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => return Poll::Ready(Ok(Some(self.decoder.decode(&frame.payload)?))),
-				Poll::Ready(None) => {
+			match ready!(group.poll_read_frame(waiter)?) {
+				Some(frame) => return Poll::Ready(Ok(Some(self.decoder.decode(&frame.payload)?))),
+				None => {
 					// This group is exhausted. Clear it and poll for a later one, which starts its own
 					// window; the stream ends only when the track does.
 					self.group = None;
 				}
-				Poll::Pending => return Poll::Pending,
 			}
 		}
 	}

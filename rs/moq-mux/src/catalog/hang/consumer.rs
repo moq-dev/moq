@@ -35,8 +35,7 @@ impl<E: CatalogExt> Consumer<E> {
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let result = ready!(self.inner.poll_next(waiter));
-		Poll::Ready(result.map_err(Into::into))
+		Poll::Ready(Ok(ready!(self.inner.poll_next(waiter))?))
 	}
 
 	/// Get the next catalog update.
