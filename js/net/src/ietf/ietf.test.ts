@@ -1529,11 +1529,28 @@ test("FetchFrame: an empty payload is a zero length, with no status byte", async
 	]);
 });
 
-// A track that declared no timescale opted out of timestamps, so the properties block is
-// present but empty rather than carrying a value in units the peer cannot read.
-test("FetchFrame: an unstamped object writes an empty properties block", async () => {
+// A track that declared no timescale opted out of timestamps, so the properties field is
+// omitted rather than carrying a value in units the peer was never told. This is what a
+// subscriber that sent INCLUDE_PROPERTIES=0 gets.
+test("FetchFrame: an unstamped object omits the properties field", async () => {
 	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 0, object: 0, first: false }, Version.DRAFT_20);
 
-	expect(Array.from(encoded)).toEqual([0x20, 0x00, 0x01, 0x01]);
+	// Flags 0 (subgroup zero, no fields present), then the payload.
+	expect(Array.from(encoded)).toEqual([0x00, 0x01, 0x01]);
+});
+
+// The first object still carries its absolute ids and priority; only the properties go.
+test("FetchFrame: an unstamped first object keeps its ids", async () => {
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 4, object: 2, first: true }, Version.DRAFT_20);
+
+	expect(Array.from(encoded)).toEqual([
+		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
+		4,
+		2,
+		0,
+		0x01,
+		0x01,
+	]);
 });

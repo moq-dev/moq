@@ -385,18 +385,23 @@ export class FetchFrame {
 	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
 		if (position.first) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
-			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | FETCH_PROPERTIES);
+			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;
+			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | properties);
 			await w.u53(position.group);
 			await w.u53(position.object);
 			await w.u8(0);
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			await w.u53(FETCH_PROPERTIES);
+			await w.u53(this.timestamp !== undefined ? FETCH_PROPERTIES : 0);
 		}
 
-		const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
-		await w.u53(extensions.byteLength);
-		await w.write(extensions);
+		// Omitted entirely rather than written empty when the object carries no timestamp:
+		// the track declared no units, so there is no property to send.
+		if (this.timestamp !== undefined) {
+			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
+			await w.u53(extensions.byteLength);
+			await w.write(extensions);
+		}
 
 		await w.u53(this.payload.byteLength);
 		if (this.payload.byteLength > 0) {

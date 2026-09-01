@@ -5,7 +5,7 @@ import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
-import type * as track from "../track.ts";
+import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
@@ -72,6 +72,15 @@ interface RunGroup {
 	/** The track's advertised timescale, applied to every frame timestamp. */
 	timescale: Timescale;
 
+	/**
+	 * Whether objects carry their presentation timestamp.
+	 *
+	 * False once the subscriber sends INCLUDE_PROPERTIES=0: that drops TIMESCALE from
+	 * SUBSCRIBE_OK, and a timestamp whose units were never declared is worse than none. Our
+	 * own reader discards it; another may read it as some default and time the media wrong.
+	 */
+	stamped: boolean;
+
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
 
@@ -100,10 +109,13 @@ interface RunFill {
 	 * An independent view of the same track, used to read the cached group without consuming
 	 * anything the subscription will deliver.
 	 */
-	cache: track.Subscriber;
+	cache: TrackSubscriber;
 
 	/** The track's advertised timescale, applied to every frame timestamp. */
 	timescale: Timescale;
+
+	/** Whether objects carry their presentation timestamp; see {@link RunGroup.stamped}. */
+	stamped: boolean;
 
 	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
@@ -213,6 +225,10 @@ export class Publisher {
 		const priority = fromWire(msg.subscriberPriority);
 		const track = broadcast.subscribe(msg.trackName, { priority });
 
+		// Hoisted so the cleanup below reaches it: the fork happens before SUBSCRIBE_OK is
+		// written, and a write that throws must not strand the sink it attached.
+		let cache: TrackSubscriber | undefined;
+
 		try {
 			const timescale = (await track.info()).timescale;
 
@@ -241,7 +257,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			const cache = fill && fill.kind !== "empty" ? track.fork({ priority }) : undefined;
+			cache = fill && fill.kind !== "empty" ? track.fork({ priority }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -302,6 +318,7 @@ export class Publisher {
 						requestId: msg.requestId,
 						group,
 						timescale,
+						stamped: msg.propertiesWanted,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 					});
@@ -312,7 +329,15 @@ export class Publisher {
 			// failures reset that stream and never touch the subscription.
 			const filling =
 				fill && cache
-					? this.#runFill({ requestId: msg.requestId, priority, fill, cache, timescale, unsubscribed })
+					? this.#runFill({
+							requestId: msg.requestId,
+							priority,
+							fill,
+							cache,
+							timescale,
+							stamped: msg.propertiesWanted,
+							unsubscribed,
+						})
 					: Promise.resolve();
 
 			let publishError: Error | undefined;
@@ -355,6 +380,9 @@ export class Publisher {
 			stream.abort(e);
 		} finally {
 			track.close();
+			// Idempotent, and the backstop for a throw between the fork and the fill starting:
+			// #runFill closes it itself on every path it reaches.
+			cache?.close();
 		}
 	}
 
@@ -362,7 +390,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, slice, unsubscribed } = options;
+		const { requestId, group, timescale, stamped, slice, unsubscribed } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -384,7 +412,9 @@ export class Publisher {
 				subGroupId: 0,
 				publisherPriority: 0,
 				flags: {
-					hasExtensions: true,
+					// The object properties carry the timestamp, so there is nothing to write
+					// when the track declared no units to read one in.
+					hasExtensions: stamped,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					hasEnd: true,
@@ -438,21 +468,21 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, unsubscribed } = options;
-		if (fill.kind === "empty") {
-			cache.close();
-			return;
-		}
-
+		const { requestId, fill, cache, timescale, stamped, unsubscribed } = options;
 		const version = this.#session.version;
-		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version });
-		if (!stream) {
-			console.debug(`fill stream failed to open: fill=${requestId}`);
-			cache.close();
-			return;
-		}
 
+		// Everything is inside the try so the cache fork is released on every path out,
+		// including a transport failure while opening the stream.
+		let stream: Writer | undefined;
 		try {
+			if (fill.kind === "empty") return;
+
+			stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version });
+			if (!stream) {
+				console.debug(`fill stream failed to open: fill=${requestId}`);
+				return;
+			}
+
 			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);
 
@@ -462,7 +492,7 @@ export class Publisher {
 
 			const group = takeGroup(cache, Number(fill.sequence));
 			try {
-				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
+				await this.#writeFillGroup(stream, group, fill, timescale, stamped, unsubscribed);
 			} finally {
 				group.close();
 			}
@@ -470,9 +500,10 @@ export class Publisher {
 			stream.close();
 			console.debug(`fill complete: fill=${requestId}`);
 		} catch (err: unknown) {
+			// A fill never fails the subscription; its own stream carries the failure.
 			const e = error(err);
 			console.debug(`fill failed, resetting its stream: fill=${requestId} error=${reason(e)}`);
-			stream.reset(e);
+			stream?.reset(e);
 		} finally {
 			cache.close();
 		}
@@ -489,6 +520,7 @@ export class Publisher {
 		group: group.Consumer,
 		fill: FillGroup,
 		timescale: Timescale,
+		stamped: boolean,
 		unsubscribed: Promise<void>,
 	) {
 		let first = true;
@@ -516,7 +548,7 @@ export class Publisher {
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
 			if (BigInt(frame.sequence) < fill.skip) continue;
 
-			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
+			const obj = new FetchFrame({ payload: frame.payload, timestamp: stamped ? frame.timestamp : undefined });
 			await obj.encode(
 				stream,
 				{ group: Number(fill.sequence), object: frame.sequence, first },
@@ -1021,7 +1053,7 @@ type FillServe =
  * would park for the life of the track. Scanning past it, or running dry, is a cache miss,
  * which the caller turns into the draft's fill-failure reset.
  */
-function takeGroup(cache: track.Subscriber, sequence: number): group.Consumer {
+function takeGroup(cache: TrackSubscriber, sequence: number): group.Consumer {
 	for (;;) {
 		const group = cache.tryRecvGroup();
 		if (!group) throw new Error(`group not found: ${sequence}`);
@@ -1038,7 +1070,7 @@ function saturatingSub(a: bigint, b: bigint): bigint {
 }
 
 /** Snapshot the live edge of a track. */
-function liveEdge(track: track.Subscriber): LiveEdge {
+function liveEdge(track: TrackSubscriber): LiveEdge {
 	const latest = track.latest();
 	if (latest === undefined) return {};
 

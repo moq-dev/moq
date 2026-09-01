@@ -810,7 +810,7 @@ test("draft-20: an empty track opens no fill stream", async () => {
 test("draft-20: an opt-out peer gets no track properties", async () => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture();
-		fx.broadcast.createTrack("video");
+		const track = fx.broadcast.createTrack("video");
 
 		const { client, ok } = await runSubscribe(
 			fx,
@@ -825,6 +825,24 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 
 		expect(ok.properties.timescale !== undefined).toBe(propertiesWanted);
 		expect(ok.properties.groupOrder !== undefined).toBe(propertiesWanted);
+
+		// With no TIMESCALE declared there are no units to read a timestamp in, so the objects
+		// must not carry one either: a bare value invites a peer to read it as some default.
+		writeGroup(track, 1);
+
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group was never served");
+		const reader = new Reader(served, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect(header.flags.hasExtensions).toBe(propertiesWanted);
+
+		await reader.u53(); // object id delta
+		if (propertiesWanted) {
+			const length = await reader.u53();
+			expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
+			await reader.read(length);
+		}
+		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();
 		client.close();
