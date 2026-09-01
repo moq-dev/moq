@@ -3105,17 +3105,29 @@ impl Consumer {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
-			match self.request_broadcast(&path).await {
-				Ok(broadcast) => return Ok(broadcast),
-				// Ride out the churn: retry once the coverage changes (the cursor
-				// replays the current coverage first, so at most one extra attempt
-				// runs before this genuinely blocks).
-				Err(Error::Unroutable) => {
+			let mut request = std::pin::pin!(self.request_broadcast(&path));
+			// An instant verdict and a queued request fail differently. An instant
+			// `Unroutable` means nothing serves the path right now, and only a
+			// coverage change fixes that: park on the announce stream (it replays
+			// the current coverage first, so at most one extra attempt runs before
+			// this genuinely blocks). A request that queued and then failed
+			// `Unroutable` was killed by its serving route retracting, and an
+			// identical standby swaps in without any announce update, so retry
+			// through the already-updated table immediately. Each such retry
+			// consumed a real retraction, so this cannot spin.
+			match futures::future::poll_immediate(&mut request).await {
+				Some(Ok(broadcast)) => return Ok(broadcast),
+				Some(Err(Error::Unroutable)) => {
 					if announced.next().await.is_none() {
 						return Err(Error::Closed);
 					}
 				}
-				Err(err) => return Err(err),
+				Some(Err(err)) => return Err(err),
+				None => match request.await {
+					Ok(broadcast) => return Ok(broadcast),
+					Err(Error::Unroutable) => {}
+					Err(err) => return Err(err),
+				},
 			}
 		}
 	}
@@ -3833,6 +3845,46 @@ mod tests {
 			.err()
 			.unwrap();
 		assert!(matches!(err, Error::Unroutable));
+	}
+
+	#[tokio::test]
+	async fn routed_broadcast_survives_serving_route_retraction() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		// Three identical routes, oldest first: the newest identical route wins
+		// requests, and swapping between them emits no announce update.
+		let (_standby, mut standby_server) = producer.announce_served("room", Route::default()).unwrap();
+		let (second, second_server) = producer.announce_served("room", Route::default()).unwrap();
+		let (incumbent, incumbent_server) = producer.announce_served("room", Route::default()).unwrap();
+
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+
+		// Each incumbent dies with the request still queued on it: the request
+		// fails Unroutable, and the resolve must retry through the next standby
+		// instead of parking on an announce update that never comes. Two
+		// retractions in a row, so the announce stream's initial coverage replay
+		// cannot paper over the missing retry.
+		drop(incumbent);
+		drop(incumbent_server);
+		assert!((&mut resolving).now_or_never().is_none());
+		drop(second);
+		drop(second_server);
+		assert!((&mut resolving).now_or_never().is_none());
+
+		let request = match standby_server.poll_requested_broadcast(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(request)) => request,
+			_ => panic!("expected the retry to queue on the standby"),
+		};
+		let source = broadcast::Info::new().produce();
+		request.accept(&source);
+
+		let resolved = resolving
+			.now_or_never()
+			.expect("resolves via the standby")
+			.expect("resolves");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
 	}
 
 	#[tokio::test]

@@ -164,8 +164,15 @@ impl Mergeable for Presence {
 
 /// One node's subscription to the merged track.
 enum Reader<V: Mergeable> {
-	/// Resolving the announced path into a broadcast.
-	Resolving(Pending<origin::Requesting>),
+	/// Resolving the announced path into a broadcast. `queued` flips once the
+	/// resolution has returned `Pending`: a queued request that then fails
+	/// `Unroutable` was killed by its serving route retracting (the table has
+	/// already changed), while an instant `Unroutable` means nothing serves the
+	/// path at all.
+	Resolving {
+		pending: Pending<origin::Requesting>,
+		queued: bool,
+	},
 	/// Awaiting the subscription handshake.
 	Subscribing(Pending<Subscribing>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
@@ -268,13 +275,13 @@ impl<V: Mergeable> Merged<V> {
 				Entry::Occupied(mut entry) => {
 					let node = entry.get_mut();
 					if matches!(node.reader, Reader::Ended) {
-						node.reader = Reader::Resolving(self.origin.request_broadcast(&node.path));
+						node.reader = resolve(&self.origin, &node.path);
 					}
 					false
 				}
 				Entry::Vacant(entry) => {
 					entry.insert(Node {
-						reader: Reader::Resolving(self.origin.request_broadcast(&path)),
+						reader: resolve(&self.origin, &path),
 						path,
 						last: None,
 					});
@@ -315,7 +322,7 @@ fn advance<V: Mergeable>(
 	let mut rearmed = false;
 	loop {
 		match &mut node.reader {
-			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
+			Reader::Resolving { pending, queued } => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
 					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
 					Err(err) => {
@@ -324,12 +331,24 @@ fn advance<V: Mergeable>(
 						return changed;
 					}
 				},
+				// A queued request killed by its route retracting: an identical
+				// standby swaps in without any announce update, so re-resolve
+				// through the already-updated table. Each retry consumed a real
+				// retraction, so this cannot spin; an instant Unroutable instead
+				// means nothing serves the path (the retraction that empties the
+				// table also unannounces this node).
+				Poll::Ready(Err(moq_net::Error::Unroutable)) if *queued => {
+					node.reader = resolve(origin, &node.path);
+				}
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(?err, name, "stats: node broadcast unresolvable");
 					node.reader = Reader::Ended;
 					return changed;
 				}
-				Poll::Pending => return changed,
+				Poll::Pending => {
+					*queued = true;
+					return changed;
+				}
 			},
 			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(subscriber)) => {
@@ -365,12 +384,24 @@ fn advance<V: Mergeable>(
 						return changed;
 					}
 					rearmed = true;
-					node.reader = Reader::Resolving(origin.request_broadcast(&node.path));
+					// Drop the dead reader before re-requesting: our own handle is
+					// what keeps a dying served broadcast cached, and releasing it
+					// first lets the request materialize a fresh one.
+					node.reader = Reader::Ended;
+					node.reader = resolve(origin, &node.path);
 				}
 				Poll::Pending => return changed,
 			},
 			Reader::Ended => return changed,
 		}
+	}
+}
+
+/// Start resolving `path` (relative to the announce cursor) into a broadcast.
+fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned) -> Reader<V> {
+	Reader::Resolving {
+		pending: origin.request_broadcast(path),
+		queued: false,
 	}
 }
 
