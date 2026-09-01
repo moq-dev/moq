@@ -40,6 +40,8 @@ export class Consumer {
 	#decompress: boolean;
 
 	#group?: Moq.Group.Consumer;
+	// Whether a read is in flight, so a second concurrent one is refused rather than served wrong.
+	#reading = false;
 	// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	#taken = false;
 	// The in-flight `recvGroup`, tagged for the race and built once: a frame read that wins leaves it
@@ -56,14 +58,27 @@ export class Consumer {
 	}
 
 	/** Get the next payload, or `undefined` once the track ends. */
-	async next(): Promise<Uint8Array | undefined> {
+	next(): Promise<Uint8Array | undefined> {
+		// One reader at a time. Two concurrent calls await the same `recvGroup`, so the second would
+		// take the first's group for a rolled log and fail a perfectly good one.
+		if (this.#reading) throw new Error("multiple calls to next not supported");
+		this.#reading = true;
+		return this.#read().finally(() => {
+			this.#reading = false;
+		});
+	}
+
+	async #read(): Promise<Uint8Array | undefined> {
 		for (;;) {
 			if (!this.#group) {
 				const { group } = await this.#recvGroup();
 				if (!group) return undefined;
 				// The resolved `#pending` is the whole record of the failure: it is left in place, so
 				// every later read arrives back here and throws again rather than reading on.
-				if (this.#taken) throw new Rolled();
+				if (this.#taken) {
+					group.close();
+					throw new Rolled();
+				}
 				this.#pending = undefined;
 				this.#taken = true;
 				this.#flate = this.#decompress ? new Flate() : undefined;
@@ -97,8 +112,12 @@ export class Consumer {
 		if ("frame" in winner) return winner.frame;
 
 		if (winner.group) {
-			// Drop the group rather than drain the rest of a log that has already lost payloads: the next
-			// read then waits on the track, where the second group is still resolved and throws again.
+			// Close both rather than drain the rest of a log that has already lost payloads. Closing the
+			// held group settles the read that just lost, which otherwise stays registered on the
+			// group's signals and keeps this consumer's subscription reachable after the caller drops
+			// it. The next read then waits on the track, where the second group is still resolved.
+			group.close();
+			winner.group.close();
 			this.#group = undefined;
 			throw new Rolled();
 		}

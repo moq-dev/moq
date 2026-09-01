@@ -91,3 +91,17 @@ test("a second group is reported while the first is still open", async () => {
 	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 });
+
+test("a second concurrent read is refused rather than served the first one's group", async () => {
+	// Both calls would await the same in-flight `recvGroup`, and the loser would take the winner's
+	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>(track);
+	producer.append({ n: 0 });
+	producer.finish();
+
+	const consumer = new Consumer<Rec>(track.subscribe());
+	const first = consumer.next();
+	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	expect(await first).toEqual({ n: 0 });
+});

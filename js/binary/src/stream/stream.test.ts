@@ -89,6 +89,20 @@ test("a second group is a rolled log, not a continuation", async () => {
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 });
 
+test("a second concurrent read is refused rather than served the first one's group", async () => {
+	// Both calls would await the same in-flight `recvGroup`, and the loser would take the winner's
+	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
+	const track = new Track.Producer("test");
+	const producer = new Producer(track);
+	producer.append(payloads(1)[0]);
+	producer.finish();
+
+	const consumer = new Consumer(track.subscribe());
+	const first = consumer.next();
+	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	expect(await first).toEqual(payloads(1)[0]);
+});
+
 test("a second group is reported while the first is still open", async () => {
 	// A boundary-only check would never look at the track again while a group is open, so a
 	// publisher that opens a second group and leaves the first one running parks the read forever
