@@ -3745,11 +3745,18 @@ fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 			end: None,
 		},
 		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one.
+		// Counted from `Largest.Group`, which sits below the newest group while that
+		// group has no objects yet; only with no largest at all does the newest group
+		// stand in for it.
 		Filter::Relative(groups) => ServeRange {
-			start: edge.latest.map(|latest| Location {
-				group: latest.saturating_add(1).saturating_sub(groups),
-				object: 0,
-			}),
+			start: edge
+				.largest
+				.map(|largest| largest.group)
+				.or(edge.latest)
+				.map(|group| Location {
+					group: group.saturating_add(1).saturating_sub(groups),
+					object: 0,
+				}),
 			end: None,
 		},
 		Filter::Absolute { start, end } => ServeRange {
@@ -3963,6 +3970,25 @@ mod range_tests {
 				"{groups} groups back"
 			);
 		}
+	}
+
+	/// Relative counts from `Largest.Group`, which is below the newest group while that
+	/// group has no objects yet, so a current-group join still reaches the content.
+	#[test]
+	fn relative_counts_from_the_largest_group_over_an_empty_newest_group() {
+		let edge = LiveEdge {
+			latest: Some(1),
+			largest: Some(Location { group: 0, object: 2 }),
+			next: Some(Location { group: 0, object: 3 }),
+		};
+		let msg = subscribe(Filter::Relative(1));
+		assert_eq!(
+			subscribe_range(&msg, edge, Version::Draft20),
+			ServeRange {
+				start: Some(Location { group: 0, object: 0 }),
+				end: None,
+			}
+		);
 	}
 
 	/// Counting back further than the track goes lands at its start rather than wrapping.
