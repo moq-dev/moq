@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::BTreeSet, task::Poll};
+use std::{
+	cmp::Ordering,
+	collections::BTreeSet,
+	task::{Poll, Waker},
+};
 
 use slab::Slab;
 
@@ -109,7 +113,60 @@ impl Default for PriorityQueue {
 impl PriorityQueue {
 	// TODO Implement some sort of round robin between tracks with the same priority.
 	pub fn insert(&self, priority: Priority) -> PriorityHandle {
-		self.state.lock().insert(priority, self.clone())
+		self.lock().insert(priority, self.clone())
+	}
+
+	/// Lock the queue for a mutation, waking whatever it reranked once the lock is back
+	/// open. Every caller goes through this, so a rerank can't leave a group parked.
+	fn lock(&self) -> Guard<'_> {
+		Guard {
+			lock: &self.state,
+			state: Some(self.state.lock()),
+		}
+	}
+}
+
+/// A locked queue whose drop wakes the groups the mutation reranked.
+///
+/// The wake has to happen with the lock open. A [`Waker`] is allowed to poll its task
+/// inline, and that task's first move is [`PriorityHandle::poll_next`], which takes this
+/// same non-reentrant lock. kio's own channels drain before waking for the same reason.
+struct Guard<'a> {
+	lock: &'a kio::Lock<PriorityState>,
+	// An Option so the lock can be released before the wakers run.
+	state: Option<kio::LockGuard<'a, PriorityState>>,
+}
+
+impl Drop for Guard<'_> {
+	fn drop(&mut self) {
+		let mut state = self.state.take().expect("guard already dropped");
+		if state.pending.is_empty() {
+			return;
+		}
+
+		let mut pending = std::mem::take(&mut state.pending);
+		drop(state);
+
+		for waker in pending.drain(..) {
+			waker.wake();
+		}
+
+		// Hand the buffer back so the next reorder reuses its capacity.
+		self.lock.lock().pending = pending;
+	}
+}
+
+impl std::ops::Deref for Guard<'_> {
+	type Target = PriorityState;
+
+	fn deref(&self) -> &Self::Target {
+		self.state.as_ref().expect("guard already dropped")
+	}
+}
+
+impl std::ops::DerefMut for Guard<'_> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.state.as_mut().expect("guard already dropped")
 	}
 }
 
@@ -126,11 +183,10 @@ struct PriorityEntry {
 	/// The rank this entry last published, so a reorder that shifts an entry without
 	/// changing its rank wakes nobody.
 	rank: u8,
-	/// The group serving this entry, parked until its rank moves. A bare list rather
-	/// than a channel: the rank is a function of `location`, so there is no value to
-	/// carry, and a `kio::Producer` per queued group would be an allocation and a
-	/// second mutex each.
-	waiters: kio::WaiterList,
+	/// The group serving this entry, parked until its rank moves. One waker rather than
+	/// a `kio::WaiterList`, because exactly one `GroupServe` ever polls an entry, and a
+	/// `kio::Producer` per queued group would be an allocation and a second mutex each.
+	waker: Option<Waker>,
 }
 
 #[derive(Default)]
@@ -142,6 +198,9 @@ struct PriorityState {
 	overflow: BTreeSet<PriorityItem>,
 	// Track location and priority for each reusable ID.
 	entries: Slab<PriorityEntry>,
+	// Wakers the mutation in progress pulled out, woken by `Guard::drop` once the lock
+	// is open. Kept here so its capacity survives across reorders.
+	pending: Vec<Waker>,
 }
 
 impl PriorityState {
@@ -150,7 +209,7 @@ impl PriorityState {
 			location: Location::Overflow,
 			priority,
 			rank: u8::MAX,
-			waiters: kio::WaiterList::new(),
+			waker: None,
 		});
 		self.place(PriorityItem { id, priority });
 
@@ -164,27 +223,24 @@ impl PriorityState {
 
 	fn update_indices_from(&mut self, start: usize) {
 		for (idx, item) in self.vec.iter().enumerate().skip(start) {
-			Self::update_location(&mut self.entries, item.id, Location::Vec(idx));
+			Self::update_location(&mut self.entries, &mut self.pending, item.id, Location::Vec(idx));
 		}
 	}
 
-	/// Move an entry and wake its group if that changed the rank it reports.
+	/// Move an entry, queueing its group for a wake if that changed the rank it reports.
 	///
-	/// Takes the slab rather than `&mut self` so a shift can walk `vec` while writing
-	/// through `entries`, which is the hot path: a reorder moves a run of entries and
-	/// only wakes the ones whose rank actually lands somewhere new.
-	///
-	/// The wake happens under the queue lock, which is what keeps it targeted: a woken
-	/// group only flags its slot on the session driver and re-reads the rank from a
-	/// later poll, so it never contends for this lock on the way out.
-	fn update_location(entries: &mut Slab<PriorityEntry>, id: usize, location: Location) {
+	/// Takes the fields rather than `&mut self` so a shift can walk `vec` while writing
+	/// through `entries`. A reorder moves a run of entries and only queues the ones whose
+	/// rank lands somewhere new, which is what keeps a shift from re-polling the session's
+	/// every stream machine.
+	fn update_location(entries: &mut Slab<PriorityEntry>, pending: &mut Vec<Waker>, id: usize, location: Location) {
 		let entry = entries.get_mut(id).expect("item not in entries");
 		entry.location = location;
 
 		let rank = Self::rank_of(&entry.location);
 		if entry.rank != rank {
 			entry.rank = rank;
-			entry.waiters.wake();
+			pending.extend(entry.waker.take());
 		}
 	}
 
@@ -218,19 +274,24 @@ impl PriorityState {
 			{
 				let promoted = self.overflow.pop_first().unwrap();
 				assert!(self.overflow.insert(item));
-				Self::update_location(&mut self.entries, id, Location::Overflow);
+				Self::update_location(&mut self.entries, &mut self.pending, id, Location::Overflow);
 
 				let insert_pos = self.vec.binary_search(&promoted).unwrap_or_else(|pos| pos);
 				let promoted_id = promoted.id;
 				self.vec.insert(insert_pos, promoted);
-				Self::update_location(&mut self.entries, promoted_id, Location::Vec(insert_pos));
+				Self::update_location(
+					&mut self.entries,
+					&mut self.pending,
+					promoted_id,
+					Location::Vec(insert_pos),
+				);
 				self.update_indices_from(insert_pos + 1);
 				return;
 			}
 
 			let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 			self.vec.insert(insert_pos, item);
-			Self::update_location(&mut self.entries, id, Location::Vec(insert_pos));
+			Self::update_location(&mut self.entries, &mut self.pending, id, Location::Vec(insert_pos));
 			self.update_indices_from(insert_pos + 1);
 			return;
 		}
@@ -240,7 +301,7 @@ impl PriorityState {
 		let lowest_in_vec = self.vec.last().unwrap();
 		if item > *lowest_in_vec {
 			assert!(self.overflow.insert(item));
-			Self::update_location(&mut self.entries, id, Location::Overflow);
+			Self::update_location(&mut self.entries, &mut self.pending, id, Location::Overflow);
 			return;
 		}
 
@@ -248,11 +309,11 @@ impl PriorityState {
 		let removed = self.vec.pop().unwrap();
 		let removed_id = removed.id;
 		assert!(self.overflow.insert(removed));
-		Self::update_location(&mut self.entries, removed_id, Location::Overflow);
+		Self::update_location(&mut self.entries, &mut self.pending, removed_id, Location::Overflow);
 
 		let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 		self.vec.insert(insert_pos, item);
-		Self::update_location(&mut self.entries, id, Location::Vec(insert_pos));
+		Self::update_location(&mut self.entries, &mut self.pending, id, Location::Vec(insert_pos));
 		self.update_indices_from(insert_pos + 1);
 	}
 
@@ -299,7 +360,7 @@ impl PriorityState {
 			let overflow_id = overflow_item.id;
 			self.vec.push(overflow_item);
 			let tail = self.vec.len() - 1;
-			Self::update_location(&mut self.entries, overflow_id, Location::Vec(tail));
+			Self::update_location(&mut self.entries, &mut self.pending, overflow_id, Location::Vec(tail));
 		}
 	}
 }
@@ -317,7 +378,7 @@ pub struct PriorityHandle {
 
 impl Drop for PriorityHandle {
 	fn drop(&mut self) {
-		self.queue.state.lock().remove(self.id);
+		self.queue.lock().remove(self.id);
 	}
 }
 
@@ -344,11 +405,16 @@ impl PriorityHandle {
 
 	/// Poll for a rank change since the last observed value.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<u8> {
+		// A plain read lock: parking stores a waker, which is not a rerank, so nothing
+		// here can queue a wake and the `Guard` would have nothing to do.
 		let mut state = self.queue.state.lock();
 		let entry = state.entries.get_mut(self.id).expect("item not in entries");
 
 		if entry.rank == self.seen {
-			entry.waiters.register(waiter);
+			let waker = waiter.waker();
+			if !entry.waker.as_ref().is_some_and(|parked| parked.will_wake(waker)) {
+				entry.waker = Some(waker.clone());
+			}
 			return Poll::Pending;
 		}
 
@@ -373,7 +439,7 @@ impl PriorityHandle {
 		self.track = new_track;
 
 		let rank = {
-			let mut state = self.queue.state.lock();
+			let mut state = self.queue.lock();
 			state.set_track(self.id, new_track);
 			state.rank(self.id)
 		};
