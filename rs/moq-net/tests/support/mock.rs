@@ -290,6 +290,10 @@ struct SessionSide {
 	peer_bidi: kio::Queue<(MockSendStream, MockRecvStream)>,
 	/// Queue to deliver uni streams TO the peer (its accept_uni pops them).
 	peer_uni: kio::Queue<MockRecvStream>,
+	/// Datagrams sent by the peer.
+	datagrams: kio::Queue<Bytes>,
+	/// Queue to deliver datagrams to the peer.
+	peer_datagrams: kio::Queue<Bytes>,
 	/// The ALPN protocol string for this side.
 	protocol: Option<&'static str>,
 	/// Connection-level close state shared with the peer.
@@ -308,6 +312,7 @@ pub struct MockSession {
 	// clone polling two classes at once must not clobber its own registration.
 	accept_uni: kio::Park,
 	accept_bi: kio::Park,
+	datagram: kio::Park,
 	closed: kio::Park,
 }
 
@@ -376,14 +381,24 @@ impl poll::Session for MockSession {
 		}
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		// Datagrams are best-effort; silently succeed in mock.
-		Poll::Ready(Ok(()))
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		match self.side.peer_datagrams.try_push(Bytes::copy_from_slice(payload)) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(_) => Poll::Ready(Err(self.close_error())),
+		}
 	}
 
-	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		// No datagram support in mock; pend forever.
-		Poll::Pending
+	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		let waiter = self.datagram.hold(cx);
+		self.side.conn.waiters.register(waiter);
+		if let Poll::Ready(res) = self.side.datagrams.poll_pop(waiter) {
+			return Poll::Ready(res.map_err(|_| self.close_error()));
+		}
+		let closed = self.side.conn.close_state.lock().unwrap().is_some();
+		match closed {
+			true => Poll::Ready(Err(self.close_error())),
+			false => Poll::Pending,
+		}
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -457,12 +472,16 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 	let c2s_uni = kio::Queue::new();
 	let s2c_bidi = kio::Queue::new();
 	let s2c_uni = kio::Queue::new();
+	let c2s_datagrams = kio::Queue::new();
+	let s2c_datagrams = kio::Queue::new();
 
 	let client_side = Arc::new(SessionSide {
 		bidi: s2c_bidi.clone(),
 		uni: s2c_uni.clone(),
 		peer_bidi: c2s_bidi.clone(),
 		peer_uni: c2s_uni.clone(),
+		datagrams: s2c_datagrams.clone(),
+		peer_datagrams: c2s_datagrams.clone(),
 		protocol,
 		conn: conn.clone(),
 	});
@@ -472,6 +491,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		uni: c2s_uni,
 		peer_bidi: s2c_bidi,
 		peer_uni: s2c_uni,
+		datagrams: c2s_datagrams,
+		peer_datagrams: s2c_datagrams,
 		protocol,
 		conn,
 	});
@@ -480,6 +501,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		side,
 		accept_uni: kio::Park::default(),
 		accept_bi: kio::Park::default(),
+		datagram: kio::Park::default(),
 		closed: kio::Park::default(),
 	};
 
