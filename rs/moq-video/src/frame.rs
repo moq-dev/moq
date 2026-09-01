@@ -276,7 +276,9 @@ impl std::fmt::Debug for DmaBuf {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBuf {
-	#[cfg(any(feature = "pipewire", feature = "vaapi"))]
+	// PipeWire capture builds these for real; the render importer's tests build
+	// them from a VA-API allocation, with no producer behind them.
+	#[cfg(any(feature = "pipewire", all(feature = "vaapi", test)))]
 	pub(crate) fn new(
 		format: DrmFormat,
 		modifier: u64,

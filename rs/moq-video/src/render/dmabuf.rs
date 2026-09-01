@@ -321,17 +321,34 @@ pub(super) mod fixture {
 		}
 	}
 
-	/// An NV12 DMA-BUF of `size` holding `pixels`, tightly packed luma followed
-	/// by tightly packed interleaved chroma.
+	/// The rows and row length of each plane of `format` at `size`, tightly
+	/// packed, in the order the format lists them.
 	///
-	/// `None` when the host has no VA-API device, which is how this skips on a
-	/// builder rather than failing there.
-	pub(in crate::render) fn nv12(size: Size, pixels: &[u8]) -> Option<DmaBuf> {
+	/// NV12's chroma row is as long as its luma row despite covering half the
+	/// pixels, since it holds a Cb and a Cr per pair; I420's two chroma rows are
+	/// each half as long.
+	fn rows(format: DrmFormat, size: Size) -> Vec<(usize, usize)> {
+		let (width, height) = (size.width as usize, size.height as usize);
+		match format {
+			DrmFormat::NV12 => vec![(height, width), (height / 2, width)],
+			DrmFormat::YUV420 => vec![(height, width), (height / 2, width / 2), (height / 2, width / 2)],
+			format => panic!("the fixture cannot build DMA-BUF format {:#x}", format.as_raw()),
+		}
+	}
+
+	/// A DMA-BUF of `format` and `size` holding `pixels`, which are the planes
+	/// tightly packed one after another.
+	///
+	/// `None` when the host has no VA-API device or its driver will not allocate
+	/// or export such a surface, which is how this skips on a builder rather
+	/// than failing there. It says which on the way out.
+	pub(in crate::render) fn surface(format: DrmFormat, size: Size, pixels: &[u8]) -> Option<DmaBuf> {
+		let fourcc = va_fourcc(format).expect("a VA-API format");
 		let display = moq_vaapi::Display::open()?;
-		let mut surfaces = display
+		let surface = display
 			.create_surfaces::<()>(
 				moq_vaapi::VA_RT_FORMAT_YUV420,
-				Some(moq_vaapi::VA_FOURCC_NV12),
+				Some(fourcc),
 				size.width,
 				size.height,
 				// The hint a decoder uses, so the driver picks the layout it
@@ -340,12 +357,17 @@ pub(super) mod fixture {
 				Some(moq_vaapi::UsageHint::USAGE_HINT_DECODER | moq_vaapi::UsageHint::USAGE_HINT_EXPORT),
 				vec![()],
 			)
-			.expect("allocate an NV12 surface");
-		let surface = surfaces.pop().expect("one surface");
+			.map_err(|e| eprintln!("no {fourcc:#x} surface on this driver: {e}"))
+			.ok()?
+			.pop()
+			.expect("one surface");
 
-		upload(&display, &surface, size, pixels);
+		upload(&display, &surface, format, size, pixels)?;
 
-		let exported = surface.export_prime().expect("export the surface");
+		let exported = surface
+			.export_prime()
+			.map_err(|e| eprintln!("this driver will not export a {fourcc:#x} surface: {e}"))
+			.ok()?;
 		let layer = exported.layers.first().expect("an exported layer");
 		let planes = (0..layer.num_planes as usize)
 			.map(|index| DmaBufPlane::new(layer.offset[index], layer.pitch[index]))
@@ -358,7 +380,7 @@ pub(super) mod fixture {
 		// the size that was asked for, and imports at that size.
 		Some(
 			DmaBuf::new(
-				DrmFormat::NV12,
+				format,
 				modifier,
 				size.width,
 				size.height,
@@ -370,41 +392,69 @@ pub(super) mod fixture {
 		)
 	}
 
-	/// Copy tightly packed NV12 into a surface, honoring the image's own plane
+	/// Copy tightly packed planes into a surface, honoring the image's own plane
 	/// offsets and pitches. A `vaCreateImage` upload rather than a derived one,
 	/// so the driver writes the pixels into whatever layout the surface has.
-	fn upload(display: &Arc<moq_vaapi::Display>, surface: &moq_vaapi::Surface<()>, size: Size, pixels: &[u8]) {
-		let format = display
+	fn upload(
+		display: &Arc<moq_vaapi::Display>,
+		surface: &moq_vaapi::Surface<()>,
+		format: DrmFormat,
+		size: Size,
+		pixels: &[u8],
+	) -> Option<()> {
+		let fourcc = va_fourcc(format).expect("a VA-API format");
+		let image_format = display
 			.query_image_formats()
 			.expect("query image formats")
 			.into_iter()
-			.find(|format| format.fourcc == moq_vaapi::VA_FOURCC_NV12)
-			.expect("the driver has an NV12 image format");
+			.find(|image| image.fourcc == fourcc)
+			.or_else(|| {
+				eprintln!("this driver has no {fourcc:#x} image format");
+				None
+			})?;
 
-		let mut image = moq_vaapi::Image::create_from(surface, format, surface.size(), surface.size())
-			.expect("create an NV12 image");
+		let mut image = moq_vaapi::Image::create_from(surface, image_format, surface.size(), surface.size())
+			.map_err(|e| eprintln!("this driver will not create a {fourcc:#x} image: {e}"))
+			.ok()?;
 		let va_image = *image.image();
 		let destination: &mut [u8] = image.as_mut();
-		let (width, height) = (size.width as usize, size.height as usize);
 
-		// Luma: `height` rows of `width` bytes. Chroma: half as many rows, each
-		// still `width` bytes, since one row holds a Cb and a Cr per two pixels.
-		for (plane, rows) in [(0usize, height), (1, height / 2)] {
-			let source = match plane {
-				0 => &pixels[..width * height],
-				_ => &pixels[width * height..],
-			};
+		let mut source = pixels;
+		for (plane, (rows, length)) in rows(format, size).into_iter().enumerate() {
 			let (pitch, offset) = (va_image.pitches[plane] as usize, va_image.offsets[plane] as usize);
 			for row in 0..rows {
 				let start = offset + row * pitch;
-				destination[start..start + width].copy_from_slice(&source[row * width..(row + 1) * width]);
+				destination[start..start + length].copy_from_slice(&source[row * length..(row + 1) * length]);
 			}
+			source = &source[rows * length..];
 		}
 
 		// `vaPutImage` runs on drop, and the surface has to be idle before
 		// anything exports it.
 		drop(image);
 		surface.sync().expect("sync the uploaded surface");
+		Some(())
+	}
+}
+
+/// The VA-API fourcc naming the same layout as a DRM format.
+///
+/// DRM spells a packed pixel from its most significant byte down and VA-API from
+/// its first byte in memory, so one layout has two reversed names. The planar
+/// formats' two vocabularies agree.
+#[cfg(all(test, feature = "vaapi"))]
+fn va_fourcc(format: DrmFormat) -> Result<u32, Error> {
+	match format {
+		DrmFormat::XRGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRX),
+		DrmFormat::ARGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRA),
+		DrmFormat::XBGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBX),
+		DrmFormat::ABGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBA),
+		DrmFormat::NV12 => Ok(moq_vaapi::VA_FOURCC_NV12),
+		DrmFormat::YUV420 => Ok(moq_vaapi::VA_FOURCC_I420),
+		format => Err(err(format!(
+			"no VA-API format for DMA-BUF format {:#x}",
+			format.as_raw()
+		))),
 	}
 }
 

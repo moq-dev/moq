@@ -872,14 +872,13 @@ mod tests {
 		[y, cb, cr].map(|c| c.round().clamp(0.0, 255.0) as u8)
 	}
 
-	/// The block pattern as tightly packed NV12: `height` rows of luma, then
-	/// `height / 2` rows of interleaved Cb, Cr at half the horizontal resolution.
+	/// The block pattern as tightly packed planes of `format`.
 	///
 	/// The blocks are 32 pixels on a side, so each 2x2 chroma group sits wholly
 	/// inside one of them and the subsampling loses nothing. Any difference the
 	/// comparison then finds is the import's, not the format's.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	fn nv12_pattern(size: Size, color: Color) -> Vec<u8> {
+	fn pattern(format: crate::DrmFormat, size: Size, color: Color) -> Vec<u8> {
 		let (width, height) = (size.width, size.height);
 		let mut pixels = Vec::with_capacity((width * height * 3 / 2) as usize);
 
@@ -888,19 +887,41 @@ mod tests {
 				pixels.push(to_yuv(color, block(x, y))[0]);
 			}
 		}
-		for y in (0..height).step_by(2) {
-			for x in (0..width).step_by(2) {
-				let [_, cb, cr] = to_yuv(color, block(x, y));
-				pixels.push(cb);
-				pixels.push(cr);
+
+		// NV12 interleaves Cb then Cr in one plane; I420 keeps them as two.
+		// Getting that pair the wrong way round is the failure this test is
+		// most concerned with, so it is written out once here and read back by
+		// the shader rather than round-tripped through a helper that could
+		// share the mistake.
+		let chroma = |channel: usize, pixels: &mut Vec<u8>| {
+			for y in (0..height).step_by(2) {
+				for x in (0..width).step_by(2) {
+					pixels.push(to_yuv(color, block(x, y))[channel]);
+				}
 			}
+		};
+		match format {
+			crate::DrmFormat::NV12 => {
+				for y in (0..height).step_by(2) {
+					for x in (0..width).step_by(2) {
+						let [_, cb, cr] = to_yuv(color, block(x, y));
+						pixels.push(cb);
+						pixels.push(cr);
+					}
+				}
+			}
+			crate::DrmFormat::YUV420 => {
+				chroma(1, &mut pixels);
+				chroma(2, &mut pixels);
+			}
+			format => panic!("no pattern for DMA-BUF format {:#x}", format.as_raw()),
 		}
 
 		pixels
 	}
 
 	/// A Vulkan device that can import DMA-BUFs, or `None` where nothing can.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	async fn dmabuf_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
@@ -924,16 +945,15 @@ mod tests {
 		)
 	}
 
-	/// An NV12 DMA-BUF has to import as two Vulkan images and draw the same
-	/// picture the CPU path draws from the same samples.
+	/// Draw one DMA-BUF of `format` and `size` twice, imported and uploaded, and
+	/// check the two against each other and against the palette.
 	///
-	/// The test the whole per-plane import exists to pass, and it is three
-	/// assertions rather than one:
+	/// Three assertions rather than one:
 	///
-	/// - The import returns a source at all, and its layout is
-	///   [`Layout::Nv12`]. Only the DMA-BUF importer produces that, so this says
-	///   which branch ran. Without it the CPU fallback would quietly satisfy
-	///   everything below.
+	/// - The import returns a source at all, its layout is `expected`, and no
+	///   frame needed a re-tile. Only the DMA-BUF importer produces those
+	///   layouts, so this says which branch ran. Without it the CPU fallback
+	///   would quietly satisfy everything below.
 	/// - Every pixel matches the CPU upload of the same samples. That is the one
 	///   that catches a swapped chroma pair, a plane at the wrong offset, an
 	///   ignored row pitch, and a mismatched matrix, all at once.
@@ -941,31 +961,27 @@ mod tests {
 	///   here from the definition of the color space. Both paths agreeing on the
 	///   wrong answer would pass the comparison and fail this.
 	///
-	/// Ignored: needs a GPU that can import DMA-BUFs and a VA-API device to
-	/// allocate one. Run with
-	/// `cargo test -p moq-video --features render,vaapi nv12_dmabuf -- --ignored --nocapture`.
+	/// `false` when the host cannot allocate such a buffer, which is a skip
+	/// rather than a pass.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[tokio::test]
-	#[ignore = "needs a Vulkan GPU and a VA-API device"]
-	async fn the_nv12_dmabuf_import_matches_the_cpu_path() {
-		let Some((device, queue)) = dmabuf_gpu().await else {
-			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
-			return;
-		};
-
-		// 192 lines is below the 576 the crate infers BT.709 above, so both
-		// paths land on BT.601 limited and the pattern is built for that.
-		let size = Size::new(256, 192);
+	async fn imported_matches_uploaded(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		format: crate::DrmFormat,
+		size: Size,
+		expected: Layout,
+	) -> bool {
+		// Below the 576 lines the crate infers BT.709 above, so both paths land
+		// on BT.601 limited and the pattern is built for that.
 		let color = Color::infer(size);
 		assert_eq!(color, Color::Bt601Limited);
-		let pattern = nv12_pattern(size, color);
 
-		let Some(buffer) = crate::render::dmabuf::fixture::nv12(size, &pattern) else {
-			eprintln!("skipping: no VA-API device to allocate a DMA-BUF from");
-			return;
+		let Some(buffer) = crate::render::dmabuf::fixture::surface(format, size, &pattern(format, size, color)) else {
+			return false;
 		};
 		eprintln!(
-			"NV12 DMA-BUF: modifier {:#x}, planes {:?}",
+			"{size} {:?}: modifier {:#x}, planes {:?}",
+			expected,
 			buffer.modifier(),
 			buffer.planes()
 		);
@@ -980,52 +996,46 @@ mod tests {
 		// than read back out of it, so it shares nothing with the path it is
 		// checking.
 		let uploaded = {
-			let i420 = crate::frame::I420::from_nv12(&pattern, size.width, size.height).expect("deinterleave NV12");
+			let nv12 = pattern(crate::DrmFormat::NV12, size, color);
+			let i420 = crate::frame::I420::from_nv12(&nv12, size.width, size.height).expect("deinterleave NV12");
 			let frame = Frame::new(Surface::I420(i420), Timestamp::ZERO);
-			let mut renderer = Renderer::new(&device, &queue, config.clone()).expect("a renderer");
+			let mut renderer = Renderer::new(device, queue, config.clone()).expect("a renderer");
 			let texture = renderer.render(&frame).expect("a rendered frame");
-			readback(&device, &queue, &texture).await
+			readback(device, queue, &texture).await
 		};
 
 		let frame = Frame::new(Surface::DmaBuf(buffer), Timestamp::ZERO);
-		let mut renderer = Renderer::new(&device, &queue, config).expect("a renderer");
+		let mut renderer = Renderer::new(device, queue, config).expect("a renderer");
 
-		// Which branch ran. `Layout::Nv12` comes from the per-plane DMA-BUF
+		// Which branch ran. These layouts come from the per-plane DMA-BUF
 		// import and from nothing else on this platform.
 		let imported = renderer
 			.source
-			.import(&device, &frame.surface)
-			.expect("import the NV12 DMA-BUF")
+			.import(device, &frame.surface)
+			.expect("import the DMA-BUF")
 			.expect("a DMA-BUF import path");
-		assert_eq!(imported.layout, Layout::Nv12, "the frame did not import as NV12");
+		assert_eq!(imported.layout, expected, "the frame imported as the wrong layout");
 		assert_eq!(imported.color, Some(color));
 		drop(imported);
 
 		let texture = renderer.render(&frame).expect("a rendered frame");
 		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
 		assert!(!renderer.retired);
-		let zero_copy = readback(&device, &queue, &texture).await;
+		let zero_copy = readback(device, queue, &texture).await;
 
 		// Every pixel, not a sample of them: a shear from an ignored row pitch
 		// grows down the frame and leaves the top correct.
 		assert_eq!(zero_copy.len(), uploaded.len());
-		let mut worst = (0usize, 0i32);
-		for (index, (&imported, &expected)) in zero_copy.iter().zip(&uploaded).enumerate() {
-			for channel in 0..4 {
-				let drift = imported[channel] as i32 - expected[channel] as i32;
-				if drift.abs() > worst.1 {
-					worst = (index, drift.abs());
-				}
-			}
+		let mut worst = 0u8;
+		for (index, (&imported, &reference)) in zero_copy.iter().zip(&uploaded).enumerate() {
+			let drift = (0..4).map(|c| imported[c].abs_diff(reference[c])).max().unwrap_or(0);
+			worst = worst.max(drift);
 			let (x, y) = (index % size.width as usize, index / size.width as usize);
-			assert!(
-				(0..4).all(|c| imported[c].abs_diff(expected[c]) <= 2),
-				"({x}, {y}): imported {imported:?}, uploaded {expected:?}"
-			);
+			assert!(drift <= 2, "({x}, {y}): imported {imported:?}, uploaded {reference:?}");
 		}
 		eprintln!(
-			"worst drift between the imported and uploaded frames: {} codes at pixel {}",
-			worst.1, worst.0
+			"  imported vs uploaded: worst drift {worst} of 255 over {} pixels",
+			zero_copy.len(),
 		);
 
 		// And both agree with the palette the pattern was built from, so a
@@ -1033,8 +1043,61 @@ mod tests {
 		for y in (16..size.height).step_by(32) {
 			for x in (16..size.width).step_by(32) {
 				let rgb = block(x, y);
-				let index = (y * size.width + x) as usize;
-				assert_close(zero_copy[index], [rgb[0], rgb[1], rgb[2], 255]);
+				assert_close(zero_copy[(y * size.width + x) as usize], [rgb[0], rgb[1], rgb[2], 255]);
+			}
+		}
+
+		true
+	}
+
+	/// An NV12 DMA-BUF has to import as two Vulkan images and draw the same
+	/// picture the CPU path draws from the same samples.
+	///
+	/// The test the whole per-plane import exists to pass. It runs at two sizes:
+	/// one whose width the driver leaves alone, and one it has to pad, so the
+	/// row pitch and the chroma plane's offset both stop being derivable from
+	/// the frame size. A pitch taken as the width shears the picture, and the
+	/// shear grows down the frame, which is why the comparison is over every
+	/// pixel rather than a sample of them.
+	///
+	/// Ignored: needs a GPU that can import DMA-BUFs and a VA-API device to
+	/// allocate one. Run with
+	/// `cargo test -p moq-video --features render,vaapi nv12_dmabuf -- --ignored --nocapture`.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn the_nv12_dmabuf_import_matches_the_cpu_path() {
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+
+		let mut ran = false;
+		for size in [Size::new(256, 192), Size::new(200, 120), Size::new(62, 34)] {
+			ran |= imported_matches_uploaded(&device, &queue, crate::DrmFormat::NV12, size, Layout::Nv12).await;
+		}
+		assert!(ran, "no NV12 DMA-BUF could be allocated to import");
+	}
+
+	/// The same for fully planar 4:2:0, which imports as three single-component
+	/// images rather than two.
+	///
+	/// Skips rather than fails where the driver will not allocate or export a
+	/// YU12 surface: what the layout has to get right is covered by NV12 either
+	/// way, and this is the arrangement a VA-API decode hands back.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn the_i420_dmabuf_import_matches_the_cpu_path() {
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+
+		for size in [Size::new(256, 192), Size::new(200, 120)] {
+			if !imported_matches_uploaded(&device, &queue, crate::DrmFormat::YUV420, size, Layout::I420).await {
+				eprintln!("skipping: this driver does not do YU12 DMA-BUFs");
+				return;
 			}
 		}
 	}
