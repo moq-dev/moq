@@ -52,7 +52,7 @@ describe("initialization", () => {
 		expect(init.capacity).toBe(128);
 		expect(init.rate).toBe(1000);
 		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
-		expect(init.control.byteLength).toBe(5 * 4); // 5 control slots * Int32
+		expect(init.control.byteLength).toBe(6 * 4); // 6 control slots * Int32
 	});
 
 	it("rounds capacity up to a power of two", () => {
@@ -696,6 +696,61 @@ describe("SharedRingBuffer.resize", () => {
 		});
 	}
 
+	it("does not double-count a read that lands between resize's snapshots", () => {
+		// resize seeds ANCHOR from one CONSUMED snapshot and derives the playhead from another.
+		// A reader advancing in between is folded into copyStart, then added again by the handoff.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 0, 64, { channels: 1, value: 1 });
+		const worklet = new SharedRingBuffer(src.init);
+
+		const realLoad = Atomics.load;
+		const atomics = Atomics as { load: unknown };
+		let advanced = false;
+		atomics.load = (arr: Int32Array, idx: number) => {
+			const value = realLoad(arr, idx);
+			// Between resize's CONSUMED load on the source and the ANCHOR load it pairs with.
+			if (!advanced && idx === 1 && arr.buffer === src.init.control) {
+				advanced = true;
+				read(worklet, 16, 1);
+			}
+			return value;
+		};
+
+		let dst: SharedRingBuffer;
+		try {
+			dst = src.resize(256);
+		} finally {
+			atomics.load = realLoad;
+		}
+
+		const replacement = new SharedRingBuffer(dst.init, worklet);
+		expect(replacement.length).toBe(48);
+		expect(Time.Milli.fromMicro(dst.timestamp)).toBe(16 as Time.Milli);
+	});
+
+	it("drops a carried tally when the replacement re-anchored after the resize", () => {
+		// The reader's tally describes the timeline it was playing. If the destination re-anchored
+		// in the meantime, carrying it forward starts the replacement past audio never played.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 10_000, 64, { channels: 1, value: 1 });
+		const worklet = new SharedRingBuffer(src.init);
+
+		const dst = src.resize(256);
+		dst.setLatency(64);
+
+		// The reader drains the old ring while the replacement message is still queued.
+		read(worklet, 64, 1);
+
+		// ...and the destination starts a new utterance before the reader switches over.
+		dst.reset();
+		insert(dst, 30_000, 64, { channels: 1, value: 2 });
+
+		const replacement = new SharedRingBuffer(dst.init, worklet);
+
+		expect(replacement.length).toBe(64);
+		expect(read(replacement, 64, 1)[0]).toEqual(new Float32Array(64).fill(2));
+	});
+
 	it("preserves the unread window when growing capacity", () => {
 		const src = create({ rate: 1000, channels: 2, capacity: 64, latency: 30 });
 		insert(src, 0, 30, { value: 3.5 });
@@ -855,26 +910,49 @@ describe("read() racing a re-anchor", () => {
 			let fired = false;
 			const atomics = Atomics as { load: unknown };
 			const realLoad = Atomics.load;
+			// The epoch the read itself snapshotted, which is what decides whether its quantum is
+			// still valid. Firing before that load means the read simply picked up the new
+			// timeline, which is correct rather than a violation.
+			let snapshot: number | undefined;
+			let epochLoads = 0;
+			let epochLoadsAtFire = 0;
 			atomics.load = (arr: Int32Array, idx: number) => {
 				const value = realLoad(arr, idx);
+				if (idx === 5) {
+					epochLoads++;
+					if (snapshot === undefined) snapshot = value;
+				}
 				if (!fired && ++calls === trigger) {
 					fired = true;
+					epochLoadsAtFire = epochLoads;
 					main.reset();
 					insert(main, 30_000, 32, { channels: 1, value: 2 });
 				}
 				return value;
 			};
 
+			const control = new Int32Array(main.init.control);
+
+			out[0].fill(-1);
+			let result = 0;
 			try {
-				worklet.read(out);
+				result = worklet.read(out);
 			} finally {
 				atomics.load = realLoad;
 			}
 
 			if (!fired) return; // read() took a shorter path than this trigger
 
+			// A read whose timeline was replaced under it must render nothing: the worklet plays
+			// whatever is in the buffer regardless of the count it gets back. Landing before the
+			// read snapshotted the epoch means it simply picked up the new timeline, and landing
+			// after it revalidated means the quantum was already committed; both are correct.
+			if (snapshot !== undefined && Atomics.load(control, 5) !== snapshot && epochLoadsAtFire < 2) {
+				expect(result).toBe(0);
+				expect(out[0].some((sample) => sample === 1)).toBe(false);
+			}
+
 			// Off by at most one quantum, never by the 2000 samples of the previous utterance.
-			const control = new Int32Array(main.init.control);
 			const playhead = (Atomics.load(control, 1) - Atomics.load(control, 2)) | 0;
 			const write = Atomics.load(control, 0);
 			expect(((playhead - write) | 0) <= out[0].length).toBe(true);

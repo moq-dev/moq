@@ -10,7 +10,10 @@ const CONSUMED = 1; // worklet: total samples it has ever played, monotonic, nev
 const ANCHOR = 2; // main thread: the CONSUMED value that the current timeline calls position 0
 const LATENCY = 3; // main thread
 const STALLED = 4; // main thread
-const CONTROL_SLOTS = 5;
+// main thread: bumped on every re-anchor. Only ever compared for equality by the reader, never
+// used to guard a write, so it cannot repeat the ABA that came with guarding a shared cursor.
+const EPOCH = 5; // main thread
+const CONTROL_SLOTS = 6;
 
 export interface SharedRingBufferInit {
 	channels: number;
@@ -128,9 +131,15 @@ export class SharedRingBuffer {
 		// The worklet's own tally, which outlives any single ring. `resize` seeds the replacement
 		// with the count it snapshotted, but the reader may have played more since, so a handoff
 		// keeps the reader's live value rather than the seed, and publishes it right away so the
-		// writer's view of the playhead does not lag until the next quantum.
+		// writer's view of the playhead does not lag a quantum behind.
+		//
+		// Only within the same epoch, though: samples played from the old ring say nothing about a
+		// timeline that re-anchored after the snapshot, and carrying them forward would start the
+		// replacement past audio it has never played.
 		this.#consumed = Atomics.load(this.#control, CONSUMED);
-		if (previous !== undefined) this.#publish(previous.#consumed);
+		if (previous !== undefined && Atomics.load(previous.#control, EPOCH) === Atomics.load(this.#control, EPOCH)) {
+			this.#publish(previous.#consumed);
+		}
 	}
 
 	/**
@@ -150,6 +159,7 @@ export class SharedRingBuffer {
 			// Rebase onto the new timeline by moving ANCHOR up to whatever the reader has played,
 			// which puts the playhead back at zero without writing a slot the reader owns.
 			this.#anchor = start;
+			Atomics.add(this.#control, EPOCH, 1);
 			Atomics.store(this.#control, ANCHOR, Atomics.load(this.#control, CONSUMED));
 			Atomics.store(this.#control, WRITE, 0);
 			this.#anchored = true;
@@ -227,6 +237,12 @@ export class SharedRingBuffer {
 	read(output: Float32Array[]): number {
 		if (Atomics.load(this.#control, STALLED) === 1) return 0;
 
+		// STALLED is only checked here, so a reset plus a re-anchoring insert can rebase the
+		// timeline while this call is still copying. The epoch says whether that happened, and
+		// unlike the cursor guards this replaces it never gates a write to a slot another thread
+		// owns: on a mismatch the read simply publishes nothing.
+		const epoch = Atomics.load(this.#control, EPOCH);
+
 		// The reader's own tally is authoritative: nothing else writes CONSUMED.
 		let consumed = this.#consumed;
 		let read = (consumed - Atomics.load(this.#control, ANCHOR)) | 0;
@@ -249,7 +265,8 @@ export class SharedRingBuffer {
 		const available = (write - read) | 0;
 		const count = Math.min(available, output[0].length);
 		if (count <= 0) {
-			this.#publish(consumed); // a latency skip still has to be published
+			// A latency skip still has to be published, but only if it still means anything.
+			if (Atomics.load(this.#control, EPOCH) === epoch) this.#publish(consumed);
 			return 0;
 		}
 
@@ -260,6 +277,14 @@ export class SharedRingBuffer {
 			for (let i = 0; i < count; i++) {
 				dst[i] = src[slot((read + i) | 0, this.capacity)];
 			}
+		}
+
+		if (Atomics.load(this.#control, EPOCH) !== epoch) {
+			// These samples belong to a timeline that no longer exists. The worklet takes the
+			// return value as an underflow count rather than clearing the buffer it handed over,
+			// so silence the written prefix or the discarded audio renders anyway.
+			for (let channel = 0; channel < this.channels; channel++) output[channel].fill(0, 0, count);
+			return 0;
 		}
 
 		this.#publish((consumed + count) | 0);
@@ -326,8 +351,11 @@ export class SharedRingBuffer {
 		dst.#anchored = this.#anchored;
 		dst.#anchor = this.#anchor;
 
+		// One snapshot for both. Loading CONSUMED again for the playhead would let the reader
+		// advance in between, so `copyStart` would already include that delta and the handoff
+		// would add it a second time.
 		const consumed = Atomics.load(this.#control, CONSUMED);
-		const read = this.#read();
+		const read = (consumed - Atomics.load(this.#control, ANCHOR)) | 0;
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 		const stalled = Atomics.load(this.#control, STALLED);
@@ -349,6 +377,7 @@ export class SharedRingBuffer {
 		// over. The worklet then publishes its own higher tally, which is monotonic against this.
 		Atomics.store(dst.#control, CONSUMED, consumed);
 		Atomics.store(dst.#control, ANCHOR, (consumed - copyStart) | 0);
+		Atomics.store(dst.#control, EPOCH, Atomics.load(this.#control, EPOCH));
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
 		Atomics.store(dst.#control, STALLED, stalled);
