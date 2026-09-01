@@ -44,7 +44,6 @@ measured and scoped to the quiche backend we ship today.
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [Cache shard](/quest/m1/perf/cache-shard.md) - stop hammering one process-global cache line and one clock read per frame from every worker
 - [Slot flags](/quest/m1/perf/slot-flags.md) - track delivery stops taking nested group locks under the track lock
-- [kio wake](/quest/m1/perf/kio-wake.md) - parking and waking stop paying a second mutex, forced re-registration, and realloc per cycle
 - [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
 - [#3200](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [#3129](/quest/m1/perf/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
