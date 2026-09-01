@@ -49,8 +49,6 @@ dashboards, fleet rollout) stay downstream.
 - [#3058](/quest/m2/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by closing it
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - Automatic LetsEncrypt support
-- [Plan: multipath](/quest/m2/plan-multipath.md) - split the bonded-contribution multipath work via /plan-quest
-- [#2276](/quest/m2/2276-moq-native-enable-quic-multipath-for-bonded-contribution.md) - moq-native: enable QUIC multipath for bonded contribution (noq already implements it)
 - [Room SDK](/quest/m2/room-sdk.md) - a headless room package: a room is a path prefix, no service, no storage
 - [LiveKit shim](/quest/m2/livekit-shim.md) - a drop-in livekit-client-compatible package running rooms over MoQ
 - [Auth verdict](/quest/m2/auth-verdict.md) - the relay hands an opaque credential to its auth API and is told the grant

@@ -19,6 +19,7 @@ its verdict lands and the follow-on work becomes concrete.
 - [Plan: Dart bindings](/quest/m3/plan-dart-bindings.md) - run the uniffi-dart spike and let its verdict gate the rest via /plan-quest
 - [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - Dart/Flutter bindings via UniFFI
 - [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - choose the custom-QUIC foundation by scored measurement
+- [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [#3203](/quest/m3/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
 - [#3205](/quest/m3/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
 - [Quiche GCC](/quest/m3/quiche-gcc.md) - a measured verdict on delay-based congestion control for media egress
