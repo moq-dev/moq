@@ -6,14 +6,15 @@ use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
 use crate::resample::{Resampler, remix, validate_channels};
-use crate::{Activity, Classified, Error, Frame};
+use crate::{Activity, Error, Frame};
 
 /// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
 /// declared by [`Config`].
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / channel count are fixed at construction, and
-/// [`read`](Self::read) returns [`Classified`] [`Frame`]s.
+/// [`read`](Self::read) returns [`Frame`]s carrying the codec activity they
+/// were decoded from.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
@@ -25,9 +26,12 @@ pub struct Consumer {
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
 	/// Codec activity spans still represented by buffered resampler output.
-	activity: VecDeque<ActivitySpan>,
+	spans: VecDeque<ActivitySpan>,
+	/// Activity of the last span the resampler output ran past, which is what the
+	/// filter's trailing rounding samples belong to.
+	trailing: Activity,
 	/// Resampled frames split at activity boundaries and waiting to be returned.
-	pending: VecDeque<Classified<Frame>>,
+	pending: VecDeque<Frame>,
 	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
@@ -93,7 +97,8 @@ impl Consumer {
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
-			activity: VecDeque::new(),
+			spans: VecDeque::new(),
+			trailing: Activity::Active,
 			pending: VecDeque::new(),
 			epoch: None,
 			frames_decoded: 0,
@@ -120,9 +125,12 @@ impl Consumer {
 		self.resolved_channels
 	}
 
-	/// Read the next decoded PCM frame and its codec activity, or `None` when the
-	/// track ends.
-	pub async fn read(&mut self) -> Result<Option<Classified<Frame>>, Error> {
+	/// Read the next decoded PCM frame, or `None` when the track ends.
+	///
+	/// [`Frame::activity`] reports whether the samples came from real audio or
+	/// Opus comfort noise. When resampling, a frame is cut short so it never spans
+	/// a change: the boundary stays on the source packet that carried it.
+	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			if let Some(frame) = self.pending.pop_front() {
 				return Ok(Some(frame));
@@ -146,7 +154,7 @@ impl Consumer {
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
 			let decoded = self.decoder.decode(&mux_frame.payload)?;
 			let activity = decoded.activity;
-			let mut decoded = decoded.into_inner();
+			let mut decoded = decoded.samples;
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
@@ -187,16 +195,16 @@ impl Consumer {
 			self.tail = Some(decoded_end);
 
 			if self.resampler.is_some() {
-				self.activity.push_back(ActivitySpan {
+				self.spans.push_back(ActivitySpan {
 					end: decoded_end,
 					activity,
 				});
-				let classified = self.classify(pcm, timestamp)?;
-				self.pending.extend(classified);
+				let split = self.split(pcm, timestamp)?;
+				self.pending.extend(split);
 				continue;
 			}
 
-			return Ok(Some(Classified::new(self.frame(pcm, timestamp)?, activity)));
+			return Ok(Some(self.frame(pcm, timestamp, activity)?));
 		}
 	}
 
@@ -213,7 +221,8 @@ impl Consumer {
 			resampler.reset();
 		}
 		self.tail = None;
-		self.activity.clear();
+		self.spans.clear();
+		self.trailing = Activity::Active;
 		self.pending.clear();
 		self.epoch = None;
 		self.frames_decoded = 0;
@@ -228,7 +237,7 @@ impl Consumer {
 	/// audio missing from the end of every resampled track. Flushing consumes the
 	/// resampler, which is what makes calling this on every later poll return
 	/// `None` rather than more tails.
-	fn flush(&mut self) -> Result<Option<Classified<Frame>>, Error> {
+	fn flush(&mut self) -> Result<Option<Frame>, Error> {
 		let (Some(resampler), Some(tail)) = (self.resampler.take(), self.tail) else {
 			return Ok(None);
 		};
@@ -237,50 +246,48 @@ impl Consumer {
 		let skipped = resampler.skipped();
 		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
 		let pcm = resampler.flush()?;
-		let classified = self.classify(pcm, timestamp)?;
-		self.pending.extend(classified);
+		let split = self.split(pcm, timestamp)?;
+		self.pending.extend(split);
 		Ok(self.pending.pop_front())
 	}
 
 	/// Split resampler output at the codec activity boundaries it spans.
-	fn classify(&mut self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Vec<Classified<Frame>>, Error> {
+	///
+	/// A chunk starts with samples the resampler was still holding from earlier
+	/// packets, so it can straddle a change that the packet just submitted knows
+	/// nothing about. Cut it where the spans say the change happened instead.
+	fn split(&mut self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Vec<Frame>, Error> {
 		let channels = self.decoder.channel_count().max(1) as usize;
 		let total = pcm.len() / channels;
 		let end = advance(timestamp, total, self.resolved_sample_rate)?;
 		let mut offset = 0;
-		let mut classified = Vec::new();
+		let mut split = Vec::new();
 
 		while offset < total {
 			let cursor = advance(timestamp, offset, self.resolved_sample_rate)?;
-			while self.activity.front().is_some_and(|span| span.end <= cursor) {
-				self.activity.pop_front();
+			while let Some(span) = self.spans.front().filter(|span| span.end <= cursor) {
+				self.trailing = span.activity;
+				self.spans.pop_front();
 			}
 
-			let Some(span) = self.activity.front() else {
-				classified.push(Classified::new(
-					self.frame(pcm[offset * channels..].to_vec(), cursor)?,
-					Activity::Active,
-				));
-				break;
+			// Only a span with another queued behind it is a real split point. The
+			// last one runs to the end of the output, since the sinc filter leaves a
+			// rounding frame or two past the final input boundary and those belong to
+			// the audio they came from rather than to a synthetic active span.
+			let (activity, next) = match self.spans.front() {
+				Some(span) if self.spans.len() > 1 => (
+					span.activity,
+					frames_between(timestamp, span.end.min(end), self.resolved_sample_rate)?.clamp(offset + 1, total),
+				),
+				Some(span) => (span.activity, total),
+				None => (self.trailing, total),
 			};
-			// The sinc filter can leave a rounding frame beyond the final input
-			// boundary. It belongs to the last span rather than a synthetic active
-			// span, while a queued following span is a real split point.
-			let boundary = if self.activity.len() > 1 {
-				span.end.min(end)
-			} else {
-				end
-			};
-			let next = frames_between(timestamp, boundary, self.resolved_sample_rate)?.clamp(offset + 1, total);
-			let activity = span.activity;
-			classified.push(Classified::new(
-				self.frame(pcm[offset * channels..next * channels].to_vec(), cursor)?,
-				activity,
-			));
+
+			split.push(self.frame(pcm[offset * channels..next * channels].to_vec(), cursor, activity)?);
 			offset = next;
 		}
 
-		Ok(classified)
+		Ok(split)
 	}
 
 	/// Where the output the resampler is about to hand back actually begins.
@@ -303,7 +310,7 @@ impl Consumer {
 	}
 
 	/// Remix and pack decoded PCM into an output frame.
-	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Frame, Error> {
+	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp, activity: Activity) -> Result<Frame, Error> {
 		let pcm = if self.decoder.channel_count() == self.resolved_channels {
 			pcm
 		} else {
@@ -314,6 +321,7 @@ impl Consumer {
 		Ok(Frame {
 			timestamp,
 			data: Bytes::from(bytes),
+			activity,
 		})
 	}
 }
@@ -391,12 +399,7 @@ mod tests {
 		for sample in samples {
 			data.extend_from_slice(&sample.to_le_bytes());
 		}
-		producer
-			.write(&Frame {
-				timestamp: Timestamp::ZERO,
-				data: data.into(),
-			})
-			.unwrap();
+		producer.write(&Frame::new(data.into(), Timestamp::ZERO)).unwrap();
 
 		let frame = consumer.read().await.unwrap().expect("decoded frame");
 		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
@@ -565,7 +568,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp,
-					payload: packet.value,
+					payload: packet.payload,
 					keyframe: true,
 					duration: None,
 				})
@@ -663,7 +666,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::ZERO,
-				payload: packet.value,
+				payload: packet.payload,
 				keyframe: true,
 				duration: None,
 			})
