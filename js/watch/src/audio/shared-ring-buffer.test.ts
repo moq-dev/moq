@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Time } from "@moq/net";
-import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
+import { allocSharedRingBuffer, SharedRingBuffer, type SharedRingBufferInit } from "./shared-ring-buffer";
 
 function create(props?: { rate?: number; channels?: number; capacity?: number; latency?: number }) {
 	const rate = props?.rate ?? 1000;
@@ -52,7 +52,8 @@ describe("initialization", () => {
 		expect(init.capacity).toBe(128);
 		expect(init.rate).toBe(1000);
 		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
-		expect(init.control.byteLength).toBe(4 * 4); // 4 control slots * Int32
+		expect(init.control.byteLength).toBe(3 * 4); // 3 control slots * Int32
+		expect(init.state.byteLength).toBe(8); // packed epoch + read cursor
 	});
 
 	it("rounds capacity up to a power of two", () => {
@@ -504,15 +505,20 @@ describe("length getter", () => {
 });
 
 describe("i32 wrap epoch", () => {
-	// READ/WRITE live in an Int32Array because they are shared with the worklet, so they wrap
-	// every ~13.5h at 44.1kHz. The modular comparisons cope; these cover the two places that
-	// used to read the raw signed value as a magnitude.
+	// WRITE is an Int32Array slot and the read cursor is the low half of the packed state word,
+	// so both wrap every ~13.5h at 44.1kHz. The modular comparisons cope; these cover the two
+	// places that used to read the raw signed value as a magnitude.
 	const WRITE = 0;
-	const READ = 1;
+
+	/** Move the read cursor without disturbing the epoch it is packed with. */
+	function seek(init: SharedRingBufferInit, read: number): void {
+		const state = new BigInt64Array(init.state);
+		const epoch = Atomics.load(state, 0) >> 32n;
+		Atomics.store(state, 0, (epoch << 32n) | BigInt(read >>> 0));
+	}
 
 	it("keeps the playhead advancing across the i32 wrap", () => {
 		const init = allocSharedRingBuffer(1, 64, 1000);
-		const control = new Int32Array(init.control);
 		const buffer = new SharedRingBuffer(init);
 		buffer.setLatency(32);
 
@@ -521,11 +527,11 @@ describe("i32 wrap epoch", () => {
 
 		// Step READ up to the boundary and over it, observing each time. Production gets these
 		// observations from the 50ms poll in `buffer.ts`.
-		control[READ] = (0x7fffffff - 1) | 0;
+		seek(init, (0x7fffffff - 1) | 0);
 		const before = buffer.timestamp;
-		control[READ] = 0x7fffffff | 0;
+		seek(init, 0x7fffffff | 0);
 		const at = buffer.timestamp;
-		control[READ] = -0x80000000;
+		seek(init, -0x80000000);
 		const after = buffer.timestamp;
 
 		// One sample at 1000Hz is 1ms. Reading the negative half as a magnitude used to report
@@ -551,7 +557,7 @@ describe("i32 wrap epoch", () => {
 
 		// Park both cursors 8 samples below the boundary so the next frame straddles it.
 		const edge = 0x7fffffff - 8;
-		control[READ] = edge | 0;
+		seek(init, edge | 0);
 		control[WRITE] = edge | 0;
 
 		insert(buffer, edge, 16, { channels: 1, value: 0.75 });
@@ -750,4 +756,90 @@ describe("buffered mode", () => {
 		expect(buffer.length).toBe(0);
 		expect(read(buffer, 100, 1)[0].length).toBe(0);
 	});
+});
+
+describe("packed state", () => {
+	it("does not replay samples consumed while the replacement message is in flight", () => {
+		// What the resize handoff exists for: the reader keeps draining the source until the
+		// message arrives, and the replacement must not start where the snapshot left off.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 0, 64, { channels: 1, value: 1 });
+
+		const dst = src.resize(256);
+		read(src, 16, 1);
+
+		const replacement = new SharedRingBuffer(dst.init, src);
+		expect(replacement.length).toBe(48);
+	});
+
+	it("drops the carried cursor when the replacement re-anchored first", () => {
+		// A different timeline: the cursor describes audio the replacement has never played.
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		insert(src, 10_000, 64, { channels: 1, value: 1 });
+		const worklet = new SharedRingBuffer(src.init);
+		read(worklet, 64, 1);
+
+		const dst = src.resize(256);
+		dst.setLatency(64);
+		dst.reset();
+		insert(dst, 30_000, 64, { channels: 1, value: 2 });
+
+		const replacement = new SharedRingBuffer(dst.init, worklet);
+		expect(replacement.length).toBe(64);
+		expect(read(replacement, 64, 1)[0]).toEqual(new Float32Array(64).fill(2));
+	});
+
+	// The reader samples the word, copies, then publishes, and the writer can rebase anywhere in
+	// between. Sweeping the re-anchor across every load covers the windows a fixed pause point
+	// misses. Because the publish is one exchange over epoch and cursor together, a rebase makes
+	// it fail rather than land: there is no ordering left to get wrong.
+	for (let trigger = 1; trigger <= 10; trigger++) {
+		it(`survives a re-anchor at load ${trigger} of a read`, () => {
+			const init = allocSharedRingBuffer(1, 64, 1000, true);
+			const main = new SharedRingBuffer(init);
+			main.setLatency(16);
+
+			const worklet = new SharedRingBuffer(init);
+			const out = [new Float32Array(16)];
+			for (let t = 0; t < 2000; t += 16) {
+				insert(main, 10_000 + t, 16, { channels: 1, value: 1 });
+				worklet.read(out);
+			}
+			insert(main, 12_000, 32, { channels: 1, value: 1 });
+
+			let calls = 0;
+			let fired = false;
+			const realLoad = Atomics.load;
+			const atomics = Atomics as { load: unknown };
+			atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
+				const value = realLoad(arr as Int32Array, idx);
+				if (!fired && ++calls === trigger) {
+					fired = true;
+					main.reset();
+					insert(main, 30_000, 32, { channels: 1, value: 2 });
+				}
+				return value;
+			};
+
+			out[0].fill(-1);
+			let result = 0;
+			try {
+				result = worklet.read(out);
+			} finally {
+				atomics.load = realLoad;
+			}
+
+			if (!fired) return; // read() took a shorter path than this trigger
+
+			// Nothing from the discarded timeline renders, and the new utterance plays in full.
+			if (result === 0) expect(out[0].some((sample) => sample === 1)).toBe(false);
+
+			let played = 0;
+			for (let i = 0; i < 20; i++) {
+				insert(main, 30_032 + i * 16, 16, { channels: 1, value: 2 });
+				played += worklet.read(out);
+			}
+			expect(played).toBe(320);
+		});
+	}
 });

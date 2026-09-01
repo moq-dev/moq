@@ -1,11 +1,37 @@
 import { Time } from "@moq/net";
 
-// Control array slot indices
+// Control array slot indices. The playhead is not here: see `state`.
 const WRITE = 0;
-const READ = 1;
-const LATENCY = 2;
-const STALLED = 3;
-const CONTROL_SLOTS = 4;
+const LATENCY = 1;
+const STALLED = 2;
+const CONTROL_SLOTS = 3;
+
+/**
+ * The playhead and the timeline it belongs to, packed into one 64-bit word: epoch in the high
+ * half, read cursor in the low half.
+ *
+ * They have to move together. The reader samples the ring, copies, and only then publishes, and
+ * the writer can rebase the timeline anywhere in between. Checking an epoch and then writing a
+ * cursor leaves a window between the two no ordering closes, which is how a stale cursor ends up
+ * on a fresh timeline: the playhead lands past WRITE, `read` returns nothing, and `insert` drops
+ * everything as too old until WRITE catches up. Packed, the check *is* the write: the reader
+ * compare-exchanges the whole word, so a rebase makes its publish fail rather than land.
+ */
+const CURSOR_MASK = 0xffffffffn;
+
+function pack(epoch: number, read: number): bigint {
+	return (BigInt(epoch >>> 0) << 32n) | BigInt(read >>> 0);
+}
+
+/** The timeline half. Bumped by the writer on every re-anchor. */
+function epochOf(state: bigint): number {
+	return Number(state >> 32n) | 0;
+}
+
+/** The playhead half, back as an i32 so the modular comparisons elsewhere still hold. */
+function readOf(state: bigint): number {
+	return Number(state & CURSOR_MASK) | 0;
+}
 
 export interface SharedRingBufferInit {
 	channels: number;
@@ -13,6 +39,7 @@ export interface SharedRingBufferInit {
 	rate: number;
 	samples: SharedArrayBuffer; // channels * capacity * Float32Array.BYTES_PER_ELEMENT bytes
 	control: SharedArrayBuffer; // CONTROL_SLOTS * Int32Array.BYTES_PER_ELEMENT bytes
+	state: SharedArrayBuffer; // one BigInt64Array element: epoch and read cursor, packed
 	// Buffered mode: never skip ahead on read, so we play through everything buffered.
 	buffered: boolean;
 }
@@ -42,12 +69,13 @@ export function allocSharedRingBuffer(
 
 	const samples = new SharedArrayBuffer(channels * capacity * Float32Array.BYTES_PER_ELEMENT);
 	const control = new SharedArrayBuffer(CONTROL_SLOTS * Int32Array.BYTES_PER_ELEMENT);
+	const state = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT);
 
 	// Initialize STALLED to 1
 	const ctrl = new Int32Array(control);
 	Atomics.store(ctrl, STALLED, 1);
 
-	return { channels, capacity, rate, samples, control, buffered };
+	return { channels, capacity, rate, samples, control, state, buffered };
 }
 
 /** Modular i32 max: returns a if a is ahead of b, else b. */
@@ -66,20 +94,6 @@ function slot(idx: number, capacity: number): number {
 	return idx & (capacity - 1);
 }
 
-/**
- * Atomically advance `arr[idx]` to `candidate` iff `candidate` is strictly ahead
- * (in modular i32 ordering). Retries under contention so the slot only ever
- * moves forward and concurrent writers/readers can't clobber each other.
- */
-function casAdvance(arr: Int32Array, idx: number, candidate: number): number {
-	for (;;) {
-		const current = Atomics.load(arr, idx);
-		if (((candidate - current) | 0) <= 0) return current;
-		const witnessed = Atomics.compareExchange(arr, idx, current, candidate);
-		if (witnessed === current) return candidate;
-	}
-}
-
 export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
@@ -88,6 +102,7 @@ export class SharedRingBuffer {
 	readonly init: SharedRingBufferInit;
 
 	#control: Int32Array;
+	#state: BigInt64Array;
 	#samples: Float32Array[];
 
 	// Whether READ/WRITE have been anchored to the first inserted sample.
@@ -107,7 +122,15 @@ export class SharedRingBuffer {
 	#position = 0;
 	#lastRead = 0;
 
-	constructor(init: SharedRingBufferInit) {
+	/**
+	 * Wrap the shared memory described by `init`.
+	 *
+	 * Pass `previous` in the worklet when this ring replaces one already being read. `resize`
+	 * snapshots the playhead on the main thread and hands the replacement over by message, so the
+	 * reader keeps draining the old ring in the meantime. Carrying its cursor across means those
+	 * samples are not played twice.
+	 */
+	constructor(init: SharedRingBufferInit, previous?: SharedRingBuffer) {
 		this.channels = init.channels;
 		this.capacity = init.capacity;
 		this.rate = init.rate;
@@ -115,11 +138,54 @@ export class SharedRingBuffer {
 		this.init = init;
 
 		this.#control = new Int32Array(init.control);
+		this.#state = new BigInt64Array(init.state);
 		this.#samples = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#samples.push(
 				new Float32Array(init.samples, i * this.capacity * Float32Array.BYTES_PER_ELEMENT, this.capacity),
 			);
+		}
+
+		if (previous !== undefined) this.#handoff(previous);
+	}
+
+	/**
+	 * Carry `source`'s playhead across, if the replacement is still the timeline it belongs to.
+	 *
+	 * `resize` copies the epoch, so a destination that re-anchored since has a different one and
+	 * the cursor is dropped rather than applied to audio the reader has never played. The check
+	 * and the write are the same exchange, so a re-anchor landing mid-handoff makes it fail
+	 * instead of slipping through the gap that separate operations would leave.
+	 */
+	#handoff(source: SharedRingBuffer): void {
+		if (source.channels !== this.channels || source.rate !== this.rate) return;
+
+		const from = Atomics.load(source.#state, 0);
+
+		for (;;) {
+			const state = Atomics.load(this.#state, 0);
+			if (epochOf(state) !== epochOf(from)) return;
+			if (((readOf(from) - readOf(state)) | 0) <= 0) return;
+
+			const next = pack(epochOf(state), readOf(from));
+			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
+		}
+	}
+
+	/**
+	 * Move the playhead forward to `candidate`, staying on whatever timeline is current.
+	 *
+	 * Retries while the word changes under it, and never steps backwards. Used by the writer's
+	 * overflow path; the reader publishes with its own exchange so it can tell a rebase apart
+	 * from losing a race.
+	 */
+	#advance(candidate: number): void {
+		for (;;) {
+			const state = Atomics.load(this.#state, 0);
+			if (((candidate - readOf(state)) | 0) <= 0) return;
+
+			const next = pack(epochOf(state), candidate);
+			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
 		}
 	}
 
@@ -138,7 +204,10 @@ export class SharedRingBuffer {
 		// from index 0.
 		if (!this.#anchored) {
 			this.#anchor = start;
-			Atomics.store(this.#control, READ, 0);
+			// One store rebases both halves, so a reader's compare-exchange against the old word
+			// cannot land afterwards.
+			const epoch = epochOf(Atomics.load(this.#state, 0));
+			Atomics.store(this.#state, 0, pack((epoch + 1) | 0, 0));
 			Atomics.store(this.#control, WRITE, 0);
 			this.#anchored = true;
 			this.#position = 0;
@@ -156,7 +225,7 @@ export class SharedRingBuffer {
 		const end = (start + originalLength) | 0;
 
 		// Trim old: discard samples before the read index
-		const read = Atomics.load(this.#control, READ);
+		const read = readOf(Atomics.load(this.#state, 0));
 		const behind = (read - start) | 0;
 		if (behind > 0) {
 			if (behind >= originalLength) {
@@ -172,7 +241,7 @@ export class SharedRingBuffer {
 		// Overflow: if the write would exceed capacity from current READ, advance READ.
 		// Use CAS so a concurrent reader advance isn't clobbered backward.
 		if (((end - read) | 0) > this.capacity) {
-			casAdvance(this.#control, READ, (end - this.capacity) | 0);
+			this.#advance((end - this.capacity) | 0);
 		}
 
 		// Gap fill: zero-fill from current WRITE to start if there's a discontinuity
@@ -201,7 +270,7 @@ export class SharedRingBuffer {
 		Atomics.store(this.#control, WRITE, i32Max(Atomics.load(this.#control, WRITE), end));
 
 		// Un-stall: if buffered data >= LATENCY
-		const currentRead = Atomics.load(this.#control, READ);
+		const currentRead = readOf(Atomics.load(this.#state, 0));
 		const currentWrite = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 		if (((currentWrite - currentRead) | 0) >= latency && latency > 0) {
@@ -216,7 +285,9 @@ export class SharedRingBuffer {
 	read(output: Float32Array[]): number {
 		if (Atomics.load(this.#control, STALLED) === 1) return 0;
 
-		let read = Atomics.load(this.#control, READ);
+		// The whole word, so the publish below can tell whether this is still the same timeline.
+		const state = Atomics.load(this.#state, 0);
+		let read = readOf(state);
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 
@@ -226,12 +297,18 @@ export class SharedRingBuffer {
 		const buffered = (write - read) | 0;
 		if (!this.buffered && latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
-			read = casAdvance(this.#control, READ, skipTo);
+			if (((skipTo - read) | 0) > 0) read = skipTo;
 		}
 
 		const available = (write - read) | 0;
 		const count = Math.min(available, output[0].length);
-		if (count <= 0) return 0;
+		if (count <= 0) {
+			// A latency skip still has to be published, and still only if nothing moved.
+			if (((read - readOf(state)) | 0) > 0) {
+				Atomics.compareExchange(this.#state, 0, state, pack(epochOf(state), read));
+			}
+			return 0;
+		}
 
 		// Copy samples
 		for (let channel = 0; channel < this.channels; channel++) {
@@ -242,8 +319,16 @@ export class SharedRingBuffer {
 			}
 		}
 
-		// Advance READ via CAS so a concurrent writer overflow can't be undone.
-		casAdvance(this.#control, READ, (read + count) | 0);
+		// Publish. The exchange fails if anything moved the word since the snapshot above, which
+		// covers both a rebase and a concurrent overflow, so these samples are only ever counted
+		// as played on the timeline they came from.
+		const next = pack(epochOf(state), (read + count) | 0);
+		if (Atomics.compareExchange(this.#state, 0, state, next) !== state) {
+			// The worklet takes the return value as an underflow count rather than clearing the
+			// buffer it handed over, so silence the prefix or the discarded audio renders anyway.
+			for (let channel = 0; channel < this.channels; channel++) output[channel].fill(0, 0, count);
+			return 0;
+		}
 
 		return count;
 	}
@@ -270,7 +355,7 @@ export class SharedRingBuffer {
 			// empty ring (read() returns nothing, insert() trims what the worklet already played) and
 			// heals on the first successor sample past the playhead, so it costs a quantum of silence
 			// rather than replaying anything.
-			const clamped = i32Max(target, Atomics.load(this.#control, READ));
+			const clamped = i32Max(target, readOf(Atomics.load(this.#state, 0)));
 			if (((write - clamped) | 0) <= 0) return;
 			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) return;
 		}
@@ -284,7 +369,8 @@ export class SharedRingBuffer {
 		this.#anchored = false;
 		Atomics.store(this.#control, STALLED, 1);
 		const write = Atomics.load(this.#control, WRITE);
-		Atomics.store(this.#control, READ, write);
+		const state = Atomics.load(this.#state, 0);
+		Atomics.store(this.#state, 0, pack(epochOf(state), write));
 	}
 
 	/**
@@ -305,7 +391,8 @@ export class SharedRingBuffer {
 		dst.#anchored = this.#anchored;
 		dst.#anchor = this.#anchor;
 
-		const read = Atomics.load(this.#control, READ);
+		const state = Atomics.load(this.#state, 0);
+		const read = readOf(state);
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 		const stalled = Atomics.load(this.#control, STALLED);
@@ -323,7 +410,7 @@ export class SharedRingBuffer {
 			}
 		}
 
-		Atomics.store(dst.#control, READ, copyStart);
+		Atomics.store(dst.#state, 0, pack(epochOf(state), copyStart));
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
 		Atomics.store(dst.#control, STALLED, stalled);
@@ -349,7 +436,7 @@ export class SharedRingBuffer {
 
 	/** `#foldRead` against the current READ. */
 	#unwrapRead(): number {
-		return this.#foldRead(Atomics.load(this.#control, READ));
+		return this.#foldRead(readOf(Atomics.load(this.#state, 0)));
 	}
 
 	/**
@@ -375,6 +462,6 @@ export class SharedRingBuffer {
 	 * tests and diagnostics, not control-flow decisions.
 	 */
 	get length(): number {
-		return (Atomics.load(this.#control, WRITE) - Atomics.load(this.#control, READ)) | 0;
+		return (Atomics.load(this.#control, WRITE) - readOf(Atomics.load(this.#state, 0))) | 0;
 	}
 }
