@@ -95,8 +95,10 @@ pub struct DrmFormat(u32);
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DrmFormat {
-	/// Semi-planar 8-bit 4:2:0 YUV.
+	/// Semi-planar 8-bit 4:2:0 YUV: one luma plane, one interleaved Cb/Cr plane.
 	pub const NV12: Self = Self::from_bytes(*b"NV12");
+	/// Fully planar 8-bit 4:2:0 YUV as named by DRM (`YU12`): luma, then Cb, then Cr.
+	pub const YUV420: Self = Self::from_bytes(*b"YU12");
 	/// Packed BGRx8888 as named by DRM (`XR24`).
 	pub const XRGB8888: Self = Self::from_bytes(*b"XR24");
 	/// Packed BGRA8888 as named by DRM (`AR24`).
@@ -127,7 +129,9 @@ pub struct DmaBufPlane {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufPlane {
-	#[cfg(feature = "pipewire")]
+	// The producers that build a real one, plus the importer's own tests, which
+	// build them without a producer to check how a layout is split up.
+	#[cfg(any(feature = "pipewire", feature = "vaapi", test))]
 	pub(crate) const fn new(offset: u32, stride: u32) -> Self {
 		Self { offset, stride }
 	}
@@ -272,7 +276,7 @@ impl std::fmt::Debug for DmaBuf {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBuf {
-	#[cfg(feature = "pipewire")]
+	#[cfg(any(feature = "pipewire", feature = "vaapi"))]
 	pub(crate) fn new(
 		format: DrmFormat,
 		modifier: u64,
@@ -330,6 +334,15 @@ impl DmaBuf {
 	/// Plane offsets and row strides, in format order.
 	pub fn planes(&self) -> &[DmaBufPlane] {
 		&self.planes
+	}
+
+	/// The color space of these samples where the producer named one.
+	///
+	/// `None` for the usual case of a producer that says nothing, which for YUV
+	/// pixels means the consumer falls back to [`Color::infer`]. Packed RGB
+	/// needs no answer at all.
+	pub const fn color(&self) -> Option<Color> {
+		self.color
 	}
 }
 
