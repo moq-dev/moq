@@ -71,22 +71,25 @@ test("the shared window shrinks repetitive payloads", async () => {
 	expect(sizes[sizes.length - 1]).toBeLessThan(sizes[0] ?? 0);
 });
 
-test("a second group is a rolled log, not a continuation", async () => {
-	// A stream is one group. A publisher that rolls lost whatever would have completed the first,
-	// so the read reports that rather than handing back the remainder as a continuous log.
+test("a second group preempts an open group", async () => {
 	// Written by hand because this producer never rolls.
 	const track = new Track.Producer("test");
-	for (const pair of [payloads(2), payloads(2)]) {
-		const group = track.appendGroup();
-		for (const payload of pair) group.writeFrame({ payload, timestamp: Time.Timestamp.now() });
-		group.close();
-	}
-	track.close();
-
+	const first = track.appendGroup();
+	first.writeFrame({ payload: payloads(1)[0], timestamp: Time.Timestamp.now() });
 	const consumer = new Consumer(track.subscribe({ maxAge: REPLAY_LATENCY }));
 	expect(await consumer.next()).toBeDefined();
-	expect(await consumer.next()).toBeDefined();
+
+	const pending = consumer.next();
+	await Promise.resolve();
+	const second = track.appendGroup();
+	first.writeFrame({ payload: payloads(1)[0], timestamp: Time.Timestamp.now() });
+
+	await expect(pending).rejects.toThrow(Rolled);
 	await expect(consumer.next()).rejects.toThrow(Rolled);
+
+	first.close();
+	second.close();
+	track.close();
 });
 
 test("an undecodable payload ends the log for a reader already inside the group", async () => {

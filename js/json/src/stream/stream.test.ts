@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Track } from "@moq/net";
-import { Consumer, Producer } from "./index.ts";
+import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };
 
@@ -46,6 +46,27 @@ test("the whole log rides one group, never rolled", async () => {
 	expect(group0?.sequence).toBe(0);
 	const group1 = await subscriber.nextGroup();
 	expect(group1).toBeUndefined();
+});
+
+test("a second group preempts an open group", async () => {
+	// Written by hand because this producer never rolls.
+	const track = new Track.Producer("test");
+	const first = track.appendGroup();
+	first.writeString(JSON.stringify({ n: 0 }));
+	const consumer = new Consumer<Rec>(track.subscribe());
+	expect(await consumer.next()).toEqual({ n: 0 });
+
+	const pending = consumer.next();
+	await Promise.resolve();
+	const second = track.appendGroup();
+	first.writeString(JSON.stringify({ n: 1 }));
+
+	await expect(pending).rejects.toThrow(Rolled);
+	await expect(consumer.next()).rejects.toThrow(Rolled);
+
+	first.close();
+	second.close();
+	track.close();
 });
 
 test("records with embedded newlines round-trip (JSON escapes the newline)", async () => {

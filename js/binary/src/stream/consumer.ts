@@ -29,7 +29,8 @@ export class Rolled extends Error {
  * The log is a single group. That is what makes the mode lossless: rolling to a second group means
  * the payloads that would have completed the first are gone, so a publisher that cannot write ends
  * the track instead. A second group is therefore a broken publisher, and reading it would present
- * a gap as a continuous log, so it throws {@link Rolled} rather than yielding the remainder.
+ * a gap as a continuous log, so it throws {@link Rolled} before yielding any more payloads from the
+ * first group.
  */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
@@ -38,6 +39,10 @@ export class Consumer {
 	#group?: Moq.Group.Consumer;
 	// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	#taken = false;
+	// The track read raced against the held group. Keep it across calls so it consumes one group.
+	#nextGroup?: Promise<Moq.Group.Consumer | undefined>;
+	#trackEnded = false;
+	#rolled?: Rolled;
 	// The DEFLATE window for the group, present while decompressing.
 	#flate?: Flate;
 
@@ -46,18 +51,44 @@ export class Consumer {
 		this.#decompress = config.compression ?? false;
 	}
 
+	#roll(): never {
+		this.#rolled ??= new Rolled();
+		throw this.#rolled;
+	}
+
 	/** Get the next payload, or `undefined` once the track ends. */
 	async next(): Promise<Uint8Array | undefined> {
+		if (this.#rolled) throw this.#rolled;
+
 		for (;;) {
 			if (!this.#group) {
+				if (this.#trackEnded) return undefined;
 				// Arrival order rather than sequence order, because there is only ever one group to
 				// take and a second one has to be seen whatever its sequence. The monotonic
 				// `nextGroup` would drop a late lower sequence, which is the very loss this reports.
-				this.#group = await this.#track.recvGroup();
+				this.#group = await (this.#nextGroup ?? this.#track.recvGroup());
+				this.#nextGroup = undefined;
 				if (!this.#group) return undefined;
-				if (this.#taken) throw new Rolled();
+				if (this.#taken) this.#roll();
 				this.#taken = true;
 				this.#flate = this.#decompress ? new Flate() : undefined;
+			}
+
+			const readable = this.#group.readable();
+			if (!this.#trackEnded) {
+				this.#nextGroup ??= this.#track.recvGroup();
+				const ready = await Promise.race([
+					this.#nextGroup.then((group) => ({ kind: "group" as const, group })),
+					readable.then(() => ({ kind: "frame" as const })),
+				]);
+				if (ready.kind === "group") {
+					this.#nextGroup = undefined;
+					if (ready.group) this.#roll();
+					this.#trackEnded = true;
+					await readable;
+				}
+			} else {
+				await readable;
 			}
 
 			const frame = await this.#group.readFrame();

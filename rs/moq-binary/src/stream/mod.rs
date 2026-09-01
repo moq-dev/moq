@@ -245,42 +245,38 @@ mod test {
 		);
 	}
 
-	/// A stream is one group. A publisher that rolls to a second one lost whatever would have
-	/// completed the first, so the read reports that rather than handing back the remainder as a
-	/// continuous log. Written by hand because this producer never rolls.
+	/// A second group invalidates the log immediately, even when the first remains open and has a
+	/// readable payload. Written by hand because this producer never rolls.
 	#[test]
-	fn a_second_group_is_a_rolled_log() {
+	fn a_second_group_preempts_an_open_group() {
 		let mut track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
+		let mut first = track.append_group().unwrap();
+		first.write_frame(moq_net::Timestamp::now(), b"first").unwrap();
 
-		for pair in payloads(4).chunks(2) {
-			// Each group is its own DEFLATE stream, which is what a recovery roll would produce.
-			let mut flate = moq_flate::Encoder::new();
-			let mut group = track.append_group().unwrap();
-			for payload in pair {
-				group
-					.write_frame(moq_net::Timestamp::now(), flate.frame(payload))
-					.unwrap();
-			}
-			group.finish().unwrap();
-		}
-		track.finish().unwrap();
-
-		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default().with_compression(true));
+		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default());
 		let waiter = kio::Waiter::noop();
-
-		// The log's one group reads normally.
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		// The second group is a gap, not a continuation.
+		let mut second = track.append_group().unwrap();
+		first.write_frame(moq_net::Timestamp::now(), b"unread").unwrap();
+
 		assert!(matches!(
 			consumer.poll_next(&waiter),
 			Poll::Ready(Err(crate::Error::Rolled))
 		));
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+
+		first.finish().unwrap();
+		second.finish().unwrap();
+		track.finish().unwrap();
 	}
 
 	/// Groups are separate QUIC streams, so a second one can land before the first. Reading in
@@ -294,24 +290,28 @@ mod test {
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 
-		// Publish sequence 1 before sequence 0, the way reordering delivers them.
-		for sequence in [1u64, 0] {
-			let mut flate = moq_flate::Encoder::new();
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			group
-				.write_frame(moq_net::Timestamp::now(), flate.frame(&[sequence as u8; 8]))
-				.unwrap();
-			group.finish().unwrap();
-		}
-		track.finish().unwrap();
-
+		let mut flate = moq_flate::Encoder::new();
+		let mut first = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		first
+			.write_frame(moq_net::Timestamp::now(), flate.frame(&[1u8; 8]))
+			.unwrap();
+		first.finish().unwrap();
 		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default().with_compression(true));
 		let waiter = kio::Waiter::noop();
-
 		assert!(matches!(
 			consumer.poll_next(&waiter),
 			Poll::Ready(Ok(Some(payload))) if payload == vec![1u8; 8]
 		));
+
+		// Sequence 0 lands after sequence 1, the way reordering delivers it.
+		let mut flate = moq_flate::Encoder::new();
+		let mut second = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		second
+			.write_frame(moq_net::Timestamp::now(), flate.frame(&[0u8; 8]))
+			.unwrap();
+		second.finish().unwrap();
+		track.finish().unwrap();
+
 		assert!(matches!(
 			consumer.poll_next(&waiter),
 			Poll::Ready(Err(crate::Error::Rolled))

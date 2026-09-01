@@ -14,13 +14,14 @@ use crate::Result;
 /// would have completed the first are gone, so a [`Producer`](super::Producer) that cannot write
 /// ends the track instead. A second group is therefore a broken publisher, and reading it would
 /// present a gap as a continuous log, so it fails with [`Error::Rolled`](crate::Error::Rolled)
-/// rather than yielding the remainder. When something else already owns the track, use the
-/// [`Decoder`] directly.
+/// before yielding any more records from the first group. When something else already owns the
+/// track, use the [`Decoder`] directly.
 pub struct Consumer<T> {
 	track: moq_net::track::Subscriber,
 	group: Option<moq_net::group::Consumer>,
 	/// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	taken: bool,
+	rolled: bool,
 	decoder: Decoder<T>,
 }
 
@@ -34,6 +35,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 			track,
 			group: None,
 			taken: false,
+			rolled: false,
 			decoder: Decoder::new(config),
 		}
 	}
@@ -48,6 +50,10 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Poll for the next record, without blocking.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
+		if self.rolled {
+			return Poll::Ready(Err(crate::Error::Rolled));
+		}
+
 		loop {
 			let Some(group) = &mut self.group else {
 				// Arrival order rather than sequence order, because there is only ever one group to
@@ -57,6 +63,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 				match self.track.poll_recv_group(waiter)? {
 					Poll::Ready(Some(group)) => {
 						if self.taken {
+							self.rolled = true;
 							return Poll::Ready(Err(crate::Error::Rolled));
 						}
 						self.taken = true;
@@ -68,6 +75,13 @@ impl<T: DeserializeOwned> Consumer<T> {
 					Poll::Pending => return Poll::Pending,
 				}
 			};
+
+			// Once the first group is held, a second invalidates the log immediately. Poll it first so
+			// unread records in the first group cannot delay the error.
+			if let Poll::Ready(Some(_)) = self.track.poll_recv_group(waiter)? {
+				self.rolled = true;
+				return Poll::Ready(Err(crate::Error::Rolled));
+			}
 
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => return Poll::Ready(Ok(Some(self.decoder.decode(&frame.payload)?))),

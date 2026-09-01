@@ -396,7 +396,7 @@ A publisher that cannot write a payload MUST close the track rather than continu
 A second group would present a gap as if it were a complete log; ending the track surfaces the failure instead, and a publisher with more to say opens a new track.
 
 A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
-It reads the one group the track carries, and MUST fail the read if the track carries a second, since whatever would have completed the first group is gone and yielding the remainder would present that gap as a continuous log.
+It reads the one group the track carries, and MUST fail the read as soon as it receives a second, even if the first remains open or has unread frames, since yielding any more records would present the gap as a continuous log.
 This is why a consumer takes groups in arrival order rather than by ascending sequence: groups are separate streams, so a second group MAY arrive with a lower sequence than the first, and skipping it would report a truncated log as a whole one.
 
 Retention is bounded, and this is the limit of "lossless".

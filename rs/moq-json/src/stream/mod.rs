@@ -112,6 +112,50 @@ mod test {
 		assert_eq!(drain(consumer(track, true)).len(), 50);
 	}
 
+	/// A second group invalidates the log immediately, even when the first remains open and has a
+	/// readable record. Written by hand because this producer never rolls.
+	#[test]
+	fn a_second_group_preempts_an_open_group() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let mut first = track.append_group().unwrap();
+		first
+			.write_frame(
+				moq_net::Timestamp::now(),
+				serde_json::to_vec(&json!({ "n": 0 })).unwrap(),
+			)
+			.unwrap();
+
+		let mut consumer = consumer(subscriber, false);
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
+
+		let mut second = track.append_group().unwrap();
+		first
+			.write_frame(
+				moq_net::Timestamp::now(),
+				serde_json::to_vec(&json!({ "n": 1 })).unwrap(),
+			)
+			.unwrap();
+
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+
+		first.finish().unwrap();
+		second.finish().unwrap();
+		track.finish().unwrap();
+	}
+
 	#[test]
 	fn live_consumer_sees_each_record() {
 		let (mut producer, track) = producer(compressed());

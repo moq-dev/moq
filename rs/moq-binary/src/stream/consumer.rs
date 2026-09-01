@@ -32,12 +32,13 @@ impl ConsumerConfig {
 /// means the records that would have completed the first are gone, so a publisher that cannot
 /// write ends the track instead. A second group is therefore a broken publisher, and reading it
 /// would present a gap as a continuous log, so it fails with
-/// [`Error::Rolled`](crate::Error::Rolled) rather than yielding the remainder.
+/// [`Error::Rolled`](crate::Error::Rolled) before yielding any more payloads from the first group.
 pub struct Consumer {
 	track: moq_net::track::Subscriber,
 	group: Option<moq_net::group::Consumer>,
 	/// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	taken: bool,
+	rolled: bool,
 	/// The DEFLATE decoder for the group, `Some` while decompressing.
 	flate: Option<moq_flate::Decoder>,
 	compression: bool,
@@ -53,6 +54,7 @@ impl Consumer {
 			track,
 			group: None,
 			taken: false,
+			rolled: false,
 			flate: None,
 			compression: config.compression,
 		}
@@ -65,6 +67,10 @@ impl Consumer {
 
 	/// Poll for the next payload, without blocking.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if self.rolled {
+			return Poll::Ready(Err(crate::Error::Rolled));
+		}
+
 		loop {
 			let Some(group) = &mut self.group else {
 				// Arrival order rather than sequence order, because there is only ever one group to
@@ -74,6 +80,7 @@ impl Consumer {
 				match self.track.poll_recv_group(waiter)? {
 					Poll::Ready(Some(group)) => {
 						if self.taken {
+							self.rolled = true;
 							return Poll::Ready(Err(crate::Error::Rolled));
 						}
 						self.taken = true;
@@ -85,6 +92,13 @@ impl Consumer {
 					Poll::Pending => return Poll::Pending,
 				}
 			};
+
+			// Once the first group is held, a second invalidates the log immediately. Poll it first so
+			// unread frames in the first group cannot delay the error.
+			if let Poll::Ready(Some(_)) = self.track.poll_recv_group(waiter)? {
+				self.rolled = true;
+				return Poll::Ready(Err(crate::Error::Rolled));
+			}
 
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => return Poll::Ready(self.decode(&frame.payload).map(Some)),
