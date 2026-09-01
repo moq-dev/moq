@@ -64,6 +64,11 @@ The first packed-RGB vertical slice is implemented locally. Native Linux validat
 
 Refs #2481, #1837.
 
+This also covers the Linux zero-copy capture input gap: V4L2 and PipeWire
+convert to I420 on the CPU today (YUYV, BGRA), so V4L2 `VIDIOC_EXPBUF` export
+and PipeWire DMA-BUF negotiation are what feed a `Surface::DmaBuf` straight
+into VAAPI or NVENC.
+
 ## Closes
 
 - [#2819](https://github.com/moq-dev/moq/issues/2819) - close this issue when the quest finishes

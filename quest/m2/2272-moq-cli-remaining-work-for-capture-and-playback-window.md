@@ -75,12 +75,12 @@ So this is a new subcommand, not a gap in an existing one. Proposed: `moq --clie
 
 ---
 
-Dependencies: the codec/platform backends this builds on are tracked in #1837 (notably Linux screen capture, Windows capture HW validation, and per-platform live camera runs). This issue covers the `moq-cli` surface: sources we can't name, devices we can't list, audio we can't capture, and playback we can't do.
+Dependencies: the codec/platform backends this builds on. Linux screen capture landed (`capture/pipewire.rs`); Windows capture hardware validation and the per-platform live camera runs have not. This issue covers the `moq-cli` surface: sources we can't name, devices we can't list, audio we can't capture, and playback we can't do.
 
 ## Required
 
 - [Plan: the moq-cli capture and playback backlog](/quest/m2/plan-cli-capture.md) - split into implementable quests first
-- [#1837: moq-video: remaining work (codecs, platforms, decode, HW validation)](/quest/m2/1837-moq-video-remaining-work-codecs-platforms-decode-hw.md) - complete the prerequisite issue first
+- [Video hardware validation](/quest/m3/video-hardware.md) - the Windows capture and live-camera runs this builds on have never been run on real hardware
 
 ## Closes
 

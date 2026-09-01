@@ -29,6 +29,10 @@ Follow-up to #2145 (NVDEC hardware decode + zero-copy NVDEC -> NVENC transcode).
 
 Both are additive to the decode/encode `Codec` enums (`#[non_exhaustive]` already), so no breaking changes expected.
 
+AV1 encode belongs here too: it was waiting on a hardware backend, and the
+NVIDIA codec path is that backend. No software AV1 encode, since rav1e is too
+slow for real time.
+
 ## Closes
 
 - [#2147](https://github.com/moq-dev/moq/issues/2147) - close this issue when the quest finishes
