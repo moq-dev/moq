@@ -89,6 +89,27 @@ test("a second group is a rolled log, not a continuation", async () => {
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 });
 
+test("a second group is reported while the first is still open", async () => {
+	// A boundary-only check would never look at the track again while a group is open, so a
+	// publisher that opens a second group and leaves the first one running parks the read forever
+	// on a log that already lost payloads. The payloads already in hand are still delivered.
+	const track = new Track.Producer("test");
+
+	// Both groups stay open, the way a publisher writing to two at once leaves them.
+	const first = track.appendGroup();
+	first.writeFrame({ payload: payloads(1)[0], timestamp: Time.Timestamp.now() });
+	const second = track.appendGroup();
+	second.writeFrame({ payload: payloads(2)[1], timestamp: Time.Timestamp.now() });
+
+	const consumer = new Consumer(track.subscribe({ maxAge: REPLAY_LATENCY }));
+	expect(await consumer.next()).toEqual(payloads(1)[0]);
+	await expect(consumer.next()).rejects.toThrow(Rolled);
+
+	// Sticky: a later read must not report the rest of the first group as a whole log.
+	first.writeFrame({ payload: payloads(3)[2], timestamp: Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toThrow(Rolled);
+});
+
 test("an undecodable payload ends the log for a reader already inside the group", async () => {
 	// The decoder-limit check ends the track like any other lost record, and by then an earlier
 	// append may already have opened the group. A reader that pulled that group has to see the

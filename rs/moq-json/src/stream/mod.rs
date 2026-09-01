@@ -251,6 +251,54 @@ mod test {
 		assert_eq!(drain(consumer(producer.consume(), true)), vec![json!({ "n": 0 })]);
 	}
 
+	/// A stream is one group. A publisher that opens a second lost whatever would have completed the
+	/// first, so the read reports that rather than handing back the remainder as a continuous log.
+	/// A boundary-only check would never look at the track again while the first group is open, so
+	/// this parks forever without the eager check. Written by hand because this producer never rolls.
+	#[test]
+	fn a_second_group_is_reported_while_the_first_is_open() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+
+		// Ask for a replay window, so the first group is delivered rather than skipped by the
+		// subscriber's default max-age budget once a newer group exists.
+		let subscription = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30));
+		let subscriber = track.subscribe(subscription);
+
+		// Both groups stay open, the way a publisher writing to two at once leaves them.
+		let mut first = track.append_group().unwrap();
+		first
+			.write_frame(moq_net::Timestamp::now(), br#"{"n":0}"#.as_slice())
+			.unwrap();
+		let mut second = track.append_group().unwrap();
+		second
+			.write_frame(moq_net::Timestamp::now(), br#"{"n":1}"#.as_slice())
+			.unwrap();
+
+		let mut consumer = consumer(subscriber, false);
+		let waiter = kio::Waiter::noop();
+
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+		));
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+
+		// Sticky: a later read must not report the rest of the first group as a whole log.
+		first
+			.write_frame(moq_net::Timestamp::now(), br#"{"n":2}"#.as_slice())
+			.unwrap();
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+	}
+
 	#[test]
 	fn embedded_newlines_survive() {
 		// Each record is its own frame (one JSON object), and JSON escapes control characters, so a

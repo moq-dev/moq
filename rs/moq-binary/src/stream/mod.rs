@@ -283,6 +283,43 @@ mod test {
 		));
 	}
 
+	/// A boundary-only check would never look at the track again while a group is open, so a
+	/// publisher that opens a second group and leaves the first one running parks the read forever
+	/// on a log that already lost payloads. The payloads already in hand are still delivered.
+	#[test]
+	fn a_second_group_is_reported_while_the_first_is_open() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(replaying());
+
+		// Both groups stay open, the way a publisher writing to two at once leaves them.
+		let mut first = track.append_group().unwrap();
+		first.write_frame(moq_net::Timestamp::now(), &b"first"[..]).unwrap();
+		let mut second = track.append_group().unwrap();
+		second.write_frame(moq_net::Timestamp::now(), &b"second"[..]).unwrap();
+
+		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default());
+		let waiter = kio::Waiter::noop();
+
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Ok(Some(payload))) if payload == Bytes::from_static(b"first")
+		));
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+
+		// Sticky: a later read must not report the rest of the first group as a whole log.
+		first.write_frame(moq_net::Timestamp::now(), &b"more"[..]).unwrap();
+		assert!(matches!(
+			consumer.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::Rolled))
+		));
+	}
+
 	/// Groups are separate QUIC streams, so a second one can land before the first. Reading in
 	/// arrival order is what catches that: the monotonic `next_group` would skip the late lower
 	/// sequence and end the log cleanly, reporting a truncated log as a whole one.

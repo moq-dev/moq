@@ -399,6 +399,10 @@ A consumer MUST NOT skip to the newest group, since a later group does not super
 It reads the one group the track carries, and MUST fail the read if the track carries a second, since whatever would have completed the first group is gone and yielding the remainder would present that gap as a continuous log.
 This is why a consumer takes groups in arrival order rather than by ascending sequence: groups are separate streams, so a second group MAY arrive with a lower sequence than the first, and skipping it would report a truncated log as a whole one.
 
+A consumer MUST NOT wait for the first group to end before it looks for a second.
+A publisher that opens a second group while the first is still open is broken in exactly the way this rule exists to catch, and a consumer that only checks at the group boundary waits forever on a group that publisher may never finish.
+A consumer MAY yield payloads it has already received from the first group before it fails, since those payloads precede the gap, but it MUST fail rather than block once they run out.
+
 Retention is bounded, and this is the limit of "lossless".
 A group's cache is finite, so a publisher that writes more than it holds evicts the log's earliest frames.
 A consumer that has not kept up, or that subscribes later, then cannot read the log at all: the read fails once it reaches the evicted prefix, rather than silently resuming at whatever the cache still holds.
