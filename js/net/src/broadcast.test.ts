@@ -386,9 +386,13 @@ test("a retained fetch fails on an evicted group instead of waiting", async () =
 	// once its latencyMax elapses. Subscribing prunes, so the fetch finds nothing cached.
 	const track = broadcast.createTrack("video", { latencyMax: 0 });
 
-	const group = track.appendGroup();
-	group.writeFrame({ payload: new TextEncoder().encode("gone"), timestamp: Timestamp.now() });
-	group.close();
+	// Two groups, both closed, so the target is unambiguously not the latest and the whole
+	// window is evictable however the latest group is treated.
+	for (const payload of ["gone", "also gone"]) {
+		const group = track.appendGroup();
+		group.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: Timestamp.now() });
+		group.close();
+	}
 
 	// The track stays open, so a blocking fetch would wait for a sequence that has already
 	// been published and will never come round again.

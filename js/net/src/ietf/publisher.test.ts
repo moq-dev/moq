@@ -820,3 +820,46 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 		client.close();
 	}
 });
+
+/**
+ * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
+ * keeps serving until the track does. Groups published above the end are dropped rather
+ * than held: parking them would leave the serving loop waiting for a cap that never rises,
+ * and PUBLISH_DONE would never go out.
+ */
+test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	writeGroup(track, 1); // group 0, the whole requested range
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+		}),
+	);
+
+	try {
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the requested group was never served");
+		expect((await readGroup(served)).sequence).toBe(0);
+
+		// Beyond the end, so it is never served, and it must not hold the subscription open.
+		writeGroup(track, 1); // group 1
+		track.close();
+
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V20);
+		expect(done.statusCode).toBe(0x2);
+
+		// Only the in-range group was ever opened.
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		fx.close();
+		client.close();
+	}
+});

@@ -234,7 +234,6 @@ export class Publisher {
 			});
 			const startGroup = range.start ? Number(range.start.group) : track.latest();
 			if (startGroup !== undefined) track.startAt(startGroup);
-			track.endAt(range.end && Number(range.end.group));
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor.
@@ -285,6 +284,17 @@ export class Publisher {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
+
+					// Past the filter's end. Dropped here rather than through `endAt`, which
+					// parks a capped group instead: this range is fixed for the life of the
+					// subscription, so a group above it is never coming back in, and holding
+					// one keeps the loop from ever ending. A producer that publishes beyond
+					// the end and then closes would otherwise strand PUBLISH_DONE.
+					if (range.end !== undefined && BigInt(group.sequence) > range.end.group) {
+						group.close();
+						continue;
+					}
+
 					void this.#runGroup({
 						requestId: msg.requestId,
 						group,
