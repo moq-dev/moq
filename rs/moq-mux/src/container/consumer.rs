@@ -21,7 +21,14 @@ use super::{Container, Frame};
 /// and the newest available timestamp exceeds the configured max age. With the default
 /// max age of zero, the consumer skips aggressively. Any group that has a newer
 /// alternative is dropped. With a non-zero max age, slow groups are tolerated up to that
-/// budget before being skipped.
+/// budget before being skipped. A missing sequence gets the same tolerance: there is no
+/// way to tell a stream that lost the delivery race from one the cache evicted, so the
+/// consumer waits for it until everything it could still present (bounded by where the
+/// next group begins) falls a full budget behind the newest content.
+///
+/// A [`Subscription::start`](moq_net::track::Subscription::start) floor pins where
+/// delivery begins: the consumer waits for that group under the same budget instead of
+/// latching onto whichever group's frames win the arrival race.
 ///
 /// A stalled group is also skipped early, regardless of the max age budget, once it has
 /// presented up to where the next group begins. CMAF frames carry a per-sample duration,
@@ -134,14 +141,18 @@ impl<F: Container> Consumer<F> {
 	/// that budget on the [`moq_net::track::Subscription`] before awaiting the
 	/// subscription, so the publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
-		let max_age = track.subscription().max_age;
+		let subscription = track.subscription();
+		// An explicit start floor says exactly where delivery begins, so there is no
+		// first-arrival race to resolve: wait for that group under the age budget
+		// instead of latching onto whichever stream wins.
+		let start = subscription.start.map(|position| position.group);
 		Self {
 			track,
 			format,
-			current: 0,
+			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
-			startup: true,
-			max_age,
+			startup: start.is_none(),
+			max_age: subscription.max_age,
 			rewind: Rewind::default(),
 			end: None,
 		}
@@ -187,21 +198,20 @@ impl<F: Container> Consumer<F> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
-		// On startup, we want to poll every pending group and advance self.current to the first with a frame.
+		// On startup, wait until at least one group has a frame, then start from the
+		// lowest arrived sequence. An earlier group whose frames merely lost the race
+		// stays pending: the age budget below decides whether to wait for it or skip
+		// it, rather than the winning stream deciding by arrival order.
 		if self.startup {
-			// NOTE: We loop in ascending order, so earlier groups will win the race.
-			for (i, group) in self.pending.iter_mut().enumerate() {
-				// We call poll_min_timestamp to try to buffer at least one frame per group.
-				// This returns Ready(Ok) if there is a buffered frame.
-				if !matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))) {
-					continue;
-				}
-
-				// Start reading from this group and skip any previous groups.
-				self.current = group.sequence;
+			// NOTE: poll_min_timestamp buffers at least one frame per group and
+			// registers the waiter on the ones still empty.
+			let any_frame = self
+				.pending
+				.iter_mut()
+				.any(|group| matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))));
+			if any_frame {
+				self.current = self.pending.front().expect("a group has a frame").sequence;
 				self.startup = false;
-				self.pending.drain(0..i);
-				break;
 			}
 		}
 
@@ -318,12 +328,15 @@ impl<F: Container> Consumer<F> {
 					over_max_age || covered
 				} else {
 					// The current group can't produce a timestamp: either it's missing
-					// entirely -- a lower sequence the cache evicted, so `front` is already
-					// past `current` -- or it's finished/empty. With a newer group buffered,
-					// skip if the track is done OR the current sequence is simply gone. On a
-					// live track a buffered higher sequence means the missing one was evicted
-					// (the relay delivers in order), not merely late, so waiting is futile.
-					finished || self.pending.front().is_some_and(|g| g.sequence > self.current)
+					// entirely, or it's arrived but frameless. Groups race on independent
+					// QUIC streams (newer ones at higher priority), so a buffered higher
+					// sequence proves nothing: the missing one may be merely late, and
+					// there is no way to tell that from an eviction. The age budget is the
+					// only gate: everything the missing group could still present is
+					// bounded by where the next group begins, so skip once the newest
+					// content is a full budget past that point. A finished track can
+					// never deliver it, so skip immediately.
+					finished || max_timestamp.saturating_sub(next_start) >= self.max_age
 				}
 			} else {
 				false
@@ -334,12 +347,16 @@ impl<F: Container> Consumer<F> {
 			{
 				// A zero-frame group is ambiguous until its FIN arrives. Keep it in order so a
 				// delayed empty-group boundary cannot be discarded before it is recognized.
+				// With nothing delivered since the last boundary there is no codec state to
+				// reset, so a would-be discontinuity is redundant and the wait is skipped.
 				let mut discontinuities = 0;
-				for group in self.pending.iter_mut().take(new_idx) {
-					match group.poll_empty(waiter) {
-						Poll::Ready(true) => discontinuities += 1,
-						Poll::Ready(false) => {}
-						Poll::Pending => return Poll::Pending,
+				if self.rewind.live_edge.is_some() {
+					for group in self.pending.iter_mut().take(new_idx) {
+						match group.poll_empty(waiter) {
+							Poll::Ready(true) => discontinuities += 1,
+							Poll::Ready(false) => {}
+							Poll::Pending => return Poll::Pending,
+						}
 					}
 				}
 				self.pending.drain(0..new_idx);
@@ -1553,10 +1570,12 @@ mod tests {
 		assert_eq!(next.timestamp, ts(150_000), "skipped the evicted gap to the live group");
 	}
 
-	/// A missing (evicted) sequence with a newer group buffered must be skipped even
-	/// while the track is still LIVE -- not only once it's finished. This is the
-	/// recorder resume stall: `current` points at a sequence the cache dropped, a
-	/// higher group is buffered, and the track never finishes.
+	/// A missing (evicted) sequence with a newer group buffered must be skipped once the
+	/// age budget runs out, even while the track is still LIVE -- not only once it's
+	/// finished. This is the recorder resume stall: `current` points at a sequence the
+	/// cache dropped, higher groups are buffered, and the track never finishes. The gap
+	/// is indistinguishable from a stream that lost the delivery race, so the skip fires
+	/// only once the newest content is a full budget past what the gap could still hold.
 	#[tokio::test]
 	async fn missing_sequence_skips_on_live_track() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1565,9 +1584,11 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
 
 		// Group 0, then group 2 -- sequence 1 is missing (evicted) and never arrives.
-		// The track is NOT finished (live), the case that used to hang.
+		// The track is NOT finished (live), the case that used to hang. Group 3 pushes
+		// the live edge a full budget past group 2's start, expiring the gap at 1.
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 2, &[ts(200_000)]);
+		write_group(&mut track, 3, &[ts(320_000)]);
 
 		// Reading must reach group 2 across the gap instead of waiting forever for 1.
 		let reached = tokio::time::timeout(Duration::from_secs(1), async {
@@ -1580,6 +1601,117 @@ mod tests {
 		})
 		.await;
 		assert!(reached.is_ok(), "consumer hung on a missing sequence on a live track");
+	}
+
+	/// The other half of the budget-gated gap: while the newest content is still within
+	/// the age budget of what the missing sequence could present, the consumer waits for
+	/// it instead of writing it off, and delivers it when its stream loses the race but
+	/// still arrives (#3258).
+	#[tokio::test]
+	async fn gap_keeps_late_arriving_group_within_max_age() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track =
+			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+
+		// Group 2's stream beats group 1's, which hasn't arrived at all yet.
+		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut track, 2, &[ts(200_000)]);
+
+		let first = consumer.read().await.unwrap().expect("group 0 frame");
+		assert_eq!(first.timestamp, ts(0));
+
+		// Group 0 is done; group 1's stream is still racing. Within the budget the
+		// consumer waits at the gap rather than skipping to group 2.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the gap at sequence 1 is within budget and must be waited for"
+		);
+
+		// Group 1's stream opens moments later, well within the 500ms budget.
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![100_000, 200_000], "the late group is delivered in order");
+	}
+
+	/// An explicit start floor pins where delivery begins: when a later group's stream
+	/// wins the arrival race, startup waits for the requested head under the age budget
+	/// instead of latching onto the winner and dropping the head on arrival (#3258).
+	#[tokio::test]
+	async fn startup_keeps_late_arriving_head_group_within_max_age() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_start(moq_net::track::Position::group(0))
+				.with_max_age(Duration::from_millis(500)),
+		);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+
+		// Group 1's stream wins the race, and the consumer polls before group 0 lands.
+		write_group(&mut track, 1, &[ts(100_000)]);
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the requested head is within budget and must be waited for"
+		);
+
+		// Group 0 arrives moments later, well within the 500ms budget.
+		write_group(&mut track, 0, &[ts(0)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![0, 100_000], "the head group is delivered first");
+	}
+
+	/// A group whose stream arrived first but whose frames lost the race is not drained
+	/// by startup: the consumer starts from the lowest arrived sequence and reads the
+	/// slow group's frames once they land (#3258).
+	#[tokio::test]
+	async fn startup_keeps_slow_earlier_stream_within_max_age() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track =
+			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+
+		// Group 0's stream opens first but carries no frames yet; group 1's frame wins.
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_group(&mut track, 1, &[ts(100_000)]);
+
+		// Startup latches onto the lowest arrived sequence and waits under the budget.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"group 0's frames are within budget and must be waited for"
+		);
+
+		Container::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		group0.finish().unwrap();
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![0, 100_000], "the slow stream's frames survive startup");
 	}
 
 	// ---- Decode errors ----
