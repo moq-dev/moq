@@ -42,7 +42,3 @@ Proposal:
 Acceptance: ingest CPU per Gbps on the video shape and the chat shape
 (`just bench BASE` on Linux), plus `rs/moq-net/benches/group.rs`. Frame
 delivery latency at the live edge must not regress.
-
-## Related
-
-- [Session micro](/quest/m1/perf/session-micro.md) - the per-chunk stats bumps on the same loop
