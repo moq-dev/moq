@@ -57,7 +57,7 @@ impl FrameChannel {
 		let mut state = self.state.lock().unwrap();
 		state.closed = true;
 		drop(state);
-		self.notify.notify_waiters();
+		self.wake();
 	}
 
 	/// End the source with an error. Any pending frame is discarded so source
@@ -71,7 +71,17 @@ impl FrameChannel {
 		state.error = Some(error);
 		state.closed = true;
 		drop(state);
-		self.notify.notify_waiters();
+		self.wake();
+	}
+
+	/// Wake the single consumer, retaining a permit if it has not parked yet.
+	///
+	/// `notify_waiters` would drop the wakeup on the floor here: `recv` builds
+	/// its `Notified` before taking the lock but only registers it when the
+	/// future is first polled, so a terminal state set from the producer thread
+	/// in that window would leave the consumer asleep forever.
+	fn wake(&self) {
+		self.notify.notify_one();
 	}
 
 	/// Await the latest frame, the terminal backend error, or `None` once closed.
@@ -151,6 +161,21 @@ mod tests {
 			Err(Error::SourceUnavailable(reason)) if reason == "window closed"
 		));
 		assert!(chan.recv().await.unwrap().is_none());
+	}
+
+	/// A terminal state set while the consumer is between building its `Notified`
+	/// and registering it must still wake that consumer, so the wakeup has to
+	/// leave a permit behind rather than only signalling registered waiters.
+	#[tokio::test]
+	async fn closing_retains_a_wakeup_for_a_consumer_that_has_not_parked() {
+		let chan = FrameChannel::new();
+		// A permit consumed by nobody stands in for the unregistered consumer.
+		chan.close();
+		chan.notify.notified().await;
+
+		let chan = FrameChannel::new();
+		chan.fail(Error::SourceUnavailable("stream stopped".to_string()));
+		chan.notify.notified().await;
 	}
 
 	/// Cancelling a parked `recv` (as the encode loop's `select!` does each time a
