@@ -12,7 +12,12 @@ printf '#!/usr/bin/env sh\necho test\n' >"$binary"
 chmod 0755 "$binary"
 target="$(rustc -vV | awk '/^host:/ {print $2}')"
 
-"$WORKSPACE_DIR/rs/scripts/package-binary.sh" \
+# This test covers archive staging, not the macOS Mach-O rewrite.
+mkdir "$tmp/bin"
+printf '#!/usr/bin/env sh\nprintf "Linux\\n"\n' >"$tmp/bin/uname"
+chmod 0755 "$tmp/bin/uname"
+
+PATH="$tmp/bin:$PATH" "$WORKSPACE_DIR/rs/scripts/package-binary.sh" \
     --crate moq-relay \
     --bin moq-relay \
     --binary "$binary" \
