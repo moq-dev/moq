@@ -376,3 +376,46 @@ test("close rejects a still-pending track request so its subscriber unblocks", a
 
 	await expect(info).rejects.toThrow();
 });
+
+// A group at or below the live edge is either still retained or gone for good, so a
+// blocking fetch for an evicted one parks for the life of the track: nothing republishes
+// an old sequence, and a blocking read cannot tell "evicted" from "not published yet".
+test("a retained fetch fails on an evicted group instead of waiting", async () => {
+	const broadcast = new BroadcastProducer();
+	// A zero window evicts a group as soon as it closes, which is what a stale one hits
+	// once its latencyMax elapses. Subscribing prunes, so the fetch finds nothing cached.
+	const track = broadcast.createTrack("video", { latencyMax: 0 });
+
+	const group = track.appendGroup();
+	group.writeFrame({ payload: new TextEncoder().encode("gone"), timestamp: Timestamp.now() });
+	group.close();
+
+	// The track stays open, so a blocking fetch would wait for a sequence that has already
+	// been published and will never come round again.
+	await expect(broadcast.fetchGroup("video", 0, { retained: true })).rejects.toThrow("group not found");
+
+	broadcast.close();
+});
+
+// The waiting form is still the default: a fetch for a group that has yet to be published
+// has to park for it, which is what the consuming wire layer's coalescing relies on.
+test("a fetch without retained waits for a group still to come", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+
+	const pending = broadcast.fetchGroup("video", 1);
+
+	const first = track.appendGroup();
+	first.writeFrame({ payload: new TextEncoder().encode("0"), timestamp: Timestamp.now() });
+	first.close();
+
+	const second = track.appendGroup();
+	second.writeFrame({ payload: new TextEncoder().encode("1"), timestamp: Timestamp.now() });
+	second.close();
+
+	const group = await pending;
+	expect(group.sequence).toBe(1);
+	expect(await group.readString()).toBe("1");
+
+	broadcast.close();
+});

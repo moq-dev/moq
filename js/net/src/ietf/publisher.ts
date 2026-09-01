@@ -84,7 +84,13 @@ interface RunFill {
 	/** The subscription's request ID, which the fetch stream names. */
 	requestId: bigint;
 
-	/** The subscriber's delivery priority, applied to the fetch stream. */
+	/**
+	 * The subscriber's delivery priority, applied to the cache subscription the fill reads.
+	 *
+	 * Deliberately not the fetch stream's send order: this publisher leaves its group
+	 * streams at the transport's default, so ranking the fill alone would put backfill
+	 * ahead of the live groups it is catching up to.
+	 */
 	priority: number;
 
 	/** The range the fill resolved to. */
@@ -463,14 +469,19 @@ export class Publisher {
 	/**
 	 * Read the fill's group out of the broadcast's cache.
 	 *
-	 * The group is at or below the Largest Object snapshot, so this resolves right away.
-	 * The race only covers the subscriber leaving in that window, and closes the group the
-	 * fetch hands back afterwards so its subscription is not left behind.
+	 * The group is at or below the Largest Object snapshot, so it is either still retained
+	 * or gone for good: `retained` is what makes an evicted one fail here rather than park
+	 * the fetch waiting for a sequence nothing will republish, which would leave the
+	 * subscriber with neither its fill nor the reset it is owed.
+	 *
+	 * The race only covers the subscriber leaving before the fetch settles, and closes the
+	 * group the fetch hands back afterwards so its subscription is not left behind.
 	 */
 	async #fetchFill(options: RunFill, sequence: bigint): Promise<group.Consumer> {
 		let left = false;
 		const pending = options.broadcast.fetchGroup(options.trackName, Number(sequence), {
 			priority: options.priority,
+			retained: true,
 		});
 		void pending.then(
 			(group) => {

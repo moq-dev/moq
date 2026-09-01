@@ -191,6 +191,16 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
+
+	/**
+	 * Fail instead of waiting when the group is not in the retained window right now.
+	 *
+	 * A group at or below the live edge is either still retained or gone for good, because
+	 * nothing republishes an old sequence. Set this when fetching one: without it, a group
+	 * that has already been evicted parks the fetch for the life of the track, since a
+	 * fetch cannot otherwise tell "evicted" from "not published yet".
+	 */
+	retained?: boolean;
 }
 
 /**
@@ -760,26 +770,42 @@ export class Subscriber {
 	 */
 	async recvGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
-			const groups = this.#state.groups.peek();
-			const { start, end } = this.#cursor.peek();
-			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
-
-			// The buffer is sequence-sorted, so an in-range group that arrives behind a
-			// beyond-cap one sorts in front of it and is never blocked by it.
-			const group = groups[0];
-			if (group && (end === undefined || group.sequence <= end)) {
-				groups.shift();
-				return group;
-			}
+			const group = this.tryRecvGroup();
+			if (group) return group;
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
 			// A group beyond the cap outlives a clean close: it becomes deliverable if
 			// the cap rises, so the track isn't over while any are held.
-			if (closed !== undefined && !group) return undefined;
+			if (closed !== undefined && !this.#state.groups.peek()[0]) return undefined;
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
+	}
+
+	/**
+	 * Take the next buffered group without blocking, honoring the same cursor bounds as
+	 * {@link recvGroup}.
+	 *
+	 * Returns `undefined` when nothing is deliverable right now, which is not by itself the
+	 * end of the track: a group may still arrive, or one may be parked beyond the
+	 * {@link endAt} cap. Use it to drain what the retained window already holds, where
+	 * waiting for a sequence nothing will republish would park forever.
+	 */
+	tryRecvGroup(): GroupConsumer | undefined {
+		const groups = this.#state.groups.peek();
+		const { start, end } = this.#cursor.peek();
+		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+
+		// The buffer is sequence-sorted, so an in-range group that arrives behind a
+		// beyond-cap one sorts in front of it and is never blocked by it.
+		const group = groups[0];
+		if (group && (end === undefined || group.sequence <= end)) {
+			groups.shift();
+			return group;
+		}
+
+		return undefined;
 	}
 
 	/**
