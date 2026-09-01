@@ -79,11 +79,10 @@ pub(super) fn windows() -> Result<Vec<Window>, Error> {
 
 	let mut result = Vec::new();
 	for id in client_windows(&connection, root)? {
-		let attributes = match connection.get_window_attributes(id).map_err(codec)?.reply() {
-			Ok(attributes) if attributes.map_state == MapState::VIEWABLE => attributes,
+		match connection.get_window_attributes(id).map_err(codec)?.reply() {
+			Ok(attributes) if attributes.map_state == MapState::VIEWABLE => {}
 			_ => continue,
-		};
-		let _ = attributes;
+		}
 		let geometry = match connection.get_geometry(id).map_err(codec)?.reply() {
 			Ok(geometry) if geometry.width > 1 && geometry.height > 1 => geometry,
 			_ => continue,
@@ -95,7 +94,7 @@ pub(super) fn windows() -> Result<Vec<Window>, Error> {
 			continue;
 		}
 		let app = property(&connection, id, AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into())
-			.map(|value| value.replace('\0', " ").trim().to_string())
+			.map(|value| wm_class(&value))
 			.unwrap_or_default();
 		result.push(Window {
 			id: format!("x11:{id}"),
@@ -189,8 +188,12 @@ impl Capture {
 		let (drawable, x, y, width, height, depth, visual, name, display) = match target {
 			Target::Display(selector) => {
 				let monitors = monitors(&connection, root)?;
-				let index = select_monitor(&monitors, selector)
-					.ok_or_else(|| Error::SourceUnavailable(format!("no X11 display at index {selector:?}")))?;
+				let index = select_monitor(&monitors, selector).ok_or_else(|| match selector {
+					Some(index) => {
+						Error::SourceUnavailable(format!("no X11 display at index {index} ({} found)", monitors.len()))
+					}
+					None => Error::SourceUnavailable("no X11 displays".to_string()),
+				})?;
 				let monitor = &monitors[index];
 				(
 					root,
@@ -275,10 +278,10 @@ impl Capture {
 		if let Some(display) = &self.display {
 			let monitors = monitors(&self.connection, self.root)?;
 			if !display.matches(&monitors) {
-				return Err(Error::SourceChanged(format!(
-					"{} geometry or monitor layout changed",
-					self.name
-				)));
+				// The encoder's geometry is fixed at open, so end the stream and
+				// let the caller reopen against the new layout.
+				tracing::info!(source = %self.name, "X11 monitor layout changed; ending capture");
+				return Ok(None);
 			}
 		} else {
 			let geometry = self
@@ -290,10 +293,13 @@ impl Capture {
 			let width = u32::from(geometry.width) & !1;
 			let height = u32::from(geometry.height) & !1;
 			if (width, height) != (self.width, self.height) {
-				return Err(Error::SourceChanged(format!(
-					"{} resized from {}x{} to {width}x{height}",
-					self.name, self.width, self.height
-				)));
+				tracing::info!(
+					source = %self.name,
+					from = %format_args!("{}x{}", self.width, self.height),
+					to = %format_args!("{width}x{height}"),
+					"X11 window resized; ending capture"
+				);
+				return Ok(None);
 			}
 		}
 
@@ -615,6 +621,14 @@ fn property(connection: &RustConnection, window: XWindow, property: u32, kind: u
 		.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
 }
 
+/// `WM_CLASS` is `instance\0class\0`; the class is the application name, which
+/// is what the other platforms report.
+fn wm_class(value: &str) -> String {
+	let mut parts = value.split('\0').filter(|part| !part.is_empty());
+	let instance = parts.next().unwrap_or_default();
+	parts.next().unwrap_or(instance).to_string()
+}
+
 fn codec(error: impl std::fmt::Display) -> Error {
 	Error::Codec(anyhow::anyhow!("X11: {error}"))
 }
@@ -689,6 +703,13 @@ mod tests {
 		assert_eq!(&rgb[..3], &[100; 3]);
 		assert_eq!(&rgb[6..9], &[178, 50, 50]);
 		assert_eq!(&rgb[9..12], &[0, 0, 255]);
+	}
+
+	#[test]
+	fn wm_class_reports_the_application_class() {
+		assert_eq!(wm_class("navigator\0Firefox\0"), "Firefox");
+		assert_eq!(wm_class("xterm\0"), "xterm");
+		assert_eq!(wm_class(""), "");
 	}
 
 	#[test]

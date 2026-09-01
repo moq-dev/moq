@@ -185,10 +185,15 @@ impl Capture {
 		let width = ((rect.right - rect.left).max(0) as u32) & !1;
 		let height = ((rect.bottom - rect.top).max(0) as u32) & !1;
 		if (width, height) != (self.width, self.height) {
-			return Err(Error::SourceChanged(format!(
-				"{} resized from {}x{} to {width}x{height}",
-				self.name, self.width, self.height
-			)));
+			// The encoder's geometry is fixed at open, so end the stream and let
+			// the caller reopen against the new size.
+			tracing::info!(
+				source = %self.name,
+				from = %format_args!("{}x{}", self.width, self.height),
+				to = %format_args!("{width}x{height}"),
+				"window resized; ending capture"
+			);
+			return Ok(None);
 		}
 		let (bgra, printed) = snapshot(self.handle, self.width, self.height, self.wm_print, self.cursor)?;
 		if !self.identity.matches() {

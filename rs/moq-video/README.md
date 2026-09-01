@@ -50,8 +50,10 @@ while let Some(surface) = capture.read().await? {
 ```
 
 The stream retains only the newest unconsumed frame, so a slow encoder adds
-drops rather than latency. Permission denial and a source disappearing are
-reported as `Error::PermissionDenied` and `Error::SourceUnavailable`.
+drops rather than latency. `read` ends with `None` when the source stopped for
+a benign reason, such as a window resize, so reopen to follow it. Permission
+denial and a source disappearing are terminal, reported as
+`Error::PermissionDenied` and `Error::SourceUnavailable`.
 
 ## Encode
 

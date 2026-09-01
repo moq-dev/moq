@@ -236,9 +236,11 @@ while let Some(surface) = capture.read().await? {
 }
 ```
 
-`Error::PermissionDenied` reports an operating-system capture denial.
-`Error::SourceUnavailable` reports a selected source that is missing or was
-removed while the stream was live.
+`read` ends with `None` when the source stopped for a benign reason, such as a
+window resize or a compositor format renegotiation; reopen to follow it. An
+error is terminal for that selection: `Error::PermissionDenied` reports an
+operating-system capture denial, and `Error::SourceUnavailable` reports a
+selected source that is missing or was removed while the stream was live.
 
 ## API Reference
 

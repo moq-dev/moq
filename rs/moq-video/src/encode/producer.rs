@@ -420,21 +420,6 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
-#[cfg(feature = "capture")]
-enum CaptureEvent<T> {
-	Value(T),
-	Changed(String),
-}
-
-#[cfg(feature = "capture")]
-fn capture_event<T>(result: Result<T, Error>) -> Result<CaptureEvent<T>, Error> {
-	match result {
-		Ok(value) => Ok(CaptureEvent::Value(value)),
-		Err(Error::SourceChanged(reason)) => Ok(CaptureEvent::Changed(reason)),
-		Err(err) => Err(err),
-	}
-}
-
 /// Async capture/encode loop. Opens the camera while at least one viewer is
 /// watching and releases it when the last one leaves.
 ///
@@ -490,7 +475,7 @@ async fn capture_loop<E: CatalogExt>(
 			.clone()
 			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
 
-		let changed = loop {
+		loop {
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
@@ -501,7 +486,7 @@ async fn capture_loop<E: CatalogExt>(
 						log_track_ended(err);
 						return Ok(());
 					}
-					break None; // no viewers: release the camera, then wait for one
+					break; // no viewers: release the camera, then wait for one
 				}
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
@@ -509,14 +494,12 @@ async fn capture_loop<E: CatalogExt>(
 					apply_estimate(&mut encoder, &mut rate, estimate).await;
 					continue;
 				}
-				frame = camera.read() => capture_event(frame)?,
+				// A read error is terminal for this selection (the source is gone
+				// or was refused); `None` just ends the stream, so reopen below.
+				frame = camera.read() => frame?,
 			};
 
-			let surface = match frame {
-				CaptureEvent::Value(Some(surface)) => surface,
-				CaptureEvent::Value(None) => break None,
-				CaptureEvent::Changed(reason) => break Some(reason),
-			};
+			let Some(surface) = frame else { break };
 
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
@@ -526,17 +509,13 @@ async fn capture_loop<E: CatalogExt>(
 				force_keyframe = false;
 			}
 			producer.publish(&encoder.encode(frame).await?)?;
-		};
+		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
 		drop(encoder);
 		capture_stopped(producer)?;
-		if let Some(reason) = changed {
-			tracing::info!(%reason, "capture source changed; reopening");
-		} else {
-			tracing::info!("capture stopped; released source");
-		}
+		tracing::info!("capture stopped; released source");
 	}
 }
 
@@ -546,19 +525,6 @@ mod tests {
 
 	use super::*;
 	use crate::encode::{Config, Encoder};
-
-	#[cfg(feature = "capture")]
-	#[test]
-	fn only_source_changes_reopen_capture() {
-		assert!(matches!(
-			capture_event::<()>(Err(Error::SourceChanged("resized".to_string()))),
-			Ok(CaptureEvent::Changed(reason)) if reason == "resized"
-		));
-		assert!(matches!(
-			capture_event::<()>(Err(Error::SourceUnavailable("closed".to_string()))),
-			Err(Error::SourceUnavailable(reason)) if reason == "closed"
-		));
-	}
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a real
 	/// [`Producer`], returning the catalog rendition's track name and config.

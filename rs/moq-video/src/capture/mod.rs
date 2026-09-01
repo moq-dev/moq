@@ -284,9 +284,13 @@ impl Stream {
 
 	/// Await the next frame, or `None` once the source ends.
 	///
+	/// `None` is recoverable: the source stopped for a benign reason (it
+	/// resized, the compositor renegotiated the format, the device went idle)
+	/// and reopening is expected to work. An `Err` is terminal for this
+	/// selection: the source is gone or was refused.
+	///
 	/// Dropping this future cancels only the pending read. Dropping the stream
-	/// releases the capture source. A geometry change returns
-	/// [`Error::SourceChanged`], after which the stream must be reopened.
+	/// releases the capture source.
 	pub async fn read(&mut self) -> Result<Option<Surface>, Error> {
 		if let Some(frame) = self.pending.take() {
 			return Ok(Some(frame));
