@@ -96,11 +96,11 @@ interface RunFill {
 	/** The range the fill resolved to. */
 	fill: FillServe;
 
-	/** The broadcast to read the cached group from. */
-	broadcast: broadcast.Producer;
-
-	/** The track the fill belongs to. */
-	trackName: string;
+	/**
+	 * An independent view of the same track, used to read the cached group without consuming
+	 * anything the subscription will deliver.
+	 */
+	cache: track.Subscriber;
 
 	/** The track's advertised timescale, applied to every frame timestamp. */
 	timescale: Timescale;
@@ -236,9 +236,12 @@ export class Publisher {
 			if (startGroup !== undefined) track.startAt(startGroup);
 
 			// A fill reads the group cache through its own consumer, independent of the
-			// subscription's cursor.
+			// subscription's cursor. Forked from this subscriber rather than resolved through
+			// the broadcast again: a dynamic serve is one request per peer subscription, so
+			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
+			const cache = fill && fill.kind !== "empty" ? track.fork({ priority }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -307,17 +310,10 @@ export class Publisher {
 
 			// The fill (when one was requested) runs alongside on its own fetch stream; its
 			// failures reset that stream and never touch the subscription.
-			const filling = fill
-				? this.#runFill({
-						requestId: msg.requestId,
-						priority,
-						fill,
-						broadcast,
-						trackName: msg.trackName,
-						timescale,
-						unsubscribed,
-					})
-				: Promise.resolve();
+			const filling =
+				fill && cache
+					? this.#runFill({ requestId: msg.requestId, priority, fill, cache, timescale, unsubscribed })
+					: Promise.resolve();
 
 			let publishError: Error | undefined;
 			try {
@@ -442,13 +438,17 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, timescale, unsubscribed } = options;
-		if (fill.kind === "empty") return;
+		const { requestId, fill, cache, timescale, unsubscribed } = options;
+		if (fill.kind === "empty") {
+			cache.close();
+			return;
+		}
 
 		const version = this.#session.version;
 		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version });
 		if (!stream) {
 			console.debug(`fill stream failed to open: fill=${requestId}`);
+			cache.close();
 			return;
 		}
 
@@ -460,7 +460,7 @@ export class Publisher {
 				throw new Error("a fill spanning several groups is not supported");
 			}
 
-			const group = await this.#fetchFill(options, fill.sequence);
+			const group = takeGroup(cache, Number(fill.sequence));
 			try {
 				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
 			} finally {
@@ -473,42 +473,9 @@ export class Publisher {
 			const e = error(err);
 			console.debug(`fill failed, resetting its stream: fill=${requestId} error=${reason(e)}`);
 			stream.reset(e);
+		} finally {
+			cache.close();
 		}
-	}
-
-	/**
-	 * Read the fill's group out of the broadcast's cache.
-	 *
-	 * The group is at or below the Largest Object snapshot, so it is either still retained
-	 * or gone for good: `retained` is what makes an evicted one fail here rather than park
-	 * the fetch waiting for a sequence nothing will republish, which would leave the
-	 * subscriber with neither its fill nor the reset it is owed.
-	 *
-	 * The race only covers the subscriber leaving before the fetch settles, and closes the
-	 * group the fetch hands back afterwards so its subscription is not left behind.
-	 */
-	async #fetchFill(options: RunFill, sequence: bigint): Promise<group.Consumer> {
-		let left = false;
-		const pending = options.broadcast.fetchGroup(options.trackName, Number(sequence), {
-			priority: options.priority,
-			retained: true,
-		});
-		void pending.then(
-			(group) => {
-				if (left) group.close();
-			},
-			() => undefined,
-		);
-
-		const group = await Promise.race([
-			pending,
-			options.unsubscribed.then(() => {
-				left = true;
-				return undefined;
-			}),
-		]);
-		if (!group) throw new Error("unsubscribed before the fill's group resolved");
-		return group;
 	}
 
 	/**
@@ -1045,6 +1012,25 @@ type FillServe =
 	 * reset instead, the draft's fill-failure signal.
 	 */
 	| { kind: "unsupported" };
+
+/**
+ * Take one group out of a cache view, without waiting.
+ *
+ * A fill's group is at or below the Largest Object snapshot, so it is either still in the
+ * retained window or gone for good: nothing republishes an old sequence, and waiting for one
+ * would park for the life of the track. Scanning past it, or running dry, is a cache miss,
+ * which the caller turns into the draft's fill-failure reset.
+ */
+function takeGroup(cache: track.Subscriber, sequence: number): group.Consumer {
+	for (;;) {
+		const group = cache.tryRecvGroup();
+		if (!group) throw new Error(`group not found: ${sequence}`);
+		if (group.sequence === sequence) return group;
+
+		group.close();
+		if (group.sequence > sequence) throw new Error(`group not found: ${sequence}`);
+	}
+}
 
 /** `a - b`, saturating at zero the way the draft's unsigned arithmetic does. */
 function saturatingSub(a: bigint, b: bigint): bigint {

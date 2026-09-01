@@ -925,3 +925,58 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
 		client.close();
 	}
 });
+
+/**
+ * A broadcast served through `requested()` resolves its track on demand, and a dynamic serve
+ * is deliberately one request per peer subscription. Resolving the track again to read the
+ * fill's cache would mint a second producer nobody has accepted, so the fill has to read the
+ * one already serving the subscription.
+ */
+test("draft-20: a fill works on a dynamically requested track", async () => {
+	const fx = fixture();
+
+	// Answer the request the subscription raises, the way an application serving on demand
+	// does, rather than inserting the track up front.
+	const serving = (async () => {
+		const request = await fx.broadcast.requested();
+		if (!request) throw new Error("no track was requested");
+		const track = request.accept();
+		const group = track.appendGroup();
+		for (let i = 0; i < 2; i++) {
+			group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+		}
+		return group;
+	})();
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	const group = await serving;
+
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
+
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		expect(await readFill(fill)).toEqual({
+			requestId: 7n,
+			objects: [
+				{ group: 0, id: 0, payload: "0.0" },
+				{ group: 0, id: 1, payload: "0.1" },
+			],
+			reset: undefined,
+		});
+	} finally {
+		group.close();
+		fx.close();
+		client.close();
+	}
+});

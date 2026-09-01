@@ -191,16 +191,6 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
-
-	/**
-	 * Fail instead of waiting when the group is not in the retained window right now.
-	 *
-	 * A group at or below the live edge is either still retained or gone for good, because
-	 * nothing republishes an old sequence. Set this when fetching one: without it, a group
-	 * that has already been evicted parks the fetch for the life of the track, since a
-	 * fetch cannot otherwise tell "evicted" from "not published yet".
-	 */
-	retained?: boolean;
 }
 
 /**
@@ -254,6 +244,8 @@ export class Consumer {
 // The shared state behind a Producer / Subscriber pair. Package-internal
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
+	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
+	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
@@ -420,6 +412,7 @@ export class Producer {
 	// the track is open) mirror future groups into it. A late subscriber to a closed
 	// track still drains the buffered groups before seeing the end.
 	#addSink(sink: TrackState): void {
+		sink.producer = this;
 		const info = this.#state.info.peek();
 		if (info) sink.info.set(info);
 
@@ -727,6 +720,23 @@ export class Subscriber {
 			if (count > 0) return { group: groups[i].sequence, frame: count - 1 };
 		}
 		return undefined;
+	}
+
+	/**
+	 * An independent subscriber to the same track, with its own cursor and its own replay of
+	 * the retained window.
+	 *
+	 * Reads here do not consume anything this one would deliver, which is what lets a
+	 * publisher read the cache alongside the cursor it is serving from. Resolving the track
+	 * again through the broadcast would not do: a dynamic serve is one request per peer
+	 * subscription, so that mints a second producer the application has to answer separately.
+	 *
+	 * @internal Wire layers only.
+	 */
+	fork(options?: Subscription): Subscriber {
+		const producer = this.#state.producer;
+		if (!producer) throw new Error("track has no producer to fork from");
+		return producer.subscribe(options);
 	}
 
 	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */

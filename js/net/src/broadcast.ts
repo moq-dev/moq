@@ -116,10 +116,7 @@ async function fetchGroup(
 	const subscriber = subscribe(state, name, { priority: options.priority });
 	try {
 		for (;;) {
-			// A retained fetch never waits. The subscription mirrors the whole window in
-			// synchronously, so running dry means the sequence has been evicted, which a
-			// blocking read could not tell from one that has yet to be published.
-			const group = options.retained ? subscriber.tryRecvGroup() : await subscriber.recvGroup();
+			const group = await subscriber.recvGroup();
 			if (!group) throw new Error(`group not found: ${sequence}`);
 			if (group.sequence === sequence) {
 				// Close the subscription when the returned group finishes, not now: an

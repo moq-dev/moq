@@ -377,33 +377,10 @@ test("close rejects a still-pending track request so its subscriber unblocks", a
 	await expect(info).rejects.toThrow();
 });
 
-// A group at or below the live edge is either still retained or gone for good, so a
-// blocking fetch for an evicted one parks for the life of the track: nothing republishes
-// an old sequence, and a blocking read cannot tell "evicted" from "not published yet".
-test("a retained fetch fails on an evicted group instead of waiting", async () => {
-	const broadcast = new BroadcastProducer();
-	// A zero window evicts a group as soon as it closes, which is what a stale one hits
-	// once its latencyMax elapses. Subscribing prunes, so the fetch finds nothing cached.
-	const track = broadcast.createTrack("video", { latencyMax: 0 });
-
-	// Two groups, both closed, so the target is unambiguously not the latest and the whole
-	// window is evictable however the latest group is treated.
-	for (const payload of ["gone", "also gone"]) {
-		const group = track.appendGroup();
-		group.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: Timestamp.now() });
-		group.close();
-	}
-
-	// The track stays open, so a blocking fetch would wait for a sequence that has already
-	// been published and will never come round again.
-	await expect(broadcast.fetchGroup("video", 0, { retained: true })).rejects.toThrow("group not found");
-
-	broadcast.close();
-});
-
-// The waiting form is still the default: a fetch for a group that has yet to be published
-// has to park for it, which is what the consuming wire layer's coalescing relies on.
-test("a fetch without retained waits for a group still to come", async () => {
+// A fetch parks for a group that has yet to be published, which is what the consuming wire
+// layer's coalescing relies on. The publisher's fill deliberately does not use this path: it
+// wants a group that already exists, and waiting for one that is gone would never return.
+test("a fetch waits for a group still to come", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video");
 
