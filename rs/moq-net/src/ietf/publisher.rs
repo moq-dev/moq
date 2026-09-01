@@ -707,14 +707,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		group_start: Option<u64>,
 		group_end: Option<u64>,
 	) -> Result<(), Error> {
-		// A fresh cursor starts at the oldest cached group, so leaving it there replays the
-		// whole retained history at once, one concurrent stream per group. The subscription
-		// range is a preference for what the publisher should keep available; the cursor is
-		// what this subscriber actually reads, and setting one does not move the other.
-		if let Some(latest) = track.latest() {
-			track.start_at(group_start.unwrap_or(latest).min(latest));
-		} else if let Some(start) = group_start {
-			track.start_at(start);
+		// The subscription range is a preference for what the publisher should keep
+		// available; the cursor is what this subscriber actually reads, and setting one does
+		// not move the other. A requested start is used as given, including one past the
+		// live edge, where waiting for that group is the point. Only an absent start falls
+		// back to the live edge, since a fresh cursor starts at the oldest cached group and
+		// would otherwise replay the whole retained history at once.
+		match group_start {
+			Some(start) => track.start_at(start),
+			None => {
+				if let Some(latest) = track.latest() {
+					track.start_at(latest);
+				}
+			}
 		}
 		track.end_at(group_end);
 
@@ -3022,6 +3027,40 @@ mod range_tests {
 
 	const LATEST: Option<u64> = Some(100);
 
+	/// A start past the live edge is what the subscriber asked for, so it is used as given.
+	/// Clamping it to the live edge would serve a group outside the requested range.
+	#[tokio::test]
+	async fn a_future_start_is_not_clamped_to_the_live_edge() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		track
+			.create_group(group::Info { sequence: 7 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		track
+			.create_group(group::Info { sequence: 8 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
+		let mut subscriber = track.subscribe(None);
+		subscriber.start_at(9);
+		assert!(
+			futures::poll!(std::pin::pin!(subscriber.recv_group())).is_pending(),
+			"a future start must wait for its group rather than serving the live edge"
+		);
+
+		// The group it asked for is what it gets once published.
+		track
+			.create_group(group::Info { sequence: 9 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("group 9");
+		assert_eq!(group.sequence, 9);
+	}
+
 	/// Earlier drafts never had their absolute filters served, so honoring one now would
 	/// change what an existing peer receives.
 	#[test]
@@ -3091,7 +3130,7 @@ mod range_tests {
 	}
 
 	/// We do not support fills, so asking for one changes nothing about what is served.
-	/// Answering it as ordinary subgroups would look like support without being it.
+	/// Answering it at all would look like support without being it.
 	#[test]
 	fn a_fill_is_parsed_but_not_served() {
 		for fill in [Filter::Relative(1), Filter::Relative(20), Filter::Unfiltered] {
