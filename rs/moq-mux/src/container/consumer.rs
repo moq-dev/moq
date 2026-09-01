@@ -26,9 +26,11 @@ use super::{Container, Frame};
 /// consumer waits for it until everything it could still present (bounded by where the
 /// next group begins) falls a full budget behind the newest content.
 ///
-/// A [`Subscription::start`](moq_net::track::Subscription::start) floor pins where
-/// delivery begins: the consumer waits for that group under the same budget instead of
-/// latching onto whichever group's frames win the arrival race.
+/// Delivery starts at the [`Subscription::start`](moq_net::track::Subscription::start)
+/// floor (or group 0), and that same budget is the one rule that catches the consumer up
+/// to the live edge: there is no separate startup path racing on arrival order. History
+/// the publisher no longer serves expires like any other gap, since its reach sits a
+/// full budget behind the newest content.
 ///
 /// A stalled group is also skipped early, regardless of the max age budget, once it has
 /// presented up to where the next group begins. CMAF frames carry a per-sample duration,
@@ -57,10 +59,6 @@ pub struct Consumer<F: Container> {
 
 	// Groups that we are monitoring, sorted by sequence ascending.
 	pending: VecDeque<GroupBuffer>,
-
-	// When true, we haven't returned a frame yet and need to select the first group.
-	// We wait until we have at least one frame before finalizing `current`
-	startup: bool,
 
 	// How far we may drift from the live edge before skipping a group.
 	max_age: std::time::Duration,
@@ -137,22 +135,25 @@ impl Reset {
 impl<F: Container> Consumer<F> {
 	/// Create a Consumer wrapping the given moq-lite consumer, decoding `format`.
 	///
-	/// The ordering window inherits the subscriber's current max age budget. Put
-	/// that budget on the [`moq_net::track::Subscription`] before awaiting the
-	/// subscription, so the publisher preserves the same replay window.
+	/// The ordering window inherits the subscriber's current max age budget, clamped
+	/// to the track's retention window. Put that budget on the
+	/// [`moq_net::track::Subscription`] before awaiting the subscription, so the
+	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
-		// An explicit start floor says exactly where delivery begins, so there is no
-		// first-arrival race to resolve: wait for that group under the age budget
-		// instead of latching onto whichever stream wins.
+		// Delivery starts at the subscription floor (or 0); the age budget is the one
+		// rule that catches the cursor up to the live edge, so there is no separate
+		// startup path racing on arrival order. The budget is clamped to the track's
+		// retention window, since history the publisher no longer keeps can't be
+		// waited for and would otherwise stall the catch-up by the excess.
 		let start = subscription.start.map(|position| position.group);
+		let max_age = subscription.max_age.min(track.info().max_age);
 		Self {
 			track,
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
-			startup: start.is_none(),
-			max_age: subscription.max_age,
+			max_age,
 			rewind: Rewind::default(),
 			end: None,
 		}
@@ -197,23 +198,6 @@ impl<F: Container> Consumer<F> {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
-
-		// On startup, wait until at least one group has a frame, then start from the
-		// lowest arrived sequence. An earlier group whose frames merely lost the race
-		// stays pending: the age budget below decides whether to wait for it or skip
-		// it, rather than the winning stream deciding by arrival order.
-		if self.startup {
-			// NOTE: poll_min_timestamp buffers at least one frame per group and
-			// registers the waiter on the ones still empty.
-			let any_frame = self
-				.pending
-				.iter_mut()
-				.any(|group| matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))));
-			if any_frame {
-				self.current = self.pending.front().expect("a group has a frame").sequence;
-				self.startup = false;
-			}
-		}
 
 		loop {
 			// A newer group whose timestamps jumped backwards means the publisher reneged
@@ -538,9 +522,11 @@ impl<F: Container> Consumer<F> {
 		Ok(())
 	}
 
-	/// Set the max age mid-stream.
+	/// Set the max age mid-stream, clamped to the track's retention window like
+	/// [`new`](Self::new). The subscription keeps the requested value verbatim,
+	/// matching [`moq_net::track::Subscription::max_age`].
 	pub fn set_max_age(&mut self, max_age: std::time::Duration) {
-		self.max_age = max_age;
+		self.max_age = max_age.min(self.track.info().max_age);
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here.
@@ -1641,8 +1627,8 @@ mod tests {
 	}
 
 	/// An explicit start floor pins where delivery begins: when a later group's stream
-	/// wins the arrival race, startup waits for the requested head under the age budget
-	/// instead of latching onto the winner and dropping the head on arrival (#3258).
+	/// wins the arrival race, the consumer waits for the requested head under the age
+	/// budget instead of dropping it on arrival (#3258).
 	#[tokio::test]
 	async fn startup_keeps_late_arriving_head_group_within_max_age() {
 		tokio::time::pause();
@@ -1672,9 +1658,8 @@ mod tests {
 		assert_eq!(micros, vec![0, 100_000], "the head group is delivered first");
 	}
 
-	/// A group whose stream arrived first but whose frames lost the race is not drained
-	/// by startup: the consumer starts from the lowest arrived sequence and reads the
-	/// slow group's frames once they land (#3258).
+	/// A group whose frames lost the race to a newer group's stream is still read once
+	/// they land: the cursor starts at group 0 and waits under the budget (#3258).
 	#[tokio::test]
 	async fn startup_keeps_slow_earlier_stream_within_max_age() {
 		tokio::time::pause();
@@ -1711,14 +1696,14 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
-		assert_eq!(micros, vec![0, 100_000], "the slow stream's frames survive startup");
+		assert_eq!(micros, vec![0, 100_000], "the slow stream's frames are delivered");
 	}
 
 	// ---- Decode errors ----
 
 	/// A container that decodes each frame's payload as an 8-byte LE microsecond
 	/// timestamp, but treats a `FAIL` payload as a malformed frame. Lets a test put a
-	/// decodable frame first (so startup selects the group) and a decode failure after.
+	/// decodable frame first (so the consumer reads the group) and a decode failure after.
 	struct FailingDecode;
 
 	impl ContainerTrait for FailingDecode {
@@ -1763,7 +1748,7 @@ mod tests {
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, FailingDecode);
 
-		// A decodable frame first (so startup selects the group), then a malformed one.
+		// A decodable frame first (so the consumer reads the group), then a malformed one.
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from(0u64.to_le_bytes().to_vec()))
