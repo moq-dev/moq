@@ -1735,6 +1735,25 @@ impl Consumer {
 		}
 	}
 
+	/// The nearest cached group below `sequence`, under the same terms as
+	/// [`Self::peek_group`]. Walks the cache's own order, so gaps in the group numbering
+	/// are crossed and aborted (evicted) entries are skipped.
+	pub(crate) fn peek_before(&self, sequence: u64) -> Option<group::Consumer> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let state = state.read();
+				state
+					.lookup
+					.range(..sequence)
+					.rev()
+					.map(|(_, slot)| &slot.group)
+					.find(|group| !group.is_aborted())
+					.map(|group| group.consume())
+			}
+			ConsumerKind::Spliced(resume) => resume.peek_before(sequence),
+		}
+	}
+
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
 	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
 	/// group alive over one a subscriber actually read; an aborted (evicted) group is a

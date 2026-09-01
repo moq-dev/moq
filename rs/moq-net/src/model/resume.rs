@@ -507,6 +507,13 @@ impl Consumer {
 		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
 		track.peek_group(sequence)
 	}
+
+	/// The nearest cached group below `sequence` in the newest segment; see
+	/// [`track::Consumer::peek_before`].
+	pub(crate) fn peek_before(&self, sequence: u64) -> Option<group::Consumer> {
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.peek_before(sequence)
+	}
 }
 
 /// The pollable state of a [`Consumer::fetch_group`]; awaited via the

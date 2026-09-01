@@ -3636,13 +3636,25 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 				// frame is told the track is empty and gets no fill.
 				None => largest_before(track, latest),
 			};
+			// One past the edge, even when the edge sits below the newest group: a group
+			// may keep writing after a newer one exists, and a floor above the true Next
+			// Object would strand those objects between the fill cap and the
+			// subscription. With no readable object anywhere, the newest group's start
+			// excludes nothing the cache can still name.
+			let next = match largest {
+				Some(largest) => Location {
+					group: largest.group,
+					object: largest.object.saturating_add(1),
+				},
+				None => Location {
+					group: latest,
+					object: 0,
+				},
+			};
 			LiveEdge {
 				latest: Some(latest),
 				largest,
-				next: Some(Location {
-					group: latest,
-					object: count,
-				}),
+				next: Some(next),
 			}
 		}
 		_ => LiveEdge {
@@ -3656,20 +3668,22 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 	}
 }
 
-/// The last object before `sequence`: the nearest earlier cached group that has started a
-/// frame. The walk only continues over empty groups, which exist for at most the instant
-/// between a group's creation and its first frame, and a cache miss ends it with nothing.
+/// The last object below `sequence`: the nearest earlier cached group that has started a
+/// frame, walked in cache order so legal gaps in the group numbering are crossed. Empty
+/// groups exist for at most the instant between creation and first frame, so the walk is
+/// one step in practice. A group evicted from the cache is not visible, which is fine:
+/// Largest Object is the track from this publisher's perspective, and that is the cache.
 fn largest_before(track: &track::Consumer, sequence: u64) -> Option<Location> {
 	let mut sequence = sequence;
 	loop {
-		sequence = sequence.checked_sub(1)?;
-		let group = track.peek_group(sequence)?;
+		let group = track.peek_before(sequence)?;
 		if let Some(object) = (group.frame_count() as u64).checked_sub(1) {
 			return Some(Location {
-				group: sequence,
+				group: group.sequence,
 				object,
 			});
 		}
+		sequence = group.sequence;
 	}
 }
 
@@ -3974,8 +3988,11 @@ mod range_tests {
 		);
 	}
 
-	/// A group created but not yet written has no objects, so the largest sits in the
-	/// group before it. Losing it would tell a fill-requesting peer the track is empty.
+	/// A group created but not yet written has no objects, so the largest sits in an
+	/// earlier group. Losing it would tell a fill-requesting peer the track is empty, and
+	/// a floor above the true Next Object would strand a late object of the earlier group
+	/// between the fill cap and the subscription: a group may keep writing after a newer
+	/// one exists, so the earlier group is deliberately left unfinished here.
 	#[tokio::test]
 	async fn an_empty_newest_group_walks_back_for_the_largest() {
 		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
@@ -3985,7 +4002,6 @@ mod range_tests {
 				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 				.unwrap();
 		}
-		first.finish().unwrap();
 		let _open = track.create_group(group::Info { sequence: 1 }).unwrap();
 
 		let edge = live_edge(&track.consume());
@@ -3995,8 +4011,30 @@ mod range_tests {
 			Some(Location { group: 0, object: 2 }),
 			"the largest object is the previous group's last frame"
 		);
-		// The next object is still the new group's start: nothing exists between the two.
-		assert_eq!(edge.next, Some(Location { group: 1, object: 0 }));
+		assert_eq!(
+			edge.next,
+			Some(Location { group: 0, object: 3 }),
+			"the floor is one past the largest, so a late object of group 0 is not stranded"
+		);
+	}
+
+	/// Group numbering may legally skip sequences, so the walk follows the cache's own
+	/// order rather than decrementing by one.
+	#[tokio::test]
+	async fn the_walkback_crosses_a_gap_in_the_numbering() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
+		first
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+			.unwrap();
+		first.finish().unwrap();
+		// Sequence 1 never exists; the newest group is empty.
+		let _open = track.create_group(group::Info { sequence: 2 }).unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(2));
+		assert_eq!(edge.largest, Some(Location { group: 0, object: 0 }));
+		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
 	}
 
 	/// Both ends carry through, object bounds included, so the boundary groups can be
