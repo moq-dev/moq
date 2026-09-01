@@ -27,10 +27,11 @@ use super::{Container, Frame};
 /// next group begins) falls a full budget behind the newest content.
 ///
 /// Delivery starts at the [`Subscription::start`](moq_net::track::Subscription::start)
-/// floor (or group 0), and that same budget is the one rule that catches the consumer up
-/// to the live edge: there is no separate startup path racing on arrival order. History
-/// the publisher no longer serves expires like any other gap, since its reach sits a
-/// full budget behind the newest content.
+/// floor when one is named, waiting for that group under the budget; without one it
+/// starts wherever the publisher does, adopted from the first served groups. From there
+/// the same budget is the one rule that catches the consumer up to the live edge, and
+/// history the publisher no longer serves expires like any other gap, since its reach
+/// sits a full budget behind the newest content.
 ///
 /// A stalled group is also skipped early, regardless of the max age budget, once it has
 /// presented up to where the next group begins. CMAF frames carry a per-sample duration,
@@ -59,6 +60,10 @@ pub struct Consumer<F: Container> {
 
 	// Groups that we are monitoring, sorted by sequence ascending.
 	pending: VecDeque<GroupBuffer>,
+
+	// Latches the cursor onto the publisher's first served group when the
+	// subscription names no start. Cleared once a first group is chosen.
+	startup: bool,
 
 	// How far we may drift from the live edge before skipping a group.
 	max_age: std::time::Duration,
@@ -141,11 +146,12 @@ impl<F: Container> Consumer<F> {
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
-		// Delivery starts at the subscription floor (or 0); the age budget is the one
-		// rule that catches the cursor up to the live edge, so there is no separate
-		// startup path racing on arrival order. The budget is clamped to the track's
-		// retention window, since history the publisher no longer keeps can't be
-		// waited for and would otherwise stall the catch-up by the excess.
+		// Delivery starts at the subscription floor; without one it starts wherever
+		// the publisher does, adopted from the first arrivals (see poll_read). Either
+		// way the age budget is the one rule that catches the cursor up to the live
+		// edge from there. The budget is clamped to the track's retention window,
+		// since history the publisher no longer keeps can't be waited for and would
+		// otherwise stall the catch-up by the excess.
 		let start = subscription.start.map(|position| position.group);
 		let max_age = subscription.max_age.min(track.info().max_age);
 		Self {
@@ -153,6 +159,7 @@ impl<F: Container> Consumer<F> {
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
+			startup: start.is_none(),
 			max_age,
 			rewind: Rewind::default(),
 			end: None,
@@ -198,6 +205,24 @@ impl<F: Container> Consumer<F> {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
+
+		// A subscription with no explicit start begins wherever the publisher does:
+		// the lowest sequence it actually serves. Timestamps can't reveal that point
+		// (a gap below the served window looks like in-flight groups until the budget
+		// expires, or forever on a quiet track), so the cursor adopts it from the
+		// first arrivals instead of assuming group 0. Skipping stays the budget's job.
+		if self.startup {
+			// NOTE: poll_min_timestamp buffers at least one frame per group and
+			// registers the waiter on the ones still empty.
+			let any_frame = self
+				.pending
+				.iter_mut()
+				.any(|group| matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))));
+			if any_frame {
+				self.current = self.pending.front().expect("a group has a frame").sequence;
+				self.startup = false;
+			}
+		}
 
 		loop {
 			// A newer group whose timestamps jumped backwards means the publisher reneged
@@ -2123,6 +2148,29 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
+	}
+
+	/// An unfloored mid-stream join adopts the publisher's served start instead of
+	/// waiting for a gap below it to expire: on a quiet track that gap never would,
+	/// since nothing newer arrives to age it out.
+	#[tokio::test]
+	async fn startup_mid_stream_live_track_starts_at_the_served_group() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track =
+			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+
+		// The track is far along and stays live (never finished); only the current
+		// group is served, and nothing else arrives.
+		write_group(&mut track, 100, &[ts(3_000_000)]);
+
+		let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+			.await
+			.expect("an unfloored join must not wait out a gap below the served start")
+			.unwrap()
+			.expect("track still live");
+		assert_eq!(frame.timestamp, ts(3_000_000));
 	}
 
 	#[tokio::test]
