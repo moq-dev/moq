@@ -579,12 +579,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		});
 
+		// Declaring the timescale is what opts the track into timestamps, so
+		// INCLUDE_PROPERTIES=0 means every object goes out unstamped: a value in units the
+		// peer was never told is worse than none. Our own reader discards it, and a peer
+		// that assumes some default would time the media wrong.
+		let timescale = msg.properties_wanted.then(|| track.info().timescale);
+
 		// A fill reads the group cache through its own consumer, independent of the
 		// subscription's cursor.
-		let fill = msg
-			.fill
-			.filter(|_| Filter::is_draft20(self.version))
-			.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache));
+		let fill = msg.fill.filter(|_| Filter::is_draft20(self.version)).map(|fill| Fill {
+			request_id,
+			priority,
+			range: fill_range(fill, msg.filter, edge.largest),
+			cache,
+			timescale,
+		});
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -599,17 +608,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// Required once the track has content; a fill-requesting subscriber
 				// sizes its backfill against this.
 				largest: edge.largest,
-				properties: match msg.properties_wanted {
-					// Declaring the timescale is what opts the track into timestamps; every
-					// object Timestamp below is in these units.
+				properties: match timescale {
+					// The declared timescale; every object Timestamp below is in these units.
 					// We serve the newest group first, matching moq-lite.
-					true => ietf::Properties {
-						timescale: Some(track.info().timescale),
+					Some(timescale) => ietf::Properties {
+						timescale: Some(timescale),
 						group_order: Some(GroupOrder::Descending),
 					},
 					// INCLUDE_PROPERTIES=0. The field stays present but empty, which also
 					// means the track opts out of timestamps for this subscriber.
-					false => ietf::Properties::default(),
+					None => ietf::Properties::default(),
 				},
 			})
 			.await?;
@@ -620,12 +628,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let res = {
 			let serve = async {
 				match fill {
-					Some((fill, cache)) => {
-						let fill = self.run_fill(request_id, priority, fill, cache);
-						let (res, ()) = futures::join!(self.run_track(track, request_id, range), fill);
+					Some(fill) => {
+						let fill = self.run_fill(fill);
+						let (res, ()) = futures::join!(self.run_track(track, request_id, range, timescale), fill);
 						res
 					}
-					None => self.run_track(track, request_id, range).await,
+					None => self.run_track(track, request_id, range, timescale).await,
 				}
 			};
 			let mut serve = std::pin::pin!(serve);
@@ -737,11 +745,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
+	///
+	/// `timescale` is the units declared in SUBSCRIBE_OK, or `None` when the subscriber
+	/// opted out of Track Properties and objects therefore go out unstamped.
 	async fn run_track(
 		&self,
 		mut track: track::Subscriber,
 		request_id: RequestId,
 		range: ServeRange,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// The subscription range is a preference for what the publisher should keep
 		// available; the cursor is what this subscriber actually reads, and setting one does
@@ -799,11 +811,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				group_id: sequence,
 				sub_group_id: 0,
 				publisher_priority: 0,
-				// Carry per-object timestamps as extension headers (the Timestamp Object
-				// Property) so moq-transport peers get the real PTS. The units are the
-				// track's, declared once in SUBSCRIBE_OK.
+				// `run_group` fills in the Extensions flag from the timescale.
 				flags: ietf::GroupFlags {
-					has_extensions: true,
 					// Only honest when the stream really starts at the group's first
 					// object; a trimmed head starts partway through.
 					first_object: slice.skip == 0,
@@ -812,7 +821,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
-			let timescale = track.info().timescale;
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -828,15 +836,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// Serve one group on its own uni stream.
+	///
+	/// `timescale` is the units the track declared in SUBSCRIBE_OK. Per-object extension
+	/// headers carry the frame's presentation timestamp (the Timestamp Object Property) so
+	/// moq-transport peers get the real PTS, and `None` is a subscriber that opted out of
+	/// Track Properties: with no units declared there is nothing to write. That one value
+	/// sets both the group header's Extensions flag and what each object carries, so the
+	/// header can't promise extensions the objects don't have.
 	async fn run_group(
 		session: S,
-		msg: ietf::GroupHeader,
+		mut msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: group::Consumer,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Result<(), Error> {
+		msg.flags.has_extensions = timescale.is_some();
+
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
@@ -886,8 +904,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let frame = buf.filled()[i].clone();
 						if index >= slice.skip {
 							let delta = if std::mem::take(&mut first_written) { index } else { 0 };
-							Self::write_object_header(&mut stream, &msg, delta, frame.timestamp, timescale, version)
-								.await?;
+							Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
 							stream.encode(&(frame.payload.len() as u64)).await?;
 							if frame.payload.is_empty() {
 								// Have to write the object status too.
@@ -926,7 +943,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 
 					let delta = if std::mem::take(&mut first_written) { index } else { 0 };
-					Self::write_object_header(&mut stream, &msg, delta, frame.timestamp, timescale, version).await?;
+					Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
 					index += 1;
 
 					// Write the size of the frame.
@@ -972,23 +989,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Write one object's header: the id delta and, when the group carries extensions,
+	/// Write one object's header: the id delta and, when the track declared a timescale,
 	/// the presentation timestamp.
 	///
 	/// The first object's delta is its absolute Object ID; every later one is the prior
 	/// ID plus the delta plus one, so a contiguous group is a zero delta throughout.
 	async fn write_object_header(
 		stream: &mut Writer<S::SendStream, Version>,
-		msg: &ietf::GroupHeader,
 		delta: u64,
 		timestamp: Timestamp,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
 		stream.encode(&delta).await?;
 
-		// Per-object extension headers carry the frame's presentation timestamp.
-		if msg.flags.has_extensions {
+		// Per-object extension headers carry the frame's presentation timestamp, matching
+		// the group header's Extensions flag: `run_group` keys both off this timescale.
+		if let Some(timescale) = timescale {
 			let mut ext = bytes::BytesMut::new();
 			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
 			stream.encode(&(ext.len() as u64)).await?;
@@ -1004,8 +1021,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// A fill is a promise once requested. An empty range opens no stream, but a range we
 	/// cannot serve still opens one and resets it right after the FETCH_HEADER, the
 	/// draft's fill-failure signal. Nothing here touches the subscription either way.
-	async fn run_fill(&self, request_id: RequestId, priority: u8, fill: FillServe, track: track::Consumer) {
-		if matches!(fill, FillServe::Empty) {
+	async fn run_fill(&self, fill: Fill) {
+		let Fill {
+			request_id,
+			priority,
+			range,
+			cache,
+			timescale,
+		} = fill;
+
+		if matches!(range, FillServe::Empty) {
 			return;
 		}
 
@@ -1023,12 +1048,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			stream.encode(&FetchHeader::TYPE).await?;
 			stream.encode(&FetchHeader { request_id }).await?;
 
-			let FillServe::Group { sequence, skip, until } = fill else {
+			let FillServe::Group { sequence, skip, until } = range else {
 				return Err(Error::Unsupported);
 			};
 
-			let group = track.fetch_group(sequence, group::Fetch { priority }).await?;
-			Self::write_fill_group(&mut stream, group, sequence, skip, until, self.version).await
+			let group = cache.fetch_group(sequence, group::Fetch { priority }).await?;
+			let slice = GroupSlice { skip, until };
+			Self::write_fill_group(&mut stream, group, sequence, slice, timescale, self.version).await
 		}
 		.await;
 
@@ -1059,11 +1085,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Writer<S::SendStream, Version>,
 		mut group: group::Consumer,
 		sequence: u64,
-		skip: u64,
-		until: Option<u64>,
+		slice: GroupSlice,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
-		let timescale = group.timescale();
+		let GroupSlice { skip, until } = slice;
 		let mut index: u64 = 0;
 		let mut first = true;
 
@@ -1186,7 +1212,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		object: u64,
 		first: bool,
 		timestamp: Timestamp,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
 		// Serialization Flags: the two low bits encode the subgroup (00 = subgroup
@@ -1196,22 +1222,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PRIORITY: u64 = 0x10;
 		const PROPERTIES: u64 = 0x20;
 
+		// An unstamped object has no properties at all, so the field is omitted rather
+		// than written empty: the track declared no units to read a timestamp in.
+		let properties = if timescale.is_some() { PROPERTIES } else { 0 };
+
 		if first {
 			// The first object must carry its absolute Group and Object IDs. Include the
 			// priority too: "same as the prior object" has no prior to refer to.
-			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES)).await?;
+			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | properties)).await?;
 			stream.encode(&sequence).await?;
 			stream.encode(&object).await?;
 			stream.encode(&0u8).await?;
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			stream.encode(&PROPERTIES).await?;
+			stream.encode(&properties).await?;
 		}
 
-		let mut ext = bytes::BytesMut::new();
-		ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
-		stream.encode(&(ext.len() as u64)).await?;
-		stream.write_chunk(ext.freeze()).await?;
+		if let Some(timescale) = timescale {
+			let mut ext = bytes::BytesMut::new();
+			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
+			stream.encode(&(ext.len() as u64)).await?;
+			stream.write_chunk(ext.freeze()).await?;
+		}
 
 		Ok(())
 	}
@@ -1962,7 +1994,7 @@ mod group_priority_test {
 			msg,
 			200,
 			consumer,
-			Timescale::default(),
+			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		)
@@ -2020,7 +2052,7 @@ mod group_priority_test {
 				header(),
 				0,
 				consumer,
-				Timescale::default(),
+				Some(Timescale::default()),
 				Version::Draft14,
 				GroupSlice::default(),
 			)
@@ -2043,7 +2075,7 @@ mod group_priority_test {
 				header(),
 				0,
 				consumer,
-				Timescale::default(),
+				Some(Timescale::default()),
 				Version::Draft14,
 				GroupSlice::default(),
 			));
@@ -2111,7 +2143,7 @@ mod group_priority_test {
 			msg,
 			0,
 			consumer,
-			Timescale::default(),
+			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		));
@@ -2165,12 +2197,129 @@ mod subscribe_cursor_test {
 		track.finish().unwrap();
 
 		publisher
-			.run_track(subscriber, RequestId(1), ServeRange::default())
+			.run_track(
+				subscriber,
+				RequestId(1),
+				ServeRange::default(),
+				Some(Timescale::default()),
+			)
 			.await
 			.unwrap();
 
 		// `run_group` sets the priority once per stream it opens, so this counts groups served.
 		assert_eq!(log.priorities().len(), 1, "only group 3 should have been served");
+	}
+}
+
+/// A subscriber that sent INCLUDE_PROPERTIES=0 gets a SUBSCRIBE_OK whose Track Properties
+/// block is empty, so no TIMESCALE is declared and there are no units to read a Timestamp
+/// in. Stamping objects anyway spends bytes our own reader discards, and a peer that
+/// assumes some default would time the media wrong.
+#[cfg(test)]
+mod unstamped_tests {
+	use super::*;
+	use crate::coding::Decode;
+	use crate::lite::test_transport::{Log, SinkSend, SinkSession};
+
+	const VERSION: Version = Version::Draft20;
+
+	/// One frame, big enough that its length can't be mistaken for a properties block.
+	const PAYLOAD: &[u8] = b"frame";
+
+	/// A finished track holding one finished group, plus a consumer of that group.
+	fn track() -> (track::Producer, group::Consumer) {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(42).unwrap(), PAYLOAD)
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+		(track, consumer)
+	}
+
+	/// Serve the track's one group over a subscription, returning that stream's bytes.
+	async fn serve_subscription(timescale: Option<Timescale>) -> Vec<u8> {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let (mut track, _group) = track();
+		let subscriber = track.subscribe(None);
+		track.finish().unwrap();
+
+		publisher
+			.run_track(subscriber, RequestId(1), ServeRange::default(), timescale)
+			.await
+			.unwrap();
+
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// Serve the track's one group as a fill, returning that fetch stream's bytes.
+	async fn serve_fill(timescale: Option<Timescale>) -> Vec<u8> {
+		let log = Log::default();
+		let mut stream = Writer::new(SinkSend::new(log.clone()), VERSION);
+
+		let (mut track, group) = track();
+		track.finish().unwrap();
+
+		Publisher::<SinkSession>::write_fill_group(&mut stream, group, 0, GroupSlice::default(), timescale, VERSION)
+			.await
+			.unwrap();
+
+		log.writes.lock().unwrap().clone()
+	}
+
+	#[tokio::test]
+	async fn a_subscription_stamps_only_what_it_declared() {
+		let stamped = serve_subscription(Some(Timescale::default())).await;
+		let mut objects = stamped.as_slice();
+		let header = ietf::GroupHeader::decode(&mut objects, VERSION).unwrap();
+		assert!(header.flags.has_extensions, "a declared timescale opts objects in");
+		// Object ID delta, then a properties block: its length, then Timestamp (0x10).
+		assert_eq!(objects[0], 0, "expected a zero object id delta, got {objects:?}");
+		assert_eq!(objects[2], 0x10, "expected a Timestamp property, got {objects:?}");
+
+		let unstamped = serve_subscription(None).await;
+		let mut objects = unstamped.as_slice();
+		let header = ietf::GroupHeader::decode(&mut objects, VERSION).unwrap();
+		assert!(
+			!header.flags.has_extensions,
+			"the group header must not claim extensions"
+		);
+		// Object ID delta, payload length, payload: nothing in between.
+		let mut expected = vec![0, PAYLOAD.len() as u8];
+		expected.extend_from_slice(PAYLOAD);
+		assert_eq!(objects, expected, "the object must go straight to its payload");
+	}
+
+	#[tokio::test]
+	async fn a_fill_stamps_only_what_it_declared() {
+		// Serialization Flags: absolute Group ID, Object ID, priority, and properties.
+		const FIRST_STAMPED: u8 = 0x3c;
+		const FIRST_UNSTAMPED: u8 = 0x1c;
+
+		let stamped = serve_fill(Some(Timescale::default())).await;
+		assert_eq!(stamped[0], FIRST_STAMPED, "expected a properties bit, got {stamped:?}");
+
+		let unstamped = serve_fill(None).await;
+		// Flags, group id, object id, priority, payload length, payload: no properties.
+		let mut expected = vec![FIRST_UNSTAMPED, 0, 0, 0, PAYLOAD.len() as u8];
+		expected.extend_from_slice(PAYLOAD);
+		assert_eq!(unstamped, expected, "the object must carry no properties field");
 	}
 }
 
@@ -2404,7 +2553,7 @@ mod serve_tests {
 
 	/// The filter's object bounds trim what `run_group` writes: the skipped head is not
 	/// sent, the first written object's delta is its absolute id, and a capped tail stops
-	/// early. Extensions are off so the wire is just deltas, sizes, and payloads.
+	/// early. Served unstamped so the wire is just deltas, sizes, and payloads.
 	#[tokio::test]
 	async fn run_group_honors_the_slice() {
 		fn header() -> ietf::GroupHeader {
@@ -2431,17 +2580,9 @@ mod serve_tests {
 			let consumer = group.consume();
 			group.finish().unwrap();
 
-			Publisher::<SinkSession>::run_group(
-				session,
-				header(),
-				0,
-				consumer,
-				Timescale::default(),
-				Version::Draft20,
-				slice,
-			)
-			.await
-			.unwrap();
+			Publisher::<SinkSession>::run_group(session, header(), 0, consumer, None, Version::Draft20, slice)
+				.await
+				.unwrap();
 
 			log.writes.lock().unwrap().clone()
 		}
@@ -3783,6 +3924,27 @@ enum FillServe {
 	/// serialization depends on a negotiated group order we do not implement, so the
 	/// stream is reset instead, the draft's fill-failure signal.
 	Unsupported,
+}
+
+/// Everything one subscription's backfill needs, resolved when the SUBSCRIBE_OK is sent.
+struct Fill {
+	/// The subscription's request ID, which the fetch stream names.
+	request_id: RequestId,
+
+	/// The subscriber's delivery priority: the fetch stream's send order, and the priority
+	/// of the cache read behind it.
+	priority: u8,
+
+	/// The range the fill resolved to.
+	range: FillServe,
+
+	/// An independent view of the same track, used to read the cached group without
+	/// consuming anything the subscription will deliver.
+	cache: track::Consumer,
+
+	/// The units declared in SUBSCRIBE_OK, or `None` when the subscriber opted out of
+	/// Track Properties and objects therefore go out unstamped.
+	timescale: Option<Timescale>,
 }
 
 /// Resolve a fill request using the Fetch rules: relative to Largest Object and never
