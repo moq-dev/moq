@@ -85,12 +85,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn whip_and_whep_round_trip_opus() {
-		let source_origin = moq_net::Origin::random().produce();
+		let source_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
 		let mut source = source_origin
-			.create_broadcast("source", moq_net::broadcast::Route::new().with_announce(true))
+			.create_broadcast("source")
 			.expect("create source broadcast");
+		let _source_announcement = source_origin
+			.announce("source", moq_net::origin::Route::default())
+			.expect("announce source broadcast");
 		let catalog = moq_mux::catalog::Producer::new(&mut source).expect("create source catalog");
 		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
 		Bridge::push(
@@ -105,11 +108,11 @@ mod tests {
 			.await
 			.expect("source announcement timed out")
 			.expect("source origin closed");
-		assert_eq!(announcement.path.as_str(), "source");
-		assert!(announcement.broadcast.is_some(), "source was unannounced");
+		assert_eq!(announcement.prefix.as_path().as_str(), "source");
+		assert!(announcement.active, "source was unannounced");
 		drop(announcements);
 
-		let server_origin = moq_net::Origin::random().produce();
+		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let server = Server::new(
 			server::Config::default(),
 			server_origin.clone(),
@@ -131,9 +134,9 @@ mod tests {
 			.expect("WHIP negotiation timed out")
 			.expect("WHIP negotiation failed");
 
-		let output_origin = moq_net::Origin::random().produce();
+		let output_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let output = output_origin
-			.create_broadcast("output", moq_net::broadcast::Route::new().with_announce(true))
+			.create_broadcast("output")
 			.expect("create output broadcast");
 		let output_consumer = output.consume();
 		let whep = format!("http://{address}/whep/ingested").parse().expect("WHEP URL");
