@@ -22,7 +22,7 @@
 
 use bytes::Bytes;
 use loom::{future::block_on, thread};
-use moq_net::{Timestamp, broadcast, cache, origin};
+use moq_net::{Error, Timestamp, broadcast, cache, origin};
 
 /// A frame written on the publisher thread must reach a subscriber parked on
 /// `next_frame`, however the write interleaves with the reader's parking.
@@ -79,6 +79,41 @@ fn back_to_back_groups_arrive_in_order() {
 		assert!(second.sequence > first.sequence, "groups arrived out of order");
 
 		publisher.join().unwrap();
+	});
+}
+
+/// An abort flag may race a track scan. A scan that wins may hand out the group,
+/// while one that loses skips it; once the aborting thread joins, no new subscriber
+/// may observe the aborted group as live.
+///
+/// The abort transition first takes the loom-backed group lock, while delivery takes
+/// the loom-backed track lock. Those independent critical sections let loom permute
+/// both sides of the flag handoff without instrumenting every cache scan in this suite.
+#[test]
+fn group_abort_flag_is_monotone_for_track_scans() {
+	loom::model(|| {
+		let mut broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast.create_track("video", None).expect("create track");
+		let group = track.append_group().expect("append group");
+		let mut before = track.subscribe(None);
+		let mut racing = track.subscribe(None);
+		let mut after = track.subscribe(None);
+		track.finish().expect("finish track");
+
+		assert!(matches!(
+			before.poll_recv_group(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Ok(Some(_)))
+		));
+
+		let aborter = thread::spawn(move || group.abort(Error::Cancel).expect("abort group"));
+		let raced = racing.poll_recv_group(&kio::Waiter::noop());
+		assert!(raced.is_ready(), "a finalized track cannot park during the abort race");
+		aborter.join().unwrap();
+
+		assert!(matches!(
+			after.poll_recv_group(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Ok(None))
+		));
 	});
 }
 

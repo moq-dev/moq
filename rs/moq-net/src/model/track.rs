@@ -289,7 +289,7 @@ impl TrackState {
 	/// Find the next live group at or after `index` in arrival order.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Consumer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Producer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
 			if *sequence >= min_sequence
@@ -297,10 +297,7 @@ impl TrackState {
 				&& slot.stamp == *stamp
 				&& !slot.group.is_aborted()
 			{
-				// Delivery is a cache access: stamp it so expiry and the eviction
-				// walk don't kill a group a subscriber is about to read.
-				slot.group.cache_refresh();
-				return Poll::Ready(Ok(Some((slot.group.consume(), self.offset + i))));
+				return Poll::Ready(Ok(Some((slot.group.clone(), self.offset + i))));
 			}
 		}
 
@@ -361,7 +358,7 @@ impl TrackState {
 		&self,
 		next_sequence: u64,
 		end_sequence: Option<u64>,
-	) -> Poll<Result<Option<group::Consumer>>> {
+	) -> Poll<Result<Option<group::Producer>>> {
 		// If the end cap is already below where we'd resume, no group can
 		// ever satisfy this call until the cap rises. Pending (not None) so
 		// the consumer is parked rather than told the stream is over.
@@ -385,7 +382,7 @@ impl TrackState {
 			// Deliberately no cache refresh here: this is a pure seek, and the spliced
 			// merge consults candidates it may not deliver. The deliverer stamps the
 			// winner; a loser re-seeked every poll must not be shielded from eviction.
-			return Poll::Ready(Ok(Some(group.consume())));
+			return Poll::Ready(Ok(Some(group.clone())));
 		}
 
 		// No in-range group is cached. Decide whether more could ever arrive.
@@ -2971,7 +2968,7 @@ impl PlainSubscriber {
 					group
 				}
 				_ => {
-					let Some((consumer, found_index)) =
+					let Some((producer, found_index)) =
 						ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
 					else {
 						// Parked groups survive a finished track: they become deliverable
@@ -2981,6 +2978,10 @@ impl PlainSubscriber {
 						}
 						return Poll::Pending;
 					};
+					let consumer = producer.consume();
+					// Stamp with the track guard released, so delivery never nests the
+					// group's state lock under the track's.
+					consumer.cache_refresh();
 					self.index = found_index + 1;
 
 					// Park a group beyond the cap instead of dropping it, and keep scanning
@@ -3056,7 +3057,7 @@ impl PlainSubscriber {
 		let drift = ready!(self.poll_drift(servable_cap(end, self.stale_cap), waiter))?;
 
 		loop {
-			let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
+			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
 				// Deliberately no flush of `seek_pending` here: only a delivery commit
 				// may count a conviction. This `None` can be an artifact of a floor
 				// that will lower again, and a mid-group boundary can serve a
@@ -3065,6 +3066,7 @@ impl PlainSubscriber {
 				// cursor, the same tail bound a retired segment already has.
 				return Poll::Ready(Ok(None));
 			};
+			let group = producer.consume();
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
 			// walks a whole backlog off rather than handing it out group by group.

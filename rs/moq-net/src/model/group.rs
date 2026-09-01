@@ -320,6 +320,10 @@ pub struct Producer {
 struct Alive {
 	info: Info,
 	state: kio::Producer<GroupState>,
+	// Monotone mirror of `GroupState::abort` for track scans that already hold the
+	// track lock. A stale false only hands out a group that is concurrently aborting;
+	// true is stored after the abort exists, so it can never hide a live group.
+	aborted: AtomicBool,
 }
 
 impl Drop for Alive {
@@ -378,6 +382,7 @@ impl Producer {
 		let alive = Arc::new(Alive {
 			info,
 			state: state.clone(),
+			aborted: AtomicBool::new(false),
 		});
 		Self {
 			info,
@@ -723,6 +728,7 @@ impl Producer {
 	pub fn abort(self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
+		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
 		Ok(())
@@ -731,7 +737,7 @@ impl Producer {
 	/// Whether the group has been aborted (including pool eviction). The track's
 	/// read paths treat an aborted cached group as absent.
 	pub(crate) fn is_aborted(&self) -> bool {
-		self.state.read().abort.is_some()
+		self.alive.aborted.load(Ordering::Acquire)
 	}
 
 	/// Whether the group was cleanly finished, so no further frame can be appended.

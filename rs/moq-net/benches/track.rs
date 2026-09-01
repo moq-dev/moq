@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Timestamp, broadcast, cache, track};
+use moq_net::{Error, Timestamp, broadcast, cache, track};
 
 /// Fanout sizes spanning a direct viewer, a small room, and a large room.
 const FANOUT: [usize; 4] = [1, 8, 64, 512];
+
+/// Aborted-prefix sizes spanning a cache hit through a long stale scan.
+const ABORTED: [usize; 4] = [1, 8, 64, 512];
 
 /// Small shared payload so the benchmark measures model overhead, not allocation.
 const PAYLOAD: usize = 64;
@@ -34,6 +37,45 @@ struct Fanout {
 	subscribers: Vec<track::Subscriber>,
 	waiters: Vec<kio::Waiter>,
 	payload: Bytes,
+}
+
+/// A cached aborted prefix followed by one live group.
+struct AbortedScan {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	waiter: kio::Waiter,
+}
+
+impl AbortedScan {
+	fn new(aborted: usize) -> Self {
+		let mut broadcast = broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("bench", None).unwrap();
+		let mut stale = Vec::with_capacity(aborted);
+
+		for _ in 0..aborted {
+			stale.push(track.append_group().unwrap());
+		}
+		track.append_group().unwrap().finish().unwrap();
+		for group in stale {
+			group.abort(Error::Cancel).unwrap();
+		}
+
+		Self {
+			_broadcast: broadcast,
+			track,
+			waiter: kio::Waiter::noop(),
+		}
+	}
+
+	/// Scan the aborted prefix and return the trailing live group.
+	fn scan(&self) {
+		let mut subscriber = self.track.subscribe(None);
+		let group = match subscriber.poll_recv_group(&self.waiter) {
+			Poll::Ready(Ok(Some(group))) => group,
+			_ => unreachable!("the trailing live group must be ready"),
+		};
+		black_box(group);
+	}
 }
 
 impl Fanout {
@@ -144,5 +186,17 @@ fn bench_parallel_write(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_fanout, bench_parallel_write);
+fn bench_aborted_scan(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_aborted_scan");
+	for aborted in ABORTED {
+		group.throughput(Throughput::Elements(aborted as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(aborted), &aborted, |b, &aborted| {
+			let scan = AbortedScan::new(aborted);
+			b.iter(|| scan.scan());
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_fanout, bench_parallel_write, bench_aborted_scan);
 criterion_main!(benches);
