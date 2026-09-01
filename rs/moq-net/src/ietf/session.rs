@@ -602,10 +602,10 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 	}
 
 	match kind {
-		// Draft-20 answers a FILL_PARAMETERS subscription on a fetch stream. Earlier drafts
-		// have no fill, so a fetch stream there answers a standalone FETCH we never sent,
-		// which `recv_fill` refuses.
-		FetchHeader::TYPE => subscriber.recv_fill(stream).await,
+		// We never request a fill, so a fetch stream answers a request we did not make. Its
+		// objects would duplicate a group the live subscription is already delivering, and
+		// two producers for one sequence is a `Duplicate` error, so refuse the stream.
+		FetchHeader::TYPE => Err(Error::Unsupported),
 		_ => Err(Error::UnexpectedStream),
 	}
 }

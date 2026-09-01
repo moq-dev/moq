@@ -449,6 +449,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 		[Lite.ALPN_04]: null,
 		[Lite.ALPN_03]: null,
 		[Lite.ALPN]: null,
+		[Ietf.ALPN.DRAFT_20]: "qmux-01",
 		[Ietf.ALPN.DRAFT_18]: "qmux-01",
 		[Ietf.ALPN.DRAFT_17]: null,
 		[Ietf.ALPN.DRAFT_16]: null,

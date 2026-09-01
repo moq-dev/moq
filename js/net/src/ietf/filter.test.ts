@@ -71,6 +71,39 @@ test("rejects a backwards range", () => {
 	}
 });
 
+// The fourth field bounds the last object in the end group. Dropping it on decode would
+// let a publisher deliver past the Location the subscriber asked for.
+test("draft-20 keeps the end object", () => {
+	const bounded: Filter.Filter = {
+		kind: "absolute",
+		startGroup: 7n,
+		startObject: 3n,
+		endGroup: 9n,
+		endObject: 4n,
+	};
+	expect([...Filter.encode(bounded, NEW)]).toEqual([0x07, 0x03, 0x02, 0x04]);
+	expect(roundTrip(bounded, NEW)).toEqual(bounded);
+
+	// Three fields leave the end group whole, which is a different filter.
+	const whole: Filter.Filter = { kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n };
+	expect([...Filter.encode(whole, NEW)]).toEqual([0x07, 0x03, 0x02]);
+});
+
+// Draft-19's AbsoluteRange ends on a group, so an object bound cannot be expressed.
+test("draft-19 cannot bound the end object", () => {
+	expect(() =>
+		Filter.encode({ kind: "absolute", startGroup: 7n, startObject: 0n, endGroup: 9n, endObject: 4n }, OLD),
+	).toThrow();
+});
+
+// OBJECTID_FILTER has an even id but is written with an explicit Length, so parity would
+// read its length byte as the whole value and desync everything after it.
+test("fill skips a length-prefixed range filter", () => {
+	// count=2, 0x26 len=3 AABBCC, delta 1 -> 0x27 len=1 DD
+	const encoded = new Uint8Array([0x02, 0x26, 0x03, 0xaa, 0xbb, 0xcc, 0x01, 0x01, 0xdd]);
+	expect(Filter.decodeFill(encoded, NEW)).toEqual({ kind: "unfiltered" });
+});
+
 test("rejects too many fields", () => {
 	expect(() => Filter.decode(new Uint8Array([0, 0, 0, 0, 0]), NEW)).toThrow();
 });

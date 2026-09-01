@@ -18,8 +18,11 @@ export type Filter =
 	 * Zero is the next group and one is the current one.
 	 */
 	| { kind: "relative"; groups: bigint }
-	/** An absolute range, ending after `endGroup` (inclusive) when one is set. */
-	| { kind: "absolute"; startGroup: bigint; startObject: bigint; endGroup?: bigint };
+	/**
+	 * An absolute range. `endGroup` is the last group, inclusive; `endObject` further bounds
+	 * the last object in it, and its absence includes the whole end group.
+	 */
+	| { kind: "absolute"; startGroup: bigint; startObject: bigint; endGroup?: bigint; endObject?: bigint };
 
 /** The tagged Filter Type of draft-19 and earlier. */
 const TAG_NEXT_GROUP = 0x1n;
@@ -77,6 +80,9 @@ function encodeFields(filter: Filter): Uint8Array {
 			const parts = [Varint.encode(filter.startGroup), Varint.encode(filter.startObject)];
 			if (filter.endGroup !== undefined) {
 				parts.push(Varint.encode(endDelta(filter.startGroup, filter.endGroup)));
+				if (filter.endObject !== undefined) {
+					parts.push(Varint.encode(filter.endObject));
+				}
 			}
 			return concat(parts);
 		}
@@ -98,6 +104,11 @@ function encodeTag(filter: Filter): Uint8Array {
 			}
 			return Varint.encode(TAG_NEXT_GROUP);
 		case "absolute": {
+			// Draft-19's AbsoluteRange ends on a group, so an object-bounded range has no
+			// spelling. Refuse rather than widen the range the caller asked for.
+			if (filter.endObject !== undefined) {
+				throw new Error("an object-bounded range needs draft-20");
+			}
 			const parts = [
 				Varint.encode(filter.endGroup === undefined ? TAG_ABSOLUTE_START : TAG_ABSOLUTE_RANGE),
 				Varint.encode(filter.startGroup),
@@ -139,10 +150,9 @@ function decodeFields(data: Uint8Array): Filter {
 			if (fields.length === 2 && startGroup === 0n && startObject === 0n) {
 				return { kind: "nextObject" };
 			}
-			// The fourth field is End Object. We deliver whole groups, so the end group is
-			// all we act on, but it still has to parse or the value is not consumed.
 			const endGroup = fields.length >= 3 ? startGroup + fields[2] : undefined;
-			return { kind: "absolute", startGroup, startObject, endGroup };
+			const endObject = fields.length === 4 ? fields[3] : undefined;
+			return { kind: "absolute", startGroup, startObject, endGroup, endObject };
 		}
 	}
 }
@@ -192,15 +202,23 @@ const FILL_LOCATION_FILTER = 0x21n;
  * The parameters draft-20 allows inside FILL_PARAMETERS. Anything else is a protocol
  * violation rather than something to skip.
  */
-const FILL_ALLOWED = new Set([
-	0x0an, // FILL_TIMEOUT
-	0x20n, // SUBSCRIBER_PRIORITY
-	FILL_LOCATION_FILTER,
-	0x22n, // GROUP_ORDER
-	0x25n, // SUBGROUP_FILTER
-	0x26n, // OBJECTID_FILTER
-	0x27n, // PRIORITY_FILTER
-	0x28n, // OBJECT_PROPERTY_FILTER
+/**
+ * Maps each to whether it carries a length prefix.
+ *
+ * The Key-Value-Pair rule keys the framing off the id's parity, but the Range Filters
+ * (0x25-0x28) are written with an explicit `Length` field despite two of them having even
+ * ids. Their own definition wins, so the framing is tabulated rather than derived: reading
+ * 0x26 or 0x28 as a bare varint would desync every parameter after it.
+ */
+const FILL_ALLOWED = new Map<bigint, boolean>([
+	[0x0an, false], // FILL_TIMEOUT, a varint
+	[0x20n, false], // SUBSCRIBER_PRIORITY, a uint8 varint
+	[FILL_LOCATION_FILTER, true],
+	[0x22n, false], // GROUP_ORDER, a uint8 varint
+	[0x25n, true], // SUBGROUP_FILTER
+	[0x26n, true], // OBJECTID_FILTER, length prefixed despite an even id
+	[0x27n, true], // PRIORITY_FILTER
+	[0x28n, true], // OBJECT_PROPERTY_FILTER, likewise
 ]);
 
 /**
@@ -237,19 +255,22 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Filter {
 		prev = key;
 		rest = afterType;
 
-		if (!FILL_ALLOWED.has(key)) {
+		const lengthPrefixed = FILL_ALLOWED.get(key);
+		if (lengthPrefixed === undefined) {
 			throw new Error(`parameter ${key} is not allowed inside FILL_PARAMETERS`);
 		}
 
 		// The rest are parameters we do not act on, but their bytes still have to be
-		// consumed or the remaining keys desync. Key-Value-Pair parity says how: an even
-		// type carries a single varint, an odd type a length-prefixed byte string.
-		if (key % 2n === 0n) {
+		// consumed or the remaining keys desync.
+		if (!lengthPrefixed) {
 			[, rest] = Varint.decodeBigInt(rest);
 			continue;
 		}
 
 		const [length, afterLength] = Varint.decodeBigInt(rest);
+		if (BigInt(afterLength.length) < length) {
+			throw new Error("truncated value inside FILL_PARAMETERS");
+		}
 		const value = afterLength.slice(0, Number(length));
 		rest = afterLength.slice(Number(length));
 

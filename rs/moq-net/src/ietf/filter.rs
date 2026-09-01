@@ -33,13 +33,22 @@ pub enum Filter {
 	/// Only draft-20 can encode a value above 1; older drafts have a tag per case.
 	Relative(u64),
 
-	/// An absolute range, ending after group `end` (inclusive) when one is set.
+	/// An absolute range, ending at `end` (inclusive) when one is set.
 	Absolute {
 		/// The first Location to deliver.
 		start: Location,
-		/// The last group to deliver, inclusive. `None` leaves the range open ended.
-		end: Option<u64>,
+		/// Where the range ends, inclusive. `None` leaves it open ended.
+		end: Option<EndLocation>,
 	},
+}
+
+/// The inclusive end of an absolute [`Filter`] range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndLocation {
+	/// The last group to deliver, inclusive.
+	pub group: u64,
+	/// The last object in that group, inclusive. `None` includes the whole group.
+	pub object: Option<u64>,
 }
 
 /// The tagged Filter Type of draft-19 and earlier.
@@ -91,7 +100,10 @@ impl Filter {
 				start.group.encode(w, version)?;
 				start.object.encode(w, version)?;
 				if let Some(end) = end {
-					Self::end_delta(start.group, end)?.encode(w, version)?;
+					Self::end_delta(start.group, end.group)?.encode(w, version)?;
+					if let Some(object) = end.object {
+						object.encode(w, version)?;
+					}
 				}
 			}
 		}
@@ -117,11 +129,19 @@ impl Filter {
 				start: Location { group, object },
 				end: None,
 			},
-			// The fourth field is End Object. We deliver whole groups, so the end group is
-			// all we can act on; parsing it is still required or the peer's bytes desync.
-			[group, object, delta] | [group, object, delta, _] => Self::Absolute {
+			[group, object, delta] => Self::Absolute {
 				start: Location { group, object },
-				end: Some(group.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?),
+				end: Some(EndLocation {
+					group: group.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?,
+					object: None,
+				}),
+			},
+			[group, object, delta, end_object] => Self::Absolute {
+				start: Location { group, object },
+				end: Some(EndLocation {
+					group: group.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?,
+					object: Some(end_object),
+				}),
 			},
 			_ => unreachable!("capped at 4 fields above"),
 		})
@@ -144,10 +164,16 @@ impl Filter {
 				tag::ABSOLUTE_START.encode(w, version)?;
 				start.encode(w, version)?;
 			}
+			// Draft-19's AbsoluteRange ends on a group, so an object-bounded range has no
+			// spelling. Refuse rather than widen the range the caller asked for.
+			Self::Absolute {
+				end: Some(EndLocation { object: Some(_), .. }),
+				..
+			} => return Err(EncodeError::Unsupported),
 			Self::Absolute { start, end: Some(end) } => {
 				tag::ABSOLUTE_RANGE.encode(w, version)?;
 				start.encode(w, version)?;
-				Self::end_delta(start.group, end)?.encode(w, version)?;
+				Self::end_delta(start.group, end.group)?.encode(w, version)?;
 			}
 		}
 		Ok(())
@@ -167,7 +193,10 @@ impl Filter {
 				let delta = u64::decode(r, version)?;
 				Self::Absolute {
 					start,
-					end: Some(start.group.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?),
+					end: Some(EndLocation {
+						group: start.group.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?,
+						object: None,
+					}),
 				}
 			}
 			_ => return Err(DecodeError::InvalidValue),
@@ -281,7 +310,7 @@ mod tests {
 			value(
 				Filter::Absolute {
 					start: Location { group: 7, object: 3 },
-					end: Some(9)
+					end: Some(EndLocation { group: 9, object: None })
 				},
 				NEW
 			),
@@ -310,7 +339,10 @@ mod tests {
 			},
 			Filter::Absolute {
 				start: Location { group: 12, object: 4 },
-				end: Some(20),
+				end: Some(EndLocation {
+					group: 20,
+					object: None,
+				}),
 			},
 		] {
 			assert_eq!(round_trip(filter, NEW), filter, "{filter:?}");
@@ -343,11 +375,52 @@ mod tests {
 			},
 			Filter::Absolute {
 				start: Location { group: 12, object: 4 },
-				end: Some(20),
+				end: Some(EndLocation {
+					group: 20,
+					object: None,
+				}),
 			},
 		] {
 			assert_eq!(round_trip(filter, OLD), filter, "{filter:?}");
 		}
+	}
+
+	/// The fourth field bounds the last object in the end group. Dropping it on decode
+	/// would let a publisher deliver past the Location the subscriber asked for.
+	#[test]
+	fn draft20_keeps_the_end_object() {
+		let bounded = Filter::Absolute {
+			start: Location { group: 7, object: 3 },
+			end: Some(EndLocation {
+				group: 9,
+				object: Some(4),
+			}),
+		};
+		assert_eq!(value(bounded, NEW), vec![0x07, 0x03, 0x02, 0x04]);
+		assert_eq!(round_trip(bounded, NEW), bounded);
+
+		// Three fields leave the end group whole, which is a different filter.
+		let whole = Filter::Absolute {
+			start: Location { group: 7, object: 3 },
+			end: Some(EndLocation { group: 9, object: None }),
+		};
+		assert_eq!(value(whole, NEW), vec![0x07, 0x03, 0x02]);
+		assert_ne!(round_trip(bounded, NEW), whole);
+	}
+
+	/// Draft-19's AbsoluteRange ends on a group, so an object bound cannot be expressed.
+	/// Widening the range silently would deliver objects the subscriber excluded.
+	#[test]
+	fn draft19_cannot_bound_the_end_object() {
+		let mut buf = Vec::new();
+		let bounded = Filter::Absolute {
+			start: Location { group: 7, object: 0 },
+			end: Some(EndLocation {
+				group: 9,
+				object: Some(4),
+			}),
+		};
+		assert!(bounded.param_encode(&mut buf, OLD).is_err());
 	}
 
 	/// Draft-19 has a tag per case and none of them mean "two groups back", so refuse
@@ -362,7 +435,7 @@ mod tests {
 	fn rejects_a_backwards_range() {
 		let backwards = Filter::Absolute {
 			start: Location { group: 9, object: 0 },
-			end: Some(4),
+			end: Some(EndLocation { group: 4, object: None }),
 		};
 		for version in [OLD, NEW] {
 			let mut buf = Vec::new();
@@ -399,17 +472,23 @@ impl Fill {
 	/// LOCATION_FILTER, the only nested parameter that changes what we deliver.
 	const LOCATION_FILTER: u64 = 0x21;
 
-	/// The parameters the draft allows inside FILL_PARAMETERS. Anything else is a
-	/// protocol violation rather than something to skip.
-	const ALLOWED: &'static [u64] = &[
-		0x0A, // FILL_TIMEOUT
-		0x20, // SUBSCRIBER_PRIORITY
-		Self::LOCATION_FILTER,
-		0x22, // GROUP_ORDER
-		0x25, // SUBGROUP_FILTER
-		0x26, // OBJECTID_FILTER
-		0x27, // PRIORITY_FILTER
-		0x28, // OBJECT_PROPERTY_FILTER
+	/// The parameters the draft allows inside FILL_PARAMETERS, and whether each carries a
+	/// length prefix. Anything absent from this table is a protocol violation rather than
+	/// something to skip.
+	///
+	/// The Key-Value-Pair rule keys the framing off the id's parity, but the Range Filters
+	/// (0x25-0x28) are written with an explicit `Length` field despite two of them having
+	/// even ids. Their own definition wins, so the framing is tabulated here rather than
+	/// derived: reading 0x26 or 0x28 as a bare varint would desync every parameter after it.
+	const ALLOWED: &'static [(u64, bool)] = &[
+		(0x0A, false), // FILL_TIMEOUT, a varint
+		(0x20, false), // SUBSCRIBER_PRIORITY, a uint8 varint
+		(Self::LOCATION_FILTER, true),
+		(0x22, false), // GROUP_ORDER, a uint8 varint
+		(0x25, true),  // SUBGROUP_FILTER
+		(0x26, true),  // OBJECTID_FILTER, length prefixed despite an even id
+		(0x27, true),  // PRIORITY_FILTER
+		(0x28, true),  // OBJECT_PROPERTY_FILTER, likewise
 	];
 }
 
@@ -452,9 +531,9 @@ impl Param for Fill {
 			};
 			prev = key;
 
-			if !Self::ALLOWED.contains(&key) {
+			let Some((_, length_prefixed)) = Self::ALLOWED.iter().find(|(id, _)| *id == key) else {
 				return Err(DecodeError::InvalidValue);
-			}
+			};
 
 			if key == Self::LOCATION_FILTER {
 				if filter.is_some() {
@@ -465,12 +544,14 @@ impl Param for Fill {
 			}
 
 			// The rest are parameters we do not act on, but their bytes still have to be
-			// consumed or the remaining keys desync. Key-Value-Pair parity says how: an even
-			// type carries a single varint, an odd type a length-prefixed byte string.
-			if key % 2 == 0 {
-				u64::decode(&mut buf, version)?;
-			} else {
-				Vec::<u8>::decode(&mut buf, version)?;
+			// consumed or the remaining keys desync.
+			match length_prefixed {
+				true => {
+					Vec::<u8>::decode(&mut buf, version)?;
+				}
+				false => {
+					u64::decode(&mut buf, version)?;
+				}
 			}
 		}
 
@@ -507,7 +588,7 @@ mod fill_tests {
 			Filter::Relative(3),
 			Filter::Absolute {
 				start: Location { group: 4, object: 0 },
-				end: Some(9),
+				end: Some(EndLocation { group: 9, object: None }),
 			},
 		] {
 			assert_eq!(round_trip(Fill { filter }).filter, filter, "{filter:?}");
@@ -545,7 +626,25 @@ mod fill_tests {
 	}
 
 	/// An allowed parameter we ignore still has to be consumed, or the keys after it
-	/// desync. Parity decides how many bytes that is.
+	/// desync. Its own definition decides how many bytes that is.
+	/// OBJECTID_FILTER has an even id but is written with an explicit Length, so parity
+	/// would read its length byte as the whole value and desync everything after it.
+	#[test]
+	fn skips_a_length_prefixed_range_filter() {
+		let mut value = Vec::new();
+		2u64.encode(&mut value, NEW).unwrap();
+		0x26u64.encode(&mut value, NEW).unwrap(); // OBJECTID_FILTER, length prefixed
+		vec![0xAAu8, 0xBB, 0xCC].encode(&mut value, NEW).unwrap();
+		1u64.encode(&mut value, NEW).unwrap(); // delta to 0x27
+		vec![0xDDu8].encode(&mut value, NEW).unwrap(); // PRIORITY_FILTER
+
+		let mut buf = Vec::new();
+		value.encode(&mut buf, NEW).unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
+		assert_eq!(fill.filter, Filter::Unfiltered);
+	}
+
 	#[test]
 	fn skips_allowed_parameters_it_ignores() {
 		let mut value = Vec::new();

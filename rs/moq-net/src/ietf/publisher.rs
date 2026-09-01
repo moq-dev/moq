@@ -591,7 +591,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = {
-			let mut serve = std::pin::pin!(self.run_track(track, request_id));
+			let mut serve = std::pin::pin!(self.run_track(track, request_id, group_start, group_end));
 			let mut reader_closed = std::pin::pin!(stream.reader.closed());
 			let mut session_closed = std::pin::pin!(self.session.closed());
 			kio::wait(|waiter| {
@@ -700,13 +700,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: track::Subscriber, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(
+		&self,
+		mut track: track::Subscriber,
+		request_id: RequestId,
+		group_start: Option<u64>,
+		group_end: Option<u64>,
+	) -> Result<(), Error> {
 		// A fresh cursor starts at the oldest cached group, so leaving it there replays the
-		// whole retained history at once, one concurrent stream per group. LargestObject is
-		// the only filter we accept and it means the live edge.
+		// whole retained history at once, one concurrent stream per group. The subscription
+		// range is a preference for what the publisher should keep available; the cursor is
+		// what this subscriber actually reads, and setting one does not move the other.
 		if let Some(latest) = track.latest() {
-			track.start_at(latest);
+			track.start_at(group_start.unwrap_or(latest).min(latest));
+		} else if let Some(start) = group_start {
+			track.start_at(start);
 		}
+		track.end_at(group_end);
 
 		let mut tasks = FuturesUnordered::new();
 
@@ -1805,7 +1815,7 @@ mod subscribe_cursor_test {
 		let subscriber = track.subscribe(None);
 		track.finish().unwrap();
 
-		publisher.run_track(subscriber, RequestId(1)).await.unwrap();
+		publisher.run_track(subscriber, RequestId(1), None, None).await.unwrap();
 
 		// `run_group` sets the priority once per stream it opens, so this counts groups served.
 		assert_eq!(log.priorities().len(), 1, "only group 3 should have been served");
@@ -3005,13 +3015,14 @@ fn filter_range(filter: Filter, latest: Option<u64>) -> (Option<u64>, Option<u64
 			None => (None, None),
 			Some(latest) => (Some(latest.saturating_add(1).saturating_sub(groups)), None),
 		},
-		Filter::Absolute { start, end } => (Some(start.group), end),
+		Filter::Absolute { start, end } => (Some(start.group), end.map(|end| end.group)),
 	}
 }
 
 #[cfg(test)]
 mod range_tests {
 	use super::*;
+	use crate::ietf::EndLocation;
 
 	fn subscribe(filter: Filter, fill: Option<Filter>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
@@ -3035,7 +3046,7 @@ mod range_tests {
 		let msg = subscribe(
 			Filter::Absolute {
 				start: Location { group: 4, object: 0 },
-				end: Some(9),
+				end: Some(EndLocation { group: 9, object: None }),
 			},
 			None,
 		);
@@ -3089,7 +3100,7 @@ mod range_tests {
 		let msg = subscribe(
 			Filter::Absolute {
 				start: Location { group: 4, object: 0 },
-				end: Some(9),
+				end: Some(EndLocation { group: 9, object: None }),
 			},
 			None,
 		);
