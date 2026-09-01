@@ -199,6 +199,14 @@ pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
 
+	/// The largest Location in the track (LARGEST_OBJECT, 0x09), which the spec requires
+	/// once the track has content. It is what a subscriber sizes a fill against.
+	///
+	/// Encoded on draft-20 only: the parameter is legal on earlier drafts too, but peers
+	/// built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
+	/// session, so emitting it there would break existing deployments over a hint.
+	pub largest: Option<Location>,
+
 	/// Metadata about the track, sent as Track Properties (draft-17+).
 	pub properties: Properties,
 }
@@ -237,7 +245,11 @@ impl Message for SubscribeOk {
 					_ => None,
 				};
 
+				// See the field doc for why LARGEST_OBJECT stays draft-20 only.
+				let largest = self.largest.filter(|_| Filter::is_draft20(version));
+
 				encode_params!(w, version,
+					0x09 => largest,
 					0x22 => group_order,
 				);
 
@@ -277,31 +289,29 @@ impl Message for SubscribeOk {
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
 				// peer that still sends it doesn't have its session torn down over a hint.
-				let group_order = match version {
-					Version::Draft15 | Version::Draft16 => {
-						// LARGEST_OBJECT is required here once the track has content, but
-						// the session model does not currently expose the location.
-						decode_params!(r, version,
-							0x09 => _largest_location: Option<Location>,
-							0x22 => group_order: Option<GroupOrder>,
-						);
-						group_order
-					}
-					_ => {
-						decode_params!(r, version,
-							0x22 => group_order: Option<GroupOrder>,
-						);
-						group_order
-					}
-				};
+				// LARGEST_OBJECT is required on every draft once the track has content, so
+				// rejecting it would tear down a session over a parameter compliant
+				// publishers must send.
+				decode_params!(r, version,
+					0x09 => largest: Option<Location>,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
+
+				return Ok(Self {
+					request_id,
+					track_alias,
+					largest,
+					properties,
+				});
 			}
 		}
 
 		Ok(Self {
 			request_id,
 			track_alias,
+			largest: None,
 			properties,
 		})
 	}
@@ -678,6 +688,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -696,7 +707,45 @@ mod tests {
 
 			assert_eq!(decoded.request_id, Some(RequestId(4)));
 			assert_eq!(decoded.track_alias, 4);
+			assert_eq!(decoded.largest, Some(Location { group: 5, object: 0 }), "{version}");
 		}
+	}
+
+	/// LARGEST_OBJECT is required in SUBSCRIBE_OK once the track has content, so a
+	/// draft-17+ decoder must accept it rather than tearing down the session over a
+	/// parameter compliant publishers have to send. The empty Track Properties block
+	/// follows the parameters.
+	#[test]
+	fn test_subscribe_ok_accepts_largest_object_draft17_on() {
+		let payload = [0x04, 0x01, 0x09, 0x02, 0x05, 0x00];
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
+			let decoded: SubscribeOk = decode_message(&payload, version).unwrap();
+
+			assert_eq!(decoded.request_id, None, "{version}");
+			assert_eq!(decoded.track_alias, 4, "{version}");
+			assert_eq!(decoded.largest, Some(Location { group: 5, object: 0 }), "{version}");
+		}
+	}
+
+	/// The encoder emits LARGEST_OBJECT on draft-20 only: it is legal earlier, but peers
+	/// built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
+	/// session.
+	#[test]
+	fn test_subscribe_ok_largest_object_round_trips_on_draft20_only() {
+		let msg = SubscribeOk {
+			request_id: None,
+			track_alias: 7,
+			largest: Some(Location { group: 9, object: 3 }),
+			properties: Properties::default(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft20);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft20).unwrap();
+		assert_eq!(decoded.largest, Some(Location { group: 9, object: 3 }));
+
+		let encoded = encode_message(&msg, Version::Draft19);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft19).unwrap();
+		assert_eq!(decoded.largest, None, "draft-19 must not carry the parameter");
 	}
 
 	#[test]
@@ -704,6 +753,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -894,6 +944,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -951,6 +1002,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties::default(),
 		};
 
@@ -970,6 +1022,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest: None,
 			properties: Properties {
 				timescale: None,
 				group_order: Some(GroupOrder::Descending),
@@ -996,6 +1049,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(7)),
 			track_alias: 42,
+			largest: None,
 			properties: Properties {
 				timescale: None,
 				group_order: Some(GroupOrder::Descending),

@@ -299,44 +299,37 @@ impl Param for u64 {
 	}
 }
 
+/// The varint format inside a length-prefixed Location value: the drafts before 17 pin it
+/// to the draft-15 encoding, matching the other length-prefixed parameters.
+fn location_inner_version(version: Version) -> Version {
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
+		_ => version,
+	}
+}
+
 impl Param for Location {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				// Length-prefixed bytes containing two QUIC varints
-				let mut buf = Vec::new();
-				self.group.encode(&mut buf, Version::Draft15)?;
-				self.object.encode(&mut buf, Version::Draft15)?;
-				buf.encode(w, version)?;
-				Ok(())
-			}
-			_ => {
-				self.group.encode(w, version)?;
-				self.object.encode(w, version)?;
-				Ok(())
-			}
-		}
+		// LARGEST_OBJECT (0x09) is an odd type, so the Key-Value-Pair rule gives it a
+		// Length on every draft: two varints inside a length-prefixed value.
+		let sv = location_inner_version(version);
+		let mut buf = Vec::new();
+		self.group.encode(&mut buf, sv)?;
+		self.object.encode(&mut buf, sv)?;
+		buf.encode(w, version)?;
+		Ok(())
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				// Length-prefixed bytes containing two QUIC varints
-				let data = Vec::<u8>::decode(r, version)?;
-				let mut buf = bytes::Bytes::from(data);
-				let group = u64::decode(&mut buf, Version::Draft15)?;
-				let object = u64::decode(&mut buf, Version::Draft15)?;
-				if buf.has_remaining() {
-					return Err(DecodeError::TrailingBytes);
-				}
-				Ok(Location { group, object })
-			}
-			_ => {
-				let group = u64::decode(r, version)?;
-				let object = u64::decode(r, version)?;
-				Ok(Location { group, object })
-			}
+		let sv = location_inner_version(version);
+		let data = Vec::<u8>::decode(r, version)?;
+		let mut buf = bytes::Bytes::from(data);
+		let group = u64::decode(&mut buf, sv)?;
+		let object = u64::decode(&mut buf, sv)?;
+		if buf.has_remaining() {
+			return Err(DecodeError::TrailingBytes);
 		}
+		Ok(Location { group, object })
 	}
 }
 
@@ -693,11 +686,15 @@ mod tests {
 			group: 255,
 			object: 128,
 		};
+		// 0x09 is odd, so the Key-Value-Pair rule gives the value a Length on every
+		// draft; only the inner varint format differs (QUIC-style before draft-17,
+		// leading-ones after).
 		for (version, expected) in [
 			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
-			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft17, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft18, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft19, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft20, &[0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = BytesMut::new();
 			encode_params!(&mut buf, version, 0x09 => location.clone());

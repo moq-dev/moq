@@ -100,7 +100,10 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 	}
 });
 
-test("Message Parameters: Location loses its length prefix in draft 17", async () => {
+test("Message Parameters: Location keeps its length prefix on every draft", async () => {
+	// 0x09 is odd, so the Key-Value-Pair rule gives the value a Length on every draft;
+	// only the inner varint format differs (QUIC-style before draft-17, leading-ones
+	// after). These bytes are pinned against the Rust codec's wire vectors.
 	const params = new Parameters();
 	params.largest = { groupId: 255n, objectId: 128n };
 
@@ -118,6 +121,7 @@ test("Message Parameters: Location loses its length prefix in draft 17", async (
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
+			0x04, // byte-string length
 			0x80,
 			0xff, // leading-ones varint 255
 			0x80,

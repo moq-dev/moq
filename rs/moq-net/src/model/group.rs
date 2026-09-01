@@ -716,6 +716,15 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The number of frames written so far (completed plus any in-flight), independent of
+	/// how many this consumer has read. The final total once the group is finished.
+	pub fn frame_count(&self) -> usize {
+		let state = self.state.read();
+		state
+			.fin
+			.unwrap_or(state.offset + state.frames.len() + state.partial.is_some() as usize)
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where

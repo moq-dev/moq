@@ -1755,6 +1755,23 @@ impl Consumer {
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
 	///
+	/// The newest group, when it is already cached: resolved synchronously, without
+	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
+	/// resolve Largest Object; a group that is not immediately available reads as no edge.
+	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let state = state.read();
+				let sequence = state.max_sequence?;
+				match state.poll_fetch_cached(sequence) {
+					Poll::Ready(Ok(group)) => Some(group),
+					_ => None,
+				}
+			}
+			ConsumerKind::Spliced(resume) => resume.peek_latest(),
+		}
+	}
+
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
 	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed. Concurrent fetches for the same sequence coalesce onto one

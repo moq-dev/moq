@@ -493,6 +493,13 @@ impl Consumer {
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().latest()
 	}
+
+	/// The newest segment's newest cached group, resolved synchronously; see
+	/// [`track::Consumer::peek_latest`].
+	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.peek_latest()
+	}
 }
 
 /// The pollable state of a [`Consumer::fetch_group`]; awaited via the

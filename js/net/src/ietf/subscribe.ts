@@ -58,9 +58,12 @@ export class Subscribe {
 			params.forward = true;
 			// moq-lite joins a track at the start of the current group, which is a decodable
 			// point, and draft-20's relative form is the first that can name it without
-			// knowing Largest Object. No fill is requested: a fill is capped at Largest
-			// Object, so pairing one with a live subscription splits a single group across
-			// two streams, and the two cannot be reassembled into one group here.
+			// knowing Largest Object. No fill is requested: the fill's fetch stream and the
+			// live subscription split the group across two streams, and this subscriber does
+			// not reassemble them into one group yet. A lenient publisher (like ours)
+			// replays the whole in-range group on the subscription instead; a strict one
+			// only delivers from the next published object, and that mid-group stream is
+			// dropped, degrading the join to the next group boundary.
 			params.subscriptionFilter = Filter.isDraft20(version)
 				? Filter.encode({ kind: "relative", groups: 1n }, version)
 				: Filter.encode({ kind: "nextObject" }, version);

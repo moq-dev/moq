@@ -483,14 +483,18 @@ enum Framing {
 /// Its presence is what asks for one. The value is a nested parameter scope describing the
 /// fill, of which the Location Filter is the part we act on.
 ///
-/// Fills are unsupported. This parses so a peer asking for one does not have its session
-/// torn down over an unknown parameter, but nothing is served in response: a fetch is
-/// capped at Largest Object, so it cannot deliver a group that is still being written, and
-/// answering on ordinary subgroups instead would look like support without being it.
+/// The publisher serves a fill whose range resolves to a single group, straight from the
+/// model's group cache on a fetch stream. That covers the draft's own current-group join
+/// (a Next Object subscription plus a `StartGroup=1` fill). A range spanning several
+/// groups is refused by resetting the fetch stream, the draft's fill-failure signal,
+/// because multi-group fetch serialization depends on a negotiated group order we do not
+/// implement. We never request a fill ourselves; see `subscriber::subscribe_filter`.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
-	/// The range to fill. [`Filter::Unfiltered`] means the whole track up to Largest Object.
-	pub filter: Filter,
+	/// The range to fill. `None` means the Location Filter was omitted, which inherits the
+	/// subscription's own filter; [`Filter::Unfiltered`] (a zero-length filter) means the
+	/// whole track up to Largest Object.
+	pub filter: Option<Filter>,
 }
 
 impl Fill {
@@ -523,10 +527,11 @@ impl Param for Fill {
 		let mut buf = Vec::new();
 
 		// A nested scope is encoded like a message's parameters: a count, then the KVPs.
-		// Unfiltered carries no filter, so the fill is the whole track and the scope is empty.
+		// An omitted filter inherits the subscription's, so the scope is empty. An explicit
+		// Unfiltered still encodes, as a zero-length filter meaning the whole track.
 		match self.filter {
-			Filter::Unfiltered => 0u64.encode(&mut buf, version)?,
-			filter => {
+			None => 0u64.encode(&mut buf, version)?,
+			Some(filter) => {
 				1u64.encode(&mut buf, version)?;
 				// The first type in a scope is not delta encoded, so this is the raw id.
 				Self::LOCATION_FILTER.encode(&mut buf, version)?;
@@ -588,9 +593,7 @@ impl Param for Fill {
 			return Err(DecodeError::TrailingBytes);
 		}
 
-		Ok(Self {
-			filter: filter.unwrap_or(Filter::Unfiltered),
-		})
+		Ok(Self { filter })
 	}
 }
 
@@ -612,13 +615,16 @@ mod fill_tests {
 	#[test]
 	fn round_trips() {
 		for filter in [
-			Filter::Unfiltered,
-			Filter::Relative(1),
-			Filter::Relative(3),
-			Filter::Absolute {
+			// An omitted filter (inherit the subscription's) and an explicit zero-length
+			// one (the whole track) are distinct spellings and must stay distinct.
+			None,
+			Some(Filter::Unfiltered),
+			Some(Filter::Relative(1)),
+			Some(Filter::Relative(3)),
+			Some(Filter::Absolute {
 				start: Location { group: 4, object: 0 },
 				end: Some(EndLocation { group: 9, object: None }),
-			},
+			}),
 		] {
 			assert_eq!(round_trip(Fill { filter }).filter, filter, "{filter:?}");
 		}
@@ -629,7 +635,7 @@ mod fill_tests {
 	#[test]
 	fn current_group_join() {
 		let fill = Fill {
-			filter: Filter::Relative(1),
+			filter: Some(Filter::Relative(1)),
 		};
 		let mut buf = Vec::new();
 		fill.param_encode(&mut buf, NEW).expect("encode");
@@ -669,7 +675,7 @@ mod fill_tests {
 		value.encode(&mut buf, NEW).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
 		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
-		assert_eq!(fill.filter, Filter::Relative(1));
+		assert_eq!(fill.filter, Some(Filter::Relative(1)));
 	}
 
 	/// An allowed parameter we ignore still has to be consumed, or the keys after it
@@ -689,7 +695,7 @@ mod fill_tests {
 		value.encode(&mut buf, NEW).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
 		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
-		assert_eq!(fill.filter, Filter::Unfiltered);
+		assert_eq!(fill.filter, None, "no Location Filter in the scope means inherit");
 	}
 
 	#[test]
@@ -705,6 +711,6 @@ mod fill_tests {
 		value.encode(&mut buf, NEW).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
 		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
-		assert_eq!(fill.filter, Filter::Relative(2));
+		assert_eq!(fill.filter, Some(Filter::Relative(2)));
 	}
 }

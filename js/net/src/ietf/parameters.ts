@@ -482,8 +482,13 @@ export class Parameters {
 						const location = this.#locations.get(key);
 						if (location === undefined)
 							throw new Error(`invalid Location message parameter: ${key.toString()}`);
-						await w.u62(location.groupId);
-						await w.u62(location.objectId);
+						// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it
+						// a Length on every draft: two varints inside the value.
+						const group = Varint.encodeLeadingOnes(location.groupId);
+						const object = Varint.encodeLeadingOnes(location.objectId);
+						await w.u53(group.length + object.length);
+						await w.write(group);
+						await w.write(object);
 						break;
 					}
 					case "bytes": {
@@ -555,8 +560,14 @@ export class Parameters {
 					params.vars.set(id, (await r.bool()) ? 1n : 0n);
 					break;
 				case "location": {
-					const groupId = await r.u62();
-					const objectId = await r.u62();
+					// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it a
+					// Length on every draft: two varints inside the value.
+					const size = await r.u53();
+					const [groupId, objectData] = Varint.decodeLeadingOnes(await r.read(size));
+					const [objectId, trailing] = Varint.decodeLeadingOnes(objectData);
+					if (trailing.length !== 0) {
+						throw new Error("trailing bytes in message parameter Location");
+					}
 					params.#locations.set(id, { groupId, objectId });
 					break;
 				}

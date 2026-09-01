@@ -2402,6 +2402,7 @@ mod tests {
 						_ => None,
 					},
 					track_alias: 7,
+					largest: None,
 					properties: Default::default(),
 				})
 				.await
@@ -3610,12 +3611,17 @@ mod tests {
 /// Object. Earlier drafts have no such spelling, so they keep asking for the next Object
 /// and joining mid-group, exactly as they always did.
 ///
-/// No fill is requested. A fill is capped at Largest Object, so pairing one with a live
-/// subscription splits a single group across two streams: the fill carries the head, the
-/// subscription the tail, and the two cannot be reassembled into one group here. Asking
-/// for the current group directly keeps a group whole and on one stream, which is what
-/// moq-lite is built around. Fills are unsupported in both directions: we request none, we
-/// do not serve one a peer asks for, and we refuse an incoming fetch stream.
+/// No fill is requested. The draft's own current-group join is Next Object plus a
+/// `StartGroup=1` fill, which splits the group across two streams: the fill carries the
+/// head on a fetch stream and the subscription the tail. Reassembling those into the one
+/// group producer the model expects means buffering the live tail until the fill
+/// finishes, which this subscriber does not do yet. Relative(1) instead asks for the
+/// whole group on the subscription: our own publisher replays it from the cache since it
+/// is inside the requested range, while a strict publisher only delivers from the next
+/// published object, whose mid-group stream [`next_object_id`] then drops, degrading the
+/// join to the next group boundary. Since we never request a fill, an incoming fetch
+/// stream answers no request of ours and is refused; the publisher side does serve fills
+/// (see `publisher::run_fill`).
 fn subscribe_filter(start: Option<u64>, end: Option<u64>, version: Version) -> Filter {
 	if !Filter::is_draft20(version) {
 		return Filter::NextObject;

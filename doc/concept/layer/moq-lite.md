@@ -168,11 +168,11 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
 - **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
-- **No Joining Fetch, and no fill**: Subscriptions start at the latest group, not the latest frame. `moqt-20` replaced the joining fetch with a fill, which we do not support in either direction. We ask for the current group directly with a relative Location Filter, so a group is never split across two streams; a fetch is capped at the largest published object, so it cannot deliver a group that is still being written. A fill a peer asks us for is parsed and ignored, and an incoming fetch stream is refused.
+- **No Joining Fetch, and single-group fills only**: Subscriptions start at the latest group, not the latest frame. `moqt-20` replaced the joining fetch with a fill. As a publisher we serve a fill whose range resolves to a single group, straight from the group cache and capped at the largest published object, which covers `moqt-20`'s own current-group join (a Next Object subscription plus a `StartGroup=1` fill); a fill spanning several groups is refused by resetting its fetch stream. As a subscriber we request no fill: we ask for the current group directly with a relative Location Filter instead, and refuse an incoming fetch stream because it answers no request of ours. Against a strict publisher, which only delivers objects published after the subscription, that degrades the join to the next group boundary.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.
-- **Group granularity**: A subscription starts and ends on a group. A `moq-transport` Location Filter can narrow a range to an object, but we widen it back to whole groups, so a filter that starts or ends mid-group gets the entire group.
+- **Group granularity, object-trimmed**: A subscription starts and ends on a group. A `moq-transport` Location Filter can narrow a range to an object, and delivery honors that: the start group is served from the requested object and the end group up to it. The subscription itself still spans whole groups.
 - **No pausing**: Unsubscribe if you don't want a track.
 - **No binary names**: Uses UTF-8 strings instead of arrays of byte arrays.
 
