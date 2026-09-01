@@ -584,8 +584,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let fill = msg
 			.fill
 			.filter(|_| Filter::is_draft20(self.version))
-			.map(|fill| fill_range(fill.filter.unwrap_or(msg.filter), edge.largest))
-			.map(|fill| (fill, cache));
+			.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache));
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -2293,6 +2292,7 @@ mod serve_tests {
 				Filter::NextObject,
 				Some(ietf::Fill {
 					filter: Some(Filter::Relative(1)),
+					range_filters: false,
 				}),
 			),
 		)
@@ -2371,6 +2371,7 @@ mod serve_tests {
 				Filter::NextObject,
 				Some(ietf::Fill {
 					filter: Some(Filter::Relative(2)),
+					range_filters: false,
 				}),
 			),
 		)
@@ -2391,6 +2392,7 @@ mod serve_tests {
 				Filter::NextObject,
 				Some(ietf::Fill {
 					filter: Some(Filter::Relative(1)),
+					range_filters: false,
 				}),
 			),
 		)
@@ -3739,9 +3741,16 @@ enum FillServe {
 	Unsupported,
 }
 
-/// Resolve a fill's Location Filter using the Fetch rules: relative to Largest Object
-/// and never extending beyond it.
-fn fill_range(filter: Filter, largest: Option<Location>) -> FillServe {
+/// Resolve a fill request using the Fetch rules: relative to Largest Object and never
+/// extending beyond it. An omitted Location Filter inherits the subscription's.
+fn fill_range(fill: ietf::Fill, subscription: Filter, largest: Option<Location>) -> FillServe {
+	// A Range Filter narrows which objects pass, which we do not implement; serving the
+	// unfiltered range instead would deliver objects the peer excluded, so refuse it.
+	if fill.range_filters {
+		return FillServe::Unsupported;
+	}
+	let filter = fill.filter.unwrap_or(subscription);
+
 	// Nothing published (or no precise edge to cap at) means no fill is servable; an
 	// empty range opens no stream.
 	let Some(largest) = largest else {
@@ -3973,12 +3982,20 @@ mod fill_range_tests {
 	/// Objects 0 through 4 of group 100 are published.
 	const LARGEST: Option<Location> = Some(Location { group: 100, object: 4 });
 
+	/// A fill with an explicit Location Filter and no range filters.
+	fn fill(filter: Filter) -> ietf::Fill {
+		ietf::Fill {
+			filter: Some(filter),
+			range_filters: false,
+		}
+	}
+
 	/// The canonical current-group join: a fill one group back covers the published head
 	/// of the current group, capped at the Largest Object snapshot.
 	#[test]
 	fn current_group_fill() {
 		assert_eq!(
-			fill_range(Filter::Relative(1), LARGEST),
+			fill_range(fill(Filter::Relative(1)), Filter::NextObject, LARGEST),
 			FillServe::Group {
 				sequence: 100,
 				skip: 0,
@@ -3991,15 +4008,27 @@ mod fill_range_tests {
 	/// always empty, as is an explicit Next Object.
 	#[test]
 	fn a_future_fill_is_empty() {
-		assert_eq!(fill_range(Filter::Relative(0), LARGEST), FillServe::Empty);
-		assert_eq!(fill_range(Filter::NextObject, LARGEST), FillServe::Empty);
+		assert_eq!(
+			fill_range(fill(Filter::Relative(0)), Filter::NextObject, LARGEST),
+			FillServe::Empty
+		);
+		assert_eq!(
+			fill_range(fill(Filter::NextObject), Filter::NextObject, LARGEST),
+			FillServe::Empty
+		);
 	}
 
 	/// Nothing published means every fill range is empty; no stream is owed.
 	#[test]
 	fn no_content_means_no_fill() {
-		assert_eq!(fill_range(Filter::Relative(1), None), FillServe::Empty);
-		assert_eq!(fill_range(Filter::Unfiltered, None), FillServe::Empty);
+		assert_eq!(
+			fill_range(fill(Filter::Relative(1)), Filter::NextObject, None),
+			FillServe::Empty
+		);
+		assert_eq!(
+			fill_range(fill(Filter::Unfiltered), Filter::NextObject, None),
+			FillServe::Empty
+		);
 	}
 
 	/// A whole past group is served to its end; only the current group is capped.
@@ -4007,10 +4036,11 @@ mod fill_range_tests {
 	fn a_past_group_is_served_whole() {
 		assert_eq!(
 			fill_range(
-				Filter::Absolute {
+				fill(Filter::Absolute {
 					start: Location { group: 7, object: 0 },
 					end: Some(EndLocation { group: 7, object: None }),
-				},
+				}),
+				Filter::NextObject,
 				LARGEST
 			),
 			FillServe::Group {
@@ -4026,13 +4056,14 @@ mod fill_range_tests {
 	fn object_bounds_trim_the_group() {
 		assert_eq!(
 			fill_range(
-				Filter::Absolute {
+				fill(Filter::Absolute {
 					start: Location { group: 7, object: 2 },
 					end: Some(EndLocation {
 						group: 7,
 						object: Some(5)
 					}),
-				},
+				}),
+				Filter::NextObject,
 				LARGEST
 			),
 			FillServe::Group {
@@ -4048,13 +4079,14 @@ mod fill_range_tests {
 	fn the_end_is_capped_at_the_largest_object() {
 		assert_eq!(
 			fill_range(
-				Filter::Absolute {
+				fill(Filter::Absolute {
 					start: Location { group: 100, object: 0 },
 					end: Some(EndLocation {
 						group: 100,
 						object: Some(1000),
 					}),
-				},
+				}),
+				Filter::NextObject,
 				LARGEST
 			),
 			FillServe::Group {
@@ -4069,17 +4101,53 @@ mod fill_range_tests {
 	/// peer may not expect; the reset is the draft's fill-failure signal.
 	#[test]
 	fn a_multi_group_fill_is_unsupported() {
-		assert_eq!(fill_range(Filter::Relative(3), LARGEST), FillServe::Unsupported);
-		assert_eq!(fill_range(Filter::Unfiltered, LARGEST), FillServe::Unsupported);
+		assert_eq!(
+			fill_range(fill(Filter::Relative(3)), Filter::NextObject, LARGEST),
+			FillServe::Unsupported
+		);
+		assert_eq!(
+			fill_range(fill(Filter::Unfiltered), Filter::NextObject, LARGEST),
+			FillServe::Unsupported
+		);
 		assert_eq!(
 			fill_range(
-				Filter::Absolute {
+				fill(Filter::Absolute {
 					start: Location { group: 7, object: 0 },
 					end: Some(EndLocation { group: 9, object: None }),
-				},
+				}),
+				Filter::NextObject,
 				LARGEST
 			),
 			FillServe::Unsupported
+		);
+	}
+
+	/// A Range Filter narrows which objects pass; refusing beats serving objects the
+	/// peer excluded.
+	#[test]
+	fn a_range_filtered_fill_is_unsupported() {
+		let fill = ietf::Fill {
+			filter: Some(Filter::Relative(1)),
+			range_filters: true,
+		};
+		assert_eq!(fill_range(fill, Filter::NextObject, LARGEST), FillServe::Unsupported);
+	}
+
+	/// An omitted Location Filter inherits the subscription's, per the draft: a fill
+	/// scope carries only the settings that differ.
+	#[test]
+	fn an_omitted_filter_inherits_the_subscription() {
+		let empty = ietf::Fill::default();
+		// A Next Object subscription inherited into a Fetch is always empty.
+		assert_eq!(fill_range(empty, Filter::NextObject, LARGEST), FillServe::Empty);
+		// A current-group subscription inherited into the fill covers its head.
+		assert_eq!(
+			fill_range(empty, Filter::Relative(1), LARGEST),
+			FillServe::Group {
+				sequence: 100,
+				skip: 0,
+				until: Some(5),
+			}
 		);
 	}
 
@@ -4088,13 +4156,14 @@ mod fill_range_tests {
 	fn a_backwards_range_is_empty() {
 		assert_eq!(
 			fill_range(
-				Filter::Absolute {
+				fill(Filter::Absolute {
 					start: Location { group: 7, object: 5 },
 					end: Some(EndLocation {
 						group: 7,
 						object: Some(2)
 					}),
-				},
+				}),
+				Filter::NextObject,
 				LARGEST
 			),
 			FillServe::Empty
@@ -4105,7 +4174,11 @@ mod fill_range_tests {
 	#[test]
 	fn unfiltered_with_one_group_is_the_canonical_fill() {
 		assert_eq!(
-			fill_range(Filter::Unfiltered, Some(Location { group: 0, object: 9 })),
+			fill_range(
+				fill(Filter::Unfiltered),
+				Filter::NextObject,
+				Some(Location { group: 0, object: 9 })
+			),
 			FillServe::Group {
 				sequence: 0,
 				skip: 0,

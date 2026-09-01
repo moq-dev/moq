@@ -495,6 +495,12 @@ pub struct Fill {
 	/// subscription's own filter; [`Filter::Unfiltered`] (a zero-length filter) means the
 	/// whole track up to Largest Object.
 	pub filter: Option<Filter>,
+
+	/// Whether the scope carried a Range Filter (0x25-0x28). Those narrow which objects
+	/// pass, which we do not implement, and serving the unfiltered range instead would
+	/// deliver objects the peer excluded, so such a fill is refused rather than widened.
+	/// Never encoded; we send no range filters.
+	pub range_filters: bool,
 }
 
 impl Fill {
@@ -552,6 +558,7 @@ impl Param for Fill {
 		}
 
 		let mut filter = None;
+		let mut range_filters = false;
 		let mut prev = 0u64;
 		for i in 0..count {
 			let delta = u64::decode(&mut buf, version)?;
@@ -574,6 +581,10 @@ impl Param for Fill {
 				continue;
 			}
 
+			// A Range Filter changes which objects the fill may contain, so its presence
+			// is recorded even though its value is not interpreted.
+			range_filters |= (0x25..=0x28).contains(&key);
+
 			// The rest are parameters we do not act on, but their bytes still have to be
 			// consumed or the remaining keys desync.
 			match framing {
@@ -593,7 +604,7 @@ impl Param for Fill {
 			return Err(DecodeError::TrailingBytes);
 		}
 
-		Ok(Self { filter })
+		Ok(Self { filter, range_filters })
 	}
 }
 
@@ -626,7 +637,11 @@ mod fill_tests {
 				end: Some(EndLocation { group: 9, object: None }),
 			}),
 		] {
-			assert_eq!(round_trip(Fill { filter }).filter, filter, "{filter:?}");
+			let fill = Fill {
+				filter,
+				range_filters: false,
+			};
+			assert_eq!(round_trip(fill).filter, filter, "{filter:?}");
 		}
 	}
 
@@ -636,6 +651,7 @@ mod fill_tests {
 	fn current_group_join() {
 		let fill = Fill {
 			filter: Some(Filter::Relative(1)),
+			range_filters: false,
 		};
 		let mut buf = Vec::new();
 		fill.param_encode(&mut buf, NEW).expect("encode");
@@ -696,6 +712,7 @@ mod fill_tests {
 		let mut bytes = bytes::Bytes::from(buf);
 		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
 		assert_eq!(fill.filter, None, "no Location Filter in the scope means inherit");
+		assert!(fill.range_filters, "a Range Filter's presence must be recorded");
 	}
 
 	#[test]
