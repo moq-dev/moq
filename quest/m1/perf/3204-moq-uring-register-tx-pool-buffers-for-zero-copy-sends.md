@@ -32,7 +32,7 @@ Compare #3201 with and without registered buffers using the same threshold and w
 
 ## Required
 
-- [#3201: moq-uring: use SENDMSG\_ZC for large UDP GSO trains](/quest/m1/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
+- [#3201: moq-uring: use SENDMSG\_ZC for large UDP GSO trains](/quest/m1/perf/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 
 ## Closes
 

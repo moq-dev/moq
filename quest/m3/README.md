@@ -19,8 +19,6 @@ its verdict lands and the follow-on work becomes concrete.
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
 - [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - choose the custom-QUIC foundation by scored measurement
 - [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
-- [#3203](/quest/m3/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
-- [#3205](/quest/m3/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
 - [Quiche GCC](/quest/m3/quiche-gcc.md) - a measured verdict on delay-based congestion control for media egress
 - [Quiche FEC](/quest/m3/quiche-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [SEI delivery](/quest/m3/sei-delivery.md) - prove a sidecar can reach a live stitcher before video; a no-go keeps SEI in-band

@@ -28,13 +28,13 @@ Four groups, all cheap relaxed atomics on the worker thread:
   GSO stay "observable"; this is what makes that true off the bench.
 - **Ring traffic**: submissions, completions, `io_uring_enter` calls. The
   syscall reduction the runtime exists for, and the metric
-  [#3199](/quest/m1/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md)
-  and [#3200](/quest/m1/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md)
+  [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md)
+  and [#3200](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md)
   are judged by.
 - **Scheduling**: park/wake counts, timer heap depth, timers armed/fired/
   cancelled. Timer churn and futex wakes were open risks in the original epic,
   and the clock-read work in
-  [#3122](/quest/m1/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md)
+  [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md)
   needs the baseline.
 
 Per cross-package sync, update the `/metrics` documentation in

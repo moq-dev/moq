@@ -32,7 +32,7 @@ Measure this after the winning #3200 configuration, where enter frequency and ar
 
 ## Required
 
-- [#3200: moq-uring: batch completion wakeups with MIN\_TIMEOUT](/quest/m1/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - complete the prerequisite issue first
+- [#3200: moq-uring: batch completion wakeups with MIN\_TIMEOUT](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - complete the prerequisite issue first
 
 ## Closes
 
