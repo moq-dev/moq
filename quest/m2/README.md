@@ -56,5 +56,7 @@ dashboards, fleet rollout) stay downstream.
 - [LiveKit shim](/quest/m2/livekit-shim.md) - a drop-in livekit-client-compatible package running rooms over MoQ
 - [Auth verdict](/quest/m2/auth-verdict.md) - the relay hands an opaque credential to its auth API and is told the grant
 - [#1310](/quest/m2/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
-- [Plan: CLI capture](/quest/m2/plan-cli-capture.md) - split the moq-cli capture and playback backlog via /plan-quest
-- [#2272](/quest/m2/2272-moq-cli-remaining-work-for-capture-and-playback-window.md) - moq-cli: remaining work for capture and playback (window/app capture, device enumeration, native player)
+- [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [Windows capture parity](/quest/m2/capture-windows.md) - window, app, system-audio and cursor capture on Windows
+- [Linux capture parity](/quest/m2/capture-linux.md) - window capture, system audio, and a chosen display through the portal
+- [Capture ergonomics](/quest/m2/capture-ergonomics.md) - region capture, audio mixing, and validating format overrides
