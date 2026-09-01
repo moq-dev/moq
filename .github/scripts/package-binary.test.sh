@@ -13,13 +13,13 @@ chmod 0755 "$binary"
 target="$(rustc -vV | awk '/^host:/ {print $2}')"
 
 "$WORKSPACE_DIR/rs/scripts/package-binary.sh" \
-	--crate moq-relay \
-	--bin moq-relay \
-	--binary "$binary" \
-	--bare \
-	--version 0.14.13 \
-	--target "$target" \
-	--output "$tmp/dist"
+    --crate moq-relay \
+    --bin moq-relay \
+    --binary "$binary" \
+    --bare \
+    --version 0.14.13 \
+    --target "$target" \
+    --output "$tmp/dist"
 
 name="moq-relay-v0.14.13-$target"
 bare="$tmp/dist/$name"
