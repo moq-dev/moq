@@ -705,7 +705,7 @@ class MoqInit {
   final String format;
   final Uint8List data;
   final MoqVideoHint? video;
-  MoqInit({required this.format, required this.data, this.video});
+  MoqInit({required this.format, required this.data, this.video = null});
 }
 
 class FfiConverterMoqInit {
@@ -1007,11 +1007,11 @@ class MoqVideoHint {
   final double? framerate;
   final bool? optimizeForLatency;
   MoqVideoHint({
-    this.coded,
-    this.displayAspect,
-    this.bitrate,
-    this.framerate,
-    this.optimizeForLatency,
+    this.coded = null,
+    this.displayAspect = null,
+    this.bitrate = null,
+    this.framerate = null,
+    this.optimizeForLatency = null,
   });
 }
 
