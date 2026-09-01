@@ -27,10 +27,21 @@
 //! the track ends. The decoded frames carry their own timestamps, so the delay
 //! itself needs nothing downstream.
 //!
-//! The output is CPU I420 rather than a zero-copy [`Surface::DmaBuf`]: VA-API
-//! decode targets on Intel come back Y-tiled (DRM modifier `0x100000000000002`),
-//! a modifier the Vulkan renderer cannot import, so a DMA-BUF here would only move
-//! the download somewhere less convenient.
+//! The output is CPU I420 rather than a zero-copy [`Surface::DmaBuf`], which is
+//! now a question of plumbing rather than of capability. It used to be the
+//! latter: a decode target was believed to be a modifier the renderer could not
+//! import. Measured on Intel Meteor Lake with iHD, a decode target exports at
+//! `0x100000000000009`, and the renderer imports that per memory plane with no
+//! re-tile, so the pixels do reach a texture untouched
+//! (`decoded_frames_reach_the_gpu_without_a_download` in
+//! [`render`](crate::render) draws them).
+//!
+//! What stands in the way of making it the default is
+//! [`Surface::into_i420`](crate::Surface::into_i420): a CPU consumer of an
+//! exported surface has nowhere to read it back from, since the frame outlives
+//! the decoder that could map it, and the buffer is tiled so mapping it as rows
+//! would be wrong anyway. Handing out GPU frames therefore has to be something a
+//! caller asks for, knowing what it will do with them.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
