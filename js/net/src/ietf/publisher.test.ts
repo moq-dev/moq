@@ -461,6 +461,9 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 /** Draft-20 is the only version whose Location Filters and fills the publisher acts on. */
 const V20 = Version.DRAFT_20;
 
+/** The PUBLISH_DONE status for a subscription the track itself ended. */
+const TRACK_ENDED_STATUS = 0x2;
+
 /** A group stream the publisher opened, decoded down to its objects. */
 interface ServedGroup {
 	/** The group's sequence number. */
@@ -861,11 +864,63 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
 
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V20);
-		expect(done.statusCode).toBe(0x2);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
 
 		// Only the in-range group was ever opened.
 		expect(await nextUni(fx.uni)).toBeUndefined();
 	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * An absolute fill ending below the live edge with no end object reads until its group
+ * closes, which a group still being written may never do. The subscriber leaving has to end
+ * it: watching only the fetch stream would pin the group and its cache subscription for the
+ * life of the track.
+ */
+test("draft-20: the subscriber leaving ends a fill still reading its group", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Group 0 stays open, so a fill over it has no end of its own to wait for. Group 1 puts
+	// the live edge above it, which is what leaves the requested end object unset.
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+
+		// The fill is parked on a group that is never going to close on its own, so this only
+		// settles once the subscriber leaving cancels it.
+		const reading = readFill(fill);
+		client.close();
+
+		// A reset discards what the peer has not acknowledged, so the objects already written
+		// may or may not survive it. That it ends at all, with the cancellation as its reason,
+		// is the whole point.
+		const served = await reading;
+		expect(served.reset?.message).toContain("unsubscribed");
+	} finally {
+		open.close();
 		fx.close();
 		client.close();
 	}

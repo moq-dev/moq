@@ -462,7 +462,7 @@ export class Publisher {
 
 			const group = await this.#fetchFill(options, fill.sequence);
 			try {
-				await this.#writeFillGroup(stream, group, fill, timescale);
+				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
 			} finally {
 				group.close();
 			}
@@ -517,16 +517,33 @@ export class Publisher {
 	 * The cap is the Largest Object snapshot: the group may keep growing, but everything
 	 * past the snapshot belongs to the subscription, not the fill.
 	 */
-	async #writeFillGroup(stream: Writer, group: group.Consumer, fill: FillGroup, timescale: Timescale) {
+	async #writeFillGroup(
+		stream: Writer,
+		group: group.Consumer,
+		fill: FillGroup,
+		timescale: Timescale,
+		unsubscribed: Promise<void>,
+	) {
 		let first = true;
 		let next = 0n;
+
+		// The subscriber leaving has to end the fill too. An absolute filter ending below the
+		// edge with no end object leaves `until` unset, so this reads until the group closes,
+		// which a still-open past group may never do. Watching only the fetch stream would
+		// then pin the group and the cache subscription behind it for the life of the track.
+		let left = false;
+		const cancelled = unsubscribed.then(() => {
+			left = true;
+			return undefined;
+		});
 
 		for (;;) {
 			// The group may keep growing, but everything at `until` and beyond belongs to the
 			// subscription, so stop without waiting for the group's end.
 			if (fill.until !== undefined && next >= fill.until) break;
 
-			const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
+			const frame = await Promise.race([group.readFrameSequence(), stream.closed, cancelled]);
+			if (left) throw new Error("unsubscribed before the fill finished");
 			if (!frame) break;
 			next = BigInt(frame.sequence) + 1n;
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
