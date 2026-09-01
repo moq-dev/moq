@@ -170,12 +170,19 @@ impl Message for Subscribe<'_> {
 				// A subscriber there simply joins mid-group, which is what it did all along.
 				let fill = self.fill.filter(|_| Filter::is_draft20(version));
 
+				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes. It
+				// arrived in draft-20, and an older peer would read it as an unknown
+				// parameter, which is a protocol violation.
+				let include_properties =
+					(!self.properties_wanted && Filter::is_draft20(version)).then_some(IncludeProperties(false));
+
 				encode_params!(w, version,
 					0x10 => true,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
 					0x22 => self.group_order,
 					0x23 => fill,
+					0x35 => include_properties,
 				);
 			}
 		}
@@ -720,6 +727,34 @@ mod tests {
 		let decoded: Unsubscribe = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(999));
+	}
+
+	/// The opt-out has to reach the wire, or a subscriber that asked for no Track
+	/// Properties decodes back as wanting them.
+	#[test]
+	fn include_properties_round_trips() {
+		for (wanted, version) in [
+			(false, Version::Draft20),
+			(true, Version::Draft20),
+			// Older drafts have no such parameter, so the opt-out is dropped rather than
+			// sent as one they would treat as a protocol violation.
+			(true, Version::Draft19),
+		] {
+			let msg = Subscribe {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new("broadcast"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: wanted,
+			};
+
+			let encoded = encode_message(&msg, version);
+			let decoded: Subscribe = decode_message(&encoded, version).unwrap();
+			assert_eq!(decoded.properties_wanted, wanted, "{version}");
+		}
 	}
 
 	#[test]
