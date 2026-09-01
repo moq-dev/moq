@@ -16,8 +16,6 @@ its verdict lands and the follow-on work becomes concrete.
 - [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
-- [Plan: Dart bindings](/quest/m3/plan-dart-bindings.md) - run the uniffi-dart spike and let its verdict gate the rest via /plan-quest
-- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - Dart/Flutter bindings via UniFFI
 - [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - choose the custom-QUIC foundation by scored measurement
 - [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [#3203](/quest/m3/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
