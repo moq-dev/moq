@@ -1605,11 +1605,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut producer: group::Producer,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
+		let mut prior_object: Option<u64> = None;
+
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
-			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-				return Err(Error::Unsupported);
-			}
+			prior_object = Some(next_object_id(prior_object, id_delta)?);
 
 			// Per-object extension headers may carry the frame's presentation timestamp
 			// (the Timestamp Object Property), in the units the track declared. A track
@@ -3632,6 +3631,69 @@ fn subscribe_filter(start: Option<u64>, end: Option<u64>, version: Version) -> F
 			start: ietf::Location { group, object: 0 },
 			end: end.map(|group| ietf::EndLocation { group, object: None }),
 		},
+	}
+}
+
+/// The absolute Object ID for a subgroup object, given the prior one and its delta.
+///
+/// The first object's delta is its absolute Object ID; every later one is the prior ID plus
+/// the delta plus one. moq-lite groups start at object 0 and never skip one, so anything
+/// else is refused: a group that starts partway through has a hole at the front, and a gap
+/// in the middle would renumber every frame after it. Checked against the ID rather than
+/// the header's FIRST_OBJECT bit, which is only the publisher's claim.
+fn next_object_id(prior: Option<u64>, delta: u64) -> Result<u64, Error> {
+	let object = match prior {
+		None => delta,
+		Some(prior) => prior
+			.checked_add(delta)
+			.and_then(|id| id.checked_add(1))
+			.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?,
+	};
+
+	let expected = prior.map_or(0, |prior| prior.saturating_add(1));
+	if object != expected {
+		tracing::warn!(object, expected, "object IDs must start at 0 and increment by 1");
+		return Err(Error::Unsupported);
+	}
+
+	Ok(object)
+}
+
+#[cfg(test)]
+mod object_id_tests {
+	use super::*;
+
+	/// A zero delta throughout is a group numbered from 0 with no gaps, which is the only
+	/// shape moq-lite can represent.
+	#[test]
+	fn accepts_sequential_ids_from_zero() {
+		let mut prior = None;
+		for expected in 0..4 {
+			let object = next_object_id(prior, 0).expect("sequential");
+			assert_eq!(object, expected);
+			prior = Some(object);
+		}
+	}
+
+	/// The first object's delta is its absolute Object ID, so a non-zero one means the
+	/// group starts partway through and has a hole at the front.
+	#[test]
+	fn rejects_a_group_that_does_not_start_at_zero() {
+		assert!(matches!(next_object_id(None, 6), Err(Error::Unsupported)));
+	}
+
+	/// A later delta skips objects, which would renumber every frame after it.
+	#[test]
+	fn rejects_a_gap() {
+		assert!(matches!(next_object_id(Some(0), 1), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(Some(3), 9), Err(Error::Unsupported)));
+	}
+
+	/// The running ID is bounded, and the draft makes an overflow a protocol violation
+	/// rather than something to wrap.
+	#[test]
+	fn rejects_an_overflow() {
+		assert!(next_object_id(Some(u64::MAX), 0).is_err());
 	}
 }
 

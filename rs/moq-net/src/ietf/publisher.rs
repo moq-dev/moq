@@ -6,7 +6,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
 	coding::{Stream, Writer},
-	ietf::{self, Control, FetchHeader, FetchType, Fill, Filter, GroupOrder, Location, RequestId},
+	ietf::{self, Control, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
@@ -2964,9 +2964,11 @@ mod tests {
 /// receives; draft-20 is also the first version whose relative forms can name a past group
 /// without the subscriber knowing Largest Object.
 ///
-/// A fill is folded into the same range rather than answered on its own fetch stream. The
-/// fill reaches further back than the subscription by design, so the earlier of the two
-/// starts wins and everything is delivered as ordinary live subgroups.
+/// FILL_PARAMETERS is parsed but not acted on: we do not support fills. Answering one as
+/// ordinary subgroups looks like support without being it, since a subscriber waiting on
+/// the fetch stream the draft promises may discard those subgroups as outside its own
+/// Location Filter. Ignoring the parameter leaves the live subscription working and the
+/// backfill simply not delivered.
 fn subscribe_range(msg: &ietf::Subscribe<'_>, latest: Option<u64>, version: Version) -> (Option<u64>, Option<u64>) {
 	if !Filter::is_draft20(version) {
 		if !matches!(msg.filter, Filter::NextObject | Filter::Unfiltered) {
@@ -2975,30 +2977,11 @@ fn subscribe_range(msg: &ietf::Subscribe<'_>, latest: Option<u64>, version: Vers
 		return (None, None);
 	}
 
-	let (start, end) = filter_range(msg.filter, latest);
-	let fill = msg.fill.map(|Fill { filter }| fill_floor(filter, latest));
-
-	// `None` is the live edge, which is later than any group a fill could name, so a fill
-	// start always wins over an absent subscription start.
-	let start = match (start, fill.flatten()) {
-		(Some(a), Some(b)) => Some(a.min(b)),
-		(Some(a), None) => Some(a),
-		(None, fill) => fill,
-	};
-
-	(start, end)
-}
-
-/// The first group a fill asks for, resolved against the live edge.
-///
-/// Identical to a subscription's filter except for the unfiltered case: on a subscription
-/// that means "no restriction", which is the live edge, but a fill with no filter asks for
-/// the whole track up to Largest Object.
-fn fill_floor(filter: Filter, latest: Option<u64>) -> Option<u64> {
-	match filter {
-		Filter::Unfiltered => Some(0),
-		_ => filter_range(filter, latest).0,
+	if msg.fill.is_some() {
+		tracing::debug!("fill requested but not supported, serving the subscription only");
 	}
+
+	filter_range(msg.filter, latest)
 }
 
 /// The group range a single Location Filter selects, resolved against the live edge.
@@ -3032,7 +3015,7 @@ mod range_tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			filter,
-			fill: fill.map(|filter| Fill { filter }),
+			fill: fill.map(|filter| ietf::Fill { filter }),
 			properties_wanted: true,
 		}
 	}
@@ -3107,18 +3090,20 @@ mod range_tests {
 		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(4), Some(9)));
 	}
 
-	/// The canonical current-group join: Next Object on the subscription, and a fill that
-	/// reaches back one group. The fill is what sets the floor.
+	/// We do not support fills, so asking for one changes nothing about what is served.
+	/// Answering it as ordinary subgroups would look like support without being it.
 	#[test]
-	fn a_fill_lowers_the_floor() {
-		let msg = subscribe(Filter::NextObject, Some(Filter::Relative(1)));
-		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(100), None));
-	}
+	fn a_fill_is_parsed_but_not_served() {
+		for fill in [Filter::Relative(1), Filter::Relative(20), Filter::Unfiltered] {
+			let msg = subscribe(Filter::NextObject, Some(fill));
+			assert_eq!(
+				subscribe_range(&msg, LATEST, Version::Draft20),
+				(None, None),
+				"{fill:?}"
+			);
+		}
 
-	/// A fill reaches further back than the subscription by design, so the earlier of the
-	/// two starts wins.
-	#[test]
-	fn the_earlier_start_wins() {
+		// The subscription's own filter still decides the range.
 		let msg = subscribe(
 			Filter::Absolute {
 				start: Location { group: 90, object: 0 },
@@ -3126,28 +3111,11 @@ mod range_tests {
 			},
 			Some(Filter::Relative(20)),
 		);
-		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(81), None));
-
-		let msg = subscribe(
-			Filter::Absolute {
-				start: Location { group: 50, object: 0 },
-				end: None,
-			},
-			Some(Filter::Relative(2)),
-		);
-		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(50), None));
+		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(90), None));
 	}
 
-	/// An empty fill scope asks for the whole track, which is the one case where the
-	/// unfiltered spelling means the start of the track rather than the live edge.
-	#[test]
-	fn an_unfiltered_fill_asks_for_the_whole_track() {
-		let msg = subscribe(Filter::NextObject, Some(Filter::Unfiltered));
-		assert_eq!(subscribe_range(&msg, LATEST, Version::Draft20), (Some(0), None));
-	}
-
-	/// The same spelling on the subscription itself is just "no restriction", so it stays
-	/// at the live edge.
+	/// An absent filter is "no restriction on what is forwarded", not a request for
+	/// history, so it stays at the live edge.
 	#[test]
 	fn an_unfiltered_subscription_stays_live() {
 		let msg = subscribe(Filter::Unfiltered, None);

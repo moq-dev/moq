@@ -292,6 +292,7 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: true,
 					hasPriority: true,
+					firstObject: true,
 				},
 			});
 

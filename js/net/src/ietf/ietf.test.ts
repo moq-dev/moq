@@ -1333,6 +1333,7 @@ test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
 				hasSubgroupObject: false,
 				hasEnd: true,
 				hasPriority: true,
+				firstObject: true,
 			},
 		});
 
@@ -1361,6 +1362,7 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 		hasSubgroupObject: false,
 		hasEnd: true,
 		hasPriority: true,
+		firstObject: true,
 	};
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
 	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });
@@ -1391,6 +1393,7 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 		hasSubgroupObject: false,
 		hasEnd: true,
 		hasPriority: true,
+		firstObject: true,
 	};
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
 	const frame = new Frame({ payload: new Uint8Array([0xaa]), timestamp });
