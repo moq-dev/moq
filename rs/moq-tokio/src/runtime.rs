@@ -66,6 +66,67 @@ impl<S: moq_net::transport::poll::Boxable> moq_net::Runtime for Runtime<S> {
 	}
 }
 
+/// The [`moq_net::Runtime`] for a pinned worker's local task set.
+///
+/// Unlike [`Runtime`], this runtime accepts transports and protocol machines
+/// that are not [`Send`]. It is supplied to the future factory passed to
+/// [`crate::worker::Spawner::run`] and cannot be constructed elsewhere.
+pub struct Local<S = ()> {
+	_transport: PhantomData<fn(S)>,
+	_local: PhantomData<std::rc::Rc<()>>,
+}
+
+impl Local {
+	/// Select the transport type this local runtime drives.
+	pub fn with_transport<S>(self) -> Local<S> {
+		Local::new()
+	}
+}
+
+impl<S> Local<S> {
+	pub(crate) fn new() -> Self {
+		Self {
+			_transport: PhantomData,
+			_local: PhantomData,
+		}
+	}
+}
+
+impl<S> Clone for Local<S> {
+	fn clone(&self) -> Self {
+		*self
+	}
+}
+
+impl<S> Copy for Local<S> {}
+
+impl<S> std::fmt::Debug for Local<S> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Local").finish()
+	}
+}
+
+impl<S> moq_net::Timers for Local<S> {
+	type Timer = Timer;
+
+	fn timer(&self) -> Self::Timer {
+		Timer { at: None, sleep: None }
+	}
+
+	fn now(&self) -> moq_net::runtime::Instant {
+		tokio::time::Instant::now().into_std()
+	}
+}
+
+impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Local<S> {
+	type Transport = S;
+
+	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
+		use tracing::Instrument;
+		tokio::task::spawn_local(machine.instrument(tracing::Span::current()));
+	}
+}
+
 /// A tokio-timer runtime that hands the machine back instead of spawning it.
 ///
 /// For callers that drive the session inline, in their own task, so its

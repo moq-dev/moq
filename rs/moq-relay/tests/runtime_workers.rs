@@ -99,12 +99,10 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let mut workers = relay.workers.expect("workers configured");
 	let mut tasks = Vec::new();
 	for (server, spawner) in workers.split() {
-		tasks.push(spawner.run(moq_relay::serve(
-			server,
-			cluster.clone(),
-			auth.clone(),
-			shutdown.clone(),
-		)));
+		let cluster = cluster.clone();
+		let auth = auth.clone();
+		let shutdown = shutdown.clone();
+		tasks.push(spawner.run(move |_| moq_relay::serve(server, cluster, auth, shutdown)));
 	}
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");

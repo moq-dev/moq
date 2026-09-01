@@ -23,7 +23,7 @@
 //! // The group owns the threads, so keep it alive as long as you want the
 //! // port served.
 //! for (server, spawner) in workers.split() {
-//!     spawner.run(async move {
+//!     spawner.run(|_| async move {
 //!         let _ = server.listen().await;
 //!     });
 //! }
@@ -266,6 +266,7 @@ impl Workers {
 					Spawner {
 						index: worker.index,
 						handle: &worker.handle,
+						spawn: &worker.spawn,
 					},
 				))
 			})
@@ -334,20 +335,39 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 pub struct Spawner<'a> {
 	index: u16,
 	handle: &'a tokio::runtime::Handle,
+	spawn: &'a tokio::sync::mpsc::UnboundedSender<Spawn>,
 }
 
 impl Spawner<'_> {
-	/// Drive `future` on this worker's thread, where its QUIC driver lives.
+	/// Build and drive a future on this worker's thread, where its QUIC driver lives.
+	///
+	/// The factory crosses the thread boundary, then creates the future inside
+	/// the worker's local task set. The future itself may therefore be `!Send`.
 	///
 	/// The returned handle reports what the future returned, so a caller can end
 	/// the process on a worker that fails. Dropping the handle does *not* stop the
 	/// future, since it runs on a thread of its own; stopping the group does.
-	pub fn run<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+	pub fn run<M, F>(&self, make: M) -> tokio::task::JoinHandle<F::Output>
 	where
-		F: Future + Send + 'static,
+		M: FnOnce(crate::runtime::Local) -> F + Send + 'static,
+		F: Future + 'static,
 		F::Output: Send + 'static,
 	{
-		self.handle.spawn(future)
+		let (task_tx, task_rx) = tokio::sync::oneshot::channel();
+		let spawn = Box::new(move || {
+			let task = tokio::task::spawn_local(make(crate::runtime::Local::new()));
+			let _ = task_tx.send(task);
+		});
+		let _ = self.spawn.send(spawn);
+
+		self.handle.spawn(async move {
+			let task = task_rx.await.expect("worker stopped before spawning task");
+			match task.await {
+				Ok(output) => output,
+				Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+				Err(err) => panic!("worker-local task cancelled: {err}"),
+			}
+		})
 	}
 
 	/// This worker's position in the group, from zero.
@@ -367,6 +387,7 @@ struct Worker {
 	server: Option<Server>,
 	index: u16,
 	handle: tokio::runtime::Handle,
+	spawn: tokio::sync::mpsc::UnboundedSender<Spawn>,
 	thread: Option<std::thread::JoinHandle<()>>,
 	stop: Option<tokio::sync::oneshot::Sender<()>>,
 	addr: SocketAddr,
@@ -384,10 +405,11 @@ impl Worker {
 		let index = shard.index();
 		let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 		let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+		let (spawn_tx, spawn_rx) = tokio::sync::mpsc::unbounded_channel();
 
 		let thread = std::thread::Builder::new()
 			.name(format!("moq-quic-{index}"))
-			.spawn(move || run(shard, core, listen, quic, ready_tx, stop_rx))
+			.spawn(move || run(shard, core, listen, quic, ready_tx, stop_rx, spawn_rx))
 			.map_err(|err| Error::WorkerStart {
 				index,
 				source: Arc::new(err),
@@ -422,6 +444,7 @@ impl Worker {
 			server: Some(server),
 			index,
 			handle,
+			spawn: spawn_tx,
 			thread: Some(thread),
 			stop: Some(stop_tx),
 			addr,
@@ -456,6 +479,9 @@ struct Ready {
 	handle: tokio::runtime::Handle,
 }
 
+/// A future factory that is sent to and invoked by its worker thread.
+type Spawn = Box<dyn FnOnce() + Send + 'static>;
+
 /// One worker thread: pin, bind, report, then park until it is stopped.
 ///
 /// The runtime is built and entered here, and the [`Server`] is constructed
@@ -470,6 +496,7 @@ fn run(
 	quic: crate::quic::Config,
 	ready: std::sync::mpsc::Sender<Result<Ready>>,
 	stop: tokio::sync::oneshot::Receiver<()>,
+	mut spawn: tokio::sync::mpsc::UnboundedReceiver<Spawn>,
 ) {
 	let index = shard.index();
 	if let Some(core) = core {
@@ -517,8 +544,15 @@ fn run(
 
 	// Parked, not idle: the runtime has to keep turning for the endpoint driver
 	// and whatever the owner spawned. `stop` resolves when its sender drops.
-	runtime.block_on(async move {
-		let _ = stop.await;
+	let local = tokio::task::LocalSet::new();
+	local.block_on(&runtime, async move {
+		tokio::pin!(stop);
+		loop {
+			tokio::select! {
+				_ = &mut stop => break,
+				Some(spawn) = spawn.recv() => spawn(),
+			}
+		}
 	});
 	tracing::debug!(index, "QUIC worker stopped");
 }

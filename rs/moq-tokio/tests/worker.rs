@@ -67,7 +67,7 @@ async fn dropping_the_workers_releases_the_port() {
 
 	// Serving first is the case that used to strand the threads.
 	for (server, spawner) in workers.split() {
-		spawner.run(async move {
+		spawner.run(|_| async move {
 			let _ = server.listen().await;
 		});
 	}
@@ -77,6 +77,32 @@ async fn dropping_the_workers_releases_the_port() {
 	// succeeds only if every worker's socket is really gone.
 	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
+}
+
+/// The future factory runs on the worker, so the future may hold local state
+/// across an await without making that state thread-safe.
+#[tokio::test]
+async fn spawner_runs_a_send_less_future() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+
+	let task = {
+		let mut split = workers.split();
+		let (_server, spawner) = split.pop().expect("one worker");
+		spawner.run(|runtime| async move {
+			let _runtime = runtime;
+			let value = std::rc::Rc::new(std::cell::Cell::new(1));
+			tokio::task::yield_now().await;
+			value.set(value.get() + 1);
+			value.get()
+		})
+	};
+
+	assert_eq!(task.await.expect("local task"), 2);
+	workers.shutdown().await;
 }
 
 /// Never splitting them has to release the port too, or a failure between bind
