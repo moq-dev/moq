@@ -461,6 +461,7 @@ impl Consumer {
 			next_sequence: 0,
 			min_sequence: 0,
 			end_sequence: None,
+			stale_cap: None,
 			drift_cap: kio::Producer::new(None),
 		}
 	}
@@ -1132,7 +1133,7 @@ impl SegmentSub {
 	/// already completed.
 	fn stale_sub_mut(&mut self) -> Option<&mut track::Subscriber> {
 		match &mut self.sub {
-			SubState::Active(sub) => Some(sub),
+			SubState::Active(sub) => Some(sub.as_mut()),
 			_ => self.terminal.as_mut(),
 		}
 	}
@@ -1141,7 +1142,7 @@ impl SegmentSub {
 	fn complete(&mut self, count: Option<u64>) {
 		let previous = std::mem::replace(&mut self.sub, SubState::Done(count));
 		if let SubState::Active(sub) = previous {
-			self.terminal = Some(sub);
+			self.terminal = Some(*sub);
 		}
 	}
 
@@ -1179,8 +1180,9 @@ impl SegmentSub {
 enum SubState {
 	/// Waiting for the underlying track's info (it may not be accepted yet).
 	Pending(kio::Pending<track::Subscribing>),
-	/// Live cursor over the underlying track.
-	Active(track::Subscriber),
+	/// Live cursor over the underlying track. Boxed: the subscriber dwarfs the other
+	/// variants, and every segment holds this enum.
+	Active(Box<track::Subscriber>),
 	/// The underlying track ended: `Some` with the group count when it finished
 	/// cleanly, `None` when it aborted or was dropped. An abort is deliberately
 	/// not surfaced: a dead route stalls the logical track until the next switch
@@ -1223,7 +1225,13 @@ pub struct Subscriber {
 	min_sequence: u64,
 	/// Inclusive cap for [`Self::next_group`], set by [`Self::end_at`].
 	end_sequence: Option<u64>,
-	/// Shared copy of [`Self::end_sequence`] for groups that outlive this cursor poll.
+	/// A cap imposed by a reader wrapping this subscriber (a nested splice segment),
+	/// folded into every drift anchor pushed onto the segments. Never bounds delivery:
+	/// the outer reader enforces its own window, and an inner cap would hide a
+	/// segment's completion from it.
+	stale_cap: Option<u64>,
+	/// Shared copy of the effective cap ([`Self::end_sequence`] and [`Self::stale_cap`]
+	/// combined) for groups that outlive this cursor poll.
 	drift_cap: kio::Producer<Option<u64>>,
 }
 
@@ -1351,12 +1359,13 @@ impl Subscriber {
 		}
 		self.segments.retain(|s| !s.retired());
 
+		let anchor = self.anchor_end();
 		for segment in segments {
 			match self.segments.iter_mut().find(|s| s.id == segment.id) {
 				Some(existing) => {
 					if existing.end != segment.end {
 						existing.end = segment.end;
-						let cap = Self::stale_cap(existing, self.end_sequence);
+						let cap = Self::stale_cap(existing, anchor);
 						if let Some(sub) = existing.stale_sub_mut() {
 							// The boundary bounds the drift anchor as well as the demand.
 							sub.set_stale_cap(cap);
@@ -1426,9 +1435,77 @@ impl Subscriber {
 	/// park boundary-crossing groups where its completion can't be seen), so this is how
 	/// both bounds reach the drift anchor. Without them a segment measures staleness
 	/// against groups it will never surface: the route running past the boundary, or the
-	/// reader's own cap holding content back.
-	fn stale_cap(seg: &SegmentSub, end_sequence: Option<u64>) -> Option<u64> {
-		min_some(end_sequence, seg.last_group())
+	/// reader's own cap holding content back. `anchor_end` is [`Self::anchor_end`], so a
+	/// cap imposed on this subscriber from outside is included.
+	fn stale_cap(seg: &SegmentSub, anchor_end: Option<u64>) -> Option<u64> {
+		min_some(anchor_end, seg.last_group())
+	}
+
+	/// The tightest cap any reader of this subscriber imposes: its own [`Self::end_at`]
+	/// and whatever a wrapping splice pushed down. What every segment's drift anchor is
+	/// bounded by.
+	fn anchor_end(&self) -> Option<u64> {
+		min_some(self.stale_cap, self.end_sequence)
+	}
+
+	/// Bound every segment's drift anchor from outside; the spliced arm of
+	/// [`track::Subscriber::set_stale_cap`], for this subscriber nested as a segment of
+	/// another splice.
+	pub(crate) fn set_stale_cap(&mut self, cap: Option<u64>) {
+		self.stale_cap = cap;
+		self.update_drift_cap();
+		let anchor = self.anchor_end();
+		for seg in &mut self.segments {
+			let cap = Self::stale_cap(seg, anchor);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.set_stale_cap(cap);
+			}
+		}
+	}
+
+	/// Count each segment's seek convictions behind the deliverer's `committed`
+	/// watermark; the spliced arm of [`track::Subscriber::commit_seek_stale`].
+	pub(crate) fn commit_seek_stale(&mut self, committed: u64) {
+		for seg in &mut self.segments {
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.commit_seek_stale(committed);
+			}
+		}
+	}
+
+	/// Drop every segment's conviction for `sequence` without counting it; the
+	/// spliced arm of [`track::Subscriber::discard_seek_conviction`].
+	pub(crate) fn discard_seek_conviction(&mut self, sequence: u64) {
+		for seg in &mut self.segments {
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.discard_seek_conviction(sequence);
+			}
+		}
+	}
+
+	/// Whether the drift budget says to skip `group`, asked of the segment whose
+	/// window covers it; the spliced arm of [`track::Subscriber::poll_stale`], for a
+	/// nested splice's parked group being re-offered after a cap rise.
+	///
+	/// A group no current segment covers gets a `false`: with no cursor left that
+	/// could judge it, delivering is the safe direction.
+	pub(crate) fn poll_stale(&mut self, group: &group::Consumer, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		for seg in &mut self.segments {
+			if seg.first_group() <= group.sequence
+				&& seg.last_group().is_none_or(|last| group.sequence <= last)
+				&& let Some(sub) = seg.stale_sub_mut()
+			{
+				return sub.poll_stale(group, waiter);
+			}
+		}
+		Poll::Ready(Ok(false))
+	}
+
+	/// Publish the effective cap for groups that outlive this cursor poll.
+	fn update_drift_cap(&mut self) {
+		if let Ok(mut cap) = self.drift_cap.write() {
+			*cap = self.anchor_end();
+		}
 	}
 
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
@@ -1438,7 +1515,7 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		end_sequence: Option<u64>,
+		anchor_end: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
@@ -1452,9 +1529,9 @@ impl Subscriber {
 					// assigned: the inner subscription resolved its own start from its
 					// budget and floor, and this must not rewind past it.
 					sub.raise_start_to(seg.first_group().max(min_sequence));
-					sub.set_stale_cap(Self::stale_cap(seg, end_sequence));
+					sub.set_stale_cap(Self::stale_cap(seg, anchor_end));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
-					seg.sub = SubState::Active(sub);
+					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
 				Poll::Ready(Err(_)) => seg.sub = SubState::Done(None),
@@ -1470,13 +1547,13 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		end_sequence: Option<u64>,
+		anchor_end: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, anchor_end, waiter));
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -1540,6 +1617,17 @@ impl Subscriber {
 	) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
 
+		// Delivery is the only irrevocable signal: the sequence cursor never returns
+		// below `next_sequence`, so every segment's convictions behind it are final.
+		// The floor is no substitute; it includes `start_at`, which can be lowered
+		// again. A nested seek (`deliver` false) commits nothing: the outer deliverer
+		// reaches these segments through its own commit recursion.
+		if deliver {
+			let committed = self.next_sequence;
+			self.commit_seek_stale(committed);
+		}
+
+		let anchor = self.anchor_end();
 		let mut floor = floor;
 		'retry: loop {
 			let mut all_done = true;
@@ -1551,7 +1639,7 @@ impl Subscriber {
 						&mut self.segments[index],
 						&self.last_prefs,
 						self.min_sequence,
-						end,
+						anchor,
 						waiter,
 					)
 					.is_pending()
@@ -1646,6 +1734,7 @@ impl Subscriber {
 		self.poll_sync(waiter);
 
 		let end_sequence = self.end_sequence;
+		let anchor = self.anchor_end();
 		let min_sequence = self.min_sequence;
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
 
@@ -1704,7 +1793,7 @@ impl Subscriber {
 					&mut self.segments[index],
 					&self.last_prefs,
 					min_sequence,
-					end_sequence,
+					anchor,
 					waiter,
 				);
 				match polled {
@@ -1783,6 +1872,12 @@ impl Subscriber {
 			return Poll::Ready(Ok(None));
 		};
 		self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
+		// A boundary inside the delivered group leaves a copy of this sequence in the
+		// next segment, which may have convicted it; the delivery splices into that
+		// copy, so its content is served and must not be counted.
+		self.discard_seek_conviction(group.sequence);
+		// The delivery commits every segment's convictions the cursor just passed.
+		self.commit_seek_stale(self.next_sequence);
 		Poll::Ready(Ok(Some(group)))
 	}
 
@@ -1815,8 +1910,9 @@ impl Subscriber {
 		// datagrams must still resolve the subscription (registering demand) and
 		// be woken when it activates.
 		let mut pending_activation = false;
+		let anchor = self.anchor_end();
 		if let Some(seg) = self.segments.last_mut() {
-			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, self.end_sequence, waiter).is_pending() {
+			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, anchor, waiter).is_pending() {
 				pending_activation = true;
 			} else if let SubState::Active(sub) = &mut seg.sub {
 				match sub.poll_recv_datagram(waiter) {
@@ -1875,7 +1971,7 @@ impl Subscriber {
 			seg,
 			&self.last_prefs,
 			self.min_sequence,
-			self.end_sequence,
+			min_some(self.stale_cap, self.end_sequence),
 			waiter
 		));
 		match &mut seg.sub {
@@ -1930,14 +2026,12 @@ impl Subscriber {
 	/// re-offers it.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
-		if let Ok(mut cap) = self.drift_cap.write() {
-			*cap = self.end_sequence;
-		}
+		self.update_drift_cap();
 		// The cap bounds each segment's drift anchor as well as this reader's own
 		// delivery: a segment must not measure against groups this cap hides.
-		let end_sequence = self.end_sequence;
+		let anchor = self.anchor_end();
 		for seg in &mut self.segments {
-			let cap = Self::stale_cap(seg, end_sequence);
+			let cap = Self::stale_cap(seg, anchor);
 			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_stale_cap(cap);
 			}
@@ -2769,6 +2863,300 @@ mod test {
 		})
 		.collect();
 		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
+	}
+
+	/// A nested splice's leaves are judged within the *outer* boundary. The outer
+	/// window reaches them two ways, through the seek's own `end` and through
+	/// [`track::Subscriber::set_stale_cap`] recursing into the spliced segment; without
+	/// either, a leaf anchors drift on a group past the outer boundary and convicts
+	/// everything the outer segment still owes its reader.
+	#[tokio::test]
+	async fn nested_splice_judges_within_the_outer_boundary() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		// Inner splice: one segment carrying groups 0..=2. Group 2 sits past the
+		// outer boundary below, so it is exactly the anchor the outer window must
+		// hide from the inner leaves.
+		let (mut track_a, consumer_a) = track_pair("a");
+		let mut inner = Producer::new();
+		inner.switch(&consumer_a, None).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_a, 2, "a2", stamp(2));
+
+		// Outer splice: the inner spliced track up to group 2, then a plain track.
+		let inner_track =
+			track::Consumer::spliced("inner".into(), Arc::new(broadcast::Info::default()), inner.consume());
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut outer = Producer::new();
+		outer.switch(&inner_track, None).unwrap();
+		outer.switch(&consumer_b, Position::group(2)).unwrap();
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+
+		// Group 1 is the newest group the outer window can serve from the nested
+		// segment, so it is its own live edge there and survives a zero budget.
+		let mut sub = outer.consume().subscribe(None);
+		let sequences: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| sub.poll_next_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(
+			sequences,
+			vec![1, 3],
+			"the nested segment is judged within the outer boundary"
+		);
+
+		let mut arrival = outer.consume().subscribe(None);
+		let arrival: Vec<u64> = std::iter::from_fn(|| {
+			kio::wait(|waiter| arrival.poll_recv_group(waiter))
+				.now_or_never()?
+				.expect("should not error")
+				.map(|group| group.sequence)
+		})
+		.collect();
+		assert_eq!(arrival, sequences, "the arrival path sheds the same backlog");
+	}
+
+	/// A seek's conviction is speculative: the spliced path seeks every segment and
+	/// delivers from one, so a losing segment's conviction must not reach the stale
+	/// count until the cursor commits past it. A budget that widens in between delivers
+	/// the group after all, and delivered content never counts.
+	#[tokio::test]
+	async fn seek_conviction_counts_only_once_committed() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position::group(2)).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+
+		let mut sub = producer.consume().subscribe(None);
+		let next = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_next_group(waiter))
+				.now_or_never()
+				.expect("should not block")
+				.expect("should not error")
+				.expect("should not be finished")
+				.sequence
+		};
+
+		// The zero budget delivers group 1 (segment A's newest) and convicts group 0
+		// there and group 2 in segment B, which loses this round: group 1 is lower.
+		// The delivery commits past group 0, so it counts; group 2 stays speculative.
+		assert_eq!(next(&mut sub), 1);
+		assert_eq!(
+			sub.take_stale().groups,
+			1,
+			"only the conviction the delivery passed counts"
+		);
+
+		// Widen the budget: the convicted-but-uncommitted group 2 is delivered after
+		// all, so it must never reach the stale count.
+		sub.update(Subscription::default().with_max_age(Duration::from_secs(60)));
+		assert_eq!(next(&mut sub), 2);
+		assert_eq!(next(&mut sub), 3);
+		assert_eq!(sub.take_stale().groups, 0, "delivered content never counts as stale");
+	}
+
+	/// The seek floor is not a commit signal: `start_at` can raise it and lower it
+	/// again, so a losing segment's conviction must survive a floor that briefly
+	/// jumped past it, and still be deliverable (uncounted) once the budget widens.
+	#[tokio::test]
+	async fn a_reversible_floor_does_not_commit_a_conviction() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position::group(2)).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+
+		let mut sub = producer.consume().subscribe(None);
+		let next = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_next_group(waiter))
+				.now_or_never()
+				.expect("should not block")
+				.expect("should not error")
+				.expect("should not be finished")
+				.sequence
+		};
+
+		// Group 1 wins; group 2's conviction in segment B stays speculative.
+		assert_eq!(next(&mut sub), 1);
+		assert_eq!(sub.take_stale().groups, 1, "the delivery commits past group 0 only");
+
+		// Jump the floor past the conviction without delivering anything, then bring
+		// it back. Nothing was delivered, so nothing was committed.
+		sub.start_at(10);
+		assert!(
+			kio::wait(|waiter| sub.poll_next_group(waiter)).now_or_never().is_none(),
+			"nothing at or above the raised floor"
+		);
+		sub.start_at(0);
+
+		// The widened budget delivers the convicted group; it must not have been
+		// counted while the floor sat above it.
+		sub.update(Subscription::default().with_max_age(Duration::from_secs(60)));
+		assert_eq!(next(&mut sub), 2);
+		assert_eq!(next(&mut sub), 3);
+		assert_eq!(sub.take_stale().groups, 0, "a floor jump commits nothing");
+	}
+
+	/// A boundary inside a group leaves a copy of the same sequence in two segments:
+	/// the earlier serves the head, the later the continuation the delivery splices
+	/// into. The later segment's cursor can convict its copy, but the delivery serves
+	/// that content, so the conviction must be discarded rather than counted.
+	#[tokio::test]
+	async fn a_delivered_continuation_is_not_counted_stale() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		// Mid-group boundary: group 1's head lives in segment A, its tail in B.
+		producer.switch(&consumer_b, Position { group: 1, frame: 1 }).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_b, 1, "b1", stamp(1));
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+
+		let mut sub = producer.consume().subscribe(None);
+		let next = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_next_group(waiter))
+				.now_or_never()
+				.expect("should not block")
+				.expect("should not error")
+				.expect("should not be finished")
+				.sequence
+		};
+
+		// Group 1 wins from segment A (it holds the head copy) while segment B has
+		// convicted both its continuation copy of 1 and group 2. Delivering 1 must
+		// discard B's copy, not count it.
+		assert_eq!(next(&mut sub), 1);
+		assert_eq!(next(&mut sub), 3);
+		assert_eq!(
+			sub.take_stale().groups,
+			2,
+			"groups 0 and 2 are stale; the delivered continuation of 1 is not"
+		);
+	}
+
+	/// A finalized losing segment's convictions must not be counted when its cursor
+	/// runs out: a mid-group boundary leaves the convicted sequence servable through
+	/// the *previous* segment (whose delivery splices into this segment's copy), and a
+	/// raised floor that forced the `None` can be lowered again. Only a delivery
+	/// commit may count; a conviction never committed is dropped with the cursor.
+	#[tokio::test]
+	async fn a_finalized_segment_flushes_nothing_without_a_delivery() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		// C owns group 0, A owns group 1's head, finalized B owns its tail onward.
+		let (mut track_c, consumer_c) = track_pair("c");
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_c, None).unwrap();
+		producer.switch(&consumer_a, Position::group(1)).unwrap();
+		producer.switch(&consumer_b, Position { group: 1, frame: 1 }).unwrap();
+		write_group_at(&mut track_c, 0, "c0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_b, 1, "b1", stamp(1));
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+		track_b.finish().unwrap();
+
+		let mut sub = producer.consume().subscribe(None);
+		let next = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_next_group(waiter))
+				.now_or_never()
+				.expect("should not block")
+				.expect("should not error")
+				.expect("should not be finished")
+				.sequence
+		};
+
+		// Delivering 0 leaves B's convictions of its copy of 1 (and of 2) pending.
+		assert_eq!(next(&mut sub), 0);
+
+		// A floor past B's final sequence runs its cursor out and completes the
+		// segment; the pending convictions must be dropped, not counted, because...
+		sub.start_at(10);
+		assert!(
+			kio::wait(|waiter| sub.poll_next_group(waiter)).now_or_never().is_none(),
+			"nothing at or above the raised floor"
+		);
+
+		// ...group 1 is still deliverable: A holds its head, and the delivery splices
+		// into the copy B's cursor convicted. Counted-and-delivered is the one thing
+		// the stale stat must never say.
+		sub.start_at(0);
+		sub.update(Subscription::default().with_max_age(Duration::from_secs(60)));
+		assert_eq!(next(&mut sub), 1);
+		assert_eq!(
+			sub.take_stale().groups,
+			0,
+			"no delivery ever committed past a conviction"
+		);
+	}
+
+	/// A parked group re-offered through a *nested* splice is re-checked against the
+	/// drift budget exactly as a plain segment's would be: the cap rising widened the
+	/// live edge too, and the covering segment's leaf is the cursor that can judge it.
+	#[tokio::test]
+	async fn nested_parked_group_is_rechecked_when_the_cap_rises() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		// Inner splice over one plain track holding groups 0..=2.
+		let (mut track_a, consumer_a) = track_pair("a");
+		let mut inner = Producer::new();
+		inner.switch(&consumer_a, None).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_a, 2, "a2", stamp(2));
+
+		let inner_track =
+			track::Consumer::spliced("inner".into(), Arc::new(broadcast::Info::default()), inner.consume());
+		let mut outer = Producer::new();
+		outer.switch(&inner_track, None).unwrap();
+
+		// Capped at group 0: group 0 is the whole window (and so its own live edge),
+		// while groups 1 and 2 park above the cap.
+		let mut sub = outer.consume().subscribe(None);
+		sub.end_at(0);
+		let recv = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_recv_group(waiter))
+				.now_or_never()
+				.map(|group| {
+					group
+						.expect("should not error")
+						.expect("should not be finished")
+						.sequence
+				})
+		};
+		assert_eq!(recv(&mut sub), Some(0));
+		assert_eq!(recv(&mut sub), None, "groups beyond the cap park");
+
+		// Raising the cap re-offers the parked groups, but it also widened the live
+		// edge to group 2, so group 1 is stale now and must be skipped, not served.
+		sub.end_at(None);
+		assert_eq!(recv(&mut sub), Some(2), "the re-offered backlog is re-checked");
+		assert_eq!(sub.take_stale().groups, 1, "the skipped park is counted once");
 	}
 
 	#[tokio::test]

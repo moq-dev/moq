@@ -1420,7 +1420,7 @@ impl Producer {
 				stale_cap: None,
 				drift_cap,
 				stale: stats::Content::default(),
-				seek_stale: 0,
+				seek_pending: BTreeMap::new(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
@@ -2373,7 +2373,7 @@ impl Subscribing {
 						stale_cap: None,
 						drift_cap,
 						stale: stats::Content::default(),
-						seek_stale: 0,
+						seek_pending: BTreeMap::new(),
 					}),
 					stats: self.stats.clone(),
 					_stats_sub: self.stats.subscribe(),
@@ -2834,9 +2834,9 @@ struct PlainSubscriber {
 	/// [`super::resume::Subscriber`] segment (untagged, so the outer wrapper is the
 	/// only place attribution happens once).
 	stale: stats::Content,
-	/// One past the highest sequence the seek path has counted into [`Self::stale`];
-	/// see [`Self::note_seek_stale`].
-	seek_stale: u64,
+	/// Groups the seek path has convicted but whose sequences no caller has committed
+	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
+	seek_pending: BTreeMap<u64, stats::Content>,
 }
 
 impl PlainSubscriber {
@@ -2872,18 +2872,19 @@ impl PlainSubscriber {
 	/// This subscriber's clamped drift budget and the live edge to measure against,
 	/// resolved once per poll.
 	///
-	/// Read fresh each poll, so a mid-stream [`SubscriberControl::update`] applies to the
-	/// very next group, and shared across every candidate that poll walks off, so
+	/// `cap` bounds the anchor: the caller passes the same window it reads from, so a
+	/// group is only ever judged against content that could actually be served in its
+	/// place. Read fresh each poll, so a mid-stream [`SubscriberControl::update`] applies
+	/// to the very next group, and shared across every candidate that poll walks off, so
 	/// discarding a backlog of N groups costs one scan rather than N. Only ever
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
-	fn poll_drift(&self, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
+	fn poll_drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
 		let mut max_age = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
 			max_age = subscription.max_age;
 			Poll::<()>::Pending
 		});
-		let cap = servable_cap(self.end_sequence, self.stale_cap);
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(Drift {
 				budget: clamp_max_age(max_age, state.max_age_bound()),
@@ -2933,7 +2934,7 @@ impl PlainSubscriber {
 			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(waiter))?;
+		let drift = ready!(self.poll_drift(servable_cap(self.end_sequence, self.stale_cap), waiter))?;
 
 		loop {
 			// Re-offer the lowest parked group back inside the cap once it rises,
@@ -3000,6 +3001,8 @@ impl PlainSubscriber {
 			return Poll::Ready(Ok(None));
 		};
 		self.next_sequence = group.sequence.saturating_add(1);
+		// The delivery commits everything the seek stepped over to reach this group.
+		self.commit_seek_stale(self.next_sequence);
 		// Delivery is a cache access, same as the arrival-order path.
 		group.cache_refresh();
 		Poll::Ready(Ok(Some(group)))
@@ -3007,6 +3010,12 @@ impl PlainSubscriber {
 
 	/// Seek the lowest servable group in `floor..=end` without advancing any cursor,
 	/// walking off everything the drift budget has convicted on the way.
+	///
+	/// The drift anchor is built from the same window the seek reads (`end` folded into
+	/// the cap), so a candidate is only judged against content that could be served in
+	/// its place. A nested splice depends on this: its outer boundary arrives only as
+	/// this call's `end`, and an anchor past it would convict groups the caller still
+	/// owes its reader.
 	///
 	/// Repeated polls return the same group until the caller's own floor passes it,
 	/// which is the point: the spliced sequence path picks the lowest candidate across
@@ -3020,36 +3029,60 @@ impl PlainSubscriber {
 		let mut floor = floor.max(self.min_sequence);
 		let end = super::subscription::min_some(end, self.end_sequence);
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(waiter))?;
+		let drift = ready!(self.poll_drift(servable_cap(end, self.stale_cap), waiter))?;
 
 		loop {
 			let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
+				// Deliberately no flush of `seek_pending` here: only a delivery commit
+				// may count a conviction. This `None` can be an artifact of a floor
+				// that will lower again, and a mid-group boundary can serve a
+				// convicted sequence through another segment even after this cursor
+				// retires. A conviction never committed is dropped uncounted with the
+				// cursor, the same tail bound a retired segment already has.
 				return Poll::Ready(Ok(None));
 			};
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
 			// walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&group, &drift, waiter))? {
-				self.note_seek_stale(&group);
+				// Not counted yet: a seek advances no cursor, and a conviction is not
+				// permanent (the budget can widen, the edge can be evicted), so the
+				// group may still be delivered. Re-snapshot on every re-examination so
+				// the eventual count reflects the group's latest observed content.
+				self.seek_pending.insert(group.sequence, group.content());
 				floor = group.sequence.saturating_add(1);
 				continue;
 			}
 
+			// A conviction the budget walked back: the group is handed over after all,
+			// so it must never reach the stale count.
+			self.seek_pending.remove(&group.sequence);
 			return Poll::Ready(Ok(Some(self.with_expiry(group))));
 		}
 	}
 
-	/// Count a group the seek path skipped, at most once per sequence.
+	/// Count the seek path's convictions below `committed` into [`Self::stale`],
+	/// exactly once each.
 	///
-	/// A seek advances no cursor, so a convicted group it steps over is re-examined on
-	/// every later poll (the spliced path seeks each segment and delivers from one). The
-	/// watermark is what keeps those repeats out of the stats.
-	fn note_seek_stale(&mut self, group: &group::Consumer) {
-		if group.sequence < self.seek_stale {
-			return;
+	/// A seek is speculative: the spliced path seeks every segment and delivers from
+	/// one, so a conviction only becomes a real skip once a delivery commits past it.
+	/// Until then the entry waits in [`Self::seek_pending`], where a delivered group
+	/// removes itself (see [`Self::poll_seek_group`]). `committed` must be the
+	/// deliverer's sequence watermark (one past its last delivery), which only rises.
+	/// The seek's floor is NOT that: it includes `start_at`, which can be lowered
+	/// again, and a conviction it flushed could then be delivered after all.
+	fn commit_seek_stale(&mut self, committed: u64) {
+		let keep = self.seek_pending.split_off(&committed);
+		for (_, content) in std::mem::replace(&mut self.seek_pending, keep) {
+			self.stale.add(content);
 		}
-		self.seek_stale = group.sequence.saturating_add(1);
-		self.stale.add(group.content());
+	}
+
+	/// Drop a conviction for `sequence` without counting it: the sequence was
+	/// delivered by another cursor over the same content (a splice boundary inside
+	/// the group leaves a copy in two segments), so its content is not stale.
+	fn discard_seek_conviction(&mut self, sequence: u64) {
+		self.seek_pending.remove(&sequence);
 	}
 }
 
@@ -3131,22 +3164,54 @@ impl Subscriber {
 	/// A [`super::resume::Subscriber`] segment is deliberately left uncapped
 	/// ([`Self::end_at`] would park boundary-crossing groups where its completion can't
 	/// be seen), so its own cap has to reach the anchor this way or the segment measures
-	/// drift against groups its reader will never be served.
+	/// drift against groups its reader will never be served. A spliced segment folds the
+	/// cap into what it pushes onto its own segments, so the bound reaches the plain
+	/// cursors at the leaves however deep the splices nest.
 	pub(crate) fn set_stale_cap(&mut self, cap: Option<u64>) {
-		if let SubscriberKind::Plain(plain) = &mut self.inner {
-			plain.stale_cap = cap;
-			plain.update_drift_cap();
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				plain.stale_cap = cap;
+				plain.update_drift_cap();
+			}
+			SubscriberKind::Spliced(spliced) => spliced.set_stale_cap(cap),
+		}
+	}
+
+	/// Count the seek path's convictions below the deliverer's `committed` watermark
+	/// as stale, exactly once each; see [`PlainSubscriber::commit_seek_stale`].
+	///
+	/// The spliced seek calls this on every segment before it delivers, so a losing
+	/// segment's convictions are counted once the winning delivery moves the cursor
+	/// past them, and never before.
+	pub(crate) fn commit_seek_stale(&mut self, committed: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.commit_seek_stale(committed),
+			SubscriberKind::Spliced(spliced) => spliced.commit_seek_stale(committed),
+		}
+	}
+
+	/// Drop any conviction for `sequence` without counting it; see
+	/// [`PlainSubscriber::discard_seek_conviction`]. The spliced deliverer calls this
+	/// for the sequence it just handed out, since a boundary inside that group leaves
+	/// a convictable copy in the next segment that the delivery splices into.
+	pub(crate) fn discard_seek_conviction(&mut self, sequence: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.discard_seek_conviction(sequence),
+			SubscriberKind::Spliced(spliced) => spliced.discard_seek_conviction(sequence),
 		}
 	}
 
 	/// Whether the drift budget says to skip `group`, for a reader holding a group this
 	/// subscriber handed it earlier (a parked one, re-offered once a cap rose). Counts
-	/// the skip here so it reaches the stats with the rest.
+	/// the skip here so it reaches the stats with the rest. A spliced subscriber asks
+	/// the segment whose window covers the group, so a nested park is re-checked
+	/// against the same anchor a fresh read would use.
 	pub(crate) fn poll_stale(&mut self, group: &group::Consumer, waiter: &kio::Waiter) -> Poll<Result<bool>> {
-		let SubscriberKind::Plain(plain) = &mut self.inner else {
-			return Poll::Ready(Ok(false));
+		let plain = match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain,
+			SubscriberKind::Spliced(spliced) => return spliced.poll_stale(group, waiter),
 		};
-		let drift = ready!(plain.poll_drift(waiter))?;
+		let drift = ready!(plain.poll_drift(servable_cap(plain.end_sequence, plain.stale_cap), waiter))?;
 		let stale = ready!(plain.poll_stale(group, &drift, waiter))?;
 		if stale {
 			plain.note_stale(group);
