@@ -42,12 +42,11 @@ export class Consumer {
 	#group?: Moq.Group.Consumer;
 	// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	#taken = false;
-	// Sticky once a second group is seen: the payloads it displaced are gone, so every later read
-	// throws too rather than reporting the rest of the log as a whole one.
-	#rolled = false;
-	// The in-flight `recvGroup`, kept across reads. Racing it against a frame read leaves it
-	// outstanding whenever the frame wins, and a second call would take a second group off the track.
-	#pending?: Promise<Moq.Group.Consumer | undefined>;
+	// The in-flight `recvGroup`, tagged for the race and built once: a frame read that wins leaves it
+	// outstanding, a second call would take a second group off the track, and tagging it per read
+	// would chain a reaction onto it for every payload in the log. Cleared only when the group it
+	// carries is taken, so a second group stays resolved here and every later read fails on it again.
+	#pending?: Promise<{ group: Moq.Group.Consumer | undefined }>;
 	// The DEFLATE window for the group, present while decompressing.
 	#flate?: Flate;
 
@@ -59,16 +58,13 @@ export class Consumer {
 	/** Get the next payload, or `undefined` once the track ends. */
 	async next(): Promise<Uint8Array | undefined> {
 		for (;;) {
-			if (this.#rolled) throw new Rolled();
-
 			if (!this.#group) {
-				const group = await this.#recvGroup();
-				this.#pending = undefined;
+				const { group } = await this.#recvGroup();
 				if (!group) return undefined;
-				if (this.#taken) {
-					this.#rolled = true;
-					continue;
-				}
+				// The resolved `#pending` is the whole record of the failure: it is left in place, so
+				// every later read arrives back here and throws again rather than reading on.
+				if (this.#taken) throw new Rolled();
+				this.#pending = undefined;
 				this.#taken = true;
 				this.#flate = this.#decompress ? new Flate() : undefined;
 				this.#group = group;
@@ -97,15 +93,13 @@ export class Consumer {
 		}
 
 		const frame = group.readFrame();
-		const winner = await Promise.race([
-			frame.then((frame) => ({ frame }) as const),
-			this.#recvGroup().then((group) => ({ group }) as const),
-		]);
+		const winner = await Promise.race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);
 		if ("frame" in winner) return winner.frame;
 
-		this.#pending = undefined;
 		if (winner.group) {
-			this.#rolled = true;
+			// Drop the group rather than drain the rest of a log that has already lost payloads: the next
+			// read then waits on the track, where the second group is still resolved and throws again.
+			this.#group = undefined;
 			throw new Rolled();
 		}
 
@@ -118,8 +112,8 @@ export class Consumer {
 	// Arrival order rather than sequence order, because there is only ever one group to take and a
 	// second one has to be seen whatever its sequence. The monotonic `nextGroup` would drop a late
 	// lower sequence, which is the very loss this reports.
-	#recvGroup(): Promise<Moq.Group.Consumer | undefined> {
-		this.#pending ??= this.#track.recvGroup();
+	#recvGroup(): Promise<{ group: Moq.Group.Consumer | undefined }> {
+		this.#pending ??= this.#track.recvGroup().then((group) => ({ group }));
 		return this.#pending;
 	}
 
