@@ -346,7 +346,6 @@ pub(crate) fn launch(
 			None => moq_net::runtime::Deadline::new(handle),
 		},
 		keep_alive_every: keep_alive,
-		scratch: vec![0u8; 65535],
 		carry: None,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
@@ -619,8 +618,6 @@ struct Driver {
 	/// caller asked for no keep-alive.
 	keep_alive: moq_net::runtime::Deadline<Handle>,
 	keep_alive_every: Option<std::time::Duration>,
-	/// Datagram receive scratch.
-	scratch: Vec<u8>,
 	/// A packet quiche handed us for a different path than the train being
 	/// packed; it opens the next one.
 	carry: Option<(SocketAddr, Vec<u8>)>,
@@ -763,11 +760,14 @@ impl Driver {
 		});
 
 		let mut received = false;
-		while let Ok(len) = conn.dgram_recv(&mut self.scratch) {
+		// The buffer factory already hands these out as `Bytes`, so moving one
+		// from quiche's queue to ours copies nothing, and no scratch buffer can
+		// be too small for a datagram and silently drop it.
+		while let Ok(dgram) = conn.dgram_recv_buf() {
 			if state.datagrams.len() >= DGRAM_QUEUE {
 				state.datagrams.pop_front();
 			}
-			state.datagrams.push_back(Bytes::copy_from_slice(&self.scratch[..len]));
+			state.datagrams.push_back(dgram);
 			received = true;
 		}
 		if received {

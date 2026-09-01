@@ -137,12 +137,18 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			return Poll::Pending;
 		}
 
+		// `capacity` was read from the same borrow, so quiche takes the whole
+		// chunk and hands back no remainder. Ownership has already left `buf`
+		// by then, so a remainder is a hole in the stream rather than a short
+		// write the caller can retry: report it instead of dropping it.
 		let chunk = buf.copy_to_bytes(capacity.min(buf.remaining()));
-		let expected = chunk.len();
 		let (written, remainder) = conn.stream_send_zc(self.id, chunk, false)?;
-		debug_assert_eq!(written, expected, "capacity changed while the connection was borrowed");
-		debug_assert!(remainder.as_ref().is_none_or(Bytes::is_empty));
 		drop(conn);
+		if remainder.is_some_and(|remainder| !remainder.is_empty()) {
+			return Poll::Ready(Err(Error::Quic(
+				"stream send took less than its reported capacity".to_string(),
+			)));
+		}
 
 		self.shared.kick();
 		Poll::Ready(Ok(written))

@@ -16,14 +16,18 @@ pub(crate) use connection::Shared;
 
 use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
 
-/// Keeps caller-owned stream chunks refcounted all the way through quiche's
-/// retransmission queue.
+/// Keeps caller-owned chunks refcounted all the way through quiche's
+/// retransmission and datagram queues.
+///
+/// Both buffer types are [`bytes::Bytes`] so a stream write hands quiche the
+/// caller's own allocation, and a received datagram comes back out of the
+/// queue as one instead of being copied through a scratch buffer.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BytesFactory;
 
 impl quiche::BufFactory for BytesFactory {
 	type Buf = bytes::Bytes;
-	type DgramBuf = Vec<u8>;
+	type DgramBuf = bytes::Bytes;
 
 	fn buf_from_slice(buf: &[u8]) -> Self::Buf {
 		#[cfg(test)]
@@ -32,7 +36,7 @@ impl quiche::BufFactory for BytesFactory {
 	}
 
 	fn dgram_buf_from_slice(buf: &[u8]) -> Self::DgramBuf {
-		buf.to_vec()
+		bytes::Bytes::copy_from_slice(buf)
 	}
 }
 
