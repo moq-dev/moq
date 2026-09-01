@@ -15,8 +15,8 @@ const PROP_TIMESTAMP = 0x10n;
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
-// 11.4.2. moq-lite always starts subgroups at object 0, so the bit carries no
-// extra information for us: set it on emit, strip it on parse.
+// 11.4.2. Our subgroups always start at object 0, so it is always set on emit; on
+// parse it is the peer saying its stream starts partway through a group.
 const FIRST_OBJECT_BIT = 0x40;
 
 function hasFirstObjectBit(version: IetfVersion): boolean {
@@ -268,14 +268,11 @@ export class Frame {
 		this.timestamp = timestamp;
 	}
 
-	/**
-	 * Encode this frame using the group flags and negotiated IETF version.
-	 *
-	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
-	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
-	 */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
-		await w.u53(idDelta);
+	/** Encode this frame using the group flags and negotiated IETF version. */
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version): Promise<void> {
+		// A subgroup stream we open always starts at object 0 and never skips one, so every
+		// object's id is the prior one plus one, which is what a zero delta says.
+		await w.u53(0);
 
 		if (flags.hasExtensions) {
 			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
@@ -305,9 +302,11 @@ export class Frame {
 		version = r.version,
 	): Promise<Frame> {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
-		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
-		// a sequential group is a zero delta throughout, and any other value means the group
-		// either starts partway through or has a gap that would renumber the frames after it.
+		// plus the delta plus one. A group starts at object 0 and never skips one, so a zero
+		// delta throughout is the only shape there is, and this is what enforces it: the
+		// header's FIRST_OBJECT bit is only a claim, and the drafts before it have no such
+		// bit at all. Anything else either starts partway through, leaving a head nothing can
+		// decode without, or opens a gap that would renumber every frame after it.
 		const delta = await r.u53();
 		if (delta !== 0) {
 			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);

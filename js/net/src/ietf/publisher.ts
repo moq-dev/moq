@@ -233,9 +233,9 @@ export class Publisher {
 			const timescale = (await track.info()).timescale;
 
 			// The filter and any fill are relative to the live edge, so snapshot it once: the
-			// fill ends exactly where a Next Object subscription begins, which is what lets
-			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
-			// group with no gap and no overlap.
+			// draft's current-group join (Next Object plus a StartGroup=1 fill) has the fill
+			// carry that group, on a fetch stream that can number a group's interior, while
+			// the subscription starts at the next group. The two meet with no overlap.
 			const edge = liveEdge(track);
 			const range = subscribeRange(msg, edge, version);
 
@@ -256,7 +256,7 @@ export class Publisher {
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
-				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
+				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge, range) : undefined;
 			cache = fill && fill.kind !== "empty" ? track.fork({ priority }) : undefined;
 
 			// Send SUBSCRIBE_OK
@@ -419,18 +419,15 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: true,
 					hasPriority: true,
-					// Only honest when the stream really starts at the group's first object;
-					// a trimmed head starts partway through.
-					firstObject: slice.skip === 0,
+					// Every group we open starts at its first object: a filter that names one
+					// partway in is rounded up to the next group instead of trimming a head.
+					firstObject: true,
 				},
 			});
 
 			await header.encode(stream, this.#session.version);
 
 			try {
-				// The first written object goes on the wire as its absolute id, so a trimmed
-				// head shows the true numbering rather than a silently renumbered group.
-				let first = true;
 				let next = 0;
 
 				for (;;) {
@@ -442,12 +439,9 @@ export class Publisher {
 					if (!frame) break;
 					next = frame.sequence + 1;
 					if (slice.until !== undefined && frame.sequence >= slice.until) break;
-					if (frame.sequence < slice.skip) continue;
 
 					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
-					const delta = first ? frame.sequence : 0;
-					first = false;
-					await obj.encode(stream, header.flags, timescale, this.#session.version, delta);
+					await obj.encode(stream, header.flags, timescale, this.#session.version);
 				}
 
 				stream.close();
@@ -1015,9 +1009,6 @@ interface ServeRange {
 
 /** The slice of one group a subscription's {@link ServeRange} selects. */
 interface GroupSlice {
-	/** Objects dropped from the front; also the first written object's absolute id. */
-	skip: number;
-
 	/** One past the last object to write, when the filter ends inside this group. */
 	until?: number;
 }
@@ -1098,7 +1089,25 @@ function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): S
 		return {};
 	}
 
-	return filterRange(msg.filter, edge);
+	const range = filterRange(msg.filter, edge);
+	return range.start === undefined ? range : { ...range, start: startOfGroup(range.start) };
+}
+
+/**
+ * Round a filter's start up to a group boundary.
+ *
+ * A subgroup stream numbers its objects from the group's first, so serving a group from
+ * partway through hands the subscriber a hole it cannot decode around: a group is the unit
+ * an application resyncs on, and moq-lite cannot even represent a partial one. Dropping the
+ * group is what the protocol does express, so a start inside one begins at the next group.
+ *
+ * A subscriber that wants the current group asks for it by group: draft-20's relative form
+ * is `{Largest Object.Group + 1 - StartGroup, 0}`, so `StartGroup=1` names that group's start
+ * without knowing Largest Object. Only Next Object and an absolute filter naming an object of
+ * its own land inside a group, and both are answered from the next one.
+ */
+function startOfGroup(start: Location): Location {
+	return start.object === 0n ? start : { group: start.group + 1n, object: 0n };
 }
 
 /** The Locations a single Location Filter selects, resolved against the live edge. */
@@ -1132,22 +1141,23 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 }
 
 /**
- * Trim a group to the filter's object bounds, so nothing outside the requested range is
- * sent. Interior groups are served whole.
+ * Trim a group to the filter's end, so nothing past the requested range is sent. Interior
+ * groups are served whole, and so is the group the range starts in: {@link startOfGroup}
+ * has already moved a start that landed inside one.
  */
 function groupSlice(range: ServeRange, sequence: number): GroupSlice {
 	const at = BigInt(sequence);
 	return {
-		skip: range.start?.group === at ? Number(range.start.object) : 0,
 		until: range.end?.group === at && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
 	};
 }
 
 /**
  * Resolve a fill request using the Fetch rules: relative to Largest Object and never
- * extending beyond it. An omitted Location Filter inherits the subscription's.
+ * extending beyond it, nor into what the subscription itself will serve. An omitted Location
+ * Filter inherits the subscription's.
  */
-function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Location): FillServe {
+function fillRange(fill: Filter.Fill, subscription: Filter.Filter, edge: LiveEdge, range: ServeRange): FillServe {
 	// A Range Filter narrows which objects pass, which we do not implement; serving the
 	// unfiltered range instead would deliver objects the peer excluded, so refuse it.
 	if (fill.rangeFilters) return { kind: "unsupported" };
@@ -1155,6 +1165,7 @@ function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Loc
 
 	// Nothing published (or no precise edge to cap at) means no fill is servable; an empty
 	// range opens no stream.
+	const largest = edge.largest;
 	if (!largest) return { kind: "empty" };
 
 	let start: Location;
@@ -1173,6 +1184,11 @@ function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Loc
 			start = { group: filter.startGroup, object: filter.startObject };
 			break;
 	}
+
+	// A fill covers what the subscription will not send, and the two are meant to meet with
+	// no gap and no overlap. The subscription starts at a group boundary and serves that
+	// group whole, so a fill at or above it has nothing left to carry.
+	if (range.start !== undefined && start.group >= range.start.group) return { kind: "empty" };
 
 	// Cap the requested end at Largest Object.
 	let end: EndLocation = { group: largest.group, object: largest.object };

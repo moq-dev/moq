@@ -3,12 +3,14 @@ import type * as announce from "../announced.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream } from "../stream.ts";
+import { Reader, Stream } from "../stream.ts";
+import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
@@ -561,4 +563,106 @@ test("a rejected subscribe is not unsubscribed", async () => {
 	]);
 
 	expect(next).toBeUndefined();
+});
+
+/** The alias the group streams below are published on. */
+const ALIAS = 9n;
+
+/** Group flags for a plain subgroup stream: no extensions, no subgroup id, no properties. */
+function groupFlags(firstObject: boolean): GroupFlags {
+	return {
+		hasExtensions: false,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+		firstObject,
+	};
+}
+
+/**
+ * The objects of a subgroup stream, written by hand.
+ *
+ * `deltas` are the raw Object ID Deltas, which is the whole point: a publisher trimming a
+ * group's head puts the first object's absolute id there, and nothing on our side will
+ * encode that.
+ */
+function encodeObjects(deltas: number[]): Uint8Array {
+	const bytes: number[] = [];
+	for (const delta of deltas) {
+		const payload = new TextEncoder().encode(`object ${delta}`);
+		// Every field here is under 64, so each is a one-byte varint.
+		bytes.push(delta, payload.byteLength, ...payload);
+	}
+	return new Uint8Array(bytes);
+}
+
+/**
+ * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
+ * and lets a group stream naming it be handled.
+ */
+async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const track = subscriber.consume(Path.from("room")).subscribe("video");
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
+
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+
+	return { subscriber, track };
+}
+
+/**
+ * A group is the unit an application resyncs on, so one served from partway through is
+ * unusable: the objects on the stream do not decode without the head the filter excluded,
+ * and moq-lite cannot represent the hole at all. Delivering it would pass the group's sixth
+ * frame off as the keyframe it opens with, so the group is dropped and the track resumes at
+ * the next one. Our own publisher never opens such a stream; a draft-20 peer may.
+ */
+test("a group served from partway through is dropped", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	// FIRST_OBJECT clear, and the first object's delta is its absolute id.
+	const flags = groupFlags(false);
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
+
+	// The next group is served whole, and it is the one the track delivers.
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 0]), VERSION),
+	);
+
+	const group = await track.nextGroup();
+	expect(group?.sequence).toBe(4);
+
+	track.close();
+});
+
+/**
+ * FIRST_OBJECT is the publisher's claim, and the object ids are what actually happened. A
+ * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
+ * is aborted rather than delivered with a hole the header said was not there.
+ */
+test("a group that claims its first object must start at zero", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(true);
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
+
+	const group = await track.nextGroup();
+	expect(group).toBeDefined();
+	if (!group) return;
+	await expect(group.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+
+	track.close();
 });

@@ -1533,6 +1533,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
+		// FIRST_OBJECT clear says this stream starts partway through the group, which the
+		// draft lets a publisher do to answer a filter. Nothing above here can use it: the
+		// objects that would arrive are not decodable without the missing head, and a group
+		// is the unit an application resyncs on. Drop it and pick up at the next group, the
+		// same degradation as a publisher that no longer holds the head.
+		//
+		// This only saves reading a stream we would throw away. The bit is the publisher's
+		// claim, so what is enforced is the object ids themselves: [`next_object_id`] holds
+		// every object to starting at 0 and incrementing by 1, whatever the header said and
+		// on the drafts that have no such bit to read.
+		if !group.flags.first_object {
+			tracing::debug!(
+				track_alias = %group.track_alias,
+				group = %group.group_id,
+				"dropping a group with no head"
+			);
+			return Err(Error::Unsupported);
+		}
+
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();

@@ -567,9 +567,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// The filter and any fill are relative to the live edge, so snapshot it once:
-		// the fill ends exactly where a Next Object subscription begins, which is what
-		// lets the draft's current-group join (Next Object plus a StartGroup=1 fill)
-		// cover the group with no gap and no overlap.
+		// the draft's current-group join (Next Object plus a StartGroup=1 fill) has the
+		// fill carry that group, on a fetch stream that can number a group's interior,
+		// while the subscription starts at the next group. The two meet with no overlap.
 		let edge = live_edge(&cache);
 		let range = subscribe_range(&msg, edge, self.version);
 		let _ = track.update(Subscription {
@@ -584,7 +584,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let fill = msg
 			.fill
 			.filter(|_| Filter::is_draft20(self.version))
-			.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache));
+			.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache))
+			// A fill covers what the subscription will not send, and the two are meant to
+			// meet with no gap and no overlap. The subscription starts at a group boundary
+			// and serves that group whole, so a fill at or above it has nothing to carry.
+			.map(|(serve, cache)| match (serve, range.start) {
+				(FillServe::Group { sequence, .. }, Some(start)) if sequence >= start.group => {
+					(FillServe::Empty, cache)
+				}
+				(serve, _) => (serve, cache),
+			});
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -781,13 +790,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let sequence = group.sequence;
 			tracing::debug!(subscribe = %request_id, track = %track.name(), sequence, "serving group");
 
-			// Trim the boundary groups to the filter's object bounds, so nothing outside
-			// the requested range is sent. Interior groups are served whole.
+			// Trim the last group to the filter's end, so nothing past the requested
+			// range is sent. Interior groups are served whole, and so is the group the
+			// range starts in: `start_of_group` has already moved a start that landed
+			// inside one.
 			let slice = GroupSlice {
-				skip: match range.start {
-					Some(start) if start.group == sequence => start.object,
-					_ => 0,
-				},
 				until: match range.end {
 					Some(end) if end.group == sequence => end.object.map(|object| object.saturating_add(1)),
 					_ => None,
@@ -804,9 +811,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// track's, declared once in SUBSCRIBE_OK.
 				flags: ietf::GroupFlags {
 					has_extensions: true,
-					// Only honest when the stream really starts at the group's first
-					// object; a trimmed head starts partway through.
-					first_object: slice.skip == 0,
+					// Every group we open starts at its first object: a filter that names
+					// one partway in is rounded up to the next group instead of trimming
+					// a head.
+					first_object: true,
 					..Default::default()
 				},
 			};
@@ -844,11 +852,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 
-		// The next object id to read. Ids below `slice.skip` are consumed without being
-		// written, and the first written id goes on the wire as its absolute delta, so
-		// the peer sees the true numbering rather than a silently renumbered group.
+		// The next object id to write, which the filter's end is compared against.
 		let mut index: u64 = 0;
-		let mut first_written = true;
 
 		// A subscriber catching up on a cached group takes the whole backlog under one
 		// lock; at the live edge the batch comes up empty and the open tail streams
@@ -884,17 +889,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							break 'serve;
 						}
 						let frame = buf.filled()[i].clone();
-						if index >= slice.skip {
-							let delta = if std::mem::take(&mut first_written) { index } else { 0 };
-							Self::write_object_header(&mut stream, &msg, delta, frame.timestamp, timescale, version)
-								.await?;
-							stream.encode(&(frame.payload.len() as u64)).await?;
-							if frame.payload.is_empty() {
-								// Have to write the object status too.
-								stream.encode(&0u8).await?;
-							} else {
-								stream.write_chunk(frame.payload).await?;
-							}
+						Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
+						stream.encode(&(frame.payload.len() as u64)).await?;
+						if frame.payload.is_empty() {
+							// Have to write the object status too.
+							stream.encode(&0u8).await?;
+						} else {
+							stream.write_chunk(frame.payload).await?;
 						}
 						index += 1;
 						// The fill stamped the group once. A flow-controlled peer can
@@ -904,29 +905,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				}
 				Step::Partial(mut frame) => {
-					if index < slice.skip {
-						// A skipped frame still has to be drained to advance the cursor.
-						loop {
-							let chunk = {
-								let mut closed = std::pin::pin!(stream.closed());
-								kio::wait(|waiter| {
-									if waiter.poll_future(closed.as_mut()).is_ready() {
-										return Poll::Ready(Err(Error::Cancel));
-									}
-									frame.poll_read_chunk(waiter)
-								})
-								.await
-							};
-							if chunk?.is_none() {
-								break;
-							}
-						}
-						index += 1;
-						continue;
-					}
-
-					let delta = if std::mem::take(&mut first_written) { index } else { 0 };
-					Self::write_object_header(&mut stream, &msg, delta, frame.timestamp, timescale, version).await?;
+					Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
 					index += 1;
 
 					// Write the size of the frame.
@@ -980,12 +959,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn write_object_header(
 		stream: &mut Writer<S::SendStream, Version>,
 		msg: &ietf::GroupHeader,
-		delta: u64,
 		timestamp: Timestamp,
 		timescale: Timescale,
 		version: Version,
 	) -> Result<(), Error> {
-		stream.encode(&delta).await?;
+		// A subgroup stream we open always starts at object 0 and never skips one, so
+		// every object's id is the prior one plus one, which is what a zero delta says.
+		stream.encode(&0u64).await?;
 
 		// Per-object extension headers carry the frame's presentation timestamp.
 		if msg.flags.has_extensions {
@@ -2329,6 +2309,46 @@ mod serve_tests {
 		}
 	}
 
+	/// A fill covers what the subscription will not send. Relative(1) names the current
+	/// group's start on both, so the subscription carries that group whole and the fill is
+	/// left with nothing: opening its stream would deliver every object a second time.
+	#[tokio::test]
+	async fn a_fill_the_subscription_covers_opens_no_stream() {
+		let mut h = serve(Version::Draft20);
+
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in [b"head-0", b"head-1", b"head-2"] {
+			group.write_frame(timestamp(), payload.as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+
+		run_live(
+			&mut h,
+			subscribe(
+				Filter::Relative(1),
+				Some(ietf::Fill {
+					filter: Some(Filter::Relative(1)),
+					range_filters: false,
+				}),
+			),
+		)
+		.await;
+
+		assert_eq!(
+			occurrences(&h.log, FETCH_STREAM),
+			0,
+			"the subscription already covers the range"
+		);
+		for payload in [b"head-0", b"head-1", b"head-2"] {
+			assert_eq!(
+				occurrences(&h.log, payload),
+				1,
+				"each object exactly once, on the subscription"
+			);
+		}
+		assert!(h.log.resets().is_empty(), "nothing failed");
+	}
+
 	/// A Next Object subscription never receives the already-published head of the
 	/// current group: everything below the snapshot is outside the requested range.
 	#[tokio::test]
@@ -2402,9 +2422,9 @@ mod serve_tests {
 		assert!(h.log.resets().is_empty());
 	}
 
-	/// The filter's object bounds trim what `run_group` writes: the skipped head is not
-	/// sent, the first written object's delta is its absolute id, and a capped tail stops
-	/// early. Extensions are off so the wire is just deltas, sizes, and payloads.
+	/// The filter's end trims what `run_group` writes: a capped tail stops early, and every
+	/// object's delta is zero because the stream always starts at the group's first object.
+	/// Extensions are off so the wire is just deltas, sizes, and payloads.
 	#[tokio::test]
 	async fn run_group_honors_the_slice() {
 		fn header() -> ietf::GroupHeader {
@@ -2414,7 +2434,7 @@ mod serve_tests {
 				sub_group_id: 0,
 				publisher_priority: 0,
 				flags: ietf::GroupFlags {
-					first_object: false,
+					first_object: true,
 					..Default::default()
 				},
 			}
@@ -2446,19 +2466,15 @@ mod serve_tests {
 			log.writes.lock().unwrap().clone()
 		}
 
-		// Skip 2: the head is dropped and the first delta is the absolute id 2.
-		let trimmed = serve_slice(GroupSlice { skip: 2, until: None }).await;
+		// Unbounded: the whole group, every delta zero.
+		let whole = serve_slice(GroupSlice { until: None }).await;
 		assert!(
-			trimmed.ends_with(&[0x02, 0x02, b'c', b'c', 0x00, 0x02, b'd', b'd']),
-			"expected delta 2 then cc, delta 0 then dd, got {trimmed:x?}"
+			whole.ends_with(&[0x00, 0x02, b'c', b'c', 0x00, 0x02, b'd', b'd']),
+			"expected cc then dd, each at delta 0, got {whole:x?}"
 		);
 
 		// Until 2: only the head is written, stopping before the cap.
-		let capped = serve_slice(GroupSlice {
-			skip: 0,
-			until: Some(2),
-		})
-		.await;
+		let capped = serve_slice(GroupSlice { until: Some(2) }).await;
 		assert!(
 			capped.ends_with(&[0x00, 0x02, b'a', b'a', 0x00, 0x02, b'b', b'b']),
 			"expected aa then bb only, got {capped:x?}"
@@ -3706,8 +3722,6 @@ struct ServeRange {
 /// The slice of one group a subscription's [`ServeRange`] selects.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupSlice {
-	/// Frames dropped from the front; also the first written object's absolute id.
-	skip: u64,
 	/// One past the last object to write, when the filter ends inside this group.
 	until: Option<u64>,
 }
@@ -3726,7 +3740,35 @@ fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge, version: Version) 
 		return ServeRange::default();
 	}
 
-	filter_range(msg.filter, edge)
+	let range = filter_range(msg.filter, edge);
+	match range.start {
+		Some(start) => ServeRange {
+			start: Some(start_of_group(start)),
+			..range
+		},
+		None => range,
+	}
+}
+
+/// Round a filter's start up to a group boundary.
+///
+/// A subgroup stream numbers its objects from the group's first, so serving a group from
+/// partway through hands the subscriber a hole it cannot decode around: a group is the unit
+/// an application resyncs on, and moq-lite cannot even represent a partial one. Dropping the
+/// group is what the protocol does express, so a start inside one begins at the next group.
+///
+/// A subscriber that wants the current group asks for it by group: draft-20's relative form
+/// is `{Largest Object.Group + 1 - StartGroup, 0}`, so `StartGroup=1` names that group's
+/// start without knowing Largest Object. Only Next Object and an absolute filter naming an
+/// object of its own land inside a group, and both are answered from the next one.
+fn start_of_group(start: Location) -> Location {
+	match start.object {
+		0 => start,
+		_ => Location {
+			group: start.group.saturating_add(1),
+			object: 0,
+		},
+	}
 }
 
 /// The Locations a single Location Filter selects, resolved against the live edge.
@@ -3919,15 +3961,16 @@ mod range_tests {
 		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft20), ServeRange::default());
 	}
 
-	/// Next Object starts one past the Largest Object, mid-group. Everything below it,
-	/// including the current group's head, is outside the requested range.
+	/// Next Object starts one past the Largest Object, which is mid-group: everything below
+	/// it, the current group's head included, is outside the requested range. What is left of
+	/// that group cannot start at object 0, so the range opens at the next group instead.
 	#[test]
-	fn next_object_starts_past_the_largest_object() {
+	fn next_object_starts_at_the_group_after_the_largest_object() {
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
 			subscribe_range(&msg, EDGE, Version::Draft20),
 			ServeRange {
-				start: Some(Location { group: 100, object: 5 }),
+				start: Some(Location { group: 101, object: 0 }),
 				end: None,
 			}
 		);
@@ -4063,10 +4106,12 @@ mod range_tests {
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
 	}
 
-	/// Both ends carry through, object bounds included, so the boundary groups can be
-	/// trimmed rather than widened.
+	/// The end carries through with its object bound, so the last group is trimmed to it: a
+	/// group cut short at the tail is still decodable from its front. A start naming an
+	/// object is the bound that cannot be honored, since what is left of that group would
+	/// have no head, so it opens at the next group.
 	#[test]
-	fn absolute_carries_both_ends() {
+	fn absolute_keeps_its_end_and_rounds_its_start_up() {
 		let msg = subscribe(Filter::Absolute {
 			start: Location { group: 4, object: 3 },
 			end: Some(EndLocation {
@@ -4077,11 +4122,27 @@ mod range_tests {
 		assert_eq!(
 			subscribe_range(&msg, EDGE, Version::Draft20),
 			ServeRange {
-				start: Some(Location { group: 4, object: 3 }),
+				start: Some(Location { group: 5, object: 0 }),
 				end: Some(EndLocation {
 					group: 9,
 					object: Some(6)
 				}),
+			}
+		);
+	}
+
+	/// An absolute start already on a group boundary is left alone.
+	#[test]
+	fn absolute_on_a_boundary_is_unchanged() {
+		let msg = subscribe(Filter::Absolute {
+			start: Location { group: 4, object: 0 },
+			end: None,
+		});
+		assert_eq!(
+			subscribe_range(&msg, EDGE, Version::Draft20),
+			ServeRange {
+				start: Some(Location { group: 4, object: 0 }),
+				end: None,
 			}
 		);
 	}
