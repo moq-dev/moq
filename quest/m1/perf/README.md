@@ -52,7 +52,6 @@ measured and scoped to the quiche backend we ship today.
 - [Session micro](/quest/m1/perf/session-micro.md) - per-datagram route lookups and per-chunk stats bumps get amortized
 - [Send order width](/quest/m1/perf/send-order-width.md) - a wider transport send order lets a group rank itself instead of taking the queue lock
 - [Priority set_track wakes](/quest/m1/perf/priority-set-track-wakes.md) - a track priority change stops waking groups that end up where they started
-- [tokio local](/quest/m1/perf/tokio-local.md) - moq-tokio's pinned workers accept !Send futures like the io_uring workers do
 - [#3203](/quest/m1/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
 - [#3205](/quest/m1/perf/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
 
