@@ -1102,6 +1102,141 @@ mod tests {
 		}
 	}
 
+	/// A real decoded picture drawn without ever reaching system memory.
+	///
+	/// The chain the whole thing is for, end to end: openh264 encodes a
+	/// gradient, VA-API decodes it, the decode surface is exported rather than
+	/// downloaded, and the renderer imports its two planes. The same stream is
+	/// decoded a second time the ordinary way and drawn through the CPU upload,
+	/// and the two pictures have to agree.
+	///
+	/// A gradient rather than the block palette, because this one is checking
+	/// the plumbing rather than the color math: it varies in both axes, so a
+	/// plane at a wrong offset or a pitch taken as the width shows up as a
+	/// mismatch. What the samples mean is settled by the sibling tests, which
+	/// know exactly what went into the buffer; here the decoder decides, and a
+	/// lossy encoder sits in front of it.
+	///
+	/// Ignored: needs a Vulkan GPU and a VA-API device. Run with
+	/// `cargo test -p moq-video --features render,vaapi decoded_frames -- --ignored --nocapture`.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn decoded_frames_reach_the_gpu_without_a_download() {
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+		let Ok(mut exporting) = moq_vaapi::decode::Decoder::new(moq_vaapi::decode::Config::new()) else {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		};
+		let mut downloading =
+			moq_vaapi::decode::Decoder::new(moq_vaapi::decode::Config::new()).expect("a second decoder");
+
+		// A gradient in both axes, so the chroma planes carry structure and a
+		// plane split or stride mistake corrupts the picture rather than
+		// tinting it.
+		let size = Size::new(320, 240);
+		let (width, height) = (size.width, size.height);
+		let mut rgba = vec![0u8; (width * height * 4) as usize];
+		for y in 0..height {
+			for x in 0..width {
+				let index = ((y * width + x) * 4) as usize;
+				rgba[index] = (x * 255 / width) as u8;
+				rgba[index + 1] = (y * 255 / height) as u8;
+				rgba[index + 2] = ((x + y) * 255 / (width + height)) as u8;
+				rgba[index + 3] = 255;
+			}
+		}
+
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
+			kind: crate::encode::Kind::Software,
+			..crate::encode::Config::new(width, height, 30)
+		})
+		.expect("a software H.264 encoder");
+
+		let mut exported = Vec::new();
+		let mut downloaded = Vec::new();
+		for index in 0..8u64 {
+			if index == 0 {
+				encoder.keyframe();
+			}
+			let surface = Surface::rgba(&rgba, size).expect("a valid RGBA frame");
+			let frame = Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap());
+			for unit in encoder.encode(&frame).expect("encode a picture") {
+				let payload = unit.payload.as_ref();
+				exported.extend(exporting.decode_exported(payload, index).expect("decode to the GPU"));
+				downloaded.extend(downloading.decode(payload, index).expect("decode to the CPU"));
+			}
+		}
+		assert!(!exported.is_empty(), "the decoder produced no pictures");
+		assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
+
+		eprintln!(
+			"decoded {} pictures, exported at modifier {:#x}",
+			exported.len(),
+			exported[0].descriptor.objects[0].drm_format_modifier
+		);
+
+		let config = Config {
+			usage: wgpu::TextureUsages::COPY_SRC,
+			..Config::new()
+		};
+		let mut importing = Renderer::new(&device, &queue, config.clone()).expect("a renderer");
+		let mut uploading = Renderer::new(&device, &queue, config).expect("a renderer");
+
+		for (index, (gpu, cpu)) in exported.iter().zip(&downloaded).enumerate() {
+			let buffer = crate::render::dmabuf::fixture::adopt(&gpu.descriptor, crate::DrmFormat::NV12, size);
+			if index == 0 {
+				eprintln!("  planes {:?}", buffer.planes());
+			}
+			let frame = Frame::new(Surface::DmaBuf(buffer), Timestamp::ZERO);
+
+			// Which branch ran, per picture: the decoder's own surfaces import
+			// as NV12, and only the per-plane DMA-BUF path produces that.
+			let source = importing
+				.source
+				.import(&device, &frame.surface)
+				.expect("import the decoded surface")
+				.expect("a DMA-BUF import path");
+			assert_eq!(source.layout, Layout::Nv12, "picture {index} did not import as NV12");
+			drop(source);
+
+			let texture = importing.render(&frame).expect("draw the imported picture");
+			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
+			assert_eq!(
+				importing.source.dmabuf.retiled(),
+				0,
+				"picture {index} reached the GPU only by way of a re-tile"
+			);
+			let zero_copy = readback(&device, &queue, &texture).await;
+
+			let i420 = crate::frame::I420::from_nv12(&cpu.data, width, height).expect("deinterleave NV12");
+			let texture = uploading
+				.render(&Frame::new(Surface::I420(i420), Timestamp::ZERO))
+				.expect("draw the downloaded picture");
+			let cpu = readback(&device, &queue, &texture).await;
+
+			let mut worst = 0u8;
+			for (pixel, (&imported, &reference)) in zero_copy.iter().zip(&cpu).enumerate() {
+				let drift = (0..4).map(|c| imported[c].abs_diff(reference[c])).max().unwrap_or(0);
+				worst = worst.max(drift);
+				let (x, y) = (pixel % width as usize, pixel / width as usize);
+				assert!(
+					drift <= 2,
+					"picture {index} at ({x}, {y}): imported {imported:?}, downloaded {reference:?}"
+				);
+			}
+			if index == 0 {
+				eprintln!(
+					"  imported vs downloaded: worst drift {worst} of 255 over {} pixels",
+					cpu.len()
+				);
+			}
+		}
+	}
+
 	/// A pool-backed NV12 surface, shaped like a hardware decode's output.
 	#[cfg(target_os = "macos")]
 	fn pooled(size: Size, rgba: [u8; 4]) -> crate::Surface {

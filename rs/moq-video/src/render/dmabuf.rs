@@ -368,28 +368,37 @@ pub(super) mod fixture {
 			.export_prime()
 			.map_err(|e| eprintln!("this driver will not export a {fourcc:#x} surface: {e}"))
 			.ok()?;
+		Some(adopt(&exported, format, size))
+	}
+
+	/// Wrap a VA-API surface export as the [`DmaBuf`] the renderer consumes.
+	///
+	/// `size` is the visible frame rather than the exported extent, which is the
+	/// driver's padded allocation. The plane pitches and offsets are the
+	/// driver's either way, which is the whole point: they are what addresses a
+	/// row, and neither follows from the visible size.
+	pub(in crate::render) fn adopt(
+		exported: &moq_vaapi::DrmPrimeSurfaceDescriptor,
+		format: DrmFormat,
+		size: Size,
+	) -> DmaBuf {
 		let layer = exported.layers.first().expect("an exported layer");
 		let planes = (0..layer.num_planes as usize)
 			.map(|index| DmaBufPlane::new(layer.offset[index], layer.pitch[index]))
 			.collect();
 		let object = exported.objects.first().expect("an exported object");
-		let modifier = object.drm_format_modifier;
 		let fd = object.fd.try_clone().expect("duplicate the exported descriptor");
 
-		// The exported extent is the driver's padded allocation; the frame is
-		// the size that was asked for, and imports at that size.
-		Some(
-			DmaBuf::new(
-				format,
-				modifier,
-				size.width,
-				size.height,
-				planes,
-				None,
-				Arc::new(Exported(fd)),
-			)
-			.expect("a well-formed DMA-BUF"),
+		DmaBuf::new(
+			format,
+			object.drm_format_modifier,
+			size.width,
+			size.height,
+			planes,
+			None,
+			Arc::new(Exported(fd)),
 		)
+		.expect("a well-formed DMA-BUF")
 	}
 
 	/// Copy tightly packed planes into a surface, honoring the image's own plane
