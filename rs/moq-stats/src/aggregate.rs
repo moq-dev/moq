@@ -164,11 +164,11 @@ impl Mergeable for Presence {
 
 /// One node's subscription to the merged track.
 enum Reader<V: Mergeable> {
-	/// Resolving the announced path into a broadcast. `queued` flips once the
-	/// resolution has returned `Pending`: a queued request that then fails
-	/// `Unroutable` was killed by its serving route retracting (the table has
-	/// already changed), while an instant `Unroutable` means nothing serves the
-	/// path at all.
+	/// Resolving the announced path into a broadcast. `queued` records whether
+	/// the request was handed to a serving route (fixed at request time): a
+	/// queued request that fails `Unroutable` was killed by its serving route
+	/// retracting (the table has already changed), while an unqueued
+	/// `Unroutable` means nothing serves the path at all.
 	Resolving {
 		pending: Pending<origin::Requesting>,
 		queued: bool,
@@ -345,10 +345,7 @@ fn advance<V: Mergeable>(
 					node.reader = Reader::Ended;
 					return changed;
 				}
-				Poll::Pending => {
-					*queued = true;
-					return changed;
-				}
+				Poll::Pending => return changed,
 			},
 			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(subscriber)) => {
@@ -399,10 +396,9 @@ fn advance<V: Mergeable>(
 
 /// Start resolving `path` (relative to the announce cursor) into a broadcast.
 fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned) -> Reader<V> {
-	Reader::Resolving {
-		pending: origin.request_broadcast(path),
-		queued: false,
-	}
+	let pending = origin.request_broadcast(path);
+	let queued = pending.is_queued();
+	Reader::Resolving { pending, queued }
 }
 
 #[cfg(test)]

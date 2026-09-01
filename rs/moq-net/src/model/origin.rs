@@ -2788,6 +2788,18 @@ impl Requesting {
 		Self::new(RequestState::Pending(consumer))
 	}
 
+	/// Whether the request was handed to a serving route or fallback handler,
+	/// rather than decided on the spot.
+	///
+	/// Fixed at request time, so it distinguishes the two ways
+	/// [`Error::Unroutable`] arises: a queued request that fails was killed by
+	/// its serving route retracting, and the table may already hold a
+	/// replacement worth retrying against ([`Consumer::routed_broadcast`] does),
+	/// while an unqueued failure means nothing could serve the path at all.
+	pub fn is_queued(&self) -> bool {
+		matches!(self.inner, RequestState::Pending(_))
+	}
+
 	fn new(inner: RequestState) -> Self {
 		Self {
 			inner,
@@ -3105,29 +3117,26 @@ impl Consumer {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
-			let mut request = std::pin::pin!(self.request_broadcast(&path));
-			// An instant verdict and a queued request fail differently. An instant
-			// `Unroutable` means nothing serves the path right now, and only a
-			// coverage change fixes that: park on the announce stream (it replays
-			// the current coverage first, so at most one extra attempt runs before
-			// this genuinely blocks). A request that queued and then failed
-			// `Unroutable` was killed by its serving route retracting, and an
-			// identical standby swaps in without any announce update, so retry
-			// through the already-updated table immediately. Each such retry
-			// consumed a real retraction, so this cannot spin.
-			match futures::future::poll_immediate(&mut request).await {
-				Some(Ok(broadcast)) => return Ok(broadcast),
-				Some(Err(Error::Unroutable)) => {
+			let request = self.request_broadcast(&path);
+			// A queued request and an instant verdict fail differently. A request
+			// that queued and then failed `Unroutable` was killed by its serving
+			// route retracting, and an identical standby swaps in without any
+			// announce update, so retry through the already-updated table
+			// immediately; each such retry consumed a real retraction, so this
+			// cannot spin. An instant `Unroutable` means nothing serves the path
+			// right now, and only a coverage change fixes that: park on the
+			// announce stream (it replays the current coverage first, so at most
+			// one extra attempt runs before this genuinely blocks).
+			let queued = request.is_queued();
+			match request.await {
+				Ok(broadcast) => return Ok(broadcast),
+				Err(Error::Unroutable) if queued => {}
+				Err(Error::Unroutable) => {
 					if announced.next().await.is_none() {
 						return Err(Error::Closed);
 					}
 				}
-				Some(Err(err)) => return Err(err),
-				None => match request.await {
-					Ok(broadcast) => return Ok(broadcast),
-					Err(Error::Unroutable) => {}
-					Err(err) => return Err(err),
-				},
+				Err(err) => return Err(err),
 			}
 		}
 	}
