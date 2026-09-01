@@ -1,11 +1,5 @@
 name: Rust cache
-description: Install mbx and restore the Rust build cache cache.yml warms on the default branch.
-
-# Pinned to a `main` commit rather than the `v1` tag on purpose. `v1` still
-# points at v1.0.1, which predates both the toolchain-derived cache key and the
-# dispatch seeding this workflow depends on, so the tag would silently degrade
-# to an untoolchained key that never saves from `workflow_dispatch`. Revisit
-# once upstream cuts a release that includes them.
+description: Restore the Cargo build cache cache.yml warms on the default branch.
 
 inputs:
   save-on-dispatch:
@@ -15,23 +9,11 @@ inputs:
 runs:
   using: composite
   steps:
-    # The toolchain keys the cache, so reading rust-toolchain.toml keeps it tied
-    # to the one thing that decides which rustc actually runs. Hardcoding the
-    # version per workflow would let a bump drift into restoring artifacts built
-    # by a different compiler.
-    - name: Read toolchain
-      id: toolchain
-      shell: bash
-      run: |
-        channel=$(grep -m1 '^channel' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
-        if [ -z "$channel" ]; then
-          echo "could not read channel from rust-toolchain.toml" >&2
-          exit 1
-        fi
-        echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-    - uses: jdx/mr-boxington-action@9783f75f9e232bb24f23694c208d9261d8a3311e # main
+    # One shared key lets differently named jobs restore the cache warmed by
+    # cache.yml. Pull requests stay read-only, while a trusted manual run can
+    # explicitly seed a cold cache.
+    - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       with:
-        version: 1.2.0
-        toolchain: ${{ steps.toolchain.outputs.channel }}
-        save-on-workflow-dispatch: ${{ inputs.save-on-dispatch }}
+        shared-key: rust
+        cache-on-failure: true
+        save-if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.save-on-dispatch == 'true') }}

@@ -9,8 +9,9 @@
 
 set working-directory := '..'
 
-# Plain `cargo` unless set. CI sets it to `mbx`, and so can a developer who
-# wants mbx's shared build store instead of a target/ per worktree.
+# Plain `cargo` unless set. A developer can select a compatible wrapper such as
+# mbx to share build artifacts across worktrees instead of using one target/
+# per worktree.
 #
 # Every recipe that compiles reads it, with three exceptions. `package` hands
 # nfpm a literal target/release path, and a managed target/ is a symlink.

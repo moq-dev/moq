@@ -15,7 +15,7 @@
 
 set quiet
 
-# Plain `cargo` unless set; CI sets it to `mbx`. See rs/justfile for the rule.
+# Plain `cargo` unless set. See rs/justfile for the local wrapper option.
 _rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
 cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
 

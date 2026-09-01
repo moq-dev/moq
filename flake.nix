@@ -435,8 +435,9 @@
         formatter = pkgs.nixfmt-tree;
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
-        # test` (see rs/justfile). CI selects mbx with MOQ_CARGO; local commands
-        # default to plain cargo. Neither path goes through crane.
+        # test` (see rs/justfile). CI and local commands default to plain Cargo;
+        # local development can select a compatible wrapper with RUST_CARGO.
+        # Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release

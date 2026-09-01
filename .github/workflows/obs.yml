@@ -84,18 +84,13 @@ jobs:
             extra-substituters = https://kixelated.cachix.org
             extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request, and Actions would
-      # scope such an entry to the PR's own branch anyway, where no later PR
-      # could read it while it ate the repository's 10 GB budget. It holds
-      # dev-profile artifacts, which is why `just obs ci` builds libmoq in debug
-      # rather than the preset's release.
+      # Restore only. cache.yml is the single writer, on `main`; see the comment
+      # there for why. It holds dev-profile artifacts, which is why `just obs ci`
+      # builds libmoq in debug rather than the preset's release.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs on Linux. Warnings are errors here, via
       # the platform's CI preset.
       - name: Build
-        run: nix develop --command env -u RUSTC_WRAPPER just obs ci
-        env:
-          RUST_CARGO: mbx
+        run: nix develop --command just obs ci
