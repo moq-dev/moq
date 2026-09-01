@@ -45,8 +45,7 @@ dashboards, fleet rollout) stay downstream.
 - [#2835](/quest/m2/2835-moq-wasm-bind-track-dynamic-so-a-browser-publisher-can.md) - moq-wasm: bind track::Dynamic so a browser publisher can serve cache-miss fetches
 - [#3193](/quest/m2/3193-expose-a-cancellable-route-watch-api-in-python.md) - Expose a cancellable route watch API in Python
 - [#3189](/quest/m2/3189-add-uniffi-defaults-to-caller-constructed-configuration.md) - Add UniFFI defaults to caller-constructed configuration records
-- [Plan: CLI arguments](/quest/m2/plan-cli-arguments.md) - decide the client/server flag scheme via /plan-quest
-- [#2696](/quest/m2/2696-re-evaluate-the-client-server-split-in-cli-arguments.md) - Re-evaluate the client/server split in CLI arguments
+- [Cluster flags](/quest/m2/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
 - [#3058](/quest/m2/3058-moq-relay-a-revalidation-re-check-cannot-update-a.md) - moq-relay: a revalidation re-check cannot update a session's tier, and changes its alias only by closing it
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - Automatic LetsEncrypt support
