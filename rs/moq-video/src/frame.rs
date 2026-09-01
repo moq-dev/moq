@@ -796,8 +796,11 @@ impl I420 {
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
 	/// `width/2 * height/2` pairs) into planar I420. A chroma deinterleave, no
 	/// color-space conversion. Used by the Windows Media Foundation and Linux
-	/// PipeWire capture paths.
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	/// PipeWire capture paths, and by the VAAPI decoder.
+	#[cfg(any(
+		target_os = "windows",
+		all(target_os = "linux", any(feature = "pipewire", feature = "vaapi"))
+	))]
 	pub(crate) fn from_nv12(nv12: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let (w, h) = (width as usize, height as usize);
 		let luma = w * h;
@@ -937,7 +940,10 @@ pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 
 /// Split a packed NV12 chroma plane into separate U and V planes, the inverse of
 /// [`interleave_uv`].
-#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+#[cfg(any(
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "pipewire", feature = "vaapi"))
+))]
 pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 	for (pair, (u, v)) in uv.chunks_exact(2).zip(u.iter_mut().zip(v)) {
 		*u = pair[0];
