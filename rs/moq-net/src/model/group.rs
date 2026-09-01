@@ -468,7 +468,7 @@ impl Producer {
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
 		state.cache += size;
-		state.charge.add(size);
+		let now = state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
@@ -478,7 +478,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle();
+		self.cache.settle_at(now);
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -521,6 +521,7 @@ impl Producer {
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
 		let mut bytes = 0;
+		let mut now = None;
 		for mut frame in frames.drain() {
 			frame.timestamp = frame
 				.timestamp
@@ -529,7 +530,7 @@ impl Producer {
 			let size = frame.payload.len() as u64;
 			bytes += size;
 			state.cache += size;
-			state.charge.add(size);
+			now = Some(state.charge.add(size));
 			state.stamp(frame.timestamp);
 			state.frames.push_back(frame);
 		}
@@ -538,7 +539,10 @@ impl Producer {
 		state.evict();
 		drop(state);
 
-		self.cache.settle();
+		match now {
+			Some(now) => self.cache.settle_at(now),
+			None => self.cache.settle(),
+		}
 		self.stats.frames(count as u64);
 		self.stats.bytes(bytes);
 		Ok(())
@@ -574,7 +578,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.cache += frame.size;
-		state.charge.add(frame.size);
+		let now = state.charge.add(frame.size);
 		state.partial = Some(Partial {
 			timestamp,
 			buf: buf.clone(),
@@ -588,7 +592,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle();
+		self.cache.settle_at(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.
@@ -628,7 +632,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.cache += frame.size;
-		state.charge.add(frame.size);
+		let now = state.charge.add(frame.size);
 		state.partial = Some(Partial {
 			timestamp,
 			buf: buf.clone(),
@@ -642,7 +646,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle();
+		self.cache.settle_at(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
@@ -664,12 +668,13 @@ impl Producer {
 		// `record_write` takes `&mut`, which marks the guard modified: kio only
 		// notifies on a mutably-accessed guard's release, and that notify is what
 		// delivers the chunk to parked readers.
-		if let Ok(mut state) = self.state.write() {
-			state.charge.record_write();
-		}
+		let now = self.state.write().ok().map(|mut state| state.charge.record_write());
 		// The payload was charged when the frame opened, but a long streamed frame
 		// still counts as track activity for the independent expiry time gate.
-		self.cache.settle();
+		match now {
+			Some(now) => self.cache.settle_at(now),
+			None => self.cache.settle(),
+		}
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
