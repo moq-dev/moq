@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, reason } from "../error.ts";
-import { OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
+import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -19,7 +19,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 			writable: new WritableStream<Uint8Array>(),
 		}),
 	} as unknown as WebTransport;
-	const subscriber = new Subscriber(quic, Version.DRAFT_03, OriginSchema.parse(1n), new Signal<ProbeStats>({}));
+	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), new Signal<ProbeStats>({}));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 	try {
@@ -65,7 +65,7 @@ function announceHarness(version: Version, origin = 1n) {
 		},
 	} as unknown as WebTransport;
 
-	const subscriber = new Subscriber(quic, version, OriginSchema.parse(origin));
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(origin));
 
 	const send = async (f: (w: Writer) => Promise<void>) => {
 		const written: Uint8Array[] = [];
@@ -123,10 +123,10 @@ function announceHarness(version: Version, origin = 1n) {
 	};
 }
 
-const PUBLISHER_A = OriginSchema.parse(7n);
-const PUBLISHER_B = OriginSchema.parse(8n);
-const PUBLISHER_C = OriginSchema.parse(9n);
-const PEER = OriginSchema.parse(2n);
+const PUBLISHER_A = HopSchema.parse(7n);
+const PUBLISHER_B = HopSchema.parse(8n);
+const PUBLISHER_C = HopSchema.parse(9n);
+const PEER = HopSchema.parse(2n);
 
 test("a restart from the same publisher is a route change, not a republish", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
@@ -174,7 +174,7 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
-	const active = (hops: ReturnType<typeof OriginSchema.parse>[]) => (w: Writer) =>
+	const active = (hops: ReturnType<typeof HopSchema.parse>[]) => (w: Writer) =>
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops }, Version.DRAFT_05);
 
 	await send(active([PUBLISHER_A]));
@@ -200,7 +200,7 @@ test("a restart from an unidentified publisher replaces rather than reroutes", a
 	const announced = subscriber.announced(Path.empty());
 	await settle();
 
-	await send((w) => new AnnounceOk(UNKNOWN_ORIGIN, 0).encode(w, Version.DRAFT_06));
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
 	await send((w) =>
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
 	);
@@ -266,7 +266,7 @@ async function runProbeScript(version: Version, probes: Probe[], initial: ProbeS
 	} as unknown as WebTransport;
 
 	const signal = new Signal<ProbeStats>(initial);
-	const subscriber = new Subscriber(quic, version, OriginSchema.parse(1n), signal);
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n), signal);
 	const running = subscriber.runProbe();
 
 	await Promise.resolve();
@@ -321,7 +321,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -362,7 +362,7 @@ test("a restart replaces an announce that was skipped as a reflected loop", asyn
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -392,7 +392,7 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_06,
 		),
 	);
@@ -457,7 +457,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_06,
 		),
 	);

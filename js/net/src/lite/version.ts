@@ -110,7 +110,7 @@ export function hasAnnounceId(version: Version): boolean {
 }
 
 /** Whether ANNOUNCE_REQUEST carries the Exclude Hop field: the subscriber's own
- * origin id, which the publisher uses to skip announces whose hop chain already
+ * Hop ID, which the publisher uses to skip announces whose hop chain already
  * passed through the subscriber. Present in lite-04 and lite-05 only.
  *
  * The receiver's own reflected-announce check drops those announces anyway (and

@@ -5,7 +5,7 @@
  * @module
  */
 
-import { type Origin, OriginSchema } from "../hop.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
@@ -17,8 +17,8 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 /** Setup Parameter id for the client's intended {@link Role} (client-only). */
 const PARAM_ROLE = 0x3n;
-/** Setup Parameter id for the endpoint's origin (hop) id. */
-const PARAM_ORIGIN = 0x5n;
+/** Setup Parameter id for the endpoint's Hop ID. */
+const PARAM_HOP = 0x5n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -169,8 +169,8 @@ export interface SetupProps {
 	path?: string;
 	/** See {@link Setup.role}. Defaults to {@link Role.Both}. */
 	role?: Role;
-	/** See {@link Setup.origin}. Omitted by default. */
-	origin?: Origin;
+	/** See {@link Setup.hop}. Omitted by default. */
+	hop?: Hop;
 }
 
 /**
@@ -201,18 +201,18 @@ export class Setup {
 	role: Role;
 
 	/**
-	 * This endpoint's origin (hop) id. The peer uses it to filter announcements and
+	 * This endpoint's Hop ID. The peer uses it to filter announcements and
 	 * subscriptions whose route flows through this endpoint (lite-06 removed the
 	 * per-stream `exclude_hop` in its favor). `undefined` when the endpoint declares
 	 * no identity; a wire value of 0 decodes the same way.
 	 */
-	origin?: Origin;
+	hop?: Hop;
 
-	constructor({ probe, path, role, origin }: SetupProps = {}) {
+	constructor({ probe, path, role, hop }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
-		this.origin = origin;
+		this.hop = hop;
 	}
 
 	static #guard(version: Version) {
@@ -234,8 +234,8 @@ export class Setup {
 		if (this.role !== Role.Both) {
 			params.setVarint(PARAM_ROLE, this.role);
 		}
-		if (this.origin !== undefined && this.origin !== 0n) {
-			params.setVarint(PARAM_ORIGIN, this.origin);
+		if (this.hop !== undefined && this.hop !== 0n) {
+			params.setVarint(PARAM_HOP, this.hop);
 		}
 		await params.encode(w);
 	}
@@ -255,10 +255,10 @@ export class Setup {
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
 		// 0 carries no identity (it cannot be excluded), so it decodes as absent.
-		const originRaw = params.getVarint(PARAM_ORIGIN);
-		const origin = originRaw === undefined || originRaw === 0n ? undefined : OriginSchema.parse(originRaw);
+		const hopRaw = params.getVarint(PARAM_HOP);
+		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		return new Setup({ probe, path, role, origin });
+		return new Setup({ probe, path, role, hop });
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */

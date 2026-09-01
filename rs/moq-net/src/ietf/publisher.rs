@@ -223,12 +223,12 @@ pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtim
 	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
-	self_origin: crate::Origin,
-	// The identity assigned to the peer by the caller (`Client::with_peer_origin`, or
+	self_origin: crate::Hop,
+	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
 	// the per-session default a server hands every request), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
-	peer_origin: Option<crate::Origin>,
+	peer_hop: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
 	version: Version,
@@ -245,7 +245,7 @@ where
 		session: S,
 		origin: origin::Consumer,
 		control: Control,
-		peer_origin: Option<crate::Origin>,
+		peer_hop: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		version: Version,
 	) -> Self {
@@ -255,7 +255,7 @@ where
 			self_origin: *origin,
 			origin,
 			control,
-			peer_origin,
+			peer_hop,
 			peer_setup,
 			version,
 		}
@@ -295,7 +295,7 @@ where
 	/// and the announce loops read this peer's routes through.
 	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
 		match self.exclude(peer) {
-			crate::Origin::UNKNOWN => self.origin.clone(),
+			crate::Hop::UNKNOWN => self.origin.clone(),
 			exclude => self.origin.clone().excluding(exclude),
 		}
 	}
@@ -303,12 +303,12 @@ where
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (`Client::with_peer_origin` when dialing, `Request::with_peer_origin`
+	/// we assigned it (`Client::with_peer_hop` when dialing, `Request::with_peer_hop`
 	/// or a fresh per-session id when accepting), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
-	fn exclude(&self, peer: &cluster::Peer) -> crate::Origin {
-		peer.identity().or(self.peer_origin).unwrap_or(crate::Origin::UNKNOWN)
+	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
+		peer.identity().or(self.peer_hop).unwrap_or(crate::Hop::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one route.
@@ -318,7 +318,7 @@ where
 	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer) -> Advert {
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
-		if self.self_origin != crate::Origin::UNKNOWN && route.hops.contains(&self.self_origin) {
+		if self.self_origin != crate::Hop::UNKNOWN && route.hops.contains(&self.self_origin) {
 			return Advert::None;
 		}
 
@@ -1123,7 +1123,7 @@ where
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
 		let origin = match self.exclude(&peer) {
-			crate::Origin::UNKNOWN => origin,
+			crate::Hop::UNKNOWN => origin,
 			exclude => origin.excluding(exclude),
 		};
 
@@ -1904,14 +1904,14 @@ mod tests {
 	/// `from/us`, which does not. The producers are returned so the routes outlive
 	/// the assertions.
 	async fn echo_harness(
-		assigned: crate::Origin,
+		assigned: crate::Hop,
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
 		Vec<crate::announce::Producer>,
 	) {
-		let other = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let other = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1925,13 +1925,13 @@ mod tests {
 			Version::Draft16,
 		);
 
-		let mut echoed_hops = crate::OriginList::new();
+		let mut echoed_hops = crate::Hops::new();
 		echoed_hops.push(assigned).unwrap();
 		let echoed = origin
 			.announce("from/peer", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
-		let mut local_hops = crate::OriginList::new();
+		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let local = origin
 			.announce("from/us", crate::origin::Route::default().with_hops(local_hops))
@@ -1941,12 +1941,12 @@ mod tests {
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
-	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
+	/// (`Client::with_peer_hop`) is never advertised to that peer; it would only
 	/// echo the peer's own content back at it. A broadcast with an independent
 	/// route still is.
 	#[tokio::test(start_paused = true)]
 	async fn assigned_peer_origin_filters_echoed_announces() {
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 		let (publisher, consumer, _routes) = echo_harness(assigned).await;
 
 		let peer = cluster::Peer::default();
@@ -1967,12 +1967,12 @@ mod tests {
 	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_origin_falls_back_to_assigned() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let declared = crate::Origin::new(9).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
+		let declared = crate::Hop::new(9).unwrap();
 		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
 
 		let withheld = cluster::Peer {
-			origin: Some(crate::Origin::UNKNOWN),
+			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		assert!(withheld.negotiated(), "the extension is on");
@@ -1982,7 +1982,7 @@ mod tests {
 		assert_eq!(publisher.exclude(&absent), assigned, "so does declaring nothing");
 
 		let named = cluster::Peer {
-			origin: Some(declared),
+			hop: Some(declared),
 			cost: None,
 		};
 		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
@@ -1995,8 +1995,8 @@ mod tests {
 	/// back.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_zero_chain_is_still_advertised_back() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -2010,14 +2010,14 @@ mod tests {
 		);
 
 		// The chain as ingress stores it: the peer named itself 0.
-		let mut hops = crate::OriginList::new();
-		hops.push(crate::Origin::UNKNOWN).unwrap();
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
 			.announce("from/peer", crate::origin::Route::default().with_hops(hops))
 			.unwrap();
 
 		let peer = cluster::Peer {
-			origin: Some(crate::Origin::UNKNOWN),
+			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
 		// The excluding cursor cannot match hop 0 (it names nobody), so the route
@@ -2036,9 +2036,9 @@ mod tests {
 	/// withdraw when the last one detaches.
 	#[tokio::test]
 	async fn namespace_follows_route_eligibility_changes() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let clean_publisher = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let clean_publisher = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -2054,7 +2054,7 @@ mod tests {
 		);
 
 		// The prefix starts with only a route through the assigned peer.
-		let mut tainted_hops = crate::OriginList::new();
+		let mut tainted_hops = crate::Hops::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
 			.announce(
@@ -2078,7 +2078,7 @@ mod tests {
 
 		// A clean route joins the same prefix: the excluded cursor now has a best
 		// visible route, so the namespace must be advertised.
-		let mut clean_hops = crate::OriginList::new();
+		let mut clean_hops = crate::Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
 			.announce("route-flip-cam", crate::origin::Route::default().with_hops(clean_hops))
@@ -2132,7 +2132,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2218,7 +2218,7 @@ mod tests {
 	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
@@ -2304,7 +2304,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2350,7 +2350,7 @@ mod tests {
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2422,7 +2422,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2500,14 +2500,14 @@ mod tests {
 	/// that can never happen: not a spin, but a session that never sleeps.
 	#[tokio::test(start_paused = true)]
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
 		// A route that already passed through us must never be forwarded: `select`
 		// wants nothing, which is what the peer already holds.
-		let mut hops = crate::OriginList::new();
-		hops.push(crate::Origin::new(1).unwrap()).unwrap();
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::new(1).unwrap()).unwrap();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
@@ -2544,7 +2544,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2605,7 +2605,7 @@ mod tests {
 	async fn a_modern_withdrawal_is_the_fin_alone() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2658,7 +2658,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
@@ -2706,7 +2706,7 @@ mod tests {
 	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -2771,7 +2771,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

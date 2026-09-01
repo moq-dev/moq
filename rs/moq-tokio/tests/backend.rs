@@ -4,7 +4,7 @@
 //! Each test is gated with `#[cfg(feature = "...")]` so it only compiles when the
 //! corresponding backend is enabled. Running `cargo test --all-features` exercises all.
 
-use moq_tokio::moq_net::Origin;
+use moq_tokio::moq_net::Hop;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -104,7 +104,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	} = config;
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let _announce_broadcast = pub_origin
 		.announce("test", Default::default())
@@ -129,7 +129,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 
@@ -283,7 +283,7 @@ struct MtlsPaths {
 async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".to_string());
@@ -470,7 +470,7 @@ async fn iroh_connect() {
 	use moq_tokio::iroh::EndpointConfig;
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let _announce_broadcast = pub_origin
 		.announce("test", Default::default())
@@ -510,7 +510,7 @@ async fn iroh_connect() {
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 

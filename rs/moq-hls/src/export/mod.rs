@@ -342,8 +342,13 @@ async fn watch(
 	renditions: &renditions::Fanout,
 ) -> crate::Result<()> {
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
-	while let Some(entry) = timeline.next().await? {
-		renditions.push(entry);
+	while let Some(event) = timeline.next().await? {
+		match event {
+			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry),
+			moq_mux::timeline::Event::Pop(range) => renditions.pop(range),
+			moq_mux::timeline::Event::Skip(_) => renditions.skip(),
+			_ => unreachable!("unknown timeline event"),
+		}
 	}
 	Ok(())
 }
@@ -352,7 +357,7 @@ async fn watch(
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -825,7 +830,7 @@ mod tests {
 	}
 
 	// A same-path republish takes the origin leaf over with a brand new broadcast (an ordinary
-	// publisher is `Origin::UNKNOWN`, which never counts as the same publisher, so even a plain
+	// publisher is `Hop::UNKNOWN`, which never counts as the same publisher, so even a plain
 	// reconnect qualifies). Renditions derived from the old broadcast's catalog must not serve the
 	// replacement's media: its group numbering restarts, so those bytes would be served under the
 	// replaced broadcast's segment number, duration, and PROGRAM-DATE-TIME.

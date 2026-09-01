@@ -50,40 +50,40 @@ pub enum Error {
 	Deprecated(crate::Deprecated),
 
 	/// The configured secret was neither a valid hex key nor a readable key file.
-	#[error("invalid iroh secret key")]
-	Secret(#[source] iroh::KeyParsingError),
+	#[error("invalid iroh secret key: {0}")]
+	Secret(String),
 
 	/// The endpoint could not bind its UDP socket.
-	#[error(transparent)]
-	Bind(#[from] iroh::endpoint::BindError),
+	#[error("{0}")]
+	Bind(String),
 
 	/// A configured bind address was rejected by iroh.
-	#[error(transparent)]
-	BindAddr(#[from] iroh::endpoint::InvalidSocketAddr),
+	#[error("{0}")]
+	BindAddr(String),
 
 	/// Dialing the peer failed before a connection was started.
-	#[error(transparent)]
-	Connect(#[from] iroh::endpoint::ConnectWithOptsError),
+	#[error("{0}")]
+	Connect(String),
 
 	/// The QUIC handshake failed while connecting.
-	#[error(transparent)]
-	Connecting(#[from] iroh::endpoint::ConnectingError),
+	#[error("{0}")]
+	Connecting(String),
 
 	/// The peer never settled on an ALPN.
-	#[error(transparent)]
-	Alpn(#[from] iroh::endpoint::AlpnError),
+	#[error("{0}")]
+	Alpn(String),
 
 	/// An established connection was lost or closed.
-	#[error(transparent)]
-	Connection(#[from] iroh::endpoint::ConnectionError),
+	#[error("{0}")]
+	Connection(String),
 
 	/// The client side of the WebTransport handshake failed.
-	#[error(transparent)]
-	Client(#[from] web_transport_iroh::ClientError),
+	#[error("{0}")]
+	Client(String),
 
 	/// The server side of the WebTransport handshake failed.
-	#[error(transparent)]
-	Server(#[from] web_transport_iroh::ServerError),
+	#[error("{0}")]
+	Server(String),
 
 	/// The negotiated ALPN was not valid UTF-8.
 	#[error("failed to decode ALPN")]
@@ -98,24 +98,36 @@ pub enum Error {
 	MissingHost,
 
 	/// The URL host was not an iroh endpoint id. Unlike QUIC, iroh dials a public key, not a hostname.
-	#[error("Invalid URL: host is not an iroh endpoint id")]
-	InvalidEndpointId(#[source] iroh::KeyParsingError),
+	#[error("Invalid URL: host is not an iroh endpoint id: {0}")]
+	InvalidEndpointId(String),
 
 	/// The URL could not be rewritten to the `https` scheme for the H3 request.
 	#[error("invalid URL")]
 	InvalidUrl,
 
 	/// The rewritten URL failed to parse.
-	#[error(transparent)]
-	Url(#[from] url::ParseError),
+	#[error("{0}")]
+	Url(String),
 
 	/// The client connected but never sent a valid WebTransport CONNECT request.
-	#[error("failed to receive WebTransport request")]
-	RecvRequest(#[source] web_transport_iroh::ServerError),
+	#[error("failed to receive WebTransport request: {0}")]
+	RecvRequest(String),
 
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
 	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
+}
+
+crate::error::from_message! {
+	iroh::endpoint::BindError => Bind,
+	iroh::endpoint::InvalidSocketAddr => BindAddr,
+	iroh::endpoint::ConnectWithOptsError => Connect,
+	iroh::endpoint::ConnectingError => Connecting,
+	iroh::endpoint::AlpnError => Alpn,
+	iroh::endpoint::ConnectionError => Connection,
+	web_transport_iroh::ClientError => Client,
+	web_transport_iroh::ServerError => Server,
+	url::ParseError => Url,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -204,7 +216,7 @@ impl EndpointConfig {
 			} else {
 				// Otherwise, read the secret from a file.
 				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str).map_err(Error::Secret)?
+				SecretKey::from_str(&key_str).map_err(|err| Error::Secret(crate::error::message(err)))?
 			}
 		} else {
 			// Otherwise, generate a new random secret.
@@ -267,14 +279,17 @@ pub(crate) async fn accept(
 		web_transport_iroh::ALPN_H3 => {
 			let request = web_transport_iroh::H3Request::accept(conn)
 				.await
-				.map_err(Error::RecvRequest)?;
+				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
 
 			let mut response = ConnectResponse::OK;
 			if let Some(protocol) = request.protocols.first() {
 				response = response.with_protocol(protocol);
 			}
-			let session = request.respond(response).await.map_err(Error::Server)?;
+			let session = request
+				.respond(response)
+				.await
+				.map_err(|err| Error::Server(crate::error::message(err)))?;
 			Ok((session, url, None))
 		}
 		// Raw QUIC carries no request URL; the path rides the SETUP.
@@ -305,7 +320,9 @@ pub(crate) async fn connect(
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
 ) -> Result<(web_transport_iroh::Session, Binding)> {
 	let host = url.host().ok_or(Error::MissingHost)?.to_string();
-	let endpoint_id: iroh::EndpointId = host.parse().map_err(Error::InvalidEndpointId)?;
+	let endpoint_id: iroh::EndpointId = host
+		.parse()
+		.map_err(|err| Error::InvalidEndpointId(crate::error::message(err)))?;
 
 	// Build an EndpointAddr with any direct IP addresses provided.
 	let mut endpoint_addr = iroh::EndpointAddr::new(endpoint_id);

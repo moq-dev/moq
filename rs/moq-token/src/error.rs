@@ -1,3 +1,20 @@
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them keep the actionable half in `source()` and nothing but a category in
+/// `Display`, so a plain `to_string()` would drop the only detail worth reporting.
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
 /// Errors related to key configuration and cryptographic operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -73,45 +90,87 @@ pub enum Error {
 	#[error("token has expired")]
 	TokenExpired,
 
-	#[error(transparent)]
-	Json(#[from] serde_json::Error),
+	/// A JWK or claims document couldn't be parsed or serialized.
+	#[error("{0}")]
+	Json(String),
 
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
-	#[error(transparent)]
-	Base64(#[from] base64::DecodeError),
+	/// A base64url field (a JWK coordinate, a JWT segment) isn't valid base64.
+	#[error("{0}")]
+	Base64(String),
 
 	#[error(transparent)]
 	Utf8(#[from] std::string::FromUtf8Error),
 
-	#[error(transparent)]
-	Jwt(#[from] jsonwebtoken::errors::Error),
+	/// The JWT itself couldn't be signed, decoded, or verified.
+	#[error("{0}")]
+	Jwt(String),
 
-	#[error(transparent)]
-	Pkcs8(#[from] p256::elliptic_curve::pkcs8::Error),
+	/// A key couldn't be parsed, imported, or used by the crypto backend.
+	#[error("{0}")]
+	Crypto(String),
 
-	#[error(transparent)]
-	EllipticCurve(#[from] p256::elliptic_curve::Error),
-
-	#[error(transparent)]
-	Rsa(#[from] rsa::Error),
-
-	#[error(transparent)]
-	RsaPkcs1(#[from] rsa::pkcs1::Error),
-
-	#[error(transparent)]
-	AwsUnspecified(#[from] aws_lc_rs::error::Unspecified),
-
-	#[error(transparent)]
-	AwsKeyRejected(#[from] aws_lc_rs::error::KeyRejected),
-
+	/// Fetching a remote JWKS failed.
 	#[cfg(feature = "jwks-loader")]
-	#[error(transparent)]
-	Reqwest(#[from] reqwest::Error),
+	#[error("{0}")]
+	Fetch(String),
 
 	#[error("{0}")]
 	Other(String),
 }
 
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API. Every one of them is opaque to a caller anyway: there is nothing to match on,
+// only something to report.
+macro_rules! from_message {
+	($($ty:ty => $variant:ident),* $(,)?) => {
+		$(
+			impl From<$ty> for Error {
+				fn from(err: $ty) -> Self {
+					Self::$variant(message(err))
+				}
+			}
+		)*
+	};
+}
+
+from_message! {
+	serde_json::Error => Json,
+	base64::DecodeError => Base64,
+	jsonwebtoken::errors::Error => Jwt,
+	p256::elliptic_curve::pkcs8::Error => Crypto,
+	p256::elliptic_curve::Error => Crypto,
+	rsa::Error => Crypto,
+	rsa::pkcs1::Error => Crypto,
+	aws_lc_rs::error::Unspecified => Crypto,
+	aws_lc_rs::error::KeyRejected => Crypto,
+}
+
+#[cfg(feature = "jwks-loader")]
+from_message! {
+	reqwest::Error => Fetch,
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A dependency that reports only a category in `Display` and keeps the real cause in
+	/// `source()` (reqwest is the one that matters here) must not lose it on conversion.
+	#[test]
+	fn message_flattens_the_source_chain() {
+		#[derive(Debug, thiserror::Error)]
+		#[error("inner")]
+		struct Inner;
+
+		#[derive(Debug, thiserror::Error)]
+		#[error("outer")]
+		struct Outer(#[source] Inner);
+
+		assert_eq!(message(Outer(Inner)), "outer: inner");
+	}
+}

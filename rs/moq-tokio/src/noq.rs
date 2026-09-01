@@ -114,20 +114,20 @@ pub enum Error {
 	NoDnsEntries,
 
 	/// The insecure `http://` fingerprint fetch failed to reach the server.
-	#[error("failed to fetch fingerprint")]
-	FetchFingerprint(#[source] reqwest::Error),
+	#[error("failed to fetch fingerprint: {0}")]
+	FetchFingerprint(String),
 
 	/// The server returned a non-success status for the fingerprint request.
-	#[error("fingerprint request failed")]
-	FingerprintStatus(#[source] reqwest::Error),
+	#[error("fingerprint request failed with status {0}")]
+	FingerprintStatus(u16),
 
 	/// The fingerprint response body could not be read.
-	#[error("failed to read fingerprint")]
-	ReadFingerprint(#[source] reqwest::Error),
+	#[error("failed to read fingerprint: {0}")]
+	ReadFingerprint(String),
 
 	/// The fetched fingerprint was not valid hex.
-	#[error("invalid fingerprint")]
-	InvalidFingerprint(#[from] hex::FromHexError),
+	#[error("invalid fingerprint: {0}")]
+	InvalidFingerprint(String),
 
 	/// The URL scheme is not one this backend can dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
@@ -158,8 +158,8 @@ pub enum Error {
 	MissingServerName,
 
 	/// The client's SNI host could not be parsed as a URL.
-	#[error("failed to construct URL from server name")]
-	BuildUrl(#[source] url::ParseError),
+	#[error("failed to construct URL from server name: {0}")]
+	BuildUrl(String),
 
 	/// The configured QUIC-LB nonce is too short to be unique.
 	#[error("quic_lb_nonce must be at least 4")]
@@ -179,36 +179,44 @@ pub enum Error {
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
 	/// The TLS config lacks a cipher suite QUIC can use for initial packets.
-	#[error(transparent)]
-	NoInitialCipherSuite(#[from] noq::crypto::rustls::NoInitialCipherSuite),
+	#[error("no cipher suite available for QUIC initial packets")]
+	NoInitialCipherSuite,
 
 	/// The connection could not be started, usually a bad config or address.
-	#[error(transparent)]
-	Connect(#[from] noq::ConnectError),
+	#[error("{0}")]
+	Connect(String),
 
 	/// The QUIC connection failed or was closed.
-	#[error(transparent)]
-	Connection(#[from] noq::ConnectionError),
+	#[error("{0}")]
+	Connection(String),
 
 	/// The WebTransport CONNECT request failed.
-	#[error(transparent)]
-	Client(#[from] web_transport_noq::ClientError),
+	#[error("{message}")]
+	Client {
+		/// What the handshake reported.
+		message: String,
+		/// The HTTP status the server answered the CONNECT with, when it answered with one.
+		///
+		/// Read at conversion time rather than kept as a `web-transport-noq` error, so the
+		/// classification survives without that crate appearing in this crate's public API.
+		status: Option<u16>,
+	},
 
 	/// The server rejected the connection with a status we understand (auth, not found, etc).
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
 	/// The WebTransport server failed to respond to a request.
-	#[error(transparent)]
-	Server(#[from] web_transport_noq::ServerError),
+	#[error("{0}")]
+	Server(String),
 
 	/// The QUIC handshake never completed for an incoming connection.
-	#[error("failed to establish QUIC connection")]
-	Establish(#[source] noq::ConnectionError),
+	#[error("failed to establish QUIC connection: {0}")]
+	Establish(String),
 
 	/// The client connected but never sent a valid WebTransport CONNECT request.
-	#[error("failed to receive WebTransport request")]
-	RecvRequest(#[source] web_transport_noq::ServerError),
+	#[error("failed to receive WebTransport request: {0}")]
+	RecvRequest(String),
 
 	/// The certificates or roots could not be loaded.
 	#[error(transparent)]
@@ -232,6 +240,28 @@ impl crate::failover::Aggregate for Error {
 		match error {
 			Some(error) => Self::DnsLookup(error),
 			None => Self::NoDnsEntries,
+		}
+	}
+}
+
+crate::error::from_message! {
+	noq::ConnectError => Connect,
+	noq::ConnectionError => Connection,
+	web_transport_noq::ServerError => Server,
+	hex::FromHexError => InvalidFingerprint,
+}
+
+impl From<noq::crypto::rustls::NoInitialCipherSuite> for Error {
+	fn from(_: noq::crypto::rustls::NoInitialCipherSuite) -> Self {
+		Self::NoInitialCipherSuite
+	}
+}
+
+impl From<web_transport_noq::ClientError> for Error {
+	fn from(err: web_transport_noq::ClientError) -> Self {
+		Self::Client {
+			status: client_status(&err),
+			message: crate::error::message(err),
 		}
 	}
 }
@@ -323,11 +353,14 @@ impl NoqClient {
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
-					.map_err(Error::FetchFingerprint)?
-					.error_for_status()
-					.map_err(Error::FingerprintStatus)?;
+					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
+				let status = resp.status().as_u16();
+				let resp = resp.error_for_status().map_err(|_| Error::FingerprintStatus(status))?;
 
-				let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
+				let fingerprint = resp
+					.text()
+					.await
+					.map_err(|err| Error::ReadFingerprint(crate::error::message(err)))?;
 				let fingerprint = hex::decode(fingerprint.trim())?;
 
 				let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
@@ -393,7 +426,9 @@ impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
-			Self::Client(err) => classify_client_error(err),
+			Self::Client {
+				status: Some(status), ..
+			} => crate::ConnectError::from_status_u16(*status),
 			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
@@ -405,10 +440,8 @@ impl Error {
 	/// WebTransport CONNECT response. See [`crate::Error::status`].
 	pub(crate) fn status(&self) -> Option<u16> {
 		match self {
-			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
-				err.status().map(|status| status.as_u16())
-			}
-			Self::Client(err) => client_status(err),
+			Self::FingerprintStatus(status) => Some(*status),
+			Self::Client { status, .. } => *status,
 			// Every raced address has to have answered, and answered with something not worth
 			// repeating, before the set counts as settled: one address refusing says nothing about
 			// the others, which may simply have been unroutable.
@@ -428,15 +461,10 @@ impl Error {
 }
 
 fn map_client_error(err: web_transport_noq::ClientError) -> Error {
-	if let Some(err) = classify_client_error(&err) {
-		return err.into();
+	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+		Some(rejected) => rejected.into(),
+		None => err.into(),
 	}
-
-	err.into()
-}
-
-fn classify_client_error(err: &web_transport_noq::ClientError) -> Option<crate::ConnectError> {
-	client_status(err).and_then(crate::ConnectError::from_status_u16)
 }
 
 /// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
@@ -628,7 +656,7 @@ pub(crate) async fn accept(
 	tracing::debug!(%host, ip = %remote, %alpn, "accepting");
 
 	// Wait for the QUIC connection to be established.
-	let conn = conn.await.map_err(Error::Establish)?;
+	let conn = conn.await.map_err(|err| Error::Establish(crate::error::message(err)))?;
 
 	let span = tracing::Span::current();
 	span.record("id", conn.stable_id());
@@ -640,7 +668,7 @@ pub(crate) async fn accept(
 			// the response consumes it.
 			let request = web_transport_noq::Request::accept(conn)
 				.await
-				.map_err(Error::RecvRequest)?;
+				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
 			let identity = crate::tls::PeerIdentity::from_any(request.conn().peer_identity());
 
@@ -648,7 +676,10 @@ pub(crate) async fn accept(
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
 			}
-			let session = request.respond(response).await.map_err(Error::Server)?;
+			let session = request
+				.respond(response)
+				.await
+				.map_err(|err| Error::Server(crate::error::message(err)))?;
 			Ok((session, url, identity))
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),

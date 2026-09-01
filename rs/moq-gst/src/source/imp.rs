@@ -354,7 +354,7 @@ async fn run_session(
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
 
-	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let origin_consumer = origin.consume();
 	let client = config.init(Default::default())?.with_subscriber(origin);
 
@@ -371,12 +371,8 @@ async fn run_session(
 	// of announcements that happens after the session is established.
 	tracing::info!(broadcast = %settings.broadcast, "waiting for broadcast to be announced");
 	let broadcast = tokio::select! {
-		routed = origin_consumer.routed(&settings.broadcast) => {
-			routed.context("broadcast not allowed or origin closed")?;
-			origin_consumer
-				.request_broadcast(&settings.broadcast)
-				.await
-				.context("broadcast unroutable")?
+		routed = origin_consumer.routed_broadcast(&settings.broadcast) => {
+			routed.context("broadcast unavailable")?
 		}
 		_ = shutdown.changed() => return Ok(()),
 	};

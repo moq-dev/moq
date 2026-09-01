@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type * as announce from "../announced.ts";
-import { type Origin, OriginSchema } from "../hop.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -335,8 +335,8 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
-const SELF: Origin = OriginSchema.parse(7n);
-const PEER: Origin = OriginSchema.parse(9n);
+const SELF: Hop = HopSchema.parse(7n);
+const PEER: Hop = HopSchema.parse(9n);
 
 /**
  * A peer that knows our Hop ID never advertises a path that already ran through us, so
@@ -441,7 +441,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	const announced = subscriber.announced(Path.empty());
 	await acceptSubscribeNamespace(pair.client);
 
-	const advert = (hops: Origin[]) =>
+	const advert = (hops: Hop[]) =>
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),

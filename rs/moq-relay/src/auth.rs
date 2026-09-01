@@ -168,13 +168,13 @@ pub enum AuthError {
 	MissingKeyId,
 
 	#[error("auth API request failed: {0}")]
-	ApiUnavailable(#[from] reqwest_middleware::Error),
+	ApiUnavailable(String),
 
 	#[error("auth API response was invalid: {0}")]
-	ApiInvalidResponse(#[from] serde_json::Error),
+	ApiInvalidResponse(String),
 
 	#[error("invalid URL: {0}")]
-	InvalidUrl(#[from] url::ParseError),
+	InvalidUrl(String),
 
 	#[error(transparent)]
 	InvalidKeyId(#[from] moq_token::KeyIdError),
@@ -203,12 +203,50 @@ impl AuthError {
 	}
 }
 
-// reqwest::Error → AuthError flows through reqwest_middleware::Error so callers can use `?`
-// on both .send() (returns reqwest_middleware::Error) and .error_for_status() / .text()
-// (return reqwest::Error) without a manual map_err.
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them keep the actionable half in `source()` and nothing but a category in
+/// `Display`, so a plain `to_string()` would drop the only detail worth reporting.
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API. `reqwest` in particular reports only a category ("error sending request for url
+// ...") and leaves the DNS, TLS, or connection cause in `source()`, so an auth outage would
+// otherwise be undiagnosable. Both HTTP error types land on the same variant, so `?` works on `.send()`
+// (which returns `reqwest_middleware::Error`) and on `.error_for_status()` / `.text()`
+// (which return `reqwest::Error`) alike.
 impl From<reqwest::Error> for AuthError {
-	fn from(e: reqwest::Error) -> Self {
-		Self::ApiUnavailable(e.into())
+	fn from(err: reqwest::Error) -> Self {
+		Self::ApiUnavailable(message(err))
+	}
+}
+
+impl From<reqwest_middleware::Error> for AuthError {
+	fn from(err: reqwest_middleware::Error) -> Self {
+		Self::ApiUnavailable(message(err))
+	}
+}
+
+impl From<serde_json::Error> for AuthError {
+	fn from(err: serde_json::Error) -> Self {
+		Self::ApiInvalidResponse(message(err))
+	}
+}
+
+impl From<url::ParseError> for AuthError {
+	fn from(err: url::ParseError) -> Self {
+		Self::InvalidUrl(message(err))
 	}
 }
 
@@ -1824,6 +1862,21 @@ struct Schedule {
 
 #[cfg(test)]
 mod tests {
+	/// A dependency that reports only a category in `Display` and keeps the real cause in
+	/// `source()` (reqwest, whose DNS/TLS detail lives there) must not lose it on conversion.
+	#[test]
+	fn message_flattens_the_source_chain() {
+		#[derive(Debug, thiserror::Error)]
+		#[error("inner")]
+		struct Inner;
+
+		#[derive(Debug, thiserror::Error)]
+		#[error("outer")]
+		struct Outer(#[source] Inner);
+
+		assert_eq!(super::message(Outer(Inner)), "outer: inner");
+	}
+
 	use super::*;
 	use moq_token::{Algorithm, Key, KeyId};
 	use tempfile::TempDir;

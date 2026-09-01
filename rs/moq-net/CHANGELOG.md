@@ -140,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - *(kio)* rename WaiterCell to Park ([#2583](https://github.com/moq-dev/moq/pull/2583))
-- add Client::with_peer_origin for peers that declare no identity ([#2577](https://github.com/moq-dev/moq/pull/2577))
+- add Client::with_peer_hop for peers that declare no identity ([#2577](https://github.com/moq-dev/moq/pull/2577))
 
 ## [0.2.6](https://github.com/moq-dev/moq/compare/moq-net-v0.2.5...moq-net-v0.2.6) - 2026-07-31
 

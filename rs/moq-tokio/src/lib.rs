@@ -27,7 +27,7 @@ compile_error!("a rustls QUIC backend requires a crypto provider: enable either 
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
-mod client;
+pub mod client;
 pub mod connect;
 mod connection;
 mod crypto;
@@ -57,7 +57,7 @@ pub mod runtime;
 	feature = "websocket",
 	feature = "tcp"
 ))]
-mod server;
+pub mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;

@@ -37,28 +37,56 @@ pub enum Error {
 
 	/// The qmux handshake failed while dialing, including a non-101 upgrade response
 	/// from the server.
-	#[error("failed to connect WebSocket")]
-	Connect(#[source] qmux::Error),
+	#[error("failed to connect WebSocket: {message}")]
+	Connect {
+		/// What qmux reported.
+		message: String,
+		/// The HTTP status the server answered the upgrade with, when it answered with one.
+		///
+		/// Read at conversion time rather than kept as a qmux error, so the classification
+		/// survives without qmux appearing in this crate's public API.
+		status: Option<u16>,
+	},
 
 	/// The URL couldn't be turned into a valid WebSocket handshake request.
-	#[error("failed to build WebSocket request")]
-	BuildRequest(#[source] tungstenite::Error),
+	#[error("failed to build WebSocket request: {0}")]
+	BuildRequest(String),
 
 	/// An ALPN contained bytes that aren't legal in the `Sec-WebSocket-Protocol` header.
-	#[error("failed to build WebSocket protocols header")]
-	ProtocolHeader(#[source] http::header::InvalidHeaderValue),
+	#[error("failed to build WebSocket protocols header: {0}")]
+	ProtocolHeader(String),
 
 	/// The TCP/TLS connection or the WebSocket upgrade itself failed.
-	#[error("failed to connect WebSocket")]
-	WebSocketConnect(#[source] tungstenite::Error),
+	#[error("failed to connect WebSocket: {0}")]
+	WebSocketConnect(String),
 
 	/// The server refused the connection outright, so retrying won't help.
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
 	/// The qmux handshake failed while accepting an incoming connection.
-	#[error("WebSocket accept failed")]
-	Accept(#[source] qmux::Error),
+	#[error("WebSocket accept failed: {0}")]
+	Accept(String),
+}
+
+impl Error {
+	/// A failed dial, keeping the upgrade status qmux reported.
+	fn connect(err: qmux::Error) -> Self {
+		let status = match err {
+			qmux::Error::Http(status) => Some(status),
+			_ => None,
+		};
+
+		Self::Connect {
+			message: crate::error::message(err),
+			status,
+		}
+	}
+
+	/// A failed accept.
+	fn accept(err: qmux::Error) -> Self {
+		Self::Accept(crate::error::message(err))
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -279,7 +307,7 @@ pub(crate) async fn connect(
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
 				.connect(url.as_str())
 				.await
-				.map_err(Error::Connect)?
+				.map_err(Error::connect)?
 		}
 	};
 
@@ -298,7 +326,10 @@ async fn connect_tls_override(
 	port: u16,
 	alpns: &[&str],
 ) -> Result<qmux::Session> {
-	let original_request = url.as_str().into_client_request().map_err(Error::BuildRequest)?;
+	let original_request = url
+		.as_str()
+		.into_client_request()
+		.map_err(|err| Error::BuildRequest(crate::error::message(err)))?;
 	let original_host = original_request
 		.headers()
 		.get(http::header::HOST)
@@ -307,13 +338,16 @@ async fn connect_tls_override(
 	let mut tls_url = url.clone();
 	tls_url
 		.set_host(Some(tls_host_name))
-		.map_err(|_| Error::Connect(qmux::Error::InvalidServerName))?;
-	let mut request = tls_url.as_str().into_client_request().map_err(Error::BuildRequest)?;
+		.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
+	let mut request = tls_url
+		.as_str()
+		.into_client_request()
+		.map_err(|err| Error::BuildRequest(crate::error::message(err)))?;
 	request.headers_mut().insert(http::header::HOST, original_host);
 	let protocols = supported_subprotocols(alpns).join(", ");
 	request.headers_mut().insert(
 		http::header::SEC_WEBSOCKET_PROTOCOL,
-		http::HeaderValue::from_str(&protocols).map_err(Error::ProtocolHeader)?,
+		http::HeaderValue::from_str(&protocols).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?,
 	);
 
 	let host = host
@@ -325,7 +359,7 @@ async fn connect_tls_override(
 	let (websocket, response) = tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
 		.await
 		.map_err(qmux::Error::from)
-		.map_err(Error::Connect)?;
+		.map_err(Error::connect)?;
 
 	let negotiated = response
 		.headers()
@@ -357,9 +391,11 @@ impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
-			// qmux surfaces a non-101 WebSocket upgrade response as `Http(status)`;
+			// qmux surfaces a non-101 WebSocket upgrade response as a status;
 			// map an auth rejection (401/403) so the caller sees it as terminal.
-			Self::Connect(qmux::Error::Http(status)) => crate::ConnectError::from_status_u16(*status),
+			Self::Connect {
+				status: Some(status), ..
+			} => crate::ConnectError::from_status_u16(*status),
 			_ => None,
 		}
 	}
@@ -370,7 +406,7 @@ impl Error {
 	/// [`crate::Error::status`].
 	pub(crate) fn status(&self) -> Option<u16> {
 		match self {
-			Self::Connect(qmux::Error::Http(status)) => Some(*status),
+			Self::Connect { status, .. } => *status,
 			_ => None,
 		}
 	}
@@ -397,7 +433,7 @@ impl Listener {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		let protocols = supported_subprotocols(alpns);
 		for protocol in &protocols {
-			http::HeaderValue::from_str(protocol).map_err(Error::ProtocolHeader)?;
+			http::HeaderValue::from_str(protocol).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?;
 		}
 		Ok(Self {
 			listener,
@@ -478,7 +514,7 @@ impl Listener {
 		let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
 			.await
 			.map_err(qmux::Error::from)
-			.map_err(Error::Accept);
+			.map_err(Error::accept);
 		Some(websocket.map(|websocket| {
 			let (protocol, url) = accepted
 				.lock()

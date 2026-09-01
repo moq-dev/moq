@@ -129,7 +129,7 @@ moq <MoQ side>  play [playback options]
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
 Any combination may be given at once (e.g. dial a relay *and* accept incoming
-sessions). `--origin <id>` pins the process's origin id (default: fresh and
+sessions). `--hop <id>` pins the process's Hop ID (default: fresh and
 random per run); see [Redundant Publishers](#redundant-publishers-11).
 
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
@@ -347,7 +347,7 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080
 ```
 
-Every stage shares one connection, one origin id, and one Origin, and each keeps
+Every stage shares one connection, one Hop ID, and one Origin, and each keeps
 its own `--help` (`moq import rtmp --help`). A stage without `--broadcast` falls
 back to the process-wide one, so a single-stage command can keep naming the
 broadcast before the verb.
@@ -374,7 +374,7 @@ Rules worth knowing:
 
 ### Redundant Publishers (1+1)
 
-An announcement's route names the publisher's origin id as its first hop.
+An announcement's route names the publisher's Hop ID as its first hop.
 Two publishers of the same broadcast that share an id (and cost) advertise
 identical routes, which relays deduplicate: the mesh sees one route while
 either publisher is alive, so killing one retracts nothing and the survivor
@@ -390,11 +390,11 @@ names, comparable timelines) so a viewer that fails over keeps decoding. Run
 the same command from two encoders, pinning the same id on both:
 
 ```bash
-moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
-moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
-Leave `--origin` unset everywhere else. The origin id also feeds loop
+Leave `--hop` unset everywhere else. The Hop ID also feeds loop
 detection: a relay drops announcements whose route already contains its own
 id, so reusing one id across unrelated publishers can make their routes
 invisible to each other. New subscriptions always resolve through the best

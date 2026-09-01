@@ -1,4 +1,4 @@
-import { type Origin, randomOrigin } from "../hop.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 
@@ -27,7 +27,7 @@ export async function exchangeSetup(
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
-	const self = randomOrigin();
+	const self = randomHop();
 	Ietf.Cluster.intoSetup(params, self, version);
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
@@ -56,7 +56,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
-): Promise<{ reader: Reader; solicit: boolean | undefined; cluster: Origin | undefined }> {
+): Promise<{ reader: Reader; solicit: boolean | undefined; cluster: Hop | undefined }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;

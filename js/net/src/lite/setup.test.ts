@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OriginSchema } from "../hop.ts";
+import { HopSchema } from "../hop.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
@@ -10,7 +10,7 @@ import { Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
-const PARAM_ORIGIN = 0x5n;
+const PARAM_HOP = 0x5n;
 
 function concat(chunks: Uint8Array[]): Uint8Array {
 	const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
@@ -127,16 +127,16 @@ test("unknown probe level saturates to Increase", async () => {
 	expect(got.probe).toBe(ProbeLevel.Increase);
 });
 
-test("SETUP with origin round-trips", async () => {
-	const origin = OriginSchema.parse(42n);
-	const got = await roundTrip(new Setup({ origin }));
-	expect(got.origin).toBe(origin);
+test("SETUP with hop round-trips", async () => {
+	const hop = HopSchema.parse(42n);
+	const got = await roundTrip(new Setup({ hop }));
+	expect(got.hop).toBe(hop);
 });
 
-test("origin 0 decodes as absent", async () => {
+test("hop 0 decodes as absent", async () => {
 	// 0 carries no identity (it cannot be excluded), so it decodes as undefined.
-	const got = await decodeParam(PARAM_ORIGIN, Varint.encode(0));
-	expect(got.origin).toBeUndefined();
+	const got = await decodeParam(PARAM_HOP, Varint.encode(0));
+	expect(got.hop).toBeUndefined();
 });
 
 test("SETUP is rejected before draft-05", async () => {

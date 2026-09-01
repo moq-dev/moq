@@ -31,8 +31,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_origin`.
-	pub peer_origin: Option<crate::Origin>,
+	/// declare one itself. See `Client::with_peer_hop`.
+	pub peer_hop: Option<crate::Hop>,
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
@@ -52,24 +52,24 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// has looped, so it is neither used as a route nor forwarded. On lite-04/05
 	// we also ask the peer to filter them out (AnnounceRequest.exclude_hop) so
 	// they never hit the wire, but this check is what makes it correct.
-	self_origin: crate::Origin,
+	self_origin: crate::Hop,
 	// The origin stamped into the hop chain of broadcasts from versions that
 	// don't carry real hop ids on the wire (Lite01/02/03), and into the
 	// placeholder entries Lite03 sends in place of real ids.
 	//
-	// This is the peer's assigned identity (`peer_origin`) when the caller gave
+	// This is the peer's assigned identity (`peer_hop`) when the caller gave
 	// it one, which also makes the route recognizable across sessions. Otherwise
-	// it is `Origin::UNKNOWN` (0), the reserved "no identity" value.
+	// it is `Hop::UNKNOWN` (0), the reserved "no identity" value.
 	//
 	// Assigning one is the caller's call, not this layer's: a server gives every
 	// accepted session a fresh id so its routes are at least distinguishable from
 	// another session's, while a client only assigns one it knows out of band. Either
 	// way the peer never learns the id, so only we can exclude it for loop detection.
-	session_origin: crate::Origin,
-	// The identity assigned to the peer by the caller (`Client::with_peer_origin`,
+	session_origin: crate::Hop,
+	// The identity assigned to the peer by the caller (`Client::with_peer_hop`,
 	// or the per-session default a server hands every request), standing in wherever
 	// the peer declines to declare one (an AnnounceOk reporting origin id 0).
-	peer_origin: Option<crate::Origin>,
+	peer_hop: Option<crate::Hop>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -103,8 +103,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: config.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
-			peer_origin: config.peer_origin,
+			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			peer_hop: config.peer_hop,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -239,7 +239,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		mut hops: crate::OriginList,
+		mut hops: crate::Hops,
 		// The route cost off the wire, i.e. as the peer advertised it.
 		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
 		// routing input as before.
@@ -250,7 +250,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
-		responder_origin: Option<crate::Origin>,
+		responder_origin: Option<crate::Hop>,
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
 		// One current advertisement per path per stream. Test what the peer
@@ -268,7 +268,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			// appending the sender again would name it twice. That is legal in a lite
 			// chain but a PROTOCOL_VIOLATION for an IETF peer we forward it to, so it
 			// must not enter the model at all. Zero names nobody, so it may repeat.
-			if responder != crate::Origin::UNKNOWN && hops.contains(&responder) {
+			if responder != crate::Hop::UNKNOWN && hops.contains(&responder) {
 				tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its sender");
 				return Ok(false);
 			}
@@ -301,7 +301,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		//
 		// The rewrite fails if the chain already names this session, which would put one
 		// id in it twice: a loop, and one a cluster receiver must close the session over.
-		if self.version_lacks_hops() && hops.replace_first(crate::Origin::UNKNOWN, self.session_origin).is_err() {
+		if self.version_lacks_hops() && hops.replace_first(crate::Hop::UNKNOWN, self.session_origin).is_err() {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its session");
 			return Ok(false);
 		}
@@ -309,7 +309,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// Guarantee at least one attributable hop for versions that did not provide
 		// one. Lite05 peers may legally advertise responder id 0; preserve it above
 		// rather than replacing it, even though that route stays loop-blind (the
-		// caller can assign an identity via `with_peer_origin`, substituted where
+		// caller can assign an identity via `with_peer_hop`, substituted where
 		// the AnnounceOk is read).
 		if hops.is_empty() {
 			hops.push(self.session_origin)
@@ -338,12 +338,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
 	/// including a restart of one already attached: a connection on its way out must
 	/// not win selection, however good the path it advertises looks.
-	fn announced_route(
-		&self,
-		hops: crate::OriginList,
-		cost: crate::origin::Cost,
-		link_cost: u64,
-	) -> crate::origin::Route {
+	fn announced_route(&self, hops: crate::Hops, cost: crate::origin::Cost, link_cost: u64) -> crate::origin::Route {
 		let mut route = crate::origin::Route::default()
 			.with_hops(hops)
 			.with_cost(cost.charged(link_cost));
@@ -362,7 +357,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// content on a new path: this session's route metadata updates in place,
 	/// in-flight tracks keep flowing, and the origin only hands over if the winner
 	/// changed. Consumers observe nothing. When the first hop differs, or is
-	/// [`Origin::UNKNOWN`](crate::Origin::UNKNOWN), the old route detaches gracefully
+	/// [`Hop::UNKNOWN`](crate::Hop::UNKNOWN), the old route detaches gracefully
 	/// and a fresh one attaches, so downstream sees a real Ended + Active.
 	/// The advertisement is already live, so this can attach a route even when the
 	/// original advertisement was declined locally.
@@ -372,21 +367,21 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	fn restart_announce(
 		&mut self,
 		path: PathOwned,
-		mut hops: crate::OriginList,
+		mut hops: crate::Hops,
 		// The route cost off the wire and this link's price. See `start_announce`.
 		cost: crate::origin::Cost,
 		link_cost: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
-		responder_origin: Option<crate::Origin>,
+		responder_origin: Option<crate::Hop>,
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): detach its route but keep the advertisement live.
 		let reflected = match responder_origin {
 			// A chain already naming the sender came back through it; see `start_announce`.
 			Some(responder) => {
-				(responder != crate::Origin::UNKNOWN && hops.contains(&responder))
+				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
 					|| hops.push(responder).is_err()
 					|| hops.contains(&self.self_origin)
 			}
@@ -1073,7 +1068,7 @@ enum PrefixState<S: crate::transport::poll::Session> {
 	/// Waiting for the link cost (may block on the peer's SETUP).
 	Cost {
 		stream: Stream<S, Version>,
-		responder_origin: Option<crate::Origin>,
+		responder_origin: Option<crate::Hop>,
 	},
 	/// Lite01/02: reading the ANNOUNCE_INIT set.
 	ReadInit { stream: Stream<S, Version>, run: PrefixRun },
@@ -1083,7 +1078,7 @@ enum PrefixState<S: crate::transport::poll::Session> {
 
 /// The announce-decode loop's state, split out so the states above can share it.
 struct PrefixRun {
-	responder_origin: Option<crate::Origin>,
+	responder_origin: Option<crate::Hop>,
 	/// What we charge every announcement arriving on this stream. Resolved once:
 	/// it comes from the connect config or the peer's SETUP, neither of which
 	/// changes for the life of the session.
@@ -1155,7 +1150,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// A peer may legally report id 0 (no identity). When the caller assigned
 					// it one, stand that in so the route isn't loop-blind.
 					let origin = match ok.origin.id() {
-						0 => self.subscriber.peer_origin.unwrap_or(ok.origin),
+						0 => self.subscriber.peer_hop.unwrap_or(ok.origin),
 						_ => ok.origin,
 					};
 					let PrefixState::ReadOk { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
@@ -1201,7 +1196,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						// model when this enters the origin via `create_broadcast`.
 						self.subscriber.start_announce(
 							path.clone(),
-							crate::OriginList::new(),
+							crate::Hops::new(),
 							crate::origin::Cost::UNKNOWN,
 							0,
 							run.responder_origin,
@@ -1341,14 +1336,14 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
 
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: session.clone(),
 			origin,
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
-			peer_origin: None,
+			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
 		});
@@ -1413,14 +1408,14 @@ mod tests {
 			// what was true at the instant it would.
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume());
-			let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+			let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				session: session.clone(),
 				origin,
 				recv_bandwidth: None,
 				version,
 				peer_setup: Default::default(),
-				peer_origin: None,
+				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
 			});
@@ -1836,8 +1831,8 @@ mod tests {
 	/// wrong route.
 	#[tokio::test]
 	async fn a_double_announce_is_an_error_even_when_reflected() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
 			origin,
@@ -1845,7 +1840,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 			going_away: Default::default(),
 		});
 
@@ -1855,7 +1850,7 @@ mod tests {
 			subscriber
 				.start_announce(
 					path.clone(),
-					crate::OriginList::new(),
+					crate::Hops::new(),
 					crate::origin::Cost::default(),
 					0,
 					Some(assigned),
@@ -1865,7 +1860,7 @@ mod tests {
 		);
 
 		// The same path again, this time with a chain that names the sender.
-		let mut reflected = crate::OriginList::new();
+		let mut reflected = crate::Hops::new();
 		reflected.push(assigned).unwrap();
 		assert!(
 			matches!(
@@ -1891,8 +1886,8 @@ mod tests {
 	/// reach, where rewriting a placeholder hop would name this session twice.
 	#[tokio::test]
 	async fn every_declined_announce_is_recorded() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
 			origin,
@@ -1902,7 +1897,7 @@ mod tests {
 			version: Version::Lite03,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 			going_away: Default::default(),
 		});
 
@@ -1911,7 +1906,7 @@ mod tests {
 
 		// A chain whose placeholder cannot be rewritten: this session's id is already in it,
 		// so writing it over the placeholder would name it twice.
-		let hops = crate::OriginList::try_from(vec![crate::Origin::UNKNOWN, assigned]).unwrap();
+		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, assigned]).unwrap();
 		assert!(
 			!subscriber
 				.start_announce(
@@ -1927,8 +1922,8 @@ mod tests {
 		);
 
 		// Declined, but still the peer's advertisement at that path.
-		let mut fresh = crate::OriginList::new();
-		fresh.push(crate::Origin::new(7).unwrap()).unwrap();
+		let mut fresh = crate::Hops::new();
+		fresh.push(crate::Hop::new(7).unwrap()).unwrap();
 		assert!(
 			matches!(
 				subscriber.start_announce(path, fresh, crate::origin::Cost::default(), 0, None, &mut announced),
@@ -1941,8 +1936,8 @@ mod tests {
 	/// A dropped announce still holds its path until the peer retracts it.
 	#[tokio::test]
 	async fn a_dropped_announce_still_holds_its_path() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -1951,13 +1946,13 @@ mod tests {
 			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 			going_away: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();
 		let mut announced = Announced::default();
-		let mut reflected = crate::OriginList::new();
+		let mut reflected = crate::Hops::new();
 		reflected.push(assigned).unwrap();
 		assert!(
 			!subscriber
@@ -1974,8 +1969,8 @@ mod tests {
 		);
 		assert!(consumer.get_broadcast("room/host").is_none());
 
-		let mut hops = crate::OriginList::new();
-		hops.push(crate::Origin::new(7).unwrap()).unwrap();
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::new(7).unwrap()).unwrap();
 		let err = subscriber
 			.start_announce(
 				path,
@@ -1995,9 +1990,9 @@ mod tests {
 	/// to, so the route must never enter the model carrying it.
 	#[tokio::test]
 	async fn an_announce_reflected_by_its_sender_is_dropped() {
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -2006,13 +2001,13 @@ mod tests {
 			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 			going_away: Default::default(),
 		});
 
 		// The sender reports origin 0, so it takes the assigned identity, and its chain
 		// already carries that identity: the route came back through it.
-		let mut hops = crate::OriginList::new();
+		let mut hops = crate::Hops::new();
 		hops.push(assigned).unwrap();
 
 		let mut announced = Announced::default();
@@ -2033,14 +2028,14 @@ mod tests {
 	}
 
 	/// A peer that declares no identity gets attributed the origin the caller
-	/// assigned it (`Client::with_peer_origin`), so every session dialing the same
+	/// assigned it (`Client::with_peer_hop`), so every session dialing the same
 	/// relay yields one recognizable hop instead of a random id per connection.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = SinkSession::new(Default::default());
-		let assigned = crate::Origin::new(777).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -2048,7 +2043,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
 		});
@@ -2059,7 +2054,7 @@ mod tests {
 		let accepted = subscriber
 			.start_announce(
 				Path::new("room/host").to_owned(),
-				crate::OriginList::new(),
+				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
 				None,
@@ -2087,7 +2082,7 @@ mod tests {
 		subscriber
 			.start_announce(
 				Path::new("room/host").to_owned(),
-				crate::OriginList::new(),
+				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
 				None,
@@ -2098,11 +2093,11 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Origin::UNKNOWN]);
+		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -2111,7 +2106,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: None,
+			peer_hop: None,
 			going_away: Default::default(),
 		});
 		(subscriber, consumer)
@@ -2128,10 +2123,10 @@ mod tests {
 		subscriber
 			.start_announce(
 				path.clone(),
-				crate::OriginList::new(),
+				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
-				Some(crate::Origin::new(7).unwrap()),
+				Some(crate::Hop::new(7).unwrap()),
 				&mut announced,
 			)
 			.unwrap();
@@ -2142,10 +2137,10 @@ mod tests {
 		subscriber
 			.restart_announce(
 				path,
-				crate::OriginList::new(),
+				crate::Hops::new(),
 				crate::origin::Cost::new(5),
 				0,
-				Some(crate::Origin::new(7).unwrap()),
+				Some(crate::Hop::new(7).unwrap()),
 				&mut announced,
 			)
 			.unwrap();
@@ -2163,7 +2158,7 @@ mod tests {
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[tokio::test(start_paused = true)]
 	async fn a_lost_announce_stream_retracts_the_route() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -2172,12 +2167,12 @@ mod tests {
 			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
-			peer_origin: None,
+			peer_hop: None,
 			going_away: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
@@ -2198,7 +2193,7 @@ mod tests {
 		cursor.assert_next_ended("room/host");
 
 		// An explicit retraction retracts it the same way.
-		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(

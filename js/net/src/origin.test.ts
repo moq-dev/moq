@@ -217,6 +217,26 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 	origin.close();
 });
 
+test("announced reports a broader covering route at the root", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	const upstream = new BroadcastProducer();
+	const dispose = origin.announce(Path.from("room"), provider(upstream));
+
+	// A route above the requested prefix covers everything under it, so it
+	// presents at the root, matching what request() resolves there.
+	const announced = consumer.announced(Path.from("room/alice"));
+	expect(await announced.next()).toEqual({ prefix: Path.empty(), active: true });
+
+	dispose();
+	expect(await announced.next()).toEqual({ prefix: Path.empty(), active: false });
+
+	announced.close();
+	upstream.close();
+	origin.close();
+});
+
 test("a local publish shadows a remote entry", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

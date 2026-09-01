@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, Error, Origin, OriginList,
+	AsPath, Error, Hop, Hops,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
@@ -33,24 +33,24 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
 	pub goaway: crate::goaway::Protocol,
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_origin`.
-	pub peer_origin: Option<Origin>,
+	/// declare one itself. See `Client::with_peer_hop`.
+	pub peer_hop: Option<Hop>,
 }
 
 /// Context shared by every control-stream child.
 struct Shared<S: crate::transport::poll::Session> {
 	session: S,
 	origin: origin::Consumer,
-	self_origin: Origin,
+	self_origin: Hop,
 	// The peer's SETUP, read for the origin id it declared. Used to serve the
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
-	// The identity assigned to the peer by the caller (`Client::with_peer_origin`, or
+	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
 	// the per-session default a server hands every request), standing in wherever the
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
-	peer_origin: Option<Origin>,
+	peer_hop: Option<Hop>,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
@@ -112,10 +112,10 @@ impl<S: crate::transport::poll::Session> Shared<S> {
 		}
 		// Pre-SETUP versions never declare an id, so only the assigned one applies.
 		let declared = match self.version.has_setup_stream() {
-			true => ready!(self.peer_setup.poll_origin(waiter)),
+			true => ready!(self.peer_setup.poll_hop(waiter)),
 			false => None,
 		};
-		let origin = match declared.or(self.peer_origin) {
+		let origin = match declared.or(self.peer_hop) {
 			Some(peer) => self.origin.clone().excluding(peer),
 			None => self.origin.clone(),
 		};
@@ -150,7 +150,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				origin: config.origin,
 				self_origin,
 				peer_setup: config.peer_setup,
-				peer_origin: config.peer_origin,
+				peer_hop: config.peer_hop,
 				serving: std::sync::OnceLock::new(),
 				priority: Default::default(),
 				version: config.version,
@@ -200,7 +200,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
-		self_origin: Origin,
+		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
@@ -488,11 +488,11 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					let prefix = interest.prefix.to_owned();
 
 					// The identity whose routes we filter out. Lite-04/05 carry it per
-					// announce stream; lite-06+ reads the session-wide SETUP Origin
+					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
 					// declares nothing falls back to the identity the caller assigned it
-					// (`with_peer_origin`), if any.
-					let assigned = self.shared.peer_origin.map(|origin| origin.id()).unwrap_or(0);
+					// (`with_peer_hop`), if any.
+					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
 							0 => assigned,
@@ -506,8 +506,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					}
 				}
 				AnnounceState::ExcludeHop { prefix } => {
-					let assigned = self.shared.peer_origin.map(|origin| origin.id()).unwrap_or(0);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_origin(waiter))
+					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
+					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
 						.map(|origin| origin.id())
 						.unwrap_or(assigned);
 					let prefix = prefix.clone();
@@ -546,7 +546,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = match Origin::new(exclude_hop) {
+		let origin = match Hop::new(exclude_hop) {
 			Ok(peer) => origin.excluding(peer),
 			Err(_) => origin,
 		};
@@ -560,7 +560,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 /// shim can supply its own.
 struct AnnounceRun {
 	prefix: crate::PathOwned,
-	self_origin: Origin,
+	self_origin: Hop,
 	version: Version,
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 	// per-stream ordinal, and `ended` references the id instead of repeating the
@@ -582,7 +582,7 @@ enum AnnouncePhase {
 }
 
 impl AnnounceRun {
-	fn new(prefix: crate::PathOwned, self_origin: Origin, version: Version) -> Self {
+	fn new(prefix: crate::PathOwned, self_origin: Hop, version: Version) -> Self {
 		Self {
 			prefix,
 			self_origin,
@@ -604,16 +604,12 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(
-		&self,
-		route: &crate::origin::Route,
-		absolute: &crate::Path,
-	) -> Option<(OriginList, crate::origin::Cost)> {
+	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
-		if self.self_origin != Origin::UNKNOWN && hops.contains(&self.self_origin) {
+		if self.self_origin != Hop::UNKNOWN && hops.contains(&self.self_origin) {
 			tracing::debug!(route = %absolute, "dropping reflected route");
 			return None;
 		}
@@ -662,7 +658,7 @@ impl AnnounceRun {
 			// An ended announce doesn't need hops; the receiver matches on path only.
 			None => stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
 				suffix: suffix.as_path(),
-				hops: OriginList::new(),
+				hops: Hops::new(),
 			})?,
 		}
 		Ok(())
@@ -709,7 +705,7 @@ impl AnnounceRun {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, OriginList, crate::origin::Cost)> = Vec::new();
+				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
 					let suffix = self.suffix(&update.prefix);
 					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
@@ -852,7 +848,7 @@ struct TrackInfoServe<S: crate::transport::poll::Session> {
 enum TrackInfoState {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Track<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -916,15 +912,14 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
-					self.state = TrackInfoState::Origin { msg };
+					self.state = TrackInfoState::Hop { msg };
 				}
-				TrackInfoState::Origin { .. } => {
+				TrackInfoState::Hop { .. } => {
 					// The peer requested this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
 					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let TrackInfoState::Origin { msg } = std::mem::replace(&mut self.state, TrackInfoState::Decode)
-					else {
+					let TrackInfoState::Hop { msg } = std::mem::replace(&mut self.state, TrackInfoState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -979,7 +974,7 @@ struct SubscribeServe<S: crate::transport::poll::Session> {
 enum SubscribeState<S: crate::transport::poll::Session> {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Subscribe<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -1054,17 +1049,16 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					self.track = msg.track.to_string();
 					tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed started");
 
-					self.state = SubscribeState::Origin { msg };
+					self.state = SubscribeState::Hop { msg };
 				}
-				SubscribeState::Origin { .. } => {
+				SubscribeState::Hop { .. } => {
 					// We just received a subscribe for this exact path, so by definition the
 					// peer has already seen an announcement for it. `request_broadcast`
 					// resolves an announced broadcast immediately; if it isn't announced it
 					// falls back to an `origin::Dynamic` handler (or resolves to an error
 					// when there is none).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let SubscribeState::Origin { msg } = std::mem::replace(&mut self.state, SubscribeState::Decode)
-					else {
+					let SubscribeState::Hop { msg } = std::mem::replace(&mut self.state, SubscribeState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -1203,7 +1197,7 @@ struct FetchServe<S: crate::transport::poll::Session> {
 enum FetchState {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Fetch<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -1286,14 +1280,14 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.group = msg.group;
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
-					self.state = FetchState::Origin { msg };
+					self.state = FetchState::Hop { msg };
 				}
-				FetchState::Origin { .. } => {
+				FetchState::Hop { .. } => {
 					// The peer fetched this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
 					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let FetchState::Origin { msg } = std::mem::replace(&mut self.state, FetchState::Decode) else {
+					let FetchState::Hop { msg } = std::mem::replace(&mut self.state, FetchState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -1640,8 +1634,8 @@ mod announce_test {
 	const VERSION: Version = Version::Lite06Wip;
 
 	/// The hops stamped on every harness route.
-	fn pub_hops() -> OriginList {
-		OriginList::try_from(vec![Origin::new(9).unwrap()]).unwrap()
+	fn pub_hops() -> Hops {
+		Hops::try_from(vec![Hop::new(9).unwrap()]).unwrap()
 	}
 
 	/// A cursor over the captured announce-stream bytes, decoding messages
@@ -1729,7 +1723,7 @@ mod announce_test {
 
 	/// Announce one route with cost 7 and run the announce loop against it.
 	async fn harness() -> Harness {
-		let origin = Origin::new(1).unwrap().produce();
+		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
 				"cam",
@@ -1830,10 +1824,10 @@ mod announce_test {
 	/// announce stream (control-plane split horizon via the cursor).
 	#[tokio::test(start_paused = true)]
 	async fn excluded_routes_are_filtered() {
-		let peer = Origin::new(42).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
+		let peer = Hop::new(42).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
 
-		let tainted = OriginList::try_from(vec![peer]).unwrap();
+		let tainted = Hops::try_from(vec![peer]).unwrap();
 		let _tainted = origin
 			.announce("echoed", crate::origin::Route::default().with_hops(tainted))
 			.unwrap();
@@ -2999,17 +2993,17 @@ mod tests {
 	/// it, which is the loop the announce filter exists to prevent.
 	#[tokio::test(start_paused = true)]
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let upstream = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let upstream = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
-		let mut echoed_hops = OriginList::new();
+		let mut echoed_hops = Hops::new();
 		echoed_hops.push(assigned).unwrap();
 		let (_echoed, _echoed_server) = origin
 			.announce_served("echoed", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
-		let mut local_hops = OriginList::new();
+		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let (_local, _local_server) = origin
 			.announce_served("local", crate::origin::Route::default().with_hops(local_hops))
@@ -3027,7 +3021,7 @@ mod tests {
 			version: Version::Lite06Wip,
 			peer_setup,
 			goaway,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3045,21 +3039,21 @@ mod tests {
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only
 	/// route flows through the excluded hop (here the peer's assigned identity,
-	/// `Client::with_peer_origin`) is filtered from the initial set too.
+	/// `Client::with_peer_hop`) is filtered from the initial set too.
 	#[tokio::test]
 	async fn announce_init_applies_route_selection() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let clean_publisher = crate::Origin::new(778).unwrap();
-		let self_origin = crate::Origin::new(1).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
+		let clean_publisher = crate::Hop::new(778).unwrap();
+		let self_origin = crate::Hop::new(1).unwrap();
 		let origin = crate::origin::Info::new(self_origin).produce();
 
-		let mut tainted_hops = OriginList::new();
+		let mut tainted_hops = Hops::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
 			.announce("echoed", crate::origin::Route::default().with_hops(tainted_hops))
 			.unwrap();
 
-		let mut clean_hops = OriginList::new();
+		let mut clean_hops = Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let _clean = origin
 			.announce("local", crate::origin::Route::default().with_hops(clean_hops))
@@ -3115,7 +3109,7 @@ mod tests {
 		stream: Stream<SinkSession, Version>,
 		version: Version,
 	) -> ProbeServe<SinkSession, TestRuntime> {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: TestRuntime::new(),
@@ -3124,7 +3118,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
-			peer_origin: None,
+			peer_hop: None,
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}

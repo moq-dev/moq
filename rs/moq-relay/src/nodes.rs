@@ -9,7 +9,7 @@ use std::{
 	sync::{Arc, Mutex},
 };
 
-use moq_net::{Origin, origin};
+use moq_net::{Hop, origin};
 use serde::Serialize;
 
 /// Namespace containing the empty broadcasts used to advertise cluster nodes.
@@ -36,7 +36,7 @@ struct ConnectionRecord {
 #[derive(Clone)]
 enum ConnectionTarget {
 	Node(String),
-	Origin(Origin),
+	Hop(Hop),
 }
 
 /// The JSON document returned by the internal `/nodes` endpoint.
@@ -51,7 +51,7 @@ pub(crate) struct Snapshot {
 pub(crate) struct Node {
 	/// Canonical URL advertised for the node.
 	pub node: String,
-	/// Origin identity from the node's announcement, when available.
+	/// Hop identity from the node's announcement, when available.
 	pub origin_id: Option<String>,
 	/// Selected route for the node's internal advertisement.
 	pub announced: Option<Announcement>,
@@ -62,7 +62,7 @@ pub(crate) struct Node {
 /// The selected route for a node advertisement.
 #[derive(Debug, Serialize)]
 pub(crate) struct Announcement {
-	/// Origin identities in traversal order, oldest first.
+	/// Hop identities in traversal order, oldest first.
 	pub hops: Vec<String>,
 	/// Number of hops in the selected route.
 	pub hop_count: usize,
@@ -104,7 +104,7 @@ struct NodeBuilder {
 #[derive(Default)]
 struct Announced {
 	nodes: BTreeMap<String, NodeBuilder>,
-	/// Origin id to the single node advertising it, or `None` once more than one
+	/// Hop id to the single node advertising it, or `None` once more than one
 	/// does and the id no longer identifies a peer.
 	origins: HashMap<u64, Option<String>>,
 }
@@ -140,8 +140,8 @@ impl Nodes {
 	///
 	/// `id` is the session's `conn` id from
 	/// [`Cluster::next_connection_id`](crate::Cluster::next_connection_id).
-	pub(crate) fn connect_inbound(&self, id: u64, origin: Origin) -> ConnectionGuard {
-		self.connect(id, Direction::Inbound, ConnectionTarget::Origin(origin))
+	pub(crate) fn connect_inbound(&self, id: u64, origin: Hop) -> ConnectionGuard {
+		self.connect(id, Direction::Inbound, ConnectionTarget::Hop(origin))
 	}
 
 	fn connect(&self, id: u64, direction: Direction, target: ConnectionTarget) -> ConnectionGuard {
@@ -223,7 +223,7 @@ impl Nodes {
 		for (&id, connection) in connections {
 			let key = match &connection.target {
 				ConnectionTarget::Node(node) => canonical_node(node),
-				ConnectionTarget::Origin(origin) => {
+				ConnectionTarget::Hop(origin) => {
 					let Some(Some(node)) = origins.get(&origin.id()) else {
 						continue;
 					};
@@ -277,7 +277,7 @@ fn canonical_announced_node(node: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{Origin, OriginList};
+	use moq_net::{Hop, Hops};
 
 	async fn announced_node(
 		origin: &moq_net::origin::Producer,
@@ -285,9 +285,9 @@ mod tests {
 		hops: &[u64],
 		cost: u64,
 	) -> moq_net::announce::Producer {
-		let hops = OriginList::try_from(
+		let hops = Hops::try_from(
 			hops.iter()
-				.map(|id| Origin::new(*id).expect("valid test origin"))
+				.map(|id| Hop::new(*id).expect("valid test origin"))
 				.collect::<Vec<_>>(),
 		)
 		.unwrap();
@@ -303,11 +303,11 @@ mod tests {
 	async fn snapshot_combines_announcements_and_live_connections() {
 		const REMOTE_ID: u64 = 9_007_199_254_740_993;
 
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let _remote = announced_node(&origin, "https://relay-b.example/", &[REMOTE_ID], 7).await;
 		let _outbound = nodes.connect_outbound(0, "https://relay-b.example/");
-		let _inbound = nodes.connect_inbound(1, Origin::new(REMOTE_ID).unwrap());
+		let _inbound = nodes.connect_inbound(1, Hop::new(REMOTE_ID).unwrap());
 
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 1);
@@ -339,16 +339,16 @@ mod tests {
 
 	#[tokio::test]
 	async fn snapshot_omits_unresolved_inbound_connections() {
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin);
-		let _inbound = nodes.connect_inbound(0, Origin::new(200).unwrap());
+		let _inbound = nodes.connect_inbound(0, Hop::new(200).unwrap());
 
 		assert!(nodes.snapshot().nodes.is_empty());
 	}
 
 	#[tokio::test]
 	async fn snapshot_stops_reporting_closed_outbound_connections() {
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin);
 		let connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		assert_eq!(nodes.snapshot().nodes.len(), 1);
@@ -359,7 +359,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn outbound_node_omits_credentials_from_url() {
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin);
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/?jwt=secret");
 
@@ -372,7 +372,7 @@ mod tests {
 	/// churned mid-request.
 	#[tokio::test(start_paused = true)]
 	async fn scan_skips_an_unannounce_queued_ahead_of_another_node() {
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-b.example/", &[300], 1).await;
@@ -398,11 +398,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn duplicate_origin_ids_do_not_resolve_inbound_connections() {
-		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let _first = announced_node(&origin, "https://relay-b.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-c.example/", &[200], 1).await;
-		let _inbound = nodes.connect_inbound(0, Origin::new(200).unwrap());
+		let _inbound = nodes.connect_inbound(0, Hop::new(200).unwrap());
 
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 2);

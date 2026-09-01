@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
-import { OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
+import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -40,7 +40,7 @@ async function roundTrip(msg: AnnounceBroadcast, version: Version): Promise<Anno
 }
 
 test("AnnounceBroadcast round-trips on draft-05", async () => {
-	const hops = [OriginSchema.parse(7n)];
+	const hops = [HopSchema.parse(7n)];
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_05);
 	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops });
 
@@ -49,7 +49,7 @@ test("AnnounceBroadcast round-trips on draft-05", async () => {
 });
 
 test("AnnounceBroadcast round-trips on draft-06", async () => {
-	const hops = [OriginSchema.parse(7n)];
+	const hops = [HopSchema.parse(7n)];
 	// An absent cost encodes as zero and decodes explicitly.
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
 	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: { warm: 0n, cold: 0n } });
@@ -113,7 +113,7 @@ async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise
 	return AnnounceRequest.decode(reader, version);
 }
 
-// Draft04/05 carry the subscriber's origin id so the publisher can skip reflected
+// Draft04/05 carry the subscriber's Hop ID so the publisher can skip reflected
 // announces before they hit the wire.
 test("AnnounceRequest carries excludeHop on draft-05", async () => {
 	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), 42n), Version.DRAFT_05);
@@ -136,24 +136,24 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 // withholds it to obscure its routing. Rejecting it tore down the announce stream of a
 // conforming publisher.
 test("AnnounceOk accepts the reserved unknown origin", async () => {
-	const msg = new AnnounceOk(UNKNOWN_ORIGIN, 3);
+	const msg = new AnnounceOk(UNKNOWN_HOP, 3);
 	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
-	expect(got.origin).toBe(UNKNOWN_ORIGIN);
+	expect(got.hop).toBe(UNKNOWN_HOP);
 	expect(got.active).toBe(3);
 });
 
 test("AnnounceOk round-trips a declared origin", async () => {
-	const msg = new AnnounceOk(OriginSchema.parse(42n), 1);
+	const msg = new AnnounceOk(HopSchema.parse(42n), 1);
 	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
 	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
-	expect(got.origin).toBe(OriginSchema.parse(42n));
+	expect(got.hop).toBe(HopSchema.parse(42n));
 	expect(got.active).toBe(1);
 });
 
 test("a hop chain that revisits a hop is refused in both directions", async () => {
-	const four = OriginSchema.parse(4n);
-	const eight = OriginSchema.parse(8n);
+	const four = HopSchema.parse(4n);
+	const eight = HopSchema.parse(8n);
 	const looped: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [four, eight, four] };
 
 	// Outbound: refused before it reaches the wire. A receiver must close the session over
@@ -166,7 +166,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 	const legal: AnnounceBroadcast = {
 		status: "active",
 		suffix: Path.from("room"),
-		hops: [four, eight, OriginSchema.parse(9n)],
+		hops: [four, eight, HopSchema.parse(9n)],
 	};
 	const forged = await bytes((w) => encodeAnnounceBroadcast(w, legal, Version.DRAFT_06));
 	const nine = forged.lastIndexOf(9);
@@ -185,7 +185,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 
 	// Repeated unknowns are not a loop: 0 identifies nothing, so any number of hops may
 	// be unknown. A lite-03 announcement is nothing but these.
-	const unknown = OriginSchema.parse(0n);
+	const unknown = HopSchema.parse(0n);
 	const anonymous: AnnounceBroadcast = {
 		status: "active",
 		suffix: Path.from("room"),

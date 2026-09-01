@@ -11,7 +11,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use moq_relay::{Config, PublicConfig, Relay};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 2;
@@ -135,7 +135,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	// ...and a raw-QUIC subscriber (moql, the native path).
 	let raw_url: url::Url = format!("moql://127.0.0.1:{port}/uring").parse().expect("parse url");
 
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
 	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
@@ -150,7 +150,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	// Several subscribers of each flavor, spread over the steered workers.
 	let mut subscribers = Vec::new();
 	for url in [&wt_url, &raw_url, &wt_url, &raw_url] {
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 		let consumer = origin.consume();
 		let announced = consumer.announced();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
@@ -297,7 +297,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	// unauthorized session establishes and is then closed, so merely
 	// connecting proves nothing.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
 	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
@@ -308,7 +308,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
-	let subscriber_origin = moq_tokio::origin::spawn(Origin::random());
+	let subscriber_origin = moq_tokio::origin::spawn(Hop::random());
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;

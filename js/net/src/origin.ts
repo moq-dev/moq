@@ -733,9 +733,21 @@ export class Consumer {
 				const next = new Map<Path.Valid, object>();
 				// Remote first, so a local publish at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
+				// The most specific route covering `prefix` itself wins the root slot,
+				// matching request() resolution.
+				let rootLen = -1;
 				for (const [path, providers] of remote ?? []) {
+					if (!providers[0]) continue;
+					if (Path.hasPrefix(path, prefix)) {
+						// A route at or above `prefix` covers everything under it and
+						// presents at the root, mirroring Rust's prefix intersection.
+						if (path.length < rootLen) continue;
+						rootLen = path.length;
+						next.set(Path.empty(), providers[0]);
+						continue;
+					}
 					const suffix = Path.stripPrefix(prefix, path);
-					if (suffix !== null && providers[0]) next.set(suffix, providers[0]);
+					if (suffix !== null) next.set(suffix, providers[0]);
 				}
 				for (const [path, front] of local ?? []) {
 					const suffix = Path.stripPrefix(prefix, path);

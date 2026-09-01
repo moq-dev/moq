@@ -27,7 +27,7 @@ use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, frame, group, track};
 
-use super::subscription::{Position, Subscription, min_some};
+use super::subscription::{Position, Subscription, max_some, min_some};
 
 /// One spliced source: a track bounded to a half-open range of positions.
 #[derive(Clone)]
@@ -76,29 +76,22 @@ impl Segment {
 /// preferences intersected with a segment's bounds.
 fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -> Subscription {
 	// A segment's bounds and a subscription's are both half-open, so they intersect
-	// directly with no inclusive/exclusive conversion in between.
+	// directly with no inclusive/exclusive conversion in between. Both sides use the
+	// `_some` family: this is an intersection of two independent ranges, not an
+	// aggregate across subscribers, so an absent bound on either side is neutral rather
+	// than absorbing.
+	//
+	// For the start that means a takeover boundary becomes demand even for a live-edge
+	// subscriber, so the replacement resumes exactly where the dead route stopped and the
+	// splice loses nothing. The catch-up that buys is bounded by how far the boundary
+	// trails the replacement's live edge, which is failover max_age: a broadcast closes
+	// with its last source (there is no linger), so a takeover only happens between
+	// overlapping routes. A consumer that would rather skip even that much drops it
+	// downstream on its own max age budget, which is what `Duration::ZERO` means.
 	Subscription {
-		start: max_unbounded_start(prefs.start, start),
+		start: max_some(prefs.start, start),
 		end: min_some(prefs.end, end),
 		..prefs.clone()
-	}
-}
-
-/// The later of two optional start bounds, treating `None` as "the live edge" for the
-/// preference and "no lower bound" for the segment. Either way the other one wins.
-///
-/// A takeover boundary therefore becomes demand even for a live-edge subscriber, so the
-/// replacement resumes exactly where the dead route stopped and the splice loses nothing.
-/// The catch-up that buys is bounded by how far the boundary trails the replacement's live
-/// edge, which is failover max_age: a broadcast closes with its last source (there is no
-/// linger), so a takeover only happens between overlapping routes. A consumer that would
-/// rather skip even that much drops it downstream on its own max age budget, which is what
-/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) means.
-fn max_unbounded_start(prefs: Option<Position>, segment: Option<Position>) -> Option<Position> {
-	match (prefs, segment) {
-		(Some(a), Some(b)) => Some(a.max(b)),
-		(Some(a), None) | (None, Some(a)) => Some(a),
-		(None, None) => None,
 	}
 }
 

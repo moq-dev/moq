@@ -743,11 +743,7 @@ async fn serve_fetch(
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
 		let consumer = origin.consume();
-		consumer.routed("").await.ok_or(StatusCode::NOT_FOUND)?;
-		let broadcast = consumer
-			.request_broadcast("")
-			.await
-			.map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let group = match params.group {
 			// "latest" needs a live subscription to learn the newest sequence, since a
 			// fetch can only retrieve a sequence you already know. Once it's known, fetch

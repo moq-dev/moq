@@ -19,7 +19,7 @@ pub struct Client {
 	versions: Versions,
 	setup_path: Option<String>,
 	cost: Option<u64>,
-	peer_origin: Option<crate::Origin>,
+	peer_hop: Option<crate::Hop>,
 }
 
 impl Client {
@@ -109,7 +109,7 @@ impl Client {
 	/// extension, and moq-transport peers that don't negotiate the MoQ Cluster
 	/// extension (or predate it, on `moqt-16` and earlier).
 	/// Broadcasts received from such a peer are normally attributed to the reserved
-	/// origin 0 ("unknown"), which identifies nothing: it never proves continuity,
+	/// Hop ID 0 ("unknown"), which identifies nothing: it never proves continuity,
 	/// so their advertisements neither splice nor survive a restart in place. This
 	/// knob pins a real identity instead, exactly as if the peer had declared it:
 	///
@@ -121,8 +121,8 @@ impl Client {
 	///   no loop detection of its own.
 	///
 	/// An identity the peer does declare wins over this one.
-	pub fn with_peer_origin(mut self, origin: crate::Origin) -> Self {
-		self.peer_origin = Some(origin);
+	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+		self.peer_hop = Some(hop);
 		self
 	}
 
@@ -145,7 +145,7 @@ impl Client {
 			.subscribe
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
-		let publish = match self.peer_origin {
+		let publish = match self.peer_hop {
 			Some(peer) => publish.map(|origin| origin.excluding(peer)),
 			None => publish,
 		};
@@ -172,7 +172,7 @@ impl Client {
 				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
-				origin: None,
+				hop: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -184,7 +184,7 @@ impl Client {
 			setup_stream: None,
 			publish,
 			subscribe,
-			peer_origin: self.peer_origin,
+			peer_hop: self.peer_hop,
 			version,
 			our_setup,
 			peer_setup: None,
@@ -255,7 +255,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
+					peer_hop: self.peer_hop,
 					cost: self.cost,
 					version: ietf::Version::Draft19,
 					path: self.setup_path.clone(),
@@ -289,7 +289,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
+					peer_hop: self.peer_hop,
 					cost: self.cost,
 					version: ietf::Version::Draft18,
 					path: self.setup_path.clone(),
@@ -323,7 +323,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
+					peer_hop: self.peer_hop,
 					cost: self.cost,
 					version: ietf::Version::Draft17,
 					path: self.setup_path.clone(),
@@ -428,7 +428,7 @@ impl Client {
 					setup_stream: Some(stream),
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
+					peer_hop: self.peer_hop,
 					version: v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
@@ -464,7 +464,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
+					peer_hop: self.peer_hop,
 					cost: self.cost,
 					version: v,
 					path: None,
@@ -782,7 +782,7 @@ mod tests {
 			.with_protocol(crate::version::ALPN_LITE_05);
 
 		// A subscribe origin is what makes the client open an announce stream at all.
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let client = Client::new()
 			.with_versions([Version::Lite(lite::Version::Lite05)].into())
 			.with_subscriber(origin);

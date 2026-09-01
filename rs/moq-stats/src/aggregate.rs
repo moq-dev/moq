@@ -6,6 +6,7 @@
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 
@@ -179,6 +180,9 @@ enum Reader<V: Mergeable> {
 /// merged view).
 struct Node<V: Mergeable> {
 	reader: Reader<V>,
+	/// The announced path, relative to the announce cursor: what a re-resolve
+	/// after the reader ends requests again.
+	path: PathOwned,
 	last: Option<BTreeMap<String, V>>,
 }
 
@@ -228,8 +232,9 @@ impl<V: Mergeable> Merged<V> {
 		// Advance each node's reader, collapsing any backlog to its latest frame.
 		let config = &self.config;
 		let name = self.name.as_str();
+		let origin = &self.origin;
 		for node in self.nodes.values_mut() {
-			changed |= advance(node, config, name, waiter);
+			changed |= advance(node, origin, config, name, waiter);
 		}
 
 		if changed {
@@ -253,13 +258,29 @@ impl<V: Mergeable> Merged<V> {
 		}
 
 		if update.active {
-			let node = Node {
-				reader: Reader::Resolving(self.origin.request_broadcast(&path)),
-				last: None,
-			};
-			// A replacement (failover) drops the old value until the new
-			// subscription catches up.
-			self.nodes.insert(absolute, node).is_some_and(|old| old.last.is_some())
+			// A route update on a node already tracked (a reprice, or a takeover
+			// with different metadata) keeps the live reader: existing
+			// subscriptions survive a takeover, and the reader re-resolves through
+			// the current best route the moment it actually ends. Only an ended
+			// node re-arms here, since a fresh route is new evidence that a
+			// re-resolve could succeed.
+			match self.nodes.entry(absolute) {
+				Entry::Occupied(mut entry) => {
+					let node = entry.get_mut();
+					if matches!(node.reader, Reader::Ended) {
+						node.reader = Reader::Resolving(self.origin.request_broadcast(&node.path));
+					}
+					false
+				}
+				Entry::Vacant(entry) => {
+					entry.insert(Node {
+						reader: Reader::Resolving(self.origin.request_broadcast(&path)),
+						path,
+						last: None,
+					});
+					false
+				}
+			}
 		} else {
 			self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
 		}
@@ -283,11 +304,15 @@ impl<V: Mergeable> Merged<V> {
 /// whether that node's contribution to the merged view changed.
 fn advance<V: Mergeable>(
 	node: &mut Node<V>,
+	origin: &origin::Consumer,
 	config: &moq_json::snapshot::ConsumerConfig,
 	name: &str,
 	waiter: &Waiter,
 ) -> bool {
 	let mut changed = false;
+	// At most one re-resolve per call: a subscription that terminates
+	// synchronously twice in a row is done, not failing over.
+	let mut rearmed = false;
 	loop {
 		match &mut node.reader {
 			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
@@ -323,12 +348,24 @@ fn advance<V: Mergeable>(
 					node.last = Some(frame);
 					changed = true;
 				}
-				Poll::Ready(Ok(None)) => return terminate(node, changed),
-				Poll::Ready(Err(err)) => {
-					// One bad node must not tear down the whole merged view; drop
-					// just this node and keep folding the rest.
-					tracing::debug!(?err, name, "stats: node read error");
-					return terminate(node, changed);
+				// The subscription ended: the serving session died (a failover to
+				// an identical route delivers no announce update) or the track
+				// finished. Drop the last frame so a stale gauge stops pinning
+				// the sum, then re-resolve through the current best route; an
+				// authoritative refusal on the way ends the node instead.
+				Poll::Ready(result @ (Ok(None) | Err(_))) => {
+					if let Err(err) = result {
+						// One bad node must not tear down the whole merged view;
+						// re-resolve just this node and keep folding the rest.
+						tracing::debug!(?err, name, "stats: node read error");
+					}
+					changed |= node.last.take().is_some();
+					if rearmed {
+						node.reader = Reader::Ended;
+						return changed;
+					}
+					rearmed = true;
+					node.reader = Reader::Resolving(origin.request_broadcast(&node.path));
 				}
 				Poll::Pending => return changed,
 			},
@@ -337,21 +374,11 @@ fn advance<V: Mergeable>(
 	}
 }
 
-/// Retire a node whose reader terminated: drop its last frame so it stops
-/// contributing (a still-announced but unreadable node must not pin a stale
-/// gauge into the sum) and mark it ended so it lingers only until it
-/// unannounces. Returns whether the merged view changed.
-fn terminate<V: Mergeable>(node: &mut Node<V>, changed: bool) -> bool {
-	let had_value = node.last.take().is_some();
-	node.reader = Reader::Ended;
-	changed || had_value
-}
-
 #[cfg(test)]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {

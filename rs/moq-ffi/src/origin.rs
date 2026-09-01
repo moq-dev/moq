@@ -22,7 +22,7 @@ pub struct MoqOriginOptions {
 /// answers whatever is requested beneath it.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqRoute {
-	/// Origin ids of the relay hops the route traversed, oldest first.
+	/// Hop ids of the relay hops the route traversed, oldest first.
 	#[uniffi(default = [])]
 	pub hops: Vec<u64>,
 	/// Preference among routes covering the same prefix: lower wins. A publisher
@@ -49,7 +49,7 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
 		let mut out = moq_net::origin::Route::default().with_cost(route.cost);
 		for id in route.hops {
-			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			let origin = moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
 				.with_hop(origin)
 				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
@@ -121,30 +121,11 @@ struct AnnouncedBroadcast {
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// Watch the path's coverage so an Unroutable resolution waits for the route
-		// table to change instead of surfacing as a spurious terminal failure. The
-		// wait and the resolution are two steps, so the covering route can retract
-		// between them (failover churn), and a route can also cover the path while
-		// nothing serves it yet (an advertise-only announce racing its handler).
-		let scoped = self.origin.with_root(&self.path).ok_or(MoqError::Unauthorized)?;
-		let mut announced = scoped.announced();
-		loop {
-			if self.origin.routed(&self.path).await.is_none() {
-				return Err(MoqError::Closed);
-			}
-			match self.origin.request_broadcast(&self.path).await {
-				Ok(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone()))),
-				// Ride out the churn: retry once the coverage changes (the cursor
-				// replays the current coverage first, so at most one extra attempt
-				// runs before this genuinely blocks).
-				Err(moq_net::Error::Unroutable) => {
-					if announced.next().await.is_none() {
-						return Err(MoqError::Closed);
-					}
-				}
-				Err(err) => return Err(err.into()),
-			}
-		}
+		// `routed_broadcast` rides out the churn between a route covering the path
+		// and the path actually resolving (failover, an advertise-only announce
+		// racing its handler).
+		let broadcast = self.origin.routed_broadcast(&self.path).await?;
+		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone())))
 	}
 }
 
@@ -186,7 +167,7 @@ impl MoqOriginProducer {
 	}
 
 	fn from_options(options: MoqOriginOptions) -> Self {
-		let mut info = moq_net::origin::Info::new(moq_net::Origin::random());
+		let mut info = moq_net::origin::Info::new(moq_net::Hop::random());
 		if let Some(capacity) = options.cache_capacity_bytes {
 			let config = moq_net::cache::Config::default()
 				.with_capacity(capacity)
@@ -225,14 +206,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = spawn(moq_net::Origin::random().into());
+		let shared = spawn(moq_net::Hop::random().into());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| spawn(moq_net::Origin::random().into()))
+			.unwrap_or_else(|| spawn(moq_net::Hop::random().into()))
 	};
 	(resolve(publish), resolve(consume))
 }

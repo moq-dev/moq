@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as GroupProducer } from "../group.ts";
-import { type Origin, OriginSchema } from "../hop.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -514,9 +514,9 @@ test("closing the session ends the unsolicited announce loop", async () => {
  * not read ours either, so sending it the parameters would be a protocol violation.
  */
 test("an advertisement carries our hop id once the peer declared one", async () => {
-	const self: Origin = OriginSchema.parse(7n);
+	const self: Hop = HopSchema.parse(7n);
 
-	for (const peer of [OriginSchema.parse(9n), undefined]) {
+	for (const peer of [HopSchema.parse(9n), undefined]) {
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 		origin.publish(Path.from("mine"));

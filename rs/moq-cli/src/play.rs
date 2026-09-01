@@ -955,7 +955,7 @@ mod tests {
 	async fn subscribe_waits_for_the_announcement() {
 		tokio::time::pause();
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let consumer = origin.consume();
 
 		// Resolving straight away, which is what the media task used to do.

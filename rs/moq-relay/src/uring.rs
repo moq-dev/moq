@@ -680,7 +680,7 @@ async fn serve_connection(
 		}
 	};
 
-	let peer_origin = request.peer_origin();
+	let peer_hop = request.peer_hop();
 	let mut request = request.with_stats(grants.stats);
 	if let Some(subscribe) = grants.subscribe {
 		request = request.with_publisher(&subscribe);
@@ -689,7 +689,7 @@ async fn serve_connection(
 		request = request.with_subscriber(publish);
 	}
 	let session = request.ok().await?;
-	let node_connection = peer_origin.map(|origin| serve.cluster.nodes.connect_inbound(id, origin));
+	let node_connection = peer_hop.map(|origin| serve.cluster.nodes.connect_inbound(id, origin));
 
 	tracing::info!(id, version = %session.version(), transport = %moq_tokio::Transport::Quic, "negotiated");
 

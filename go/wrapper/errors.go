@@ -60,8 +60,10 @@ var (
 	ErrForbidden = ffi.ErrMoqErrorForbidden
 	// ErrNotFound is returned when the requested track or group is not available.
 	ErrNotFound = ffi.ErrMoqErrorNotFound
-	// ErrUnsupported is returned when the requested operation is not supported.
+	// ErrUnsupported is returned when the requested operation is not supported by this build or peer, however it is asked for.
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
+	// ErrAlreadyCommitted is returned when a track already reading in one group order is asked for the other; subscribe again for a second cursor.
+	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 )

@@ -108,13 +108,13 @@ impl Version {
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the Exclude Hop field: the subscriber's own
-	/// origin id, which the publisher uses to skip announces whose hop chain already
+	/// Hop ID, which the publisher uses to skip announces whose hop chain already
 	/// passed through the subscriber. Present in lite-04 and lite-05 only.
 	///
 	/// The receiver's own reflected-announce check drops those announces anyway (and
 	/// catches loops of any length, not just the two-hop case), so lite-06 drops the
 	/// field and keeps the check. Lite-06 also declares the same identity session-wide
-	/// in the SETUP `Origin` parameter, which filters announcements and subscriptions
+	/// in the SETUP `Hop` parameter, which filters announcements and subscriptions
 	/// alike rather than one announce stream.
 	///
 	/// Unlike the gates above, this lists the versions that *have* the field: it was

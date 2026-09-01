@@ -1,3 +1,20 @@
+/// Renders an error and its `source()` chain into a single message.
+///
+/// Dependency errors are stored as messages so their crates stay out of this crate's public
+/// API. Several of them keep the actionable half in `source()` and nothing but a category in
+/// `Display`, so a plain `to_string()` would drop the only detail worth reporting.
+pub(crate) fn message(err: impl std::error::Error) -> String {
+	use std::fmt::Write;
+
+	let mut out = err.to_string();
+	let mut source = err.source();
+	while let Some(err) = source {
+		let _ = write!(out, ": {err}");
+		source = err.source();
+	}
+	out
+}
+
 /// Errors from moq-mux operations.
 ///
 /// Most variants are delegations to underlying layers: [`moq_net::Error`] for
@@ -93,7 +110,7 @@ pub enum Error {
 
 	/// URL parse error.
 	#[error("url: {0}")]
-	Url(#[from] url::ParseError),
+	Url(String),
 
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
@@ -148,6 +165,17 @@ pub enum Error {
 		duration_max: std::time::Duration,
 	},
 
+	/// [`timeline::Producer::finish`](crate::timeline::Producer::finish) was called before its
+	/// deferred [`timeline::Segmenter`](crate::timeline::Segmenter) completed and every record
+	/// was committed.
+	#[error("finish and commit every deferred timeline record before closing the Producer")]
+	TimelineDeferredPending,
+
+	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a pending record that
+	/// its [`timeline::Deferred`](crate::timeline::Deferred) did not yield.
+	#[error("timeline segment {0} was not yielded for deferred publication")]
+	TimelineDeferredRecord(u64),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
@@ -195,6 +223,13 @@ impl From<anyhow::Error> for Error {
 impl From<mp4_atom::Error> for Error {
 	fn from(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
+	}
+}
+
+// Flattened to its message so `url` stays out of this crate's public API.
+impl From<url::ParseError> for Error {
+	fn from(err: url::ParseError) -> Self {
+		Error::Url(message(err))
 	}
 }
 

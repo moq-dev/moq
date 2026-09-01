@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, SessionError, bandwidth,
+	Error, Hop, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 };
@@ -71,8 +71,8 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_origin`.
-	pub peer_origin: Option<Origin>,
+	/// declare one itself. See `Client::with_peer_hop`.
+	pub peer_hop: Option<Hop>,
 
 	/// The version of the protocol to use.
 	pub version: Version,
@@ -102,7 +102,7 @@ where
 		setup_stream,
 		publish,
 		subscribe,
-		peer_origin,
+		peer_hop,
 		version,
 		mut our_setup,
 		peer_setup,
@@ -120,18 +120,18 @@ where
 		_ => Some(recv_bw),
 	};
 
-	// Declare our origin (hop) id in SETUP so the peer can serve our
-	// subscriptions from a route that does not flow through us. Taken from the
-	// caller's real handles before the empty-half defaulting below, since those
-	// placeholders carry throwaway ids that never appear in a hop chain. The
-	// publish identity is what we stamp onto forwarded announcements, so it
-	// wins when both halves are wired (they share it in practice).
-	if our_setup.origin.is_none() {
-		our_setup.origin = publish
+	// Declare our Hop ID in SETUP so the peer can serve our subscriptions from a
+	// route that does not flow through us. Taken from the caller's real handles
+	// before the empty-half defaulting below, since those placeholders carry
+	// throwaway ids that never appear in a hop chain. The publish identity is what
+	// we stamp onto forwarded announcements, so it wins when both halves are wired
+	// (they share it in practice).
+	if our_setup.hop.is_none() {
+		our_setup.hop = publish
 			.as_deref()
 			.or(subscribe.as_deref())
 			.copied()
-			.filter(|origin| origin.id() != 0);
+			.filter(|hop| hop.id() != 0);
 	}
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
@@ -139,8 +139,8 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
-	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
+	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -172,7 +172,7 @@ where
 		version,
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
-		peer_origin,
+		peer_hop,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -180,7 +180,7 @@ where
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
-		peer_origin,
+		peer_hop,
 		// Local policy for what pulling from this peer costs. Set only when we
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.

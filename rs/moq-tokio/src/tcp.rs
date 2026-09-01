@@ -90,12 +90,12 @@ pub enum Error {
 	MissingPort,
 
 	/// The qmux handshake failed while dialing.
-	#[error("qmux connect failed")]
-	Connect(#[source] qmux::Error),
+	#[error("qmux connect failed: {0}")]
+	Connect(String),
 
 	/// The qmux handshake failed while accepting.
-	#[error("qmux accept failed")]
-	Accept(#[source] qmux::Error),
+	#[error("qmux accept failed: {0}")]
+	Accept(String),
 
 	/// DNS resolved the host to no addresses at all.
 	#[error("no addresses resolved")]
@@ -161,7 +161,7 @@ async fn connect_addrs(
 				.protocols(protocols.iter().map(String::as_str))
 				.connect(addr)
 				.await
-				.map_err(Error::Connect)
+				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
 	.await
@@ -234,7 +234,7 @@ impl Listener {
 			.protocols(self.protocols.iter().map(String::as_str))
 			.accept(stream)
 			.await
-			.map_err(Error::Accept);
+			.map_err(|err| Error::Accept(crate::error::message(err)));
 		Some(session)
 	}
 

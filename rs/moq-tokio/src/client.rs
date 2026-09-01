@@ -1,9 +1,53 @@
+//! Dialing peers: the [`Client`] and the [`Config`] it is built from.
+//!
+//! [`Config`] pairs the dial half of an endpoint ([`crate::connect::Config`]) with the
+//! QUIC settings ([`crate::quic::Config`]) a binary shares with its accept half. The
+//! accept side is [`crate::server`].
+
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 use crate::QuicBackend;
 use crate::{Addrs, Backoff, Connection, Error, GoawayConfig};
 #[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 use std::future::Future;
 use url::Url;
+
+/// Everything a [`Client`] is built from.
+///
+/// Distinct from [`crate::connect::Config`], which is only the dial half of an endpoint:
+/// this pairs that half with the [`quic::Config`](crate::quic::Config) a binary shares
+/// between dialing and listening, because a `Client` needs both and neither owns the
+/// other. Grouping them here is what lets a future knob land as a field rather than as
+/// another [`Client::new`] parameter.
+///
+/// Most callers want the [`crate::connect::Config::init`] shorthand instead.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// The dial side of the endpoint: where to connect and how to be trusted.
+	pub connect: crate::connect::Config,
+
+	/// QUIC socket and transport settings, shared with [`crate::Server`].
+	pub quic: crate::quic::Config,
+}
+
+impl Config {
+	/// Set the dial side, returning `self` for chaining.
+	pub fn with_connect(mut self, connect: crate::connect::Config) -> Self {
+		self.connect = connect;
+		self
+	}
+
+	/// Set the QUIC settings, returning `self` for chaining.
+	pub fn with_quic(mut self, quic: crate::quic::Config) -> Self {
+		self.quic = quic;
+		self
+	}
+
+	/// Build the [`Client`] this config describes.
+	pub fn init(self) -> crate::Result<Client> {
+		Client::new(self)
+	}
+}
 
 /// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
 ///
@@ -72,7 +116,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub fn new(_config: crate::connect::Config, _quic: crate::quic::Config) -> crate::Result<Self> {
+	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
@@ -88,7 +132,11 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub fn new(config: crate::connect::Config, quic: crate::quic::Config) -> crate::Result<Self> {
+	pub fn new(config: Config) -> crate::Result<Self> {
+		let Config {
+			connect: config, quic, ..
+		} = config;
+
 		// Refuse here rather than in `init`, so a caller that skipped its own check
 		// can't reach a dial that quietly ignored half of what it was given.
 		let mut deprecated = config.deprecated();
@@ -223,9 +271,9 @@ impl Client {
 	}
 
 	/// Assign an origin (hop) id to the peers this client dials, used whenever a
-	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_origin`].
-	pub fn with_peer_origin(mut self, origin: moq_net::Origin) -> Self {
-		self.moq = self.moq.with_peer_origin(origin);
+	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_hop`].
+	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+		self.moq = self.moq.with_peer_hop(hop);
 		self
 	}
 
@@ -826,7 +874,7 @@ mod tests {
 	#[test]
 	fn building_a_client_refuses_a_released_spelling() {
 		let config = Cli::config_from(["test", "--client-connect", "https://relay.example.com/anon"]);
-		let Err(err) = crate::Client::new(config, crate::quic::Config::default()) else {
+		let Err(err) = crate::client::Config::default().with_connect(config).init() else {
 			panic!("building a client must refuse a released spelling");
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");

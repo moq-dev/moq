@@ -127,20 +127,20 @@ pub enum Error {
 	NoDnsEntries,
 
 	/// The insecure `http://` bootstrap couldn't fetch `/certificate.sha256`.
-	#[error("failed to fetch fingerprint")]
-	FetchFingerprint(#[source] reqwest::Error),
+	#[error("failed to fetch fingerprint: {0}")]
+	FetchFingerprint(String),
 
 	/// The `/certificate.sha256` fetch returned a non-success status.
-	#[error("fingerprint request failed")]
-	FingerprintStatus(#[source] reqwest::Error),
+	#[error("fingerprint request failed with status {0}")]
+	FingerprintStatus(u16),
 
 	/// The fingerprint response body couldn't be read.
-	#[error("failed to read fingerprint")]
-	ReadFingerprint(#[source] reqwest::Error),
+	#[error("failed to read fingerprint: {0}")]
+	ReadFingerprint(String),
 
 	/// The fetched fingerprint wasn't valid hex.
-	#[error("invalid fingerprint")]
-	InvalidFingerprint(#[from] hex::FromHexError),
+	#[error("invalid fingerprint: {0}")]
+	InvalidFingerprint(String),
 
 	/// The URL scheme isn't one this backend can dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
@@ -171,8 +171,8 @@ pub enum Error {
 	MissingServerName,
 
 	/// The client's SNI hostname didn't form a valid URL.
-	#[error("failed to construct URL from server name")]
-	BuildUrl(#[source] url::ParseError),
+	#[error("failed to construct URL from server name: {0}")]
+	BuildUrl(String),
 
 	/// The configured QUIC-LB nonce is too short to be unguessable.
 	#[error("quic_lb_nonce must be at least 4")]
@@ -192,36 +192,44 @@ pub enum Error {
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
 	/// The rustls crypto provider offers no cipher suite usable for QUIC initial packets.
-	#[error(transparent)]
-	NoInitialCipherSuite(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
+	#[error("no cipher suite available for QUIC initial packets")]
+	NoInitialCipherSuite,
 
 	/// Quinn refused to start the connection, before any packet was sent.
-	#[error(transparent)]
-	Connect(#[from] quinn::ConnectError),
+	#[error("{0}")]
+	Connect(String),
 
 	/// The QUIC connection failed or was closed by the peer.
-	#[error(transparent)]
-	Connection(#[from] quinn::ConnectionError),
+	#[error("{0}")]
+	Connection(String),
 
 	/// The WebTransport client handshake failed.
-	#[error(transparent)]
-	Client(#[from] web_transport_quinn::ClientError),
+	#[error("{message}")]
+	Client {
+		/// What the handshake reported.
+		message: String,
+		/// The HTTP status the server answered the CONNECT with, when it answered with one.
+		///
+		/// Read at conversion time rather than kept as a `web-transport-quinn` error, so the
+		/// classification survives without that crate appearing in this crate's public API.
+		status: Option<u16>,
+	},
 
 	/// The server answered the WebTransport CONNECT with a rejection status.
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
 	/// The WebTransport server handshake failed while responding.
-	#[error(transparent)]
-	Server(#[from] web_transport_quinn::ServerError),
+	#[error("{0}")]
+	Server(String),
 
 	/// The QUIC handshake didn't complete for an incoming connection.
-	#[error("failed to establish QUIC connection")]
-	Establish(#[source] quinn::ConnectionError),
+	#[error("failed to establish QUIC connection: {0}")]
+	Establish(String),
 
 	/// The client never sent a usable WebTransport CONNECT request.
-	#[error("failed to receive WebTransport request")]
-	RecvRequest(#[source] web_transport_quinn::ServerError),
+	#[error("failed to receive WebTransport request: {0}")]
+	RecvRequest(String),
 
 	/// The TLS configuration or certificates couldn't be loaded.
 	#[error(transparent)]
@@ -245,6 +253,28 @@ impl crate::failover::Aggregate for Error {
 		match error {
 			Some(error) => Self::DnsLookup(error),
 			None => Self::NoDnsEntries,
+		}
+	}
+}
+
+crate::error::from_message! {
+	quinn::ConnectError => Connect,
+	quinn::ConnectionError => Connection,
+	web_transport_quinn::ServerError => Server,
+	hex::FromHexError => InvalidFingerprint,
+}
+
+impl From<quinn::crypto::rustls::NoInitialCipherSuite> for Error {
+	fn from(_: quinn::crypto::rustls::NoInitialCipherSuite) -> Self {
+		Self::NoInitialCipherSuite
+	}
+}
+
+impl From<web_transport_quinn::ClientError> for Error {
+	fn from(err: web_transport_quinn::ClientError) -> Self {
+		Self::Client {
+			status: client_status(&err),
+			message: crate::error::message(err),
 		}
 	}
 }
@@ -336,11 +366,14 @@ impl QuinnClient {
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
-					.map_err(Error::FetchFingerprint)?
-					.error_for_status()
-					.map_err(Error::FingerprintStatus)?;
+					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
+				let status = resp.status().as_u16();
+				let resp = resp.error_for_status().map_err(|_| Error::FingerprintStatus(status))?;
 
-				let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
+				let fingerprint = resp
+					.text()
+					.await
+					.map_err(|err| Error::ReadFingerprint(crate::error::message(err)))?;
 				let fingerprint = hex::decode(fingerprint.trim())?;
 
 				let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
@@ -406,7 +439,9 @@ impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
-			Self::Client(err) => classify_client_error(err),
+			Self::Client {
+				status: Some(status), ..
+			} => crate::ConnectError::from_status_u16(*status),
 			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
@@ -418,10 +453,8 @@ impl Error {
 	/// WebTransport CONNECT response. See [`crate::Error::status`].
 	pub(crate) fn status(&self) -> Option<u16> {
 		match self {
-			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
-				err.status().map(|status| status.as_u16())
-			}
-			Self::Client(err) => client_status(err),
+			Self::FingerprintStatus(status) => Some(*status),
+			Self::Client { status, .. } => *status,
 			// Every raced address has to have answered, and answered with something not worth
 			// repeating, before the set counts as settled: one address refusing says nothing about
 			// the others, which may simply have been unroutable.
@@ -441,21 +474,16 @@ impl Error {
 }
 
 fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
-	if let Some(err) = classify_client_error(&err) {
-		return err.into();
+	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+		Some(rejected) => rejected.into(),
+		None => err.into(),
 	}
-
-	err.into()
-}
-
-fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
-	client_status(err).and_then(crate::ConnectError::from_status_u16)
 }
 
 /// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
 /// all (as opposed to the connection failing underneath the request).
 ///
-/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// Read once, when the error is converted: [`Error::connect_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
 /// the status. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
@@ -635,7 +663,7 @@ pub(crate) async fn accept(
 	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
 
 	// Wait for the QUIC connection to be established.
-	let conn = conn.await.map_err(Error::Establish)?;
+	let conn = conn.await.map_err(|err| Error::Establish(crate::error::message(err)))?;
 
 	let span = tracing::Span::current();
 	span.record("id", conn.stable_id()); // TODO can we get this earlier?
@@ -647,7 +675,7 @@ pub(crate) async fn accept(
 			// the response consumes it.
 			let request = web_transport_quinn::Request::accept(conn)
 				.await
-				.map_err(Error::RecvRequest)?;
+				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
 			let identity = crate::tls::PeerIdentity::from_any(request.conn().peer_identity());
 
@@ -660,7 +688,10 @@ pub(crate) async fn accept(
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
 			}
-			let session = request.respond(response).await.map_err(Error::Server)?;
+			let session = request
+				.respond(response)
+				.await
+				.map_err(|err| Error::Server(crate::error::message(err)))?;
 			Ok((session, url, identity))
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
@@ -751,11 +782,10 @@ mod tests {
 	use super::*;
 
 	fn connect_rejected(status: u16) -> Error {
-		Error::Client(web_transport_quinn::ClientError::HttpError(
-			web_transport_quinn::ConnectError::ErrorStatus(
-				web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
-			),
+		web_transport_quinn::ClientError::HttpError(web_transport_quinn::ConnectError::ErrorStatus(
+			web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
 		))
+		.into()
 	}
 
 	/// A CONNECT the relay answered carries its status through to the caller, so a wrong path or an

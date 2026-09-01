@@ -338,15 +338,20 @@ pub struct MoqSide {
 	#[usage(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
-	/// Fix this process's origin id instead of minting a fresh random one.
+	/// Fix this process's Hop ID instead of minting a fresh random one.
 	///
-	/// The origin id is the first hop of every announcement this process
+	/// The Hop ID is the first hop of every announcement this process
 	/// publishes, and relays treat it as the broadcast's content identity:
 	/// redundant publishers of the same broadcast share an id so relays fail
 	/// over between them at a group boundary. Leave unset outside a redundant
 	/// (1+1) chain; the default fresh id per run is what makes a restarted
 	/// publisher look like new content instead of silently splicing.
-	#[usage(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
+	#[usage(long, env = "MOQ_HOP", help_heading = "MoQ")]
+	pub hop: Option<u64>,
+
+	/// The released spelling of [`Self::hop`], kept in the parser only so a
+	/// process that still passes it is told what to pass instead.
+	#[usage(name = "origin", long = "origin", env = "MOQ_ORIGIN", hide = true)]
 	pub origin: Option<u64>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
@@ -379,16 +384,19 @@ impl MoqSide {
 		let mut found = self.client.deprecated();
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
+		if self.origin.is_some() {
+			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
+		}
 		found
 	}
 
-	/// Mint the origin all broadcasts route through: the pinned `--origin` id
-	/// when set, otherwise fresh and random.
+	/// Mint the origin all broadcasts route through, identified by the pinned
+	/// `--hop` id when set and a fresh random one otherwise.
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
 		use anyhow::Context;
-		Ok(moq_tokio::origin::spawn(match self.origin {
-			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
-			None => moq_net::Origin::random(),
+		Ok(moq_tokio::origin::spawn(match self.hop {
+			Some(id) => moq_net::Hop::new(id).with_context(|| format!("invalid --hop {id}"))?,
+			None => moq_net::Hop::random(),
 		}))
 	}
 
@@ -475,8 +483,8 @@ impl MoqSide {
 	/// of the resolved side: every one of these flags has a `MOQ_*` variable, and a
 	/// shell that exports one for the publishing it usually does has not asked this
 	/// verb for anything. A call site that picked the wrong view would read correctly
-	/// and be wrong, so there is only one view to pick. `--origin` is in the list for
-	/// the same reason it used to be out of it -- an ambient `MOQ_ORIGIN` no longer
+	/// and be wrong, so there is only one view to pick. `--hop` is in the list for
+	/// the same reason it used to be out of it -- an ambient `MOQ_HOP` no longer
 	/// reaches here, so a typed one can be refused like the rest.
 	fn reject(&self, command: &str) -> anyhow::Result<()> {
 		#[cfg(feature = "cluster-lan")]
@@ -493,7 +501,7 @@ impl MoqSide {
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
-			("--origin", self.origin.is_some()),
+			("--hop", self.hop.is_some()),
 		];
 		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
@@ -847,6 +855,33 @@ mod tests {
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
+	}
+
+	/// `moq-cli`'s own rename rides the same refusal as the flags it flattens from
+	/// `moq-tokio`, and lands in the same message.
+	///
+	/// Both halves matter: `--origin` must not silently pin a Hop ID onto the field
+	/// `--hop` now owns, and the migration has to name the environment variable too,
+	/// since a deployment that sets `MOQ_ORIGIN` never typed the flag.
+	#[test]
+	fn the_released_origin_spelling_is_refused_with_a_migration() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--origin",
+			"42",
+			"--connect",
+			"http://relay/anon",
+			"export",
+			"ts",
+		]) else {
+			panic!("--origin must not start a run");
+		};
+
+		let reported = err.to_string();
+		assert!(
+			reported.contains("--origin / MOQ_ORIGIN -> --hop / MOQ_HOP"),
+			"missing the migration from {reported}"
+		);
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.

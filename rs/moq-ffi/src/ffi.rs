@@ -78,7 +78,7 @@ where
 	match task.await {
 		Ok(result) => result.map_err(Into::into),
 		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-		Err(e) => Err(MoqError::Task(e)),
+		Err(e) => Err(e.into()),
 	}
 }
 
@@ -166,7 +166,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		match handle.await {
 			Ok(result) => result,
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-			Err(e) => Err(MoqError::Task(e)),
+			Err(e) => Err(e.into()),
 		}
 	}
 

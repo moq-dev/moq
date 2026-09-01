@@ -223,7 +223,15 @@ impl Position {
 	}
 }
 
-/// The lower of two optional bounds, treating `None` as unbounded.
+// Combining two optional bounds comes in two families, and they disagree on what `None`
+// means. `_some` treats it as the neutral element (the other side wins), for intersecting
+// two ranges that each restrict independently. `_floored` / `_unbounded` treat it as
+// absorbing (the result is `None` too), for aggregating across subscribers, where one
+// subscriber asking for everything makes the aggregate everything. Picking the wrong
+// family silently narrows or widens what the publisher sends, so the suffix, not the
+// `min`/`max`, is the part to read.
+
+/// The lower of two optional bounds, `None` neutral. Pairs with [`max_some`].
 pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -232,9 +240,18 @@ pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
-/// The lower of two optional floors, treating `None` as no floor (and therefore
-/// absorbing). The mirror of [`max_unbounded`]: both bounds only ever *restrict*, so a
-/// subscriber without one keeps the aggregate unrestricted.
+/// The higher of two optional bounds, `None` neutral. Pairs with [`min_some`].
+pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.max(b)),
+		(Some(a), None) | (None, Some(a)) => Some(a),
+		(None, None) => None,
+	}
+}
+
+/// The lower of two optional floors, `None` absorbing (no floor). The mirror of
+/// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
+/// the aggregate unrestricted.
 pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -242,8 +259,7 @@ pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
-/// The higher of two optional bounds, treating `None` as unbounded (and therefore
-/// absorbing).
+/// The higher of two optional bounds, `None` absorbing (unbounded).
 pub(super) fn max_unbounded<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),

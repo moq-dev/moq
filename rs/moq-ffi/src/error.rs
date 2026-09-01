@@ -24,22 +24,22 @@ pub enum MoqError {
 	#[error(transparent)]
 	Video(#[from] moq_video::Error),
 
-	#[error(transparent)]
-	Url(#[from] url::ParseError),
+	#[error("url: {0}")]
+	Url(String),
 
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
 
-	#[error(transparent)]
-	LogLevel(#[from] tracing::metadata::ParseLevelError),
+	#[error("log level: {0}")]
+	LogLevel(String),
 
 	// Only the native path spawns onto a runtime, so only it can fail to join.
 	#[cfg(not(target_arch = "wasm32"))]
-	#[error(transparent)]
-	Task(#[from] tokio::task::JoinError),
+	#[error("task: {0}")]
+	Task(String),
 
 	#[error("json: {0}")]
-	Json(#[from] serde_json::Error),
+	Json(String),
 
 	#[error("cancelled")]
 	Cancelled,
@@ -73,8 +73,22 @@ pub enum MoqError {
 	NotFound,
 
 	/// The requested operation is not supported.
+	///
+	/// A statement about this build or this peer, not about the call: the feature is
+	/// unavailable however the caller asks for it. Caller misuse gets its own error, so
+	/// that a binding can tell "MoQ can't do this here" from "you held it wrong".
 	#[error("unsupported")]
 	Unsupported,
+
+	/// This track already committed to the other delivery order.
+	///
+	/// A track is read in arrival order or in sequence order, never both, and the first
+	/// group read picks which. Reaching for the other one afterwards is this error rather
+	/// than [`Self::Unsupported`]: both orders work fine here, the track just isn't
+	/// reading in the one you asked for. Read the track through a second consumer if you
+	/// genuinely need both.
+	#[error("already committed to the other delivery order")]
+	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
 	#[error("invalid route: {0}")]
@@ -87,4 +101,29 @@ pub enum MoqError {
 
 	#[error("log: {0}")]
 	Log(String),
+}
+
+// Dependency errors are flattened to their message so their crates stay out of this crate's
+// public API.
+macro_rules! from_message {
+	($($ty:ty => $variant:ident),* $(,)?) => {
+		$(
+			impl From<$ty> for MoqError {
+				fn from(err: $ty) -> Self {
+					Self::$variant(err.to_string())
+				}
+			}
+		)*
+	};
+}
+
+from_message! {
+	url::ParseError => Url,
+	tracing::metadata::ParseLevelError => LogLevel,
+	serde_json::Error => Json,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+from_message! {
+	tokio::task::JoinError => Task,
 }

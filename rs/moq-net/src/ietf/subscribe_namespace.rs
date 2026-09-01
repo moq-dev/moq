@@ -303,11 +303,8 @@ mod tests {
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
-		let hops = ids
-			.iter()
-			.map(|&id| crate::Origin::new(id).unwrap())
-			.collect::<Vec<_>>();
-		cluster::HopPath::new(crate::OriginList::try_from(hops).unwrap())
+		let hops = ids.iter().map(|&id| crate::Hop::new(id).unwrap()).collect::<Vec<_>>();
+		cluster::HopPath::new(crate::Hops::try_from(hops).unwrap())
 	}
 
 	/// The extended NAMESPACE appends a Parameters field carrying the path and cost;

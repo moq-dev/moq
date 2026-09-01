@@ -2,7 +2,7 @@ use crate::{broadcast, cache, stats, track};
 use kio::Pollable;
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, HashMap, HashSet},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	fmt,
 	sync::Arc,
 	sync::atomic::{AtomicU64, Ordering},
@@ -22,49 +22,40 @@ use crate::{
 	util::{TaskSet, Tasks},
 };
 
-/// A relay origin, identified by a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
 ///
-/// Local origins are built with [`Origin::new`] or [`Origin::random`], both of
-/// which guarantee a non-zero id so loop detection can work. Remote peers may
-/// still send `0`; it is legal on the wire but cannot be used for loop detection.
+/// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
+/// origin, and this is the id it stamps into a route's hop chain as an announcement
+/// passes through, so a receiver can spot its own id and reject a loop.
+///
+/// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
+/// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal
+/// on the wire but cannot be used for loop detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Origin {
+pub struct Hop {
 	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
 	id: u64,
 }
 
-/// Returned when a local origin id is zero or outside the 62-bit wire range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct InvalidOrigin;
-
-impl fmt::Display for InvalidOrigin {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "local origin id must be non-zero and below 2^62")
-	}
-}
-
-impl std::error::Error for InvalidOrigin {}
-
-impl Origin {
+impl Hop {
 	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
 	/// Also used for remote peers that choose the legal but loop-blind id 0.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Build an origin from a stable id.
+	/// Build a hop from a stable id.
 	///
 	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0, but local origins should not use it because
+	/// decode accepts remote id 0, but a local hop should not use it because
 	/// downstream peers cannot exclude it for loop detection.
-	pub fn new(id: u64) -> Result<Self, InvalidOrigin> {
+	pub fn new(id: u64) -> Result<Self, InvalidHop> {
 		if id == 0 || id >= 1u64 << 62 {
-			return Err(InvalidOrigin);
+			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
 	}
 
-	/// Generate a fresh origin with a random non-zero id. Use this for any
-	/// origin that does not need a stable identity across restarts.
+	/// Generate a fresh hop with a random non-zero id. Use this for any relay that
+	/// does not need a stable identity across restarts.
 	///
 	/// TEMPORARY: the wire format allows 62 bits, but older `@moq/lite` JS
 	/// clients decode `AnnounceInterest.exclude_hop` as a u53 (number) and
@@ -97,7 +88,7 @@ impl Origin {
 pub struct Info {
 	/// The origin's wire identity, appended to broadcast hop chains for loop
 	/// detection and shortest-path routing.
-	pub id: Origin,
+	pub id: Hop,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
@@ -134,7 +125,7 @@ impl Default for Info {
 	fn default() -> Self {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
-			id: Origin::UNKNOWN,
+			id: Hop::UNKNOWN,
 			pool,
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
@@ -144,7 +135,7 @@ impl Default for Info {
 
 impl Info {
 	/// Config for the given origin id with no byte target and the default idle expiry.
-	pub fn new(id: Origin) -> Self {
+	pub fn new(id: Hop) -> Self {
 		Self { id, ..Self::default() }
 	}
 
@@ -169,28 +160,28 @@ impl Info {
 	}
 }
 
-impl From<Origin> for Info {
+impl From<Hop> for Info {
 	/// Config for the given origin id with the defaults of [`Info::new`].
-	fn from(id: Origin) -> Self {
+	fn from(id: Hop) -> Self {
 		Self::new(id)
 	}
 }
 
-impl TryFrom<u64> for Origin {
-	type Error = InvalidOrigin;
+impl TryFrom<u64> for Hop {
+	type Error = InvalidHop;
 
 	fn try_from(id: u64) -> Result<Self, Self::Error> {
 		Self::new(id)
 	}
 }
 
-impl fmt::Display for Origin {
+impl fmt::Display for Hop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		self.id.fmt(f)
 	}
 }
 
-impl<V: Copy> Encode<V> for Origin
+impl<V: Copy> Encode<V> for Hop
 where
 	u64: Encode<V>,
 {
@@ -199,7 +190,7 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for Origin
+impl<V: Copy> Decode<V> for Hop
 where
 	u64: Decode<V>,
 {
@@ -212,27 +203,31 @@ where
 	}
 }
 
-/// Maximum number of origins (hops) an [`OriginList`] can hold.
+/// Maximum number of origins (hops) an [`Hops`] can hold.
 ///
 /// Caps pathological or loop-induced announcements at a reasonable cluster
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
 pub(crate) const MAX_HOPS: usize = 32;
 
-/// Bounded, loop-free list of [`Origin`] entries: the hop chain of a broadcast.
+/// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
-/// Guarantees `len() <= MAX_HOPS` and that no non-zero [`Origin`] appears twice. Both
+/// Guarantees `len() <= MAX_HOPS` and that no non-zero [`Hop`] appears twice. Both
 /// are wire rules, and both hold wherever a list exists rather than only where one was
 /// parsed, so a chain that a conforming receiver would reject cannot be built and sent.
-/// Construct via [`OriginList::new`] + [`OriginList::push`], or fall back to the
-/// fallible [`TryFrom<Vec<Origin>>`].
+/// Construct via [`Hops::new`] + [`Hops::push`], or fall back to the
+/// fallible [`TryFrom<Vec<Hop>>`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OriginList(Vec<Origin>);
+pub struct Hops(Vec<Hop>);
 
-/// Why an [`Origin`] cannot join an [`OriginList`].
+/// Why a [`Hop`] is not usable, on its own or as part of a [`Hops`] chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
+	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
+	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	Range,
+
 	/// The list is already at its hop-count cap, which a real path never reaches and a
 	/// loop does.
 	TooMany,
@@ -246,8 +241,9 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::TooMany => write!(f, "too many origins (max {MAX_HOPS})"),
-			Self::Duplicate => write!(f, "origin already in the hop chain"),
+			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
+			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
 	}
 }
@@ -258,30 +254,30 @@ impl From<InvalidHop> for DecodeError {
 	fn from(err: InvalidHop) -> Self {
 		match err {
 			InvalidHop::TooMany => DecodeError::BoundsExceeded,
-			InvalidHop::Duplicate => DecodeError::InvalidValue,
+			InvalidHop::Range | InvalidHop::Duplicate => DecodeError::InvalidValue,
 		}
 	}
 }
 
-impl OriginList {
+impl Hops {
 	/// Create an empty list.
 	pub fn new() -> Self {
 		Self(Vec::new())
 	}
 
-	/// Append an [`Origin`], rejecting anything a conforming receiver would.
+	/// Append an [`Hop`], rejecting anything a conforming receiver would.
 	///
 	/// Fails with [`InvalidHop::TooMany`] once the list is full, and with
 	/// [`InvalidHop::Duplicate`] for an id already in the chain, which is a loop. The
 	/// reserved id 0 identifies nothing, so it may repeat.
-	pub fn push(&mut self, origin: Origin) -> Result<(), InvalidHop> {
+	pub fn push(&mut self, hop: Hop) -> Result<(), InvalidHop> {
 		if self.0.len() >= MAX_HOPS {
 			return Err(InvalidHop::TooMany);
 		}
-		if origin != Origin::UNKNOWN && self.0.contains(&origin) {
+		if hop != Hop::UNKNOWN && self.0.contains(&hop) {
 			return Err(InvalidHop::Duplicate);
 		}
-		self.0.push(origin);
+		self.0.push(hop);
 		Ok(())
 	}
 
@@ -292,12 +288,12 @@ impl OriginList {
 	/// `replacement` twice, which is the loop [`Self::push`] refuses to build. A `target`
 	/// that is not present changes nothing and so cannot duplicate anything, and the slot
 	/// being overwritten is not a duplicate of itself.
-	pub fn replace_first(&mut self, target: Origin, replacement: Origin) -> Result<bool, InvalidHop> {
+	pub fn replace_first(&mut self, target: Hop, replacement: Hop) -> Result<bool, InvalidHop> {
 		let Some(index) = self.0.iter().position(|entry| *entry == target) else {
 			return Ok(false);
 		};
 
-		if replacement != Origin::UNKNOWN
+		if replacement != Hop::UNKNOWN
 			&& self
 				.0
 				.iter()
@@ -311,9 +307,9 @@ impl OriginList {
 		Ok(true)
 	}
 
-	/// Returns true if any entry matches `origin`.
-	pub fn contains(&self, origin: &Origin) -> bool {
-		self.0.contains(origin)
+	/// Returns true if any entry matches `hop`.
+	pub fn contains(&self, hop: &Hop) -> bool {
+		self.0.contains(hop)
 	}
 
 	/// Number of entries currently in the list (always `<= MAX_HOPS`).
@@ -327,26 +323,26 @@ impl OriginList {
 	}
 
 	/// Iterate over the entries in hop order (oldest first).
-	pub fn iter(&self) -> std::slice::Iter<'_, Origin> {
+	pub fn iter(&self) -> std::slice::Iter<'_, Hop> {
 		self.0.iter()
 	}
 
 	/// Borrow the entries as a slice.
-	pub fn as_slice(&self) -> &[Origin] {
+	pub fn as_slice(&self) -> &[Hop] {
 		&self.0
 	}
 }
 
-impl TryFrom<Vec<Origin>> for OriginList {
+impl TryFrom<Vec<Hop>> for Hops {
 	type Error = InvalidHop;
 
-	fn try_from(v: Vec<Origin>) -> Result<Self, Self::Error> {
+	fn try_from(v: Vec<Hop>) -> Result<Self, Self::Error> {
 		if v.len() > MAX_HOPS {
 			return Err(InvalidHop::TooMany);
 		}
 		// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
-		for (i, origin) in v.iter().enumerate() {
-			if *origin != Origin::UNKNOWN && v[i + 1..].contains(origin) {
+		for (i, hop) in v.iter().enumerate() {
+			if *hop != Hop::UNKNOWN && v[i + 1..].contains(hop) {
 				return Err(InvalidHop::Duplicate);
 			}
 		}
@@ -354,19 +350,19 @@ impl TryFrom<Vec<Origin>> for OriginList {
 	}
 }
 
-impl<'a> IntoIterator for &'a OriginList {
-	type Item = &'a Origin;
-	type IntoIter = std::slice::Iter<'a, Origin>;
+impl<'a> IntoIterator for &'a Hops {
+	type Item = &'a Hop;
+	type IntoIter = std::slice::Iter<'a, Hop>;
 
 	fn into_iter(self) -> Self::IntoIter {
 		self.iter()
 	}
 }
 
-impl<V: Copy> Encode<V> for OriginList
+impl<V: Copy> Encode<V> for Hops
 where
 	u64: Encode<V>,
-	Origin: Encode<V>,
+	Hop: Encode<V>,
 {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		(self.0.len() as u64).encode(w, version)?;
@@ -377,10 +373,10 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for OriginList
+impl<V: Copy> Decode<V> for Hops
 where
 	u64: Decode<V>,
-	Origin: Decode<V>,
+	Hop: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let count = u64::decode(r, version)? as usize;
@@ -391,7 +387,7 @@ where
 		// entering the model and being forwarded on to a receiver that must close on it.
 		let mut list = Self(Vec::with_capacity(count));
 		for _ in 0..count {
-			list.push(Origin::decode(r, version)?)?;
+			list.push(Hop::decode(r, version)?)?;
 		}
 		Ok(list)
 	}
@@ -544,9 +540,9 @@ impl std::fmt::Display for Prefix {
 #[non_exhaustive]
 pub struct Route {
 	/// The chain of origins the route has traversed, oldest first. Each relay
-	/// appends its own [`crate::Origin`] when forwarding; used for loop detection
+	/// appends its own [`crate::Hop`] when forwarding; used for loop detection
 	/// and as the selection tie-break.
-	pub hops: OriginList,
+	pub hops: Hops,
 
 	/// What pulling content via this route costs, accumulated per link: lower wins,
 	/// with ties broken by hop length, then a deterministic hash, and finally the
@@ -559,13 +555,13 @@ impl Route {
 	///
 	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
 	/// chain's length cap, or one already in it, which is a loop.
-	pub fn with_hop(mut self, origin: Origin) -> Result<Self, InvalidHop> {
-		self.hops.push(origin)?;
+	pub fn with_hop(mut self, hop: Hop) -> Result<Self, InvalidHop> {
+		self.hops.push(hop)?;
 		Ok(self)
 	}
 
 	/// Replace the hop chain.
-	pub fn with_hops(mut self, hops: OriginList) -> Self {
+	pub fn with_hops(mut self, hops: Hops) -> Self {
 		self.hops = hops;
 		self
 	}
@@ -611,7 +607,7 @@ struct OriginBroadcast {
 /// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
 /// the standard FNV-64 prime and should stay put. Mixing the path in spreads
 /// equal routes across different upstreams rather than funneling onto one.
-fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
+fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Hop>) -> u64 {
 	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -643,7 +639,7 @@ fn route_order(prefix: &Path, entry: &RouteEntry) -> (Cost, usize, u64, Reverse<
 }
 
 /// The `(hops, cost)` metadata an announce cursor delivers alongside a prefix.
-type RouteMeta = (OriginList, Cost);
+type RouteMeta = (Hops, Cost);
 
 /// One coalesced update queued for an `AnnounceConsumer`.
 ///
@@ -664,6 +660,11 @@ enum PendingUpdate {
 #[derive(Default)]
 struct OriginConsumerState {
 	pending: BTreeMap<PathOwned, PendingUpdate>,
+	/// Prefixes whose most recently delivered update was an announce. A pending
+	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
+	/// retraction cancels it entirely) or a metadata update on a route the
+	/// consumer already observed (a retraction must still be delivered).
+	delivered: BTreeSet<PathOwned>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
@@ -684,9 +685,12 @@ impl OriginConsumerState {
 
 	fn apply_unannounce(&mut self, path: PathOwned, last: RouteMeta) {
 		match self.pending.remove(&path) {
-			// Consumer has not seen the pending announce; drop both entirely.
-			Some(PendingUpdate::Announce(_)) => {}
-			None | Some(PendingUpdate::Unannounce(_)) => {
+			// The pending announce was never delivered and neither was any earlier
+			// one, so the pair cancels entirely.
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&path) => {}
+			// Either nothing is pending or the pending announce was a metadata
+			// update on a delivered route; the consumer still owes a retraction.
+			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Unannounce(_)) => {
 				self.pending.insert(path, PendingUpdate::Unannounce(last));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
@@ -701,11 +705,18 @@ impl OriginConsumerState {
 	fn take(&mut self) -> Option<AnnounceUpdate> {
 		let path = self.pending.keys().next()?.clone();
 		let (meta, active) = match self.pending.remove(&path).unwrap() {
-			PendingUpdate::Announce(meta) => (meta, true),
-			PendingUpdate::Unannounce(meta) => (meta, false),
+			PendingUpdate::Announce(meta) => {
+				self.delivered.insert(path.clone());
+				(meta, true)
+			}
+			PendingUpdate::Unannounce(meta) => {
+				self.delivered.remove(&path);
+				(meta, false)
+			}
 			PendingUpdate::UnannounceAnnounce { old, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
+				self.delivered.remove(&path);
 				self.pending.insert(path.clone(), PendingUpdate::Announce(new));
 				(old, false)
 			}
@@ -725,7 +736,7 @@ impl OriginConsumerState {
 struct RouteEntry {
 	id: u64,
 	prefix: PathOwned,
-	hops: OriginList,
+	hops: Hops,
 	cost: Cost,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a session). `None` for an advertise-only
@@ -765,7 +776,7 @@ struct TableCursor {
 	/// is visible where it intersects one of these, clamped to the intersection.
 	allowed: Vec<PathOwned>,
 	/// Skip routes whose hop chain contains this peer (control-plane split horizon).
-	exclude: Option<Origin>,
+	exclude: Option<Hop>,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
 	/// The last delivered best route per presented (absolute) prefix, for change
@@ -788,7 +799,7 @@ impl TableCursor {
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		match self.exclude {
-			Some(peer) if peer != Origin::UNKNOWN => !entry.hops.contains(&peer),
+			Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
 			_ => true,
 		}
 	}
@@ -989,7 +1000,7 @@ pub struct AnnounceUpdate {
 pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
-	info: Origin,
+	info: Hop,
 
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
@@ -1029,7 +1040,7 @@ pub struct Producer {
 }
 
 impl std::ops::Deref for Producer {
-	type Target = Origin;
+	type Target = Hop;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -1103,7 +1114,7 @@ impl Producer {
 	/// advertises no subscribe interest (its `allowed()` is empty, so the
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
-	pub(crate) fn empty(info: Origin) -> Self {
+	pub(crate) fn empty(info: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
@@ -2382,11 +2393,22 @@ impl OriginState {
 	/// Recompute the best visible route presenting at `presented` (absolute) for
 	/// one cursor and deliver the change, if any.
 	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned) {
-		let best = routes
+		// Mirror `best_server`: among entries presenting here, the most specific
+		// prefix wins outright, so the metadata a cursor advertises matches what
+		// a request through it actually resolves. Entries at shorter prefixes
+		// only present here when clamped to the cursor's scope.
+		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
 			.filter(|entry| cursor.presented(&entry.prefix.as_path()).contains(presented))
-			.min_by_key(|entry| route_order(&presented.as_path(), entry));
+			.collect();
+		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
+		let best = most.and_then(|most| {
+			candidates
+				.into_iter()
+				.filter(|entry| entry.prefix.len() == most)
+				.min_by_key(|entry| route_order(&presented.as_path(), entry))
+		});
 
 		let relative = presented
 			.strip_prefix(&cursor.root)
@@ -2449,13 +2471,13 @@ impl OriginState {
 	/// announcement shadows a broad served one: requests under it fall through to
 	/// the fallback handler instead of being routed around it. Among routes at the
 	/// winning prefix, the cheapest served one is picked by [`route_order`].
-	fn best_server(&self, path: &Path, exclude: Option<Origin>) -> Option<kio::Shared<ServeState>> {
+	fn best_server(&self, path: &Path, exclude: Option<Hop>) -> Option<kio::Shared<ServeState>> {
 		let candidates: Vec<&RouteEntry> = self
 			.routes
 			.iter()
 			.filter(|entry| path.has_prefix(&entry.prefix))
 			.filter(|entry| match exclude {
-				Some(peer) if peer != Origin::UNKNOWN => !entry.hops.contains(&peer),
+				Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
 				_ => true,
 			})
 			.collect();
@@ -2492,7 +2514,7 @@ struct PendingBroadcast {
 /// [`Consumer::announced`]. Drop this handle (and every clone) to reject the
 /// requests still waiting to be served.
 pub struct Dynamic {
-	info: Origin,
+	hop: Hop,
 	root: PathOwned,
 	state: kio::Shared<OriginState>,
 }
@@ -2505,7 +2527,7 @@ impl Clone for Dynamic {
 		self.state.lock().fallback.add_handler();
 
 		Self {
-			info: self.info,
+			hop: self.hop,
 			root: self.root.clone(),
 			state: self.state.clone(),
 		}
@@ -2513,15 +2535,15 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Origin, root: PathOwned, state: kio::Shared<OriginState>) -> Self {
+	fn new(hop: Hop, root: PathOwned, state: kio::Shared<OriginState>) -> Self {
 		state.lock().fallback.add_handler();
 
-		Self { info, root, state }
+		Self { hop, root, state }
 	}
 
-	/// The origin this handler belongs to.
-	pub fn info(&self) -> &Origin {
-		&self.info
+	/// The id of the origin this handler belongs to.
+	pub fn hop(&self) -> Hop {
+		self.hop
 	}
 
 	/// Poll for the next requested broadcast, without blocking.
@@ -2888,7 +2910,7 @@ impl Consume<track::Consumer> for track::Consumer {
 #[derive(Clone)]
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
-	info: Origin,
+	info: Hop,
 	nodes: OriginNodes,
 
 	// A prefix that is automatically stripped from all paths.
@@ -2906,11 +2928,11 @@ pub struct Consumer {
 	// Split horizon: routes whose hop chain contains this peer are invisible to
 	// `announced` and skipped by `request_broadcast`, so a peer is never served
 	// (or advertised) its own content back. `None` (the default) filters nothing.
-	exclude: Option<Origin>,
+	exclude: Option<Hop>,
 }
 
 impl std::ops::Deref for Consumer {
-	type Target = Origin;
+	type Target = Hop;
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
@@ -2919,7 +2941,7 @@ impl std::ops::Deref for Consumer {
 
 impl Consumer {
 	fn new(
-		info: Origin,
+		info: Hop,
 		root: PathOwned,
 		nodes: OriginNodes,
 		shared: kio::Shared<OriginState>,
@@ -2939,7 +2961,7 @@ impl Consumer {
 	/// chain contains `peer` are invisible and never resolved from, matching what
 	/// the announce loop advertises to them. Sessions apply this once they learn
 	/// the peer's origin id.
-	pub(crate) fn excluding(mut self, peer: Origin) -> Self {
+	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
 	}
@@ -3051,6 +3073,49 @@ impl Consumer {
 			let update = announced.next().await?;
 			if update.active && update.prefix.as_path() == path {
 				return Some(update.route);
+			}
+		}
+	}
+
+	/// Block until `path` resolves to a broadcast: [`Self::routed`], then
+	/// [`Self::request_broadcast`], retried when the two race.
+	///
+	/// The wait and the resolution are separate steps, so the covering route can
+	/// retract between them (failover churn), and a route can cover the path while
+	/// nothing serves it yet (an advertise-only announce racing its handler). This
+	/// rides out the churn by retrying whenever the path's coverage changes, which
+	/// is what makes it the right call for resolving a path right after
+	/// connecting. Returns [`Error::Unauthorized`] for a path outside this
+	/// consumer's scope, [`Error::Closed`] once the origin closes, and any other
+	/// resolution failure as-is.
+	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
+		let path = path.as_path();
+
+		// Watch the path's coverage for the retry wake: scoped so it only wakes
+		// for covering routes, untagged because this is a lookup, not egress
+		// announce forwarding.
+		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
+		// `scope` keeps narrower permissions intact: if the whole path is not
+		// reachable, no route can ever cover it, so bail rather than loop forever.
+		if !scoped.allowed().any(|allowed| path.has_prefix(allowed)) {
+			return Err(Error::Unauthorized);
+		}
+		let mut announced = scoped.untagged().announced();
+		loop {
+			if self.routed(&path).await.is_none() {
+				return Err(Error::Closed);
+			}
+			match self.request_broadcast(&path).await {
+				Ok(broadcast) => return Ok(broadcast),
+				// Ride out the churn: retry once the coverage changes (the cursor
+				// replays the current coverage first, so at most one extra attempt
+				// runs before this genuinely blocks).
+				Err(Error::Unroutable) => {
+					if announced.next().await.is_none() {
+						return Err(Error::Closed);
+					}
+				}
+				Err(err) => return Err(err),
 			}
 		}
 	}
@@ -3243,7 +3308,7 @@ impl AnnounceConsumer {
 		root: PathOwned,
 		allowed: Vec<PathOwned>,
 		stats: stats::Session,
-		exclude: Option<Origin>,
+		exclude: Option<Hop>,
 		shared: &kio::Shared<OriginState>,
 	) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -3428,7 +3493,7 @@ impl ProduceTest for Info {
 }
 
 #[cfg(test)]
-impl ProduceTest for Origin {
+impl ProduceTest for Hop {
 	fn produce(self) -> Producer {
 		Info::new(self).produce()
 	}
@@ -3439,12 +3504,12 @@ mod tests {
 	use super::*;
 	use futures::FutureExt;
 
-	fn origin(id: u64) -> Origin {
-		Origin::new(id).unwrap()
+	fn origin(id: u64) -> Hop {
+		Hop::new(id).unwrap()
 	}
 
-	fn hops(ids: &[u64]) -> OriginList {
-		let mut list = OriginList::new();
+	fn hops(ids: &[u64]) -> Hops {
+		let mut list = Hops::new();
 		for id in ids {
 			list.push(origin(*id)).unwrap();
 		}
@@ -3608,6 +3673,57 @@ mod tests {
 		announcement.update(Route::default().with_cost(9)).unwrap();
 		let route = announced.assert_next_active("room");
 		assert_eq!(route.cost, Cost::new(9));
+	}
+
+	#[tokio::test]
+	async fn retract_after_undelivered_reprice_still_delivered() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+
+		let announcement = producer.announce("room", Route::default()).unwrap();
+		announced.assert_next_active("room");
+
+		// Reprice, then retract before the consumer observes the reprice: the
+		// pending metadata update must not cancel the retraction the delivered
+		// announce still owes.
+		announcement.update(Route::default().with_cost(9)).unwrap();
+		drop(announcement);
+		announced.assert_next_ended("room");
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn scoped_cursor_advertises_most_specific_covering_route() {
+		let producer = origin(1).produce();
+		// Broad and cheap; narrow and expensive. Both clamp to a cursor rooted
+		// below them, and the narrow one is what a request there resolves.
+		let _broad = producer.announce("room", Route::default().with_cost(1)).unwrap();
+		let _narrow = producer.announce("room/alice", Route::default().with_cost(9)).unwrap();
+
+		let consumer = producer.consume().with_root("room/alice").unwrap();
+		let mut announced = consumer.announced();
+		let route = announced.assert_next_active("");
+		assert_eq!(route.cost, Cost::new(9));
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn routed_broadcast_resolves_once_announced() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		// Asking before anything is announced parks instead of failing Unroutable.
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		let _announcement = producer.announce("room/alice", Route::default()).unwrap();
+		let resolved = resolving
+			.now_or_never()
+			.expect("resolves once announced")
+			.expect("resolves");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		drop(broadcast);
 	}
 
 	#[tokio::test]

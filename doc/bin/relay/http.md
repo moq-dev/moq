@@ -153,7 +153,7 @@ session over one UDP socket, so it never calls `accept` and cannot exhaust it.
 Returns this relay's local view of cluster nodes. A node is included when it is
 visible through the `.internal/origins` discovery namespace or has an
 established outbound cluster connection. An inbound connection is attached
-only after its SETUP origin id maps to one unique node advertisement. Sessions
+only after its SETUP Hop ID maps to one unique node advertisement. Sessions
 without a unique match are omitted.
 
 ```json
@@ -161,7 +161,7 @@ without a unique match are omitted.
   "nodes": [
     {
       "node": "https://relay-b.example/",
-      "origin_id": "200",
+      "hop_id": "200",
       "announced": {
         "hops": ["200"],
         "hop_count": 1,
@@ -182,7 +182,7 @@ as the cluster stands, so it reads 0 through a relay already carrying the
 broadcast; `cold_cost` prices the same route with those discounts removed, which
 is what tells two warm relays apart. A node can be visible
 without a direct connection, directly connected without an advertisement, or
-both. Origin ids are decimal strings because the wire supports values larger
+both. Hop IDs are decimal strings because the wire supports values larger
 than JavaScript's precise integer range.
 
 A connection `id` is the same id the session's log lines carry in their
@@ -192,8 +192,8 @@ exactly one session. It is process-local and only lasts for that session, so
 don't persist it or compare it across relays.
 
 Inbound association is best-effort correlation, not authenticated node
-identity. The SETUP origin id is self-declared, and `/nodes` associates it only
-when one visible advertisement has the same origin id. Do not use this endpoint
+identity. The SETUP Hop ID is self-declared, and `/nodes` associates it only
+when one visible advertisement has the same Hop ID. Do not use this endpoint
 for authorization or other security decisions.
 
 ## See Also

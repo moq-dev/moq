@@ -46,9 +46,9 @@ pub mod announce {
 	};
 }
 
-// Origin identity and the `Consume` conversion trait aren't part of a role
+// Hop identity and the `Consume` conversion trait aren't part of a role
 // module; keep them flat at the crate root.
-pub use origin_impl::{Consume, InvalidHop, InvalidOrigin, Origin, OriginList};
+pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The per-route request queue handed to sessions by `origin::Producer::announce_served`.
 pub(crate) use origin_impl::RouteServer;

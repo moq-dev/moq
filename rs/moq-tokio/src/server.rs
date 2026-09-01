@@ -1,3 +1,9 @@
+//! Accepting peers: the [`Server`], its [`Request`]s, and the [`Config`] it is built from.
+//!
+//! [`Config`] pairs the accept half of an endpoint ([`crate::listen::Config`]) with the
+//! QUIC settings ([`crate::quic::Config`]) a binary shares with its dial half. The dial
+//! side is [`crate::client`].
+
 use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
@@ -27,7 +33,7 @@ use futures::stream::StreamExt;
 impl crate::listen::Config {
 	/// Build the [`Server`] this config describes, binding its listeners.
 	pub fn init(self, quic: crate::quic::Config) -> crate::Result<Server> {
-		Server::new(self, quic)
+		Config::default().with_listen(self).with_quic(quic).init()
 	}
 
 	/// Build a server with only the `tcp`/`unix` listeners, leaving the QUIC
@@ -42,7 +48,7 @@ impl crate::listen::Config {
 	/// Distinct from clearing [`bind`](crate::listen::Config::bind), which still
 	/// opens the default QUIC listener when nothing else is configured.
 	pub fn init_streams(self) -> crate::Result<Server> {
-		Server::build(self, crate::quic::Config::default(), Parts::Streams)
+		Server::build(Config::default().with_listen(self), Parts::Streams)
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
@@ -132,6 +138,44 @@ impl Parts {
 	}
 }
 
+/// Everything a [`Server`] is built from.
+///
+/// Distinct from [`crate::listen::Config`], which is only the accept half of an endpoint:
+/// this pairs that half with the [`quic::Config`](crate::quic::Config) a binary shares
+/// between listening and dialing, because a `Server` needs both and neither owns the
+/// other. Grouping them here is what lets a future knob land as a field rather than as
+/// another [`Server::new`] parameter. The mirror of [`crate::client::Config`].
+///
+/// Most callers want the [`crate::listen::Config::init`] shorthand instead.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// The accept side of the endpoint: what to listen on and how to be trusted.
+	pub listen: crate::listen::Config,
+
+	/// QUIC socket and transport settings, shared with [`crate::Client`].
+	pub quic: crate::quic::Config,
+}
+
+impl Config {
+	/// Set the accept side, returning `self` for chaining.
+	pub fn with_listen(mut self, listen: crate::listen::Config) -> Self {
+		self.listen = listen;
+		self
+	}
+
+	/// Set the QUIC settings, returning `self` for chaining.
+	pub fn with_quic(mut self, quic: crate::quic::Config) -> Self {
+		self.quic = quic;
+		self
+	}
+
+	/// Build the [`Server`] this config describes.
+	pub fn init(self) -> crate::Result<Server> {
+		Server::new(self)
+	}
+}
+
 /// Server for accepting MoQ connections.
 ///
 /// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP
@@ -160,12 +204,16 @@ impl Server {
 	///
 	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
 	/// [`listen`](Self::listen).
-	pub fn new(config: crate::listen::Config, quic: crate::quic::Config) -> crate::Result<Self> {
-		Self::build(config, quic, Parts::All)
+	pub fn new(config: Config) -> crate::Result<Self> {
+		Self::build(config, Parts::All)
 	}
 
 	/// [`Self::new`], for a caller that opens only some of the config's listeners.
-	pub(crate) fn build(config: crate::listen::Config, quic: crate::quic::Config, parts: Parts) -> crate::Result<Self> {
+	pub(crate) fn build(config: Config, parts: Parts) -> crate::Result<Self> {
+		let Config {
+			listen: config, quic, ..
+		} = config;
+
 		// Refuse here rather than in `init`, so a caller that skipped its own check
 		// can't reach a listener that quietly ignored half of what it was given.
 		let mut deprecated = config.deprecated();
@@ -1199,16 +1247,16 @@ impl Request {
 	}
 
 	/// Assign the identity this peer's routes are attributed to; see
-	/// [`moq_net::Request::with_peer_origin`]. Derive it from [`Self::peer_identity`],
+	/// [`moq_net::Request::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
-	pub fn with_peer_origin(self, origin: moq_net::Origin) -> Self {
+	pub fn with_peer_hop(self, hop: moq_net::Hop) -> Self {
 		let Request {
 			transport,
 			url,
 			identity,
 			kind,
 		} = self;
-		let kind = request_map!(kind, request => request.with_peer_origin(origin));
+		let kind = request_map!(kind, request => request.with_peer_hop(hop));
 		Request {
 			transport,
 			url,
@@ -1291,15 +1339,15 @@ impl Request {
 		request_ref!(self, r => r.role())
 	}
 
-	/// The origin identity the peer declared in its SETUP (moq-lite-05+).
+	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
 	///
 	/// A peer declares this when it attaches a publish or subscribe origin.
 	/// Older versions and peers without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_origin(&self) -> Option<moq_net::Origin> {
-		request_ref!(self, r => r.peer_origin())
+	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
+		request_ref!(self, r => r.peer_hop())
 	}
 
 	/// The client certificate chain the peer presented, if any, validated
@@ -1351,7 +1399,10 @@ mod tests {
 	fn accept_health_covers_stream_listeners_before_they_bind() {
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		let server = Server::new(config, Default::default()).expect("stream-only server");
+		let server = Config::default()
+			.with_listen(config)
+			.init()
+			.expect("stream-only server");
 
 		let names: Vec<_> = server.accept_health().iter().map(|h| h.listener()).collect();
 		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
@@ -1381,7 +1432,10 @@ mod tests {
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 		config.unix.bind = Some(occupied);
-		let server = Server::new(config, Default::default()).expect("stream-only server");
+		let server = Config::default()
+			.with_listen(config)
+			.init()
+			.expect("stream-only server");
 
 		assert!(server.listen().await.is_err(), "the unix bind must fail");
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
@@ -1397,7 +1451,9 @@ mod tests {
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let listener = Server::new(config, Default::default())
+		let listener = Config::default()
+			.with_listen(config)
+			.init()
 			.expect("stream-only server")
 			.listen()
 			.await
@@ -1421,9 +1477,9 @@ mod tests {
 		let path = PathBuf::from(format!("/tmp/moq-tokio-publish-{}.sock", std::process::id()));
 		let _ = std::fs::remove_file(&path);
 
-		let origin = crate::origin::spawn(moq_net::Origin::random());
+		let origin = crate::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-		let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
+		let _announce_broadcast = origin.announce("test", Default::default()).expect("announce broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
@@ -1458,7 +1514,7 @@ mod tests {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
-		let subscriber = crate::origin::spawn(moq_net::Origin::random());
+		let subscriber = crate::origin::spawn(moq_net::Hop::random());
 		let consumer = subscriber.consume();
 		let mut announced = consumer.announced();
 		let client = crate::connect::Config::default()
@@ -1515,7 +1571,10 @@ mod tests {
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let server = Server::new(config, Default::default()).expect("stream-only server");
+		let server = Config::default()
+			.with_listen(config)
+			.init()
+			.expect("stream-only server");
 		let listener = server.listen().await.expect("listen");
 		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
 
@@ -1535,7 +1594,7 @@ mod tests {
 		};
 
 		assert!(matches!(
-			Server::new(config, Default::default()),
+			Config::default().with_listen(config).init(),
 			Err(Error::NoBackend(_))
 		));
 	}

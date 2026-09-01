@@ -541,7 +541,7 @@ mod tests {
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		let _announcement = server_origin.announce("live/cam0", Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
@@ -564,7 +564,7 @@ mod tests {
 		});
 
 		// Client: dial, connect(`live`), play(`cam0`), republish into our own origin.
-		let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let client_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let announced = client_origin.consume();
 		let pull_origin = client_origin.clone();
 		let pull = tokio::spawn(async move {
