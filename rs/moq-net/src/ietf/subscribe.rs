@@ -472,7 +472,14 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
+					0x23 => fill: Option<Fill>,
 				);
+
+				// FILL_PARAMETERS is a draft-20 addition, so an earlier peer sending one is
+				// still the protocol violation it was.
+				if fill.is_some() && !Filter::is_draft20(version) {
+					return Err(DecodeError::InvalidValue);
+				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let forward = forward.unwrap_or(true);

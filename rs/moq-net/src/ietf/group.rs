@@ -174,9 +174,11 @@ pub struct GroupFlags {
 	// When false (0x30 base), priority inherits from the control message.
 	pub has_priority: bool,
 
-	// draft-18+: whether this stream carries the subgroup from its first published object.
-	// A subgroup that starts partway through has a hole at the front, which moq-lite cannot
-	// represent. Always true on the drafts that predate the bit, where there is no signal.
+	/// Whether this stream carries the subgroup from its first published object.
+	///
+	/// A subgroup that starts partway through has a hole at the front, which moq-lite cannot
+	/// represent. Always true on the drafts that predate the FIRST_OBJECT bit (before
+	/// draft-18), where there is no such signal to read.
 	pub first_object: bool,
 }
 
