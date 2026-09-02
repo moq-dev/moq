@@ -380,14 +380,16 @@ identical routes, which relays deduplicate: the mesh sees one route while
 either publisher is alive, so killing one retracts nothing and the survivor
 keeps serving.
 
-A relay never splices a live subscription from one publisher to another.
-When the publisher serving a subscription goes away, that subscription ends
-and the viewer re-subscribes, landing on the best remaining route; players do
-this automatically when the path is (still) announced. So 1+1 buys a fast
-resubscribe instead of a dead stream, not a seamless mid-group handover, and
-the two encoders should still produce equivalent broadcasts (same track
-names, comparable timelines) so a viewer that fails over keeps decoding. Run
-the same command from two encoders, pinning the same id on both:
+A relay resumes a live subscription across routes that name the same first
+hop. When the publisher serving a subscription goes away, the relay
+re-splices it through the best remaining route with that first hop at a group
+boundary, and the viewer keeps watching. So 1+1 with a shared id buys a
+seamless handover, and the two encoders must produce equivalent broadcasts
+(same track names, aligned group sequences, comparable timelines) so the
+spliced stream keeps decoding. Publishers with different ids (or none) never
+splice: that subscription ends and the viewer re-subscribes, landing on the
+best remaining route. Run the same command from two encoders, pinning the
+same id on both:
 
 ```bash
 moq --hop 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
