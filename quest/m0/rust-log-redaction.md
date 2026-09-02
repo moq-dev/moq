@@ -24,10 +24,10 @@ with its own `set_query(None)` copy. `rs/moq-rtmp/src/dial.rs` logs
 The browser half of the same finding is
 [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md).
 
+## Required
+
+- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - the issue closes only once both halves are fixed, so the half that closes it goes second
+
 ## Closes
 
 - [#2405](https://github.com/moq-dev/moq/issues/2405) - close this issue when the quest finishes
-
-## Related
-
-- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - the js/net half
