@@ -9,15 +9,15 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use unsafe_libopus::{
-	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK,
-	OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder,
-	opus_encode_float, opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
+	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE,
+	OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder, opus_encode_float,
+	opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
 use super::Encoded;
 use crate::opus;
 use crate::pcm;
-use crate::{Activity, Error, Format};
+use crate::{Error, Format};
 
 /// libopus packet size ceiling per RFC 6716 §3.4.
 const MAX_PACKET_BYTES: usize = 4_000;
@@ -112,6 +112,13 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
 	/// because its bitrate is fixed by the sample rate and channel count.
+	///
+	/// Rates too low for Opus to code anything at the chosen
+	/// [`frame_duration`](Self::frame_duration) are rejected: libopus stops
+	/// coding below roughly `24_000 / frame_duration_ms` bits per second and
+	/// emits empty frames instead, which carry no audio and are indistinguishable
+	/// from silence. The floor is 1200 bps at the default 20 ms and rises as the
+	/// frame gets shorter.
 	pub bitrate: Option<u32>,
 	/// Enable Opus in-band forward error correction.
 	pub fec: bool,
@@ -171,9 +178,6 @@ enum Backend {
 struct Opus {
 	inner: *mut OpusEncoder,
 	scratch: Vec<u8>,
-	/// Whether the last packet was classified as comfort noise, which is what
-	/// lets a refresh be told apart from a return to audio.
-	in_dtx: bool,
 }
 
 // SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
@@ -237,7 +241,7 @@ impl Encoder {
 			return Err(opus::error(err, "opus_encoder_create"));
 		}
 
-		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels);
+		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels, frame_size);
 		let (bitrate, lookahead, pre_skip) = match configured {
 			Ok(configured) => configured,
 			Err(err) => {
@@ -251,7 +255,6 @@ impl Encoder {
 			backend: Backend::Opus(Opus {
 				inner,
 				scratch: vec![0u8; MAX_PACKET_BYTES],
-				in_dtx: false,
 			}),
 			config,
 			codec_rate,
@@ -308,9 +311,10 @@ impl Encoder {
 		config: &Config,
 		codec_rate: u32,
 		codec_channels: u32,
+		frame_size: usize,
 	) -> Result<(u64, usize, u16), Error> {
 		if let Some(bitrate) = config.bitrate {
-			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64)?;
+			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64, codec_rate, frame_size)?;
 		}
 		Self::set_opus_ctl(
 			inner,
@@ -334,11 +338,20 @@ impl Encoder {
 		Ok((bitrate, lookahead, pre_skip))
 	}
 
-	fn set_opus_bitrate(inner: *mut OpusEncoder, channels: u32, bitrate: u64) -> Result<(), Error> {
+	fn set_opus_bitrate(
+		inner: *mut OpusEncoder,
+		channels: u32,
+		bitrate: u64,
+		codec_rate: u32,
+		frame_size: usize,
+	) -> Result<(), Error> {
 		let max = 300_000 * channels as u64;
-		if !(500..=max).contains(&bitrate) {
+		// Below the floor libopus codes nothing at all, so the stream carries no
+		// audio and every packet is framed like discontinuous transmission.
+		let min = opus::bitrate_floor(codec_rate, frame_size).max(500);
+		if !(min..=max).contains(&bitrate) {
 			return Err(Error::Unsupported(format!(
-				"Opus bitrate must be between 500 and {max} bits per second for {channels} channel(s), got {bitrate}"
+				"Opus bitrate must be between {min} and {max} bits per second for {channels} channel(s) at {frame_size} samples, got {bitrate}"
 			)));
 		}
 		Self::set_opus_ctl(inner, OPUS_SET_BITRATE_REQUEST, bitrate as i32, "OPUS_SET_BITRATE")
@@ -351,11 +364,6 @@ impl Encoder {
 			return Err(opus::error(rc, name));
 		}
 		Ok(())
-	}
-
-	/// Whether libopus is currently withholding audio frames.
-	fn in_dtx(inner: *mut OpusEncoder) -> Result<bool, Error> {
-		Ok(Self::get_opus_ctl(inner, OPUS_GET_IN_DTX_REQUEST, "OPUS_GET_IN_DTX")? != 0)
 	}
 
 	fn get_opus_ctl(inner: *mut OpusEncoder, request: i32, name: &'static str) -> Result<i32, Error> {
@@ -409,7 +417,13 @@ impl Encoder {
 			return Err(Error::Unsupported("pcm bitrate is fixed".into()));
 		};
 		if bitrate != self.bitrate {
-			Self::set_opus_bitrate(opus.inner, self.codec_channels, bitrate)?;
+			Self::set_opus_bitrate(
+				opus.inner,
+				self.codec_channels,
+				bitrate,
+				self.codec_rate,
+				self.frame_size,
+			)?;
 			self.bitrate = bitrate;
 			self.config.bitrate = Some(bitrate as u32);
 		}
@@ -422,7 +436,6 @@ impl Encoder {
 			// SAFETY: `inner` owns a live encoder and OPUS_RESET_STATE takes no arguments.
 			let rc = unsafe { opus_encoder_ctl_impl(opus.inner, OPUS_RESET_STATE, varargs![]) };
 			debug_assert_eq!(rc, OPUS_OK, "OPUS_RESET_STATE failed with {rc}");
-			opus.in_dtx = false;
 		}
 		self.started = false;
 	}
@@ -462,20 +475,11 @@ impl Encoder {
 					return Err(crate::opus::error(n, "opus_encode_float"));
 				}
 				let payload = Bytes::copy_from_slice(&opus.scratch[..n as usize]);
-				// The framing decides, so the decoder reaches the same answer from the
-				// packet alone. It is ambiguous in exactly one place: a bare TOC codes
-				// nothing, which is silence while libopus is withholding audio and a
-				// starved bitrate when it is not (below `3 * frame_rate * 8` bps it
-				// emits one for loud input too). `OPUS_GET_IN_DTX` is the only thing
-				// that separates those, so it is used to veto that case and nothing
-				// else. A SID refresh is never empty, so it needs no veto.
-				let starved = !Self::in_dtx(opus.inner)? && crate::opus::carries_nothing(&payload);
-				let activity = if crate::opus::is_comfort_noise(&payload, opus.in_dtx) && !starved {
-					Activity::Dtx
-				} else {
-					Activity::Active
-				};
-				opus.in_dtx = activity.is_dtx();
+				// The same rule the decoder applies, so both sides agree by reading the
+				// packet rather than by two mechanisms kept in step. `Config::bitrate`
+				// refuses the rates where a bare TOC would mean something else, which
+				// is what makes reading the packet enough here.
+				let activity = crate::opus::activity(&payload, false);
 				Encoded { payload, activity }
 			}
 			Backend::Pcm => {
@@ -690,15 +694,13 @@ mod tests {
 		}
 		let dtx = dtx.expect("silence should enter Opus DTX");
 		assert!(
-			(1..=2).contains(&dtx.payload.len()),
-			"DTX comfort noise should be one or two bytes"
-		);
-		assert_eq!(
-			dec.decode(&[0xf8, 0xff]).unwrap().activity,
-			Activity::Dtx,
-			"a two-byte comfort-noise frame should remain DTX"
+			dtx.payload.len() <= 2,
+			"withholding audio is a bare TOC, got {} bytes",
+			dtx.payload.len()
 		);
 
+		// Padding does not change what a packet codes, so it does not change how it
+		// reads either.
 		let mut padded = dtx.payload.to_vec();
 		let original_len = padded.len();
 		padded.resize(original_len + 8, 0);
@@ -707,14 +709,10 @@ mod tests {
 		let rc =
 			unsafe { unsafe_libopus::opus_packet_pad(padded.as_mut_ptr(), original_len as i32, padded.len() as i32) };
 		assert_eq!(rc, unsafe_libopus::OPUS_OK);
-		assert_eq!(
-			dec.decode(&padded).unwrap().activity,
-			Activity::Dtx,
-			"padding must not change a DTX packet's classification"
-		);
+		assert_eq!(dec.decode(&padded).unwrap().activity, Activity::Dtx);
 
-		// An absent payload asks libopus for packet-loss concealment. The
-		// classification remains DTX until a normal packet exits that state.
+		// An absent payload asks libopus for packet-loss concealment, which says
+		// nothing: the classification stays where the last real packet left it.
 		assert_eq!(dec.decode(&[]).unwrap().activity, Activity::Dtx);
 
 		// A rejected packet must not mutate the state used to classify later loss.
@@ -736,76 +734,55 @@ mod tests {
 	}
 
 	#[test]
-	fn opus_classifies_periodic_dtx_refreshes() {
-		for duration_ms in [20, 40, 60] {
-			let mut enc = Encoder::new(&Config {
-				dtx: true,
-				bitrate: Some(24_000),
-				frame_duration: Duration::from_millis(duration_ms),
-				..Config::new(Input {
-					channels: 1,
-					..Input::default()
-				})
-			})
-			.unwrap();
-			let mut dec = Decoder::new(&enc.catalog()).unwrap();
-			let silence = vec![0.0; enc.frame_size()];
-
-			let mut entered = false;
-			let mut refresh = None;
-			for _ in 0..100 {
-				let packet = enc.encode(&silence).unwrap();
-				let decoded = dec.decode(&packet.payload).unwrap();
-				assert_eq!(decoded.activity, packet.activity);
-				entered |= packet.payload.len() <= 2;
-				if entered && packet.payload.len() > 2 && packet.activity.is_dtx() {
-					refresh = Some(packet);
-					break;
-				}
-			}
-			assert!(
-				refresh.is_some(),
-				"{duration_ms} ms Opus should refresh DTX comfort noise"
-			);
-		}
-	}
-
-	/// Below libopus's `3 * frame_rate * 8` bps floor the encoder emits a bare TOC
-	/// whatever the input, so the packet framing alone reads loud audio as comfort
-	/// noise. `OPUS_GET_IN_DTX` is the only thing that tells them apart.
-	#[test]
-	fn opus_starved_bitrate_audio_is_not_dtx() {
-		// 500 bps at 20 ms is under the 1,200 bps floor, and the crate accepts it.
-		let mut enc = Encoder::new(&Config {
+	fn opus_rejects_a_bitrate_that_would_code_nothing() {
+		let starved = Encoder::new(&Config {
 			dtx: true,
 			bitrate: Some(500),
 			..Config::new(Input {
 				channels: 1,
 				..Input::default()
 			})
-		})
-		.unwrap();
-		let loud = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
+		});
+		assert!(
+			matches!(starved, Err(Error::Unsupported(_))),
+			"500 bps at 20 ms is under the 1200 bps floor"
+		);
 
-		for _ in 0..10 {
-			let packet = enc.encode(&loud).unwrap();
-			assert_eq!(packet.payload.len(), 1, "a starved encoder emits a bare TOC");
-			assert_eq!(
-				packet.activity,
-				Activity::Active,
-				"loud audio is never comfort noise, however little of it fits"
-			);
-		}
-	}
+		// The floor moves with the frame duration: 2.5 ms needs 9600 bps.
+		let short = Encoder::new(&Config {
+			bitrate: Some(6_000),
+			frame_duration: Duration::from_micros(2_500),
+			..Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		});
+		assert!(matches!(short, Err(Error::Unsupported(_))));
 
-	/// The first refresh after entering DTX at 40 ms leaves one frame empty beside
-	/// a full-size one, which is silence rather than a return to audio.
-	#[test]
-	fn opus_partially_empty_refresh_stays_dtx() {
+		// And a live retune cannot get under it either, which is how a stream that
+		// started healthy could otherwise end up coding nothing.
 		let mut enc = Encoder::new(&Config {
 			dtx: true,
 			bitrate: Some(24_000),
-			frame_duration: Duration::from_millis(40),
+			..Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
+		.unwrap();
+		assert!(enc.set_bitrate(500).is_err());
+		assert_eq!(enc.bitrate(), 24_000, "a refused retune leaves the bitrate alone");
+	}
+
+	/// A silence run is interrupted by an ordinarily coded frame of that silence,
+	/// which carries no marker saying so. It reads active, because the framing
+	/// that would catch it is the same framing a speech onset produces, and
+	/// calling real audio silence is the worse error.
+	#[test]
+	fn opus_reports_silence_between_refreshes() {
+		let mut enc = Encoder::new(&Config {
+			dtx: true,
+			bitrate: Some(24_000),
 			..Config::new(Input {
 				channels: 1,
 				..Input::default()
@@ -817,26 +794,32 @@ mod tests {
 		let silence = vec![0.0; enc.frame_size()];
 
 		for _ in 0..6 {
-			enc.encode(&loud).unwrap();
+			let packet = enc.encode(&loud).unwrap();
+			assert_eq!(packet.activity, Activity::Active);
 		}
 
-		let mut mixed = None;
-		for _ in 0..60 {
+		let mut dtx = 0;
+		let mut refreshes = 0;
+		for _ in 0..200 {
 			let packet = enc.encode(&silence).unwrap();
-			let sizes = crate::opus::frame_sizes_for_test(&packet.payload);
 			assert_eq!(
 				dec.decode(&packet.payload).unwrap().activity,
 				packet.activity,
-				"encoder and decoder disagree on {sizes:?}"
+				"both sides read the same packet"
 			);
-			if sizes.contains(&0) && sizes.iter().any(|&size| size > 2) {
-				mixed = Some(packet);
-				break;
+			match packet.activity {
+				Activity::Dtx => dtx += 1,
+				_ if dtx > 0 => refreshes += 1,
+				_ => {}
 			}
 		}
 
-		let mixed = mixed.expect("40 ms DTX should refresh with one coded frame beside an empty one");
-		assert_eq!(mixed.activity, Activity::Dtx);
+		assert!(dtx > 150, "silence should mostly withhold audio, got {dtx} of 200");
+		assert!(refreshes > 0, "a silence run should be refreshed periodically");
+		assert!(
+			refreshes < dtx / 10,
+			"refreshes should be rare against the run they interrupt, got {refreshes} vs {dtx}"
+		);
 	}
 
 	#[test]

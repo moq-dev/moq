@@ -64,7 +64,7 @@ pub(crate) fn decode_error(code: i32) -> Error {
 	error(code, "opus_decode_float")
 }
 
-/// Classify a packet a decoder accepted, preserving DTX across packet loss.
+/// Classify a packet, preserving DTX across packet loss.
 ///
 /// An empty payload asks the decoder for packet-loss concealment, which says
 /// nothing about the audio: carry `in_dtx` from the last real packet through it.
@@ -73,50 +73,33 @@ pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 		return if in_dtx { Activity::Dtx } else { Activity::Active };
 	}
 
-	if is_comfort_noise(packet, in_dtx) {
+	if carries_nothing(packet) {
 		Activity::Dtx
 	} else {
 		Activity::Active
 	}
 }
 
-/// The largest coded frame that is still comfort noise rather than audio.
-const SID_BYTES: i16 = 2;
-
-/// Whether an accepted packet's framing looks like comfort noise.
+/// Whether the sender coded no audio at all for this packet: a bare TOC whose
+/// every frame is empty.
 ///
-/// libopus codes silence as frames that are empty or a two-byte SID payload,
-/// where audio fills every frame with tens of bytes. Once DTX is established it
-/// also emits a periodic refresh that can carry a larger payload in one frame
-/// and leave the others empty, so an empty frame beside that one still means
-/// silence rather than a return to audio.
+/// Exactly the packet libopus emits when it withholds audio, in any mode, from
+/// either of the two paths that do so (SILK coding nothing, and the Opus-level
+/// silence detector). Nothing else in a conforming encoder produces it except a
+/// bitrate below libopus's floor, which codes nothing whatever the input;
+/// [`Config::bitrate`](crate::encode::Config::bitrate) refuses those, so our own
+/// encoder cannot emit one and this stays exact on both sides.
 ///
-/// This reads the framing rather than the payload bytes, so it does not assume
-/// the sender's libopus emits the same SID as ours. It cannot be exact: a
-/// sender below libopus's `3 * frame_rate * 8` bps floor emits a bare TOC for
-/// audio too, and nothing on the wire distinguishes that from silence. Only the
-/// encoder can tell the difference, via `OPUS_GET_IN_DTX`.
-pub(crate) fn is_comfort_noise(packet: &[u8], in_dtx: bool) -> bool {
+/// It deliberately says nothing about the periodic refresh that interrupts a
+/// silence run. That refresh is an ordinarily coded frame of the silence, not a
+/// marked packet, so it reads as active. Erring that way keeps the rule from
+/// ever calling real audio silence, which is the direction that matters.
+pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
 	let Some((sizes, count)) = frame_sizes(packet) else {
 		return false;
 	};
-	let Some(sizes) = sizes.get(..count) else {
-		return false;
-	};
-	if sizes.is_empty() {
-		return false;
-	}
 
-	sizes.iter().all(|&size| size <= SID_BYTES) || (in_dtx && sizes.contains(&0))
-}
-
-/// Whether the packet codes nothing at all: a bare TOC with every frame empty.
-///
-/// Ambiguous on its own. libopus emits this both while withholding silence and,
-/// below its `3 * frame_rate * 8` bps floor, for loud audio it has no room to
-/// code. Only `OPUS_GET_IN_DTX` separates the two, so a decoder cannot.
-pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
-	match frame_sizes(packet).and_then(|(sizes, count)| sizes.get(..count).map(<[i16]>::to_vec)) {
+	match sizes.get(..count) {
 		Some(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
 		None => false,
 	}
@@ -145,13 +128,17 @@ fn frame_sizes(packet: &[u8]) -> Option<([i16; 48], usize)> {
 	Some((sizes, usize::try_from(count).ok()?))
 }
 
-/// The coded frame sizes of an accepted packet, so tests can assert on the
-/// framing libopus actually produced rather than on a hand-built packet.
-#[cfg(test)]
-pub(crate) fn frame_sizes_for_test(packet: &[u8]) -> Vec<i16> {
-	frame_sizes(packet)
-		.and_then(|(sizes, count)| sizes.get(..count).map(<[i16]>::to_vec))
-		.unwrap_or_default()
+/// The lowest bitrate that still codes audio, in bits per second.
+///
+/// Below `3 * frame_rate * 8` (and below 2400 for frame rates under 50 Hz)
+/// libopus stops coding entirely and emits a bare TOC for every frame, however
+/// loud the input, which is byte-for-byte what it sends while withholding
+/// silence. Refusing those rates keeps the two apart.
+pub(crate) fn bitrate_floor(sample_rate: u32, frame_size: usize) -> u64 {
+	// Integer division, matching how libopus derives the same value.
+	let frame_rate = u64::from(sample_rate) / frame_size.max(1) as u64;
+	let floor = 3 * frame_rate * 8;
+	if frame_rate < 50 { floor.max(2_400) } else { floor }
 }
 
 #[cfg(test)]
@@ -169,30 +156,47 @@ mod tests {
 
 	#[test]
 	fn activity_reads_the_opus_framing() {
-		// A bare TOC, and the two-byte SID refresh libopus emits at 20 ms.
+		// A bare TOC codes nothing, whatever the mode or frame count.
 		assert_eq!(activity(&[0xf8], false), Activity::Dtx);
-		assert_eq!(activity(&[0xf8, 0xff], false), Activity::Dtx);
-		assert_eq!(activity(&[0xf8, 0xff, 0xfe], false), Activity::Dtx);
+		assert_eq!(activity(&[0x08], false), Activity::Dtx);
+		assert_eq!(activity(&[0xfb, 0x03], false), Activity::Dtx);
+		// Anything with a coded frame is audio, however little of it there is.
+		assert_eq!(activity(&[0xf8, 0xff, 0xfe], false), Activity::Active);
+		assert_eq!(activity(&[0xf8, 0xff], false), Activity::Active);
 		// Loss carries the last real packet's classification.
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
 	}
 
-	/// Another sender's comfort noise is not byte-for-byte ours, so only the
-	/// framing may decide. Code 3 CBR, three 20 ms frames, contents arbitrary.
+	/// A silence run's periodic refresh is an ordinarily coded frame, and a
+	/// speech onset can leave an earlier frame of the same packet empty. Neither
+	/// is distinguishable by framing, so both read active rather than risking
+	/// real audio being called silence.
 	#[test]
-	fn activity_ignores_the_sid_payload_bytes() {
-		assert_eq!(
-			activity(&[0xfb, 0x03, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc], false),
-			Activity::Dtx
-		);
-		// The same framing carrying three-byte frames is audio, not comfort noise.
-		assert_eq!(
-			activity(
-				&[0xfb, 0x03, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11],
-				false
-			),
-			Activity::Active
-		);
+	fn activity_never_calls_a_coded_frame_silence() {
+		// Code 3 VBR, two 20 ms frames: TOC, then the count byte, then the first
+		// frame's length. A refresh puts the coded frame first and leaves the
+		// second empty; a speech onset is the same shape the other way round.
+		let mut refresh = vec![0xfb, 0x82, 57];
+		refresh.extend(std::iter::repeat_n(0xaa, 57));
+		let mut onset = vec![0xfb, 0x82, 0];
+		onset.extend(std::iter::repeat_n(0xaa, 57));
+
+		assert_eq!(activity(&refresh, true), Activity::Active);
+		assert_eq!(activity(&onset, true), Activity::Active);
+
+		// The same framing with both frames empty is the packet that does say
+		// silence, which also proves the two above really parse as two frames.
+		assert_eq!(activity(&[0xfb, 0x82, 0], true), Activity::Dtx);
+	}
+
+	#[test]
+	fn bitrate_floor_matches_libopus() {
+		// 3 * frame_rate * 8, with the 2400 floor libopus adds under 50 Hz.
+		assert_eq!(bitrate_floor(48_000, 960), 1_200); // 20 ms
+		assert_eq!(bitrate_floor(48_000, 120), 9_600); // 2.5 ms
+		assert_eq!(bitrate_floor(48_000, 480), 2_400); // 10 ms
+		assert_eq!(bitrate_floor(48_000, 1_920), 2_400); // 40 ms, 25 Hz
+		assert_eq!(bitrate_floor(48_000, 2_880), 2_400); // 60 ms, 16 Hz
 	}
 }

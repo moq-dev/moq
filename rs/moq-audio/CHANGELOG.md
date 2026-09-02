@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- [**breaking**] *(moq-audio)* report Opus DTX as an `Activity` on the audio itself: `Frame` gains an `activity` field (build one with the new `Frame::new`), `Encoder::encode` returns `encode::Encoded`, `Decoder::decode` returns `decode::Decoded`, and `encode::Producer::activity` reports what was published most recently ([#2481](https://github.com/moq-dev/moq/issues/2481))
+- [**breaking**] *(moq-audio)* report Opus discontinuous transmission as an `Activity` on the audio itself: `Frame` gains an `activity` field (build one with the new `Frame::new`), `Encoder::encode` returns `encode::Encoded`, `Decoder::decode` returns `decode::Decoded`, and `encode::Producer::activity` reports what was published most recently ([#2481](https://github.com/moq-dev/moq/issues/2481))
+- [**breaking**] *(moq-audio)* reject an Opus bitrate too low for the frame duration to code any audio, which libopus otherwise accepts and answers with empty frames
 
 ## [0.0.21](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.20...moq-audio-v0.0.21) - 2026-09-01
 
