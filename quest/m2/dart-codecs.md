@@ -28,6 +28,3 @@ against the Kotlin and Swift artifacts that already pay it, and update
 Deployment floors stay as they are (Android API 24, iOS 16); a codec addition
 that raises either is a separate decision.
 
-## Required
-
-- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - there are no Dart libraries to build with codecs yet

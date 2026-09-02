@@ -20,7 +20,22 @@ bound.
 The fix belongs upstream, not here: `dart/moq_ffi/lib/src/uniffi_runtime.dart`
 is generated, and `dart/scripts/check.sh` diffs it against a fresh
 `generate.sh` run, so an in-tree patch fails the staleness check by design.
-Fix it in `kixelated/uniffi-dart`, release the tag, then regenerate here.
+
+That upstream fix is merged as
+[kixelated/uniffi-dart#1](https://github.com/kixelated/uniffi-dart/pull/1), on
+the `uniffi-0.32` branch rather than `main`, which carries a different
+(`0.31.2`) line. What remains here: tag it, repin `flake.nix` and
+`nix/uniffi-dart-Cargo.lock`, and run `just dart generate`.
+
+Freeing the returned buffer alone would have been a use-after-free, which is
+probably why nothing freed it. `BytesCodeType.read` returned a `Uint8List.view`
+over the buffer, so a lifted byte array aliased Rust memory and escaped into
+the caller. The byte read has to copy first; only then is the free sound.
+
+Expect red CI on that fork: `futures_test.dart: sleep` and the payjoin
+downstream job both fail on an unmodified `uniffi-0.32`, confirmed by a
+baseline run. Neither is caused by the fix, and `bytes_types`, the fixture
+that covers it, passes.
 
 Cover it with a test that would have caught it: a loop over an accessor
 returning a `String`, asserting resident memory does not grow.
@@ -31,5 +46,4 @@ place to hold it.
 
 ## Required
 
-- [#3100](/quest/m3/3100-dart-flutter-bindings-via-uniffi.md) - the generated runtime this fixes does not exist in the tree yet
-- A `kixelated/uniffi-dart` release fixing both leaks in the generated runtime
+- A `kixelated/uniffi-dart` tag on `uniffi-0.32` containing the merged fix
