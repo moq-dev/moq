@@ -567,6 +567,15 @@ impl ScriptedSession {
 		}
 	}
 
+	/// Like [`Self::per_stream`], but an exhausted script closes the stream instead of
+	/// parking, for a test that drives each stream to its end.
+	pub fn per_stream_eof(scripts: Vec<Vec<u8>>) -> Self {
+		Self {
+			eof: true,
+			..Self::per_stream(scripts)
+		}
+	}
+
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
 	/// replies normally and is simply out of stream credit until then.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {

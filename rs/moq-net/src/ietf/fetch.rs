@@ -332,6 +332,202 @@ impl Decode<Version> for FetchHeader {
 	}
 }
 
+/// The bits of an Object's Serialization Flags (draft-20 section 11.4.4.1).
+mod flag {
+	/// The two low bits, which spell the Subgroup ID rather than a presence bit.
+	pub const SUBGROUP: u64 = 0x03;
+	pub const OBJECT_ID: u64 = 0x04;
+	pub const GROUP_ID: u64 = 0x08;
+	pub const PRIORITY: u64 = 0x10;
+	pub const PROPERTIES: u64 = 0x20;
+	/// The object was published as a datagram, so it has no Subgroup ID at all and the
+	/// two low bits mean nothing.
+	pub const DATAGRAM: u64 = 0x40;
+}
+
+/// How an Object on a fetch stream names its Subgroup ID: the two low bits of the
+/// Serialization Flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FetchSubgroup {
+	/// Subgroup zero.
+	#[default]
+	Zero,
+	/// The prior Object's Subgroup ID.
+	Prior,
+	/// One past the prior Object's Subgroup ID.
+	PriorPlusOne,
+	/// Spelled out on the wire.
+	Explicit(u64),
+	/// A datagram Object, which has no Subgroup ID.
+	Datagram,
+}
+
+/// One Object on a fetch stream, from its Serialization Flags through its Properties
+/// (draft-20 section 11.4.4).
+///
+/// The Object Payload Length and payload follow on the wire; they are streamed by the
+/// caller rather than buffered here, which is what keeps a large frame off the heap twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchObject {
+	/// An Object. A field is on the wire only when its flag says so, and an absent one
+	/// inherits from the prior Object on the stream.
+	Object {
+		/// How the Subgroup ID is spelled.
+		subgroup: FetchSubgroup,
+
+		/// The Group ID Delta. On the first Object this is the absolute Group ID; on any
+		/// later one it names a *different* group (the prior one plus or minus the delta
+		/// plus one, by group order).
+		group: Option<u64>,
+
+		/// The Object ID Delta. Absolute when `group` is present, otherwise added to the
+		/// prior Object ID. Absent means the prior ID plus one.
+		object: Option<u64>,
+
+		/// The Publisher Priority, absent when it repeats the prior Object's.
+		priority: Option<u8>,
+
+		/// The Object Properties block, which carries the Timestamp.
+		properties: Option<Vec<u8>>,
+	},
+
+	/// An End of Range marker: every Location between the prior Object and this one,
+	/// inclusive, does not exist (`0x8C`), is unknown (`0x10C`), or timed out (`0x20C`).
+	///
+	/// The Group and Object IDs are the same delta fields an [`Self::Object`] carries.
+	EndOfRange {
+		/// The raw Serialization Flags, which is which of the three it is.
+		reason: u64,
+		/// The Group ID Delta.
+		group: u64,
+		/// The Object ID Delta.
+		object: u64,
+	},
+}
+
+impl FetchObject {
+	/// The Serialization Flags values that mark an End of Range instead of an Object.
+	const END_OF_RANGE: &'static [u64] = &[0x8C, 0x10C, 0x20C];
+}
+
+impl Encode<Version> for FetchObject {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match self {
+			Self::EndOfRange { reason, group, object } => {
+				if !Self::END_OF_RANGE.contains(reason) {
+					return Err(EncodeError::InvalidState);
+				}
+				reason.encode(w, version)?;
+				group.encode(w, version)?;
+				object.encode(w, version)?;
+			}
+			Self::Object {
+				subgroup,
+				group,
+				object,
+				priority,
+				properties,
+			} => {
+				let mut flags = match subgroup {
+					FetchSubgroup::Zero => 0,
+					FetchSubgroup::Prior => 1,
+					FetchSubgroup::PriorPlusOne => 2,
+					FetchSubgroup::Explicit(_) => 3,
+					FetchSubgroup::Datagram => flag::DATAGRAM,
+				};
+				if group.is_some() {
+					flags |= flag::GROUP_ID;
+				}
+				if object.is_some() {
+					flags |= flag::OBJECT_ID;
+				}
+				if priority.is_some() {
+					flags |= flag::PRIORITY;
+				}
+				if properties.is_some() {
+					flags |= flag::PROPERTIES;
+				}
+				flags.encode(w, version)?;
+
+				if let Some(group) = group {
+					group.encode(w, version)?;
+				}
+				if let FetchSubgroup::Explicit(subgroup) = subgroup {
+					subgroup.encode(w, version)?;
+				}
+				if let Some(object) = object {
+					object.encode(w, version)?;
+				}
+				if let Some(priority) = priority {
+					priority.encode(w, version)?;
+				}
+				if let Some(properties) = properties {
+					properties.encode(w, version)?;
+				}
+			}
+		}
+		Ok(())
+	}
+}
+
+impl Decode<Version> for FetchObject {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+		let flags = u64::decode(buf, version)?;
+
+		// Anything at or above 128 is a named value rather than a set of flags, and only
+		// the three End of Range markers are defined.
+		if flags >= 0x80 {
+			if !Self::END_OF_RANGE.contains(&flags) {
+				return Err(DecodeError::InvalidValue);
+			}
+			return Ok(Self::EndOfRange {
+				reason: flags,
+				group: u64::decode(buf, version)?,
+				object: u64::decode(buf, version)?,
+			});
+		}
+
+		// Wire order: Group ID Delta, Subgroup ID, Object ID Delta, Priority, Properties.
+		let group = match flags & flag::GROUP_ID != 0 {
+			true => Some(u64::decode(buf, version)?),
+			false => None,
+		};
+
+		let subgroup = match flags & flag::DATAGRAM != 0 {
+			true => FetchSubgroup::Datagram,
+			false => match flags & flag::SUBGROUP {
+				0 => FetchSubgroup::Zero,
+				1 => FetchSubgroup::Prior,
+				2 => FetchSubgroup::PriorPlusOne,
+				_ => FetchSubgroup::Explicit(u64::decode(buf, version)?),
+			},
+		};
+
+		let object = match flags & flag::OBJECT_ID != 0 {
+			true => Some(u64::decode(buf, version)?),
+			false => None,
+		};
+
+		let priority = match flags & flag::PRIORITY != 0 {
+			true => Some(u8::decode(buf, version)?),
+			false => None,
+		};
+
+		let properties = match flags & flag::PROPERTIES != 0 {
+			true => Some(Vec::<u8>::decode(buf, version)?),
+			false => None,
+		};
+
+		Ok(Self::Object {
+			subgroup,
+			group,
+			object,
+			priority,
+			properties,
+		})
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -558,5 +754,115 @@ mod tests {
 			0, // zero message parameters
 		];
 		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+	}
+}
+
+/// The Object serialization on a fetch stream (draft-20 section 11.4.4), which a fill's
+/// head arrives on.
+#[cfg(test)]
+mod object_tests {
+	use super::*;
+	use bytes::{Buf as _, BytesMut};
+
+	const VERSION: Version = Version::Draft20;
+
+	fn round_trip(object: &FetchObject) -> (Vec<u8>, FetchObject) {
+		let mut buf = BytesMut::new();
+		object.encode(&mut buf, VERSION).expect("encode");
+
+		let mut bytes = bytes::Bytes::from(buf.to_vec());
+		let decoded = FetchObject::decode(&mut bytes, VERSION).expect("decode");
+		assert!(!bytes.has_remaining(), "the object header is fully consumed");
+
+		(buf.to_vec(), decoded)
+	}
+
+	/// The first Object carries absolute IDs and a priority, because "same as the prior
+	/// Object" has no prior to refer to. Byte-pinned: the flags declare exactly the fields
+	/// that follow, in wire order.
+	#[test]
+	fn the_first_object_spells_everything_out() {
+		let object = FetchObject::Object {
+			subgroup: FetchSubgroup::Zero,
+			group: Some(4),
+			object: Some(0),
+			priority: Some(0),
+			properties: Some(vec![0x02, 0x40]),
+		};
+
+		let (encoded, decoded) = round_trip(&object);
+		assert_eq!(decoded, object);
+
+		#[rustfmt::skip]
+		let expected = vec![
+			0x3C, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES, subgroup zero
+			0x04, // group 4
+			0x00, // object 0
+			0x00, // priority
+			0x02, 0x02, 0x40, // 2 bytes of properties
+		];
+		assert_eq!(encoded, expected);
+	}
+
+	/// Every later Object inherits the group, subgroup and priority, and its ID is the prior
+	/// one plus one, so only the properties go on the wire.
+	#[test]
+	fn a_later_object_inherits() {
+		let object = FetchObject::Object {
+			subgroup: FetchSubgroup::Zero,
+			group: None,
+			object: None,
+			priority: None,
+			properties: Some(vec![]),
+		};
+
+		let (encoded, decoded) = round_trip(&object);
+		assert_eq!(decoded, object);
+		assert_eq!(encoded, vec![0x20, 0x00]);
+	}
+
+	/// The two low bits spell the Subgroup ID rather than a presence bit, and the datagram
+	/// flag says there is none at all.
+	#[test]
+	fn the_subgroup_is_spelled_by_the_low_bits() {
+		for subgroup in [
+			FetchSubgroup::Zero,
+			FetchSubgroup::Prior,
+			FetchSubgroup::PriorPlusOne,
+			FetchSubgroup::Explicit(9),
+			FetchSubgroup::Datagram,
+		] {
+			let object = FetchObject::Object {
+				subgroup,
+				group: None,
+				object: None,
+				priority: None,
+				properties: None,
+			};
+			assert_eq!(round_trip(&object).1, object, "{subgroup:?}");
+		}
+	}
+
+	/// An End of Range is a named value rather than a set of flags, and its two IDs are
+	/// always present.
+	#[test]
+	fn an_end_of_range_carries_its_location() {
+		for reason in [0x8C, 0x10C, 0x20C] {
+			let object = FetchObject::EndOfRange {
+				reason,
+				group: 3,
+				object: 7,
+			};
+			assert_eq!(round_trip(&object).1, object, "{reason:#x}");
+		}
+	}
+
+	/// Every other value at or above 128 is undefined, and reading one as flags would
+	/// desync the rest of the stream.
+	#[test]
+	fn an_undefined_value_is_refused() {
+		// 0x8D, one past End of Non-Existent Range, in the draft-17+ leading-ones form.
+		let mut bytes = bytes::Bytes::from_static(&[0x80, 0x8D, 0x00, 0x00]);
+		assert!(FetchObject::decode(&mut bytes, VERSION).is_err());
 	}
 }

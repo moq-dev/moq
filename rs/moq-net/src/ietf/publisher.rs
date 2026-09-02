@@ -1175,35 +1175,38 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
-		// Serialization Flags: the two low bits encode the subgroup (00 = subgroup
-		// zero), then per-field presence bits.
-		const OBJECT_ID: u64 = 0x04;
-		const GROUP_ID: u64 = 0x08;
-		const PRIORITY: u64 = 0x10;
-		const PROPERTIES: u64 = 0x20;
-
 		// An unstamped object has no properties at all, so the field is omitted rather
 		// than written empty: the track declared no units to read a timestamp in.
-		let properties = if timescale.is_some() { PROPERTIES } else { 0 };
+		let properties = match timescale {
+			Some(timescale) => {
+				let mut properties = bytes::BytesMut::new();
+				ietf::encode_object_time(&mut properties, timestamp, timescale, version)?;
+				Some(properties.to_vec())
+			}
+			None => None,
+		};
 
-		if first {
+		let header = match first {
 			// The first object must carry its absolute Group and Object IDs. Include the
 			// priority too: "same as the prior object" has no prior to refer to.
-			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | properties)).await?;
-			stream.encode(&sequence).await?;
-			stream.encode(&object).await?;
-			stream.encode(&0u8).await?;
-		} else {
+			true => ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: Some(sequence),
+				object: Some(object),
+				priority: Some(0),
+				properties,
+			},
 			// Same group and priority; the Object ID is the prior one plus one.
-			stream.encode(&properties).await?;
-		}
+			false => ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: None,
+				object: None,
+				priority: None,
+				properties,
+			},
+		};
 
-		if let Some(timescale) = timescale {
-			let mut ext = bytes::BytesMut::new();
-			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
-			stream.encode(&(ext.len() as u64)).await?;
-			stream.write_chunk(ext.freeze()).await?;
-		}
+		stream.encode(&header).await?;
 
 		Ok(())
 	}

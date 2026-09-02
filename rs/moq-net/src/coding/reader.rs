@@ -86,6 +86,22 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
+	/// Peek the next message unless the stream is closed.
+	///
+	/// The pair of [`Self::decode_maybe`] and [`Self::decode_peek`]: it blocks until the
+	/// message arrives or the peer finishes the stream, which is what lets a caller branch
+	/// on the first message without consuming it.
+	pub async fn decode_peek_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	where
+		V: Clone,
+	{
+		if !self.has_more().await? {
+			return Ok(None);
+		}
+
+		Ok(Some(self.decode_peek().await?))
+	}
+
 	/// Read the next chunk, draining the reader's internal buffer first.
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		if !self.buffer.is_empty() {

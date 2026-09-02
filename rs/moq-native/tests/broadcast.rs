@@ -573,6 +573,103 @@ async fn broadcast_moq_lite_05_default_timescale() {
 }
 
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.
+/// Draft-20's current-group join (section 5.1.6), which splits one group across two
+/// streams: the subscriber asks for the next Object plus a fill of the current group, and
+/// the publisher serves the head on a fill fetch stream and the rest on the subscription's
+/// own subgroup stream.
+///
+/// Both halves have to land in one group, in order and exactly once. Without the fill the
+/// publisher delivers nothing before the live edge, so the join would start at the next
+/// group boundary instead.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_transport_20_current_group_join() {
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("create broadcast");
+	let mut track = broadcast.create_track("video", None).expect("create track");
+
+	// The group is left open, so the subscriber joins part way through it: the two head
+	// frames are published before the SUBSCRIBE and the tail frame after.
+	let mut group = track.append_group().expect("append group");
+	for payload in [b"head-0".as_ref(), b"head-1".as_ref()] {
+		group
+			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.expect("write head");
+	}
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-transport-20".parse().unwrap()];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-transport-20".parse().unwrap()];
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let announced = next_announce(&mut announcements).await;
+	let remote = announced.broadcast.expect("expected an announce");
+
+	let mut subscriber = tokio::time::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
+
+	let mut joined = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed");
+	assert_eq!(joined.sequence, 0);
+
+	async fn read(group: &mut moq_net::group::Consumer) -> Option<Vec<u8>> {
+		tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read_frame timed out")
+			.expect("read_frame failed")
+			.map(|frame| frame.payload.to_vec())
+	}
+
+	// The first head frame proves the publisher processed the SUBSCRIBE, so the tail frame
+	// really is published after the live edge the fill was sized against.
+	assert_eq!(read(&mut joined).await.as_deref(), Some(b"head-0".as_ref()));
+
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"tail-2".as_ref())
+		.expect("write tail");
+	group.finish().expect("finish group");
+
+	assert_eq!(read(&mut joined).await.as_deref(), Some(b"head-1".as_ref()));
+	assert_eq!(read(&mut joined).await.as_deref(), Some(b"tail-2".as_ref()));
+	assert_eq!(read(&mut joined).await, None, "the stitched group ends once");
+
+	drop(session);
+	server_handle.await.expect("server panicked").expect("server failed");
+}
+
 async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_net::announce::Update {
 	tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
