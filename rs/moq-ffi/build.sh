@@ -236,9 +236,13 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     cp "$TARGET_DIR/moq_ffi.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
 
 elif is_ios "$TARGET"; then
-    # iOS: staticlib only (no dylib)
+    # Both, like macOS below: Swift links the staticlib, while Dart's Native
+    # Assets hook bundles the cdylib (the SDK does not implement static
+    # linking). rustc emits a PLATFORM_IOS dylib for device and simulator
+    # alike, so this is a packaging choice rather than a platform limit.
     TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
+    cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 elif is_android "$TARGET"; then
     # Android: shared library only
