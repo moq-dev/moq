@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.13](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.12...moq-boy-v0.4.13) - 2026-09-02
+
+### Added
+
+- *(moq-audio)* expose Opus DTX classification ([#3238](https://github.com/moq-dev/moq/pull/3238))
+
 ## [0.4.12](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.11...moq-boy-v0.4.12) - 2026-09-01
 
 ### Other

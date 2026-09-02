@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.15...moq-cli-v0.10.0) - 2026-09-02
+
+### Added
+
+- *(moq-audio)* [**breaking**] reach devices through PipeWire or PulseAudio ([#3328](https://github.com/moq-dev/moq/pull/3328))
+- *(moq-audio)* control microphone publication ([#3235](https://github.com/moq-dev/moq/pull/3235))
+
 ## [0.9.15](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.14...moq-cli-v0.9.15) - 2026-09-01
 
 ### Added

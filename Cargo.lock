@@ -418,9 +418,9 @@ dependencies = [
 
 [[package]]
 name = "async-compression"
-version = "0.4.43"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3976abdc8fe7d1133d43d304afd42abdf5bc3e1319d263d223bde07b5efc4be8"
+checksum = "515a1f282e33d55983c499d7e9e87082e81cbc32974825bf9032f928392d5844"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -1335,9 +1335,9 @@ dependencies = [
 
 [[package]]
 name = "compression-codecs"
-version = "0.4.38"
+version = "0.4.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+checksum = "2fe67f2944eef52fc7b106b8c9450d243a88701a0c065f7f57235e76abaed7df"
 dependencies = [
  "compression-core",
  "flate2",
@@ -1346,9 +1346,9 @@ dependencies = [
 
 [[package]]
 name = "compression-core"
-version = "0.4.32"
+version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
+checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "concurrent-queue"
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.9"
+version = "0.20.10"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4369,7 +4369,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4618,9 +4618,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -4650,7 +4650,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4695,13 +4695,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
 ]
 
 [[package]]
 name = "moq-boy"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4721,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.15"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4787,7 +4787,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4805,7 +4805,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "axum",
@@ -4828,7 +4828,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "bytes",
  "criterion",
@@ -4845,7 +4845,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4863,7 +4863,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.15"
+version = "0.19.16"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4930,7 +4930,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-android",
  "tracing-subscriber",
@@ -4948,7 +4948,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -4981,7 +4981,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.14.14"
+version = "0.14.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5014,7 +5014,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tower-http 0.7.1",
  "tower-service",
  "tracing",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5045,7 +5045,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -5069,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5084,7 +5084,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "futures",
  "moq-json",
@@ -5128,7 +5128,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5162,7 +5162,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5282,9 +5282,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error-macros"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2acd8b070213b0299282f884b4beba4e7b52d624fdcd504a3ad3665390c11e1"
+checksum = "4412346410d6616f3668c40e53c298e5320c7b856f7a960e5914e442601be79f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8453,9 +8453,9 @@ dependencies = [
 
 [[package]]
 name = "sfv"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d471eaefb14f4b30032525bdb124b36e55ba9cb1292080e06f1a236cd10fe87"
+checksum = "890ef0e5532daf21fdaa3dbaf991417187f3a87ab69231fe69be942495746480"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.1",
@@ -9198,7 +9198,7 @@ dependencies = [
  "cfg-expr",
  "heck",
  "pkg-config",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "version-compare",
 ]
 
@@ -9629,9 +9629,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap 2.14.1",
  "serde_core",
@@ -10071,7 +10071,7 @@ dependencies = [
  "serde",
  "tempfile",
  "textwrap",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "uniffi_internal_macros",
  "uniffi_meta",
  "uniffi_pipeline",
@@ -10127,7 +10127,7 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.119",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "uniffi_meta",
 ]
 
@@ -10636,9 +10636,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-proto"
-version = "0.6.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0225d295c8ac00a2e9a498aefeaf3f3c6186da12a251c938189b15b82ea22808"
+checksum = "1a81bcc79bf48ad0b819bfa51ec28524ee7c356056d43c316727d6b505dcc71e"
 dependencies = [
  "bytes",
  "http",
