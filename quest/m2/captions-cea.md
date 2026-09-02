@@ -22,15 +22,13 @@ should become its own rendition with its own `lang`.
 Emit cues on the shared media clock, taken from the access unit the SEI rode
 in, so the text rendition needs no timeline of its own to stay in sync.
 
-Parse at import rather than waiting on the SEI sidecar work. That line is
-gated on [SEI delivery](/quest/m3/sei-delivery.md) proving a nonblocking
-cross-track mechanism, and a no-go there keeps SEI inside the access unit
-permanently. An accessibility feature should not be blocked behind an
-unresolved transport question.
+Parse at import rather than waiting on the SEI sidecar work, so captions do not
+inherit that line's schedule. Once SEI is a sidecar the parser can read it from
+there instead of walking the access unit, which is a refactor rather than a
+prerequisite.
 
 ## Related
 
-- [SEI](/quest/m2/sei/README.md) - carries SEI byte-faithfully as a sidecar and
-  names a semantic caption decoder as something it would enable; if that line
-  lands, this parser is a candidate to move onto it rather than walking the
-  access unit itself
+- [SEI](/quest/m2/sei/README.md) - carries SEI byte-faithfully as a sidecar; if
+  that line lands, this parser is a candidate to move onto it rather than
+  walking the access unit itself
