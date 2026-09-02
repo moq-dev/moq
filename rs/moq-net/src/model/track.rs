@@ -1407,6 +1407,7 @@ impl Producer {
 				stale_cap: None,
 				drift_cap,
 				stale: stats::Content::default(),
+				arrival_stale: None,
 				seek_pending: BTreeMap::new(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
@@ -2397,6 +2398,7 @@ impl Subscribing {
 						stale_cap: None,
 						drift_cap,
 						stale: stats::Content::default(),
+						arrival_stale: None,
 						seek_pending: BTreeMap::new(),
 					}),
 					stats: self.stats.clone(),
@@ -2858,9 +2860,22 @@ struct PlainSubscriber {
 	/// [`super::resume::Subscriber`] segment (untagged, so the outer wrapper is the
 	/// only place attribution happens once).
 	stale: stats::Content,
+	/// Arrival skips awaiting a wrapping splice's decision. Empty for plain reads.
+	arrival_stale: Option<Box<ArrivalStale>>,
 	/// Groups the seek path has convicted but whose sequences no caller has committed
 	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
 	seek_pending: BTreeMap<u64, stats::Content>,
+}
+
+struct ArrivalStale {
+	sequence: u64,
+	state: ArrivalStaleState,
+	next: Option<Box<ArrivalStale>>,
+}
+
+enum ArrivalStaleState {
+	Pending(stats::Content),
+	Forgiven,
 }
 
 impl PlainSubscriber {
@@ -2891,6 +2906,62 @@ impl PlainSubscriber {
 	/// same counter as the ones skipped here.
 	fn note_stale(&mut self, group: &group::Consumer) {
 		self.stale.add(group.content());
+	}
+
+	fn note_arrival_stale(&mut self, group: &group::Consumer) {
+		match self.arrival_stale_mut(group.sequence) {
+			Some(ArrivalStaleState::Pending(content)) => content.add(group.content()),
+			Some(ArrivalStaleState::Forgiven) => {}
+			None => self.stale.add(group.content()),
+		}
+	}
+
+	fn defer_arrival_stale(&mut self, sequence: u64) {
+		if self.arrival_stale_mut(sequence).is_none() {
+			self.arrival_stale = Some(Box::new(ArrivalStale {
+				sequence,
+				state: ArrivalStaleState::Pending(stats::Content::default()),
+				next: self.arrival_stale.take(),
+			}));
+		}
+	}
+
+	fn forgive_arrival_stale(&mut self, sequence: u64) {
+		if let Some(state) = self.arrival_stale_mut(sequence) {
+			*state = ArrivalStaleState::Forgiven;
+		} else {
+			self.arrival_stale = Some(Box::new(ArrivalStale {
+				sequence,
+				state: ArrivalStaleState::Forgiven,
+				next: self.arrival_stale.take(),
+			}));
+		}
+	}
+
+	fn commit_arrival_stale(&mut self, sequence: u64) {
+		fn remove(entry: &mut Option<Box<ArrivalStale>>, sequence: u64) -> Option<ArrivalStaleState> {
+			if entry.as_ref()?.sequence == sequence {
+				let mut removed = entry.take().expect("entry just observed");
+				*entry = removed.next.take();
+				return Some(removed.state);
+			}
+			remove(&mut entry.as_mut()?.next, sequence)
+		}
+
+		if let Some(ArrivalStaleState::Pending(content)) = remove(&mut self.arrival_stale, sequence) {
+			self.stale.add(content);
+		}
+	}
+
+	fn arrival_stale_mut(&mut self, sequence: u64) -> Option<&mut ArrivalStaleState> {
+		let mut entry = self.arrival_stale.as_deref_mut();
+		while let Some(current) = entry {
+			if current.sequence == sequence {
+				return Some(&mut current.state);
+			}
+			entry = current.next.as_deref_mut();
+		}
+		None
 	}
 
 	/// This subscriber's clamped drift budget and the live edge to measure against,
@@ -2936,7 +3007,7 @@ impl PlainSubscriber {
 		}))
 	}
 
-	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_recv_group<const NESTED: bool>(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		// An eviction aborts a parked group without touching any cursor this
 		// subscriber polls, so each entry needs a waiter or this poll would never
 		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
@@ -3001,7 +3072,11 @@ impl PlainSubscriber {
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, &drift, waiter))? {
-				self.stale.add(consumer.content());
+				if NESTED {
+					self.note_arrival_stale(&consumer);
+				} else {
+					self.stale.add(consumer.content());
+				}
 				continue;
 			}
 			return Poll::Ready(Ok(Some(self.with_expiry(consumer))));
@@ -3225,6 +3300,31 @@ impl Subscriber {
 		}
 	}
 
+	/// Hold an arrival-path skip until a wrapping splice resolves whether another
+	/// segment delivered the same logical group.
+	pub(crate) fn defer_arrival_stale(&mut self, sequence: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.defer_arrival_stale(sequence),
+			SubscriberKind::Spliced(spliced) => spliced.defer_arrival_stale(sequence),
+		}
+	}
+
+	/// Drop an arrival-path skip because another segment delivered the group.
+	pub(crate) fn forgive_arrival_stale(&mut self, sequence: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.forgive_arrival_stale(sequence),
+			SubscriberKind::Spliced(spliced) => spliced.forgive_arrival_stale(sequence),
+		}
+	}
+
+	/// Commit a deferred arrival-path skip once no segment can deliver the group.
+	pub(crate) fn commit_arrival_stale(&mut self, sequence: u64) {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.commit_arrival_stale(sequence),
+			SubscriberKind::Spliced(spliced) => spliced.commit_arrival_stale(sequence),
+		}
+	}
+
 	/// Whether the drift budget says to skip `group`, for a reader holding a group this
 	/// subscriber handed it earlier (a parked one, re-offered once a cap rose). Counts
 	/// the skip here so it reaches the stats with the rest. A spliced subscriber asks
@@ -3282,13 +3382,25 @@ impl Subscriber {
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_recv_group_inner::<false>(waiter)
+	}
+
+	fn poll_recv_group_inner<const NESTED: bool>(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
-			SubscriberKind::Plain(plain) => plain.poll_recv_group(waiter),
+			SubscriberKind::Plain(plain) => plain.poll_recv_group::<NESTED>(waiter),
 			SubscriberKind::Spliced(spliced) => spliced.poll_recv_group(waiter),
 		};
 		self.count_stale(&meter);
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+	}
+
+	/// Poll through a splice segment, enabling its continuation accounting.
+	pub(crate) fn poll_recv_group_nested(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_recv_group_inner::<true>(waiter)
 	}
 
 	/// Receive the next group in arrival order.

@@ -463,6 +463,8 @@ impl Consumer {
 			end_sequence: None,
 			stale_cap: None,
 			drift_cap: kio::Producer::new(None),
+			arrival_stale: ArrivalStale::default(),
+			open_delivery: None,
 		}
 	}
 
@@ -1158,6 +1160,51 @@ struct SegmentSub {
 	/// the lowest is re-offered first; holding them here (rather than blocking on
 	/// the first) keeps in-range groups that arrive behind a capped one flowing.
 	parked: BTreeMap<u64, group::Consumer>,
+	/// Arrival-stale decisions inherited from a wrapping splice.
+	arrival_stale: ArrivalStale,
+	/// The accounting state for this segment's mid-group start, if it has one.
+	continuation: Option<ArrivalStaleState>,
+}
+
+#[derive(Clone, Default)]
+struct ArrivalStale(Vec<(u64, ArrivalStaleState)>);
+
+impl ArrivalStale {
+	fn get(&self, sequence: u64) -> Option<ArrivalStaleState> {
+		self.0
+			.iter()
+			.find_map(|(key, state)| (*key == sequence).then_some(*state))
+	}
+
+	fn insert(&mut self, sequence: u64, state: ArrivalStaleState) {
+		if let Some((_, current)) = self.0.iter_mut().find(|(key, _)| *key == sequence) {
+			*current = state;
+		} else {
+			self.0.push((sequence, state));
+		}
+	}
+
+	fn insert_pending(&mut self, sequence: u64) {
+		if self.get(sequence).is_none() {
+			self.0.push((sequence, ArrivalStaleState::Pending));
+		}
+	}
+
+	fn remove(&mut self, sequence: u64) {
+		if let Some(index) = self.0.iter().position(|(key, _)| *key == sequence) {
+			self.0.swap_remove(index);
+		}
+	}
+
+	fn iter(&self) -> impl Iterator<Item = (u64, ArrivalStaleState)> + '_ {
+		self.0.iter().copied()
+	}
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ArrivalStaleState {
+	Pending,
+	Forgiven,
 }
 
 impl SegmentSub {
@@ -1167,6 +1214,21 @@ impl SegmentSub {
 		match &mut self.sub {
 			SubState::Active(sub) => Some(sub.as_mut()),
 			_ => self.terminal.as_mut(),
+		}
+	}
+
+	fn configure_arrival_stale(&self, sub: &mut track::Subscriber) {
+		for (sequence, state) in self.arrival_stale.iter() {
+			match state {
+				ArrivalStaleState::Pending => sub.defer_arrival_stale(sequence),
+				ArrivalStaleState::Forgiven => sub.forgive_arrival_stale(sequence),
+			}
+		}
+		if let (Some(start), Some(state)) = (self.start, self.continuation) {
+			match state {
+				ArrivalStaleState::Pending => sub.defer_arrival_stale(start.group),
+				ArrivalStaleState::Forgiven => sub.forgive_arrival_stale(start.group),
+			}
 		}
 	}
 
@@ -1265,6 +1327,11 @@ pub struct Subscriber {
 	/// Shared copy of the effective cap ([`Self::end_sequence`] and [`Self::stale_cap`]
 	/// combined) for groups that outlive this cursor poll.
 	drift_cap: kio::Producer<Option<u64>>,
+	/// Arrival-stale decisions imposed by a wrapping splice and inherited by new segments.
+	arrival_stale: ArrivalStale,
+	/// The handed-out group that is still the producer's open edge and can become
+	/// a continuation boundary on the next takeover.
+	open_delivery: Option<u64>,
 }
 
 impl Subscriber {
@@ -1272,7 +1339,31 @@ impl Subscriber {
 	/// boundaries, re-slice demand, and register the waiter for the next change.
 	fn poll_sync(&mut self, waiter: &kio::Waiter) {
 		self.sync(waiter);
+		self.settle_arrival_continuations();
 		self.reap();
+	}
+
+	fn settle_arrival_continuations(&mut self) {
+		for index in 0..self.segments.len() {
+			if self.segments[index].continuation != Some(ArrivalStaleState::Pending) {
+				continue;
+			}
+			let sequence = self.segments[index].start.expect("continuation has a start").group;
+			let head_possible = self.segments[..index].iter().any(|seg| {
+				frames(seg.start, seg.end, sequence).is_some_and(|(start, _)| start == 0)
+					&& (!matches!(seg.sub, SubState::Done(_)) || seg.parked.contains_key(&sequence))
+			});
+			if head_possible {
+				continue;
+			}
+
+			self.segments[index].continuation = None;
+			if self.segments[index].arrival_stale.get(sequence).is_none()
+				&& let Some(sub) = self.segments[index].stale_sub_mut()
+			{
+				sub.commit_arrival_stale(sequence);
+			}
+		}
 	}
 
 	/// Reap retired cursors, then bound the live stragglers: a pruned segment's
@@ -1414,6 +1505,13 @@ impl Subscriber {
 					}
 				}
 				None => {
+					let continuation = segment.start.filter(|start| start.frame > 0).map(|start| {
+						if self.open_delivery == Some(start.group) {
+							ArrivalStaleState::Forgiven
+						} else {
+							ArrivalStaleState::Pending
+						}
+					});
 					let sub = segment
 						.track
 						.subscribe(slice(&self.last_prefs, segment.start, segment.end));
@@ -1425,6 +1523,8 @@ impl Subscriber {
 						terminal: None,
 						pruned: false,
 						parked: BTreeMap::new(),
+						arrival_stale: self.arrival_stale.clone(),
+						continuation,
 					});
 				}
 			}
@@ -1438,13 +1538,36 @@ impl Subscriber {
 	/// starts partway into the group, which only happens after an earlier segment served
 	/// the head. Those frames reach the reader through the group it already holds, so
 	/// surfacing the copy again would duplicate them.
-	fn hand_out(&self, segment: usize, group: group::Consumer) -> Option<group::Consumer> {
-		let seg = &self.segments[segment];
+	fn hand_out(&mut self, segment: usize, group: group::Consumer) -> Option<group::Consumer> {
 		let sequence = group.sequence;
-		let (start, end) = frames(seg.start, seg.end, sequence)?;
+		let (id, last_group, start, end) = {
+			let seg = &self.segments[segment];
+			let (start, end) = frames(seg.start, seg.end, sequence)?;
+			(seg.id, seg.last_group(), start, end)
+		};
 		if start != 0 {
 			return None;
 		}
+
+		for seg in &mut self.segments {
+			if seg
+				.start
+				.is_some_and(|start| start.group == sequence && start.frame > 0)
+			{
+				seg.continuation = Some(ArrivalStaleState::Forgiven);
+				if let Some(sub) = seg.stale_sub_mut() {
+					sub.forgive_arrival_stale(sequence);
+				}
+			}
+		}
+		self.open_delivery = self
+			.state
+			.read()
+			.resume_position()
+			.filter(|position| position.group == sequence && position.frame > 0)
+			.map(|position| position.group);
+		self.settle_arrival_continuations();
+
 		// Latch the delivering copy: the spliced reader otherwise re-resolves it
 		// through the segment list, which forgets this route the moment its
 		// segment is pruned, turning a group the cursor already delivered into an
@@ -1456,7 +1579,7 @@ impl Subscriber {
 			sequence,
 			0,
 		)
-		.latched(seg.id, end, seg.last_group(), group.clone());
+		.latched(id, end, last_group, group.clone());
 		Some(group.into_spliced(spliced))
 	}
 
@@ -1515,6 +1638,36 @@ impl Subscriber {
 		}
 	}
 
+	pub(crate) fn defer_arrival_stale(&mut self, sequence: u64) {
+		self.arrival_stale.insert_pending(sequence);
+		for seg in &mut self.segments {
+			seg.arrival_stale.insert_pending(sequence);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.defer_arrival_stale(sequence);
+			}
+		}
+	}
+
+	pub(crate) fn forgive_arrival_stale(&mut self, sequence: u64) {
+		self.arrival_stale.insert(sequence, ArrivalStaleState::Forgiven);
+		for seg in &mut self.segments {
+			seg.arrival_stale.insert(sequence, ArrivalStaleState::Forgiven);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.forgive_arrival_stale(sequence);
+			}
+		}
+	}
+
+	pub(crate) fn commit_arrival_stale(&mut self, sequence: u64) {
+		self.arrival_stale.remove(sequence);
+		for seg in &mut self.segments {
+			seg.arrival_stale.remove(sequence);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.commit_arrival_stale(sequence);
+			}
+		}
+	}
+
 	/// Whether the drift budget says to skip `group`, asked of the segment whose
 	/// window covers it; the spliced arm of [`track::Subscriber::poll_stale`], for a
 	/// nested splice's parked group being re-offered after a cap rise.
@@ -1563,6 +1716,7 @@ impl Subscriber {
 					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_stale_cap(Self::stale_cap(seg, anchor_end));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
+					seg.configure_arrival_stale(&mut sub);
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
@@ -1587,7 +1741,7 @@ impl Subscriber {
 				SubState::Pending(_) => {
 					ready!(Self::poll_activate(seg, prefs, min_sequence, anchor_end, waiter));
 				}
-				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
+				SubState::Active(sub) => match sub.poll_recv_group_nested(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
 						// `start_at` already floors the cursor; enforce the cap here since
 						// arrival-order reads don't honor `end_at`.
@@ -3082,6 +3236,42 @@ mod test {
 		// discard B's copy, not count it.
 		assert_eq!(next(&mut sub), 1);
 		assert_eq!(next(&mut sub), 3);
+		assert_eq!(
+			sub.take_stale().groups,
+			2,
+			"groups 0 and 2 are stale; the delivered continuation of 1 is not"
+		);
+	}
+
+	/// The arrival cursor has the same continuation accounting contract as the
+	/// ordered cursor: content reached through a handed-out group is not stale.
+	#[tokio::test]
+	async fn an_arrival_delivered_continuation_is_not_counted_stale() {
+		let stamp = |sequence: u64| Duration::from_secs(10 * sequence);
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		producer.switch(&consumer_b, Position { group: 1, frame: 1 }).unwrap();
+		write_group_at(&mut track_a, 0, "a0", stamp(0));
+		write_group_at(&mut track_a, 1, "a1", stamp(1));
+		write_group_at(&mut track_b, 1, "b1", stamp(1));
+		write_group_at(&mut track_b, 2, "b2", stamp(2));
+		write_group_at(&mut track_b, 3, "b3", stamp(3));
+
+		let mut sub = producer.consume().subscribe(None);
+		let recv = |sub: &mut Subscriber| {
+			kio::wait(|waiter| sub.poll_recv_group(waiter))
+				.now_or_never()
+				.expect("should not block")
+				.expect("should not error")
+				.expect("should not be finished")
+				.sequence
+		};
+
+		assert_eq!(recv(&mut sub), 1);
+		assert_eq!(recv(&mut sub), 3);
 		assert_eq!(
 			sub.take_stale().groups,
 			2,
