@@ -725,6 +725,17 @@ impl Consumer {
 			.unwrap_or(state.offset + state.frames.len() + state.partial.is_some() as usize)
 	}
 
+	/// Advance the read cursor to `sequence`, skipping every frame below it.
+	///
+	/// Skipped frames are never returned, and an eviction confined to them is not a gap:
+	/// reads resume at the cursor instead of failing with [`Error::Lagged`]. An eviction at
+	/// or above the cursor still fails, because the caller asked for that frame. The cursor
+	/// only moves forward; a `sequence` at or below it is a no-op.
+	pub fn skip_to(&mut self, sequence: u64) {
+		let sequence = usize::try_from(sequence).unwrap_or(usize::MAX);
+		self.index = self.index.max(sequence);
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -1504,6 +1515,33 @@ mod test {
 		let mut consumer = producer.consume();
 		// First frame was evicted, next_frame should return Lagged.
 		let result = consumer.next_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::Lagged)));
+	}
+
+	/// A cursor at the eviction boundary never asked for the missing frames, so the read
+	/// proceeds at the retained tail; a cursor one below it has a gap and lags.
+	#[test]
+	fn skip_to_tolerates_an_eviction_below_it() {
+		let mut producer = Info { sequence: 0 }.produce();
+
+		// Two oversized frames overflow the budget once the small frame lands: frames 0
+		// and 1 evict, frame 2 is retained.
+		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
+		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
+		producer.write_frame(Timestamp::ZERO, big).unwrap();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail"))
+			.unwrap();
+		assert_eq!(producer.state.read().offset, 2);
+
+		let mut reader = producer.consume();
+		reader.skip_to(2);
+		let frame = reader.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.size, 4);
+
+		let mut behind = producer.consume();
+		behind.skip_to(1);
+		let result = behind.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Lagged)));
 	}
 

@@ -862,10 +862,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 
-		// The next object id to read. Ids below `slice.skip` are consumed without being
-		// written, and the first written id goes on the wire as its absolute delta, so
-		// the peer sees the true numbering rather than a silently renumbered group.
-		let mut index: u64 = 0;
+		// Ids below `slice.skip` are outside the requested range: the cursor starts above
+		// them, so an eviction confined to that excluded prefix is not a gap and the rest
+		// of the group is still served. The first written id goes on the wire as its
+		// absolute delta, so the peer sees the true numbering rather than a silently
+		// renumbered group.
+		group.skip_to(slice.skip);
+		let mut index: u64 = slice.skip;
 		let mut first_written = true;
 
 		// A subscriber catching up on a cached group takes the whole backlog under one
@@ -902,16 +905,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							break 'serve;
 						}
 						let frame = buf.filled()[i].clone();
-						if index >= slice.skip {
-							let delta = if std::mem::take(&mut first_written) { index } else { 0 };
-							Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
-							stream.encode(&(frame.payload.len() as u64)).await?;
-							if frame.payload.is_empty() {
-								// Have to write the object status too.
-								stream.encode(&0u8).await?;
-							} else {
-								stream.write_chunk(frame.payload).await?;
-							}
+						let delta = if std::mem::take(&mut first_written) { index } else { 0 };
+						Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
+						stream.encode(&(frame.payload.len() as u64)).await?;
+						if frame.payload.is_empty() {
+							// Have to write the object status too.
+							stream.encode(&0u8).await?;
+						} else {
+							stream.write_chunk(frame.payload).await?;
 						}
 						index += 1;
 						// The fill stamped the group once. A flow-controlled peer can
@@ -921,27 +922,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				}
 				Step::Partial(mut frame) => {
-					if index < slice.skip {
-						// A skipped frame still has to be drained to advance the cursor.
-						loop {
-							let chunk = {
-								let mut closed = std::pin::pin!(stream.closed());
-								kio::wait(|waiter| {
-									if waiter.poll_future(closed.as_mut()).is_ready() {
-										return Poll::Ready(Err(Error::Cancel));
-									}
-									frame.poll_read_chunk(waiter)
-								})
-								.await
-							};
-							if chunk?.is_none() {
-								break;
-							}
-						}
-						index += 1;
-						continue;
-					}
-
 					let delta = if std::mem::take(&mut first_written) { index } else { 0 };
 					Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
 					index += 1;
@@ -1090,7 +1070,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		let GroupSlice { skip, until } = slice;
-		let mut index: u64 = 0;
+		// The fill's range starts at `skip`: the cursor starts above the excluded prefix,
+		// so an eviction confined to it is not a gap.
+		group.skip_to(skip);
+		let mut index: u64 = skip;
 		let mut first = true;
 
 		let mut buf: frame::Buffer = frame::Buffer::new();
@@ -1124,48 +1107,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							break 'serve;
 						}
 						let frame = buf.filled()[i].clone();
-						if index >= skip {
-							Self::write_fill_object(
-								stream,
-								sequence,
-								index,
-								std::mem::take(&mut first),
-								frame.timestamp,
-								timescale,
-								version,
-							)
-							.await?;
-							stream.encode(&(frame.payload.len() as u64)).await?;
-							if !frame.payload.is_empty() {
-								stream.write_chunk(frame.payload).await?;
-							}
+						Self::write_fill_object(
+							stream,
+							sequence,
+							index,
+							std::mem::take(&mut first),
+							frame.timestamp,
+							timescale,
+							version,
+						)
+						.await?;
+						stream.encode(&(frame.payload.len() as u64)).await?;
+						if !frame.payload.is_empty() {
+							stream.write_chunk(frame.payload).await?;
 						}
 						index += 1;
 						group.keep_alive();
 					}
 				}
 				Step::Partial(mut frame) => {
-					if index < skip {
-						// A skipped frame still has to be drained to advance the cursor.
-						loop {
-							let chunk = {
-								let mut closed = std::pin::pin!(stream.closed());
-								kio::wait(|waiter| {
-									if waiter.poll_future(closed.as_mut()).is_ready() {
-										return Poll::Ready(Err(Error::Cancel));
-									}
-									frame.poll_read_chunk(waiter)
-								})
-								.await
-							};
-							if chunk?.is_none() {
-								break;
-							}
-						}
-						index += 1;
-						continue;
-					}
-
 					Self::write_fill_object(
 						stream,
 						sequence,
@@ -2609,6 +2569,56 @@ mod serve_tests {
 			0,
 			"the cap excludes cc"
 		);
+	}
+
+	/// An open group sheds its front once it outgrows the cache budget. A subscriber whose
+	/// filter already excludes the evicted prefix still gets the tail it asked for; one
+	/// whose range reaches into the gap is the reader that actually lost something, so it
+	/// still fails with Lagged.
+	#[tokio::test]
+	async fn run_group_serves_the_tail_of_an_evicted_head() {
+		fn header() -> ietf::GroupHeader {
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: ietf::GroupFlags {
+					first_object: false,
+					..Default::default()
+				},
+			}
+		}
+
+		async fn serve_evicted(slice: GroupSlice) -> Result<Vec<u8>, Error> {
+			let log = Log::default();
+			let session = SinkSession::new(log.clone());
+			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+
+			// Two oversized frames overflow the budget once the small frames land:
+			// objects 0 and 1 evict, 2 and 3 are retained.
+			let big = vec![0u8; group::MAX_CACHE_BYTES as usize];
+			group.write_frame(timestamp(), big.as_slice()).unwrap();
+			group.write_frame(timestamp(), big.as_slice()).unwrap();
+			for payload in [b"cc", b"dd"] {
+				group.write_frame(timestamp(), payload.as_slice()).unwrap();
+			}
+			let consumer = group.consume();
+			group.finish().unwrap();
+
+			Publisher::<SinkSession>::run_group(session, header(), 0, consumer, None, Version::Draft20, slice).await?;
+			Ok(log.writes.lock().unwrap().clone())
+		}
+
+		let served = serve_evicted(GroupSlice { skip: 2, until: None }).await.unwrap();
+		assert!(
+			served.ends_with(&[0x02, 0x02, b'c', b'c', 0x00, 0x02, b'd', b'd']),
+			"expected delta 2 then cc, delta 0 then dd, got {served:x?}"
+		);
+
+		let lagged = serve_evicted(GroupSlice { skip: 1, until: None }).await;
+		assert!(matches!(lagged, Err(Error::Lagged)));
 	}
 }
 
