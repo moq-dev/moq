@@ -744,10 +744,10 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// A path stays routed across two publisher sessions announcing it.
 ///
 /// The client connects to two servers announcing the same route. The preferred
-/// (cheaper) route serves the track; when that session dies, the materialized
-/// broadcast aborts and a fresh request resolves through the standby, without
-/// the path ever being retracted. Routes claim capability, not content
-/// identity, so the failover is an explicit re-request rather than a splice.
+/// (cheaper) route serves the track; when that session dies, the broadcast
+/// re-splices through the standby at a group boundary, without the path ever
+/// being retracted: both routes name the same first hop, so they are the same
+/// origin reached different ways and the subscription rides the failover.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
@@ -872,28 +872,10 @@ async fn broadcast_route_migration() {
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["a1"]);
 
-	// Kill the serving session. The materialized broadcast aborts; the next
-	// request resolves through the standby route and serves its content.
+	// Kill the serving session. Both routes name the same first hop, so the
+	// broadcast re-splices through the standby at the group boundary and the
+	// SAME subscription carries B's continuation.
 	drop(session_a);
-	tokio::time::timeout(TIMEOUT, async { while sub.recv_group().await.is_ok() {} })
-		.await
-		.expect("the dead session's subscription should abort");
-
-	let mut sub = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			// The dead session's entry may still be routable for an instant; keep
-			// re-requesting until the standby serves the subscription.
-			if let Ok(broadcast) = sub_consumer.request_broadcast("test").await
-				&& let Ok(track) = broadcast.track("video")
-				&& let Ok(sub) = track.subscribe(subscription.clone()).await
-			{
-				return sub;
-			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("the standby route should serve a fresh subscription");
 	assert_eq!(read_payloads(&mut sub, 2).await, ["b2", "b3"]);
 
 	// The new subscription is live: what B produces from here on flows through it.

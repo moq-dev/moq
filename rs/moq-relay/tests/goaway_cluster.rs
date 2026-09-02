@@ -373,9 +373,9 @@ async fn spawn_relay_with_upstream(
 ///    gated: MID-B's first inbound connection can only be that reconnect).
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
-/// 4. Once the old leg closes, the subscription through it ends (failover is
-///    a resubscribe, not a transparent splice) and a fresh subscription
-///    through MID-B carries the rest.
+/// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
+///    routes share TOP as their first hop, so BOTTOM's front re-splices onto
+///    the MID-B leg at a group boundary instead of ending the subscription.
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
@@ -552,36 +552,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// BOTTOM, positively proving the new leg carries the resubscribe.
 	drop(mid_a_upstream);
 
-	// The subscription was served through the MID-A leg, so its close ends it:
-	// failover is a resubscribe, not a transparent splice. Drain any groups
-	// still in flight, then observe the end.
-	within("old subscription ends with the drained leg", async {
-		while let Ok(Some(_)) = sub.recv_group().await {}
-	})
-	.await;
-
-	// Resubscribe on the same broadcast handle: the subscriber's session with
-	// BOTTOM is intact, and BOTTOM now resolves the track through MID-B.
-	drop(bc);
-	let bc = within("broadcast re-resolves after the failover", async {
-		let consumer = sub_origin.consume();
-		consumer.request_broadcast("diamond").await.ok()
-	})
-	.await
-	.expect("broadcast re-resolves");
-	let mut sub = within(
-		"resubscribe after the failover",
-		bc.track("video")
-			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))),
-	)
-	.await
-	.expect("resubscribe");
-
-	// A lite-05 subscription starts at the live edge (its Max Age is a staleness
-	// tolerance, not a replay request), so publish at a steady cadence and collect
-	// what lands once the fresh chain establishes. MID-A is severed, so any
-	// post-drain group can only have flowed TOP -> MID-B -> BOTTOM.
+	// The subscription was served through the MID-A leg, but its close does not
+	// end it: both legs' routes name TOP as their first hop, so BOTTOM's front
+	// re-splices onto the MID-B leg at a group boundary and the subscription
+	// rides through. Keep publishing and keep reading the SAME subscription.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = tokio::spawn(async move {
 		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
@@ -596,13 +570,19 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		}
 	});
 
-	// Three distinct post-drain groups, every frame verified, proves the new leg
-	// carries the subscription (the establish may still see the pre-swap edge).
+	// Three distinct post-drain groups on the same subscription, every frame
+	// verified, proves the new leg carries it: MID-A is severed, so they can
+	// only have flowed TOP -> MID-B -> BOTTOM.
 	let mut post = BTreeSet::new();
 	while post.iter().filter(|seq| **seq > LAST_GROUP).count() < 3 {
 		collect_group(&mut sub, &mut post, FRAMES_PER_GROUP, "post-drain (MID-B leg only)").await;
 	}
 	post_publisher.abort();
+	// The splice must not re-deliver anything the old leg already served.
+	assert!(
+		post.iter().all(|seq| *seq > LAST_GROUP),
+		"the splice re-delivered pre-failover groups: {post:?}"
+	);
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
@@ -671,8 +651,8 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 }
 
 /// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. The subscription through the drained session ends with it, and a
-/// resubscribe through the redialed session resumes delivery.
+/// endpoint. Both sessions' routes name the same first hop, so the subscription
+/// through the drained session re-splices onto the redial and keeps delivering.
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -744,39 +724,17 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	within("old session drains", first_dial.closed()).await;
 
-	// The broadcast was materialized through the first session, so its close ends
-	// the subscription: failover is a resubscribe, not a transparent splice.
-	within("old subscription ends with the session", async {
-		while let Ok(Some(_)) = sub.recv_group().await {}
-	})
-	.await;
-
-	// Re-request through the redialed session's route and resubscribe.
-	let bc = within("broadcast resolves through the redial", async {
-		cluster.origin.consume().request_broadcast("cam").await.ok()
-	})
-	.await
-	.expect("broadcast resolves");
-	let mut sub = within("resubscribe", async {
-		bc.track("video").expect("track handle").subscribe(None).await
-	})
-	.await
-	.expect("resubscribe");
-
+	// The redialed session's route names the same first hop, so the broadcast
+	// re-splices onto it: the SAME subscription delivers the next group, with
+	// nothing re-delivered and no visible end.
 	let mut g = track.append_group().expect("append group");
 	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g1".as_ref())
 		.expect("write frame");
 	g.finish().expect("finish");
-	// The fresh subscription may start at the retained group 0; skip up to g1.
-	let mut g1 = loop {
-		let g = within("recv g1 after the redial", sub.recv_group())
-			.await
-			.expect("recv")
-			.expect("track ended early");
-		if g.sequence >= 1 {
-			break g;
-		}
-	};
+	let mut g1 = within("recv g1 through the redial", sub.recv_group())
+		.await
+		.expect("subscription survives the redial")
+		.expect("track ended early");
 	assert_eq!(g1.sequence, 1, "the redialed session must deliver the new group");
 	assert_eq!(
 		g1.read_frame().await.expect("read").expect("frame").payload[..],

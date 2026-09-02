@@ -371,8 +371,10 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering prefix, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-A route carries no content identity: nothing on the wire promises that two routes covering one path serve interchangeable bytes.
-A relay MUST NOT splice a live subscription across sources reached through different routes; when a serving session ends, in-flight subscriptions end with it (a reset), and the subscriber re-requests through the best remaining route.
+A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
+Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
+Equal first hops promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -1283,6 +1285,7 @@ The `Message Length` describes the payload size on the wire.
 - Removed `Subscriber Ordered` from SUBSCRIBE and SUBSCRIBE_UPDATE, and `Publisher Ordered` from TRACK_INFO and SUBSCRIBE_OK. Group order within a Track is now normatively newest-first, with no field to invert it: a subscriber that wants sequence order reads in sequence order, which costs the network nothing and does not let one subscriber's preference reach a Track a relay is fanning out to many. Note this removes a byte from the middle of each message, so a lite-06 peer cannot parse a lite-05 one's SUBSCRIBE (the earlier drafts keep the byte, and an implementation serving them SHOULD write 0 and ignore what it reads).
 - Made `Group Start` an absolute floor (the raw minimum group sequence, default 0) rather than the sequence + 1 with 0 meaning the latest group. The start resolves from `Subscriber Max Age` instead: the oldest group at or above the floor within the budget, so a subscriber that buffers is handed the head of what it can still play. A zero budget still resolves to the latest group, which was the only start the old encoding could ask for by default.
 - Removed the actively-carrying Warm discount, its ceiling exemption, and the `(Cold cost, hash)` adoption rank with its re-parenting delay: costs are forwarded accumulated only. The `Warm` and `Cold` fields and the selection order are unchanged.
+- Replaced the no-splice rule with a first-hop identity: two routes covering one path with the same non-zero first hop are the same origin reached another way, and a relay MAY move a live subscription between them at a group boundary. Splicing across differing or unknown (0) first hops remains prohibited.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

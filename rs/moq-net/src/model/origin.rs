@@ -14,7 +14,7 @@ use rand::RngExt;
 use web_async::Lock;
 use web_transport_trait::{MaybeSend, MaybeSync};
 
-use super::{Requests, WeakCache};
+use super::{Requests, WeakCache, WeakEntry};
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
@@ -767,6 +767,35 @@ struct ServeState {
 	closed: bool,
 }
 
+/// Key of a remotely-served front: the absolute path and the requester's
+/// split-horizon exclusion. Requesters excluding different peers get separate
+/// fronts, so a front's failover never adopts a route flowing back through one
+/// of its own readers.
+type FrontKey = (PathOwned, Option<Hop>);
+
+/// One remotely-served front in [`OriginState::fronts`]: the shared spliced
+/// broadcast at a path plus the channel requesters resolve through.
+#[derive(Clone)]
+struct RemoteFront {
+	/// Resolves requesters with the front's consumer (or the error that ended it
+	/// unresolved). The producer lives here so the teardown can reject requesters
+	/// still parked on a front whose watcher was cancelled.
+	request: kio::Producer<PendingBroadcast>,
+	/// The front's spliced broadcast, weak: dead once its watcher exits, so a
+	/// later request re-creates the front instead of joining a corpse.
+	broadcast: broadcast::WeakConsumer,
+}
+
+impl WeakEntry for RemoteFront {
+	fn is_closed(&self) -> bool {
+		self.broadcast.is_closed()
+	}
+
+	fn same_channel(&self, other: &Self) -> bool {
+		self.broadcast.same_channel(&other.broadcast)
+	}
+}
+
 /// One registered announce cursor: which prefixes it may see, how they are
 /// re-rooted, and the per-cursor delivery buffer.
 struct TableCursor {
@@ -1383,13 +1412,7 @@ impl Producer {
 	pub fn consume(&self) -> Consumer {
 		// Untagged: a session tags the egress consumer separately via
 		// `origin::Consumer::with_stats` (ingress and egress are distinct sides).
-		Consumer::new(
-			self.info,
-			self.root.clone(),
-			self.nodes.clone(),
-			self.shared.clone(),
-			stats::Session::default(),
-		)
+		Consumer::from_producer(self, stats::Session::default())
 	}
 
 	/// Returns a new Producer that automatically strips out the provided prefix.
@@ -1663,18 +1686,27 @@ impl DriverState {
 		// `create_broadcast` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (pending, servers, cursors) = {
+		let (pending, servers, cursors, fronts) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			let servers: Vec<_> = shared.routes.iter().filter_map(|entry| entry.server.clone()).collect();
 			let cursors: Vec<_> = shared.cursors.values().map(|cursor| cursor.state.clone()).collect();
-			(shared.fallback.drain_all(), servers, cursors)
+			let fronts: Vec<_> = shared.fronts.values().map(|front| front.request.clone()).collect();
+			(shared.fallback.drain_all(), servers, cursors, fronts)
 		};
 
 		// Reject every pending request, including those already handed to a
 		// handler: the teardown is terminal, so a handler resolving late must not
 		// beat it (resolution is first-write-wins).
 		for producer in pending {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Dropped));
+			}
+		}
+
+		// Reject requesters still parked on a remote front's channel: its watcher
+		// was cancelled above and will never resolve them.
+		for producer in fronts {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Dropped));
 			}
@@ -2345,6 +2377,372 @@ async fn serve_track(
 	}
 }
 
+/// The content identity of a remotely-served front: who originated the route
+/// its first source arrived through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Identity {
+	/// No source has attached yet: the first request may resolve through any
+	/// covering route, and whoever serves it fixes the identity.
+	Undetermined,
+	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
+	/// identifies nobody and never matches itself: the front cannot resume, so
+	/// its source ending ends it. Two anonymous publishers must never pass for
+	/// one reconnecting.
+	Anonymous,
+	/// The first hop of the serving route: the endpoint that originated it.
+	/// Routes sharing it are the same origin reached another way and safe to
+	/// resume through; anything else is different content at the same path.
+	Publisher(Hop),
+}
+
+impl Identity {
+	/// The first-hop pin for [`OriginState::best_route`], or `None` when any
+	/// route qualifies (no source attached yet).
+	fn pin(&self) -> Option<Hop> {
+		match self {
+			Self::Publisher(hop) => Some(*hop),
+			_ => None,
+		}
+	}
+
+	/// Whether route selection applies at all: an anonymous front never adopts
+	/// another route.
+	fn routable(&self) -> bool {
+		!matches!(self, Self::Anonymous)
+	}
+}
+
+/// Everything [`run_remote_front`] owns, queued by [`Consumer::request_broadcast`].
+struct RemoteFrontTask {
+	/// The route table the front selects and re-selects from.
+	shared: kio::Shared<OriginState>,
+	/// The front's source table, shared with its [`serve_track`] tasks.
+	state: kio::Producer<FrontState>,
+	/// The spliced broadcast the front serves.
+	broadcast: broadcast::Producer,
+	/// Absolute path of the front.
+	path: PathOwned,
+	/// The requesters' split-horizon exclusion, applied to every (re)selection.
+	exclude: Option<Hop>,
+	/// Resolves the requesters parked on the front's channel.
+	request: kio::Producer<PendingBroadcast>,
+	tasks: Tasks,
+	timers: TimersSlot,
+}
+
+/// Owns a remotely-served front: materializes the path from the best covering
+/// route, dispatches its spliced tracks, and re-splices through routes sharing
+/// the front's first-hop identity when the serving source dies or a better
+/// qualifying route appears, so subscribers never observe a survivable route
+/// change. The front ends (aborting its subscribers) when the source dies with
+/// no qualifying route left, when a qualifying route refuses the path, or when
+/// the origin tears down.
+async fn run_remote_front(task: RemoteFrontTask) {
+	let RemoteFrontTask {
+		shared,
+		state,
+		broadcast,
+		path,
+		exclude,
+		request,
+		tasks,
+		timers,
+	} = task;
+
+	enum Step {
+		/// A spliced track needs a serve task.
+		Serve(Arc<str>, super::resume::Producer),
+		/// The in-flight upstream request resolved.
+		Resolved(Result<broadcast::Consumer, Error>),
+		/// The attached source closed.
+		SourceDead,
+		/// The route table changed in a way the decision below cares about.
+		Table,
+		/// The origin tore down.
+		Closed,
+	}
+
+	let mut front = FrontDriver {
+		state,
+		broadcast,
+		initial: Some(request),
+		identity: Identity::Undetermined,
+		serving: None,
+	};
+	// The in-flight upstream request: the targeted route entry, its first hop,
+	// and the pending channel.
+	let mut upstream: Option<(u64, Option<Hop>, kio::Consumer<PendingBroadcast>)> = None;
+	// Routes that refused the path (an authoritative reject while another source
+	// was serving, or a queue with no live handler). Never retried while the
+	// entry stands; a reconnect is a fresh entry.
+	let mut refused: HashSet<u64> = HashSet::new();
+	// Why the last candidate fell through, reported if the front dies unresolved.
+	let mut last_err: Option<Error> = None;
+
+	'run: loop {
+		// Decide what the table means for us, then fire at most one upstream
+		// request. Locks are sequential, never nested: the table's, then the
+		// chosen route's queue.
+		// What the wait below compares table changes against: the qualifying
+		// route this pass decided on, recomputed identically by the wait's
+		// predicate so only a table change that would alter the decision wakes it.
+		let decided;
+		let fire = {
+			let table = shared.read();
+			if table.closed {
+				break 'run;
+			}
+			refused.retain(|id| table.routes.iter().any(|entry| entry.id == *id));
+			let best = match front.identity.routable() {
+				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused),
+				false => None,
+			};
+			decided = best.map(|entry| entry.id);
+			let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
+			match best {
+				// The serving route is still the best qualifying one.
+				Some(entry) if Some(entry.id) == serving_route => {
+					upstream = None;
+					None
+				}
+				// A better (or replacement) qualifying route: request through it,
+				// unless we already are.
+				Some(entry) => match upstream.as_ref().is_some_and(|(route, ..)| *route == entry.id) {
+					true => None,
+					false => Some((
+						entry.id,
+						entry.hops.iter().next().copied(),
+						entry.server.clone().expect("best_route yields served entries"),
+					)),
+				},
+				// Nothing qualifies. A live source keeps serving (its route may
+				// return); without one the front is over.
+				None => {
+					upstream = None;
+					match &front.serving {
+						Some(_) => None,
+						None => {
+							let err = match front.identity {
+								Identity::Undetermined => last_err.take().unwrap_or(Error::Unroutable),
+								_ => last_err.take().unwrap_or(Error::Dropped),
+							};
+							front.end(err);
+							return;
+						}
+					}
+				}
+			}
+		};
+
+		if let Some((route, first, server)) = fire {
+			let mut serve = server.lock();
+			match serve.closed {
+				// Retracted between the table read and its lock: the table has
+				// already moved on, so just re-decide.
+				true => continue 'run,
+				false => {
+					// A source this route already materialized for the path
+					// attaches without another upstream round trip.
+					if let Some(weak) = serve.served.get(&path) {
+						drop(serve);
+						front.attach(weak.consume(), route, first);
+						continue 'run;
+					}
+					let pending = match serve.requests.join(&path) {
+						Some(producer) => producer.consume(),
+						None => {
+							let producer = kio::Producer::<PendingBroadcast>::default();
+							let consumer = producer.consume();
+							match serve.requests.insert(path.clone(), producer) {
+								Ok(()) => consumer,
+								// No live handler behind the route: it cannot
+								// serve, whatever the table says.
+								Err(_) => {
+									refused.insert(route);
+									last_err = Some(Error::Unroutable);
+									continue 'run;
+								}
+							}
+						}
+					};
+					upstream = Some((route, first, pending));
+				}
+			}
+		}
+
+		let pin = front.identity.pin();
+		let routable = front.identity.routable();
+
+		let step = kio::wait(|waiter| {
+			if let Poll::Ready((name, resume)) = front.broadcast.poll_spliced_assigned(waiter) {
+				return Poll::Ready(Step::Serve(name, resume));
+			}
+
+			if let Some((.., pending)) = &upstream
+				&& let Poll::Ready(result) = pending.poll(waiter, |p| match &p.resolved {
+					Some(result) => Poll::Ready(result.clone()),
+					None => Poll::Pending,
+				}) {
+				return Poll::Ready(Step::Resolved(match result {
+					Ok(resolved) => resolved,
+					// The queue died unresolved (its handler dropped): the route
+					// could not serve.
+					Err(_closed) => Err(Error::Unroutable),
+				}));
+			}
+
+			if let Some((.., source)) = &front.serving
+				&& source.poll_closed(waiter).is_ready()
+			{
+				return Poll::Ready(Step::SourceDead);
+			}
+
+			match shared.poll(waiter, |table| {
+				if table.closed {
+					return Poll::Ready(());
+				}
+				let best = match routable {
+					true => table.best_route(&path.as_path(), exclude, pin, &refused).map(|e| e.id),
+					false => None,
+				};
+				match best == decided {
+					true => Poll::Pending,
+					false => Poll::Ready(()),
+				}
+			}) {
+				Poll::Ready(table) => {
+					let closed = table.closed;
+					drop(table);
+					Poll::Ready(match closed {
+						true => Step::Closed,
+						false => Step::Table,
+					})
+				}
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await;
+
+		match step {
+			Step::Serve(name, resume) => {
+				tasks.push(serve_track(front.state.clone(), name, resume, timers.clone()));
+			}
+			Step::Resolved(result) => {
+				let (route, first, _) = upstream.take().expect("resolved an in-flight request");
+				match result {
+					Ok(source) => front.attach(source, route, first),
+					// The route retracted before serving: the table already
+					// reflects it, so the next pass retries the survivor. Each
+					// such retry consumed a real retraction, so this cannot spin.
+					Err(Error::Unroutable) => {
+						last_err = Some(Error::Unroutable);
+					}
+					// An authoritative refusal of the path. It ends a front with
+					// no other source (a refusal is never retried); a serving
+					// front merely skips the refuser.
+					Err(err) => match &front.serving {
+						Some(_) => {
+							refused.insert(route);
+							last_err = Some(err);
+						}
+						None => {
+							front.end(err);
+							return;
+						}
+					},
+				}
+			}
+			Step::SourceDead => {
+				front.detach_dead();
+				last_err = Some(Error::Dropped);
+			}
+			Step::Table => {}
+			Step::Closed => break 'run,
+		}
+	}
+
+	// The origin tore down; its teardown already rejected parked requesters.
+	front.end(Error::Dropped);
+}
+
+/// The mutable half of a remote front's watcher: the source table and spliced
+/// broadcast it manages, who is serving, and the requesters awaiting the first
+/// source.
+struct FrontDriver {
+	/// The front's source table, shared with its [`serve_track`] tasks.
+	state: kio::Producer<FrontState>,
+	/// The spliced broadcast the front serves.
+	broadcast: broadcast::Producer,
+	/// Resolves the requesters parked on the front once the first source
+	/// attaches (or the front dies first).
+	initial: Option<kio::Producer<PendingBroadcast>>,
+	/// The front's content identity, fixed by the first source to attach.
+	identity: Identity,
+	/// The attached source: its id in the front's table, the route entry that
+	/// served it, and the source itself.
+	serving: Option<(u64, u64, broadcast::Consumer)>,
+}
+
+impl FrontDriver {
+	/// Attach a materialized source: replace the previous one (its tracks
+	/// re-splice at a group boundary), fix the front's identity on the first
+	/// attach, and resolve the requesters parked on the front's channel.
+	fn attach(&mut self, source: broadcast::Consumer, route: u64, first: Option<Hop>) {
+		let Ok(mut front) = self.state.write() else { return };
+		if let Some((id, ..)) = self.serving.take() {
+			front.sources.retain(|entry| entry.id != id);
+		}
+		let id = front.next_source;
+		front.next_source += 1;
+		front.sources.push(FrontSource {
+			id,
+			source: source.clone(),
+		});
+		front.reselect();
+		drop(front);
+
+		self.serving = Some((id, route, source));
+		if self.identity == Identity::Undetermined {
+			self.identity = match first {
+				Some(hop) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
+				_ => Identity::Anonymous,
+			};
+		}
+		if let Some(request) = self.initial.take()
+			&& let Ok(mut pending) = request.write()
+		{
+			pending.resolved.get_or_insert(Ok(self.broadcast.consume()));
+		}
+	}
+
+	/// Remove the dead source from the table. Its spliced tracks park on the
+	/// empty table until a replacement attaches or the front ends.
+	fn detach_dead(&mut self) {
+		if let Some((id, ..)) = self.serving.take()
+			&& let Ok(mut front) = self.state.write()
+		{
+			front.sources.retain(|entry| entry.id != id);
+			front.reselect();
+		}
+	}
+
+	/// End the front: reject requesters still parked on its channel, close the
+	/// source table so its serve tasks exit, and abort the spliced broadcast so
+	/// its subscribers observe the end.
+	fn end(&mut self, err: Error) {
+		if let Some(request) = self.initial.take()
+			&& let Ok(mut pending) = request.write()
+		{
+			pending.resolved.get_or_insert(Err(err.clone()));
+		}
+		if let Ok(mut front) = self.state.write() {
+			front.closed = true;
+		}
+		self.broadcast.abort_spliced(err);
+		self.broadcast.finish();
+	}
+}
+
 /// The origin's shared state: the route table, the announce cursors observing
 /// it, and the fallback request queue.
 ///
@@ -2370,6 +2768,15 @@ struct OriginState {
 	// the handler. Weak so a served broadcast still closes once its real
 	// consumers drop.
 	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
+
+	// The remotely-served fronts, keyed by absolute path and the requester's
+	// split-horizon exclusion. Each is a spliced broadcast whose watcher task
+	// materializes it from the best covering route and re-splices it through
+	// routes sharing its first hop, so a route change the identity survives is
+	// invisible to subscribers. Keyed per exclusion so a front's failover can
+	// never adopt a route flowing back through one of its own readers. Weak, so
+	// a front dies with its watcher and a later request re-creates it.
+	fronts: WeakCache<FrontKey, RemoteFront>,
 
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
@@ -2464,14 +2871,26 @@ impl OriginState {
 		self.cursors.insert(id, cursor);
 	}
 
-	/// The queue behind the best served route covering `path` (absolute) for a
-	/// requester excluding `exclude`.
+	/// The best served route covering `path` (absolute) for a requester excluding
+	/// `exclude`, skipping the `refused` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it fall through to
 	/// the fallback handler instead of being routed around it. Among routes at the
 	/// winning prefix, the cheapest served one is picked by [`route_order`].
-	fn best_server(&self, path: &Path, exclude: Option<Hop>) -> Option<kio::Shared<ServeState>> {
+	///
+	/// With `publisher` set, only routes originated by that first hop are
+	/// candidates: this is the identity a front resumes through, and a route from
+	/// anyone else is different content rather than an alternate path (see
+	/// [`run_remote_front`]). `Hop::UNKNOWN` identifies nobody, so callers never
+	/// pin it.
+	fn best_route(
+		&self,
+		path: &Path,
+		exclude: Option<Hop>,
+		publisher: Option<Hop>,
+		refused: &HashSet<u64>,
+	) -> Option<&RouteEntry> {
 		let candidates: Vec<&RouteEntry> = self
 			.routes
 			.iter()
@@ -2480,6 +2899,11 @@ impl OriginState {
 				Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
 				_ => true,
 			})
+			.filter(|entry| match publisher {
+				Some(first) => entry.hops.iter().next() == Some(&first),
+				None => true,
+			})
+			.filter(|entry| !refused.contains(&entry.id))
 			.collect();
 
 		// Covering prefixes of one path form a chain, so the longest is unique.
@@ -2488,7 +2912,6 @@ impl OriginState {
 			.into_iter()
 			.filter(|entry| entry.prefix.len() == most && entry.server.is_some())
 			.min_by_key(|entry| route_order(path, entry))
-			.and_then(|entry| entry.server.clone())
 	}
 }
 
@@ -2873,13 +3296,7 @@ impl Consume<Consumer> for Producer {
 		// Mirrors the inherent `Producer::consume`; inlined to avoid the
 		// inherent-vs-trait `consume` ambiguity. Untagged: egress is tagged
 		// separately from ingress.
-		Consumer::new(
-			self.info,
-			self.root.clone(),
-			self.nodes.clone(),
-			self.shared.clone(),
-			stats::Session::default(),
-		)
+		Consumer::from_producer(self, stats::Session::default())
 	}
 }
 
@@ -2941,6 +3358,18 @@ pub struct Consumer {
 	// `announced` and skipped by `request_broadcast`, so a peer is never served
 	// (or advertised) its own content back. `None` (the default) filters nothing.
 	exclude: Option<Hop>,
+
+	// The origin config remote fronts inherit (identity, cache pool, retention),
+	// mirroring what `create_broadcast` gives a local front.
+	origin: Info,
+
+	// Submission handle to the origin's [`Driver`], for the front watcher a
+	// routed `request_broadcast` spawns. Closed once the driver drops.
+	tasks: Tasks,
+
+	// The driver's clock and timers, threaded into fronts for the track idle
+	// linger.
+	timers: TimersSlot,
 }
 
 impl std::ops::Deref for Consumer {
@@ -2952,20 +3381,17 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	fn new(
-		info: Hop,
-		root: PathOwned,
-		nodes: OriginNodes,
-		shared: kio::Shared<OriginState>,
-		stats: stats::Session,
-	) -> Self {
+	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
-			info,
-			nodes,
-			root,
-			shared,
+			info: producer.info,
+			nodes: producer.nodes.clone(),
+			root: producer.root.clone(),
+			shared: producer.shared.clone(),
 			stats,
 			exclude: None,
+			origin: producer.info(),
+			tasks: producer.tasks.clone(),
+			timers: producer.timers.clone(),
 		}
 	}
 
@@ -3002,12 +3428,8 @@ impl Consumer {
 	/// rather than tearing the stream down.
 	pub(crate) fn empty(&self) -> Self {
 		Self {
-			info: self.info,
 			nodes: OriginNodes { nodes: Vec::new() },
-			root: self.root.clone(),
-			shared: self.shared.clone(),
-			stats: self.stats.clone(),
-			exclude: self.exclude,
+			..self.clone()
 		}
 	}
 
@@ -3149,12 +3571,8 @@ impl Consumer {
 	pub fn scope(&self, prefixes: &[Path]) -> Option<Consumer> {
 		let prefixes = PathPrefixes::new(prefixes);
 		Some(Consumer {
-			info: self.info,
-			root: self.root.clone(),
 			nodes: self.nodes.select(&prefixes)?,
-			shared: self.shared.clone(),
-			stats: self.stats.clone(),
-			exclude: self.exclude,
+			..self.clone()
 		})
 	}
 
@@ -3169,8 +3587,12 @@ impl Consumer {
 	/// 2. Otherwise the best announced route covering the path (most specific
 	///    prefix first, then cheapest) serves it on demand: sessions materialize
 	///    the path from the peer that announced the route. Concurrent requests
-	///    for the same path coalesce, and the served broadcast is shared for as
-	///    long as it stays live; a closed one is re-served on the next request.
+	///    for the same path coalesce onto one shared front, which outlives any
+	///    single route: when its serving route dies or a better one appears, the
+	///    front re-splices through the best route sharing its first hop at a
+	///    group boundary, invisibly to subscribers. A route change that does not
+	///    preserve the first hop ends the broadcast instead, and the next
+	///    request re-serves the path.
 	/// 3. Otherwise a live [`Dynamic`] handler (see [`Producer::dynamic`])
 	///    receives the request as a fallback.
 	///
@@ -3208,39 +3630,58 @@ impl Consumer {
 			return kio::Pending::new(Requesting::failed(Error::Closed));
 		}
 
-		if in_scope && let Some(server) = state.best_server(&absolute.as_path(), self.exclude) {
-			// Two sequential locks, never nested: the entry's queue has its own.
-			drop(state);
-			let mut serve = server.lock();
-			if !serve.closed {
-				// Reuse a still-live broadcast already served for this path, so repeat
-				// requests share one upstream subscription.
-				if let Some(weak) = serve.served.get(&absolute) {
-					let resolved = Requesting::ready(weak.consume()).with_path(requested).with_stats(scope);
-					return kio::Pending::new(resolved);
-				}
-
-				// Coalesce onto a pending request for the same path; otherwise
-				// register a new one.
-				let consumer = if let Some(producer) = serve.requests.join(&absolute) {
-					producer.consume()
-				} else {
-					let producer = kio::Producer::<PendingBroadcast>::default();
-					let consumer = producer.consume();
-					if serve.requests.insert(absolute, producer).is_err() {
-						return kio::Pending::new(Requesting::failed(Error::Unroutable));
-					}
-					consumer
-				};
-				return kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope));
+		if in_scope {
+			// Join the live front for this path and exclusion, if any: its watcher
+			// resolves (or already resolved) the request channel with the front's
+			// spliced broadcast, so repeat requests share one upstream
+			// subscription. A front whose route has since retracted still serves
+			// for as long as its session does.
+			let key = (absolute.clone(), self.exclude);
+			if let Some(front) = state.fronts.get(&key) {
+				let pending = Requesting::pending(front.request.consume())
+					.with_path(requested)
+					.with_stats(scope);
+				return kio::Pending::new(pending);
 			}
 
-			// The route was retracted between the lookup and its lock; fall
-			// through to the fallback handler.
-			drop(serve);
-			state = self.shared.lock();
-			if state.closed {
-				return kio::Pending::new(Requesting::failed(Error::Closed));
+			if state
+				.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new())
+				.is_some()
+			{
+				// A route covers the path: mint the front and hand its watcher the
+				// request. The watcher materializes the path from the best covering
+				// route, resolves the channel, and re-splices the front through
+				// routes sharing its first hop for as long as one serves.
+				let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
+					origin: self.origin.clone(),
+					path: absolute.clone(),
+				});
+				let front_state = kio::Producer::new(FrontState {
+					next_source: 0,
+					sources: Vec::new(),
+					active: None,
+					closed: false,
+				});
+				let request = kio::Producer::<PendingBroadcast>::default();
+				let consumer = request.consume();
+				state.fronts.insert(
+					key,
+					RemoteFront {
+						request: request.clone(),
+						broadcast: broadcast.consume().weak(),
+					},
+				);
+				self.tasks.push(run_remote_front(RemoteFrontTask {
+					shared: self.shared.clone(),
+					state: front_state,
+					broadcast,
+					path: absolute,
+					exclude: self.exclude,
+					request,
+					tasks: self.tasks.clone(),
+					timers: self.timers.clone(),
+				}));
+				return kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope));
 			}
 		}
 
@@ -3275,12 +3716,9 @@ impl Consumer {
 		let prefix = prefix.as_path();
 
 		Some(Self {
-			info: self.info,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
-			shared: self.shared.clone(),
-			stats: self.stats.clone(),
-			exclude: self.exclude,
+			..self.clone()
 		})
 	}
 
@@ -3549,6 +3987,20 @@ mod tests {
 		panic!("condition never settled");
 	}
 
+	/// Yield to the driver until the server's front watcher delivers a request.
+	async fn queued(server: &mut RouteServer) -> Request {
+		let mut request = None;
+		settle(|| match server.poll_requested_broadcast(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(popped)) => {
+				request = Some(popped);
+				true
+			}
+			_ => false,
+		})
+		.await;
+		request.unwrap()
+	}
+
 	#[tokio::test]
 	async fn announce_and_retract() {
 		let producer = origin(1).produce();
@@ -3787,16 +4239,13 @@ mod tests {
 		let (_announcement, mut server) = producer.announce_served("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
-		let request = match server.poll_requested_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(request)) => request,
-			_ => panic!("expected a queued request"),
-		};
+		let request = queued(&mut server).await;
 		assert_eq!(request.path().as_str(), "room/alice");
 
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
 
-		let resolved = pending.now_or_never().expect("accepted").expect("resolves");
+		let resolved = pending.await.expect("resolves");
 		// The handle is named by what the requester asked for.
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 
@@ -3818,18 +4267,15 @@ mod tests {
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
 
-		let request = match server.poll_requested_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(request)) => request,
-			_ => panic!("expected a queued request"),
-		};
+		let request = queued(&mut server).await;
 		// Only one request reaches the server.
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
 
-		let first = first.now_or_never().expect("accepted").expect("resolves");
-		let second = second.now_or_never().expect("accepted").expect("resolves");
+		let first = first.await.expect("resolves");
+		let second = second.await.expect("resolves");
 		assert!(first.is_clone(&second));
 	}
 
@@ -3843,7 +4289,7 @@ mod tests {
 		drop(announcement);
 		drop(server);
 
-		let err = pending.now_or_never().expect("rejected").err().unwrap();
+		let err = pending.await.err().unwrap();
 		assert!(matches!(err, Error::Unroutable));
 
 		// With the route gone, later requests are unroutable immediately.
@@ -3870,9 +4316,9 @@ mod tests {
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
 
-		// Each incumbent dies with the request still queued on it: the request
-		// fails Unroutable, and the resolve must retry through the next standby
-		// instead of parking on an announce update that never comes. Two
+		// Each incumbent dies with the front's request in flight on it: the
+		// front's watcher observes the retraction and retries through the next
+		// standby instead of parking on an announce update that never comes. Two
 		// retractions in a row, so the announce stream's initial coverage replay
 		// cannot paper over the missing retry.
 		drop(incumbent);
@@ -3882,17 +4328,11 @@ mod tests {
 		drop(second_server);
 		assert!((&mut resolving).now_or_never().is_none());
 
-		let request = match standby_server.poll_requested_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(request)) => request,
-			_ => panic!("expected the retry to queue on the standby"),
-		};
+		let request = queued(&mut standby_server).await;
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
 
-		let resolved = resolving
-			.now_or_never()
-			.expect("resolves via the standby")
-			.expect("resolves");
+		let resolved = resolving.await.expect("resolves via the standby");
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 	}
 
@@ -3939,7 +4379,8 @@ mod tests {
 
 		// Everything else still routes to the broad server.
 		let _pending = consumer.request_broadcast("room/alice");
-		assert!(broad_server.poll_requested_broadcast(&kio::Waiter::noop()).is_ready());
+		let request = queued(&mut broad_server).await;
+		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
 	#[tokio::test]
@@ -4028,6 +4469,201 @@ mod tests {
 		// A cursor born after the teardown is born ended.
 		let mut late = consumer.announced();
 		assert!(late.next().now_or_never().expect("ended").is_none());
+	}
+
+	/// One live subscription reading a track through a remote front, plus the
+	/// bookkeeping to kill and replace its serving route.
+	struct ResumeRig {
+		producer: Producer,
+		resolved: broadcast::Consumer,
+		subscription: track::Subscriber,
+		/// Keeps the incumbent's track producing; dropping it would abort the
+		/// track out from under the front mid-test.
+		_incumbent_track: track::Producer,
+	}
+
+	impl ResumeRig {
+		/// Announce a served route with `first` as its first hop, materialize
+		/// "room/alice" through it with a one-group "before" track, and subscribe.
+		async fn new(first: &[u64]) -> (Self, AnnounceProducer, broadcast::Producer) {
+			let producer = origin(1).produce();
+			let consumer = producer.consume();
+
+			let (announcement, mut server) = producer
+				.announce_served("room", Route::default().with_hops(hops(first)))
+				.unwrap();
+
+			let pending = consumer.request_broadcast("room/alice");
+			let request = queued(&mut server).await;
+			let mut source = broadcast::Info::new().produce();
+			let mut track = source.create_track("video", None).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+			group.finish().unwrap();
+			request.accept(&source);
+
+			let resolved = pending.await.expect("resolves");
+			let mut subscription = resolved
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+			let mut group = subscription
+				.recv_group()
+				.await
+				.expect("recv group")
+				.expect("track ended early");
+			let frame = group.read_frame().await.expect("read frame").expect("frame");
+			assert_eq!(&frame.payload[..], b"before");
+
+			(
+				Self {
+					producer,
+					resolved,
+					subscription,
+					_incumbent_track: track,
+				},
+				announcement,
+				source,
+			)
+		}
+
+		/// Stand up a second served route with `first` as its first hop and hand
+		/// back its server, ready to answer the front's re-request.
+		fn standby(&self, first: &[u64]) -> (AnnounceProducer, RouteServer) {
+			self.producer
+				.announce_served("room", Route::default().with_hops(hops(first)))
+				.unwrap()
+		}
+	}
+
+	/// Accept the front's re-request on `server` with a source carrying the same
+	/// content stream (the delivered group plus its successor) and prove the
+	/// rig's subscription resumes onto it: the successor group is delivered on
+	/// the same subscription, at the group boundary.
+	async fn assert_resumes(rig: &mut ResumeRig, server: &mut RouteServer) {
+		let request = queued(server).await;
+		let mut replacement = broadcast::Info::new().produce();
+		let mut track = replacement.create_track("video", None).unwrap();
+		// The same content: group 0 was already delivered through the old route,
+		// so the splice resumes at group 1.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		request.accept(&replacement);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut group = rig
+			.subscription
+			.recv_group()
+			.await
+			.expect("subscription survives the failover")
+			.expect("track ended early");
+		let frame = group.read_frame().await.expect("read frame").expect("frame");
+		assert_eq!(&frame.payload[..], b"resumed");
+	}
+
+	#[tokio::test]
+	async fn remote_source_resumes_through_same_first_hop() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		let (_standby, mut standby_server) = rig.standby(&[10, 20]);
+
+		// The serving route dies: retraction plus source abort, like a session.
+		drop(incumbent);
+		drop(source);
+
+		// The standby shares the first hop, so the subscription resumes there.
+		assert_resumes(&mut rig, &mut standby_server).await;
+	}
+
+	#[tokio::test]
+	async fn different_first_hop_ends_the_subscription() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		// Another publisher entirely: same path, different first hop.
+		let (_rival, mut rival_server) = rig.standby(&[11]);
+
+		drop(incumbent);
+		drop(source);
+
+		// The subscription ends rather than splicing onto the rival's frames.
+		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
+		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
+
+		// A fresh request resolves through the rival.
+		let consumer = rig.producer.consume();
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&mut rival_server).await;
+		let replacement = broadcast::Info::new().produce();
+		request.accept(&replacement);
+		pending.await.expect("re-request resolves through the rival");
+	}
+
+	#[tokio::test]
+	async fn anonymous_routes_never_resume() {
+		// An empty hop chain identifies nobody, so two of them must not pass for
+		// one publisher reconnecting.
+		let (mut rig, incumbent, source) = ResumeRig::new(&[]).await;
+		let (_twin, _twin_server) = rig.standby(&[]);
+
+		drop(incumbent);
+		drop(source);
+
+		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
+		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
+	}
+
+	#[tokio::test]
+	async fn reprice_is_invisible_to_the_subscription() {
+		let (rig, incumbent, mut source) = ResumeRig::new(&[10]).await;
+
+		// A metadata-only reprice of the only route: nothing re-requests and the
+		// subscription keeps flowing from the same source.
+		incumbent
+			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
+			.unwrap();
+
+		let mut track = source.create_track("audio", None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut audio = rig
+			.resolved
+			.track("audio")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe survives the reprice");
+		let mut group = audio
+			.recv_group()
+			.await
+			.expect("recv group")
+			.expect("track ended early");
+		let frame = group.read_frame().await.expect("read frame").expect("frame");
+		assert_eq!(&frame.payload[..], b"steady");
+	}
+
+	#[tokio::test]
+	async fn drain_reprice_migrates_before_the_session_dies() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		let (_standby, mut standby_server) = rig.standby(&[10, 20]);
+
+		// The serving route drains: repriced to the ceiling while its session
+		// keeps serving. The front migrates to the standby without waiting for
+		// the death.
+		incumbent
+			.update(Route::default().with_hops(hops(&[10])).with_cost(DRAIN_COST))
+			.unwrap();
+
+		assert_resumes(&mut rig, &mut standby_server).await;
+
+		// The drained source outlived the migration.
+		drop(incumbent);
+		drop(source);
 	}
 
 	#[tokio::test]
