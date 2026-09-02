@@ -98,8 +98,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 History belongs in commits and PRs; pending work belongs in a quest. Read
 [`quest/AGENTS.md`](quest/AGENTS.md) whenever work mentions a quest or
 questline, and use the `$plan-quest` or `$start-quest` skills when available.
-GitHub issues remain the public front door, while quests carry durable plans
-and dependency edges alongside the code.
+GitHub issues remain the public front door for outside reports, but for
+follow-up work discovered here, prefer creating a quest over filing an issue:
+quests carry durable plans and dependency edges alongside the code, and land
+reviewed.
 
 ## Dependencies
 

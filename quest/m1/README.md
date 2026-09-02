@@ -29,6 +29,7 @@ with the current dev tree before starting.
 - [#2624](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - moq-native: GOAWAY redirect guard classifies hosts by name, not by resolved address
 - [#3086](/quest/m1/3086-refactor-net-make-group-delivery-order-a-handle-and-move.md) - refactor(net): make group delivery order a handle, and move timestamp-based skipping into moq-net
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - Retention should reclaim idle open groups now that expiry is timestamp-only
+- [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
 - [#699](/quest/m1/699-better-prioritize-ties.md) - Better prioritize ties
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
 - [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
