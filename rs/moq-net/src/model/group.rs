@@ -141,7 +141,9 @@ pub(crate) struct GroupState {
 	// at finish so the count outlives an abort that clears the cache.
 	pub(crate) fin: Option<usize>,
 
-	// The error that caused the group to be aborted, if any.
+	// The error that caused the group to be aborted, if any. Mirrored into
+	// `Alive::aborted`, so [`Producer::abort`] stays the only writer: anything else
+	// setting this would leave track scans reading a group as live.
 	pub(crate) abort: Option<Error>,
 }
 
@@ -736,6 +738,11 @@ impl Producer {
 
 	/// Whether the group has been aborted (including pool eviction). The track's
 	/// read paths treat an aborted cached group as absent.
+	///
+	/// Reads the mirror rather than the group's state, so a track scan holding the
+	/// track lock never takes the group's. Monotone, and only ever conservative: a
+	/// concurrent abort can still read as live for the length of [`Self::abort`],
+	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.alive.aborted.load(Ordering::Acquire)
 	}

@@ -4,6 +4,9 @@
 //! track cache and subscription cursors around that storage: append a complete
 //! group, notify every subscriber, and hand the cached group to each cursor.
 //!
+//! `track_aborted_scan` isolates the other half of delivery: how much a cached
+//! prefix of aborted groups costs the scan that has to walk past it.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -37,45 +40,6 @@ struct Fanout {
 	subscribers: Vec<track::Subscriber>,
 	waiters: Vec<kio::Waiter>,
 	payload: Bytes,
-}
-
-/// A cached aborted prefix followed by one live group.
-struct AbortedScan {
-	_broadcast: broadcast::Producer,
-	track: track::Producer,
-	waiter: kio::Waiter,
-}
-
-impl AbortedScan {
-	fn new(aborted: usize) -> Self {
-		let mut broadcast = broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("bench", None).unwrap();
-		let mut stale = Vec::with_capacity(aborted);
-
-		for _ in 0..aborted {
-			stale.push(track.append_group().unwrap());
-		}
-		track.append_group().unwrap().finish().unwrap();
-		for group in stale {
-			group.abort(Error::Cancel).unwrap();
-		}
-
-		Self {
-			_broadcast: broadcast,
-			track,
-			waiter: kio::Waiter::noop(),
-		}
-	}
-
-	/// Scan the aborted prefix and return the trailing live group.
-	fn scan(&self) {
-		let mut subscriber = self.track.subscribe(None);
-		let group = match subscriber.poll_recv_group(&self.waiter) {
-			Poll::Ready(Ok(Some(group))) => group,
-			_ => unreachable!("the trailing live group must be ready"),
-		};
-		black_box(group);
-	}
 }
 
 impl Fanout {
@@ -117,6 +81,45 @@ impl Fanout {
 			black_box(group);
 			assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Pending));
 		}
+	}
+}
+
+/// A cached aborted prefix followed by one live group.
+struct AbortedScan {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	waiter: kio::Waiter,
+}
+
+impl AbortedScan {
+	fn new(aborted: usize) -> Self {
+		let mut broadcast = broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("bench", None).unwrap();
+		let mut stale = Vec::with_capacity(aborted);
+
+		for _ in 0..aborted {
+			stale.push(track.append_group().unwrap());
+		}
+		track.append_group().unwrap().finish().unwrap();
+		for group in stale {
+			group.abort(Error::Cancel).unwrap();
+		}
+
+		Self {
+			_broadcast: broadcast,
+			track,
+			waiter: kio::Waiter::noop(),
+		}
+	}
+
+	/// Walk the aborted prefix to reach the trailing live group.
+	fn scan(&self) {
+		let mut subscriber = self.track.subscribe(None);
+		let group = match subscriber.poll_recv_group(&self.waiter) {
+			Poll::Ready(Ok(Some(group))) => group,
+			_ => unreachable!("the trailing live group must be ready"),
+		};
+		black_box(group);
 	}
 }
 

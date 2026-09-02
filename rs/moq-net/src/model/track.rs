@@ -289,6 +289,8 @@ impl TrackState {
 	/// Find the next live group at or after `index` in arrival order.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
+	/// The cached producer rather than a consumer: `consume` reads the clock and can
+	/// take the group's own lock, which the caller does once the track guard is gone.
 	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Producer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
@@ -382,6 +384,7 @@ impl TrackState {
 			// Deliberately no cache refresh here: this is a pure seek, and the spliced
 			// merge consults candidates it may not deliver. The deliverer stamps the
 			// winner; a loser re-seeked every poll must not be shielded from eviction.
+			// The caller consumes it with the track guard released, like `poll_recv_group`.
 			return Poll::Ready(Ok(Some(group.clone())));
 		}
 
