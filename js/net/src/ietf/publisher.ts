@@ -431,7 +431,11 @@ export class Publisher {
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
-				let next = 0;
+				// The next object id that could be written, which starts at the filter rather
+				// than at zero. A backwards range (`startObject` above `endObject` in the same
+				// group) is empty, and starting here is what lets the check below see that
+				// before the read parks on an object the range already excludes.
+				let next = slice.skip;
 
 				for (;;) {
 					// The filter ends inside this group: everything at `until` and beyond is

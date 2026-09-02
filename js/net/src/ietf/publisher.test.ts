@@ -744,9 +744,9 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 });
 
 /**
- * A group that outgrows its cache evicts its own front, which used to fail the serving loop
- * and forfeit every remaining object in it. A Next Object subscriber joins above the evicted
- * prefix, so nothing it asked for was lost and the live tail is still served.
+ * A group that outgrows its cache evicts its own front. A Next Object subscriber joins above
+ * that evicted prefix, so it lost nothing it asked for: evicting objects the filter already
+ * excludes must not forfeit the live tail it did request.
  */
 test("draft-20: an open group that outgrew its cache still serves the live tail", async () => {
 	const fx = fixture();
@@ -784,6 +784,42 @@ test("draft-20: an open group that outgrew its cache still serves the live tail"
 			firstObject: false,
 			objects: [{ id: published, payload: `0.${published}` }],
 		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * An absolute filter naming one group with `startObject` above `endObject` selects nothing.
+ * Nothing rejects it on the wire, so the serving loop has to recognize the empty range and
+ * end the stream, rather than waiting on a start object the range itself excludes.
+ */
+test("draft-20: a backwards range within one group serves nothing and ends the stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Deliberately left open: a hang here would outlive the group rather than end with it.
+	const group = track.appendGroup();
+	for (let i = 0; i < 3; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 0n, endObject: 2n },
+		}),
+	);
+
+	try {
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group stream never opened");
+		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, objects: [] });
 	} finally {
 		fx.close();
 		client.close();
