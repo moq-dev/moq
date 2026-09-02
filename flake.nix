@@ -75,57 +75,6 @@
           ];
         };
 
-        # Keep local Cargo commands on one machine-wide cache and scheduler,
-        # even when several worktrees enter this dev shell at once. Release
-        # binaries avoid compiling the cache itself before the shell can open.
-        mbxVersion = "1.3.2";
-        mbxRelease =
-          {
-            aarch64-darwin = {
-              target = "aarch64-apple-darwin";
-              hash = "sha256-OpHsstb/SthGYueVmdEeee/0c4wiKjXtQy20sVreTR4=";
-            };
-            aarch64-linux = {
-              target = "aarch64-unknown-linux-musl";
-              hash = "sha256-q7vMjMfAgP68X2x34a56+J+vFUdiSCgve/TDMeg27hs=";
-            };
-            x86_64-linux = {
-              target = "x86_64-unknown-linux-musl";
-              hash = "sha256-oxozIJWsKRaGd3c21FCy9iZYFFrBc/9UP4MnHkSFDfc=";
-            };
-          }
-          .${system};
-        mbx = pkgs.stdenvNoCC.mkDerivation {
-          pname = "mbx";
-          version = mbxVersion;
-          src = pkgs.fetchurl {
-            url = "https://github.com/jdx/mr-boxington/releases/download/v${mbxVersion}/mbx-${mbxRelease.target}.tar.gz";
-            inherit (mbxRelease) hash;
-          };
-          sourceRoot = ".";
-          dontBuild = true;
-          installPhase = ''
-            runHook preInstall
-            install -Dm755 mbx "$out/bin/mbx"
-            runHook postInstall
-          '';
-          meta = {
-            description = "Shared Cargo compilation cache and scheduler";
-            homepage = "https://mr-boxington.jdx.dev";
-            license = pkgs.lib.licenses.mit;
-            mainProgram = "mbx";
-          };
-        };
-        cargo-mbx = pkgs.writeShellScriptBin "cargo" ''
-          if [[ -n "''${CI:-}" ]]; then
-            exec ${rust-toolchain}/bin/cargo "$@"
-          fi
-
-          export MBX_CARGO_SHIM_MODE=1
-          export MBX_CARGO_SHIM_PATH="$0"
-          exec ${mbx}/bin/mbx "$@"
-        '';
-
         # GStreamer dependencies (for moq-gst plugin)
         gstreamerDeps = with pkgs; [
           gst_all_1.gstreamer
@@ -488,34 +437,37 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = [
-            mbx
-            cargo-mbx
-          ]
-          ++ rustDeps
-          ++ jsDeps
-          ++ pyDeps
-          ++ cdnDeps
-          ++ draftsDeps
-          ++ packagingDeps
-          ++ lintDeps
-          ++ obsDeps
-          ++ ktDeps
-          ++ goDeps
-          ++ dartDeps
-          ++ devTools;
+          packages =
+            rustDeps
+            ++ jsDeps
+            ++ pyDeps
+            ++ cdnDeps
+            ++ draftsDeps
+            ++ packagingDeps
+            ++ lintDeps
+            ++ obsDeps
+            ++ ktDeps
+            ++ goDeps
+            ++ dartDeps
+            ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
-          # mkShell adds the pinned Rust toolchain to PATH too. Restore this
-          # shim last and normalize inherited wrapper settings so neither bare
-          # Cargo nor a just recipe can accidentally bypass mbx locally.
+          # The pinned Rust toolchain goes on PATH ahead of everything the
+          # host had, which shadows a Cargo shim like the one `mbx setup`
+          # installs. Put such a shim back in front, so a bare `cargo` in this
+          # shell reaches the same wrapper it reaches outside. A no-op when
+          # nothing installed one; which wrapper (if any) is a per-machine
+          # choice this flake doesn't make.
           shellHook = ''
-            export PATH="${cargo-mbx}/bin:$PATH"
-            export RUST_CARGO=cargo
-            unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+            for dir in "$HOME/Library/Application Support/mbx/bin" "''${XDG_DATA_HOME:-$HOME/.local/share}/mbx/bin"; do
+              if [ -x "$dir/cargo" ]; then
+                export PATH="$dir:$PATH"
+                break
+              fi
+            done
           '';
 
           env = {
@@ -532,17 +484,17 @@
         formatter = pkgs.nixfmt-tree;
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
-        # test` (see rs/justfile). The dev shell routes local Cargo commands
-        # through mbx, while its shim delegates directly to Cargo when CI is
-        # set so the workflow-owned target cache stays authoritative. Neither
-        # path goes through crane.
+        # test` (see rs/justfile). CI and local commands default to plain Cargo;
+        # local development can select a compatible wrapper with RUST_CARGO.
+        # Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #
-        # CI cache policy remains a workflow concern (`.github/actions/rust-cache`).
+        # Which compiler cache those runs get is a workflow concern
+        # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
             for asset in \
