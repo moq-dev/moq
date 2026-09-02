@@ -7,8 +7,8 @@ use crate::Activity;
 /// [`encode::Producer::write`](crate::encode::Producer::write) takes and what
 /// [`decode::Consumer::read`](crate::decode::Consumer::read) returns.
 ///
-/// Just a payload, a presentation timestamp, and what the codec was doing when
-/// it produced these samples. PCM layout (format / sample rate / channel count)
+/// Just a payload, a presentation timestamp, and whether the packet these
+/// samples came from coded any audio. PCM layout (format / sample rate / channel count)
 /// is fixed by the producer or consumer at construction time, never per frame,
 /// so callers can't accidentally drift the format mid-stream.
 #[derive(Clone, Debug)]

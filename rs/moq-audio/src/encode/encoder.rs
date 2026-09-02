@@ -114,11 +114,11 @@ pub struct Config {
 	/// because its bitrate is fixed by the sample rate and channel count.
 	///
 	/// Rates too low for Opus to code anything at the chosen
-	/// [`frame_duration`](Self::frame_duration) are rejected: libopus stops
-	/// coding below roughly `24_000 / frame_duration_ms` bits per second and
-	/// emits empty frames instead, which carry no audio and are indistinguishable
-	/// from silence. The floor is 1200 bps at the default 20 ms and rises as the
-	/// frame gets shorter.
+	/// [`frame_duration`](Self::frame_duration) are rejected: below its floor
+	/// libopus emits empty frames whatever the input, which carry no audio and
+	/// are indistinguishable from silence. The floor is 1200 bps at the default
+	/// 20 ms, rises for shorter frames (9600 bps at 2.5 ms), and is 2400 bps for
+	/// frames of 10 ms and longer.
 	pub bitrate: Option<u32>,
 	/// Enable Opus in-band forward error correction.
 	pub fec: bool,

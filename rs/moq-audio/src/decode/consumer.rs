@@ -561,6 +561,11 @@ mod tests {
 		let expected = first_dtx.expect("silence should enter Opus DTX");
 		let mut actual = None;
 		while let Some(frame) = consumer.read().await.unwrap() {
+			// 10 ms packets do not fill the 20 ms chunk, so the resampler hands back
+			// nothing every other packet. Those must not surface as frames: a frame
+			// with no samples reads as audio arriving, and carries an activity
+			// describing samples that are not there.
+			assert!(!frame.data.is_empty(), "read returned a frame with no samples");
 			if frame.activity.is_dtx() {
 				actual = Some(frame.timestamp);
 				break;
