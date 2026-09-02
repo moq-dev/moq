@@ -62,9 +62,9 @@ mix as its reference.
 
 ## Publishing
 
-`encode::Publication` advertises the track and catalog up front and opens the
-microphone only while somebody is listening. Its separate driver owns capture
-and encoding, while clones of the retained handle control that same track:
+`encode::Publication` advertises the track up front and opens the microphone
+only while somebody is listening. Its separate driver owns capture and encoding,
+while clones of the retained handle control that same track:
 
 ```rust
 use moq_audio::{capture, encode};
@@ -76,8 +76,7 @@ local.run_until(async move {
     options.capture = capture::Config::default();
     options.clock = clock;
 
-    let (mut microphone, driver) =
-        encode::Publication::new(broadcast, catalog, options).await?;
+    let (mut microphone, driver) = encode::Publication::new(broadcast, catalog, options)?;
     let publish = tokio::task::spawn_local(driver.run());
 
     microphone.stop(); // releases the device, but keeps the track
@@ -103,10 +102,16 @@ local.run_until(async move {
 
 The native capture driver is not `Send`, so await it directly or use a
 `LocalSet` when it needs a separate task. `encode::publish_capture` remains the
-shorthand when no controls are needed. Transient input failures retry with
-capped backoff. Terminal failures leave the track registered in
-`Status::Failed`; `start` retries, while `replace` selects another device without
-changing the identity subscribers already know. `Publication::level` is measured
+shorthand when no controls are needed.
+
+Constructing a publication never touches the device, so the controls exist even
+on a machine with no microphone. The driver probes the input for the PCM layout
+the catalog rendition describes and registers that rendition on the first
+success, so the catalog advertises no audio until then and `Status::Starting` is
+how an observer sees it. Transient input failures retry with capped backoff.
+Terminal failures leave the track registered in `Status::Failed`; `start`
+retries, while `replace` selects another device without changing the identity
+subscribers already know. `Publication::level` is measured
 after AEC and other capture processing, so it is suitable for a local meter or
 active-speaker input. It rides its own channel rather than `State`, because it
 changes every buffer and `changed` reports lifecycle transitions only.

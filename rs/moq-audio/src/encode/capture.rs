@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rand::RngExt;
 
+use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Resampler, remix, validate_channels};
@@ -25,7 +26,7 @@ pub enum Status {
 	Stopped,
 	/// Capture is enabled and waiting for a subscriber.
 	Waiting,
-	/// The selected input is being opened.
+	/// The selected input is being probed or opened.
 	Starting,
 	/// Post-processing samples are being encoded and published.
 	Live,
@@ -185,35 +186,27 @@ impl Publication {
 	/// streams are not `Send`; [`Publication`] itself is `Send + Sync`, so the
 	/// controls can live anywhere.
 	///
-	/// Reads the source's PCM layout first, since the catalog rendition is
-	/// registered from it, retrying a transient discovery failure with capped
-	/// backoff. A source that never appears keeps this pending, so the caller
-	/// owns the timeout by dropping the future.
-	pub async fn new(
+	/// The track is registered here, but its catalog rendition describes the
+	/// source's PCM layout, so the driver probes for that first and registers the
+	/// rendition on the first success. Until then the broadcast advertises no
+	/// audio, which [`Status::Starting`] reports. A source that never appears is
+	/// retried with capped backoff rather than blocking the controls.
+	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		options: PublicationOptions,
 	) -> Result<(Self, Driver), Error> {
-		let mut supervisor = Supervisor::default();
-		let mut source = DeviceSource;
-		let layout = supervisor.discover(&mut source, &options.capture).await?;
-		Self::build(broadcast, catalog, options, layout, supervisor)
+		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
 
 	fn build(
 		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		options: PublicationOptions,
-		layout: capture::Layout,
 		supervisor: Supervisor,
 	) -> Result<(Self, Driver), Error> {
-		let input = Input {
-			format: Format::F32,
-			sample_rate: layout.sample_rate,
-			channels: layout.channels,
-		};
-		let producer = Producer::new(&mut broadcast, catalog, input, &options.encode)?;
-		let track_name: Arc<str> = producer.track_name().into();
+		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
+		let track_name: Arc<str> = reserved.name().into();
 		let desired = Desired {
 			config: options.capture,
 			enabled: true,
@@ -221,7 +214,7 @@ impl Publication {
 		};
 		let initial = PublishedState {
 			state: State {
-				status: Status::Waiting,
+				status: Status::Starting,
 				source: desired.config.source.clone(),
 				device: None,
 				failure: None,
@@ -240,7 +233,8 @@ impl Publication {
 		};
 		let driver = Driver {
 			_broadcast: broadcast,
-			producer: Some(producer),
+			track: Some(Track::Reserved(reserved)),
+			encode: options.encode,
 			clock: options.clock,
 			supervisor,
 			desired: desired_tx.consume(),
@@ -338,7 +332,9 @@ impl Publication {
 /// ends the driver and releases that identity.
 pub struct Driver {
 	_broadcast: moq_net::broadcast::Producer,
-	producer: Option<Producer>,
+	track: Option<Track>,
+	/// The codec settings the rendition is built from once the layout is known.
+	encode: Options,
 	clock: moq_mux::Clock,
 	supervisor: Supervisor,
 	desired: kio::Consumer<Desired>,
@@ -364,18 +360,22 @@ impl Driver {
 
 	async fn run_with<S: CaptureSource>(mut self, mut source: S) -> Result<(), Error> {
 		let result = self.drive(&mut source).await;
-		let producer = self.producer.take().expect("driver always owns its producer");
+		// An encoder that rejects the discovered layout consumes the reservation,
+		// leaving nothing to finalize.
+		let track = self.track.take();
 
 		match &result {
 			Ok(()) => {
 				self.update(Status::Ended, None, None);
-				if let Err(err) = producer.finish() {
+				if let Some(Err(err)) = track.map(Track::finish) {
 					tracing::debug!(error = %err, "audio track finish after capture ended");
 				}
 			}
 			Err(err) => {
 				self.fail(err);
-				producer.abort(moq_net::Error::Transport(err.to_string()));
+				if let Some(track) = track {
+					track.abort(moq_net::Error::Transport(err.to_string()));
+				}
 			}
 		}
 		self.silence();
@@ -385,33 +385,105 @@ impl Driver {
 
 	async fn drive<S: CaptureSource>(&mut self, source: &mut S) -> Result<(), Error> {
 		let track = self
-			.producer
+			.track
 			.as_ref()
-			.expect("driver always owns its producer")
+			.expect("driver always owns its track")
 			.track()
 			.clone();
 
+		if let Some(result) = self.discover(source, &track).await {
+			return result;
+		}
+		self.capture(source, &track).await
+	}
+
+	/// Probe the selected input for the PCM layout the catalog rendition
+	/// describes, registering the rendition on the first success.
+	///
+	/// Returns `Some` when the driver should exit before that happens: the
+	/// controls were dropped, the track ended, or a probe failed terminally with
+	/// nobody left to retry it.
+	async fn discover<S: CaptureSource>(
+		&mut self,
+		source: &mut S,
+		track: &moq_net::track::Producer,
+	) -> Option<Result<(), Error>> {
 		loop {
 			let desired = self.desired.read().clone();
 			if !desired.enabled {
-				self.silence();
-				self.update(Status::Stopped, None, None);
-				tokio::select! {
-					biased;
-					changed = desired_changed(&self.desired, desired.revision) => {
-						if changed.is_none() { return Ok(()) }
-						continue;
-					}
-					err = track.closed() => {
-						log_track_ended(err);
-						return Ok(());
-					}
+				if !self.idle(track, desired.revision).await {
+					return Some(Ok(()));
 				}
+				continue;
+			}
+
+			self.update(Status::Starting, None, None);
+			let discovered = tokio::select! {
+				biased;
+				changed = desired_changed(&self.desired, desired.revision) => {
+					if changed.is_none() {
+						return Some(Ok(()));
+					}
+					// A replaced source deserves an immediate probe, not the backoff
+					// the one it replaced had climbed to.
+					self.supervisor.reset();
+					continue;
+				}
+				closed = track.closed() => {
+					log_track_ended(closed);
+					return Some(Ok(()));
+				}
+				layout = self.supervisor.discover(source, &desired.config) => layout,
+			};
+
+			let layout = match discovered {
+				Ok(layout) => layout,
+				Err(err) => match self.failed(err, track, desired.revision).await {
+					Some(result) => return Some(result),
+					None => continue,
+				},
+			};
+
+			let Some(Track::Reserved(reserved)) = self.track.take() else {
+				unreachable!("the track stays reserved until discovery succeeds")
+			};
+			let input = Input {
+				format: Format::F32,
+				sample_rate: layout.sample_rate,
+				channels: layout.channels,
+			};
+			return match reserved.encode(input, &self.encode) {
+				Ok(producer) => {
+					self.track = Some(Track::Encoding(producer));
+					None
+				}
+				Err(err) => Some(Err(err)),
+			};
+		}
+	}
+
+	async fn capture<S: CaptureSource>(
+		&mut self,
+		source: &mut S,
+		track: &moq_net::track::Producer,
+	) -> Result<(), Error> {
+		loop {
+			let desired = self.desired.read().clone();
+			if !desired.enabled {
+				if !self.idle(track, desired.revision).await {
+					return Ok(());
+				}
+				continue;
 			}
 
 			let event = {
-				let producer = self.producer.as_mut().expect("driver always owns its producer");
-				let mut demand = TrackDemand { track: &track };
+				// Borrow the field, not all of `self`: the select below needs the rest.
+				let producer = self
+					.track
+					.as_mut()
+					.and_then(Track::producer)
+					.expect("the layout is discovered before capture runs");
+				let mut demand = TrackDemand { track };
 				let mut output = EncoderOutput {
 					producer,
 					clock: &self.clock,
@@ -439,27 +511,58 @@ impl Driver {
 				}
 				DriveEvent::Capture(Ok(())) => return Ok(()),
 				DriveEvent::Capture(Err(err)) => {
-					self.fail(&err);
-					if !self.park_on_failure || track.is_closed() {
-						return Err(err);
-					}
-					tokio::select! {
-						biased;
-						changed = desired_changed(&self.desired, desired.revision) => {
-							if changed.is_none() { return Ok(()) }
-						}
-						closed = track.closed() => {
-							log_track_ended(closed);
-							return Err(err);
-						}
+					if let Some(result) = self.failed(err, track, desired.revision).await {
+						return result;
 					}
 				}
 			}
 		}
 	}
 
+	/// Release the input and wait for a control action, returning false when the
+	/// driver should exit.
+	async fn idle(&mut self, track: &moq_net::track::Producer, revision: u64) -> bool {
+		self.silence();
+		self.update(Status::Stopped, None, None);
+		tokio::select! {
+			biased;
+			changed = desired_changed(&self.desired, revision) => changed.is_some(),
+			err = track.closed() => {
+				log_track_ended(err);
+				false
+			}
+		}
+	}
+
+	/// Publish a terminal input failure and park until a control action retries
+	/// it, returning `Some` with the result when the driver should exit instead.
+	async fn failed(
+		&mut self,
+		err: Error,
+		track: &moq_net::track::Producer,
+		revision: u64,
+	) -> Option<Result<(), Error>> {
+		self.fail(&err);
+		if !self.park_on_failure || track.is_closed() {
+			return Some(Err(err));
+		}
+		tokio::select! {
+			biased;
+			changed = desired_changed(&self.desired, revision) => {
+				changed.is_none().then_some(Ok(()))
+			}
+			closed = track.closed() => {
+				log_track_ended(closed);
+				Some(Err(err))
+			}
+		}
+	}
+
 	fn producer_mut(&mut self) -> &mut Producer {
-		self.producer.as_mut().expect("driver always owns its producer")
+		self.track
+			.as_mut()
+			.and_then(Track::producer)
+			.expect("the layout is discovered before capture runs")
 	}
 
 	fn update(&self, status: Status, device: Option<capture::Device>, failure: Option<Error>) {
@@ -488,6 +591,45 @@ impl Driver {
 enum DriveEvent {
 	Control(Option<Desired>),
 	Capture(Result<(), Error>),
+}
+
+/// The publication's track, before and after the input's layout is known.
+enum Track {
+	/// Registered in the broadcast but not the catalog, because the rendition
+	/// describes a PCM layout no probe has returned yet.
+	Reserved(Reserved),
+	/// Probed, so the rendition is registered and samples can be encoded.
+	Encoding(Producer),
+}
+
+impl Track {
+	fn track(&self) -> &moq_net::track::Producer {
+		match self {
+			Self::Reserved(reserved) => reserved.track(),
+			Self::Encoding(producer) => producer.track(),
+		}
+	}
+
+	fn producer(&mut self) -> Option<&mut Producer> {
+		match self {
+			Self::Reserved(_) => None,
+			Self::Encoding(producer) => Some(producer),
+		}
+	}
+
+	fn finish(self) -> Result<(), Error> {
+		match self {
+			Self::Reserved(reserved) => reserved.finish(),
+			Self::Encoding(producer) => producer.finish(),
+		}
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Reserved(reserved) => reserved.abort(err),
+			Self::Encoding(producer) => producer.abort(err),
+		}
+	}
 }
 
 async fn desired_changed(desired: &kio::Consumer<Desired>, revision: u64) -> Option<Desired> {
@@ -551,7 +693,7 @@ pub async fn publish_capture(
 ) -> Result<(), Error> {
 	let options = PublicationOptions { capture, encode, clock };
 	// Held, not dropped: the driver ends as soon as the last control handle goes.
-	let (_publication, driver) = Publication::new(broadcast, catalog, options).await?;
+	let (_publication, driver) = Publication::new(broadcast, catalog, options)?;
 	Driver {
 		park_on_failure: false,
 		..driver
@@ -1252,26 +1394,23 @@ mod tests {
 
 	async fn setup_publication(
 		opens: impl IntoIterator<Item = Open>,
-	) -> (Publication, Driver, MockSource, moq_net::track::Subscriber) {
+	) -> (
+		Publication,
+		Driver,
+		MockSource,
+		moq_net::track::Subscriber,
+		moq_mux::catalog::Producer,
+	) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut options = PublicationOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		let (publication, driver) = Publication::build(
-			broadcast,
-			catalog,
-			options,
-			capture::Layout {
-				sample_rate: 48_000,
-				channels: 2,
-			},
-			Supervisor::exact(),
-		)
-		.unwrap();
+		let (publication, driver) =
+			Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		(publication, driver, source(opens, false), subscription)
+		(publication, driver, source(opens, false), subscription, catalog)
 	}
 
 	async fn wait_for(publication: &mut Publication, status: Status) -> State {
@@ -1292,7 +1431,7 @@ mod tests {
 	async fn failed_publication_retries_but_duplicate_start_is_idempotent() {
 		let (_events, recovered) = stream(None);
 		let recovered = with_device(recovered, "allowed");
-		let (mut publication, driver, source, _subscription) =
+		let (mut publication, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Fatal("permission denied"), Open::Stream(recovered)]).await;
 		let attempts = source.attempts.clone();
 		let task = tokio::spawn(driver.run_with(source));
@@ -1321,7 +1460,7 @@ mod tests {
 		let first = with_device(first, "first");
 		let (_second_events, second) = stream(None);
 		let second = with_device(second, "second");
-		let (mut publication, driver, source, _subscription) =
+		let (mut publication, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Stream(first), Open::Stream(second)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 
@@ -1344,7 +1483,7 @@ mod tests {
 	#[tokio::test]
 	async fn reports_post_processing_level() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 		wait_for(&mut publication, Status::Live).await;
 		assert_eq!(publication.level(), Level::default());
@@ -1374,7 +1513,7 @@ mod tests {
 	#[tokio::test]
 	async fn level_updates_do_not_wake_state_waiters() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 		wait_for(&mut publication, Status::Live).await;
 
@@ -1395,7 +1534,8 @@ mod tests {
 	/// failure would hang `moq import capture` instead of reporting the denial.
 	#[tokio::test]
 	async fn a_publication_without_controls_returns_its_terminal_failure() {
-		let (publication, driver, source, _subscription) = setup_publication([Open::Fatal("permission denied")]).await;
+		let (publication, driver, source, _subscription, _catalog) =
+			setup_publication([Open::Fatal("permission denied")]).await;
 		let driver = Driver {
 			park_on_failure: false,
 			..driver
@@ -1413,7 +1553,7 @@ mod tests {
 	/// A retained publication keeps the track and waits to be told what to do.
 	#[tokio::test]
 	async fn a_terminal_failure_parks_a_retained_publication() {
-		let (mut publication, driver, source, _subscription) =
+		let (mut publication, driver, source, _subscription, _catalog) =
 			setup_publication([Open::Fatal("permission denied")]).await;
 		let task = tokio::spawn(driver.run_with(source));
 
@@ -1428,7 +1568,7 @@ mod tests {
 	#[tokio::test]
 	async fn stopping_zeroes_the_level() {
 		let (events, input) = stream(None);
-		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 		wait_for(&mut publication, Status::Live).await;
 
@@ -1457,7 +1597,7 @@ mod tests {
 	async fn a_terminal_live_failure_keeps_the_device_that_failed() {
 		let (events, input) = stream(None);
 		let input = with_device(input, "wired");
-		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let (mut publication, driver, source, _subscription, _catalog) = setup_publication([Open::Stream(input)]).await;
 		let task = tokio::spawn(driver.run_with(source));
 		wait_for(&mut publication, Status::Live).await;
 
@@ -1470,6 +1610,67 @@ mod tests {
 		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "device vanished"));
 
 		// Retained controls park rather than end, so dropping them is the clean exit.
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// The whole point of a retained handle is to outlive a missing device, so
+	/// construction must not wait on one and the controls must work meanwhile.
+	#[tokio::test]
+	async fn controls_are_live_before_the_input_is_discovered() {
+		let (mut publication, driver, mut source, _subscription, catalog) = setup_publication([]).await;
+		// Nothing ever answers a probe, which is a machine with no input device.
+		source.formats.clear();
+		let attempts = source.format_attempts.clone();
+		let task = tokio::spawn(driver.run_with(source));
+
+		assert_eq!(publication.track_name(), "audio");
+		tokio::time::timeout(Duration::from_secs(1), async {
+			while attempts.load(Ordering::SeqCst) == 0 {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the driver never probed the input");
+
+		assert_eq!(publication.state().status(), Status::Starting);
+		// The layout is unknown, so there is no rendition to advertise yet.
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+
+		// A probe nothing answers is still cancellable by the controls.
+		publication.stop();
+		wait_for(&mut publication, Status::Stopped).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// The rendition the catalog advertises describes the discovered layout, so
+	/// it appears only once a probe succeeds.
+	#[tokio::test]
+	async fn discovery_registers_the_rendition() {
+		let (_events, input) = stream(None);
+		let (mut publication, driver, mut source, _subscription, catalog) =
+			setup_publication([Open::Stream(input)]).await;
+		source.formats = [Discovery::Fatal("permission denied"), Discovery::Format(48_000, 2)]
+			.into_iter()
+			.collect();
+		let task = tokio::spawn(driver.run_with(source));
+
+		let failed = wait_for(&mut publication, Status::Failed).await;
+		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "permission denied"));
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+
+		// A terminal probe failure parks like a terminal open failure, so `start`
+		// retries it rather than the driver ending with no track.
+		publication.start();
+		wait_for(&mut publication, Status::Live).await;
+		let renditions = catalog.snapshot().audio.renditions;
+		let config = renditions.get("audio").expect("the rendition was never registered");
+		assert_eq!(config.sample_rate, 48_000);
+		assert_eq!(config.channel_count, 2);
+
 		drop(publication);
 		task.await.unwrap().unwrap();
 	}
