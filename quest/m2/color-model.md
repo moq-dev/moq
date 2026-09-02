@@ -20,13 +20,24 @@ H.265 VUI, AV1 colour config, and a container's `colr` box all populate the same
 fields. Fill them at import from whichever of those the source provides, and
 emit them on export.
 
+Settle the precedence before adding the fields, because these sources disagree
+in real files and a renderer must not see a different answer per import path.
+Prefer the bitstream over the container: VUI and the AV1 colour config are what
+the encoder actually signalled and travel with the elementary stream, while a
+`colr` box is added by a muxer that may be wrong or stale. Record which source
+won so a conflict is diagnosable rather than invisible, and treat an
+unspecified value as absent rather than as a signalled default, so a partial
+container box does not override a complete bitstream.
+
 Static display properties belong here rather than in a timed track, which is
 also where the HDR10 metadata that lives in H.26x SEI should land once it can be
 read. That is the one seam with the SEI line, and it runs in one direction:
 this quest gives display metadata a home, and does not depend on SEI work.
 
 Test each source of truth in isolation, a source that signals nothing, a
-conflict between VUI and container, and an SDR round trip that stays byte-identical.
+conflict between VUI and container resolving to the bitstream, a container box
+that fills a gap the bitstream left unspecified, and an SDR round trip that
+stays byte-identical.
 
 ## Related
 

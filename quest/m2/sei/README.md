@@ -26,17 +26,20 @@ stitches. It subscribes to the sidecar when it wants the data, and otherwise
 decodes stripped video unchanged. Only export reinserts, rebuilding the
 bitstream a downstream decoder expects.
 
-That removes the delivery problem this line used to be gated on. Nothing waits
-on a sidecar to release a video frame, so there is no cross-track deadline to
-prove, no presence marker in the video framing, and no compatibility cliff for
-an old player. An old exporter drops SEI from its output; upgrading is the
-answer.
+That shrinks the delivery problem this line used to be gated on, without
+erasing it. No video frame waits on a sidecar, so there is no cross-track
+deadline to prove and no compatibility cliff for an old player. But export
+still joins two independently scheduled tracks, so it owns a stated buffer
+budget and reports what missed it. An old exporter drops SEI from its output;
+upgrading is the answer.
 
-Correlate by the video frame's timestamp, which already identifies the access
-unit within a rendition and is the key an application syncing data to
-presentation time actually wants. Preserve the original NAL bytes, prefix or
-suffix placement, and in-access-unit order so reinsertion is byte-faithful
-without interpreting payload types. A semantic decoder for captions, HDR,
+Correlate by group sequence and frame ordinal, which is exact by construction,
+and carry the video frame's timestamp alongside as data so an application
+syncing to presentation time gets it without subscribing to video. Preserve the
+original NAL bytes, prefix or suffix placement, and in-access-unit order so
+reinsertion is byte-faithful without interpreting payload types. Placement must
+be exact: misplaced `recovery_point` misdirects tune-in, and reordered caption
+byte pairs garble a stateful decoder. A semantic decoder for captions, HDR,
 telemetry, or vendor data can be layered on later without changing this
 contract.
 

@@ -27,6 +27,11 @@ inherit that line's schedule. Once SEI is a sidecar the parser can read it from
 there instead of walking the access unit, which is a refactor rather than a
 prerequisite.
 
+Whichever lands first, the import order is a contract, not an accident: caption
+extraction sees the SEI before stripping removes it. Running the split first
+silently produces a broadcast with no captions, which is the failure this quest
+exists to prevent, so cover the ordering with a test rather than a comment.
+
 ## Related
 
 - [SEI](/quest/m2/sei/README.md) - carries SEI byte-faithfully as a sidecar; if
