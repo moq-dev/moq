@@ -11,6 +11,10 @@ is VBR, inserts no null packets, and paces PCR once per media frame, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
+Two instruments live here. `compliance.py` (via `run.sh`) grades a captured file
+against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
+pipe, which is the only way to see *when* the exporter released each PCR.
+
 ## Running
 
 ```bash
@@ -73,6 +77,71 @@ Thresholds are CLI flags forwarded through `run.sh` (e.g.
 `--tb-size-bytes`, `--video-leak-bps`, `--audio-leak-bps`). `--report-json <path>`
 writes the full machine-readable report.
 
+## PCR timing (`pcr-timing.py`)
+
+A PCR makes three claims at once, and an instrument pointed at one of them
+cannot see the other two:
+
+| Domain | What it claims | Graded from |
+|---|---|---|
+| value | consecutive PCR values are spaced within the repetition limit | the values |
+| release | the bytes carrying a PCR were handed over when that PCR asserts | arrival stamps |
+| position | a PCR packet sits among the media bytes it describes | packet offsets |
+
+`compliance.py` grades `value` from a file, deterministically and with no
+wall-clock capture, which is the right basis for the model math it does. That
+also means it cannot grade `release`: a change to *when* the exporter hands bytes
+over is invisible to any harness that does not stamp arrivals.
+`pcr-timing.py` reads a pipe and grades all three in one pass.
+
+```bash
+# live: all three domains, reading the exporter directly
+moq --client-connect http://localhost:4443 --broadcast live.hang export ts \
+  | ./pcr-timing.py --live --seconds 45
+
+# offline: value and position only (a file has no release timing left in it)
+./pcr-timing.py capture.ts
+```
+
+It needs only `python3` — no TSDuck, no source file and no declared mux rate,
+because every check is graded against the stream's **own** PCR values. If two
+consecutive PCRs are 25 ms apart in value then they must be ~25 ms apart in
+arrival, whatever clock rate the stream is running at. The price of that basis is
+the same one `compliance.py` pays: a PCR emitted at the wrong rate stays
+internally consistent, so absolute rate is not what this grades.
+
+| Check | Severity | What it verifies |
+|---|---|---|
+| `sync` | hard | no invalid sync bytes / transport-error packets |
+| `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
+| `pcr-single-pid` | hard | every PCR rides one PID |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290) |
+| `pcr-release-timing` | hard | each interval's arrival is within `--release-ms` of the interval its own values assert, with bounded accumulated drift (`--live` only) |
+| `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
+
+`pcr-position` is a shape check because `export ts` is VBR by design. It is worth
+reporting even so: a consumer holding only the byte stream — which is every
+MPEG-TS tool — recovers the clock from where the PCR packets sit, so a layout
+that clusters them and heaps the media bytes between the clusters is one such a
+consumer cannot follow, however exact the values are.
+
+When both `release` and `position` flag, the report cross-tabulates them:
+
+```text
+  release timing by byte position (report only)
+    adjacent + early       615  ( 34.0%)
+    adjacent + on time     408  ( 22.5%)
+    spaced   + on time     641  ( 35.4%)
+    spaced   + late        136  (  7.5%)
+```
+
+Two invariants failing on the *same* PCRs is one cause rather than two, which two
+aggregate percentages cannot show. It is report-only: it explains a failure, it
+does not define one.
+
+`--report-json <path>` writes the full report, and `--strict` promotes the shape
+check to hard.
+
 ## EIT fixture
 
 `make-eit-fixture.sh` adds a synthetic DVB EPG to any transport stream, so the
@@ -126,8 +195,9 @@ local developer would.
 
 - Physical-layer TR 101 290 items (RF, real sync-byte loss) cannot be measured
   from a file; TSDuck notes the same limitation.
-- Wall-clock delivery jitter/burstiness is intentionally out of scope: all timing
-  is derived from the stream's PCR, not from socket arrival times.
+- Wall-clock delivery jitter/burstiness is out of scope *for `compliance.py`*:
+  all of its timing is derived from the stream's PCR, not from arrival times.
+  `pcr-timing.py --live` covers that axis separately, by stamping a pipe.
 - `tstd` models only the transport-buffer (TB) smoothing stage of the ISO 13818-1
   T-STD, not the full multiplex/elementary decode buffers. Its leak rates are
   defaults, not level-derived, so treat overflow as a smell rather than proof.
