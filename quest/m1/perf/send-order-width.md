@@ -55,7 +55,7 @@ Open order and sequence order diverge whenever groups arrive reordered at a
 relay, when a `Group Start` backfills, and on a FETCH range, and `Priority`
 orders on the sequence.
 
-An `i64` layout of `[track: 8][subscribe_rank: 12][group: 43]` makes the
+An `i64` layout of `[track: 8][subscribe_rank: 12][group: 33]` makes the
 per-group path arithmetic over values the group already carries: no lock, no
 shift, no wake, and `GroupServe` loses its `poll_next` priority arm.
 
@@ -76,9 +76,16 @@ the tie-break to a subscription exists to prevent.
 
 That makes three tiers, not two:
 
-- Browsers, 63 bits. `[8][12][43]` is comfortable, and the wrap is unreachable.
+- Browsers, 53 bits. `sendOrder` is IDL `long long`, but WebIDL converts to it
+  through `ToNumber`, so the value crosses as a double and only integers below
+  2^53 survive exactly. Past that, distinct orders round together into a silent
+  tie rather than an error, and because rounding drops the low bits it is
+  `group` that loses resolution first. A BigInt is not a way out: `ToNumber` on
+  one throws. `[8][12][33]` fits under the limit and still puts the wrap
+  centuries away. web-transport-wasm's own `set_priority` takes an `i32` today,
+  so it needs widening too, just not as far as the IDL suggests.
 - quinn, 31 bits, and `i32` is quinn's own API rather than something the trait
-  imposes. After `track` there are 23 bits to divide, so `subscribe_rank` and
+  imposes, so widening `web-transport-trait` does not lift it. After `track` there are 23 bits to divide, so `subscribe_rank` and
   the wrap period trade directly: `[8][8][15]` wraps every 32k groups, about
   nine hours at a one-second GoP, while `[8][4][19]` buys six days at 16
   subscriptions. Neither is obviously right, and a relay mesh session may hold
