@@ -9,8 +9,11 @@ within the issue's stated scope and boundaries.
 
 Rescoped during the 2026-08 grooming: subscription options, track info, abort
 codes, and client TLS roots landed in dev's rs/libmoq. Remaining gaps:
-fetch_group, dynamic track/broadcast serving, server-side accept, and
-datagrams, tracked against the dev FFI surface.
+fetch_group, dynamic track serving within a broadcast, server-side accept, and
+datagrams, tracked against the dev FFI surface. Broadcast serving is not in
+this quest: the announce handle that advertises a prefix and yields its
+requests reaches C through the bindings quest linked below, so do not add a
+separate `requested_broadcast` path here.
 
 ### Issue context
 
@@ -36,3 +39,7 @@ knob. `moq play` is the worked example of what the shape should be.
 ## Closes
 
 - [#2152](https://github.com/moq-dev/moq/issues/2152) - close this issue when the quest finishes
+
+## Related
+
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - brings the announce handle and broadcast request serving to C

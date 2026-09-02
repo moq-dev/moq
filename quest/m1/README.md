@@ -36,6 +36,7 @@ with the current dev tree before starting.
 - [Announce handle](/quest/m1/announce-handle.md) - announce(prefix, route) advertises and serves requests; create_broadcast plus set_announce publishes
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, set_announce, and announce with one meaning
 - [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, an announce flag, and the announce handle
+- [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper mirrors the same three operations once dev merges
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
 - [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation

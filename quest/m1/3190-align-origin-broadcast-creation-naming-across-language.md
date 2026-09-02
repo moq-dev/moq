@@ -33,7 +33,7 @@ the rename must not paper over.
   the `cpp/obs/test` stub that declares the old symbol.
 - Wrappers: `py/moq-rs`, `swift`, `kt`, and `go/wrapper` (flat on `dev`)
   adopt the three verbs and drop any create-and-announce convenience.
-  `dart/` exists only on `main`; port it when `dev` merges.
+  `dart/` exists only on `main`, so it has its own quest gated on the merge.
 - Docs: `doc/lib/{py,swift,kt,go,c}`, including the `doc/lib/py/moq-rs.md`
   sentence that says `create_broadcast` creates an announced broadcast.
 
@@ -55,3 +55,4 @@ Branch from `dev`: every rename is breaking.
 
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the rest of the C ABI catch-up
 - [JS announce](/quest/m1/js-announce.md) - the same alignment for js/net
+- [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper, once `dev` merges
