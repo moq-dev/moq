@@ -1,4 +1,4 @@
-# [L] Prototype a three-level stream scheduler in our own QUIC stack
+# [L] Prototype a three-level stream scheduler as a quinn patch
 
 ## Goal
 
@@ -8,8 +8,9 @@ subscription. Nothing available offers all three, and a scalar send order cannot
 express the middle one at all, since any total order picks a winner and that
 winner takes strict precedence.
 
-Prototype the real shape in a QUIC stack we own, where the send loop is ours,
-rather than negotiating it into someone else's scheduler first.
+Prototype the real shape against quinn's scheduler, which already has two of the
+three levels and the counter the third one needs, rather than designing it in
+the abstract.
 
 ## Plan
 
@@ -39,10 +40,21 @@ buckets round-robin against each other reusing the existing recency counter,
 `order` strict within a bucket for group sequence. That is `sendGroup` semantics
 plus the priority dimension `sendGroup` lacks.
 
-Prototype it in moq-uring's own stack rather than as a quinn fork. We own that
-send loop, the ordering key is ours to shape, and it avoids carrying a fork
-before the semantics are settled. If it works, that is the evidence for an
-upstream quinn change or a spec issue, and the fallback stays a fork.
+That field lives in the QUIC stack, not above it, and moq-uring does not change
+that. Its quinn path hands stream selection to `poll_transmit` and its quiche
+path to `Connection::send`, so what moq-uring owns is the UDP path, not the
+ordering key. Either backend means a fork or an upstream patch; there is no
+third option to reach for first.
+
+Take quinn, and carry it as a patch rather than a fork. Its key is already
+`(priority, recency, id)` with the recency counter this needs, so the change is
+one field in one struct and a `SendStream` setter to reach it, which is also the
+smallest thing to keep rebased and the most likely to be acceptable upstream.
+Run it under moq-uring's quinn backend, which is where the relay workload is,
+and treat a working prototype as the evidence for the upstream PR or a spec
+issue. quiche stays out of scope: reproducing the result there is a second
+fork's worth of work, and its `urgency` plus `incremental` already give the same
+top two levels, so it tells us nothing new about whether the third one helps.
 
 Measure against the two points reachable without any of this, both of which are
 real options rather than strawmen: a scalar send order of `[track][group]`, which

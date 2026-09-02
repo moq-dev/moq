@@ -41,10 +41,20 @@ substitute a counter bumped at group open: open order and sequence order diverge
 whenever groups arrive reordered at a relay, when a `Group Start` backfills, and
 on a FETCH range, and `Priority` orders on the sequence.
 
-The cost is the wrap, when a subscription's live window straddles a boundary and
-the newest group truncates low, briefly sorting under the backlog it should
-preempt. At the widths below it is centuries away, since `append_group` advances
-by one.
+The cost is a live window sorting under its own backlog rather than above it,
+which two cases produce and neither is remote. The wrap: 24 bits is 194 days at
+a one-second GoP but about 4 days at the 20ms audio cadence this plan uses
+elsewhere, so a long-lived dense publisher crosses a boundary regularly. And
+sparse sequences, which need no wrap at all: `append_group` advances by one, but
+`track::Producer::create_group` takes a caller-chosen `u64` and a relay
+preserves upstream numbering, so two live groups can start out more than the
+field apart.
+
+Both are bounded the same way, at one live window each time, so treat them as a
+stated boundary rather than a reason to rebase. Rebasing to the subscription's
+first sequence trades a bounded, occasional inversion for an unbounded one:
+every group backfilled below the base collapses onto a single ordinal and loses
+its order against the others permanently.
 
 `subscribe` is dropped, and same-priority ordering becomes explicitly undefined.
 A flat total order cannot express round-robin: whatever occupies that field
@@ -74,10 +84,10 @@ Bit budgets, which are looser than the field types suggest:
 - quinn, 32 bits. The full `i32` range is usable, negatives included, as long as
   the pack preserves order: build the key unsigned and store
   `(key ^ 0x8000_0000) as i32`, so unsigned order maps onto signed order. That
-  gives `[8][24]`, and 24 bits is 16.7M groups, about 194 days at a one-second
-  GoP. `i32` is quinn's own API rather than something the trait imposes, so
-  widening `web-transport-trait` does not lift it, but at this layout it does
-  not need lifting.
+  gives `[8][24]`, and 24 bits is 16.7M groups. `i32` is quinn's own API rather
+  than something the trait imposes, so widening `web-transport-trait` does not
+  lift it, and 32 bits is the whole budget: `track` is a `u8` on the wire, so
+  the 8 it takes are not negotiable and `group` gets the rest.
 - Browsers, about 54 bits. `sendOrder` is IDL `long long`, but WebIDL converts
   to it through `ToNumber`, so the value crosses as a double and only integers
   within +/-(2^53 - 1) survive exactly. Past that, distinct orders round
