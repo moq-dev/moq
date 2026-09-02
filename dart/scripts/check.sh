@@ -2,7 +2,6 @@
 set -euo pipefail
 
 DART_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-WORKSPACE_DIR=$(cd "$DART_DIR/.." && pwd)
 ACTION=check
 
 if [[ "${1:-}" == --fix ]]; then
@@ -62,14 +61,6 @@ done
 
 dart format --output=none --set-exit-if-changed \
     "$DART_DIR/moq_ffi" "$DART_DIR/moq"
-
-host=$(rustc -vV | sed -n 's/^host: //p')
-case "$host" in
-    *-apple-*) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.dylib" ;;
-    *-windows-*) library="$WORKSPACE_DIR/target/$host/release/moq_ffi.dll" ;;
-    *) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.so" ;;
-esac
-export MOQ_DART_FFI_LIB="$library"
 
 publish_dir="$generated/publish"
 mkdir -p "$publish_dir"

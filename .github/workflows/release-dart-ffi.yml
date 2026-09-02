@@ -121,8 +121,7 @@ jobs:
             --no-default-features
 
           case "$BUILD_TARGET" in
-            *-apple-ios*) LIBRARY=libmoq_ffi.a ;;
-            *-apple-darwin*) LIBRARY=libmoq_ffi.dylib ;;
+            *-apple-ios* | *-apple-darwin*) LIBRARY=libmoq_ffi.dylib ;;
             *-windows-*) LIBRARY=moq_ffi.dll ;;
             *) LIBRARY=libmoq_ffi.so ;;
           esac

@@ -32,9 +32,10 @@ Future<void> main(List<String> args) async {
         package: input.packageName,
         name: assetId,
         file: bundled,
-        linkMode: code.targetOS == OS.iOS
-            ? StaticLinking()
-            : DynamicLoadingBundled(),
+        // StaticLinking is declared by code_assets but unimplemented in the
+        // Dart and Flutter SDK (dart-lang/sdk#49418), so every platform,
+        // iOS included, ships a dynamic library.
+        linkMode: DynamicLoadingBundled(),
       ),
     );
   });
@@ -52,13 +53,20 @@ Future<_Resolved> _resolveLibrary(
   String target,
   String library,
 ) async {
-  final override = Platform.environment['MOQ_DART_FFI_LIB'];
-  if (override != null) {
-    final file = File(override);
+  // Hooks run with a filtered environment, so an env var cannot reach here.
+  // A consumer pins their own build through pubspec user-defines:
+  //
+  //   hooks:
+  //     user_defines:
+  //       moq_ffi:
+  //         library: path/to/libmoq_ffi.dylib
+  final pinned = input.userDefines.path('library');
+  if (pinned != null) {
+    final file = File.fromUri(pinned);
     if (!await file.exists()) {
-      throw StateError('MOQ_DART_FFI_LIB does not exist: $override');
+      throw StateError('moq_ffi library user-define does not exist: $pinned');
     }
-    return (library: file.uri, inputs: const <Uri>[]);
+    return (library: file.uri, inputs: <Uri>[file.uri]);
   }
 
   final workspace = input.packageRoot.resolve('../../');
@@ -117,8 +125,17 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
 Future<List<Uri>> _rustInputs(Uri workspace) async {
   final inputs = <Uri>[];
 
-  final lock = File.fromUri(workspace.resolve('Cargo.lock'));
-  if (await lock.exists()) inputs.add(lock.uri);
+  // Anything Cargo consults, not just the crate sources: a [profile.release]
+  // edit or a toolchain bump changes the artifact without touching rs/.
+  for (final name in const [
+    'Cargo.lock',
+    'Cargo.toml',
+    'rust-toolchain.toml',
+    '.cargo/config.toml',
+  ]) {
+    final file = File.fromUri(workspace.resolve(name));
+    if (await file.exists()) inputs.add(file.uri);
+  }
 
   final sources = Directory.fromUri(workspace.resolve('rs/'));
   await for (final entry in sources.list(recursive: true, followLinks: false)) {
@@ -134,7 +151,17 @@ Future<Uri> _download(Uri cache, String target, String library) async {
   final name = 'moq-ffi-$ffiVersion-$target-$library';
   final cached = cache.resolve(name);
   final cachedFile = File.fromUri(cached);
-  if (await cachedFile.exists()) return cached;
+  final cachedSum = File.fromUri(cache.resolve('$name.sha256'));
+
+  // Re-verify rather than trusting the file's presence. A build killed
+  // mid-write leaves a truncated library that would otherwise be copied into
+  // the application and only fail later, when the native load fails.
+  if (await cachedFile.exists() && await cachedSum.exists()) {
+    final want = (await cachedSum.readAsString()).trim();
+    if (sha256.convert(await cachedFile.readAsBytes()).toString() == want) {
+      return cached;
+    }
+  }
 
   final base = Uri.parse(
     'https://github.com/moq-dev/moq/releases/download/'
@@ -158,8 +185,13 @@ Future<Uri> _download(Uri cache, String target, String library) async {
     );
   }
 
-  await cachedFile.create(recursive: true);
-  await cachedFile.writeAsBytes(responses[0].bodyBytes, flush: true);
+  // Write to a sibling and rename, so a concurrent or interrupted build never
+  // observes a partial file at the real path.
+  final staging = File.fromUri(cache.resolve('$name.${pid}.part'));
+  await staging.create(recursive: true);
+  await staging.writeAsBytes(responses[0].bodyBytes, flush: true);
+  await staging.rename(cachedFile.path);
+  await cachedSum.writeAsString(actual, flush: true);
   return cached;
 }
 
@@ -199,9 +231,8 @@ String _target(CodeConfig code) {
 }
 
 String _libraryName(OS os) => switch (os) {
-  OS.iOS => 'libmoq_ffi.a',
+  OS.iOS || OS.macOS => 'libmoq_ffi.dylib',
   OS.android || OS.linux => 'libmoq_ffi.so',
-  OS.macOS => 'libmoq_ffi.dylib',
   OS.windows => 'moq_ffi.dll',
   _ => throw UnsupportedError('unsupported operating system: $os'),
 };
