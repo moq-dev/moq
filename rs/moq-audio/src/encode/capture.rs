@@ -246,6 +246,7 @@ impl Publication {
 			desired: desired_tx.consume(),
 			state: state_tx,
 			level: level_tx,
+			park_on_failure: true,
 		};
 		Ok((publication, driver))
 	}
@@ -343,6 +344,10 @@ pub struct Driver {
 	desired: kio::Consumer<Desired>,
 	state: kio::Producer<PublishedState>,
 	level: kio::Producer<Level>,
+	/// Whether a terminal input failure parks the driver waiting for a control
+	/// action. False for [`publish_capture`], whose caller never receives the
+	/// controls, so parking there would hang instead of returning the error.
+	park_on_failure: bool,
 }
 
 impl fmt::Debug for Driver {
@@ -369,13 +374,11 @@ impl Driver {
 				}
 			}
 			Err(err) => {
-				self.update(Status::Failed, None, Some(err.clone()));
+				self.fail(err);
 				producer.abort(moq_net::Error::Transport(err.to_string()));
 			}
 		}
-		if let Ok(mut level) = self.level.write() {
-			*level = Level::default();
-		}
+		self.silence();
 		let _ = self.state.close();
 		result
 	}
@@ -391,6 +394,7 @@ impl Driver {
 		loop {
 			let desired = self.desired.read().clone();
 			if !desired.enabled {
+				self.silence();
 				self.update(Status::Stopped, None, None);
 				tokio::select! {
 					biased;
@@ -425,6 +429,9 @@ impl Driver {
 				}
 			};
 
+			// The supervisor is gone either way, so the input is closed.
+			self.silence();
+
 			match event {
 				DriveEvent::Control(None) => return Ok(()),
 				DriveEvent::Control(Some(_)) => {
@@ -432,8 +439,8 @@ impl Driver {
 				}
 				DriveEvent::Capture(Ok(())) => return Ok(()),
 				DriveEvent::Capture(Err(err)) => {
-					self.update(Status::Failed, None, Some(err.clone()));
-					if track.is_closed() {
+					self.fail(&err);
+					if !self.park_on_failure || track.is_closed() {
 						return Err(err);
 					}
 					tokio::select! {
@@ -458,6 +465,23 @@ impl Driver {
 	fn update(&self, status: Status, device: Option<capture::Device>, failure: Option<Error>) {
 		let source = self.desired.read().config.source.clone();
 		publish_state(&self.state, &source, status, device, failure);
+	}
+
+	/// Publish a failure the supervisor did not report itself (or re-publish one
+	/// it did), keeping whichever device is already on record so a microphone
+	/// that died while live stays identifiable.
+	fn fail(&self, err: &Error) {
+		let device = self.state.read().state.device.clone();
+		self.update(Status::Failed, device, Some(err.clone()));
+	}
+
+	/// The meter reads zero whenever no supervisor is delivering samples.
+	fn silence(&self) {
+		if let Ok(mut level) = self.level.write()
+			&& *level != Level::default()
+		{
+			*level = Level::default();
+		}
 	}
 }
 
@@ -491,8 +515,14 @@ fn publish_state(
 	failure: Option<Error>,
 ) {
 	let Ok(mut published) = state.write() else { return };
-	if failure.is_none()
-		&& published.state.failure.is_none()
+	// `Error` is not `PartialEq`, and a failure publish is rare enough that
+	// rendering both to compare them costs nothing worth avoiding.
+	let same_failure = match (&published.state.failure, &failure) {
+		(None, None) => true,
+		(Some(before), Some(now)) => before.to_string() == now.to_string(),
+		_ => false,
+	};
+	if same_failure
 		&& published.state.status == status
 		&& published.state.source == *source
 		&& published.state.device == device
@@ -522,7 +552,12 @@ pub async fn publish_capture(
 	let options = PublicationOptions { capture, encode, clock };
 	// Held, not dropped: the driver ends as soon as the last control handle goes.
 	let (_publication, driver) = Publication::new(broadcast, catalog, options).await?;
-	driver.run().await
+	Driver {
+		park_on_failure: false,
+		..driver
+	}
+	.run()
+	.await
 }
 
 /// A capture backend as the supervisor sees it. Kept separate from cpal so the
@@ -1355,6 +1390,89 @@ mod tests {
 			.await
 			.expect_err("a level change woke a state waiter");
 
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// `publish_capture` hands its caller no controls, so parking on a terminal
+	/// failure would hang `moq import capture` instead of reporting the denial.
+	#[tokio::test]
+	async fn a_publication_without_controls_returns_its_terminal_failure() {
+		let (publication, driver, source, _subscription) = setup_publication([Open::Fatal("permission denied")]).await;
+		let driver = Driver {
+			park_on_failure: false,
+			..driver
+		};
+
+		let err = tokio::time::timeout(Duration::from_secs(1), driver.run_with(source))
+			.await
+			.expect("a terminal failure parked instead of returning")
+			.expect_err("the terminal failure was swallowed");
+
+		assert!(matches!(&err, Error::Capture(message) if message == "permission denied"));
+		drop(publication);
+	}
+
+	/// A retained publication keeps the track and waits to be told what to do.
+	#[tokio::test]
+	async fn a_terminal_failure_parks_a_retained_publication() {
+		let (mut publication, driver, source, _subscription) =
+			setup_publication([Open::Fatal("permission denied")]).await;
+		let task = tokio::spawn(driver.run_with(source));
+
+		wait_for(&mut publication, Status::Failed).await;
+		assert!(!publication.is_finished());
+
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// The meter must not stay pinned at the last buffer after the input closes.
+	#[tokio::test]
+	async fn stopping_zeroes_the_level() {
+		let (events, input) = stream(None);
+		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let task = tokio::spawn(driver.run_with(source));
+		wait_for(&mut publication, Status::Live).await;
+
+		events
+			.try_push(Ok(capture::Samples::plain(vec![0.5, -0.5], false)))
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(1), async {
+			while publication.level() == Level::default() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("no level was measured");
+
+		publication.stop();
+		wait_for(&mut publication, Status::Stopped).await;
+		assert_eq!(publication.level(), Level::default());
+
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// `State::device` promises the last microphone that failed while live, so
+	/// the terminal republish must not erase what the supervisor reported.
+	#[tokio::test]
+	async fn a_terminal_live_failure_keeps_the_device_that_failed() {
+		let (events, input) = stream(None);
+		let input = with_device(input, "wired");
+		let (mut publication, driver, source, _subscription) = setup_publication([Open::Stream(input)]).await;
+		let task = tokio::spawn(driver.run_with(source));
+		wait_for(&mut publication, Status::Live).await;
+
+		events
+			.try_push(Err(capture::Failure::fatal(Error::Capture("device vanished".into()))))
+			.unwrap();
+
+		let failed = wait_for(&mut publication, Status::Failed).await;
+		assert_eq!(failed.device().map(|device| device.id.as_str()), Some("wired"));
+		assert!(matches!(failed.failure(), Some(Error::Capture(message)) if message == "device vanished"));
+
+		// Retained controls park rather than end, so dropping them is the clean exit.
 		drop(publication);
 		task.await.unwrap().unwrap();
 	}

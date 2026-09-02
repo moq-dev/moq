@@ -85,6 +85,9 @@ local.run_until(async move {
     }
     let level = microphone.level(); // rms/peak, for a local meter
 
+    // The driver runs until the track ends or the last handle drops, so
+    // releasing the controls is how this flow finishes.
+    drop(microphone);
     publish.await??;
     Ok(())
 }).await?;

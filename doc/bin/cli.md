@@ -301,7 +301,7 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang import 
 # Pick devices, resolution, and bitrates:
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang \
     import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
-                   --microphone "MacBook Pro Microphone" --audio-bitrate 64000
+                   --microphone coreaudio:BuiltInMicrophoneDevice --audio-bitrate 64000
 
 # One medium only:
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
