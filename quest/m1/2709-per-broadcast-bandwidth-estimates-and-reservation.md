@@ -1,24 +1,63 @@
-# [S] per-broadcast bandwidth estimates and reservation
+# [L] js/net: mirror the send-side bandwidth allocator
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2709](https://github.com/moq-dev/moq/issues/2709)
-within the issue's stated scope and boundaries.
+On a connection shared by several components (#2705), each JS publisher's
+encoder targets its own share of the send-rate estimate instead of the
+whole-session number, and audio reserves its bitrate so video's share is
+honest. The split follows the Rust allocator exactly: strict priority tiers by
+track priority, max-min fair within a tier, surplus left unclaimed.
+
+Boundaries: the receive side is untouched. Watch ABR keeps reading the
+whole-connection PROBE estimate until Rust has a receive-side split to mirror.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+The Rust side landed on `dev` in `rs/moq-net/src/model/bandwidth.rs`
+(#2854): `Allocator::new(estimate)` / `unlimited()`, `reserve(&track::Demand,
+max) -> Reservation`, `Reservation::{peek, consumer, update}` with `Drop`
+removing the entry, and a pure `allocate(estimate, wants, id) -> Option<Rate>`
+where `None` means "not registered, hold your rate" and is distinct from a
+zero grant. Only tracks whose demand is active claim anything. That module is
+the spec; JS has no equivalent today.
 
-### Issue context
+What JS does today: `js/publish/src/element.ts` polls `connection.stats()`
+every 100 ms into one signal and hands it to the video encoder only, which
+caps at `estimate * 0.9`; audio is invisible to it. `js/net` exposes
+`Stats.estimatedSendRate` and the PROBE `estimatedRecvRate` but nothing
+divides either.
 
-The congestion controller's `estimatedSendRate` (and the PROBE receive estimate) are per-session. With #2705 sharing one session across every component on a page, that aggregate is the wrong number for any individual publisher: two publish components each cap their encoder at the full-session estimate and jointly overshoot, and a watcher's ABR reads a budget it shares with everything else on the connection.
+Steps:
 
-This is not a regression in kind (separate sessions just let congestion control arbitrate blindly), but sharing makes it structural. What is missing is a mechanism to split the session estimate across broadcasts: per-broadcast accounting at minimum, and ideally a way to reserve or prioritize bitrate so a publisher's encoder cap and a watcher's rendition selection each work against their own share rather than the whole pipe.
+- Add a `bandwidth` module to `js/net` porting `Allocator`, `Reservation`,
+  and `allocate()` one to one, including the Rust unit tests. Rates are bits
+  per second as plain numbers. A reservation exposes its grant as a
+  `Getter<number | undefined>` so encoders react through the signal model.
+- Move the send-estimate sampler from `js/publish` into `js/net`: the
+  established connection owns one 100 ms `getStats()` loop and one
+  `Allocator`, shared across reloads, so every component on the connection
+  reserves against the same registry.
+- Demand comes from the `js/net` track producer (active vs idle) and priority
+  from the track info the publisher set (`js/hang` `PRIORITY`: catalog 100,
+  audio 80, video 60), the same tiers Rust allocates on.
+- `js/publish` video takes its reservation's grant instead of `estimate *
+  0.9`; audio reserves at its configured bitrate and ignores the grant, which
+  matches Rust's audio today. Following the grant for Opus is the JS twin of
+  [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
+  and stays out of scope.
 
-Related: #2283 fed the session estimate into the encoder; catalog::Estimator (#2530) measures per-rendition receive rates. Neither divides the send budget.
+Tests: the ported `allocate()` cases verbatim; an integration test with two
+publish components on one connection whose grants sum to at most the estimate
+and rank by priority; a test that an idle track claims nothing.
+
+Branch from `dev`, where the shared connection and `forward.ts` live.
 
 ## Closes
 
 - [#2709](https://github.com/moq-dev/moq/issues/2709) - close this issue when the quest finishes
+
+## Related
+
+- [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - audio following its grant, the Rust half
+- [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports reserving nothing
+- [#2857](/quest/m1/2857-bindings-cant-reach-encoder-rate-control-so-every-non.md) - the same gap for the native bindings

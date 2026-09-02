@@ -1,64 +1,57 @@
-# [L] Align origin broadcast creation naming across language bindings
+# [M] Bindings: create_broadcast, set_announce, and announce mean the same thing everywhere
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3190](https://github.com/moq-dev/moq/issues/3190)
-within the issue's stated scope and boundaries.
+Every native binding exposes the announce surface the Rust model settled on,
+with one meaning per name:
+
+- `create_broadcast` (Python, Rust) / `createBroadcast` (Swift, Kotlin) /
+  `CreateBroadcast` (Go) / `moq_origin_create_broadcast` (C) creates an
+  unadvertised broadcast.
+- `set_announce(bool)` on the broadcast producer flips its exact-path advert.
+- `announce(prefix, route)` returns the handle that advertises and serves
+  requests beneath the prefix.
+
+No binding announces on the caller's behalf any more.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Today `rs/moq-ffi`'s `create_broadcast` calls `announce(path, ..)` internally
+and stores the guard, so Python, Swift, Kotlin, Go, and C all inherit an
+auto-announce that Rust does not have, while `MoqOriginDynamic` is a separate
+type from `MoqAnnounce`. Two surfaces share a name and differ; that is what
+the rename must not paper over.
 
-### After prefix routes
+- moq-ffi: `MoqOriginProducer::create_broadcast(path)` stops announcing.
+  `MoqBroadcastProducer::set_announce(bool)` stays as the flip, now defaulting
+  to `false`. `MoqAnnounce` gains the request queue (`requested()` yielding
+  `MoqBroadcastRequest` with accept and reject) and `MoqOriginDynamic` is
+  deleted.
+- libmoq: hard rename `moq_origin_publish` to `moq_origin_create_broadcast`
+  with no alias, `moq_publish_set_announce` kept, and announce/request
+  accessors mirroring the FFI. Regenerate `moq.h`; update `cpp/obs/src` and
+  the `cpp/obs/test` stub that declares the old symbol.
+- Wrappers: `py/moq-rs`, `swift`, `kt`, and `go/wrapper` (flat on `dev`)
+  adopt the three verbs and drop any create-and-announce convenience.
+  `dart/` exists only on `main`; port it when `dev` merges.
+- Docs: `doc/lib/{py,swift,kt,go,c}`, including the `doc/lib/py/moq-rs.md`
+  sentence that says `create_broadcast` creates an announced broadcast.
 
-This is now a semantics divergence, not only a naming one.
-[moq#3225](https://github.com/moq-dev/moq/pull/3225) made Rust's
-`origin::Producer::create_broadcast` stop announcing, while the FFI's
-`create_broadcast` still announces the exact path on the caller's behalf (it
-calls `announce(path, Default::default())` and hands back the guard), so
-wrappers keep announcing by convention. Two surfaces now share one name and do
-different things.
+Tests: each wrapper covers create, populate, `set_announce(true)`, visible in
+`announced`; and `announce(prefix)` serving a request. Run `just test
+smoke-full` since the FFI surface changed.
 
-Settle that before the rename: either the FFI's auto-announce becomes explicit
-in the wrappers too, or the fused operation keeps a distinct name of its own.
-Renaming both to `create_broadcast` without deciding hides the difference behind
-matching spelling, which is worse than the inconsistency it fixes.
+Branch from `dev`: every rename is breaking.
 
-### Issue context
+## Required
 
-#### Problem
-
-The operation that allocates and owns a new broadcast has different names across public surfaces:
-
-- Rust FFI uses [`create_broadcast`](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/rs/moq-ffi/src/origin.rs#L251-L267)
-- Python, Swift, and Go expose `create_broadcast` or `CreateBroadcast`, for example [Go](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/go/wrapper/origin.go#L38-L51)
-- TypeScript uses [`publish(path)`](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/js/net/src/origin.ts#L106-L107)
-- C uses [`moq_origin_publish`](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/rs/libmoq/src/api.rs#L1102-L1123)
-
-`publish` suggests announcement or transmission. The operation actually creates a broadcast, while announcement visibility is controlled separately through `setAnnounce` or its equivalent.
-
-Issue #1073 changes Origin lifecycle but explicitly leaves naming outside its scope.
-
-#### Proposed direction
-
-Use the role-accurate creation verb consistently:
-
-- Rust and Python: `create_broadcast`
-- TypeScript, Swift, and Kotlin: `createBroadcast`
-- Go: `CreateBroadcast`
-- C: `moq_origin_create_broadcast`
-
-If compatibility aliases are retained, keep deprecated names hidden from user-facing documentation according to the repository deprecation policy.
-
-#### Acceptance criteria
-
-- Every language uses its idiomatic spelling of the same `create broadcast` operation.
-- Announcement APIs retain separate announce terminology.
-- Examples and generated documentation use only the canonical name.
-- Breaking renames target `dev`.
+- [Announce handle](/quest/m1/announce-handle.md) - the Rust surface these bindings mirror
 
 ## Closes
 
 - [#3190](https://github.com/moq-dev/moq/issues/3190) - close this issue when the quest finishes
+
+## Related
+
+- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the rest of the C ABI catch-up
+- [JS announce](/quest/m1/js-announce.md) - the same alignment for js/net

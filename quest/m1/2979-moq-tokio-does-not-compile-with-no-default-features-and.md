@@ -1,39 +1,50 @@
-# [S] moq-tokio does not compile with --no-default-features, and workspace feature unification hides it
+# [M] moq-tokio: compile with any subset of transport features
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2979](https://github.com/moq-dev/moq/issues/2979)
-within the issue's stated scope and boundaries.
+`cargo check -p moq-tokio --no-default-features` and every single-feature
+build compile. A crate with no transport at all builds into something that
+cannot connect; a `tcp` / `uds`-only build serves qmux. `moq-relay`,
+`moq-cli`, `moq-bench`, and `moq-boy` compile with their own
+`--no-default-features`. Nightly proves all of it per crate, so workspace
+feature unification can never hide a break again.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Decided: make it compile rather than `compile_error!`. `dev` already gates
+`server`, `worker`, and `util` on a transport, hands `QuicBackend` an empty
+choice list without a QUIC feature, and treats tcp-only as a real
+configuration, so refusing the backend-less build would contradict the gates
+the crate ships. The existing `compile_error!` for a rustls backend without a
+crypto provider stays.
 
-### Issue context
+What breaks today, measured on the pre-rename crate:
 
-`cargo check -p moq-tokio --no-default-features` fails on `dev`. Found while reviewing #2977; the breakage predates #2921.
+- Zero features: four errors, all from `RequestKind` in `src/server.rs`.
+  Every variant is feature-gated, so the `request_ref!` / `request_into!` /
+  `request_map!` matches become non-exhaustive over an empty, still-inhabited
+  enum. Fix the macros to expand to an uninhabited match (`match *self {}`)
+  when no variant exists, or give the enum a gated never-variant.
+- `tcp`-only relay and cli: `tls::Server::server_config` is gated on a QUIC
+  backend but called unconditionally. Split the gate so only the QUIC-specific
+  parts of `tls::Server` need a backend.
+- The `steer` module the issue names no longer exists; `worker` and `util`
+  already share one gate on `dev`.
 
-#### Errors
+Why nightly is green: `just rs features` runs `--workspace
+--no-default-features`, and `moq-rtmp`'s dev-dependency enables
+`moq-tokio/quinn` (so its RTMPS test can borrow the self-signed cert helper,
+which needs `tls::Server`). Unification hands every crate a backend. Once
+`tls` compiles without one, drop that pin, keeping `aws-lc-rs`.
 
-At `ca2fd504f` (before #2921 merged), 4 errors:
+Even then relay and cli unify `tcp` and `aws-lc-rs` into `moq-tokio`, so add
+per-crate coverage to `just rs features`: `cargo hack check -p moq-tokio
+--each-feature --no-dev-deps --locked`, plus `cargo check -p <crate>
+--no-default-features` for `moq-relay`, `moq-cli`, `moq-bench`, and
+`moq-boy`. Add `cargo-hack` to the Nix dev shell next to `cargo-deny`; if it
+must be installed in CI, pin the version, since `--locked` alone does not.
 
-- 2x `E0004: non-exhaustive patterns: type &RequestKind is non-empty` (all variants cfg'd out by the missing backend features, so the remaining matches don't compile)
-- 2x `E0282: type annotations needed`
-
-`#2921` added a 5th: `E0433: cannot find util in crate` from `worker.rs`, which calls `crate::util::resolve` while `mod util` is gated on `any(noq, quinn, quiche)`. `worker::Workers::bind` now also references the equally-gated `crate::server::DEFAULT_BIND` (#2977), deepening the same dependency rather than introducing it.
-
-#### Why CI never sees it
-
-Nightly `just rs features` runs `--no-default-features` across the workspace, and cargo unifies features per crate: `moq-relay` (and everything else) depends on `moq-tokio` with a backend enabled, so `moq-tokio` never actually compiles with zero features in a workspace build. Only a `-p moq-tokio --no-default-features` invocation, or an external consumer with `default-features = false` and no backend feature, hits it.
-
-#### Options
-
-- Decide the backend-less configuration is unsupported and enforce it: `compile_error!` when no QUIC backend feature is enabled (a tcp/uds-only build would need its own thought), which turns 5 confusing errors into 1 honest one.
-- Or make it compile: ungate `util`/`DEFAULT_BIND` (both are dependency-free), gate `worker`/`steer` on a backend, and fix the pre-existing `RequestKind` matches.
-
-The first is less work and matches reality: `worker`, `steer`, and `server` all assume a backend exists.
+Branch from `dev`: the crate exists only there.
 
 ## Closes
 
