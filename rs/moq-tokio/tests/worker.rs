@@ -67,7 +67,7 @@ async fn dropping_the_workers_releases_the_port() {
 
 	// Serving first is the case that used to strand the threads.
 	for (server, spawner) in workers.split() {
-		spawner.run(|_| async move {
+		spawner.run(|| async move {
 			let _ = server.listen().await;
 		});
 	}
@@ -80,7 +80,8 @@ async fn dropping_the_workers_releases_the_port() {
 }
 
 /// The future factory runs on the worker, so the future may hold local state
-/// across an await without making that state thread-safe.
+/// across an await without making that state thread-safe, and spawn more of it
+/// onto the same task set.
 #[tokio::test]
 async fn spawner_runs_a_send_less_future() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -92,16 +93,77 @@ async fn spawner_runs_a_send_less_future() {
 	let task = {
 		let mut split = workers.split();
 		let (_server, spawner) = split.pop().expect("one worker");
-		spawner.run(|runtime| async move {
-			let _runtime = runtime;
+		spawner.run(|| async move {
 			let value = std::rc::Rc::new(std::cell::Cell::new(1));
 			tokio::task::yield_now().await;
 			value.set(value.get() + 1);
+
+			// A nested `!Send` task, which panics outside a local task set.
+			let shared = value.clone();
+			tokio::task::spawn_local(async move { shared.set(shared.get() + 1) })
+				.await
+				.expect("local spawn");
+
 			value.get()
 		})
 	};
 
-	assert_eq!(task.await.expect("local task"), 2);
+	assert_eq!(task.await.expect("local task"), 3);
+	workers.shutdown().await;
+}
+
+/// A factory that panics while building its future takes the task down, not the
+/// worker thread: the group keeps running and the next future still starts.
+#[tokio::test]
+async fn spawner_contains_a_factory_panic() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+
+	let (panicked, survived) = {
+		let mut split = workers.split();
+		let (_server, spawner) = split.pop().expect("one worker");
+		let panicked = spawner.run(|| -> std::future::Pending<()> { panic!("factory") });
+		let survived = spawner.run(|| async { "still here" });
+		(panicked, survived)
+	};
+
+	assert!(panicked.await.expect_err("factory panic").is_panic());
+	assert_eq!(survived.await.expect("worker survived"), "still here");
+	workers.shutdown().await;
+}
+
+/// Aborting the returned handle stops the worker-local future, rather than
+/// detaching it to run unreachable until the group stops.
+#[tokio::test]
+async fn spawner_abort_reaches_the_worker() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+
+	// Dropped when the future is, so it reports the cancellation from the worker.
+	let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
+	let (started, has_started) = tokio::sync::oneshot::channel::<()>();
+
+	let task = {
+		let mut split = workers.split();
+		let (_server, spawner) = split.pop().expect("one worker");
+		spawner.run(move || async move {
+			let _dropped = dropped;
+			let _ = started.send(());
+			std::future::pending::<()>().await;
+		})
+	};
+
+	has_started.await.expect("future started");
+	task.abort();
+
+	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	assert!(waited.expect("abort reached the worker").is_err());
 	workers.shutdown().await;
 }
 

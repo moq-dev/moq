@@ -323,7 +323,7 @@ impl Relay {
 				let cluster = cluster.clone();
 				let auth = auth.clone();
 				let worker_shutdown = shutdown.clone();
-				let task = spawner.run(move |_| serve(server, cluster, auth, worker_shutdown));
+				let task = spawner.run(move || serve(server, cluster, auth, worker_shutdown));
 				running.push(async move {
 					match task.await {
 						Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),

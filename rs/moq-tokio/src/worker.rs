@@ -23,7 +23,7 @@
 //! // The group owns the threads, so keep it alive as long as you want the
 //! // port served.
 //! for (server, spawner) in workers.split() {
-//!     spawner.run(|_| async move {
+//!     spawner.run(|| async move {
 //!         let _ = server.listen().await;
 //!     });
 //! }
@@ -252,9 +252,9 @@ impl Workers {
 	/// So dropping one of these servers, or letting the future built from it
 	/// return while its siblings serve, corrupts steering for the rest. Run all of
 	/// them, and treat the first one that finishes as the end of the group. The
-	/// type system does not enforce this yet, because doing so means handing the
-	/// group a closure to build each future from, and this crate keeps callbacks
-	/// out of its public API. Tracked in
+	/// type system does not enforce this yet: doing so means the group owns every
+	/// server and ends them together, which is a bigger reshape than the
+	/// per-worker builder [`Spawner::run`] takes. Tracked in
 	/// <https://github.com/moq-dev/moq/issues/2964>.
 	pub fn split(&mut self) -> Vec<(Server, Spawner<'_>)> {
 		self.workers
@@ -342,26 +342,41 @@ impl Spawner<'_> {
 	/// Build and drive a future on this worker's thread, where its QUIC driver lives.
 	///
 	/// The factory crosses the thread boundary, then creates the future inside
-	/// the worker's local task set. The future itself may therefore be `!Send`.
+	/// the worker's local task set, so the future itself may be `!Send`. It is a
+	/// builder rather than a hook: it runs once, to make the future, and nothing
+	/// calls back into it afterwards.
 	///
 	/// The returned handle reports what the future returned, so a caller can end
-	/// the process on a worker that fails. Dropping the handle does *not* stop the
-	/// future, since it runs on a thread of its own; stopping the group does.
+	/// the process on a worker that fails, and stands in for the worker-local task
+	/// itself: a panic in the factory or the future surfaces through it, and
+	/// [`abort`](tokio::task::JoinHandle::abort) cancels the task on the worker.
+	/// Dropping the handle does *not* stop the future, since it runs on a thread
+	/// of its own; stopping the group does.
 	pub fn run<M, F>(&self, make: M) -> tokio::task::JoinHandle<F::Output>
 	where
-		M: FnOnce(crate::runtime::Local) -> F + Send + 'static,
+		M: FnOnce() -> F + Send + 'static,
 		F: Future + 'static,
 		F::Output: Send + 'static,
 	{
 		let (task_tx, task_rx) = tokio::sync::oneshot::channel();
 		let spawn = Box::new(move || {
-			let task = tokio::task::spawn_local(make(crate::runtime::Local::new()));
-			let _ = task_tx.send(task);
+			// The factory runs inside the task, not as the argument to the spawn:
+			// panicking while building the future is then the task's panic, not the
+			// worker thread's.
+			let task = tokio::task::spawn_local(async move { make().await });
+			// Nothing is left to stand for the task, so abort it rather than leave
+			// it running unreachable on the worker.
+			if let Err(task) = task_tx.send(task) {
+				task.abort();
+			}
 		});
 		let _ = self.spawn.send(spawn);
 
 		self.handle.spawn(async move {
 			let task = task_rx.await.expect("worker stopped before spawning task");
+			// This hop is what the caller holds, so its cancellation has to reach
+			// the real task; dropping the handle below would only detach it.
+			let _abort = AbortOnDrop(task.abort_handle());
 			match task.await {
 				Ok(output) => output,
 				Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
@@ -481,6 +496,15 @@ struct Ready {
 
 /// A future factory that is sent to and invoked by its worker thread.
 type Spawn = Box<dyn FnOnce() + Send + 'static>;
+
+/// Cancels a worker-local task when the handle standing for it is cancelled.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
 
 /// One worker thread: pin, bind, report, then park until it is stopped.
 ///
