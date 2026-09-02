@@ -55,16 +55,37 @@ Open order and sequence order diverge whenever groups arrive reordered at a
 relay, when a `Group Start` backfills, and on a FETCH range, and `Priority`
 orders on the sequence.
 
-An `i64` layout of `[track: 8][subscribe_rank: 16][group: 39]` makes the
+An `i64` layout of `[track: 8][subscribe_rank: 12][group: 43]` makes the
 per-group path arithmetic over values the group already carries: no lock, no
 shift, no wake, and `GroupServe` loses its `poll_next` priority arm.
 
-Width is a real parameter rather than a free choice, because it sets how often
-that field wraps. Browsers have room to spare, but quinn caps at `i32`, so the
-same layout there is nearer `[8][8][15]` and wraps every 32k groups, which at a
-one-second GoP is every nine hours rather than never. Spend spare bits on
-`group` instead of `subscribe_rank`; live subscriptions per session number in
-the tens, so 8 bits is already generous.
+`track` is fixed at 8: it is a `u8` on the wire and every level is meaningful.
+So the whole budget question is how to split what is left between the other two,
+and that split is not free, because bits taken from `subscribe_rank` lengthen
+the `group` wrap period and vice versa.
+
+`subscribe_rank` is bounded by `initial_max_streams_bidi`, since every control
+stream is a bidi stream (`Stream::open` -> `open_bi`). This repo drives that from
+one `max_streams` knob shared with uni streams: 1024 in moq-tokio, 10,000 in
+moq-relay. Uni streams are one per group and dominate that budget, so live
+subscriptions sit far below the cap. 12 bits covers 4096 with saturation beyond,
+which no real session reaches. Saturating is not free either, so size it to
+avoid: colliding ranks make two subscriptions tie, and the tie-break then falls
+through to `group`, which is exactly the cross-track interleaving that scoping
+the tie-break to a subscription exists to prevent.
+
+That makes three tiers, not two:
+
+- Browsers, 63 bits. `[8][12][43]` is comfortable, and the wrap is unreachable.
+- quinn, 31 bits, and `i32` is quinn's own API rather than something the trait
+  imposes. After `track` there are 23 bits to divide, so `subscribe_rank` and
+  the wrap period trade directly: `[8][8][15]` wraps every 32k groups, about
+  nine hours at a one-second GoP, while `[8][4][19]` buys six days at 16
+  subscriptions. Neither is obviously right, and a relay mesh session may hold
+  more subscriptions than the small end allows. Decide this with a real
+  subscription-count distribution, not from the cap.
+- quiche and qmux, 8 bits. Not enough for a packed key at all; see the
+  round-robin question above.
 
 Open question for the narrow backends. quiche's 256 urgency levels fit `track`
 exactly, and `incremental: true` would round-robin within a track, which is what
