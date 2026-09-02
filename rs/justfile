@@ -46,6 +46,7 @@ check *args:
     just rs _select-test
     just rs _publish-test
     just rs _doc-names-test
+    rs/scripts/package-nfpm.test.sh
     {{ cargo_compile }} clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     just rs _doc-names
@@ -656,7 +657,5 @@ package crate packager:
     cargo build --locked --release -p {{ crate }}
     mkdir -p dist
     VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
-    	nfpm pkg --packager {{ packager }} \
-    		--config packaging/{{ crate }}/nfpm.yaml \
-    		--target dist/
+        rs/scripts/package-nfpm.sh packaging/{{ crate }}/nfpm.yaml {{ packager }} dist/
     ls -1 dist/

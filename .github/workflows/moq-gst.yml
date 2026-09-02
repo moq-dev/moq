@@ -156,10 +156,7 @@ jobs:
           PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
         run: |
           mkdir -p dist
-          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
-          envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
-            < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
-          nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
+          rs/scripts/package-nfpm.sh packaging/moq-gst/nfpm.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
@@ -171,10 +168,7 @@ jobs:
           PLUGIN_DIR: /usr/lib64/gstreamer-1.0
         run: |
           mkdir -p dist
-          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
-          envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
-            < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
-          nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/
+          rs/scripts/package-nfpm.sh packaging/moq-gst/nfpm.yaml rpm dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

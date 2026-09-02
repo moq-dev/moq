@@ -75,13 +75,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.deb-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
-        run: |
-          # nfpm doesn't expand ${VAR} in contents[].src or templating
-          # there either, so render the env vars in ourselves.
-          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
-          envsubst '$VERSION $ARCH $BINARY_PATH' \
-            < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
-          nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
+        run: rs/scripts/package-nfpm.sh packaging/moq-cli/nfpm.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
@@ -89,11 +83,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.rpm-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
-        run: |
-          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
-          envsubst '$VERSION $ARCH $BINARY_PATH' \
-            < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
-          nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/
+        run: rs/scripts/package-nfpm.sh packaging/moq-cli/nfpm.yaml rpm dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
