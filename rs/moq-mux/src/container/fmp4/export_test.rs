@@ -1010,6 +1010,10 @@ async fn simulcast_keyframes_only_roll_their_own_video_track() {
 
 	let fragments = drain_now(&mut exporter).await;
 	assert_ascending_sequence_numbers(&fragments);
+	// Only per track: two renditions rolling on keyframes that don't coincide
+	// interleave their fragments out of order, which is what `Export::next`
+	// promises and all it promises.
+	assert_each_track_ascends(&init.data, &fragments);
 
 	let mut per_track: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
 	for fragment in fragments {
@@ -1112,6 +1116,21 @@ fn assert_ascending_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fr
 			start >= previous,
 			"track {id} starts at {start}s after track {previous_id} started at {previous}s: {starts:?}",
 		);
+	}
+}
+
+/// Every track's own fragments must ascend in start time, whatever the order
+/// they are interleaved in.
+fn assert_each_track_ascends(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) {
+	let starts = fragment_starts(init, fragments);
+	let mut previous: std::collections::BTreeMap<u32, f64> = std::collections::BTreeMap::new();
+	for (id, start) in &starts {
+		if let Some(previous) = previous.insert(*id, *start) {
+			assert!(
+				*start > previous,
+				"track {id} starts at {start}s after starting at {previous}s: {starts:?}",
+			);
+		}
 	}
 }
 

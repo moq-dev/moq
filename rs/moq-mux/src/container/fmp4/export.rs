@@ -18,8 +18,9 @@ use moq_net::Timestamp;
 /// Built from a [`Source`](crate::Source), `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
-/// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
-/// is what an fMP4 player (e.g. ffplay, MSE) expects.
+/// segment + moof+mdat fragments, each track in presentation-timestamp order (see
+/// [`next`](Self::next) for how far that goes across tracks). This is what an fMP4
+/// player (e.g. ffplay, MSE) expects.
 ///
 /// Use [`next`](Self::next) to pull byte chunks: the first call returns the merged
 /// init segment (ftyp + multi-track moov), subsequent calls return moof+mdat
@@ -186,9 +187,20 @@ impl<S: Stream> Export<S> {
 	/// Get the next byte chunk.
 	///
 	/// The first call returns the merged init segment (ftyp + multi-track moov); each
-	/// subsequent call returns one moof+mdat fragment. Fragments arrive in ascending
-	/// timestamp order across tracks. Returns `None` when the catalog and every track
-	/// have ended.
+	/// subsequent call returns one moof+mdat fragment. Returns `None` when the catalog
+	/// and every track have ended.
+	///
+	/// A track's own fragments always ascend in timestamp, and a GOP boundary writes
+	/// the fragments it rolls in ascending order, so a broadcast with one video
+	/// rendition comes out ordered across its tracks too, for as long as the video
+	/// keeps drawing boundaries. Beyond that the order is only approximate: each
+	/// rendition of a simulcast ladder rolls on its own keyframes, which need not
+	/// coincide, and audio rolled by its own cap has no video fragment beside it, so a
+	/// fragment can follow one that starts later, by as much as the difference between
+	/// the GOP lengths. Putting that right would mean holding every fragment for the
+	/// length of the longest GOP in the ladder, which is not a trade a live export
+	/// should make; narrow the catalog to a single rendition with
+	/// [`Stream::select`](crate::catalog::Stream::select) where the order matters.
 	pub async fn next(&mut self) -> Result<Option<Bytes>> {
 		Ok(self.next_fragment().await?.map(|f| f.data))
 	}
