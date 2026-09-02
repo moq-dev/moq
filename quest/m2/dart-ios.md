@@ -38,4 +38,4 @@ and drop the three iOS targets from `release-dart-ffi.yml` rather than paying
 
 ## Related
 
-- [Dart publish](/quest/m2/dart-publish.md) - blocked on this verdict, since publishing spreads the iOS claim
+- [Dart publish](/quest/m2/dart-publish.md) - requires this verdict, since publishing spreads the iOS claim
