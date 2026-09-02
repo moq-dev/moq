@@ -806,9 +806,11 @@ async fn audio_fragments_roll_with_the_video_gop() {
 	assert!(init.init);
 	let (video_id, audio_id) = track_ids(&init.data);
 
+	let fragments = drain_now(&mut exporter).await;
+	assert_ascending_starts(&init.data, &fragments);
+
 	// Every fragment, tagged with the track it belongs to and its sample count.
-	let fragments: Vec<(u32, usize)> = drain_now(&mut exporter)
-		.await
+	let fragments: Vec<(u32, usize)> = fragments
 		.iter()
 		.map(|fragment| {
 			let trafs = traf_samples(&fragment.data);
@@ -830,6 +832,71 @@ async fn audio_fragments_roll_with_the_video_gop() {
 			(audio_id, 2),
 		],
 	);
+}
+
+/// A video track that ends while the audio plays on must not leave its last GOP
+/// behind the whole rest of the audio.
+///
+/// Audio falls back to per-frame fragmenting once no unfinished video track is
+/// left to roll it, so a source with another packet always ready (a recording, a
+/// fetch) keeps producing fragments and the exporter never reaches the idle path
+/// that drains a finished track's buffer. The video's tail then lands after every
+/// audio fragment, however long the audio runs on: a `tfdt` inversion with no
+/// bound on it.
+#[tokio::test(start_paused = true)]
+async fn video_that_ends_first_writes_its_tail_in_order() {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let mut live = Live::avc3();
+	let mut audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// Two 30 fps GOPs of three frames each, and then the video ends.
+	for i in 0..6u64 {
+		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+	}
+	live.track.finish().unwrap();
+	// The audio runs on for another half second, always ready.
+	for i in 0..30u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+			.unwrap();
+	}
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = fragment_now(&mut exporter).await;
+	assert!(init.init);
+	let (video_id, audio_id) = track_ids(&init.data);
+
+	let fragments = drain_now(&mut exporter).await;
+	assert_ascending_starts(&init.data, &fragments);
+
+	let counts: Vec<(u32, usize)> = fragments
+		.iter()
+		.map(|fragment| {
+			let trafs = traf_samples(&fragment.data);
+			assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+			trafs[0]
+		})
+		.collect();
+
+	// The first GOP rolls the first five packets with it; the second GOP is the
+	// video tail, which goes out as soon as the video ends rather than waiting
+	// for the audio, followed by the audio buffered up to that point.
+	assert_eq!(
+		counts[..4],
+		[(video_id, 3), (audio_id, 5), (video_id, 3), (audio_id, 4)],
+		"the video tail must not trail the audio",
+	);
+	// Everything after it is audio, one fragment per packet.
+	assert!(counts[4..].iter().all(|(id, samples)| *id == audio_id && *samples == 1));
+	let audio_samples: usize = counts.iter().filter(|(id, _)| *id == audio_id).map(|(_, n)| n).sum();
+	assert_eq!(audio_samples, 30, "every audio packet must be written exactly once");
+	let video_samples: usize = counts.iter().filter(|(id, _)| *id == video_id).map(|(_, n)| n).sum();
+	assert_eq!(video_samples, 6, "every video frame must be written exactly once");
 }
 
 /// A simulcast ladder rolls each video track on its own keyframes: one
@@ -940,6 +1007,50 @@ fn traf_samples(fragment: &Bytes) -> Vec<(u32, usize)> {
 		}
 	}
 	trafs
+}
+
+/// The timescale the init segment declares for each track id.
+fn track_timescales(init: &Bytes) -> std::collections::BTreeMap<u32, u64> {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut scales = std::collections::BTreeMap::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			for trak in &moov.trak {
+				scales.insert(trak.tkhd.track_id, u64::from(trak.mdia.mdhd.timescale));
+			}
+		}
+	}
+	scales
+}
+
+/// The presentation time each fragment starts at (its `tfdt`), in seconds, read
+/// at the timescale its track declares in the init segment.
+fn fragment_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) -> Vec<(u32, f64)> {
+	let scales = track_timescales(init);
+	fragments
+		.iter()
+		.map(|fragment| {
+			let traf = super::first_traf(&fragment.data);
+			let track_id = traf.tfhd.track_id;
+			let tfdt = traf.tfdt.expect("a tfdt").base_media_decode_time;
+			let scale = *scales.get(&track_id).expect("a track in the init segment");
+			(track_id, tfdt as f64 / scale as f64)
+		})
+		.collect()
+}
+
+/// Assert the fragments' start times never go backwards, across every track.
+fn assert_ascending_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) {
+	let starts = fragment_starts(init, fragments);
+	for pair in starts.windows(2) {
+		let [(previous_id, previous), (id, start)] = pair else {
+			unreachable!();
+		};
+		assert!(
+			start >= previous,
+			"track {id} starts at {start}s after track {previous_id} started at {previous}s: {starts:?}",
+		);
+	}
 }
 
 /// Every fragment the exporter can produce without waiting for more input.

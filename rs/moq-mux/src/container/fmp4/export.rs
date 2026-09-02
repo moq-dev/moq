@@ -111,6 +111,21 @@ struct Fmp4Track {
 	sequence_number: u32,
 }
 
+impl Fmp4Track {
+	/// When the next content this track will contribute starts: the first frame
+	/// of its buffered run, or its pending frame when the buffer is empty.
+	///
+	/// A [`Duration`] rather than a [`Timestamp`], whose ordering breaks a
+	/// cross-scale tie by scale, so a 48 kHz audio track would sort ahead of a
+	/// 90 kHz video one at t=0.
+	fn next_start(&self) -> Option<Duration> {
+		self.buffer
+			.first()
+			.or(self.pending.as_ref())
+			.map(|frame| Duration::from(frame.timestamp))
+	}
+}
+
 impl<S: Stream> Export<S> {
 	/// Subscribe to `source` and produce fMP4 byte chunks, driving track
 	/// (un)subscription from `catalog`.
@@ -264,7 +279,19 @@ impl<S: Stream> Export<S> {
 				return Poll::Pending;
 			}
 
-			// 4. Pick the track whose pending frame has the smallest timestamp and
+			// 4. Write out the buffered tail of a track that has ended, as soon as no
+			// other track still holds something earlier. Step 6 does the same, but
+			// only once every track is idle at the same moment, which a track fed by
+			// a recording or a fetch never is: the tail of a video track that ends
+			// mid-broadcast would trail the whole rest of the audio.
+			if let Some(name) = self.stranded_tail() {
+				let track = self.tracks.get_mut(&name).unwrap();
+				let frames = std::mem::take(&mut track.buffer);
+				let fragment = emit_fragment(track, frames, None)?;
+				return Poll::Ready(Ok(Some(fragment)));
+			}
+
+			// 5. Pick the track whose pending frame has the smallest timestamp and
 			// decide whether to flush its buffer before appending the new frame.
 			let chosen = self
 				.tracks
@@ -331,8 +358,10 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 
-			// 5. No pending frames. Flush any finished tracks' remaining buffers,
-			// in ascending first-frame-timestamp order.
+			// 6. Nothing pending anywhere. Step 4 has already written every finished
+			// tail that was next in order, so what's left is one held back by a track
+			// that stalled without ending. Write it anyway, earliest first, rather
+			// than wait out a track that may never speak again.
 			let flushable = self
 				.tracks
 				.iter()
@@ -353,17 +382,36 @@ impl<S: Stream> Export<S> {
 				return Poll::Ready(Ok(Some(fragment)));
 			}
 
-			// 6. If catalog is closed and every track is finished and drained, we're done.
+			// 7. If catalog is closed and every track is finished and drained, we're done.
 			if self.catalog.is_none() && self.tracks.values().all(|t| t.finished && t.buffer.is_empty()) {
 				return Poll::Ready(Ok(None));
 			}
 
-			// 7. Drop finished tracks with empty buffers so the next catalog update can re-add a track of the same name.
+			// 8. Drop finished tracks with empty buffers so the next catalog update can re-add a track of the same name.
 			self.tracks
 				.retain(|_, t| !(t.finished && t.pending.is_none() && t.buffer.is_empty()));
 
 			return Poll::Pending;
 		}
+	}
+
+	/// The track whose ended run can be written now: it is finished, so nothing
+	/// more will join its buffer, and nothing another track holds starts earlier.
+	///
+	/// A track that ends mid-broadcast has no successor to flush its tail. Video
+	/// that has ended no longer draws the GOP boundary that rolls the audio with
+	/// it either, so the audio switches to per-frame fragments and keeps the
+	/// exporter busy, which is what strands the tail: it would otherwise wait for
+	/// every other track to end too.
+	fn stranded_tail(&self) -> Option<String> {
+		let earliest = self.tracks.values().filter_map(Fmp4Track::next_start).min()?;
+		self.tracks
+			.iter()
+			.filter(|(_, track)| track.finished && !track.buffer.is_empty())
+			.map(|(name, track)| (Duration::from(track.buffer[0].timestamp), !track.is_video, name))
+			.filter(|(start, _, _)| *start <= earliest)
+			.min()
+			.map(|(_, _, name)| name.clone())
 	}
 
 	/// Encode every audio track's buffered run as a fragment, tagged with the
