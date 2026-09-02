@@ -16,31 +16,28 @@ regression test per Root Cause First.
 ## Quests
 
 - [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
-- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect() logs on every connection at the wrong level and prints the JWT in the URL
+- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
+- [Rust log redaction](/quest/m0/rust-log-redaction.md) - moq-native logs relay URLs with their query and moq-rtmp logs stream keys
 - [Dart leaks](/quest/m0/dart-leak.md) - the generated Dart bindings leak native memory on every call
-- [#2388](/quest/m0/2388-safari-stops-delivering-new-incoming-unidirectional.md) - Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one stream per group exhausts that in about two minutes of playback
-- [#2527](/quest/m0/2527-publish-video-breaks-when-the-publishers-window-is.md) - Publish video breaks when the publisher's window is minimized, on every browser using the MediaStreamTrackProcessor polyfill
 - [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
 - [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
-- [#2812](/quest/m0/2812-watch-has-audio-stutter-on-ios-on-https-moq-dev-watch.md) - Watch has Audio stutter on iOS on https://moq.dev/watch/
 - [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: a media gap is a hole in the output, not a splice
-- [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - fix(watch): audio ring truncate can race the worklet reader for one quantum
+- [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls SI tables, PCR, and pacing until the media clock catches up
-- [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the first
+- [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request
 - [Windows window capture](/quest/m0/windows-window-capture-blank.md) - Windows window capture returns black pixels for GPU-composited windows
 - [Capture device loss](/quest/m0/capture-device-loss.md) - an AVFoundation camera that disappears parks the reader forever
 - [X11 window identity](/quest/m0/x11-window-identity.md) - a reused X11 window id can publish an unrelated window
 - [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - a minimized or resizing window ends capture instead of riding it out
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with
-- [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
 - [Bandwidth estimate release](/quest/m0/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
 - [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [H.265 suffix SEI ownership](/quest/m0/h265-suffix.md) - suffix SEI stays with the access unit it follows, including at EOF
 - [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority
-- [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: give Reader a synchronous decode so the publisher need not read controls ahead
+- [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue (dev)
 - [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group ends the subscription, so offered load silently decays mid-run
-- [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test load
+- [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: the inflate-cap test times out under parallel load
 - [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync leaves no trace, no log, no counter
 - [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
