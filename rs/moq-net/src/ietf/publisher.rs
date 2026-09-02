@@ -567,9 +567,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// The filter and any fill are relative to the live edge, so snapshot it once:
-		// the draft's current-group join (Next Object plus a StartGroup=1 fill) has the
-		// fill carry that group, on a fetch stream that can number a group's interior,
-		// while the subscription starts at the next group. The two meet with no overlap.
+		// the fill ends exactly where a Next Object subscription begins, which is what
+		// lets the draft's current-group join (Next Object plus a StartGroup=1 fill)
+		// cover the group with no gap and no overlap.
 		let edge = live_edge(&cache);
 		let range = subscribe_range(&msg, edge, self.version);
 		let _ = track.update(Subscription {
@@ -579,21 +579,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		});
 
+		// Declaring the timescale is what opts the track into timestamps, so
+		// INCLUDE_PROPERTIES=0 means every object goes out unstamped: a value in units the
+		// peer was never told is worse than none. Our own reader discards it, and a peer
+		// that assumes some default would time the media wrong.
+		let timescale = msg.properties_wanted.then(|| track.info().timescale);
+
 		// A fill reads the group cache through its own consumer, independent of the
 		// subscription's cursor.
-		let fill = msg
-			.fill
-			.filter(|_| Filter::is_draft20(self.version))
-			.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache))
-			// A fill covers what the subscription will not send, and the two are meant to
-			// meet with no gap and no overlap. The subscription starts at a group boundary
-			// and serves that group whole, so a fill at or above it has nothing to carry.
-			.map(|(serve, cache)| match (serve, range.start) {
-				(FillServe::Group { sequence, .. }, Some(start)) if sequence >= start.group => {
-					(FillServe::Empty, cache)
-				}
-				(serve, _) => (serve, cache),
-			});
+		let fill = msg.fill.filter(|_| Filter::is_draft20(self.version)).map(|fill| Fill {
+			request_id,
+			priority,
+			range: fill_range(fill, msg.filter, edge.largest),
+			cache,
+			timescale,
+		});
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -608,17 +608,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// Required once the track has content; a fill-requesting subscriber
 				// sizes its backfill against this.
 				largest: edge.largest,
-				properties: match msg.properties_wanted {
-					// Declaring the timescale is what opts the track into timestamps; every
-					// object Timestamp below is in these units.
+				properties: match timescale {
+					// The declared timescale; every object Timestamp below is in these units.
 					// We serve the newest group first, matching moq-lite.
-					true => ietf::Properties {
-						timescale: Some(track.info().timescale),
+					Some(timescale) => ietf::Properties {
+						timescale: Some(timescale),
 						group_order: Some(GroupOrder::Descending),
 					},
 					// INCLUDE_PROPERTIES=0. The field stays present but empty, which also
 					// means the track opts out of timestamps for this subscriber.
-					false => ietf::Properties::default(),
+					None => ietf::Properties::default(),
 				},
 			})
 			.await?;
@@ -629,12 +628,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let res = {
 			let serve = async {
 				match fill {
-					Some((fill, cache)) => {
-						let fill = self.run_fill(request_id, priority, fill, cache);
-						let (res, ()) = futures::join!(self.run_track(track, request_id, range), fill);
+					Some(fill) => {
+						let fill = self.run_fill(fill);
+						let (res, ()) = futures::join!(self.run_track(track, request_id, range, timescale), fill);
 						res
 					}
-					None => self.run_track(track, request_id, range).await,
+					None => self.run_track(track, request_id, range, timescale).await,
 				}
 			};
 			let mut serve = std::pin::pin!(serve);
@@ -746,11 +745,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
+	///
+	/// `timescale` is the units declared in SUBSCRIBE_OK, or `None` when the subscriber
+	/// opted out of Track Properties and objects therefore go out unstamped.
 	async fn run_track(
 		&self,
 		mut track: track::Subscriber,
 		request_id: RequestId,
 		range: ServeRange,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// The subscription range is a preference for what the publisher should keep
 		// available; the cursor is what this subscriber actually reads, and setting one does
@@ -790,11 +793,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let sequence = group.sequence;
 			tracing::debug!(subscribe = %request_id, track = %track.name(), sequence, "serving group");
 
-			// Trim the last group to the filter's end, so nothing past the requested
-			// range is sent. Interior groups are served whole, and so is the group the
-			// range starts in: `start_of_group` has already moved a start that landed
-			// inside one.
+			// Trim the boundary groups to the filter's object bounds, so nothing outside
+			// the requested range is sent. Interior groups are served whole.
 			let slice = GroupSlice {
+				skip: match range.start {
+					Some(start) if start.group == sequence => start.object,
+					_ => 0,
+				},
 				until: match range.end {
 					Some(end) if end.group == sequence => end.object.map(|object| object.saturating_add(1)),
 					_ => None,
@@ -806,21 +811,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				group_id: sequence,
 				sub_group_id: 0,
 				publisher_priority: 0,
-				// Carry per-object timestamps as extension headers (the Timestamp Object
-				// Property) so moq-transport peers get the real PTS. The units are the
-				// track's, declared once in SUBSCRIBE_OK.
+				// `run_group` fills in the Extensions flag from the timescale.
 				flags: ietf::GroupFlags {
-					has_extensions: true,
-					// Every group we open starts at its first object: a filter that names
-					// one partway in is rounded up to the next group instead of trimming
-					// a head.
-					first_object: true,
+					// Only honest when the stream really starts at the group's first
+					// object; a trimmed head starts partway through.
+					first_object: slice.skip == 0,
 					..Default::default()
 				},
 			};
 
 			let priority = track.subscription().priority;
-			let timescale = track.info().timescale;
 			tasks.push(
 				Self::run_group(
 					self.session.clone(),
@@ -836,15 +836,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// Serve one group on its own uni stream.
+	///
+	/// `timescale` is the units the track declared in SUBSCRIBE_OK. Per-object extension
+	/// headers carry the frame's presentation timestamp (the Timestamp Object Property) so
+	/// moq-transport peers get the real PTS, and `None` is a subscriber that opted out of
+	/// Track Properties: with no units declared there is nothing to write. That one value
+	/// sets both the group header's Extensions flag and what each object carries, so the
+	/// header can't promise extensions the objects don't have.
 	async fn run_group(
 		session: S,
-		msg: ietf::GroupHeader,
+		mut msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: group::Consumer,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Result<(), Error> {
+		msg.flags.has_extensions = timescale.is_some();
+
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
@@ -852,8 +862,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 
-		// The next object id to write, which the filter's end is compared against.
+		// The next object id to read. Ids below `slice.skip` are consumed without being
+		// written, and the first written id goes on the wire as its absolute delta, so
+		// the peer sees the true numbering rather than a silently renumbered group.
 		let mut index: u64 = 0;
+		let mut first_written = true;
 
 		// A subscriber catching up on a cached group takes the whole backlog under one
 		// lock; at the live edge the batch comes up empty and the open tail streams
@@ -889,13 +902,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							break 'serve;
 						}
 						let frame = buf.filled()[i].clone();
-						Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
-						stream.encode(&(frame.payload.len() as u64)).await?;
-						if frame.payload.is_empty() {
-							// Have to write the object status too.
-							stream.encode(&0u8).await?;
-						} else {
-							stream.write_chunk(frame.payload).await?;
+						if index >= slice.skip {
+							let delta = if std::mem::take(&mut first_written) { index } else { 0 };
+							Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
+							stream.encode(&(frame.payload.len() as u64)).await?;
+							if frame.payload.is_empty() {
+								// Have to write the object status too.
+								stream.encode(&0u8).await?;
+							} else {
+								stream.write_chunk(frame.payload).await?;
+							}
 						}
 						index += 1;
 						// The fill stamped the group once. A flow-controlled peer can
@@ -905,7 +921,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				}
 				Step::Partial(mut frame) => {
-					Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
+					if index < slice.skip {
+						// A skipped frame still has to be drained to advance the cursor.
+						loop {
+							let chunk = {
+								let mut closed = std::pin::pin!(stream.closed());
+								kio::wait(|waiter| {
+									if waiter.poll_future(closed.as_mut()).is_ready() {
+										return Poll::Ready(Err(Error::Cancel));
+									}
+									frame.poll_read_chunk(waiter)
+								})
+								.await
+							};
+							if chunk?.is_none() {
+								break;
+							}
+						}
+						index += 1;
+						continue;
+					}
+
+					let delta = if std::mem::take(&mut first_written) { index } else { 0 };
+					Self::write_object_header(&mut stream, delta, frame.timestamp, timescale, version).await?;
 					index += 1;
 
 					// Write the size of the frame.
@@ -951,24 +989,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Write one object's header: the id delta and, when the group carries extensions,
+	/// Write one object's header: the id delta and, when the track declared a timescale,
 	/// the presentation timestamp.
 	///
 	/// The first object's delta is its absolute Object ID; every later one is the prior
 	/// ID plus the delta plus one, so a contiguous group is a zero delta throughout.
 	async fn write_object_header(
 		stream: &mut Writer<S::SendStream, Version>,
-		msg: &ietf::GroupHeader,
+		delta: u64,
 		timestamp: Timestamp,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
-		// A subgroup stream we open always starts at object 0 and never skips one, so
-		// every object's id is the prior one plus one, which is what a zero delta says.
-		stream.encode(&0u64).await?;
+		stream.encode(&delta).await?;
 
-		// Per-object extension headers carry the frame's presentation timestamp.
-		if msg.flags.has_extensions {
+		// Per-object extension headers carry the frame's presentation timestamp, matching
+		// the group header's Extensions flag: `run_group` keys both off this timescale.
+		if let Some(timescale) = timescale {
 			let mut ext = bytes::BytesMut::new();
 			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
 			stream.encode(&(ext.len() as u64)).await?;
@@ -984,8 +1021,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// A fill is a promise once requested. An empty range opens no stream, but a range we
 	/// cannot serve still opens one and resets it right after the FETCH_HEADER, the
 	/// draft's fill-failure signal. Nothing here touches the subscription either way.
-	async fn run_fill(&self, request_id: RequestId, priority: u8, fill: FillServe, track: track::Consumer) {
-		if matches!(fill, FillServe::Empty) {
+	async fn run_fill(&self, fill: Fill) {
+		let Fill {
+			request_id,
+			priority,
+			range,
+			cache,
+			timescale,
+		} = fill;
+
+		if matches!(range, FillServe::Empty) {
 			return;
 		}
 
@@ -1003,12 +1048,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			stream.encode(&FetchHeader::TYPE).await?;
 			stream.encode(&FetchHeader { request_id }).await?;
 
-			let FillServe::Group { sequence, skip, until } = fill else {
+			let FillServe::Group { sequence, skip, until } = range else {
 				return Err(Error::Unsupported);
 			};
 
-			let group = track.fetch_group(sequence, group::Fetch { priority }).await?;
-			Self::write_fill_group(&mut stream, group, sequence, skip, until, self.version).await
+			let group = cache.fetch_group(sequence, group::Fetch { priority }).await?;
+			let slice = GroupSlice { skip, until };
+			Self::write_fill_group(&mut stream, group, sequence, slice, timescale, self.version).await
 		}
 		.await;
 
@@ -1039,11 +1085,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Writer<S::SendStream, Version>,
 		mut group: group::Consumer,
 		sequence: u64,
-		skip: u64,
-		until: Option<u64>,
+		slice: GroupSlice,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
-		let timescale = group.timescale();
+		let GroupSlice { skip, until } = slice;
 		let mut index: u64 = 0;
 		let mut first = true;
 
@@ -1166,7 +1212,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		object: u64,
 		first: bool,
 		timestamp: Timestamp,
-		timescale: Timescale,
+		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
 		// Serialization Flags: the two low bits encode the subgroup (00 = subgroup
@@ -1176,22 +1222,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PRIORITY: u64 = 0x10;
 		const PROPERTIES: u64 = 0x20;
 
+		// An unstamped object has no properties at all, so the field is omitted rather
+		// than written empty: the track declared no units to read a timestamp in.
+		let properties = if timescale.is_some() { PROPERTIES } else { 0 };
+
 		if first {
 			// The first object must carry its absolute Group and Object IDs. Include the
 			// priority too: "same as the prior object" has no prior to refer to.
-			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES)).await?;
+			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | properties)).await?;
 			stream.encode(&sequence).await?;
 			stream.encode(&object).await?;
 			stream.encode(&0u8).await?;
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			stream.encode(&PROPERTIES).await?;
+			stream.encode(&properties).await?;
 		}
 
-		let mut ext = bytes::BytesMut::new();
-		ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
-		stream.encode(&(ext.len() as u64)).await?;
-		stream.write_chunk(ext.freeze()).await?;
+		if let Some(timescale) = timescale {
+			let mut ext = bytes::BytesMut::new();
+			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
+			stream.encode(&(ext.len() as u64)).await?;
+			stream.write_chunk(ext.freeze()).await?;
+		}
 
 		Ok(())
 	}
@@ -1942,7 +1994,7 @@ mod group_priority_test {
 			msg,
 			200,
 			consumer,
-			Timescale::default(),
+			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		)
@@ -2000,7 +2052,7 @@ mod group_priority_test {
 				header(),
 				0,
 				consumer,
-				Timescale::default(),
+				Some(Timescale::default()),
 				Version::Draft14,
 				GroupSlice::default(),
 			)
@@ -2023,7 +2075,7 @@ mod group_priority_test {
 				header(),
 				0,
 				consumer,
-				Timescale::default(),
+				Some(Timescale::default()),
 				Version::Draft14,
 				GroupSlice::default(),
 			));
@@ -2091,7 +2143,7 @@ mod group_priority_test {
 			msg,
 			0,
 			consumer,
-			Timescale::default(),
+			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		));
@@ -2145,12 +2197,129 @@ mod subscribe_cursor_test {
 		track.finish().unwrap();
 
 		publisher
-			.run_track(subscriber, RequestId(1), ServeRange::default())
+			.run_track(
+				subscriber,
+				RequestId(1),
+				ServeRange::default(),
+				Some(Timescale::default()),
+			)
 			.await
 			.unwrap();
 
 		// `run_group` sets the priority once per stream it opens, so this counts groups served.
 		assert_eq!(log.priorities().len(), 1, "only group 3 should have been served");
+	}
+}
+
+/// A subscriber that sent INCLUDE_PROPERTIES=0 gets a SUBSCRIBE_OK whose Track Properties
+/// block is empty, so no TIMESCALE is declared and there are no units to read a Timestamp
+/// in. Stamping objects anyway spends bytes our own reader discards, and a peer that
+/// assumes some default would time the media wrong.
+#[cfg(test)]
+mod unstamped_tests {
+	use super::*;
+	use crate::coding::Decode;
+	use crate::lite::test_transport::{Log, SinkSend, SinkSession};
+
+	const VERSION: Version = Version::Draft20;
+
+	/// One frame, big enough that its length can't be mistaken for a properties block.
+	const PAYLOAD: &[u8] = b"frame";
+
+	/// A finished track holding one finished group, plus a consumer of that group.
+	fn track() -> (track::Producer, group::Consumer) {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(42).unwrap(), PAYLOAD)
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+		(track, consumer)
+	}
+
+	/// Serve the track's one group over a subscription, returning that stream's bytes.
+	async fn serve_subscription(timescale: Option<Timescale>) -> Vec<u8> {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let (mut track, _group) = track();
+		let subscriber = track.subscribe(None);
+		track.finish().unwrap();
+
+		publisher
+			.run_track(subscriber, RequestId(1), ServeRange::default(), timescale)
+			.await
+			.unwrap();
+
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// Serve the track's one group as a fill, returning that fetch stream's bytes.
+	async fn serve_fill(timescale: Option<Timescale>) -> Vec<u8> {
+		let log = Log::default();
+		let mut stream = Writer::new(SinkSend::new(log.clone()), VERSION);
+
+		let (mut track, group) = track();
+		track.finish().unwrap();
+
+		Publisher::<SinkSession>::write_fill_group(&mut stream, group, 0, GroupSlice::default(), timescale, VERSION)
+			.await
+			.unwrap();
+
+		log.writes.lock().unwrap().clone()
+	}
+
+	#[tokio::test]
+	async fn a_subscription_stamps_only_what_it_declared() {
+		let stamped = serve_subscription(Some(Timescale::default())).await;
+		let mut objects = stamped.as_slice();
+		let header = ietf::GroupHeader::decode(&mut objects, VERSION).unwrap();
+		assert!(header.flags.has_extensions, "a declared timescale opts objects in");
+		// Object ID delta, then a properties block: its length, then Timestamp (0x10).
+		assert_eq!(objects[0], 0, "expected a zero object id delta, got {objects:?}");
+		assert_eq!(objects[2], 0x10, "expected a Timestamp property, got {objects:?}");
+
+		let unstamped = serve_subscription(None).await;
+		let mut objects = unstamped.as_slice();
+		let header = ietf::GroupHeader::decode(&mut objects, VERSION).unwrap();
+		assert!(
+			!header.flags.has_extensions,
+			"the group header must not claim extensions"
+		);
+		// Object ID delta, payload length, payload: nothing in between.
+		let mut expected = vec![0, PAYLOAD.len() as u8];
+		expected.extend_from_slice(PAYLOAD);
+		assert_eq!(objects, expected, "the object must go straight to its payload");
+	}
+
+	#[tokio::test]
+	async fn a_fill_stamps_only_what_it_declared() {
+		// Serialization Flags: absolute Group ID, Object ID, priority, and properties.
+		const FIRST_STAMPED: u8 = 0x3c;
+		const FIRST_UNSTAMPED: u8 = 0x1c;
+
+		let stamped = serve_fill(Some(Timescale::default())).await;
+		assert_eq!(stamped[0], FIRST_STAMPED, "expected a properties bit, got {stamped:?}");
+
+		let unstamped = serve_fill(None).await;
+		// Flags, group id, object id, priority, payload length, payload: no properties.
+		let mut expected = vec![FIRST_UNSTAMPED, 0, 0, 0, PAYLOAD.len() as u8];
+		expected.extend_from_slice(PAYLOAD);
+		assert_eq!(unstamped, expected, "the object must carry no properties field");
 	}
 }
 
@@ -2309,46 +2478,6 @@ mod serve_tests {
 		}
 	}
 
-	/// A fill covers what the subscription will not send. Relative(1) names the current
-	/// group's start on both, so the subscription carries that group whole and the fill is
-	/// left with nothing: opening its stream would deliver every object a second time.
-	#[tokio::test]
-	async fn a_fill_the_subscription_covers_opens_no_stream() {
-		let mut h = serve(Version::Draft20);
-
-		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
-		for payload in [b"head-0", b"head-1", b"head-2"] {
-			group.write_frame(timestamp(), payload.as_slice()).unwrap();
-		}
-		group.finish().unwrap();
-
-		run_live(
-			&mut h,
-			subscribe(
-				Filter::Relative(1),
-				Some(ietf::Fill {
-					filter: Some(Filter::Relative(1)),
-					range_filters: false,
-				}),
-			),
-		)
-		.await;
-
-		assert_eq!(
-			occurrences(&h.log, FETCH_STREAM),
-			0,
-			"the subscription already covers the range"
-		);
-		for payload in [b"head-0", b"head-1", b"head-2"] {
-			assert_eq!(
-				occurrences(&h.log, payload),
-				1,
-				"each object exactly once, on the subscription"
-			);
-		}
-		assert!(h.log.resets().is_empty(), "nothing failed");
-	}
-
 	/// A Next Object subscription never receives the already-published head of the
 	/// current group: everything below the snapshot is outside the requested range.
 	#[tokio::test]
@@ -2422,9 +2551,9 @@ mod serve_tests {
 		assert!(h.log.resets().is_empty());
 	}
 
-	/// The filter's end trims what `run_group` writes: a capped tail stops early, and every
-	/// object's delta is zero because the stream always starts at the group's first object.
-	/// Extensions are off so the wire is just deltas, sizes, and payloads.
+	/// The filter's object bounds trim what `run_group` writes: the skipped head is not
+	/// sent, the first written object's delta is its absolute id, and a capped tail stops
+	/// early. Served unstamped so the wire is just deltas, sizes, and payloads.
 	#[tokio::test]
 	async fn run_group_honors_the_slice() {
 		fn header() -> ietf::GroupHeader {
@@ -2434,7 +2563,7 @@ mod serve_tests {
 				sub_group_id: 0,
 				publisher_priority: 0,
 				flags: ietf::GroupFlags {
-					first_object: true,
+					first_object: false,
 					..Default::default()
 				},
 			}
@@ -2451,30 +2580,26 @@ mod serve_tests {
 			let consumer = group.consume();
 			group.finish().unwrap();
 
-			Publisher::<SinkSession>::run_group(
-				session,
-				header(),
-				0,
-				consumer,
-				Timescale::default(),
-				Version::Draft20,
-				slice,
-			)
-			.await
-			.unwrap();
+			Publisher::<SinkSession>::run_group(session, header(), 0, consumer, None, Version::Draft20, slice)
+				.await
+				.unwrap();
 
 			log.writes.lock().unwrap().clone()
 		}
 
-		// Unbounded: the whole group, every delta zero.
-		let whole = serve_slice(GroupSlice { until: None }).await;
+		// Skip 2: the head is dropped and the first delta is the absolute id 2.
+		let trimmed = serve_slice(GroupSlice { skip: 2, until: None }).await;
 		assert!(
-			whole.ends_with(&[0x00, 0x02, b'c', b'c', 0x00, 0x02, b'd', b'd']),
-			"expected cc then dd, each at delta 0, got {whole:x?}"
+			trimmed.ends_with(&[0x02, 0x02, b'c', b'c', 0x00, 0x02, b'd', b'd']),
+			"expected delta 2 then cc, delta 0 then dd, got {trimmed:x?}"
 		);
 
 		// Until 2: only the head is written, stopping before the cap.
-		let capped = serve_slice(GroupSlice { until: Some(2) }).await;
+		let capped = serve_slice(GroupSlice {
+			skip: 0,
+			until: Some(2),
+		})
+		.await;
 		assert!(
 			capped.ends_with(&[0x00, 0x02, b'a', b'a', 0x00, 0x02, b'b', b'b']),
 			"expected aa then bb only, got {capped:x?}"
@@ -3626,8 +3751,8 @@ struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
 	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet, or a spliced track
-	/// between segments), in which case nothing is advertised and no fill is servable.
+	/// group's frames cannot be read right now, in which case nothing is advertised and
+	/// no fill is servable.
 	largest: Option<Location>,
 	/// One past the Largest Object, which is where a Next Object subscription begins.
 	/// When the edge is imprecise this falls back to the next group boundary: never below
@@ -3685,10 +3810,13 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 }
 
 /// The last object below `sequence`: the nearest earlier cached group that has started a
-/// frame, walked in cache order so legal gaps in the group numbering are crossed. Empty
-/// groups exist for at most the instant between creation and first frame, so the walk is
-/// one step in practice. A group evicted from the cache is not visible, which is fine:
-/// Largest Object is the track from this publisher's perspective, and that is the cache.
+/// frame, walked in cache order so legal gaps in the group numbering are crossed and a
+/// spliced track's older segments are reached. Empty groups exist for at most the instant
+/// between creation and first frame, so within a segment the walk is one step in
+/// practice; a takeover is what makes it more. A group evicted from the cache is not
+/// visible, which is fine: Largest Object is the track from this publisher's perspective,
+/// and that is the cache. The newest group is never evicted, so the walk always has a
+/// floor to stop at.
 fn largest_before(track: &track::Consumer, sequence: u64) -> Option<Location> {
 	let mut sequence = sequence;
 	loop {
@@ -3722,6 +3850,8 @@ struct ServeRange {
 /// The slice of one group a subscription's [`ServeRange`] selects.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupSlice {
+	/// Frames dropped from the front; also the first written object's absolute id.
+	skip: u64,
 	/// One past the last object to write, when the filter ends inside this group.
 	until: Option<u64>,
 }
@@ -3740,35 +3870,7 @@ fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge, version: Version) 
 		return ServeRange::default();
 	}
 
-	let range = filter_range(msg.filter, edge);
-	match range.start {
-		Some(start) => ServeRange {
-			start: Some(start_of_group(start)),
-			..range
-		},
-		None => range,
-	}
-}
-
-/// Round a filter's start up to a group boundary.
-///
-/// A subgroup stream numbers its objects from the group's first, so serving a group from
-/// partway through hands the subscriber a hole it cannot decode around: a group is the unit
-/// an application resyncs on, and moq-lite cannot even represent a partial one. Dropping the
-/// group is what the protocol does express, so a start inside one begins at the next group.
-///
-/// A subscriber that wants the current group asks for it by group: draft-20's relative form
-/// is `{Largest Object.Group + 1 - StartGroup, 0}`, so `StartGroup=1` names that group's
-/// start without knowing Largest Object. Only Next Object and an absolute filter naming an
-/// object of its own land inside a group, and both are answered from the next one.
-fn start_of_group(start: Location) -> Location {
-	match start.object {
-		0 => start,
-		_ => Location {
-			group: start.group.saturating_add(1),
-			object: 0,
-		},
-	}
+	filter_range(msg.filter, edge)
 }
 
 /// The Locations a single Location Filter selects, resolved against the live edge.
@@ -3825,6 +3927,27 @@ enum FillServe {
 	/// serialization depends on a negotiated group order we do not implement, so the
 	/// stream is reset instead, the draft's fill-failure signal.
 	Unsupported,
+}
+
+/// Everything one subscription's backfill needs, resolved when the SUBSCRIBE_OK is sent.
+struct Fill {
+	/// The subscription's request ID, which the fetch stream names.
+	request_id: RequestId,
+
+	/// The subscriber's delivery priority: the fetch stream's send order, and the priority
+	/// of the cache read behind it.
+	priority: u8,
+
+	/// The range the fill resolved to.
+	range: FillServe,
+
+	/// An independent view of the same track, used to read the cached group without
+	/// consuming anything the subscription will deliver.
+	cache: track::Consumer,
+
+	/// The units declared in SUBSCRIBE_OK, or `None` when the subscriber opted out of
+	/// Track Properties and objects therefore go out unstamped.
+	timescale: Option<Timescale>,
 }
 
 /// Resolve a fill request using the Fetch rules: relative to Largest Object and never
@@ -3961,16 +4084,15 @@ mod range_tests {
 		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft20), ServeRange::default());
 	}
 
-	/// Next Object starts one past the Largest Object, which is mid-group: everything below
-	/// it, the current group's head included, is outside the requested range. What is left of
-	/// that group cannot start at object 0, so the range opens at the next group instead.
+	/// Next Object starts one past the Largest Object, mid-group. Everything below it,
+	/// including the current group's head, is outside the requested range.
 	#[test]
-	fn next_object_starts_at_the_group_after_the_largest_object() {
+	fn next_object_starts_past_the_largest_object() {
 		let msg = subscribe(Filter::NextObject);
 		assert_eq!(
 			subscribe_range(&msg, EDGE, Version::Draft20),
 			ServeRange {
-				start: Some(Location { group: 101, object: 0 }),
+				start: Some(Location { group: 100, object: 5 }),
 				end: None,
 			}
 		);
@@ -4106,12 +4228,77 @@ mod range_tests {
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
 	}
 
-	/// The end carries through with its object bound, so the last group is trimmed to it: a
-	/// group cut short at the tail is still decodable from its front. A start naming an
-	/// object is the bound that cannot be honored, since what is left of that group would
-	/// have no head, so it opens at the next group.
+	/// Build a spliced track: `old` serving up to the boundary, `new` from it on.
+	fn spliced(boundary: u64) -> (track::Producer, track::Producer, track::Consumer) {
+		let broadcast = std::sync::Arc::new(crate::broadcast::Info::default());
+		let old = track::Producer::new(broadcast.clone(), "video", None);
+		let new = track::Producer::new(broadcast, "video", None);
+
+		let mut resume = crate::model::resume::Producer::new();
+		resume.takeover(old.consume()).unwrap();
+		resume.switch(new.consume(), boundary).unwrap();
+
+		(old, new, track::Consumer::spliced("video".into(), resume.consume()))
+	}
+
+	fn write_frames(group: &mut group::Producer, count: usize) {
+		for _ in 0..count {
+			group
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+	}
+
+	/// A takeover splices a fresh track in above the old one. Resolving the edge against
+	/// the newest segment alone reads the whole logical track as empty, and unlike an
+	/// empty newest group that lasts an instant, this lasts the entire failover window.
+	#[tokio::test]
+	async fn an_empty_spliced_segment_keeps_the_previous_edge() {
+		let (mut old, _new, track) = spliced(1);
+
+		let mut group = old.create_group(group::Info { sequence: 0 }).unwrap();
+		write_frames(&mut group, 3);
+		group.finish().unwrap();
+
+		// The new route serves from group 1 onward but hasn't produced anything yet.
+		let edge = live_edge(&track);
+		assert_eq!(edge.latest, Some(0));
+		assert_eq!(
+			edge.largest,
+			Some(Location { group: 0, object: 2 }),
+			"the previous segment's edge survives the takeover"
+		);
+		assert_eq!(edge.next, Some(Location { group: 0, object: 3 }));
+	}
+
+	/// The walkback itself has to cross the boundary: the new route's first group exists
+	/// but has no objects yet, so the largest sits in the segment below it.
+	#[tokio::test]
+	async fn the_walkback_crosses_a_spliced_segment() {
+		let (mut old, mut new, track) = spliced(1);
+
+		let mut group = old.create_group(group::Info { sequence: 0 }).unwrap();
+		write_frames(&mut group, 3);
+		group.finish().unwrap();
+
+		// Created on the new route, not yet written: the instant the walkback exists for,
+		// except the earlier group is in another segment.
+		let _open = new.create_group(group::Info { sequence: 1 }).unwrap();
+
+		let edge = live_edge(&track);
+		assert_eq!(edge.latest, Some(1));
+		assert_eq!(
+			edge.largest,
+			Some(Location { group: 0, object: 2 }),
+			"the walk crosses into the previous segment"
+		);
+		assert_eq!(edge.next, Some(Location { group: 0, object: 3 }));
+	}
+
+	/// Both ends carry through, object bounds included, so the boundary groups can be
+	/// trimmed rather than widened.
 	#[test]
-	fn absolute_keeps_its_end_and_rounds_its_start_up() {
+	fn absolute_carries_both_ends() {
 		let msg = subscribe(Filter::Absolute {
 			start: Location { group: 4, object: 3 },
 			end: Some(EndLocation {
@@ -4122,27 +4309,11 @@ mod range_tests {
 		assert_eq!(
 			subscribe_range(&msg, EDGE, Version::Draft20),
 			ServeRange {
-				start: Some(Location { group: 5, object: 0 }),
+				start: Some(Location { group: 4, object: 3 }),
 				end: Some(EndLocation {
 					group: 9,
 					object: Some(6)
 				}),
-			}
-		);
-	}
-
-	/// An absolute start already on a group boundary is left alone.
-	#[test]
-	fn absolute_on_a_boundary_is_unchanged() {
-		let msg = subscribe(Filter::Absolute {
-			start: Location { group: 4, object: 0 },
-			end: None,
-		});
-		assert_eq!(
-			subscribe_range(&msg, EDGE, Version::Draft20),
-			ServeRange {
-				start: Some(Location { group: 4, object: 0 }),
-				end: None,
 			}
 		);
 	}

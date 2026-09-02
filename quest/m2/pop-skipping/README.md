@@ -85,9 +85,8 @@ underneath it.
   produced the content, which alternate routes to one publisher deliberately
   share. The pre-#3225 front kept both (`FrontState.publisher` for the first,
   `handover_allowed` and the hold for the last), with `same_identity` comparing
-  either and refusing `Hop::UNKNOWN` on both. [Route resume
-  identity](/quest/m0/route-resume.md) restores that comparison rule and the
-  publisher half as a failover fix; [Rank](/quest/m2/pop-skipping/rank.md) owns
+  either and refusing `Hop::UNKNOWN` on both. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored that comparison rule and the
+  publisher half as the first-hop resume; [Rank](/quest/m2/pop-skipping/rank.md) owns
   the carrier half rather than reusing the wrong one.
 - The operator hand-authors one undirected base graph. Same-PoP connectivity is
   unconditional, not a self-edge operators must remember. The radius-two closure
@@ -154,7 +153,6 @@ wire version and the two directional costs of one bidirectional session.
 
 ## Related
 
-- [Route resume identity](/quest/m0/route-resume.md) - supplies the identity comparison rule adoption reuses on a different hop
 - [drain](/quest/m2/drain/README.md) - a second relay per PoP makes the same-PoP link price and its connection cardinality operationally important
 - [wildcard](/quest/m2/wildcard/README.md) - it reuses this questline's route cost, and needs a cluster on Lite06
 - [relay-memory](/quest/m2/relay-memory/README.md) - a denser mesh multiplies whatever a non-selected route costs

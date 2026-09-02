@@ -57,6 +57,27 @@ impl Segment {
 			None => latest,
 		})
 	}
+
+	/// The newest cached group this segment serves below `before` (exclusive), or its
+	/// newest cached group at all when `before` is `None`.
+	///
+	/// Bounded at both ends, since a segment's track can hold groups outside the range
+	/// it serves: a fetch can backfill below `start`, and the track's own edge can race
+	/// past `end` before the next takeover splices above it. Neither belongs to this
+	/// segment, so the search is capped at `end` and anything below `start` reads as a
+	/// miss (there is nothing in range, or the caller would have found it).
+	fn peek_below(&self, before: Option<u64>) -> Option<group::Consumer> {
+		// `end` is inclusive and `peek_before` is exclusive, hence the +1.
+		let limit = min_some(before, self.end.map(|end| end.saturating_add(1)));
+		let group = match limit {
+			Some(limit) => self.track.peek_before(limit)?,
+			None => self.track.peek_latest()?,
+		};
+		if self.start.is_some_and(|start| group.sequence < start) {
+			return None;
+		}
+		Some(group)
+	}
 }
 
 /// The demand to register on an underlying track: the subscriber's own
@@ -442,7 +463,7 @@ impl Consumer {
 	/// serving session may not have accepted it yet).
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<track::Info>> {
 		// Wait for the first segment (or a terminal state), then poll its info.
-		let track = match self.state.poll(waiter, |state| {
+		let track = match ready!(self.state.poll(waiter, |state| {
 			if state.abort.is_some() || !state.segments.is_empty() {
 				Poll::Ready(
 					state
@@ -453,15 +474,14 @@ impl Consumer {
 			} else {
 				Poll::Pending
 			}
-		}) {
-			Poll::Ready(Ok(res)) => res?,
-			Poll::Ready(Err(state)) => match (&state.abort, state.segments.first()) {
+		})) {
+			Ok(res) => res?,
+			Err(state) => match (&state.abort, state.segments.first()) {
 				(Some(err), _) => return Poll::Ready(Err(err.clone())),
 				(None, Some(segment)) => segment.track.clone(),
 				// Closed without ever getting a segment: nothing will resolve this.
 				(None, None) => return Poll::Ready(Err(Error::Dropped)),
 			},
-			Poll::Pending => return Poll::Pending,
 		};
 
 		track.info().poll_ok(waiter)
@@ -494,11 +514,10 @@ impl Consumer {
 		self.state.read().latest()
 	}
 
-	/// The newest segment's newest cached group, resolved synchronously; see
+	/// The newest cached group across every spliced segment; see
 	/// [`track::Consumer::peek_latest`].
 	pub(crate) fn peek_latest(&self) -> Option<group::Consumer> {
-		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
-		track.peek_latest()
+		self.peek_below(None)
 	}
 
 	/// A cached group by sequence from the newest segment; see
@@ -508,11 +527,24 @@ impl Consumer {
 		track.peek_group(sequence)
 	}
 
-	/// The nearest cached group below `sequence` in the newest segment; see
+	/// The nearest cached group below `sequence` across every spliced segment; see
 	/// [`track::Consumer::peek_before`].
 	pub(crate) fn peek_before(&self, sequence: u64) -> Option<group::Consumer> {
-		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
-		track.peek_before(sequence)
+		self.peek_below(Some(sequence))
+	}
+
+	/// Walk the segments newest-first for the first one holding a group in range.
+	///
+	/// Every segment, not just the newest: a takeover splices in a fresh track with no
+	/// groups at all, and a peek that stopped there would read the whole logical track
+	/// as empty for the entire failover window. Ranges are disjoint and ascending, so
+	/// the first hit walking backwards is the newest.
+	///
+	/// The segment list is copied out rather than held, since resolving each candidate
+	/// takes the underlying track's own lock.
+	fn peek_below(&self, before: Option<u64>) -> Option<group::Consumer> {
+		let segments = self.state.read().segments.clone();
+		segments.iter().rev().find_map(|segment| segment.peek_below(before))
 	}
 }
 
@@ -865,8 +897,8 @@ impl Subscriber {
 	/// error). Never consumes groups, so terminal-state pollers can share it.
 	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
-			match pending.poll_ok(waiter) {
-				Poll::Ready(Ok(mut sub)) => {
+			match ready!(pending.poll_ok(waiter)) {
+				Ok(mut sub) => {
 					// Enforce the floor on the read cursor, and re-slice demand in
 					// case a boundary moved while the subscription was pending. The
 					// upper bounds (segment boundary and `end_at` cap) are enforced by
@@ -877,8 +909,7 @@ impl Subscriber {
 					seg.sub = SubState::Active(sub);
 				}
 				// The underlying track was rejected or closed: stall, not error.
-				Poll::Ready(Err(_)) => seg.sub = SubState::Done(None),
-				Poll::Pending => return Poll::Pending,
+				Err(_) => seg.sub = SubState::Done(None),
 			}
 		}
 		Poll::Ready(())
@@ -897,8 +928,8 @@ impl Subscriber {
 				SubState::Pending(_) => {
 					ready!(Self::poll_activate(seg, prefs, min_sequence, waiter));
 				}
-				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
-					Poll::Ready(Ok(Some(group))) => {
+				SubState::Active(sub) => match ready!(sub.poll_recv_group(waiter)) {
+					Ok(Some(group)) => {
 						// `start_at` already floors the cursor; enforce the cap here since
 						// arrival-order reads don't honor `end_at`.
 						if let Some(end) = seg.end
@@ -908,7 +939,7 @@ impl Subscriber {
 						}
 						return Poll::Ready(Some(group));
 					}
-					Poll::Ready(Ok(None)) => {
+					Ok(None) => {
 						let count = sub.poll_finished(waiter).map(|res| res.ok());
 						let count = match count {
 							Poll::Ready(count) => count,
@@ -919,11 +950,10 @@ impl Subscriber {
 					}
 					// A dead segment stalls the logical track rather than erroring;
 					// the next switch resumes it.
-					Poll::Ready(Err(_)) => {
+					Err(_) => {
 						seg.sub = SubState::Done(None);
 						return Poll::Ready(None);
 					}
-					Poll::Pending => return Poll::Pending,
 				},
 				SubState::Done(_) => return Poll::Ready(None),
 			}
@@ -1060,14 +1090,13 @@ impl Subscriber {
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		loop {
 			if let Some(group) = &mut self.reading {
-				match group.poll_read_frame(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
+				match ready!(group.poll_read_frame(waiter)) {
+					Ok(Some(frame)) => {
 						self.reading = None;
 						return Poll::Ready(Ok(Some(frame)));
 					}
 					// An empty or broken group is skipped like a gap.
-					Poll::Ready(_) => self.reading = None,
-					Poll::Pending => return Poll::Pending,
+					_ => self.reading = None,
 				}
 				continue;
 			}
@@ -1097,13 +1126,10 @@ impl Subscriber {
 		if let Some(seg) = self.segments.last_mut() {
 			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter).is_pending() {
 				pending_activation = true;
-			} else if let SubState::Active(sub) = &mut seg.sub {
-				match sub.poll_recv_datagram(waiter) {
-					Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Some(datagram))),
-					// Terminal states fall through to the logical checks below.
-					Poll::Ready(_) => {}
-					Poll::Pending => return Poll::Pending,
-				}
+			} else if let SubState::Active(sub) = &mut seg.sub
+				&& let Ok(Some(datagram)) = ready!(sub.poll_recv_datagram(waiter))
+			{
+				return Poll::Ready(Ok(Some(datagram)));
 			}
 		}
 
@@ -1890,6 +1916,49 @@ mod test {
 			.now_or_never()
 			.expect("a live copy's answer must resolve immediately");
 		assert!(matches!(result, Err(Error::NotFound)));
+	}
+
+	/// A takeover splices in a track with no groups at all. A peek that stopped at the
+	/// newest segment would read the logical track as empty until the new route
+	/// produces, which is the whole failover window.
+	#[tokio::test]
+	async fn peeks_walk_past_an_empty_segment() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (_track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		write_group(&mut track_a, 0, "a0");
+		write_group(&mut track_a, 1, "a1");
+		producer.switch(&consumer_b, 2).unwrap();
+
+		let consumer = producer.consume();
+		assert_eq!(consumer.peek_latest().map(|group| group.sequence), Some(1));
+		assert_eq!(consumer.peek_before(1).map(|group| group.sequence), Some(0));
+		assert_eq!(consumer.peek_before(0).map(|group| group.sequence), None);
+	}
+
+	/// A segment's track can hold groups outside the range the segment serves: its own
+	/// edge can race past the cap before the next takeover splices above it. Those
+	/// belong to the newer segment's range, so a peek must not return them.
+	#[tokio::test]
+	async fn peeks_respect_segment_bounds() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (_track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		write_group(&mut track_a, 0, "a0");
+		// B takes over at 1, capping A at 0. A then races past its own cap.
+		producer.switch(&consumer_b, 1).unwrap();
+		write_group(&mut track_a, 5, "a5");
+
+		let consumer = producer.consume();
+		assert_eq!(
+			consumer.peek_latest().map(|group| group.sequence),
+			Some(0),
+			"group 5 is above A's cap and belongs to B's range"
+		);
 	}
 
 	#[tokio::test]

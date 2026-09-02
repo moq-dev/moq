@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.11...moq-mux-v0.9.12) - 2026-09-01
+
+### Other
+
+- *(rs)* simplify poll propagation ([#3307](https://github.com/moq-dev/moq/pull/3307))
+
+## [0.9.11](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.10...moq-mux-v0.9.11) - 2026-09-01
+
+### Fixed
+
+- *(moq-mux)* wait for late groups within the latency budget ([#3271](https://github.com/moq-dev/moq/pull/3271))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.9.10](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.9...moq-mux-v0.9.10) - 2026-08-26
 
 ### Added

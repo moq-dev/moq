@@ -1,6 +1,6 @@
 //! Consuming a window from a track: a [`Decoder`] plus the track it reads from.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use serde::de::DeserializeOwned;
 
@@ -57,29 +57,27 @@ impl<T: DeserializeOwned> Consumer<T> {
 			}
 
 			let Some(group) = &mut self.group else {
-				match self.track.poll_next_group(waiter)? {
-					Poll::Ready(Some(group)) => {
+				match ready!(self.track.poll_next_group(waiter)?) {
+					Some(group) => {
 						self.codec = Some(Codec::new());
 						self.group = Some(group);
 						continue;
 					}
-					Poll::Ready(None) => return Poll::Ready(Ok(None)),
-					Poll::Pending => return Poll::Pending,
+					None => return Poll::Ready(Ok(None)),
 				}
 			};
 
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match ready!(group.poll_read_frame(waiter)?) {
+				Some(frame) => {
 					let codec = self.codec.as_mut().expect("an open MoQ group has a window codec");
 					self.decoder.decode(codec, &frame.payload)?;
 				}
-				Poll::Ready(None) => {
+				None => {
 					// This group is exhausted. Clear it and poll for a later one, which restates the
 					// window; the stream ends only when the track does.
 					self.group = None;
 					self.codec = None;
 				}
-				Poll::Pending => return Poll::Pending,
 			}
 		}
 	}

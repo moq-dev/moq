@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7](https://github.com/moq-dev/moq/compare/kio-v0.5.6...kio-v0.5.7) - 2026-09-01
+
+### Added
+
+- add local regression benchmark suite ([#3093](https://github.com/moq-dev/moq/pull/3093))
+
+### Other
+
+- *(kio)* lazily allocate waiter list IDs ([#3194](https://github.com/moq-dev/moq/pull/3194))
+
 ## [0.5.6](https://github.com/moq-dev/moq/compare/kio-v0.5.5...kio-v0.5.6) - 2026-08-24
 
 ### Fixed

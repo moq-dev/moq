@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.17](https://github.com/moq-dev/moq/compare/moq-net-v0.2.16...moq-net-v0.2.17) - 2026-09-01
+
+### Other
+
+- *(rs)* simplify poll propagation ([#3307](https://github.com/moq-dev/moq/pull/3307))
+
+## [0.2.16](https://github.com/moq-dev/moq/compare/moq-net-v0.2.15...moq-net-v0.2.16) - 2026-09-01
+
+### Added
+
+- *(moq-net)* add moq-transport draft-20 (moqt-20) ([#3255](https://github.com/moq-dev/moq/pull/3255))
+- *(json)* add a sliding-window mode ([#3168](https://github.com/moq-dev/moq/pull/3168))
+- add local regression benchmark suite ([#3093](https://github.com/moq-dev/moq/pull/3093))
+- *(net)* batch frame reads and writes through a reusable buffer ([#3090](https://github.com/moq-dev/moq/pull/3090))
+
+### Fixed
+
+- *(net)* send registered PUBLISH_DONE statuses ([#3232](https://github.com/moq-dev/moq/pull/3232))
+- *(net)* escape slashes in IETF namespaces ([#3226](https://github.com/moq-dev/moq/pull/3226))
+- *(net)* bound lite message sizes ([#3222](https://github.com/moq-dev/moq/pull/3222))
+
+### Other
+
+- *(net)* fuzz the wire codecs ([#3198](https://github.com/moq-dev/moq/pull/3198))
+- *(net)* reduce priority queue churn ([#3211](https://github.com/moq-dev/moq/pull/3211))
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+- *(net)* seek instead of scan for the next in-range group ([#3088](https://github.com/moq-dev/moq/pull/3088))
+- *(net)* assert a stalled write releases the group it was serving ([#3095](https://github.com/moq-dev/moq/pull/3095))
+
 ## [0.2.15](https://github.com/moq-dev/moq/compare/moq-net-v0.2.14...moq-net-v0.2.15) - 2026-08-26
 
 ### Fixed

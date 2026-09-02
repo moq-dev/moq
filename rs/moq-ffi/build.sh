@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build and package moq-ffi native libraries for release.
-# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only]
+# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--no-default-features]
 #
 # Examples:
 #   ./build.sh                                    # Build for host, detect version from Cargo.toml
@@ -38,6 +38,7 @@ VERSION=""
 OUTPUT_DIR="dist"
 BINDINGS_ONLY=false
 ARCHIVE=false
+NO_DEFAULT_FEATURES=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -64,8 +65,12 @@ while [[ $# -gt 0 ]]; do
             ARCHIVE=true
             shift
             ;;
+        --no-default-features)
+            NO_DEFAULT_FEATURES=true
+            shift
+            ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive] [--no-default-features]"
             exit 0
             ;;
         *)
@@ -109,6 +114,10 @@ can_run_on_host() {
 # Build the library for a single target
 build_target() {
     local target="$1"
+    local cargo_args=(build --locked --release --package moq-ffi)
+    if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
+        cargo_args+=(--no-default-features)
+    fi
     echo "Building moq-ffi for $target..."
 
     # Ensure the target's std is installed for the pinned toolchain Cargo
@@ -122,14 +131,14 @@ build_target() {
     if is_android "$target"; then
         # Android targets use cargo-ndk
         cargo ndk --target "$target" --platform 24 -- \
-            build --locked --release --package moq-ffi --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+            "${cargo_args[@]}" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         fi
 
-        cargo build --locked --release --package moq-ffi --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        cargo "${cargo_args[@]}" --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     fi
 }
 
@@ -171,8 +180,17 @@ generate_bindings() {
         echo "  Skipping go bindings: uniffi-bindgen-go not on PATH"
     fi
 
+    if command -v uniffi_bindgen_dart >/dev/null 2>&1; then
+        echo "  Generating dart bindings..."
+        uniffi_bindgen_dart --library "$lib_path" \
+            --config "$WORKSPACE_DIR/dart/uniffi.toml" \
+            --out-dir "$OUTPUT_DIR/bindings/dart"
+    else
+        echo "  Skipping dart bindings: uniffi_bindgen_dart not on PATH"
+    fi
+
     if [[ "$ARCHIVE" == true ]]; then
-        for lang in kotlin swift python go; do
+        for lang in kotlin swift python go dart; do
             if [[ -d "$OUTPUT_DIR/bindings/$lang" ]]; then
                 local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
                 tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"
@@ -218,9 +236,13 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     cp "$TARGET_DIR/moq_ffi.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
 
 elif is_ios "$TARGET"; then
-    # iOS: staticlib only (no dylib)
+    # Both, like macOS below: Swift links the staticlib, while Dart's Native
+    # Assets hook bundles the cdylib (the SDK does not implement static
+    # linking). rustc emits a PLATFORM_IOS dylib for device and simulator
+    # alike, so this is a packaging choice rather than a platform limit.
     TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
+    cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 elif is_android "$TARGET"; then
     # Android: shared library only

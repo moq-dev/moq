@@ -2,7 +2,7 @@ use std::{
 	future::Future,
 	pin::Pin,
 	sync::Arc,
-	task::{Context, Poll},
+	task::{Context, Poll, ready},
 	time::Duration,
 };
 
@@ -310,11 +310,9 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 		loop {
 			match &mut self.mode {
 				SendBandwidthMode::Idle => {
-					match self.producer.poll_used(waiter) {
-						// A consumer appeared: sample immediately, then on the interval.
-						Poll::Ready(Ok(())) => {}
-						Poll::Ready(Err(_)) => return Poll::Ready(()),
-						Poll::Pending => return Poll::Pending,
+					// A consumer appeared: sample immediately, then on the interval.
+					if ready!(self.producer.poll_used(waiter)).is_err() {
+						return Poll::Ready(());
 					}
 					if self.sample().is_err() {
 						return Poll::Ready(());

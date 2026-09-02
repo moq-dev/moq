@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { error } from "../error.ts";
+import { MAX_GROUP_FRAMES } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -635,12 +636,11 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
 }
 
 /**
- * An absolute filter names the objects it wants, so the groups outside it are never opened
- * and the last one stops where the filter does. A start that lands inside a group is the one
- * bound not honored to the object: what is left of that group cannot start at object 0, so
- * the range begins at the next group instead of serving a head the subscriber cannot use.
+ * An absolute filter names the objects it wants, so the boundary groups are trimmed to it
+ * and the groups outside it are never opened. The first object written carries its absolute
+ * id, or the subscriber would read a silently renumbered group.
  */
-test("draft-20: an absolute filter starting inside a group begins at the next one", async () => {
+test("draft-20: an absolute filter trims the range it serves", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video");
 	for (let i = 0; i < 4; i++) writeGroup(track, 3);
@@ -652,39 +652,32 @@ test("draft-20: an absolute filter starting inside a group begins at the next on
 			trackNamespace: Path.from("test"),
 			trackName: "video",
 			subscriberPriority: 0,
-			filter: { kind: "absolute", startGroup: 1n, startObject: 1n, endGroup: 3n, endObject: 1n },
+			filter: { kind: "absolute", startGroup: 1n, startObject: 1n, endGroup: 2n, endObject: 0n },
 		}),
 	);
 
 	try {
-		// Group 1 is where the filter starts, and it is skipped: object 1 is not a group the
-		// subscriber could decode, so the range opens at group 2 and serves it whole.
 		const first = await nextUni(fx.uni);
-		if (!first) throw new Error("the range's first whole group was never served");
+		if (!first) throw new Error("the filter's start group was never served");
 		expect(await readGroup(first)).toEqual({
-			sequence: 2,
-			firstObject: true,
+			sequence: 1,
+			// The head was trimmed, so the stream does not start at the group's first object.
+			firstObject: false,
 			objects: [
-				{ id: 0, payload: "2.0" },
-				{ id: 1, payload: "2.1" },
-				{ id: 2, payload: "2.2" },
+				{ id: 1, payload: "1.1" },
+				{ id: 2, payload: "1.2" },
 			],
 		});
 
-		// The end is honored to the object: a group truncated at the tail is still decodable
-		// from its front, which is what makes it different from a trimmed head.
 		const second = await nextUni(fx.uni);
 		if (!second) throw new Error("the filter's end group was never served");
 		expect(await readGroup(second)).toEqual({
-			sequence: 3,
+			sequence: 2,
 			firstObject: true,
-			objects: [
-				{ id: 0, payload: "3.0" },
-				{ id: 1, payload: "3.1" },
-			],
+			objects: [{ id: 0, payload: "2.0" }],
 		});
 
-		// Groups 0 and 1 are outside the range, so nothing more is opened.
+		// Groups 0 and 3 are outside the range, so nothing more is opened.
 		expect(await nextUni(fx.uni)).toBeUndefined();
 	} finally {
 		fx.close();
@@ -693,12 +686,11 @@ test("draft-20: an absolute filter starting inside a group begins at the next on
 });
 
 /**
- * The draft's own current-group join: a Next Object subscription plus a StartGroup=1 fill for
- * the head already published. The fill carries that group, on a fetch stream that numbers a
- * group's interior explicitly, and the subscription starts at the next group: what is left of
- * the current one after the fill cannot begin at object 0, so it is not served at all.
+ * The draft's own current-group join: a Next Object subscription for the live tail, plus a
+ * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
+ * arrives once, on the fetch stream, and the subscription picks up at the next object.
  */
-test("draft-20: a fill serves the current group on a fetch stream", async () => {
+test("draft-20: a fill serves the current group's head on a fetch stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video");
 
@@ -720,8 +712,7 @@ test("draft-20: a fill serves the current group on a fetch stream", async () => 
 	);
 
 	try {
-		// A fill-requesting subscriber sizes its backfill against this, so it is the true
-		// Largest Object: naming the group's start instead would understate what we hold.
+		// A fill-requesting subscriber sizes its backfill against this.
 		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
 
 		const fill = await nextUni(fx.uni);
@@ -735,19 +726,100 @@ test("draft-20: a fill serves the current group on a fetch stream", async () => 
 			reset: undefined,
 		});
 
-		// What is left of group 0 is never opened: a stream carrying only object 2 is a group
-		// the subscriber has to throw away. The subscription resumes at the next group.
+		// Everything past the snapshot belongs to the subscription, not the fill.
 		group.writeFrame({ payload: new TextEncoder().encode("0.2"), timestamp: Timestamp.now() });
 		group.close();
-		writeGroup(track, 1);
 
 		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("the subscription never served the next group");
+		if (!live) throw new Error("the subscription never served the live tail");
 		expect(await readGroup(live)).toEqual({
-			sequence: 1,
-			firstObject: true,
-			objects: [{ id: 0, payload: "1.0" }],
+			sequence: 0,
+			firstObject: false,
+			objects: [{ id: 2, payload: "0.2" }],
 		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A group that outgrows its cache evicts its own front. A Next Object subscriber joins above
+ * that evicted prefix, so it lost nothing it asked for: evicting objects the filter already
+ * excludes must not forfeit the live tail it did request.
+ */
+test("draft-20: an open group that outgrew its cache still serves the live tail", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Past the frame cap, so the oldest objects are gone before anyone subscribes.
+	const group = track.appendGroup();
+	const published = MAX_GROUP_FRAMES + 10;
+	for (let i = 0; i < published; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+		}),
+	);
+
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(published - 1) });
+
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${published}`), timestamp: Timestamp.now() });
+		group.close();
+
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("the subscription never served the live tail");
+		expect(await readGroup(live)).toEqual({
+			sequence: 0,
+			// The join is mid-group, so the stream does not start at the group's first object.
+			firstObject: false,
+			objects: [{ id: published, payload: `0.${published}` }],
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * An absolute filter naming one group with `startObject` above `endObject` selects nothing.
+ * Nothing rejects it on the wire, so the serving loop has to recognize the empty range and
+ * end the stream, rather than waiting on a start object the range itself excludes.
+ */
+test("draft-20: a backwards range within one group serves nothing and ends the stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Deliberately left open: a hang here would outlive the group rather than end with it.
+	const group = track.appendGroup();
+	for (let i = 0; i < 3; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 0n, endObject: 2n },
+		}),
+	);
+
+	try {
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group stream never opened");
+		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, objects: [] });
 	} finally {
 		fx.close();
 		client.close();
@@ -951,49 +1023,6 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
 		expect(served.reset?.message).toContain("unsubscribed");
 	} finally {
 		open.close();
-		fx.close();
-		client.close();
-	}
-});
-
-/**
- * A fill covers what the subscription will not send. Relative(1) names the current group's
- * start on both, so the subscription carries that group whole and the fill is left with
- * nothing: opening its stream would deliver every object a second time.
- */
-test("draft-20: a fill the subscription covers opens no stream", async () => {
-	const fx = fixture();
-	const track = fx.broadcast.createTrack("video");
-	writeGroup(track, 3);
-
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			filter: { kind: "relative", groups: 1n },
-			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
-		}),
-	);
-
-	try {
-		// The subscription's own stream, carrying the group whole.
-		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("the subscription never served the group");
-		expect(await readGroup(live)).toEqual({
-			sequence: 0,
-			firstObject: true,
-			objects: [
-				{ id: 0, payload: "0.0" },
-				{ id: 1, payload: "0.1" },
-				{ id: 2, payload: "0.2" },
-			],
-		});
-
-		expect(await nextUni(fx.uni)).toBeUndefined();
-	} finally {
 		fx.close();
 		client.close();
 	}

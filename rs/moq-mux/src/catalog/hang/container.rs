@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use crate::container::{Container as ContainerTrait, Frame, fmp4, legacy, loc};
 
@@ -72,7 +72,7 @@ impl ContainerTrait for Container {
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
 			Self::Legacy => legacy::Wire.poll_read(group, waiter),
-			Self::Cmaf(cmaf) => cmaf.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
+			Self::Cmaf(cmaf) => Poll::Ready(Ok(ready!(cmaf.poll_read(group, waiter))?)),
 			Self::Loc => loc::Wire.poll_read(group, waiter),
 		}
 	}

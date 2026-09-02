@@ -1235,7 +1235,7 @@ impl Producer {
 
 		let prev = &self.prev_subscription;
 		let mut combined = None;
-		let mut guard = match subs.poll(waiter, |subs| {
+		let mut guard = ready!(subs.poll(waiter, |subs| {
 			let next = combined_subscription(subs, bound, waiter);
 			if &next == prev {
 				Poll::Pending
@@ -1243,10 +1243,7 @@ impl Producer {
 				combined = next;
 				Poll::Ready(())
 			}
-		}) {
-			Poll::Ready(guard) => guard,
-			Poll::Pending => return Poll::Pending,
-		};
+		}));
 		// The aggregate changed: prune any closed subscribers now that we hold the lock.
 		guard.retain(|sub| !sub.is_closed());
 		drop(guard);

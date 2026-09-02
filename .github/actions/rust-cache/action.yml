@@ -14,6 +14,9 @@ runs:
     # explicitly seed a cold cache.
     - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       with:
-        shared-key: rust
+        # Build scripts link against Nix store paths from the dev shell. Roll
+        # the cache when that shell changes so Cargo never restores executables
+        # whose dynamic linker has disappeared.
+        shared-key: rust-${{ hashFiles('flake.nix', 'flake.lock') }}
         cache-on-failure: true
         save-if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.save-on-dispatch == 'true') }}

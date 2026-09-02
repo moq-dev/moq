@@ -1,4 +1,9 @@
-use std::{ffi::c_char, future::Future, pin::Pin, task::Poll};
+use std::{
+	ffi::c_char,
+	future::Future,
+	pin::Pin,
+	task::{Poll, ready},
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
@@ -581,11 +586,9 @@ impl Consume {
 					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					match track.poll_next_group(waiter) {
-						Poll::Ready(Ok(Some(group))) => Poll::Ready(Ok(RawStep::Item(group))),
-						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
-						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
-						Poll::Pending => Poll::Pending,
+					match ready!(track.poll_next_group(waiter))? {
+						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
+						None => Poll::Ready(Ok(RawStep::End)),
 					}
 				})
 				.await?
@@ -600,11 +603,9 @@ impl Consume {
 					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					match group.poll_read_frame(waiter) {
-						Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(RawStep::Item(frame))),
-						Poll::Ready(Ok(None)) => Poll::Ready(Ok(RawStep::End)),
-						Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
-						Poll::Pending => Poll::Pending,
+					match ready!(group.poll_read_frame(waiter))? {
+						Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
+						None => Poll::Ready(Ok(RawStep::End)),
 					}
 				})
 				.await?

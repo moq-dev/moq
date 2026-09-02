@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use base64::Engine;
 use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
@@ -39,8 +39,8 @@ impl Consumer {
 		};
 
 		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match ready!(group.poll_read_frame(waiter)?) {
+				Some(frame) => {
 					self.group = None;
 					let json = std::str::from_utf8(&frame.payload).map_err(|_| Error::InvalidUtf8)?;
 					let msf = match moq_msf::Catalog::from_str(json) {
@@ -53,8 +53,7 @@ impl Consumer {
 					let catalog = from_msf(&msf)?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
-				Poll::Ready(None) => self.group = None,
-				Poll::Pending => return Poll::Pending,
+				None => self.group = None,
 			}
 		}
 

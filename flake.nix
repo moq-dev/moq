@@ -298,6 +298,37 @@
           uniffi-bindgen-go
         ];
 
+        # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
+        # carries the uniffi 0.32 port and library-mode CLI while those changes
+        # remain open upstream.
+        uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-dart";
+          version = "0.3.0+v0.32.0";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "kixelated";
+            repo = "uniffi-dart";
+            rev = "v${version}";
+            hash = "sha256-jvVEZVZLorj+GPUXL6Y4riCLsbJcWWbQgIIUoK/ZSEo=";
+          };
+
+          # The upstream repository ignores Cargo.lock so cargo installs test
+          # the unlocked resolver. Nix still consumes committed lock data.
+          cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
+          postPatch = ''
+            cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
+          '';
+          buildFeatures = [ "binary" ];
+          cargoBuildFlags = [ "--bin=uniffi_bindgen_dart" ];
+          doCheck = false;
+        };
+
+        # Dart bindings plus the pinned external generator.
+        dartDeps = [
+          pkgs.dart
+          uniffi-bindgen-dart
+        ];
+
         # The libobs headers, unpacked from the same OBS release
         # cpp/obs/buildspec.json downloads. Headers only: nothing here links, so
         # it works on Darwin even though obs-studio itself does not build there,
@@ -382,6 +413,8 @@
             moq-gst
             ;
 
+          inherit uniffi-bindgen-dart;
+
           # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
           # CI builds this and prepends its bin/ to $PATH so subsequent steps
           # use the same versions a local `nix develop` user would.
@@ -415,6 +448,7 @@
             ++ obsDeps
             ++ ktDeps
             ++ goDeps
+            ++ dartDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with

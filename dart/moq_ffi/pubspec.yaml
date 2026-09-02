@@ -1,0 +1,26 @@
+name: moq_ffi
+description: Raw Dart and Flutter bindings for Media over QUIC.
+# Overridden by dart/scripts/package.sh from the moq-ffi-v* tag. Committing a
+# real version would go stale the moment release-plz bumps the crate.
+version: 0.0.0-dev
+repository: https://github.com/moq-dev/moq/tree/main/dart/moq_ffi
+issue_tracker: https://github.com/moq-dev/moq/issues
+topics:
+  - moq
+  - quic
+  - media
+  - ffi
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  code_assets: ^2.0.0
+  crypto: ^3.0.7
+  ffi: ^2.2.0
+  hooks: ^2.2.0
+  http: ^1.6.0
+
+dev_dependencies:
+  lints: ^6.1.0
+  test: ^1.31.2
