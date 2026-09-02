@@ -9,7 +9,9 @@ subscribing to the video track at all.
 ## Plan
 
 Add typed catalog bindings for the section and a subscriber that yields raw SEI
-samples keyed by the video frame timestamp they came from. Keep it independent
+samples keyed by the video group sequence and frame ordinal they came from, the
+exact identity the section defines, with the frame timestamp carried as data
+for presentation-time sync. Keep it independent
 of the decode path: nothing here feeds a `VideoDecoder`, because stripped video
 decodes unchanged and WebCodecs does not surface SEI regardless.
 

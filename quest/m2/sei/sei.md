@@ -20,8 +20,9 @@ Carry the video frame's timestamp on the sample as well, as data rather than
 identity. An application syncing to presentation time reads it directly instead
 of joining against the video track it deliberately did not subscribe to.
 
-Preserve codec, prefix or suffix placement, original NAL bytes, and order when
-several SEI units accompany one access unit. Placement has to be exact, not
+Preserve prefix or suffix placement, original NAL bytes, and order when
+several SEI units accompany one access unit. The codec is the mapped video
+rendition's, not serialized again in the sidecar. Placement has to be exact, not
 approximate: `recovery_point` on the wrong access unit misdirects a receiver's
 tune-in, `pic_timing` breaks field cadence and pulldown, and reordered
 CEA-608/708 byte pairs garble a stateful caption decoder.
