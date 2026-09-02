@@ -5182,7 +5182,7 @@ dependencies = [
 [[package]]
 name = "moq-vaapi"
 version = "0.0.3"
-source = "git+https://github.com/Frando/vaapi?branch=pr%2Fdecode#b2550c8f63a7a982e607dc482a5131457f9dd5d2"
+source = "git+https://github.com/Frando/vaapi?branch=pr%2Fdecode#857d1be88168941bdbf2713379a2cfe5426b74b3"
 dependencies = [
  "anyhow",
  "bindgen 0.70.1",

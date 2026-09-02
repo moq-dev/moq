@@ -129,11 +129,11 @@ pub struct DmaBufPlane {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufPlane {
-	// The producers that build a real one, plus the importer's own tests, which
-	// build them without a producer to check how a layout is split up. The VA-API
-	// half of that is the render importer, so it needs `render` too: `vaapi`
-	// alone pulls in `dmabuf` without anything that reads a plane back.
-	#[cfg(any(feature = "pipewire", all(feature = "render", test)))]
+	// The producers that build a real one: PipeWire capture and, since it can
+	// hand its decode surfaces out, the VA-API decoder. Plus the importer's own
+	// tests, which build them without a producer to check how a layout is split
+	// up, and so need `render`.
+	#[cfg(any(feature = "pipewire", feature = "vaapi", all(feature = "render", test)))]
 	pub(crate) const fn new(offset: u32, stride: u32) -> Self {
 		Self { offset, stride }
 	}
@@ -278,10 +278,9 @@ impl std::fmt::Debug for DmaBuf {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBuf {
-	// PipeWire capture builds these for real; the render importer's tests build
-	// them from a VA-API allocation, with no producer behind them, which is why
-	// the VA-API arm needs `render` as well.
-	#[cfg(any(feature = "pipewire", all(feature = "render", feature = "vaapi", test)))]
+	// The two producers: PipeWire capture, and the VA-API decoder describing a
+	// picture it is handing out rather than downloading.
+	#[cfg(any(feature = "pipewire", feature = "vaapi"))]
 	pub(crate) fn new(
 		format: DrmFormat,
 		modifier: u64,

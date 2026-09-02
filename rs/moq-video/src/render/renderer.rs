@@ -128,6 +128,9 @@ pub struct Renderer {
 	strikes: u32,
 	/// Set once the fast path is retired for the life of this renderer.
 	retired: bool,
+	/// Set once a frame has been imported rather than uploaded, so the line
+	/// saying so is logged once rather than per frame.
+	imported: bool,
 }
 
 /// The compiled pipeline, one variant per plane layout, and everything they share.
@@ -237,6 +240,7 @@ impl Renderer {
 			output: None,
 			strikes: 0,
 			retired: false,
+			imported: false,
 		})
 	}
 
@@ -337,6 +341,17 @@ impl Renderer {
 			match self.source.import(&self.device, &frame.surface) {
 				Ok(Some(source)) => {
 					self.strikes = 0;
+					// The one observable difference between a picture that
+					// reached the GPU untouched and one that went through system
+					// memory. Worth a line the first time it happens, because
+					// nothing else about a working renderer says which it was.
+					if !self.imported {
+						self.imported = true;
+						tracing::debug!(
+							layout = ?source.layout,
+							"drawing frames zero-copy; the picture reaches the GPU without a download"
+						);
+					}
 					return Ok(source);
 				}
 				// No import path for this surface on this platform. Not a
@@ -1105,10 +1120,15 @@ mod tests {
 	/// A real decoded picture drawn without ever reaching system memory.
 	///
 	/// The chain the whole thing is for, end to end: openh264 encodes a
-	/// gradient, VA-API decodes it, the decode surface is exported rather than
-	/// downloaded, and the renderer imports its two planes. The same stream is
-	/// decoded a second time the ordinary way and drawn through the CPU upload,
-	/// and the two pictures have to agree.
+	/// gradient, the VAAPI decode backend is asked for GPU-resident frames and
+	/// hands back the surfaces it decoded into, and the renderer imports their
+	/// two planes. The same stream is decoded a second time by the same backend
+	/// asked for CPU frames and drawn through the upload path, and the two
+	/// pictures have to agree.
+	///
+	/// Through `decode::backend` rather than `moq_vaapi` directly, so what this
+	/// covers is the path `Config::gpu_frames` actually turns on rather than an
+	/// arrangement only the test knows how to build.
 	///
 	/// A gradient rather than the block palette, because this one is checking
 	/// the plumbing rather than the color math: it varies in both axes, so a
@@ -1123,16 +1143,27 @@ mod tests {
 	#[tokio::test]
 	#[ignore = "needs a Vulkan GPU and a VA-API device"]
 	async fn decoded_frames_reach_the_gpu_without_a_download() {
+		use crate::decode::backend::{self, Codec};
+
 		let Some((device, queue)) = dmabuf_gpu().await else {
 			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
 			return;
 		};
-		let Ok(mut exporting) = moq_vaapi::decode::Decoder::new(moq_vaapi::decode::Config::new()) else {
+		let decode = |gpu_frames| {
+			backend::open(
+				Codec::H264,
+				&crate::decode::Config {
+					kind: crate::decode::Kind::Named("vaapi".into()),
+					gpu_frames,
+					..crate::decode::Config::new()
+				},
+			)
+		};
+		let Ok(mut exporting) = decode(true) else {
 			eprintln!("skipping: no VA-API H.264 decoder");
 			return;
 		};
-		let mut downloading =
-			moq_vaapi::decode::Decoder::new(moq_vaapi::decode::Config::new()).expect("a second decoder");
+		let mut downloading = decode(false).expect("a second decoder");
 
 		// A gradient in both axes, so the chroma planes carry structure and a
 		// plane split or stride mistake corrupts the picture rather than
@@ -1165,18 +1196,29 @@ mod tests {
 			let surface = Surface::rgba(&rgba, size).expect("a valid RGBA frame");
 			let frame = Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap());
 			for unit in encoder.encode(&frame).expect("encode a picture") {
-				let payload = unit.payload.as_ref();
-				exported.extend(exporting.decode_exported(payload, index).expect("decode to the GPU"));
-				downloaded.extend(downloading.decode(payload, index).expect("decode to the CPU"));
+				let timestamp = unit.timestamp;
+				exported.extend(
+					exporting
+						.decode(unit.payload.clone(), timestamp, index == 0)
+						.expect("decode to the GPU"),
+				);
+				downloaded.extend(
+					downloading
+						.decode(unit.payload, timestamp, index == 0)
+						.expect("decode to the CPU"),
+				);
 			}
 		}
 		assert!(!exported.is_empty(), "the decoder produced no pictures");
 		assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
 
+		let Surface::DmaBuf(first) = &exported[0].surface else {
+			panic!("gpu_frames did not produce a DMA-BUF surface");
+		};
 		eprintln!(
 			"decoded {} pictures, exported at modifier {:#x}",
 			exported.len(),
-			exported[0].descriptor.objects[0].drm_format_modifier
+			first.modifier()
 		);
 
 		let config = Config {
@@ -1187,30 +1229,32 @@ mod tests {
 		let mut uploading = Renderer::new(&device, &queue, config).expect("a renderer");
 
 		for (index, (gpu, cpu)) in exported.iter().zip(&downloaded).enumerate() {
-			let buffer = crate::render::dmabuf::fixture::adopt(&gpu.descriptor, crate::DrmFormat::NV12, size);
+			let Surface::DmaBuf(buffer) = &gpu.surface else {
+				panic!("picture {index} did not come back GPU-resident");
+			};
 			if index == 0 {
 				eprintln!("  planes {:?}", buffer.planes());
 			}
-			let frame = Frame::new(Surface::DmaBuf(buffer), Timestamp::ZERO);
+			assert!(
+				matches!(cpu.surface, Surface::I420(_)),
+				"picture {index} was not downloaded without gpu_frames"
+			);
 
 			// Which branch ran, per picture: the decoder's own surfaces import
 			// as NV12, and only the per-plane DMA-BUF path produces that.
 			let source = importing
 				.source
-				.import(&device, &frame.surface)
+				.import(&device, &gpu.surface)
 				.expect("import the decoded surface")
 				.expect("a DMA-BUF import path");
 			assert_eq!(source.layout, Layout::Nv12, "picture {index} did not import as NV12");
 			drop(source);
 
-			let texture = importing.render(&frame).expect("draw the imported picture");
+			let texture = importing.render(gpu).expect("draw the imported picture");
 			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
 			let zero_copy = readback(&device, &queue, &texture).await;
 
-			let i420 = crate::frame::I420::from_nv12(&cpu.data, width, height).expect("deinterleave NV12");
-			let texture = uploading
-				.render(&Frame::new(Surface::I420(i420), Timestamp::ZERO))
-				.expect("draw the downloaded picture");
+			let texture = uploading.render(cpu).expect("draw the downloaded picture");
 			let cpu = readback(&device, &queue, &texture).await;
 
 			let mut worst = 0u8;

@@ -27,34 +27,45 @@
 //! the track ends. The decoded frames carry their own timestamps, so the delay
 //! itself needs nothing downstream.
 //!
-//! The output is CPU I420 rather than a zero-copy [`Surface::DmaBuf`], which is
-//! now a question of plumbing rather than of capability. It used to be the
-//! latter: a decode target was believed to be a modifier the renderer could not
-//! import. Measured on Intel Meteor Lake with iHD, a decode target exports at
-//! `0x100000000000009`, and the renderer imports that per memory plane with no
-//! re-tile, so the pixels do reach a texture untouched
+//! The output is CPU I420 unless [`Config::gpu_frames`] asks otherwise, in which
+//! case each picture comes back as the zero-copy [`Surface::DmaBuf`] the
+//! hardware decoded it into. Measured on Intel Meteor Lake with iHD, a decode
+//! target exports at modifier `0x100000000000009`, and the renderer imports that
+//! per memory plane with no re-tile, so the pixels reach a texture untouched
 //! (`decoded_frames_reach_the_gpu_without_a_download` in
 //! [`render`](crate::render) draws them).
 //!
-//! What stands in the way of making it the default is
-//! [`Surface::into_i420`](crate::Surface::into_i420): a CPU consumer of an
-//! exported surface has nowhere to read it back from, since the frame outlives
-//! the decoder that could map it, and the buffer is tiled so mapping it as rows
-//! would be wrong anyway. Handing out GPU frames therefore has to be something a
-//! caller asks for, knowing what it will do with them.
+//! Opt-in rather than the default because it is not free to a consumer that does
+//! not draw. Exporting a surface retires it from the decoder's recycling pool,
+//! since a later picture decoded over it would corrupt one the consumer still
+//! holds, so it trades an allocation per picture for a download that a CPU
+//! consumer would have to pay anyway. Such a consumer is not stranded either:
+//! [`Surface::into_i420`](crate::Surface::into_i420) still answers, because
+//! `moq-vaapi` keeps the retired surface alongside the descriptor and reads it
+//! back through `vaDeriveImage` rather than trying to read a tiled buffer as
+//! rows.
 
+use std::os::fd::{AsFd, OwnedFd};
+use std::sync::{Arc, Mutex};
+
+use anyhow::Context as _;
 use bytes::Bytes;
 use moq_net::Timestamp;
-use moq_vaapi::decode::{Config as VaapiConfig, Decoder};
+use moq_vaapi::decode::{Config as VaapiConfig, Decoder, ExportedFrame};
 
 use super::{Backend, Codec, Config};
-use crate::frame::{I420, Surface};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface};
 use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "vaapi";
 
 pub(crate) struct Vaapi {
 	decoder: Decoder,
+	/// Whether pictures are handed out as DMA-BUFs rather than downloaded, from
+	/// [`Config::gpu_frames`]. Cleared if the driver turns out not to export, so
+	/// a host that decodes but cannot share what it decoded loses the fast path
+	/// rather than the stream.
+	gpu_frames: bool,
 }
 
 // The decoder is `!Send` (libva uses `Rc` internally) but is created, used, and
@@ -67,7 +78,7 @@ impl Vaapi {
 	/// this handles H.264 only. `config` carries no hardware scaler request we can
 	/// honor: VA-API's scaler is a separate VPP pipeline, so callers scale the
 	/// frames themselves.
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		if codec != Codec::H264 {
 			return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", codec.label())));
 		}
@@ -75,8 +86,52 @@ impl Vaapi {
 		let decoder =
 			Decoder::new(VaapiConfig::new()).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
-		tracing::info!(decoder = NAME, "opened H.264 decoder");
-		Ok(Box::new(Self { decoder }))
+		tracing::info!(decoder = NAME, gpu_frames = config.gpu_frames, "opened H.264 decoder");
+		Ok(Box::new(Self {
+			decoder,
+			gpu_frames: config.gpu_frames,
+		}))
+	}
+
+	/// Decodes one access unit into GPU-resident frames, or `None` once the
+	/// driver has shown it will not export.
+	///
+	/// A driver can decode without being able to share what it decoded, and the
+	/// caller only asked for GPU frames as an optimization. Losing the pictures
+	/// of the one call that discovers this beats losing the stream, and the DPB
+	/// is untouched by it: those pictures had already been bumped out of it.
+	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Vec<Frame>> {
+		if !self.gpu_frames {
+			return None;
+		}
+
+		Some(
+			match self.decoder.decode_exported(access_unit, timestamp).and_then(share) {
+				Ok(frames) => frames,
+				Err(err) => self.cannot_share(&err),
+			},
+		)
+	}
+
+	/// The same for the stream's tail, so a track that ends does not switch to
+	/// downloading for its last few pictures.
+	fn flush_shared(&mut self) -> Option<Vec<Frame>> {
+		if !self.gpu_frames {
+			return None;
+		}
+
+		Some(match self.decoder.flush_exported().and_then(share) {
+			Ok(frames) => frames,
+			Err(err) => self.cannot_share(&err),
+		})
+	}
+
+	/// Records that this driver will not share what it decoded, and gives up the
+	/// pictures of the call that found out.
+	fn cannot_share(&mut self, err: &anyhow::Error) -> Vec<Frame> {
+		tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
+		self.gpu_frames = false;
+		Vec::new()
 	}
 }
 
@@ -84,9 +139,14 @@ impl Backend for Vaapi {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// The timestamp rides through the decoder with the picture, so it
 		// survives the DPB reordering a stream with B-frames goes through.
+		let timestamp = timestamp.as_micros() as u64;
+		if let Some(frames) = self.decode_shared(&access_unit, timestamp) {
+			return Ok(frames);
+		}
+
 		let decoded = self
 			.decoder
-			.decode(&access_unit, timestamp.as_micros() as u64)
+			.decode(&access_unit, timestamp)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
 		convert(decoded)
@@ -96,6 +156,10 @@ impl Backend for Vaapi {
 	/// no-op: the DPB is holding as many pictures as the sequence's reference and
 	/// reorder limits allow, and nothing else will ever ask for them.
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		if let Some(frames) = self.flush_shared() {
+			return Ok(frames);
+		}
+
 		let decoded = self
 			.decoder
 			.flush()
@@ -122,6 +186,106 @@ fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> 
 		.collect()
 }
 
+/// Wrap each exported picture as the DMA-BUF surface a renderer imports, keeping
+/// the timestamp the picture was coded with.
+fn share(exported: Vec<ExportedFrame>) -> anyhow::Result<Vec<Frame>> {
+	exported
+		.into_iter()
+		.map(|frame| {
+			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
+			Ok(Frame::new(Surface::DmaBuf(adopt(frame)?), timestamp))
+		})
+		.collect()
+}
+
+/// Describe an exported picture as a [`DmaBuf`]: the driver's format modifier,
+/// and the offset and pitch of each of its memory planes.
+///
+/// The width and height are the visible frame rather than the exported extent,
+/// which is the driver's padded allocation. Neither the pitches nor the offsets
+/// follow from the visible size, which is exactly why they are read off the
+/// export rather than computed from it.
+fn adopt(frame: ExportedFrame) -> anyhow::Result<DmaBuf> {
+	let (width, height) = (frame.width, frame.height);
+	let layer = frame
+		.descriptor
+		.layers
+		.first()
+		.context("the VA-API export carries no layer")?;
+	if layer.drm_format != DrmFormat::NV12.as_raw() {
+		anyhow::bail!("VA-API exported DRM format {:#x}, expected NV12", layer.drm_format);
+	}
+	let planes = (0..layer.num_planes as usize)
+		.map(|plane| DmaBufPlane::new(layer.offset[plane], layer.pitch[plane]))
+		.collect();
+	let modifier = frame
+		.descriptor
+		.objects
+		.first()
+		.context("the VA-API export carries no object")?
+		.drm_format_modifier;
+
+	// A decode target names no color space, so the renderer infers one from the
+	// frame size exactly as it does for a downloaded picture.
+	DmaBuf::new(
+		DrmFormat::NV12,
+		modifier,
+		width,
+		height,
+		planes,
+		None,
+		Arc::new(Exported::new(frame)),
+	)
+	.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// A decoded picture the consumer holds as a DMA-BUF.
+///
+/// Both of the things a consumer can do with one: hand a descriptor to a
+/// graphics API, or give up on drawing it and read the pixels back. Dropping the
+/// last clone destroys the surface, which is what returns its allocation to the
+/// driver.
+struct Exported {
+	/// Locked because [`DmaBufFrame`] hands out `&self` while what is behind it
+	/// is a single libva surface: `download_i420` maps that surface, and two
+	/// threads doing so at once is more than libva promises to serialize. The
+	/// frame is [`Send`] on its own, so a lock is enough and no `unsafe impl` is
+	/// involved.
+	frame: Mutex<ExportedFrame>,
+}
+
+impl Exported {
+	fn new(frame: ExportedFrame) -> Self {
+		Self {
+			frame: Mutex::new(frame),
+		}
+	}
+}
+
+impl DmaBufFrame for Exported {
+	/// Vulkan takes ownership of an imported descriptor on success and closes it
+	/// on failure, so every import needs one of its own and the original stays
+	/// with the picture.
+	fn export(&self) -> std::io::Result<OwnedFd> {
+		let frame = self.frame.lock().expect("poisoned");
+		let object = frame.descriptor.objects.first().ok_or_else(|| {
+			std::io::Error::new(std::io::ErrorKind::InvalidData, "the VA-API export carries no object")
+		})?;
+		object.fd.as_fd().try_clone_to_owned()
+	}
+
+	/// Read the picture back through the retained surface rather than the
+	/// descriptor: a decode target is tiled, so mapping the file descriptor as
+	/// rows would be wrong.
+	fn download_i420(&self) -> Result<I420, Error> {
+		let frame = self.frame.lock().expect("poisoned");
+		let nv12 = frame
+			.download()
+			.map_err(|e| Error::Codec(anyhow::anyhow!("read a VA-API decode surface back: {e:?}")))?;
+		I420::from_nv12(&nv12.data, nv12.width, nv12.height)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -138,6 +302,13 @@ mod tests {
 		DecodeConfig {
 			kind: DecodeKind::Named(NAME.into()),
 			..DecodeConfig::new()
+		}
+	}
+
+	fn gpu_decode_config() -> DecodeConfig {
+		DecodeConfig {
+			gpu_frames: true,
+			..decode_config()
 		}
 	}
 
@@ -223,6 +394,81 @@ mod tests {
 		}
 	}
 
+	/// `gpu_frames` hands out DMA-BUFs, and a CPU consumer of one gets the same
+	/// pixels it would have got without asking for them.
+	///
+	/// The bargain the knob rests on: a caller opting into GPU-resident output
+	/// does not take `Surface::into_i420` away from whatever it hands the frames
+	/// to. Byte-exact rather than approximate, because both sides are the same
+	/// hardware decoding the same units, and the read-back goes through the same
+	/// `vaDeriveImage` path the download does.
+	///
+	/// Needs no GPU beyond the VA-API device: this is about what a picture on the
+	/// GPU can still do for a consumer that is not on one.
+	#[test]
+	fn gpu_frames_still_answer_into_i420() {
+		if !hw_available() {
+			return;
+		}
+		let (w, h) = (320u32, 240u32);
+		let rgba = gradient_rgba(w, h);
+
+		let mut encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Software,
+			..EncodeConfig::new(w, h, 30)
+		})
+		.unwrap();
+		let mut exporting = Vaapi::open(Codec::H264, &gpu_decode_config()).expect("VAAPI H.264 decoder");
+		let mut downloading = Vaapi::open(Codec::H264, &decode_config()).expect("a second decoder");
+
+		let mut exported = Vec::new();
+		let mut downloaded = Vec::new();
+		for i in 0..10u64 {
+			if i == 0 {
+				encoder.keyframe();
+			}
+			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
+			for encoded in encoder.encode(&frame).unwrap() {
+				let (payload, timestamp) = (encoded.payload, encoded.timestamp);
+				exported.extend(exporting.decode(payload.clone(), timestamp, i == 0).unwrap());
+				downloaded.extend(downloading.decode(payload, timestamp, i == 0).unwrap());
+			}
+		}
+		assert!(!exported.is_empty(), "VAAPI produced no frames");
+		assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
+
+		for (i, (gpu, cpu)) in exported.iter().zip(&downloaded).enumerate() {
+			let Surface::DmaBuf(buffer) = &gpu.surface else {
+				panic!("frame {i} did not come back GPU-resident");
+			};
+			assert_eq!(buffer.format(), crate::DrmFormat::NV12);
+			assert_eq!((buffer.width(), buffer.height()), (w, h));
+			assert_eq!(gpu.timestamp, cpu.timestamp, "frame {i} lost its timestamp");
+
+			let Surface::I420(reference) = &cpu.surface else {
+				panic!("frame {i} came back GPU-resident without gpu_frames");
+			};
+			let read_back = gpu.surface.to_i420().expect("read the decoded surface back");
+			assert_eq!(
+				(read_back.width(), read_back.height()),
+				(reference.width(), reference.height())
+			);
+			assert!(
+				read_back.y() == reference.y(),
+				"frame {i} read back a different Y plane"
+			);
+			assert!(
+				read_back.u() == reference.u(),
+				"frame {i} read back a different U plane"
+			);
+			assert!(
+				read_back.v() == reference.v(),
+				"frame {i} read back a different V plane"
+			);
+		}
+	}
+
 	/// Regression: every picture fed in comes back out, which needs the flush.
 	///
 	/// H.264 releases a picture from the DPB only once a later one needs its slot,
@@ -237,6 +483,22 @@ mod tests {
 		if !hw_available() {
 			return;
 		}
+		flushing_returns_the_tail(&decode_config());
+	}
+
+	/// The same for GPU-resident output, which drains through `flush_exported`
+	/// rather than `flush`. Without its own case it would be the one path where a
+	/// track's last pictures go missing, since the two drains are separate calls
+	/// into `moq-vaapi` and only one of them is on the default path.
+	#[test]
+	fn flushing_returns_the_tail_of_a_gpu_stream() {
+		if !hw_available() {
+			return;
+		}
+		flushing_returns_the_tail(&gpu_decode_config());
+	}
+
+	fn flushing_returns_the_tail(config: &DecodeConfig) {
 		const FRAMES: u64 = 5;
 		let (w, h) = (320u32, 240u32);
 		let rgba = gradient_rgba(w, h);
@@ -246,7 +508,7 @@ mod tests {
 			..EncodeConfig::new(w, h, 30)
 		})
 		.unwrap();
-		let mut decoder = Vaapi::open(Codec::H264, &decode_config()).expect("VAAPI H.264 decoder");
+		let mut decoder = Vaapi::open(Codec::H264, config).expect("VAAPI H.264 decoder");
 
 		let mut streamed = Vec::new();
 		for i in 0..FRAMES {
