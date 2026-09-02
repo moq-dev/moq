@@ -82,7 +82,3 @@ harness = false
 [[bench]]
 name = "priority"
 harness = false
-
-[[bench]]
-name = "datagram"
-harness = false
