@@ -26,14 +26,25 @@ So the split is quinn and browsers on one side, quiche and qmux on the other.
 Both sides are defaults somewhere: quiche for moq-uring, quinn for moq-tokio.
 
 An exact order-preserving pack of the full key needs 136 bits, so this only
-works because exactness is only required among *live* streams:
+works because exactness is only required among *live* streams. The asymmetry
+between the two unbounded fields is direction, not size:
 
-- `group` needs no structure at all. "Newest first" is "most recently opened
-  first", so a per-subscription counter bumped at group open already ranks them.
-- `subscribe` cannot be truncated, because a session-old subscription and a
-  fresh one span an arbitrary id gap. It needs a rank among live subscriptions,
-  but that table is per-subscription rather than per-group, so it changes orders
-  of magnitude less often than the queue does today.
+- `group` maps ascending to ascending. Newest first means a higher sequence
+  wants a higher send order, so it is the identity and only has to fit. Rebase
+  it per subscription as `group - base`, where base is the first sequence that
+  subscription served, saturating at zero below (ancient backlog belongs last
+  anyway) and at the field width above. 39 bits is centuries at any real group
+  rate, and nothing needs tracking beyond one `u64` per subscription.
+- `subscribe` maps ascending to descending. The lowest id wants the highest send
+  order, and inverting needs an upper bound the session does not have, since
+  subscription ids grow forever. That one needs a rank among live subscriptions.
+  The table is per-subscription rather than per-group, so it changes orders of
+  magnitude less often than the queue does today.
+
+Do not substitute a counter bumped at group open for the rebased sequence. Open
+order and sequence order diverge whenever groups arrive reordered at a relay,
+when a `Group Start` backfills, and on a FETCH range, and `Priority` orders on
+the sequence.
 
 An `i64` layout of `[track: 8][subscribe_rank: 16][group_ordinal: 39]` makes the
 per-group path a counter bump: no lock, no shift, no wake, and `GroupServe`
