@@ -443,79 +443,63 @@ impl<'a> Producer<'a> {
 /// Crate-private on purpose: the exclusivity the public borrow enforces (one
 /// live frame per group) becomes the holder's promise here. Do not open another
 /// frame on the group until this one is finished or aborted.
-pub(crate) struct ProducerOwned {
-	raw: Raw<group::Producer>,
-	/// Chunks have been written since the last [`Self::notify`], so consumers are
-	/// still owed a wake at the next poll boundary.
-	pending: bool,
-}
+pub(crate) struct ProducerOwned(Raw<group::Producer>);
 
 impl std::ops::Deref for ProducerOwned {
 	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
-		&self.raw.info
+		&self.0.info
 	}
 }
 
 impl ProducerOwned {
 	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info) -> Self {
-		Self {
-			raw: Raw {
-				group,
-				buf,
-				info,
-				done: false,
-				stats: stats::Meter::default(),
-			},
-			pending: false,
-		}
+		Self(Raw {
+			group,
+			buf,
+			info,
+			done: false,
+			stats: stats::Meter::default(),
+		})
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
-		self.raw.stats = meter;
+		self.0.stats = meter;
 		self
 	}
 
 	/// Bytes still needed to complete the frame.
 	pub fn remaining(&self) -> usize {
-		self.raw.remaining()
+		self.0.remaining()
 	}
 
-	/// Write a transport chunk, deferring the wake to the next [`Self::notify`].
+	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
 	///
-	/// The wire ingest drains every chunk the transport has already buffered in one
-	/// poll turn. A consumer parked on the group cannot run until that turn yields,
-	/// so waking per chunk buys no latency while paying a group lock and a clock
-	/// read each time; one wake at the boundary is the same thing, cheaper.
+	/// The wake is split out because the wire ingest drains every chunk the transport
+	/// has already buffered in one poll turn, and a consumer parked on the group cannot
+	/// run until that turn yields. Waking per chunk pays a group lock and a clock read
+	/// to publish bytes nobody can observe yet.
+	///
+	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.raw.write(chunk)?;
-		self.pending = true;
-		Ok(())
+		self.0.write(chunk)
 	}
 
-	/// Wake consumers with whatever was written since the last call.
-	///
-	/// A no-op when nothing is owed, so an ingest loop can call it unconditionally
-	/// on the path that yields. Skipping it only delays a wake to the next write or
-	/// to [`Self::finish`], which publishes the frame either way.
-	pub(crate) fn notify(&mut self) {
-		if std::mem::take(&mut self.pending) {
-			self.raw.group.frame_notify();
-		}
+	/// Publish what has been written so far, waking consumers parked on the group.
+	pub(crate) fn notify(&self) {
+		self.0.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
 	pub fn finish(mut self) -> Result<()> {
-		self.pending = false;
-		self.raw.finish()
+		self.0.finish()
 	}
 
 	/// Abort the frame (and its group) with the given error.
 	pub fn abort(mut self, err: Error) -> Result<()> {
-		self.pending = false;
-		self.raw.abort(err)
+		self.0.abort(err)
 	}
 }
 
