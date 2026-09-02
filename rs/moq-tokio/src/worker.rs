@@ -363,21 +363,18 @@ impl Spawner<'_> {
 			// The factory runs inside the task, not as the argument to the spawn:
 			// panicking while building the future is then the task's panic, not the
 			// worker thread's.
-			let task = tokio::task::spawn_local(async move { make().await });
-			// Nothing is left to stand for the task, so abort it rather than leave
-			// it running unreachable on the worker.
-			if let Err(task) = task_tx.send(task) {
-				task.abort();
-			}
+			let task = AbortOnDrop(tokio::task::spawn_local(async move { make().await }));
+			// The guard travels with the handle, so every way of losing it from here
+			// on (a failed send, a caller that aborts while it is still in flight,
+			// the forwarding task below being cancelled) cancels the task instead of
+			// detaching it onto the worker.
+			let _ = task_tx.send(task);
 		});
 		let _ = self.spawn.send(spawn);
 
 		self.handle.spawn(async move {
-			let task = task_rx.await.expect("worker stopped before spawning task");
-			// This hop is what the caller holds, so its cancellation has to reach
-			// the real task; dropping the handle below would only detach it.
-			let _abort = AbortOnDrop(task.abort_handle());
-			match task.await {
+			let mut task = task_rx.await.expect("worker stopped before spawning task");
+			match (&mut task.0).await {
 				Ok(output) => output,
 				Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
 				Err(err) => panic!("worker-local task cancelled: {err}"),
@@ -497,10 +494,14 @@ struct Ready {
 /// A future factory that is sent to and invoked by its worker thread.
 type Spawn = Box<dyn FnOnce() + Send + 'static>;
 
-/// Cancels a worker-local task when the handle standing for it is cancelled.
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// Owns a worker-local task from the moment it is spawned, cancelling it if the
+/// handle standing for it is lost.
+///
+/// A bare [`tokio::task::JoinHandle`] detaches on drop, which would leave the
+/// task running unreachable on its worker until the whole group stopped.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
-impl Drop for AbortOnDrop {
+impl<T> Drop for AbortOnDrop<T> {
 	fn drop(&mut self) {
 		self.0.abort();
 	}

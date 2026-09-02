@@ -167,6 +167,38 @@ async fn spawner_abort_reaches_the_worker() {
 	workers.shutdown().await;
 }
 
+/// The same, but aborting before the factory has even reached its worker. The
+/// task is owned from the moment it is spawned, so no handoff window detaches
+/// it: a caller that aborts while the handle is still in flight cancels it.
+#[tokio::test]
+async fn spawner_abort_races_the_handoff() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+
+	// Dropped with the future, whether or not it was ever polled.
+	let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
+
+	let task = {
+		let mut split = workers.split();
+		let (_server, spawner) = split.pop().expect("one worker");
+		spawner.run(move || async move {
+			let _dropped = dropped;
+			std::future::pending::<()>().await;
+		})
+	};
+
+	// No wait: the closure may still be in the channel, or its handle buffered in
+	// the oneshot the forwarding task has yet to read.
+	task.abort();
+
+	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	assert!(waited.expect("abort reached the worker").is_err());
+	workers.shutdown().await;
+}
+
 /// Never splitting them has to release the port too, or a failure between bind
 /// and serve strands the group. Dropping is the path `shutdown` is the async
 /// alternative to, so both are covered.
