@@ -31,7 +31,7 @@
 //! case each picture comes back as the zero-copy [`Surface::DmaBuf`] the
 //! hardware decoded it into. Measured on Intel Meteor Lake with iHD, a decode
 //! target exports at modifier `0x100000000000009`, and the renderer imports that
-//! per memory plane with no re-tile, so the pixels reach a texture untouched
+//! a memory plane at a time, so the pixels reach a texture untouched
 //! (`decoded_frames_reach_the_gpu_without_a_download` in
 //! [`render`](crate::render) draws them).
 //!
@@ -48,7 +48,6 @@
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context as _;
 use bytes::Bytes;
 use moq_net::Timestamp;
 use moq_vaapi::decode::{Config as VaapiConfig, Decoder, ExportedFrame};
@@ -66,11 +65,16 @@ pub(crate) struct Vaapi {
 	/// a host that decodes but cannot share what it decoded loses the fast path
 	/// rather than the stream.
 	gpu_frames: bool,
+	/// Whether a picture has ever come back as a descriptor, which is what
+	/// settles the question above. See [`Vaapi::exported`].
+	has_exported: bool,
 }
 
-// The decoder is `!Send` (libva uses `Rc` internally) but is created, used, and
-// dropped only on the dedicated decode thread (see `decode::sink`); the `Send`
-// impl just lets the boxed trait object satisfy `Backend: Send`.
+// SAFETY: the decoder is `!Send` (libva uses `Rc` internally) but is created,
+// used, and dropped only on the dedicated decode thread (see `decode::sink`);
+// the `Send` impl just lets the boxed trait object satisfy `Backend: Send`.
+// None of the `Rc`s escape with a picture either: an exported one holds its own
+// `Arc<Display>` and a surface id, and is `Send` and `Sync` on its own terms.
 unsafe impl Send for Vaapi {}
 
 impl Vaapi {
@@ -90,48 +94,61 @@ impl Vaapi {
 		Ok(Box::new(Self {
 			decoder,
 			gpu_frames: config.gpu_frames,
+			has_exported: false,
 		}))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
-	///
-	/// A driver can decode without being able to share what it decoded, and the
-	/// caller only asked for GPU frames as an optimization. Losing the pictures
-	/// of the one call that discovers this beats losing the stream, and the DPB
-	/// is untouched by it: those pictures had already been bumped out of it.
-	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Vec<Frame>> {
+	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<Vec<Frame>, Error>> {
 		if !self.gpu_frames {
 			return None;
 		}
 
-		Some(
-			match self.decoder.decode_exported(access_unit, timestamp).and_then(share) {
-				Ok(frames) => frames,
-				Err(err) => self.cannot_share(&err),
-			},
-		)
+		let exported = self.decoder.decode_exported(access_unit, timestamp).and_then(share);
+		Some(self.exported(exported))
 	}
 
 	/// The same for the stream's tail, so a track that ends does not switch to
 	/// downloading for its last few pictures.
-	fn flush_shared(&mut self) -> Option<Vec<Frame>> {
+	fn flush_shared(&mut self) -> Option<Result<Vec<Frame>, Error>> {
 		if !self.gpu_frames {
 			return None;
 		}
 
-		Some(match self.decoder.flush_exported().and_then(share) {
-			Ok(frames) => frames,
-			Err(err) => self.cannot_share(&err),
-		})
+		let exported = self.decoder.flush_exported().and_then(share);
+		Some(self.exported(exported))
 	}
 
-	/// Records that this driver will not share what it decoded, and gives up the
-	/// pictures of the call that found out.
-	fn cannot_share(&mut self, err: &anyhow::Error) -> Vec<Frame> {
-		tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
-		self.gpu_frames = false;
-		Vec::new()
+	/// Hands back the pictures a shared decode produced, and decides what a
+	/// failure to produce any means.
+	///
+	/// A driver can decode without being able to share what it decoded, and the
+	/// caller only asked for GPU frames as an optimization, so until one picture
+	/// has come back that way a failure is read as this driver answering the
+	/// question. Losing the pictures of the call that found out beats losing the
+	/// stream, and the DPB is untouched by it: those pictures had already been
+	/// bumped out of it.
+	///
+	/// Once a picture has come back the question is settled, and a later failure
+	/// is a decode error rather than a verdict on the driver. Reporting it as
+	/// one keeps a corrupt access unit from silently costing the rest of the
+	/// session its fast path.
+	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<Vec<Frame>, Error> {
+		match exported {
+			Ok(frames) => {
+				// An access unit whose pictures are all still in the DPB proves
+				// nothing about exporting, so only a non-empty answer counts.
+				self.has_exported |= !frames.is_empty();
+				Ok(frames)
+			}
+			Err(err) if self.has_exported => Err(Error::Codec(err.context("VAAPI decode to a shared surface"))),
+			Err(err) => {
+				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
+				self.gpu_frames = false;
+				Ok(Vec::new())
+			}
+		}
 	}
 }
 
@@ -141,7 +158,7 @@ impl Backend for Vaapi {
 		// survives the DPB reordering a stream with B-frames goes through.
 		let timestamp = timestamp.as_micros() as u64;
 		if let Some(frames) = self.decode_shared(&access_unit, timestamp) {
-			return Ok(frames);
+			return frames;
 		}
 
 		let decoded = self
@@ -157,7 +174,7 @@ impl Backend for Vaapi {
 	/// reorder limits allow, and nothing else will ever ask for them.
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		if let Some(frames) = self.flush_shared() {
-			return Ok(frames);
+			return frames;
 		}
 
 		let decoded = self
@@ -205,25 +222,48 @@ fn share(exported: Vec<ExportedFrame>) -> anyhow::Result<Vec<Frame>> {
 /// which is the driver's padded allocation. Neither the pitches nor the offsets
 /// follow from the visible size, which is exactly why they are read off the
 /// export rather than computed from it.
+///
+/// # Errors
+///
+/// When the export is not the one shape a [`DmaBuf`] can describe: a single NV12
+/// layer whose planes all live in a single object. The Intel and AMD drivers
+/// export exactly that, and the alternatives are refused rather than guessed at,
+/// because every one of them draws as a plausible-looking picture made of the
+/// wrong bytes.
 fn adopt(frame: ExportedFrame) -> anyhow::Result<DmaBuf> {
 	let (width, height) = (frame.width, frame.height);
-	let layer = frame
-		.descriptor
-		.layers
-		.first()
-		.context("the VA-API export carries no layer")?;
+	// One object, because a consumer imports every plane from the one descriptor
+	// `Exported::export` hands out, and one layer, because the planes are read
+	// off it as a group. Both are what `VA_EXPORT_SURFACE_COMPOSED_LAYERS` asks
+	// for; neither is what it guarantees.
+	let [object] = frame.descriptor.objects.as_slice() else {
+		anyhow::bail!(
+			"VA-API exported {} objects, expected one holding every plane",
+			frame.descriptor.objects.len()
+		);
+	};
+	let [layer] = frame.descriptor.layers.as_slice() else {
+		anyhow::bail!(
+			"VA-API exported {} layers, expected one composed layer",
+			frame.descriptor.layers.len()
+		);
+	};
 	if layer.drm_format != DrmFormat::NV12.as_raw() {
 		anyhow::bail!("VA-API exported DRM format {:#x}, expected NV12", layer.drm_format);
 	}
-	let planes = (0..layer.num_planes as usize)
+
+	// `num_planes` and the arrays it indexes both come from the driver, and only
+	// the arrays are bounded, so indexing on the count would panic rather than
+	// fail.
+	let count = layer.num_planes as usize;
+	anyhow::ensure!(
+		count <= layer.offset.len(),
+		"VA-API exported {count} planes, more than a PRIME descriptor holds"
+	);
+	let planes = (0..count)
 		.map(|plane| DmaBufPlane::new(layer.offset[plane], layer.pitch[plane]))
 		.collect();
-	let modifier = frame
-		.descriptor
-		.objects
-		.first()
-		.context("the VA-API export carries no object")?
-		.drm_format_modifier;
+	let modifier = object.drm_format_modifier;
 
 	// A decode target names no color space, so the renderer infers one from the
 	// frame size exactly as it does for a downloaded picture.
