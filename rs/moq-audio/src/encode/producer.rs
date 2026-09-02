@@ -151,8 +151,12 @@ impl<E: CatalogExt> Reserved<E> {
 		Ok(Self { catalog, track, name })
 	}
 
-	/// Register the rendition for `input` and start encoding into the track.
-	pub(crate) fn encode(mut self, input: Input, options: &Options) -> Result<Producer<E>, Error> {
+	/// Build the encoder for `input` and register the rendition describing it.
+	///
+	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
+	/// codec rejects (more channels than Opus takes, a mismatch with
+	/// [`Options::channels`]) leaves the reservation intact for another input.
+	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
 		let encoder = Encoder::new(&options.config(input))?;
 		let input = &encoder.config().input;
 
@@ -175,9 +179,14 @@ impl<E: CatalogExt> Reserved<E> {
 		config.timeline = Some(self.catalog.timeline(&self.name)?.section());
 		self.catalog.lock().audio.insert(&self.name, config)?;
 
-		Ok(Producer {
-			encoder,
-			resampler,
+		Ok(Registered { encoder, resampler })
+	}
+
+	/// Spend the reservation on a registered encoder, publishing through the track.
+	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
+		Producer {
+			encoder: registered.encoder,
+			resampler: registered.resampler,
 			track: self.track,
 			rendition: Rendition {
 				catalog: self.catalog,
@@ -189,8 +198,17 @@ impl<E: CatalogExt> Reserved<E> {
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
-		})
+		}
 	}
+}
+
+/// A registered rendition, waiting for its [`Reserved`] to be spent on it.
+///
+/// Proof that [`Reserved::register`] succeeded, so [`Reserved::encode`] takes no
+/// fallible step and cannot strand the track it consumes.
+pub(crate) struct Registered {
+	encoder: Encoder,
+	resampler: Option<Resampler>,
 }
 
 /// What a capture publication needs while its layout is still undiscovered.
@@ -227,7 +245,9 @@ impl<E: CatalogExt> Producer<E> {
 		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
-		Reserved::new(broadcast, catalog, options)?.encode(input, options)
+		let mut reserved = Reserved::new(broadcast, catalog, options)?;
+		let registered = reserved.register(input, options)?;
+		Ok(reserved.encode(registered))
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.

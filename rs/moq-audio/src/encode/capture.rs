@@ -360,22 +360,18 @@ impl Driver {
 
 	async fn run_with<S: CaptureSource>(mut self, mut source: S) -> Result<(), Error> {
 		let result = self.drive(&mut source).await;
-		// An encoder that rejects the discovered layout consumes the reservation,
-		// leaving nothing to finalize.
-		let track = self.track.take();
+		let track = self.track.take().expect("driver always owns its track");
 
 		match &result {
 			Ok(()) => {
 				self.update(Status::Ended, None, None);
-				if let Some(Err(err)) = track.map(Track::finish) {
+				if let Err(err) = track.finish() {
 					tracing::debug!(error = %err, "audio track finish after capture ended");
 				}
 			}
 			Err(err) => {
 				self.fail(err);
-				if let Some(track) = track {
-					track.abort(moq_net::Error::Transport(err.to_string()));
-				}
+				track.abort(moq_net::Error::Transport(err.to_string()));
 			}
 		}
 		self.silence();
@@ -444,7 +440,7 @@ impl Driver {
 				},
 			};
 
-			let Some(Track::Reserved(reserved)) = self.track.take() else {
+			let Some(Track::Reserved(mut reserved)) = self.track.take() else {
 				unreachable!("the track stays reserved until discovery succeeds")
 			};
 			let input = Input {
@@ -452,13 +448,21 @@ impl Driver {
 				sample_rate: layout.sample_rate,
 				channels: layout.channels,
 			};
-			return match reserved.encode(input, &self.encode) {
-				Ok(producer) => {
-					self.track = Some(Track::Encoding(producer));
-					None
+			let registered = match reserved.register(input, &self.encode) {
+				Ok(registered) => registered,
+				// A layout the codec rejects parks like any other terminal failure,
+				// so `replace` can still hand the same track a compatible input.
+				Err(err) => {
+					self.track = Some(Track::Reserved(reserved));
+					match self.failed(err, track, desired.revision).await {
+						Some(result) => return Some(result),
+						None => continue,
+					}
 				}
-				Err(err) => Some(Err(err)),
 			};
+
+			self.track = Some(Track::Encoding(reserved.encode(registered)));
+			return None;
 		}
 	}
 
@@ -594,6 +598,10 @@ enum DriveEvent {
 }
 
 /// The publication's track, before and after the input's layout is known.
+///
+/// One per publication, moved twice in its life, so the size difference between
+/// the variants never costs a copy worth an allocation to avoid.
+#[allow(clippy::large_enum_variant)]
 enum Track {
 	/// Registered in the broadcast but not the catalog, because the rendition
 	/// describes a PCM layout no probe has returned yet.
@@ -1413,6 +1421,30 @@ mod tests {
 		(publication, driver, source(opens, false), subscription, catalog)
 	}
 
+	/// Same, with the caller's encode options, which `setup_publication` fixes.
+	async fn setup_encoding(
+		channels: u32,
+		opens: impl IntoIterator<Item = Open>,
+	) -> (
+		Publication,
+		Driver,
+		MockSource,
+		moq_net::track::Subscriber,
+		moq_mux::catalog::Producer,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut options = PublicationOptions::default();
+		options.capture.source = capture::Source::Microphone(Some("first".into()));
+		options.encode.track = Some("audio".into());
+		options.encode.channels = Some(channels);
+		let (publication, driver) =
+			Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
+		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		(publication, driver, source(opens, false), subscription, catalog)
+	}
+
 	async fn wait_for(publication: &mut Publication, status: Status) -> State {
 		tokio::time::timeout(Duration::from_secs(1), async {
 			loop {
@@ -1670,6 +1702,33 @@ mod tests {
 		let config = renditions.get("audio").expect("the rendition was never registered");
 		assert_eq!(config.sample_rate, 48_000);
 		assert_eq!(config.channel_count, 2);
+
+		drop(publication);
+		task.await.unwrap().unwrap();
+	}
+
+	/// A discovered layout the codec rejects must not take the track down with
+	/// it: the whole promise of the retained handle is that `replace` can still
+	/// point the same track at an input that works.
+	#[tokio::test]
+	async fn a_rejected_layout_parks_the_publication() {
+		let (_events, input) = stream(None);
+		// Opus does not remap channels, so a stereo codec rejects a mono input.
+		let (mut publication, driver, mut source, _subscription, catalog) =
+			setup_encoding(2, [Open::Stream(input)]).await;
+		source.formats = [Discovery::Format(48_000, 1), Discovery::Format(48_000, 2)]
+			.into_iter()
+			.collect();
+		let task = tokio::spawn(driver.run_with(source));
+
+		let failed = wait_for(&mut publication, Status::Failed).await;
+		assert!(failed.failure().is_some());
+		assert!(!publication.is_finished());
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+
+		publication.replace(capture::Source::Microphone(Some("second".into())));
+		wait_for(&mut publication, Status::Live).await;
+		assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 
 		drop(publication);
 		task.await.unwrap().unwrap();
