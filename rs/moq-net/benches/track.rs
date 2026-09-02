@@ -134,8 +134,9 @@ fn bench_parallel_write(c: &mut Criterion) {
 		.with_expiry(cache::DEFAULT_EXPIRY);
 	let pool = cache::Pool::new(config);
 	let mut group = c.benchmark_group("track_parallel_write");
+	// No throughput: one iteration is one frame write, wherever it landed, so the
+	// per-iteration time is already the number to compare across writer counts.
 	for writers in WRITERS {
-		group.throughput(Throughput::Elements(writers as u64));
 		group.bench_with_input(BenchmarkId::from_parameter(writers), &writers, |b, &writers| {
 			b.iter_custom(|iterations| parallel_write(&pool, writers, iterations));
 		});
