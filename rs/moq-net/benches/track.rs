@@ -109,6 +109,8 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 					let mut broadcast = broadcast::Producer::new(info);
 					let mut track = broadcast.create_track("bench", None).unwrap();
 					let payload = Bytes::from_static(&[0; PAYLOAD]);
+					// Arrive once setup is done, then park until the main thread has stamped the clock.
+					barrier.wait();
 					barrier.wait();
 					for _ in 0..iterations {
 						let mut group = track.append_group().unwrap();
@@ -119,8 +121,11 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 			})
 			.collect();
 
+		// The first wait returns once every writer has built its producer, keeping setup out
+		// of the interval. The second releases them, so no write lands before the stamp.
 		barrier.wait();
 		let start = Instant::now();
+		barrier.wait();
 		for handle in handles {
 			handle.join().unwrap();
 		}
