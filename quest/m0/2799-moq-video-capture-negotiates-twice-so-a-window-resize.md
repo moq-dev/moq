@@ -26,8 +26,12 @@ the fix, and the two opens stay.
 - On a catalog snapshot whose chosen source rendition changed dimensions,
   re-run `resolve_rungs` and diff against the live set: retire rungs that no
   longer fit (finish their tracks, drop their catalog entries), probe and add
-  the new ones, keep the rest. A subscriber on a retired rung sees its track
-  end and picks another rendition, the same as any rendition change.
+  the new ones, keep the rest. A browser subscriber on a retired rung sees
+  its track end and picks another rendition, the same as any rendition change.
+- `moq play` does not: `rs/moq-cli/src/play.rs` stops following the catalog
+  once video and audio have both started, so a retired rung ends playback or
+  leaves audio alone. Re-arm its catalog loop when a started track ends, so
+  native playback reselects too; that is part of this quest, not a follow-up.
 - Test: a source that republishes its rendition at a new size; assert the
   ladder changes, passthrough follows, and a subscriber on a retired rung is
   ended cleanly.

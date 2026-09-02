@@ -31,9 +31,12 @@ Exact contiguity cannot be the test. RTMP stamps in milliseconds and an AAC
 frame at 44.1 kHz is 23.22 ms, so every packet on the most common ingest path
 reads as discontinuous under a strict rule.
 
-- One stated policy in `decode::Consumer`: a jump counts as a gap when it
-  exceeds one codec frame duration at the track timescale, derived from the
-  frame size and timescale rather than a constant.
+- One stated policy in `decode::Consumer`: a packet counts as discontinuous
+  when its timestamp differs from the tracked tail by more than half a codec
+  frame at the track timescale, derived from the frame size and timescale
+  rather than a constant. One lost frame lands exactly one frame off, so the
+  tolerance has to sit well below a frame; millisecond rounding is under
+  1 ms against a 23 ms frame, so it stays well inside.
 - On a gap: flush the resampler's pending samples as their own frame (they
   belong before the hole) or drop them, reset it, and stamp the next output
   from the new packet rather than by rewinding.
