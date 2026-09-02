@@ -30,7 +30,9 @@ deletes from `#namespaces` without touching `#namespacesByRequestId`.
 - Fold the two decode sites into one, since the bug was in the copy.
 - Regression test through `ControlStreamAdapter` (not `NativeSession`, which
   bypasses it): two PUBLISH_NAMESPACE for one namespace, the second refused,
-  then DONE for the first withdraws it.
+  then DONE for the first withdraws it. Cover the other two fixes too: a
+  withdrawal that resolves to nothing leaves the session open, and a CANCEL
+  leaves `#namespaces` and `#namespacesByRequestId` in step.
 
 Only reachable on draft-14/15 against a peer that sends the duplicate; draft-19
 is negotiated by default.

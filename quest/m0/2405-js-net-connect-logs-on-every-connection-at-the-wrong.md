@@ -23,7 +23,9 @@ helper.
   prints nothing. The WebSocket warning is the one line worth keeping visible
   in dev, since it means the transport race lost.
 - Test: connect against a URL carrying `?jwt=secret` with the console captured
-  and assert no logged string contains the token.
+  and assert no logged string contains the token; and under a production
+  `MODE`, assert no connect diagnostic is emitted at all, so a redacted URL
+  logged in production still fails.
 
 The moq-native and moq-rtmp half of the same finding is
 [Rust log redaction](/quest/m0/rust-log-redaction.md).

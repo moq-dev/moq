@@ -25,7 +25,10 @@ anchor path bumps the epoch today.
 - The `postMessage` transport (`AudioRingBuffer`) has no such race, since its
   truncate and write are ordered on the worklet's queue.
 - Test: a deterministic interleaving that drives `truncate()` between
-  `read()`'s snapshot and its commit and asserts zero output for that quantum.
+  `read()`'s snapshot and its commit and asserts zero output for that quantum,
+  with the output buffers pre-filled with nonzero samples and checked at full
+  length, since the current helper slices to `samplesRead` and would pass on
+  an empty slice.
   The current tests are single-threaded and cannot reach it, so split
   `read()`'s snapshot and commit into steps a test can interleave.
 

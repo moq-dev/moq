@@ -35,7 +35,9 @@ already buffered. All 23 `static async decode` message decoders under
   `SubscriptionControls` goes away.
 - Tests: a decoder given a partial buffer reports incomplete without
   consuming; the publisher applies N buffered updates before the next group
-  pop; the flood case stays bounded.
+  pop; a partial update with a group already ready waits for the second fill
+  and pops the group under the new range, so incomplete is never read as "no
+  control pending"; the flood case stays bounded.
 
 ## Closes
 

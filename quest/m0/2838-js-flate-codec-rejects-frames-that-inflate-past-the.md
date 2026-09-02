@@ -16,8 +16,10 @@ string allocation, UTF-8 encode, and deflate are pure CPU, so the test takes
 The assertion is about the cap being enforced, which the decoder does as
 output is produced, so the value of the cap is irrelevant to the code path.
 Exercise it through the existing `maxFrameSize` option with a small cap and a
-payload just past it, and pin the default separately by asserting
-`DEFAULT_MAX_FRAME_SIZE` is 64 MiB. That keeps the test honest and fast rather
+payload just past it, and pin the default separately: assert
+`DEFAULT_MAX_FRAME_SIZE` is 64 MiB and that a decoder built without the option
+reports that value as its cap, so the default wiring is tested rather than
+only the exported constant. That keeps the test honest and fast rather
 than tolerating a slow one with a wider timeout.
 
 ## Closes
