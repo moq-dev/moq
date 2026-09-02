@@ -13,7 +13,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = []
 noq = []
 quiche = []

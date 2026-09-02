@@ -5,7 +5,7 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(all(target_os = "linux", any(feature = "quiche", feature = "quinn")))]
+#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 
 #[path = "support/quiche.rs"]
 mod support;

@@ -17,6 +17,8 @@ use std::task::Poll;
 use std::time::Instant;
 
 use bytes::BytesMut;
+#[cfg(feature = "noq")]
+use noq_proto as quinn_proto;
 use quinn_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
 use rustc_hash::FxHashMap;
 
@@ -87,6 +89,9 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
+		#[cfg(feature = "noq")]
+		let endpoint = quinn_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false);
+		#[cfg(not(feature = "noq"))]
 		let endpoint = quinn_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false, None);
 
 		let inner = Rc::new(Inner {
@@ -231,6 +236,15 @@ impl Inner {
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
+			#[cfg(feature = "noq")]
+			let event = self.endpoint.borrow_mut().handle(
+				Instant::now(),
+				from.into(),
+				None,
+				BytesMut::from(&segment[..]),
+				&mut buf,
+			);
+			#[cfg(not(feature = "noq"))]
 			let event = self.endpoint.borrow_mut().handle(
 				Instant::now(),
 				from,

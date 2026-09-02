@@ -71,7 +71,7 @@ runtime serves every connection off one UDP socket.
 # that owns its connection.
 #
 # Linux only. Needs a backend whose connection IDs can name the owning worker,
-# so listen.backend must be quinn (the default) or noq; quiche refuses to start.
+# so listen.backend must be noq (the default) or quinn; quiche refuses to start.
 # Cannot be combined with listen.quic_lb_id, which wants the same bytes of the
 # connection ID.
 #
@@ -101,8 +101,7 @@ pin = true
 io_uring = false
 ```
 
-The `io-uring` feature is off by default because quiche links BoringSSL, which
-a default relay build does not need. Prebuilt binaries that ship it say so;
+The `io-uring` feature is off by default. Prebuilt binaries that ship it say so;
 building it yourself is `cargo build -p moq-relay --features io-uring`.
 
 The `[quic]` section applies to this listener too: `max_streams`,

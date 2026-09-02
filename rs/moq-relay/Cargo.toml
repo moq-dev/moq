@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "quinn", "websocket", "uds"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -40,18 +40,17 @@ websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
 # Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only, in one of
-# two flavors. Both are off by default: the relay is useful without io_uring,
-# and `io-uring` links a second TLS stack (quiche brings BoringSSL, which needs
-# cmake and a C++ toolchain a default relay build does not). `io-uring-quinn`
-# serves the same path from quinn-proto over the rustls this relay already
-# links, so it builds no second stack.
+# three flavors. All are off by default: the relay is useful without io_uring.
+# `io-uring` uses noq-proto over rustls, matching the default tokio backend;
+# the suffixed features retain quinn-proto and quiche as explicit alternatives.
 #
-# Cargo features are additive, so asking for both compiles both and runs quinn,
-# which is what the nightly `--all-features` pass (`just rs features`) does.
-# `just rs uring` builds each on its own.
-io-uring = ["_uring", "moq-uring/quiche"]
+# Cargo features are additive, so asking for several compiles them and runs noq,
+# which is what the nightly `--all-features` pass does. `just rs uring` builds
+# each on its own.
+io-uring = ["_uring", "moq-uring/noq"]
 io-uring-quinn = ["_uring", "moq-uring/quinn"]
-# The listener both flavors share. Not one to enable on its own: moq-uring has
+io-uring-quiche = ["_uring", "moq-uring/quiche"]
+# The listener all flavors share. Not one to enable on its own: moq-uring has
 # no `quic` module without a backend, so this alone does not build.
 _uring = ["dep:moq-sock", "dep:moq-uring"]
 

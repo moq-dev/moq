@@ -50,12 +50,13 @@ them is compiled:
 
 | Feature | Stack | TLS |
 |---|---|---|
-| `quiche` (default) | [quiche](https://github.com/cloudflare/quiche) | BoringSSL, which needs cmake and a C++ toolchain to build |
+| `noq` (default) | [noq-proto](https://github.com/kixelated/noq) | rustls |
 | `quinn` | [quinn-proto](https://github.com/quinn-rs/quinn) | rustls, the stack the rest of this workspace already links |
+| `quiche` | [quiche](https://github.com/cloudflare/quiche) | BoringSSL, which needs cmake and a C++ toolchain to build |
 
 Nothing above the module changes: the same `quic::{Endpoint, Connection,
 SendStream, RecvStream}`, the same WebTransport layer, the same tests. A build
-asking for both (`--all-features`) gets `quinn`, and a build asking for
+asking for several (`--all-features`) gets `noq`, and a build asking for
 neither leaves the `quic` module out entirely, keeping the worker, its timers,
 and `udp::Socket`.
 
@@ -63,14 +64,13 @@ and `udp::Socket`.
 cargo test -p moq-uring --no-default-features --features quinn
 ```
 
-`moq-relay` picks with its own pair: `--features io-uring` takes quiche and
-`--features io-uring-quinn` takes quinn, since cargo features are additive and
-a backend selected on top of a default one would compile both.
+`moq-relay` uses noq with `--features io-uring`. The
+`io-uring-quinn` and `io-uring-quiche` features select the alternatives.
 
 ## Validation
 
 Every test runs against whichever backend is compiled, so the suite is the
-parity check between the two.
+parity check between the three.
 
 `tests/echo.rs` runs a raw [quiche](https://github.com/cloudflare/quiche) echo
 over the worker: handshake, half a megabyte each way, timers driven by

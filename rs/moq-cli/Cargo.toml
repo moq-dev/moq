@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "quinn", "websocket", "nvidia", "pipewire"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia", "pipewire"]
 iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -55,7 +55,7 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
 # dependencies, drop it:
-#   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
+#   cargo build -p moq-cli --no-default-features --features "iroh noq websocket capture"
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # Compatibility aliases for the pre-consolidation names, kept so a manifest that
 # already asks for the old split still resolves. Undocumented on purpose: the

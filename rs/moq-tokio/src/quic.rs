@@ -140,8 +140,7 @@ pub struct Config {
 	pub mtu_discovery: Option<bool>,
 
 	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq and iroh, whose shared BBRv3 can panic on packet loss and take
-	/// the process with it. Selecting `delay` there is for deliberate testing only.
+	/// `loss` on noq and iroh. Selecting `delay` there uses BBRv3.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-congestion-control",

@@ -13,7 +13,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs", "dep:dns-lookup", "watch"]
@@ -56,7 +56,7 @@ moq-net = { workspace = true }
 moq-sock = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
 # congestion configs. Version matched to the copy iroh pulls in.
-noq-proto = { version = "1", default-features = false, optional = true }
+noq-proto = { workspace = true, optional = true }
 notify = { version = "8", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }

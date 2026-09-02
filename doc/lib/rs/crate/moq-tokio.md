@@ -15,7 +15,7 @@ Tokio-based connection helpers for native Rust applications. Provides TLS config
 `moq-tokio` bridges the gap between the transport-agnostic `moq-net` crate and actual QUIC/WebTransport networking. It handles:
 
 - TLS certificate loading and configuration
-- QUIC connection setup via a pluggable backend, defaulting to [quinn](https://crates.io/crates/quinn), with noq and quiche available through features
+- QUIC connection setup via a pluggable backend, defaulting to [noq](https://crates.io/crates/noq), with quinn and quiche available through features
 - WebTransport session management
 - Development certificate generation for local testing
 - Thread-per-core QUIC workers (`worker::Workers`): a pinned thread and socket per core, sharing one port and steered by connection ID
@@ -27,7 +27,7 @@ Tokio-based connection helpers for native Rust applications. Provides TLS config
 moq-tokio = "0.19"
 ```
 
-The default features select Quinn with the AWS-LC crypto provider. With
+The default features select noq with the AWS-LC crypto provider. With
 `default-features = false`, the `quinn` and `noq` backends must be paired with
 the `aws-lc-rs` or `ring` feature.
 

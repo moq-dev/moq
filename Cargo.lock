@@ -5227,6 +5227,7 @@ dependencies = [
  "moq-sock",
  "moq-tokio",
  "nix",
+ "noq-proto",
  "noq-udp",
  "quiche",
  "quinn-proto",
@@ -5716,9 +5717,9 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+checksum = "9a46813e306c29c4f86357b6ffa39a8e1c97bb274b9a296a19a56d62e4111225"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",

@@ -14,8 +14,10 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
 [features]
 # The sans-IO QUIC stack behind `quic`. Exactly one is compiled: a build that
-# somehow asks for both (`--all-features`) gets `quinn`.
-default = ["quiche"]
+# asks for several (`--all-features`) gets `noq`.
+default = ["noq"]
+# noq-proto, with TLS through rustls.
+noq = ["dep:noq-proto", "dep:rustls", "dep:rustls-platform-verifier"]
 # Cloudflare's quiche, with TLS through BoringSSL. Building that needs cmake
 # and a C++ toolchain.
 quiche = ["dep:boring", "dep:quiche"]
@@ -32,6 +34,8 @@ kio = { workspace = true }
 libc = { workspace = true }
 moq-net = { workspace = true }
 moq-sock = { workspace = true }
+# default-features off so the crypto provider is ours to pick.
+noq-proto = { workspace = true, features = ["bloom", "tracing-log", "rustls-aws-lc-rs"], optional = true }
 quiche = { version = "0.29", optional = true }
 # default-features off so the crypto provider is ours to pick, matching how
 # moq-tokio wires its quinn dependency.
@@ -39,8 +43,8 @@ quinn-proto = { version = "0.11", default-features = false, features = ["bloom",
 rand = "0.10"
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
-# OS-native server-cert verifier for the quinn backend. Version matched to the
-# copy moq-tokio pulls in, to avoid duplication.
+# OS-native server-cert verifier for the rustls backends. Version matched to
+# the copy moq-tokio pulls in, to avoid duplication.
 rustls-platform-verifier = { version = "0.7", optional = true }
 slab = "0.4"
 thiserror = "2"

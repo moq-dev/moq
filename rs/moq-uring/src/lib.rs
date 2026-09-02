@@ -17,8 +17,8 @@
 //! included), each a [`quic::Connection`] implementing the transport traits,
 //! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
 //! moq-lite sessions on the worker ([`Handle`] is their
-//! [`moq_net::Runtime`]). The stack underneath is the `quiche` (default) or
-//! `quinn` feature; the module is the same either way, and a build with
+//! [`moq_net::Runtime`]). The stack underneath is the `noq` (default),
+//! `quinn`, or `quiche` feature; the module is the same either way, and a build with
 //! neither leaves it out.
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
@@ -29,7 +29,7 @@
 
 mod error;
 mod park;
-#[cfg(any(feature = "quiche", feature = "quinn"))]
+#[cfg(any(feature = "noq", feature = "quiche", feature = "quinn"))]
 pub mod quic;
 mod shared;
 mod timer;

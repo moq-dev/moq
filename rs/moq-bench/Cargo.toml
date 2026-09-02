@@ -35,7 +35,7 @@ required-features = ["uring"]
 doc = false
 
 [features]
-default = ["quinn", "websocket"]
+default = ["noq", "websocket"]
 iroh = ["moq-tokio/iroh"]
 noq = ["moq-tokio/noq"]
 quinn = ["moq-tokio/quinn"]

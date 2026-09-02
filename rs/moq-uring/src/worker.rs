@@ -507,7 +507,7 @@ impl moq_net::Timers for Handle {
 
 // Without a QUIC backend there is no transport to name, so the worker is a
 // task and timer runtime only.
-#[cfg(any(feature = "quiche", feature = "quinn"))]
+#[cfg(any(feature = "noq", feature = "quiche", feature = "quinn"))]
 impl moq_net::Runtime for Handle {
 	type Transport = crate::quic::web::Session;
 

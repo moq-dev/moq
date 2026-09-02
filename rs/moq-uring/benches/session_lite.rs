@@ -9,11 +9,11 @@
 
 use criterion::{criterion_group, criterion_main};
 
-#[cfg(all(target_os = "linux", any(feature = "quiche", feature = "quinn")))]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 #[path = "../tests/support/quiche.rs"]
 mod support;
 
-#[cfg(all(target_os = "linux", any(feature = "quiche", feature = "quinn")))]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 mod linux {
 	use std::net::UdpSocket;
 	use std::pin::Pin;
@@ -255,10 +255,10 @@ mod linux {
 	}
 }
 
-#[cfg(all(target_os = "linux", any(feature = "quiche", feature = "quinn")))]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 use linux::benchmark;
 
-#[cfg(not(all(target_os = "linux", any(feature = "quiche", feature = "quinn"))))]
+#[cfg(not(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn"))))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);

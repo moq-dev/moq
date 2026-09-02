@@ -12,7 +12,7 @@ edition = "2024"
 rust-version.workspace = true
 
 [features]
-default = ["quinn", "websocket"]
+default = ["noq", "websocket"]
 jemalloc = ["moq-tokio/jemalloc"]
 noq = ["moq-tokio/noq"]
 quinn = ["moq-tokio/quinn"]

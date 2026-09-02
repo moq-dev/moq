@@ -144,7 +144,7 @@ moq-tokio = { version = "0.19.11", path = "rs/moq-tokio", default-features = fal
 # them on when depended on directly. VAAPI is opt-in everywhere, since that
 # backend has never been validated on real hardware.
 moq-transcode = { version = "0.0.15", path = "rs/moq-transcode", default-features = false }
-# default-features off (the quiche backend) so the consumer picks which QUIC
+# default-features off (the noq backend) so the consumer picks which QUIC
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
 moq-uring = { version = "0.0.1", path = "rs/moq-uring", default-features = false }
@@ -158,6 +158,7 @@ moq-vaapi = "0.0.3"
 # that argument, so moq-ffi and libmoq opt them back in by name.
 moq-video = { version = "0.0.21", path = "rs/moq-video", default-features = false }
 nix = { version = "0.30.1", features = ["net", "socket", "uio"] }
+noq-proto = { version = "1.2", default-features = false }
 noq-udp = "1.1.1"
 num_enum = "0.7"
 objc2 = "0.6.4"

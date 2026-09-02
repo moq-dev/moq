@@ -6,6 +6,8 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
+#[cfg(feature = "noq")]
+use noq_proto as quinn_proto;
 use quinn_proto::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
@@ -512,14 +514,31 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
+		#[cfg(feature = "noq")]
+		let (stats, path) = {
+			let mut conn = self.shared.conn.borrow_mut();
+			let stats = conn.stats();
+			let path = conn.path_stats(quinn_proto::PathId::ZERO).unwrap_or_default();
+			(stats, path)
+		};
+		#[cfg(not(feature = "noq"))]
 		let stats = self.shared.conn.borrow().stats();
 		Stats {
 			bytes_sent: stats.udp_tx.bytes,
 			bytes_received: stats.udp_rx.bytes,
+			#[cfg(feature = "noq")]
+			bytes_lost: stats.lost_bytes,
+			#[cfg(not(feature = "noq"))]
 			bytes_lost: stats.path.lost_bytes,
 			packets_sent: stats.udp_tx.datagrams,
 			packets_received: stats.udp_rx.datagrams,
+			#[cfg(feature = "noq")]
+			packets_lost: stats.lost_packets,
+			#[cfg(not(feature = "noq"))]
 			packets_lost: stats.path.lost_packets,
+			#[cfg(feature = "noq")]
+			rtt: path.rtt,
+			#[cfg(not(feature = "noq"))]
 			rtt: stats.path.rtt,
 		}
 	}
@@ -693,6 +712,10 @@ impl Driver {
 				quinn_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
 				quinn_proto::Event::HandshakeDataReady => {}
 				quinn_proto::Event::Stream(event) => sweep_stream(&mut state, event),
+				#[cfg(feature = "noq")]
+				quinn_proto::Event::HandshakeConfirmed
+				| quinn_proto::Event::Path(_)
+				| quinn_proto::Event::NatTraversal(_) => {}
 			}
 		}
 	}
@@ -752,6 +775,8 @@ impl Driver {
 				tx.len()
 			))));
 		}
+		#[cfg(feature = "noq")]
+		let segments = std::num::NonZeroUsize::new(segments).expect("segments was checked above");
 
 		self.scratch.clear();
 		let transmit = match self

@@ -8,6 +8,8 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
+#[cfg(feature = "noq")]
+use noq_proto as quinn_proto;
 use quinn_proto::{StreamId, VarInt};
 
 use super::super::Error;

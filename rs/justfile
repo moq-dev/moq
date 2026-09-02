@@ -439,20 +439,21 @@ fix-changed $FILES:
 windows *args:
     {{ cargo_compile }} check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
-# Compile and test the io_uring relay path, which is off the default feature
-# set (quiche links BoringSSL, and a default relay build has no use for it).
+# Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
 #
-# The second pair is the same suite over the other QUIC backend, and the line
-# after it is the relay on that backend. moq-uring compiles exactly one, so
-# quinn gets its own invocations rather than another feature on the first:
-# feature unification would otherwise fold the two builds back together.
+# The remaining pairs run the same suite over the alternative QUIC backends.
+# moq-uring compiles exactly one, so each gets its own invocation: feature
+# unification would otherwise fold the builds back together.
 uring *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
     cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
     cargo clippy --locked -p moq-relay --features io-uring-quinn --all-targets {{ args }} -- -D warnings
+    cargo clippy --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }}
+    cargo clippy --locked -p moq-relay --features io-uring-quiche --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,

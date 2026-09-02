@@ -1,4 +1,4 @@
-//! The quinn backend: sans-IO [`quinn_proto`] on the worker's UDP path.
+//! The rustls backends: sans-IO noq-proto or quinn-proto on the worker's UDP path.
 //!
 //! TLS goes through rustls, which is what the rest of this workspace speaks,
 //! so a build selecting this backend links one TLS stack instead of two.
@@ -22,6 +22,8 @@ pub(crate) use connection::{End, Shared};
 
 use std::sync::Arc;
 
+#[cfg(feature = "noq")]
+use noq_proto as quinn_proto;
 use quinn_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -78,6 +80,9 @@ pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
 ) -> Result<Arc<quinn_proto::EndpointConfig>, Error> {
 	let mut config = quinn_proto::EndpointConfig::default();
+	#[cfg(feature = "noq")]
+	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
+	#[cfg(not(feature = "noq"))]
 	config.cid_generator(move || Box::new(Cids { shard }));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
@@ -221,7 +226,9 @@ fn transport_config(config: &Transport) -> Result<Arc<quinn_proto::TransportConf
 	transport.congestion_controller_factory(match config.congestion {
 		Congestion::Loss => Arc::new(quinn_proto::congestion::CubicConfig::default())
 			as Arc<dyn quinn_proto::congestion::ControllerFactory + Send + Sync>,
-		// quinn's BBR is v1.
+		#[cfg(feature = "noq")]
+		Congestion::Delay => Arc::new(quinn_proto::congestion::Bbr3Config::default()),
+		#[cfg(not(feature = "noq"))]
 		Congestion::Delay => Arc::new(quinn_proto::congestion::BbrConfig::default()),
 	});
 	Ok(Arc::new(transport))

@@ -208,15 +208,15 @@ pub fn qlog_supported() -> bool {
 /// reaches for a default, since `QuicBackend` has no variants there.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 fn default_quic_backend() -> QuicBackend {
-	#[cfg(feature = "quinn")]
-	{
-		QuicBackend::Quinn
-	}
-	#[cfg(all(feature = "noq", not(feature = "quinn")))]
+	#[cfg(feature = "noq")]
 	{
 		QuicBackend::Noq
 	}
-	#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
+	#[cfg(all(feature = "quinn", not(feature = "noq")))]
+	{
+		QuicBackend::Quinn
+	}
+	#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
 	{
 		QuicBackend::Quiche
 	}
@@ -224,9 +224,9 @@ fn default_quic_backend() -> QuicBackend {
 
 #[cfg(test)]
 mod tests {
-	#[cfg(feature = "quinn")]
+	#[cfg(feature = "noq")]
 	#[test]
-	fn quinn_is_the_default_backend() {
-		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Quinn));
+	fn noq_is_the_default_backend() {
+		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Noq));
 	}
 }

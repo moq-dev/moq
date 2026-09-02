@@ -17,10 +17,7 @@ pub use web_transport_iroh;
 
 /// The congestion control family to install, defaulting to loss-based.
 ///
-/// Unlike the other backends we don't default to BBR here: noq's BBRv3 subtracts
-/// without a floor when computing the inflight bytes at the loss event, so a single
-/// packet loss can underflow and panic, taking the whole process with it. Delay-based
-/// stays reachable, but only when an operator asks for it by name.
+/// iroh uses loss-based congestion control unless delay-based is requested.
 fn congestion_control(quic: &crate::quic::Resolved) -> CongestionControl {
 	quic.congestion_control.unwrap_or(CongestionControl::Loss)
 }
@@ -435,8 +432,7 @@ mod tests {
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
 	}
 
-	/// noq's BBRv3 panics on loss, so an unset knob must land on CUBIC here even
-	/// though every other backend defaults to BBR.
+	/// An unset knob lands on CUBIC, while an explicit delay request gets BBRv3.
 	#[test]
 	fn congestion_control_defaults_to_loss() {
 		let mut quic = crate::quic::Config::default();
