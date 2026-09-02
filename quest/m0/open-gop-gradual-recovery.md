@@ -1,4 +1,4 @@
-# [M] Open-GOP gradual recovery trims through the recovery picture
+# [M] Open-GOP gradual recovery withholds display until the recovery picture
 
 ## Goal
 
@@ -6,7 +6,9 @@ A viewer tuning in at an H.264 recovery point with `recovery_frame_cnt > 0`
 never displays a picture before recovery completes, and a viewer already
 playing shows every frame. Today such a stream tunes in with the same
 glitches as any open GOP, and the leading-picture rule cannot help because the
-unsafe pictures sit at or after the keyframe timestamp.
+unsafe pictures sit at or after the keyframe timestamp. Recovery points with
+`broken_link_flag` set are out of scope: there even a continuous viewer must
+withhold display (H.264 D.2.8), which is a different rule with its own plan.
 
 ## Plan
 
