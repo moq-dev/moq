@@ -186,12 +186,14 @@ impl<E: CatalogExt> Producer<E> {
 		self.track.track()
 	}
 
-	/// How the encoder classified the packet it published most recently: real
-	/// audio, or the comfort noise Opus sends while the input is silent.
+	/// Whether the packet published most recently coded audio, or withheld it
+	/// because the input was silent.
 	///
 	/// A local "am I talking" indicator without running a second voice detector
-	/// over the microphone. [`Activity::Active`] until the first packet, and for
-	/// codecs without a DTX mode.
+	/// over the microphone, though a silent run is punctuated by coded frames
+	/// that read [`Activity::Active`], so hold the indicator across those rather
+	/// than following it packet by packet. [`Activity::Active`] until the first
+	/// packet, and for codecs without a discontinuous mode.
 	pub fn activity(&self) -> Activity {
 		self.activity
 	}

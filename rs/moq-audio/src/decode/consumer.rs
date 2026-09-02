@@ -124,8 +124,8 @@ impl Consumer {
 
 	/// Read the next decoded PCM frame, or `None` when the track ends.
 	///
-	/// [`Frame::activity`] reports whether the samples came from real audio or
-	/// Opus comfort noise. It describes where the frame begins, so a resampled
+	/// [`Frame::activity`] reports whether the packet these samples came from
+	/// coded audio. It describes where the frame begins, so a resampled
 	/// frame that straddles a change carries the activity its first sample came
 	/// from and the next frame carries the new one.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
@@ -190,18 +190,28 @@ impl Consumer {
 
 			// The resampler hands back samples it was holding from earlier packets,
 			// so what comes out starts before the packet that filled its chunk. Track
-			// where each packet's activity ends and label the output by where it
-			// actually begins, not by the packet just submitted.
-			let activity = if self.resampler.is_some() {
+			// where each packet's activity ends so the output can be labelled by
+			// where it actually begins, not by the packet just submitted.
+			let resampled = self.resampler.is_some();
+			if resampled {
 				self.spans.push_back(ActivitySpan {
 					end: decoded_end,
 					activity,
 				});
+			}
+
+			// A packet shorter than the resampler's chunk leaves nothing to hand
+			// over yet. Read on rather than returning a frame with no samples, which
+			// a caller would otherwise see as audio arriving.
+			if pcm.is_empty() {
+				continue;
+			}
+
+			let activity = if resampled {
 				self.activity_at(timestamp)
 			} else {
 				activity
 			};
-
 			return Ok(Some(self.frame(pcm, timestamp, activity)?));
 		}
 	}

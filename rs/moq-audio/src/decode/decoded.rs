@@ -12,7 +12,8 @@ use crate::Activity;
 pub struct Decoded {
 	/// Interleaved samples, at [`Decoder::sample_rate`](super::Decoder::sample_rate).
 	pub samples: Vec<f32>,
-	/// Real audio, or the comfort noise an Opus sender emits while silent.
-	/// Always [`Activity::Active`] for codecs without a DTX mode.
+	/// Whether the sender coded audio for this packet or withheld it. Always
+	/// [`Activity::Active`] for codecs without a discontinuous mode, and for the
+	/// coded frames that punctuate a silent run.
 	pub activity: Activity,
 }

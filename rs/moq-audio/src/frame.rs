@@ -17,10 +17,10 @@ pub struct Frame {
 	pub timestamp: Timestamp,
 	/// The samples, in the layout the producer or consumer was built with.
 	pub data: Bytes,
-	/// What the decoder these samples came out of was doing: real audio, or Opus
-	/// comfort noise. Set on the way out of [`decode`](crate::decode) and ignored
-	/// on the way into [`encode`](crate::encode), which classifies what it
-	/// encodes rather than what it was told.
+	/// Whether the packet these samples came out of coded audio, or none at all.
+	/// Set on the way out of [`decode`](crate::decode) and ignored on the way
+	/// into [`encode`](crate::encode), which classifies what it encodes rather
+	/// than what it was told.
 	pub activity: Activity,
 }
 

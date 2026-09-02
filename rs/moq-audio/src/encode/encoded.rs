@@ -12,8 +12,9 @@ use crate::Activity;
 pub struct Encoded {
 	/// The packet, in the framing the matching catalog importer expects.
 	pub payload: Bytes,
-	/// Real audio, or the comfort noise Opus sends while the input is silent.
-	/// Always [`Activity::Active`] for codecs without a DTX mode.
+	/// Whether this packet codes audio, or withholds it because the input was
+	/// silent. Always [`Activity::Active`] for codecs without a discontinuous
+	/// mode, and for the coded frames that punctuate a silent run.
 	pub activity: Activity,
 }
 

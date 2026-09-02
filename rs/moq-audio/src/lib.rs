@@ -40,10 +40,10 @@
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
 //! expects. [`Frame`] is a thin owned buffer: a timestamp, a payload, and the
-//! [`Activity`] it was decoded from, which is how a caller tells real audio from
-//! the comfort noise an Opus sender emits while silent. PCM layout lives on the
-//! producer / consumer via [`encode::Input`] / [`decode::Config`], not on each
-//! frame, so callers can't drift between calls.
+//! [`Activity`] it was decoded from, which is how a caller tells coded audio
+//! from the frames an Opus sender withholds while its input is silent. PCM
+//! layout lives on the producer / consumer via [`encode::Input`] /
+//! [`decode::Config`], not on each frame, so callers can't drift between calls.
 
 #[cfg(feature = "aac")]
 mod aac;
