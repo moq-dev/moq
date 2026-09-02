@@ -41,9 +41,9 @@ regression test per Root Cause First.
 - [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: give Reader a synchronous decode so the publisher need not read controls ahead
 - [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group ends the subscription, so offered load silently decays mid-run
 - [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: "codec rejects frames that inflate past the default cap" times out under parallel test load
-- [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: the publication has no generation, so a flush after EOS cannot restart it
+- [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync leaves no trace, no log, no counter
 - [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
-- [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
+- [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against 32
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Open-GOP H.264: a regression fixture and a measured cold tune-in
 - [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them

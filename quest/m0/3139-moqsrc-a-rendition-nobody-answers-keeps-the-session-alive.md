@@ -2,32 +2,41 @@
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3139](https://github.com/moq-dev/moq/issues/3139)
-within the issue's stated scope and boundaries.
+A catalog that names a track its publisher never serves does not park a
+subscriber: once the catalog closes, the subscription to that track resolves
+with an error, `moqsrc` drops that one pump, and the session delivers its
+terminal EOS when the served renditions drain.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+`moqsrc`'s pumps (`rs/moq-gst/src/source/imp.rs`) each await their own
+subscription, and `follow_catalog` deliberately keeps them alive across
+catalog close, because "has not taken a pad yet" also describes a pump spawned
+microseconds ago; cancelling on close dropped whole broadcasts, which
+`a_closing_catalog_keeps_the_renditions_it_named` guards against. So a pump for
+a rendition nobody ever answers keeps the session open until the broadcast
+ends or the element stops.
 
-### Issue context
+moq-net already fails fast for one case: `broadcast::Consumer::track` returns
+`NotFound` when there is no producer and no `Dynamic`. The parking case is a
+request that stays queued forever: a `track::Request` from `reserve_track`
+that is never accepted, or a producer whose info never arrives, and over the
+network every broadcast is a `Dynamic`, so that is the common shape.
+A timeout would stand in for information the publisher has, so the fix is a
+promise on the publisher side: closing the catalog means the announced set is
+final.
 
-Split out of [#3130](https://github.com/moq-dev/moq/pull/3130), where two attempts at this traded one bug for a worse one.
-
-`moqsrc`'s pumps each wait for their subscription to resolve. If a catalog names a rendition the publisher never serves, that pump waits forever. When the catalog track then closes, the session loop has nothing left to make progress on: it waits for the remaining pumps to drain, and that one never does. The session holds its connection open and never delivers a terminal EOS until the broadcast ends or the element is stopped.
-
-Cancelling the not-yet-live pumps on catalog close is the obvious fix and it is wrong. "Has not taken a pad yet" does not mean "will never take one" -- it also describes a pump that was spawned microseconds ago and has not been polled. A publisher that names its tracks and then finishes the catalog produces exactly that: the snapshot and the close arrive back to back, so the close is routinely observed before the freshly spawned pumps run at all, and every rendition it just announced gets cancelled before it can subscribe. That drops the entire broadcast instead of one bad rendition, which is far worse than the hang. #3130 tried it, reproduced the media loss in a test, and reverted; `a_closing_catalog_keeps_the_renditions_it_named` guards against re-introducing it.
-
-Separating the two needs a signal the catalog does not carry today. Some options, none obviously right:
-
-- A bounded grace period after the catalog closes, before giving up on a still-unresolved subscription. Simple, but it is a timeout standing in for information, and picking the number is guesswork.
-- Ask the moq layer whether a track can still be served: a subscription with no producer and no `Dynamic` that could ever answer it is already knowable inside `broadcast::Consumer`, and surfacing it would make this decidable rather than timed.
-- Treat catalog closure as a promise that the announced set is final, and have the publisher side finish tracks it never intends to serve, so the subscription resolves rather than parking.
-
-The middle option looks the most principled, since it fixes the class rather than this element, but it widens `moq-net`'s surface.
-
-Note this is not a regression from #3130: before it, the same input parked `reconcile` inside the catalog loop, so the session hung there instead.
+- moq-net: dropping or refusing an unaccepted `track::Request`, and closing a
+  producer that never published info, resolves every pending subscribe with
+  `NotFound`; verify and pin that.
+- hang publishers (`moqsink` reserves per pad, `moq-cli` and the FFI create
+  tracks by name): when the catalog finishes, refuse every reserved or
+  info-less track the catalog named, so their subscribers resolve.
+- moqsrc: a pump whose subscribe resolves with an error ends that pump alone,
+  and the loop exits once the catalog is closed and the served pumps drain.
+- Tests: the existing test keeps its media; a new one names a reserved track,
+  finishes the catalog, and asserts EOS within the served renditions' drain
+  rather than at element stop.
 
 ## Closes
 

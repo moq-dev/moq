@@ -1,45 +1,42 @@
-# [M] moqsink: the publication has no generation, so a flush after EOS cannot restart it
+# [L] moqsink: a flushing restart after EOS opens a new publication generation
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3115](https://github.com/moq-dev/moq/issues/3115)
-within the issue's stated scope and boundaries.
+`FLUSH_STOP` after `moqsink` has completed EOS resumes data flow, as GStreamer
+specifies: the element publishes a fresh broadcast, catalog, and producers
+without cycling through `READY`, and a buffer arriving after EOS is either
+written into the new generation or refused, never into finalized producers.
 
 ## Plan
 
-Rescoped during the 2026-08 grooming: items 2 and 3 landed on main via #2998
-(Completion/CompletionHandle) and #3104. What remains is item 1: give the
-publication a generation so an element-wide flush after EOS can restart it.
+#2998 landed `Completion` in `rs/moq-gst/src/sink/session.rs`: a monotonic
+per-session state (`Open`, `Eos`, `Failed`) whose first terminal transition
+wins, with session identity carried by pointer equality on the handle. That
+is the right shape for one generation and deliberately has no way back. In
+`sink/imp.rs`, `FlushStart`, `FlushStop`, and `StreamStart` are all guarded on
+the live state being open, so once `maybe_finish_locked` finished the
+completion they are no-ops, `render` keeps answering `FlowError::Eos`, and the
+only reset is `start_session` on the `READY` transition.
 
-### Issue context
+Design, settled with the #2998 author: `Completion::Eos` stays terminal for
+its generation. The first `FLUSH_STOP` after EOS opens one new generation
+globally (a fresh `CompletionHandle`, broadcast, catalog, and producers);
+every other pad joins that generation on its next buffer rather than each pad
+opening its own, so aggregate EOS membership is one set per generation.
 
-Split out of the adversarial reviews on #3101, #3102 and #3104. Each of those fixes a concrete `moqsink` lifecycle bug, and each one stops at the same wall: **a `moqsink` publication has no notion of a generation.** Once it ends, the only way back is a cycle through `READY`.
-
-Three findings across those PRs are all the same root cause.
-
-##### 1. A flushing seek after the element completed EOS is broken
-
-Once the last pad sends EOS, `maybe_post_eos` finalizes every producer and takes the catalog. There is no way to reopen them. #3104 makes a post-EOS buffer answer `FlowError::Eos` instead of writing into finalized producers, which is an improvement over silently dropping it, but GStreamer specifies that `FLUSH_STOP` clears EOS and data flow resumes. We cannot honour that today.
-
-A correct fix creates a new publication generation on a flushing restart (new broadcast/catalog/producers) rather than treating the first EOS as terminal for the element.
-
-##### 2. `eos_posted` conflates two facts
-
-It answers both "the producers were finalized" and "the EOS message was posted". #3104 gates the flush reset on it and therefore inherits the conflation. #2998 separates the two, which is what its per-pad lifecycle rewrite buys, but that separation does not reproduce standalone.
-
-##### 3. The identity check and the bus post are not atomic
-
-`post_session_error` (#3102) checks whether a session is still current, releases the element lock, then posts. A `PAUSED -> READY -> PAUSED` completing inside `post_message` still lands a stale error on the replacement's bus. The lock cannot be held across the post: `post_message` runs bus sync handlers inline on the calling thread, and a handler that reads an element or pad property would deadlock on it.
-
-The natural remedy (an in-flight posting permit that teardown waits on) has the same problem in a different place: a sync handler calling `set_state(READY)` re-enters teardown on the thread already holding the permit. #2998 hits this too and accepts the window explicitly.
-
-Deferring the post to a main-loop idle source would decouple it, at the cost of changing when the error is delivered and requiring a running main loop.
-
-##### Why this is filed rather than fixed
-
-Each PR is a strict improvement over `main` and none of them can close these without redesigning the publication lifecycle. That redesign overlaps heavily with #2998, so it should be settled once rather than three times.
-
-@arielmol  -  flagging you since #2998 is the closest thing to a design for this, and its `Completion` state machine is most of the way to a generation. Worth deciding whether generations belong in that PR or in a follow-up on top of it.
+- Separate "the producers were finalized" from "the EOS message was posted";
+  the per-pad lifecycle from #2998 already distinguishes them for pads, and
+  the element-level latch (`eos_delivered`) needs the same split so a
+  generation can post EOS again.
+- Pad lifecycles reset into the new generation on join, reusing
+  `lifecycle.reset()` from `start_session`.
+- The stale-error window in `post_session_error` (identity check, then a bus
+  post outside the lock, which a sync handler may re-enter) is a separate
+  delivery problem that generations do not close; leave it as documented.
+- Tests: EOS on every pad, then `FLUSH_STOP` and buffers, asserts a second
+  broadcast with a second catalog and a second EOS; a pad that flushes late
+  joins the current generation, not a third; the post-EOS buffer without a
+  flush still answers `Eos`.
 
 ## Closes
 

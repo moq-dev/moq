@@ -1,37 +1,29 @@
-# [S] obs: the plugin targets OBS 31.1.1 while Linux CI links against nixpkgs' 32.1.2
+# [S] obs: the plugin targets OBS 31.1.1 while Linux CI links against 32
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2868](https://github.com/moq-dev/moq/issues/2868)
-within the issue's stated scope and boundaries.
+The libobs the released macOS and Windows plugin binaries link against is the
+same major as the one the Linux compile gate checks, so a libobs API change
+cannot pass CI and surface only in a release build on the platforms with no
+gate.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+`cpp/obs/buildspec.json` pins obs-studio 31.1.1, which is what obs-deps hands
+a macOS or Windows build. `flake.nix`'s `libobs-headers` pins the same, and
+`just obs check` fails if the two drift. Neither is what Linux links: the
+`obs.yml` gate uses nixpkgs' obs-studio, a major release ahead, and nothing
+compares that third version to the other two.
 
-### Issue context
-
-Split out of a review finding on #2867 (CodeRabbit flagged the stale pin; the divergence below is what makes it worth its own issue).
-
-#### The two versions
-
-- `cpp/obs/buildspec.json` pins **obs-studio 31.1.1**. That's what the obs-deps download gives a macOS or Windows build, so it's the libobs the *released* plugin binaries link against.
-- nixpkgs currently carries **obs-studio 32.1.2**, which is what a Linux `just obs build` and the new `obs.yml` gate link against.
-- `flake.nix`'s `libobs-headers` also pins 31.1.1, matching buildspec.json (#2867 added a guard in `just obs check` that fails if those two drift).
-
-So the Linux compile gate and the shipped macOS/Windows binaries are a major OBS release apart. Nothing has broken yet, but that gap is exactly where a libobs API change gets through CI and shows up only in a release build, on the platforms with no compile gate at all.
-
-#### What to do
-
-Bump `cpp/obs/buildspec.json` to the current stable (32.2.2 at time of writing) and move `libobs-headers` in `flake.nix` in the same commit. Needs:
-
-- new hashes for the obs-studio, prebuilt obs-deps and Qt6 archives (macOS + Windows entries), and the nix `fetchzip` hash;
-- a check that `libobs/obsconfig.h.in` and `frontend/api/obs-frontend-api.h` are still where `libobs-headers` expects them;
-- a real `just obs build` on macOS, since that's the platform the release actually ships and the one PR CI never compiles.
-
-`just obs check` will fail until both pins move together, which is the intended tripwire rather than an obstacle.
+- Bump `buildspec.json` and `libobs-headers` together to the current stable,
+  32.2.2 as of 2026-08-14: new hashes for the obs-studio, prebuilt obs-deps,
+  and Qt6 archives (macOS and Windows) plus the nix `fetchzip` hash.
+- Check `libobs/obsconfig.h.in` and `frontend/api/obs-frontend-api.h` are
+  still where `libobs-headers` expects them.
+- Extend the drift guard to the nixpkgs version `just obs ci` links against,
+  so the next gap is a failing check rather than a discovery.
+- A real `just obs build` on macOS, since that is the platform the release
+  ships and PR CI never compiles.
 
 ## Closes
 
