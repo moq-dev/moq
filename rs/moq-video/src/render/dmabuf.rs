@@ -519,6 +519,46 @@ mod tests {
 		assert_eq!(planes[1].stride, 64, "chroma is half as wide but two bytes a texel");
 	}
 
+	/// Fully planar 4:2:0 splits into three single-component images, each with
+	/// its own offset and pitch.
+	///
+	/// The one arm of the split with no coverage on a builder otherwise: the
+	/// three-plane case only shows up on a driver that will allocate YU12, and
+	/// the difference from NV12 is exactly what a shared helper would get wrong
+	/// once for both.
+	#[test]
+	fn planar_420_imports_as_three_single_component_planes() {
+		let size = Size::new(64, 64);
+		let shape = Shape::of(DrmFormat::YUV420, size).expect("YU12 is importable");
+		assert_eq!(shape.layout, Layout::I420);
+
+		assert!(
+			shape
+				.planes(&[DmaBufPlane::new(0, 64), DmaBufPlane::new(64 * 64, 32)])
+				.is_err(),
+			"two planes is NV12's count, not this one's"
+		);
+
+		let planes = shape
+			.planes(&[
+				DmaBufPlane::new(0, 64),
+				DmaBufPlane::new(64 * 64, 32),
+				DmaBufPlane::new(64 * 64 + 32 * 32, 32),
+			])
+			.expect("a complete YU12 buffer");
+		assert_eq!(planes.len(), 3);
+		for plane in &planes {
+			assert_eq!(plane.format, wgpu::TextureFormat::R8Unorm);
+		}
+		assert_eq!(planes[0].size, size);
+		// Cb and Cr each cover a quarter of the pixels at one byte a texel, so
+		// unlike NV12 their rows really are half as long.
+		assert_eq!(planes[1].size, Size::new(32, 32));
+		assert_eq!(planes[2].size, Size::new(32, 32));
+		assert_eq!(planes[2].offset, 64 * 64 + 32 * 32);
+		assert_eq!(planes[2].stride, 32);
+	}
+
 	/// Packed formats stay one image, and needs no color matrix.
 	#[test]
 	fn packed_formats_import_as_a_single_plane() {
