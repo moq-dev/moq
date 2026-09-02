@@ -31,9 +31,11 @@ holds that consumer and never reads the counter, and `discontinuity_indicator`
 is hardcoded false at the exporter's one adaptation-field site.
 
 - Forward the counter from `ExportSource` to `ts::Export`. When it changes:
-  clear `last_psi`, `last_si`, and `last_pcr` so the next frame is due; set
-  `discontinuity_indicator` on the first packet of the PCR PID in the new
-  epoch, which is what the flag is for.
+  clear `last_psi`, `last_si`, and `last_pcr` so the next frame is due, and
+  carry a pending `discontinuity_indicator` that the next packet on the PCR
+  PID sets exactly once. That packet is the standalone PCR-only one from
+  `pcr_packet`, whose flags byte is hardcoded today, not the PES adaptation
+  field in `write_pes`; an audio-only program never reaches the latter.
 - `Delivery` in the cli export path calls `Pacer::hurry` on the same signal;
   that function exists for this and is only reached from an overshoot today.
 - Tests: a rewound-timeline fixture asserts SI re-emitted within one interval,

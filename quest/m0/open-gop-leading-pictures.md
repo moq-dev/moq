@@ -5,7 +5,11 @@
 A viewer joining an open-GOP broadcast at a recovery point never hands the
 decoder a leading picture whose references it does not have, while a viewer
 already playing keeps every frame. The rule is the same for H.264
-recovery-point keyframes and H.265 CRA pictures.
+recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
+contribution case, and what the reference capture carries) and H.265 CRA
+pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: the
+splitter does not retain the count, and unsafe pictures there can sit at or
+after the keyframe timestamp, so it needs its own plan.
 
 ## Plan
 
@@ -19,11 +23,16 @@ everyone.
 
 - In the JS consumer (`js/hang/src/container/consumer.ts` forces the first
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
-  it as `"key"`): for the first group decoded after a subscribe or a
-  discontinuity, skip delta frames stamped before that group's keyframe. Every
-  later group is passed through untouched.
-- The same rule in the Rust decode path (`moq-video` decode consumers), so
-  native playback and the transcoder tune in the same way.
+  it as `"key"`): for the first group after any non-continuous transition,
+  skip delta frames stamped before that group's keyframe. That covers a
+  subscribe, a declared discontinuity, and a latency skip: `#checkLatency`
+  records the skip through `#gap` and `next()` reports the next frame with
+  `continuous: false` without touching the discontinuity counter, and a viewer
+  that skipped into a later GOP lacks its references just like a cold join.
+  Every continuous group is passed through untouched.
+- The same rule in the Rust decode path (`moq-video` decode consumers), with
+  an equivalent non-continuous signal from `container::Consumer`, so native
+  playback and the transcoder tune in the same way.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second, in both
   languages.
