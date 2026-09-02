@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -24,8 +24,10 @@ use moq_net::Timestamp;
 /// Use [`next`](Self::next) to pull byte chunks: the first call returns the merged
 /// init segment (ftyp + multi-track moov), subsequent calls return moof+mdat
 /// fragments. By default each video fragment covers one GOP (rolled over on
-/// keyframes); [`with_fragment_duration`](Self::with_fragment_duration) caps the
-/// fragment duration for downstream consumers that throttle by fragment rate.
+/// keyframes) and every audio track rolls at the same boundaries, so the
+/// fragments of a broadcast line up in time;
+/// [`with_fragment_duration`](Self::with_fragment_duration) caps the fragment
+/// duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
 ///
 /// [`next_fragment`](Self::next_fragment) returns the same bytes wrapped in a
@@ -49,6 +51,11 @@ pub struct Export<S: Stream> {
 	/// Set after the init segment has been emitted; subsequent catalog updates only
 	/// (un)subscribe tracks without re-emitting init.
 	init_emitted: bool,
+
+	/// Fragments encoded but not yet returned. A video GOP boundary rolls every
+	/// audio track alongside the video one, which produces more than one fragment
+	/// at a time; they're returned in ascending first-sample order.
+	outgoing: VecDeque<Fragment>,
 }
 
 /// One emitted CMAF chunk: either the init segment or a moof+mdat fragment,
@@ -77,14 +84,16 @@ struct Fmp4Track {
 	pending: Option<Frame>,
 
 	/// Frames accumulated for the current fragment. Flushed as a single
-	/// moof+mdat on the next keyframe (video) or duration cap.
+	/// moof+mdat at a GOP boundary (a keyframe on this track for video, the
+	/// keyframe of any video track for audio) or on the duration cap.
 	buffer: Vec<Frame>,
 
 	/// Whether the first frame of the current `buffer` was a keyframe, i.e. the
 	/// fragment it produces can start an HLS segment. Meaningless for audio.
 	buffer_independent: bool,
 
-	/// True if this track is video. Video tracks roll fragments on keyframes.
+	/// True if this track is video. Video tracks roll fragments on their own
+	/// keyframes and drag the audio tracks along with them.
 	is_video: bool,
 
 	/// True for Opus audio, whose packets carry their duration in the TOC byte.
@@ -118,6 +127,7 @@ impl<S: Stream> Export<S> {
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			init_emitted: false,
+			outgoing: VecDeque::new(),
 		}
 	}
 
@@ -132,8 +142,9 @@ impl<S: Stream> Export<S> {
 
 	/// Cap the fragment (moof+mdat) duration.
 	///
-	/// By default video fragments roll over on each keyframe (one fragment
-	/// per GOP); audio-only tracks emit one fragment per sample. Setting this
+	/// By default video fragments roll over on each keyframe (one fragment per
+	/// GOP) and audio rolls with them; a broadcast with no video at all emits
+	/// one audio fragment per sample, having no GOP to follow. Setting this
 	/// caps each fragment to roughly `duration` of frames, useful for
 	/// downstream consumers that throttle by fragment rate. [`Duration::ZERO`]
 	/// emits one fragment per frame (the historical behavior); otherwise the
@@ -174,6 +185,11 @@ impl<S: Stream> Export<S> {
 		// track buffers a whole GOP, and stack use must stay flat however many
 		// samples that is.
 		loop {
+			// 0. Return anything a previous GOP boundary rolled but couldn't hand back yet.
+			if let Some(fragment) = self.outgoing.pop_front() {
+				return Poll::Ready(Ok(Some(fragment)));
+			}
+
 			// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 			while let Some(catalog) = self.catalog.as_mut() {
 				match catalog.poll_next(waiter)? {
@@ -263,7 +279,11 @@ impl<S: Stream> Export<S> {
 				// no keyframe will ever roll the fragment. These never depend on the
 				// successor, so emit immediately instead of buffering the frame until
 				// the next one flushes it.
-				let has_video = self.tracks.values().any(|t| t.is_video);
+				//
+				// A finished video track can't roll anything either, so audio that
+				// outlives the video falls back to per-frame rather than buffering
+				// until it finishes too.
+				let has_video = self.tracks.values().any(|t| t.is_video && !t.finished);
 				let per_frame = frag == Some(Duration::ZERO) || (frag.is_none() && !has_video);
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frame = track.pending.take().unwrap();
@@ -281,12 +301,27 @@ impl<S: Stream> Export<S> {
 					return Poll::Ready(Ok(Some(fragment)));
 				}
 				if should_flush(track, &frame, frag) {
+					// A video keyframe closes a GOP for the whole presentation, not
+					// just for this track: audio has no keyframes of its own, so it
+					// rolls here to keep every track's fragments covering the same
+					// span. Without it an audio track would buffer until it finished.
+					let gop = track.is_video && frame.keyframe;
+					let start = track.buffer[0].timestamp;
 					let frames = std::mem::take(&mut track.buffer);
 					let fragment = emit_fragment(track, frames, Some(&frame))?;
 					// The flushed run is done; the incoming frame opens the next buffer.
 					track.buffer_independent = frame.keyframe;
 					track.buffer.push(frame);
-					return Poll::Ready(Ok(Some(fragment)));
+					if !gop {
+						return Poll::Ready(Ok(Some(fragment)));
+					}
+					// Video first, so a tie at the same start puts the track that
+					// drove the boundary ahead of the audio that followed it.
+					let mut rolled = vec![(start, fragment)];
+					rolled.extend(self.flush_audio()?);
+					rolled.sort_by_key(|(start, _)| *start);
+					self.outgoing.extend(rolled.into_iter().map(|(_, fragment)| fragment));
+					return Poll::Ready(Ok(self.outgoing.pop_front()));
 				}
 				if track.buffer.is_empty() {
 					track.buffer_independent = frame.keyframe;
@@ -329,6 +364,30 @@ impl<S: Stream> Export<S> {
 
 			return Poll::Pending;
 		}
+	}
+
+	/// Encode every audio track's buffered run as a fragment, tagged with the
+	/// timestamp of its first sample so the caller can order it against the
+	/// video fragment it accompanies.
+	///
+	/// Called only from a video GOP boundary, so no audio track is the one
+	/// currently being appended to.
+	fn flush_audio(&mut self) -> Result<Vec<(Timestamp, Fragment)>> {
+		let mut fragments = Vec::new();
+		for track in self.tracks.values_mut() {
+			if track.is_video || track.buffer.is_empty() {
+				continue;
+			}
+			let start = track.buffer[0].timestamp;
+			let frames = std::mem::take(&mut track.buffer);
+			// The pending frame is this track's next sample, so it bounds the
+			// duration of the run's last one.
+			let successor = track.pending.take();
+			let fragment = emit_fragment(track, frames, successor.as_ref())?;
+			track.pending = successor;
+			fragments.push((start, fragment));
+		}
+		Ok(fragments)
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
@@ -556,7 +615,9 @@ pub(crate) fn extract_init(
 
 /// Should we flush `track.buffer` before appending the incoming `frame`?
 /// Triggers on a video keyframe (one fragment per GOP) or the duration cap.
-/// Per-frame modes never buffer and are handled before this check.
+/// Audio has no keyframe of its own and is rolled by the video track instead,
+/// via [`Export::flush_audio`]. Per-frame modes never buffer and are handled
+/// before this check.
 fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
 	if track.buffer.is_empty() {
 		return false;

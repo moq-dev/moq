@@ -10,7 +10,7 @@ pub(crate) struct Live {
 	pub(crate) track: crate::container::Producer<crate::catalog::hang::Container>,
 	pub(crate) catalog: crate::catalog::Producer,
 	consumer: moq_net::broadcast::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Live {
@@ -27,8 +27,24 @@ impl Live {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog,
 			consumer,
-			_broadcast: broadcast,
+			broadcast,
 		}
+	}
+
+	/// Add another track named `name` to the same broadcast, with `insert`
+	/// registering its catalog rendition. Used to build an A/V broadcast.
+	pub(crate) fn add_track(
+		&mut self,
+		name: &str,
+		insert: impl FnOnce(&mut crate::catalog::Producer, String),
+	) -> crate::container::Producer<crate::catalog::hang::Container> {
+		let name = self.broadcast.unique_name(name);
+		let track = self
+			.broadcast
+			.create_track(name, hang::container::track_info())
+			.unwrap();
+		insert(&mut self.catalog, track.name().to_string());
+		crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
 	}
 
 	/// One Avc3-shape H.264 rendition (320x240 at 30 fps).

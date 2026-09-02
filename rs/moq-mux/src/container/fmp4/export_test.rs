@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
@@ -769,6 +769,191 @@ fn a_long_gop_does_not_cost_a_stack_frame_per_sample() {
 		.expect("spawn");
 
 	run.join().expect("a long GOP overflowed the stack");
+}
+
+/// An A/V broadcast must roll its audio fragments alongside the video ones.
+///
+/// Audio has no keyframes, so with the default (per-GOP) fragmenting it has no
+/// rollover trigger of its own: its samples used to pile up in the track buffer
+/// and land in a single `traf` after the video track had already finished, which
+/// left a player seeking to a video fragment with no audio to go with it.
+#[tokio::test(start_paused = true)]
+async fn audio_fragments_roll_with_the_video_gop() {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let mut live = Live::avc3();
+	let mut audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// Three GOPs of three 30 fps frames, keyframes at 0, 99 ms and 198 ms.
+	for i in 0..9u64 {
+		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+	}
+	// 20 ms Opus packets (TOC 0x08) covering the same span and a little past it.
+	for i in 0..12u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+			.unwrap();
+	}
+	live.track.finish().unwrap();
+	audio.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = fragment_now(&mut exporter).await;
+	assert!(init.init);
+	let (video_id, audio_id) = track_ids(&init.data);
+
+	// Every fragment, tagged with the track it belongs to and its sample count.
+	let fragments: Vec<(u32, usize)> = drain_now(&mut exporter)
+		.await
+		.iter()
+		.map(|fragment| {
+			let trafs = traf_samples(&fragment.data);
+			assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+			trafs[0]
+		})
+		.collect();
+
+	// Audio rolls with the video GOP, so the two tracks alternate: five 20 ms
+	// packets beside each three-frame GOP, then the tail of both tracks.
+	assert_eq!(
+		fragments,
+		vec![
+			(video_id, 3),
+			(audio_id, 5),
+			(video_id, 3),
+			(audio_id, 5),
+			(video_id, 3),
+			(audio_id, 2),
+		],
+	);
+}
+
+/// A simulcast ladder rolls each video track on its own keyframes: one
+/// rendition's GOP boundary must not split another's, or the second rendition's
+/// fragments stop being independently decodable. Audio rolls at whichever
+/// boundary comes first, so it still never accumulates past one GOP.
+#[tokio::test(start_paused = true)]
+async fn simulcast_keyframes_only_roll_their_own_video_track() {
+	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
+
+	let mut live = Live::avc3();
+	let mut fast = live.add_track(".avc3", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+	let mut audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// The same 30 fps cadence on both video tracks, but a three-frame GOP on one
+	// and a two-frame GOP on the other, so their keyframes rarely coincide.
+	for i in 0..9u64 {
+		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+	}
+	for i in 0..8u64 {
+		fast.write(video_frame(i * 33_000, i % 2 == 0)).unwrap();
+	}
+	for i in 0..12u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+			.unwrap();
+	}
+	live.track.finish().unwrap();
+	fast.finish().unwrap();
+	audio.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = fragment_now(&mut exporter).await;
+	assert!(init.init);
+	let audio_id = track_ids(&init.data).1;
+
+	let mut per_track: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
+	for fragment in drain_now(&mut exporter).await {
+		let trafs = traf_samples(&fragment.data);
+		assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+		let (track_id, samples) = trafs[0];
+		assert!(
+			fragment.independent,
+			"track {track_id} fragment of {samples} samples was split off a keyframe",
+		);
+		per_track.entry(track_id).or_default().push(samples);
+	}
+
+	// Each video track keeps its own GOP length; the audio track rolls at every
+	// boundary either of them draws, plus the tail both leave behind.
+	let mut video: Vec<Vec<usize>> = per_track
+		.iter()
+		.filter(|(id, _)| **id != audio_id)
+		.map(|(_, samples)| samples.clone())
+		.collect();
+	video.sort();
+	assert_eq!(video, vec![vec![2, 2, 2, 2], vec![3, 3, 3]]);
+	assert_eq!(per_track[&audio_id], vec![4, 1, 2, 3, 2]);
+}
+
+/// The `(video, audio)` track ids declared by an init segment.
+fn track_ids(init: &Bytes) -> (u32, u32) {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut video = None;
+	let mut audio = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		let mp4_atom::Any::Moov(moov) = atom else {
+			continue;
+		};
+		for trak in &moov.trak {
+			match trak.mdia.hdlr.handler.to_string().as_str() {
+				"vide" => video = Some(trak.tkhd.track_id),
+				"soun" => audio = Some(trak.tkhd.track_id),
+				other => panic!("unexpected handler {other}"),
+			}
+		}
+	}
+	(video.expect("a video trak"), audio.expect("an audio trak"))
+}
+
+/// The `(track_id, sample count)` of every `traf` in a media fragment.
+fn traf_samples(fragment: &Bytes) -> Vec<(u32, usize)> {
+	let mut cursor = Cursor::new(fragment.as_ref());
+	let mut trafs = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+		let mp4_atom::Any::Moof(moof) = atom else {
+			continue;
+		};
+		for traf in moof.traf {
+			let samples = traf.trun.iter().map(|trun| trun.entries.len()).sum();
+			trafs.push((traf.tfhd.track_id, samples));
+		}
+	}
+	trafs
+}
+
+/// Every fragment the exporter can produce without waiting for more input.
+async fn drain_now(
+	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
+) -> Vec<crate::container::fmp4::Fragment> {
+	let mut fragments = Vec::new();
+	while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_fragment()).await {
+		match next.expect("exporter failed") {
+			Some(fragment) => fragments.push(fragment),
+			None => break,
+		}
+	}
+	fragments
 }
 
 /// The next fragment, required to be ready without another frame arriving.
