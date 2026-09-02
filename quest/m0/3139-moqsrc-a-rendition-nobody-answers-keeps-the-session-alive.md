@@ -26,12 +26,16 @@ A timeout would stand in for information the publisher has, so the fix is a
 promise on the publisher side: closing the catalog means the announced set is
 final.
 
-- moq-net: dropping or refusing an unaccepted `track::Request`, and closing a
-  producer that never published info, resolves every pending subscribe with
-  `NotFound`; verify and pin that.
+- moq-net keeps its generic semantics: a dropped `track::Request` or a
+  producer closed without a reason resolves pending subscribes with
+  `Error::Dropped`, as `rs/moq-net/src/model/track.rs` documents, and a
+  `request.reject(reason)` carries that reason. Verify and pin both; do not
+  fold `NotFound` into the drop path, since a handler lost to a publisher or
+  transport failure is not an absent track.
 - hang publishers (`moqsink` reserves per pad, `moq-cli` and the FFI create
-  tracks by name): when the catalog finishes, refuse every reserved or
-  info-less track the catalog named, so their subscribers resolve.
+  tracks by name): when the catalog finishes, `reject(Error::NotFound)` every
+  reserved or info-less track the catalog named, so their subscribers resolve
+  and the catalog meaning stays out of moq-net.
 - moqsrc: a pump whose subscribe resolves with an error ends that pump alone,
   and the loop exits once the catalog is closed and the served pumps drain.
 - Tests: the existing test keeps its media; a new one names a reserved track,

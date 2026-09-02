@@ -36,8 +36,14 @@ running thread touches state whose destructor already ran.
 - Fix the mechanism where it lives. If it is teardown ordering, an atexit
   handler that quiesces the runtime thread before static destructors run is
   the likely shape; do not add a `moq_shutdown` the contract does not ask for.
-- Remove `_exit` from the smoke client's success path. The failure paths keep
-  it for the separate `user_data` lifetime reason from #2675.
+- Remove `_exit` from the smoke client's success path. Returning is only safe
+  once every registration that holds the stack `ctx_t` has fired its terminal
+  callback: closing the session ends its status registration alone, while
+  `moq_origin_consume_announced`, `moq_consume_catalog`, and
+  `moq_consume_video` each keep the pointer until their own terminal, so close
+  and drain all of them before `return`, or a late frame callback reproduces
+  a second lifetime bug instead of isolating atexit teardown. The failure
+  paths keep `_exit` for the `user_data` lifetime reason from #2675.
 
 ## Closes
 

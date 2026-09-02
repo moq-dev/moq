@@ -29,12 +29,17 @@ opening its own, so aggregate EOS membership is one set per generation.
   the element-level latch (`eos_delivered`) needs the same split so a
   generation can post EOS again.
 - Pad lifecycles reset into the new generation on join, reusing
-  `lifecycle.reset()` from `start_session`.
+  `lifecycle.reset()` from `start_session`. That reset replaces the pad state
+  with `Pad::new()`, which has no caps and no track, and a normal
+  `FLUSH_STOP` resends the segment but not the sticky CAPS, so the joining
+  pad must replay its sticky caps and rebuild its producer before accepting
+  the first buffer of the new generation, or `push_buffer` drops it silently.
 - The stale-error window in `post_session_error` (identity check, then a bus
   post outside the lock, which a sync handler may re-enter) is a separate
   delivery problem that generations do not close; leave it as documented.
 - Tests: EOS on every pad, then `FLUSH_STOP` and buffers, asserts a second
-  broadcast with a second catalog and a second EOS; a pad that flushes late
+  broadcast with a second catalog, media in it from the first post-flush
+  buffer, and a second EOS; a pad that flushes late
   joins the current generation, not a third; the post-EOS buffer without a
   flush still answers `Eos`.
 
