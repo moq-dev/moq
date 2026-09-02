@@ -56,6 +56,15 @@ pub struct Export<S: Stream> {
 	/// audio track alongside the video one, which produces more than one fragment
 	/// at a time; they're returned in ascending first-sample order.
 	outgoing: VecDeque<Fragment>,
+
+	/// The `mfhd.sequence_number` the next fragment gets.
+	///
+	/// One counter for the file rather than one per track: ISO/IEC 14496-12
+	/// section 8.8.5 wants the numbers to increase from one movie fragment to the
+	/// next, and a per-track counter written into a multi-track file steps
+	/// backwards on every other fragment. Each track's own numbers still ascend
+	/// within the shared sequence, which is what CMAF asks for.
+	sequence_number: u32,
 }
 
 /// One emitted CMAF chunk: either the init segment or a moof+mdat fragment,
@@ -109,7 +118,6 @@ struct Fmp4Track {
 
 	track_id: u32,
 	timescale: u64,
-	sequence_number: u32,
 }
 
 impl Fmp4Track {
@@ -144,6 +152,7 @@ impl<S: Stream> Export<S> {
 			catalog_snapshot: None,
 			init_emitted: false,
 			outgoing: VecDeque::new(),
+			sequence_number: 1,
 		}
 	}
 
@@ -289,7 +298,7 @@ impl<S: Stream> Export<S> {
 			if let Some(name) = self.stranded_tail() {
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(track, frames, None)?;
+				let fragment = emit_fragment(track, &mut self.sequence_number, frames, None)?;
 				return Poll::Ready(Ok(Some(fragment)));
 			}
 
@@ -321,36 +330,25 @@ impl<S: Stream> Export<S> {
 					// first and retry this frame on the next poll.
 					if !track.buffer.is_empty() {
 						let frames = std::mem::take(&mut track.buffer);
-						let fragment = emit_fragment(track, frames, Some(&frame))?;
+						let fragment = emit_fragment(track, &mut self.sequence_number, frames, Some(&frame))?;
 						track.pending = Some(frame);
 						return Poll::Ready(Ok(Some(fragment)));
 					}
 					track.buffer_independent = frame.keyframe;
-					let fragment = emit_fragment(track, vec![frame], None)?;
+					let fragment = emit_fragment(track, &mut self.sequence_number, vec![frame], None)?;
 					return Poll::Ready(Ok(Some(fragment)));
 				}
 				if should_flush(track, &frame, frag) {
-					// A video keyframe closes a GOP for the whole presentation, not
-					// just for this track: audio has no keyframes of its own, so it
-					// rolls here to keep every track's fragments covering the same
-					// span. Without it an audio track would buffer until it finished.
-					let gop = track.is_video && frame.keyframe;
-					let start = track.buffer[0].timestamp;
+					if track.is_video && frame.keyframe {
+						self.roll_gop(&name, frame)?;
+						return Poll::Ready(Ok(self.outgoing.pop_front()));
+					}
 					let frames = std::mem::take(&mut track.buffer);
-					let fragment = emit_fragment(track, frames, Some(&frame))?;
+					let fragment = emit_fragment(track, &mut self.sequence_number, frames, Some(&frame))?;
 					// The flushed run is done; the incoming frame opens the next buffer.
 					track.buffer_independent = frame.keyframe;
 					track.buffer.push(frame);
-					if !gop {
-						return Poll::Ready(Ok(Some(fragment)));
-					}
-					// Video first, so a tie at the same start puts the track that
-					// drove the boundary ahead of the audio that followed it.
-					let mut rolled = vec![(start, fragment)];
-					rolled.extend(self.flush_audio()?);
-					rolled.sort_by_key(|(start, _)| *start);
-					self.outgoing.extend(rolled.into_iter().map(|(_, fragment)| fragment));
-					return Poll::Ready(Ok(self.outgoing.pop_front()));
+					return Poll::Ready(Ok(Some(fragment)));
 				}
 				if track.buffer.is_empty() {
 					track.buffer_independent = frame.keyframe;
@@ -380,7 +378,7 @@ impl<S: Stream> Export<S> {
 			if let Some(name) = flushable {
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(track, frames, None)?;
+				let fragment = emit_fragment(track, &mut self.sequence_number, frames, None)?;
 				return Poll::Ready(Ok(Some(fragment)));
 			}
 
@@ -416,28 +414,55 @@ impl<S: Stream> Export<S> {
 			.map(|(_, _, name)| name.clone())
 	}
 
-	/// Encode every audio track's buffered run as a fragment, tagged with the
-	/// timestamp of its first sample so the caller can order it against the
-	/// video fragment it accompanies.
+	/// Roll the run that `frame`, a keyframe, has just closed on video track
+	/// `name`, along with every audio track's buffered run, into
+	/// [`Self::outgoing`]. `frame` opens the video track's next run.
 	///
-	/// Called only from a video GOP boundary, so no audio track is the one
-	/// currently being appended to.
-	fn flush_audio(&mut self) -> Result<Vec<(Timestamp, Fragment)>> {
-		let mut fragments = Vec::new();
-		for track in self.tracks.values_mut() {
-			if track.is_video || track.buffer.is_empty() {
-				continue;
+	/// A keyframe closes a GOP for the whole presentation, not just for the track
+	/// it arrived on: audio has no keyframes of its own, so it rolls here to keep
+	/// every track's fragments covering the same span. Without it an audio track
+	/// would buffer until it finished.
+	///
+	/// The runs are encoded in ascending first-sample order, so the fragments are
+	/// written in the order they leave in and their `mfhd` sequence numbers
+	/// ascend with the file.
+	fn roll_gop(&mut self, name: &str, frame: Frame) -> Result<()> {
+		let track = self.tracks.get_mut(name).unwrap();
+		let start = Duration::from(track.buffer[0].timestamp);
+		let mut closed = std::mem::take(&mut track.buffer);
+
+		// Video leads the audio it rolled when both start at the same instant.
+		// Ordered by elapsed time rather than by `Timestamp`, whose ordering
+		// settles a cross-scale tie by scale: 48 kHz audio would otherwise sort
+		// ahead of 90 kHz video at t=0, which is the tie this exists to settle.
+		let mut rolled = vec![(start, false, name.to_string())];
+		for (name, track) in &self.tracks {
+			if !track.is_video && !track.buffer.is_empty() {
+				rolled.push((Duration::from(track.buffer[0].timestamp), true, name.clone()));
 			}
-			let start = track.buffer[0].timestamp;
-			let frames = std::mem::take(&mut track.buffer);
-			// The pending frame is this track's next sample, so it bounds the
-			// duration of the run's last one.
-			let successor = track.pending.take();
-			let fragment = emit_fragment(track, frames, successor.as_ref())?;
-			track.pending = successor;
-			fragments.push((start, fragment));
 		}
-		Ok(fragments)
+		rolled.sort();
+
+		for (_, audio, name) in rolled {
+			let track = self.tracks.get_mut(&name).unwrap();
+			// Whatever the track's next sample is bounds the duration of this
+			// run's last one: the keyframe for the video track that drew the
+			// boundary, the pending frame for an audio track.
+			let (frames, successor) = if audio {
+				(std::mem::take(&mut track.buffer), track.pending.clone())
+			} else {
+				(std::mem::take(&mut closed), Some(frame.clone()))
+			};
+			let fragment = emit_fragment(track, &mut self.sequence_number, frames, successor.as_ref())?;
+			self.outgoing.push_back(fragment);
+		}
+
+		// The closed run is written; the keyframe opens the video track's next one.
+		let track = self.tracks.get_mut(name).unwrap();
+		track.buffer_independent = frame.keyframe;
+		track.buffer.push(frame);
+
+		Ok(())
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
@@ -488,7 +513,6 @@ impl<S: Stream> Export<S> {
 					finished: false,
 					track_id: next_track_id,
 					timescale,
-					sequence_number: 1,
 				},
 			);
 			next_track_id += 1;
@@ -516,7 +540,6 @@ impl<S: Stream> Export<S> {
 					finished: false,
 					track_id: next_track_id,
 					timescale,
-					sequence_number: 1,
 				},
 			);
 			next_track_id += 1;
@@ -710,13 +733,14 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	max.saturating_sub(min) >= cap
 }
 
-/// Encode a buffered run of samples as a single CMAF moof+mdat fragment.
-fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
+/// Encode a buffered run of samples as a single CMAF moof+mdat fragment,
+/// consuming the next `mfhd` sequence number of the file.
+fn encode_fragment(track: &Fmp4Track, sequence_number: &mut u32, frames: Vec<Frame>) -> Result<Bytes> {
 	if frames.is_empty() {
 		return Err(Error::NoFrames.into());
 	}
-	let seq = track.sequence_number;
-	track.sequence_number += 1;
+	let seq = *sequence_number;
+	*sequence_number += 1;
 	let timescale = moq_net::Timescale::new(track.timescale)?;
 	let info = crate::container::fmp4::FragmentInfo {
 		track_id: track.track_id,
@@ -727,7 +751,12 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
-fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
+fn emit_fragment(
+	track: &Fmp4Track,
+	sequence_number: &mut u32,
+	mut frames: Vec<Frame>,
+	successor: Option<&Frame>,
+) -> Result<Fragment> {
 	apply_codec_durations(&mut frames, track.opus);
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
@@ -735,7 +764,7 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	let timescale = moq_net::Timescale::new(track.timescale)?;
 	infer_missing_durations(&mut frames, successor, track.default_frame, timescale)?;
 	let duration = fragment_seconds(&frames, track.default_frame);
-	let data = encode_fragment(track, frames)?;
+	let data = encode_fragment(track, sequence_number, frames)?;
 	Ok(Fragment {
 		data,
 		init: false,

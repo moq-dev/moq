@@ -808,6 +808,7 @@ async fn audio_fragments_roll_with_the_video_gop() {
 
 	let fragments = drain_now(&mut exporter).await;
 	assert_ascending_starts(&init.data, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
 
 	// Every fragment, tagged with the track it belongs to and its sample count.
 	let fragments: Vec<(u32, usize)> = fragments
@@ -873,6 +874,7 @@ async fn video_that_ends_first_writes_its_tail_in_order() {
 
 	let fragments = drain_now(&mut exporter).await;
 	assert_ascending_starts(&init.data, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
 
 	let counts: Vec<(u32, usize)> = fragments
 		.iter()
@@ -934,6 +936,7 @@ async fn audio_rolls_on_its_own_cap_when_the_video_stalls() {
 
 	let fragments = drain_now(&mut exporter).await;
 	assert_ascending_starts(&init.data, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
 	for fragment in &fragments {
 		assert!(
 			fragment.duration <= 5.0,
@@ -1005,8 +1008,11 @@ async fn simulcast_keyframes_only_roll_their_own_video_track() {
 	assert!(init.init);
 	let audio_id = track_ids(&init.data).1;
 
+	let fragments = drain_now(&mut exporter).await;
+	assert_ascending_sequence_numbers(&fragments);
+
 	let mut per_track: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
-	for fragment in drain_now(&mut exporter).await {
+	for fragment in fragments {
 		let trafs = traf_samples(&fragment.data);
 		assert_eq!(trafs.len(), 1, "expected one traf per fragment");
 		let (track_id, samples) = trafs[0];
@@ -1107,6 +1113,32 @@ fn assert_ascending_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fr
 			"track {id} starts at {start}s after track {previous_id} started at {previous}s: {starts:?}",
 		);
 	}
+}
+
+/// The `mfhd` sequence numbers must ascend from one fragment to the next, which
+/// is what ISO/IEC 14496-12 section 8.8.5 asks of a file.
+fn assert_ascending_sequence_numbers(fragments: &[crate::container::fmp4::Fragment]) {
+	let numbers: Vec<u32> = fragments
+		.iter()
+		.map(|fragment| first_moof(&fragment.data).mfhd.sequence_number)
+		.collect();
+	for pair in numbers.windows(2) {
+		assert!(
+			pair[1] > pair[0],
+			"sequence numbers must ascend in file order, got {numbers:?}",
+		);
+	}
+}
+
+/// The first `moof` of a media fragment.
+fn first_moof(fragment: &Bytes) -> mp4_atom::Moof {
+	let mut cursor = Cursor::new(fragment.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			return moof;
+		}
+	}
+	panic!("a fragment with no moof");
 }
 
 /// Every fragment the exporter can produce without waiting for more input.
