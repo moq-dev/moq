@@ -85,11 +85,40 @@ impl Tasks {
 	}
 }
 
+impl Tasks {
+	/// A non-owning submission handle: pushes work while the driver lives, but
+	/// neither keeps the set from finishing nor counts as a sender. For read
+	/// handles, whose existence must not extend the origin's lifecycle.
+	pub fn downgrade(&self) -> TasksWeak {
+		TasksWeak {
+			state: self.state.clone(),
+		}
+	}
+}
+
 impl Clone for Tasks {
 	fn clone(&self) -> Self {
 		self.state.lock().senders += 1;
 		Self {
 			state: self.state.clone(),
+		}
+	}
+}
+
+/// Non-owning [`Tasks`]: same submissions, no claim on the set's lifetime, so
+/// [`TaskSet::poll`] still finishes once the owning handles drop.
+#[derive(Clone)]
+pub(crate) struct TasksWeak {
+	state: kio::Shared<Submissions>,
+}
+
+impl TasksWeak {
+	/// Queue a future for polling by the associated [`TaskSet`], dropped if the
+	/// set (or every owning [`Tasks`] handle) is already gone.
+	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
+		let mut state = self.state.lock();
+		if !state.closed && state.senders > 0 {
+			state.queued.push_back(task.maybe_boxed());
 		}
 	}
 }

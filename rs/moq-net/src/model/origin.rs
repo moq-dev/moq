@@ -19,7 +19,7 @@ use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{AnyTimers, Instant, Timers, TimersSlot},
-	util::{TaskSet, Tasks},
+	util::{TaskSet, Tasks, TasksWeak},
 };
 
 /// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
@@ -2426,7 +2426,7 @@ struct RemoteFrontTask {
 	exclude: Option<Hop>,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
-	tasks: Tasks,
+	tasks: TasksWeak,
 	timers: TimersSlot,
 }
 
@@ -2537,9 +2537,14 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		if let Some((route, first, server)) = fire {
 			let mut serve = server.lock();
 			match serve.closed {
-				// Retracted between the table read and its lock: the table has
-				// already moved on, so just re-decide.
-				true => continue 'run,
+				// The server is gone: retracted under us, or its handler dropped
+				// while the announcement stands. Either way the route cannot
+				// serve, so skip it rather than re-picking it forever.
+				true => {
+					refused.insert(route);
+					last_err = Some(Error::Unroutable);
+					continue 'run;
+				}
 				false => {
 					// A source this route already materialized for the path
 					// attaches without another upstream round trip.
@@ -3363,9 +3368,10 @@ pub struct Consumer {
 	// mirroring what `create_broadcast` gives a local front.
 	origin: Info,
 
-	// Submission handle to the origin's [`Driver`], for the front watcher a
-	// routed `request_broadcast` spawns. Closed once the driver drops.
-	tasks: Tasks,
+	// Non-owning submission handle to the origin's [`Driver`], for the front
+	// watcher a routed `request_broadcast` spawns. Non-owning so a lingering
+	// read handle never keeps the driver from finishing.
+	tasks: TasksWeak,
 
 	// The driver's clock and timers, threaded into fronts for the track idle
 	// linger.
@@ -3390,7 +3396,7 @@ impl Consumer {
 			stats,
 			exclude: None,
 			origin: producer.info(),
-			tasks: producer.tasks.clone(),
+			tasks: producer.tasks.downgrade(),
 			timers: producer.timers.clone(),
 		}
 	}
@@ -4565,6 +4571,38 @@ mod tests {
 			.expect("track ended early");
 		let frame = group.read_frame().await.expect("read frame").expect("frame");
 		assert_eq!(&frame.payload[..], b"resumed");
+	}
+
+	/// A `RouteServer` dropped while its announcement stands leaves the entry in
+	/// the table with a closed queue. The front must refuse it rather than
+	/// re-pick it forever, which would spin the origin driver on one core.
+	#[tokio::test]
+	async fn dropped_server_with_live_announcement_is_refused() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let (_announcement, server) = producer.announce_served("room", Route::default()).unwrap();
+		drop(server);
+
+		let err = tokio::time::timeout(Duration::from_secs(5), consumer.request_broadcast("room/alice"))
+			.await
+			.expect("the front must give up, not spin")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
+	}
+
+	/// The driver's completion contract: it resolves once every producer handle
+	/// drops, however many read handles remain.
+	#[tokio::test]
+	async fn driver_resolves_with_live_consumers() {
+		let (producer, driver) = Producer::new(Info::new(origin(1)));
+		let consumer = producer.consume();
+		let run = driver.run(crate::runtime::tokio_test::Tokio::<()>::new());
+		drop(producer);
+		tokio::time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("driver must finish once the producers are gone");
+		drop(consumer);
 	}
 
 	#[tokio::test]
