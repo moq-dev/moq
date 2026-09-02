@@ -23,10 +23,9 @@ regression test per Root Cause First.
 - [#2388](/quest/m0/2388-safari-stops-delivering-new-incoming-unidirectional.md) - Safari stops delivering new incoming unidirectional streams after roughly 7000 on a session; one stream per group exhausts that in about two minutes of playback
 - [#2527](/quest/m0/2527-publish-video-breaks-when-the-publishers-window-is.md) - Publish video breaks when the publisher's window is minimized, on every browser using the MediaStreamTrackProcessor polyfill
 - [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
-- [#2788](/quest/m0/2788-moq-transcode-run-cant-bootstrap-from-a-demand-gated.md) - moq-transcode: run() can't bootstrap from a demand-gated source that doesn't advertise its geometry
 - [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
 - [#2812](/quest/m0/2812-watch-has-audio-stutter-on-ios-on-https-moq-dev-watch.md) - Watch has Audio stutter on iOS on https://moq.dev/watch/
-- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: nothing in the decode or playback path models a media gap
+- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: a media gap is a hole in the output, not a splice
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - fix(watch): audio ring truncate can race the worklet reader for one quantum
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls the SI table cadence until the media clock catches up
 - [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: the draft-14/15 adapter keeps one request per namespace, so a duplicate strands the first
@@ -34,7 +33,7 @@ regression test per Root Cause First.
 - [Capture device loss](/quest/m0/capture-device-loss.md) - an AVFoundation camera that disappears parks the reader forever
 - [X11 window identity](/quest/m0/x11-window-identity.md) - a reused X11 window id can publish an unrelated window
 - [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - a minimized or resizing window ends capture instead of riding it out
-- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-video: capture negotiates twice, so a window resize between the probe and the first subscriber strands consumers that fixed on the first snapshot
+- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with
 - [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
 - [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
