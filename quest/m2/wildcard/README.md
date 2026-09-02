@@ -63,10 +63,10 @@ What is genuinely missing, beyond patterns themselves, is content identity.
 Announcement `Epoch` was specified into lite-06 by
 [#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
 removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
-with it. [Route resume identity](/quest/m0/route-resume.md) restores per-path
-identity from the route's first hop, reversing #3225's no-splice rule, and
-this questline builds its collision handling on that rather than on a
-generation field.
+with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
+from the route's first hop, reversing #3225's no-splice rule, and this
+questline builds its collision handling on that rather than on a generation
+field.
 
 ### Decisions
 
@@ -169,8 +169,7 @@ generation field.
   can hash one path to different workers before either concrete announcement
   propagates, and both land at the SAME literal path. Whichever route wins
   selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per [Route resume
-  identity](/quest/m0/route-resume.md); two distinct workers are two identities,
+  identity is preserved, per the first-hop resume rule ([moq#3312](https://github.com/moq-dev/moq/pull/3312)); two distinct workers are two identities,
   so the loser's subscribers end and resubscribe rather than being spliced onto
   another worker's frames mid-group. Wildcard routing invents neither a lease
   nor a generation. This is weaker than the retired `Epoch` design, which could
@@ -262,5 +261,3 @@ than announce state.
   pattern, and its catalog names the generations a wildcard cannot
 - [pop-skipping](/quest/m2/pop-skipping/README.md) - it owns the route cost and
   the rank hash this reuses
-- [Route resume identity](/quest/m0/route-resume.md) - the per-path identity two
-  colliding advertisers are settled by

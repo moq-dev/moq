@@ -49,13 +49,12 @@ leaving a drained or vanished route stays immediate.
 ### Two identities, not one
 
 Adoption is a statement about the adjacent relay, and that is a different
-identity from the one [Route resume identity](/quest/m0/route-resume.md)
-restores. The pre-#3225 front kept both, because they answer different
-questions:
+identity from the first-hop resume rule [moq#3312](https://github.com/moq-dev/moq/pull/3312) landed.
+The pre-#3225 front kept both, because they answer different questions:
 
 - The **first** hop is who produced the content. Alternate routes to one
   publisher deliberately share it, which is what makes them spliceable, and it
-  is what route-resume keys on.
+  is what the resume rule keys on.
 - The **last** hop is the peer that advertised the route: the parent a relay
   would be adopting. `handover_allowed` and the hold both keyed on it, and the
   rank hash was taken over it (`fnv_key(name, [peer])`).
@@ -65,7 +64,7 @@ of one broadcast look like the same peer, so a changed parent would go
 undetected and two relays could adopt each other, which is the failure the hold
 exists to prevent.
 
-What this quest reuses from route-resume is the comparison rule rather than the
+What this quest reuses from the resume rule is the comparison rather than the
 field: `Hop::UNKNOWN` identifies nobody and never matches itself, so two
 anonymous relays must not pass for one relay reconnecting and skip the gate.
 
@@ -90,5 +89,3 @@ lucky hash.
 
 - [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) - there is nothing
   to rank until two relays can both advertise one broadcast as warm
-- [Route resume identity](/quest/m0/route-resume.md) - supplies the identity
-  comparison rule, and the publisher half of it

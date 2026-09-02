@@ -17,7 +17,6 @@ regression test per Root Cause First.
 
 - [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass --auth-api-mode, so proxy grants can't refuse or scope them
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect() logs on every connection at the wrong level and prints the JWT in the URL
-- [Route resume identity](/quest/m0/route-resume.md) - a failing route ends the subscription instead of resuming through the next one, since announcements became prefix routes
 - [Dart leaks](/quest/m0/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [#3207](/quest/m0/3207-send-valid-publish-done-statuses-for-every-supported-ietf.md) - Send valid PUBLISH_DONE statuses for every supported IETF draft
 - [#3076](/quest/m0/3076-moq-relay-publish-is-unimplemented-by-design-make-the.md) - moq-relay: PUBLISH is unimplemented by design - make the rejection fail fast for clients that wait

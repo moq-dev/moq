@@ -50,7 +50,3 @@ draining path retracts rather than repricing, and a subscriber on it moves to
 the broader route; a second relay carrying the same broadcast ties on warm and
 is separated by cold.
 
-## Required
-
-- [Route resume identity](/quest/m0/route-resume.md) - a subscriber moving
-  between a warm route and a broader one must resume rather than end

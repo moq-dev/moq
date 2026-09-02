@@ -50,7 +50,7 @@ front's ordinary route change moves consumers at a group boundary. A
 cache-only answer would strand every bound consumer on the wildcard
 subscription with nothing able to migrate or stop it. When the concrete claim
 is a DIFFERENT publisher, its consumers end and resubscribe rather than
-splicing, per [Route resume identity](/quest/m0/route-resume.md); this quest's
+splicing, per the first-hop resume rule ([moq#3312](https://github.com/moq-dev/moq/pull/3312)); this quest's
 obligation is the route install that makes selection between them possible. Repeat requests for one path
 share that one route, keyed to survive the exclusion filter rather than
 handing one peer's answer to another.
@@ -97,5 +97,3 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 ## Required
 
 - [Advertise](/quest/m2/wildcard/advertise.md)
-- [Route resume identity](/quest/m0/route-resume.md) - a wildcard-served
-  subscription must resume or end correctly when a concrete claim arrives
