@@ -461,13 +461,20 @@
           # shell reaches the same wrapper it reaches outside. A no-op when
           # nothing installed one; which wrapper (if any) is a per-machine
           # choice this flake doesn't make.
+          #
+          # Never in CI, where check.yml enters this shell and the `target/`
+          # the workflow restored is the one the job has to build in. A shim
+          # would silently move it into a machine-wide managed target instead,
+          # on whichever runner happens to have been set up that way.
           shellHook = ''
-            for dir in "$HOME/Library/Application Support/mbx/bin" "''${XDG_DATA_HOME:-$HOME/.local/share}/mbx/bin"; do
-              if [ -x "$dir/cargo" ]; then
-                export PATH="$dir:$PATH"
-                break
-              fi
-            done
+            if [ -z "''${CI:-}" ]; then
+              for dir in "$HOME/Library/Application Support/mbx/bin" "''${XDG_DATA_HOME:-$HOME/.local/share}/mbx/bin"; do
+                if [ -x "$dir/cargo" ]; then
+                  export PATH="$dir:$PATH"
+                  break
+                fi
+              done
+            fi
           '';
 
           env = {
