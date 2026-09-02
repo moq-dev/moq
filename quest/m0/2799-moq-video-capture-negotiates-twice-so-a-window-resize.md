@@ -34,7 +34,9 @@ the fix, and the two opens stay.
   native playback reselects too; that is part of this quest, not a follow-up.
 - Test: a source that republishes its rendition at a new size; assert the
   ladder changes, passthrough follows, and a subscriber on a retired rung is
-  ended cleanly.
+  ended cleanly. For `moq play`, complete the active video task and assert a
+  later catalog snapshot starts the replacement track, so an implementation
+  that leaves `video_started` set fails.
 
 ## Closes
 
