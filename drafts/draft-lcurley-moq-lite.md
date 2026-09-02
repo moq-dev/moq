@@ -816,11 +816,9 @@ A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
 
 **Warm Route Cost** and **Cold Route Cost**:
-What subscribing to content under this route costs, in units chosen by the deployment, priced against two different cache states.
-The Warm cost is what one more subscription would cost the mesh as it stands, and is what routing minimizes.
-The Cold cost prices the identical path as if no relay along it were carrying anything, and breaks a Warm tie (see [Routing](#routing)).
-The original publisher seeds both with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
-When forwarding an announcement received from an upstream peer, a relay adds the cost that peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+What subscribing to content under this route costs, in units chosen by the deployment.
+This document defines no rule that prices the two apart: the original publisher seeds both with its production cost (0 for content it is already producing, larger for content it would have to start producing on demand, e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it), and a forwarding relay adds the cost the upstream peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+The two fields exist for extensions that price a cached copy below the accumulated value: such a discount applies to the Warm cost only, which is what route selection minimizes, while the Cold cost keeps ranking the undiscounted path and breaks a Warm tie (see [Routing](#routing)).
 Saturation MUST cap each sum at the largest value a variable-length integer can carry, since the sums are re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
 
 A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
