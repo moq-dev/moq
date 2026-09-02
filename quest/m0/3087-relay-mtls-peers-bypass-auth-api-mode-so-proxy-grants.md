@@ -1,34 +1,43 @@
-# [M] relay: mTLS peers bypass --auth-api-mode, so proxy grants can't refuse or scope them
+# [M] relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3087](https://github.com/moq-dev/moq/issues/3087)
-within the issue's stated scope and boundaries.
+An mTLS peer is authorized through the same auth API path as every other
+connection. In proxy mode the endpoint's grant, or its absence, decides what
+the peer may publish and subscribe; in token mode a certificate-authenticated
+peer with no grant stays unrestricted, so a deployment answering
+`{alias, tier}` today is unaffected. Fixes on dev, where the mode lands.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+`Auth::verify_mtls` in `rs/moq-relay/src/auth.rs` calls `resolve_mtls`, which
+builds its own `AuthApiRequest`, reads only `alias` and `tier` off the reply,
+and mints `AuthToken::unrestricted`. Nothing the endpoint returns can narrow
+that, and the request carries no `host`, so host-routed tenants dialing the
+same path are indistinguishable at the endpoint.
 
-### Issue context
+- Delete `resolve_mtls`. Build the request through `api_request` with
+  `mtls: true`, plus `host` in proxy mode as the mode already sends it, and
+  resolve through `authorize`, so a grant is read one way for every credential.
+- Token mode: `mtls: true` satisfies "has a credential" without a JWT or a
+  `key`; the certificate is the token. No grant means unrestricted, as today.
+- Proxy mode: the endpoint returns a grant like anyone else, and no grant is a
+  refusal, consistent with the rest of the mode.
+- `revalidate` stays `None` for mTLS peers, which the "mTLS peers must never
+  revalidate" test already pins. A deployed endpoint sending a blanket
+  `Cache-Control: max-age` would otherwise arm revalidation across a production
+  relay mesh the moment this ships, gating fleet interconnect on that endpoint
+  staying reachable. Mesh revalidation is its own change: an explicit opt-in
+  for `mtls=true` and a relay-side floor on the staleness window. Note
+  `stale-if-error` alone is not enough, since an endpoint that successfully
+  answers "no" still partitions the mesh.
+- Tests: a proxy-mode mTLS peer refused by an empty reply, scoped by a narrow
+  grant, and admitted unrestricted in token mode; `host` present on the proxy
+  request. Update the mTLS section of `doc/bin/relay/auth.md`.
 
-`--auth-api-mode proxy` (#3044) lets an auth endpoint decide every connection - except mTLS ones, which bypass the mode entirely.
+## Required
 
-`Auth::verify_mtls` calls `resolve_mtls`, which builds its own request and reads only `alias` and `tier` off the reply. A `200 {}`, or a reply carrying a deliberately narrow `grant`, still becomes an unrestricted publish-and-subscribe token. So an operator delegating authorization to their endpoint cannot refuse or scope an mTLS client through the documented grant response. `resolve_mtls` also hardcodes `host: None`, so host-routed tenants dialing the same path produce indistinguishable lookups.
-
-#### Shape
-
-Stop special-casing mTLS in the authorization path. It should build its request through `api_request` (sending `mtls=true`, and `host` in proxy mode) and resolve through `authorize`, like any other connection:
-
-- **token mode**: `mtls=true` satisfies "has a credential" without a JWT or `key` - the cert *is* the token. Absent a grant the peer stays unrestricted, exactly as today, so existing deployments returning `{alias, tier}` are unaffected.
-- **proxy mode**: the endpoint returns a `grant` like anyone else, and no grant is a refusal - consistent with the rest of the mode.
-
-#### Deliberately NOT in scope: revalidation
-
-mTLS peers keep `revalidate: None`. Not because mTLS is precious, but because a deployed endpoint sending a blanket `Cache-Control: max-age` on every reply would silently arm revalidation on a production relay mesh the moment the relay ships - gating fleet interconnect on that endpoint staying reachable, with no one having chosen it.
-
-If mesh revalidation is wanted later it should be its own change, with the endpoint opting in deliberately for `mtls=true`, and a **relay-side floor** on the staleness window for those requests so an operator who forgets the header doesn't get a fleet that partitions on the first auth blip. Note `stale-if-error` alone is not sufficient protection: it only applies when the endpoint *errors*, so an endpoint that successfully answers "no" still partitions the mesh instantly.
+- [Auth verdict](/quest/m2/auth-verdict.md) - lands the proxy mode, the grant response, and the `host` field this builds on
 
 ## Closes
 
