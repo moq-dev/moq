@@ -78,6 +78,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just obs ci
 
+      # The TS exporter's PCR release timing. Everything else about the stream
+      # can be graded from a capture, but *when* the bytes were handed over
+      # cannot: the grader has to sit on the exporter's stdout for the length of
+      # the run, stamping each packet. That is a real-time window no per-PR gate
+      # should pay for, so it lives here (see test/ts/README.md).
+      - name: TS timing
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --live
+
   # `just rs windows` is the only thing that compiles moq-video's Media
   # Foundation capture/encode/decode, its D3D11 frames, and every
   # `#[cfg(target_os = "windows")]` test module. The Linux gate skips all of it,
