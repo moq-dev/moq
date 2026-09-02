@@ -71,7 +71,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// the peer declines to declare one (an AnnounceOk reporting origin id 0).
 	peer_hop: Option<crate::Hop>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
-	subscribes_generation: Arc<atomic::AtomicU64>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
@@ -107,7 +106,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			peer_hop: config.peer_hop,
 			subscribes: Default::default(),
-			subscribes_generation: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
@@ -414,37 +412,25 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		Ok(true)
 	}
 
-	/// Remove a subscription and invalidate the datagram loop's last-hit route.
+	/// Remove a subscription, releasing the session's handle on its producer.
 	fn remove_subscribe(&self, id: u64) {
-		let mut subscribes = self.subscribes.lock();
-		if subscribes.remove(&id).is_some() {
-			self.subscribes_generation.fetch_add(1, atomic::Ordering::Release);
-		}
+		self.subscribes.lock().remove(&id);
 	}
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
-	fn route_datagram(&self, payload: bytes::Bytes, route: &mut Option<DatagramRoute>) -> Result<(), Error> {
+	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let mut buf = payload;
 		let dg = lite::Datagram::decode(&mut buf, self.version)?;
 
-		let generation = self.subscribes_generation.load(atomic::Ordering::Acquire);
-		if !matches!(route, Some(route) if route.subscribe == dg.subscribe && route.generation == generation) {
-			let subscribes = self.subscribes.lock();
-			let Some(entry) = subscribes.get(&dg.subscribe).cloned() else {
-				// Unknown or already-closed subscription: drop the datagram.
-				*route = None;
-				return Ok(());
-			};
-			// Removals bump the generation while holding this same lock, so the cached
-			// entry and generation describe one consistent map state.
-			let generation = self.subscribes_generation.load(atomic::Ordering::Relaxed);
-			*route = Some(DatagramRoute {
-				subscribe: dg.subscribe,
-				generation,
-				entry,
-			});
-		}
-		let entry = &mut route.as_mut().expect("route filled above").entry;
+		// Write through the map rather than cloning the entry out: a `TrackEntry` clone
+		// is a handful of atomic bumps on every datagram, and a producer held past its
+		// removal would keep the track (its cached groups, its stats subscription) alive.
+		// The group path already writes to a producer under this lock.
+		let mut subscribes = self.subscribes.lock();
+		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
+			// Unknown or already-closed subscription: drop the datagram.
+			return Ok(());
+		};
 
 		// Datagrams are lite-05+, which always negotiates a timescale; default defensively.
 		let scale = entry.timescale.unwrap_or_default();
@@ -907,13 +893,6 @@ struct DatagramRecv<S: crate::transport::poll::Session> {
 	// A dedicated receive handle: the poll interface takes `&mut self`.
 	recv: S,
 	enabled: bool,
-	route: Option<DatagramRoute>,
-}
-
-struct DatagramRoute {
-	subscribe: u64,
-	generation: u64,
-	entry: TrackEntry,
 }
 
 impl<S: crate::transport::poll::Session> DatagramRecv<S> {
@@ -924,7 +903,6 @@ impl<S: crate::transport::poll::Session> DatagramRecv<S> {
 			subscriber,
 			recv,
 			enabled,
-			route: None,
 		}
 	}
 
@@ -935,7 +913,7 @@ impl<S: crate::transport::poll::Session> DatagramRecv<S> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
 			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(Error::from_transport)?;
-			if let Err(err) = self.subscriber.route_datagram(payload, &mut self.route) {
+			if let Err(err) = self.subscriber.route_datagram(payload) {
 				tracing::debug!(%err, "dropping datagram");
 			}
 		}
@@ -1354,8 +1332,11 @@ mod tests {
 
 	const VERSION: Version = Version::Lite05;
 
+	/// Removing a subscription both stops delivery and releases the session's handle
+	/// on the producer, so the track (its cached groups, its stats subscription) ends
+	/// rather than outliving the subscription it belonged to.
 	#[test]
-	fn datagram_route_cache_invalidates_on_unsubscribe() {
+	fn unsubscribe_drops_the_datagram_and_releases_the_producer() {
 		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::default(),
@@ -1369,6 +1350,8 @@ mod tests {
 		});
 
 		let mut broadcast = crate::broadcast::Info::new().produce();
+		// The broadcast keeps only a weak handle, so the map below owns the only strong
+		// `track::Producer`: dropping it is what ends the track.
 		let producer = broadcast.create_track("datagrams", None).unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
@@ -1389,8 +1372,7 @@ mod tests {
 			.encode_bytes(VERSION)
 			.unwrap()
 		};
-		let mut route = None;
-		subscriber.route_datagram(payload(1), &mut route).unwrap();
+		subscriber.route_datagram(payload(1)).unwrap();
 		assert_eq!(
 			received
 				.recv_datagram()
@@ -1403,10 +1385,13 @@ mod tests {
 		);
 
 		subscriber.remove_subscribe(7);
-		subscriber.route_datagram(payload(2), &mut route).unwrap();
+		subscriber.route_datagram(payload(2)).unwrap();
+		// Dropping the last producer is an abrupt teardown, so the track resolves with
+		// `Dropped` rather than parking. A route that outlived the removal would keep the
+		// producer alive and leave this pending forever.
 		assert!(
-			!matches!(received.recv_datagram().now_or_never(), Some(Ok(Some(_)))),
-			"stale cached route delivered"
+			matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
+			"the track outlived its subscription"
 		);
 	}
 
