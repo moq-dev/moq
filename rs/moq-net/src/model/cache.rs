@@ -379,12 +379,11 @@ impl Track {
 	/// when expiry is enabled. This is what makes a track that only appends frames to
 	/// open groups, never inserting another group, still pay its debt and age its
 	/// idle content out.
-	pub(crate) fn settle(&self) {
-		self.settle_at(self.pool.now());
-	}
-
-	/// Settle after a cache access that already sampled the pool clock.
-	pub(crate) fn settle_at(&self, now: u64) {
+	///
+	/// `now` is the coarse tick a cache access on this path just sampled (see
+	/// [`Charge::add`]), reused so a frame write reads the clock once instead of
+	/// twice. `None` leaves the gate to sample it, and only if it needs it.
+	pub(crate) fn settle(&self, now: Option<u64>) {
 		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
 		let scan_expiry = self.expiry_due(now);
 		if !settle_debt && !scan_expiry {
@@ -419,12 +418,15 @@ impl Track {
 	}
 
 	/// Claim the next write-driven expiry scan when its time gate is due.
-	fn expiry_due(&self, now: u64) -> bool {
+	fn expiry_due(&self, now: Option<u64>) -> bool {
 		let expiry = self.pool.expiry_ticks();
 		if expiry == u64::MAX {
 			return false;
 		}
 
+		// Sampled here, below the gate: a pool with no expiry window returns above
+		// without ever reading the clock, whether or not a caller had a tick.
+		let now = now.unwrap_or_else(|| self.pool.now());
 		let interval = expiry.clamp(1, EXPIRY_SCAN_TICKS);
 		let deadline = now.saturating_add(interval);
 		let next = self.next_expiry.load(Ordering::Relaxed);
@@ -471,7 +473,11 @@ impl Charge {
 	/// actively-growing group (a straggler or backfill still being filled) from
 	/// being evicted or expired mid-write, even within the same coarse tick as
 	/// content that was merely inserted.
-	pub(crate) fn add(&mut self, n: u64) -> u64 {
+	///
+	/// Returns the coarse tick it stamped, which the caller hands to
+	/// [`Track::settle`] so the write path reads the clock once rather than twice.
+	/// `None` when the charge is detached and stamped nothing.
+	pub(crate) fn add(&mut self, n: u64) -> Option<u64> {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
@@ -525,8 +531,9 @@ impl Charge {
 	/// Record a write that charges no new bytes (a chunk written into an
 	/// already-charged in-flight frame): restarts the retention clock like any
 	/// other write. `&mut self` deliberately: reaching it through a kio write
-	/// guard marks the guard modified, so its release wakes parked readers.
-	pub(crate) fn record_write(&mut self) -> u64 {
+	/// guard marks the guard modified, so its release wakes parked readers. Returns
+	/// the stamped tick like [`Self::add`].
+	pub(crate) fn record_write(&mut self) -> Option<u64> {
 		self.touch(WRITE_BOOST)
 	}
 
@@ -537,20 +544,17 @@ impl Charge {
 	/// same-tick access still reads as strictly newer than the population mean of
 	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
 	/// repeated accesses remain idempotent without advancing the expiry clock.
-	fn touch(&self, boost: u64) -> u64 {
-		let Some(track) = &self.track else { return 0 };
+	/// Returns the tick it read, or `None` when the charge is detached.
+	fn touch(&self, boost: u64) -> Option<u64> {
+		let track = self.track.as_ref()?;
 		let target = track.pool.stamp(boost);
-		let tick = target >> ACCESS_SHIFT;
 		// `fetch_max` keeps the stamp monotone, and its prior value makes the
 		// paired mean update exact even for back-to-back accesses.
 		let prev = self.last.fetch_max(target, Ordering::Relaxed);
-		if target <= prev {
-			return tick;
-		}
-		if self.counted {
+		if target > prev && self.counted {
 			track.pool.access_refresh(prev, target);
 		}
-		tick
+		Some(target >> ACCESS_SHIFT)
 	}
 
 	/// Release everything this charge holds: bytes, overhead, and the access
@@ -761,12 +765,25 @@ mod test {
 	}
 
 	#[test]
-	fn expiry_gate_uses_supplied_tick_without_staleness() {
+	fn expiry_gate_reuses_a_supplied_tick() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(1)));
 		let track = Track::new(pool, kio::Weak::new());
-		assert!(track.expiry_due(0));
-		assert!(!track.expiry_due(9));
-		assert!(track.expiry_due(10));
+		// A supplied tick drives the gate on its own: claimed immediately, closed
+		// until the interval elapses, claimable again on the tick it reopens.
+		assert!(track.expiry_due(Some(0)));
+		assert!(!track.expiry_due(Some(9)));
+		assert!(track.expiry_due(Some(10)));
+		// Without one the gate samples the pool clock, frozen here at tick 0, so it
+		// stays closed rather than inheriting the caller's tick 10.
+		assert!(!track.expiry_due(None));
+	}
+
+	#[test]
+	fn expiry_gate_stays_closed_without_a_window() {
+		// No window means no time gate, and no clock read to reach it.
+		let track = Track::new(Pool::unbounded(), kio::Weak::new());
+		assert!(!track.expiry_due(None));
+		assert!(!track.expiry_due(Some(u64::MAX)));
 	}
 
 	#[test]

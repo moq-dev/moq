@@ -1163,7 +1163,7 @@ impl Producer {
 		});
 		let cache = state.cache.clone();
 		drop(state);
-		cache.settle();
+		cache.settle(None);
 		Ok(sequence)
 	}
 
@@ -1195,7 +1195,7 @@ impl Producer {
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
-		cache.settle();
+		cache.settle(None);
 		Ok(())
 	}
 

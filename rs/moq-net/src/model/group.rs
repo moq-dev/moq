@@ -478,7 +478,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle_at(now);
+		self.cache.settle(now);
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -521,6 +521,7 @@ impl Producer {
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
 		let mut bytes = 0;
+		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
 		for mut frame in frames.drain() {
 			frame.timestamp = frame
@@ -530,7 +531,7 @@ impl Producer {
 			let size = frame.payload.len() as u64;
 			bytes += size;
 			state.cache += size;
-			now = Some(state.charge.add(size));
+			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
 			state.frames.push_back(frame);
 		}
@@ -539,10 +540,7 @@ impl Producer {
 		state.evict();
 		drop(state);
 
-		match now {
-			Some(now) => self.cache.settle_at(now),
-			None => self.cache.settle(),
-		}
+		self.cache.settle(now);
 		self.stats.frames(count as u64);
 		self.stats.bytes(bytes);
 		Ok(())
@@ -592,7 +590,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle_at(now);
+		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.
@@ -646,7 +644,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle_at(now);
+		self.cache.settle(now);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
@@ -668,13 +666,14 @@ impl Producer {
 		// `record_write` takes `&mut`, which marks the guard modified: kio only
 		// notifies on a mutably-accessed guard's release, and that notify is what
 		// delivers the chunk to parked readers.
-		let now = self.state.write().ok().map(|mut state| state.charge.record_write());
+		let now = self
+			.state
+			.write()
+			.ok()
+			.and_then(|mut state| state.charge.record_write());
 		// The payload was charged when the frame opened, but a long streamed frame
 		// still counts as track activity for the independent expiry time gate.
-		match now {
-			Some(now) => self.cache.settle_at(now),
-			None => self.cache.settle(),
-		}
+		self.cache.settle(now);
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
