@@ -26,8 +26,10 @@ had not arrived, and nothing retried; caught in review rather than by a test.
   the terminal exactly once; a reconnect (epoch 2) while an epoch-1 delivery is
   in flight drops the stale delivery on the generation check and closes its
   handle; refcounts return to zero on the delivered, errored, and closed paths.
-- Wire the new binary into the `just obs test` recipe under the same TSan
-  build, and mention it in `doc/bin/obs.md` next to the output test.
+- Wire the new binary into `just obs test` under the same TSan build, and
+  also run it without TSan from `just obs ci`, which is what `obs.yml`
+  invokes; `just obs test` is manual, so on its own it cannot make the build
+  red. Mention both in `doc/bin/obs.md` next to the output test.
 
 ## Closes
 
