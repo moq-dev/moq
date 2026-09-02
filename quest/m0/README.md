@@ -34,7 +34,8 @@ regression test per Root Cause First.
 - [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - a minimized or resizing window ends capture instead of riding it out
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-video: capture negotiates twice, so a window resize between the probe and the first subscriber strands consumers that fixed on the first snapshot
 - [#2813](/quest/m0/2813-capture-on-ios-is-software-only-not-hardware.md) - Capture on iOS is software only , not hardware
-- [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: report the congestion controller bandwidth estimate instead of cwnd/rtt
+- [Bandwidth estimate release](/quest/m0/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
+- [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [H.265 suffix SEI ownership](/quest/m0/h265-suffix.md) - suffix SEI stays with the access unit it follows, including at EOF
 - [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority

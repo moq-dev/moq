@@ -1,4 +1,4 @@
-# [S] The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
+# [XS] The quinn backend's send-bandwidth estimate is cwnd/rtt, not a rate
 
 ## Goal
 
@@ -24,19 +24,14 @@ after quinn-proto 0.11.17 shipped, so nothing published carries it yet, and
 `web-transport-quinn` 0.12.1 still computes the window quotient. moq-native
 defaults quinn to BBR, so the default path is populated once plumbed.
 
-- In `moq-dev/web-transport`: return `path.bandwidth_estimate` from
-  `estimated_send_rate()` with no cwnd/rtt fallback, and tighten the
-  `web-transport-trait` doc to say the quantity is the controller's
-  estimate, so a third backend does not invent a fourth interpretation.
-  Release it.
-- Here: bump quinn and web-transport-quinn, and check `moq_net`'s sampler
-  behaves when the estimate flips between `Some` and `None` mid-session (it
-  only creates the sampler when the first sample is `Some`).
+- Bump quinn and web-transport-quinn to the releases that carry the estimate.
+- Check `moq_net`'s sampler behaves when the estimate flips between `Some`
+  and `None` mid-session: it only creates the sampler when the first sample is
+  `Some`, and a controller swap or an app-limited stretch can change that.
 
 ## Required
 
-- A quinn-proto release after 0.11.17 that carries quinn-rs/quinn#2802
-- A web-transport-quinn release that returns `bandwidth_estimate` from `estimated_send_rate`
+- [Bandwidth estimate release](/quest/m0/web-transport-bandwidth-estimate.md) - the upstream change and the release this bumps to
 
 ## Closes
 
