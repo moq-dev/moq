@@ -60,21 +60,14 @@ delivering precedence is worse than declaring it undefined.
 That leaves `[track: 8][group: rest]`.
 
 Fairness between equal-priority subscriptions belongs in the transport
-scheduler, which is the only layer that can round-robin. The W3C primitive is
-[`sendGroup`](https://www.w3.org/TR/webtransport/#sendGroup): streams sharing a
-send group are strictly ordered by `sendOrder`, and bandwidth is allocated
-equally between send groups. One send group per subscription with
-`sendOrder = [track][group]` is the shape we want, with one catch worth knowing
-before designing around it: send groups carry no priority relative to each
-other, so a send group per subscription also flattens track priority across
-subscriptions. `sendGroup` is the tool for the equal-priority case, not a
-replacement for `sendOrder`.
+scheduler, which is the only layer that can round-robin, and is out of scope
+here. See [Stream scheduler](/quest/m1/perf/stream-scheduler.md); this quest
+deliberately gives up that level to get the queue off the hot path first.
 
-Natively there is no equivalent. quinn schedules on a single `i32`, so
-round-robin there needs a fork or an upstream change. quiche's `incremental`
-flag round-robins within one urgency level, which is the same idea with one bit
-instead of a group id, so it cannot both round-robin between subscriptions and
-keep newest-first inside one.
+Backends that cannot carry a 32-bit scalar compress it themselves rather than
+making moq-net keep two paths. That is where a queue belongs anyway: quiche's
+adapter owns its send loop, so it can rank lazily at send time and needs none of
+the waker plumbing the current queue exists to drive.
 
 Bit budgets, which are looser than the field types suggest:
 
