@@ -325,12 +325,17 @@ impl DmaBuf {
 		self.modifier
 	}
 
-	/// Width of the coded allocation in pixels.
+	/// Visible width in pixels.
+	///
+	/// Not the extent the producer allocated, which is padded: the padding is in
+	/// each plane's [`stride`](DmaBufPlane::stride) and in where the next plane
+	/// [`starts`](DmaBufPlane::offset), and neither follows from this.
 	pub const fn width(&self) -> u32 {
 		self.width
 	}
 
-	/// Height of the coded allocation in pixels.
+	/// Visible height in pixels. As [`width`](Self::width), this is not the
+	/// allocated extent.
 	pub const fn height(&self) -> u32 {
 		self.height
 	}

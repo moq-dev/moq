@@ -15,10 +15,10 @@
 //! reformatted; only the descriptor is duplicated, once per plane.
 //!
 //! What that leaves is the modifier itself. A buffer whose modifier the driver
-//! does not list for those formats at all still has nowhere to go, and with the
-//! `vaapi` feature it gets a second chance: blitted on the GPU into an allocation
-//! the driver lays out itself. The direct import is
-//! always tried first, since it moves nothing at all.
+//! lists for neither format has nowhere to go at all, and the import fails so
+//! the renderer downloads the frame instead. Nothing here re-tiles such a
+//! buffer into a layout Vulkan would take: on the hardware this was measured on,
+//! a VA-API decode target already lands on an importable modifier.
 
 use std::os::fd::{AsFd, BorrowedFd};
 

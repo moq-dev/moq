@@ -863,11 +863,14 @@ mod tests {
 		PALETTE[((y / 32 * 3 + x / 32) % PALETTE.len() as u32) as usize]
 	}
 
-	/// Encode one RGB triple to 8-bit Y'CbCr with the forward matrix of `color`.
+	/// Encode one RGB triple to limited-range 8-bit Y'CbCr with the forward
+	/// matrix of `color`.
 	///
 	/// The inverse of what the shader does, written out rather than derived from
 	/// [`super::super::color`], so the expected pixels come from the definition
-	/// of the color space rather than from the code under test.
+	/// of the color space rather than from the code under test. Only the matrix
+	/// follows `color`; the range does not, which is all the callers need since
+	/// they assert the space is limited before building a pattern.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	fn to_yuv(color: Color, rgb: [u8; 3]) -> [u8; 3] {
 		let (kr, kb) = match color {
@@ -965,10 +968,9 @@ mod tests {
 	///
 	/// Three assertions rather than one:
 	///
-	/// - The import returns a source at all, its layout is `expected`, and no
-	///   frame needed a re-tile. Only the DMA-BUF importer produces those
-	///   layouts, so this says which branch ran. Without it the CPU fallback
-	///   would quietly satisfy everything below.
+	/// - The import returns a source at all and its layout is `expected`. Only
+	///   the DMA-BUF importer produces those layouts, so this says which branch
+	///   ran. Without it the CPU fallback would quietly satisfy everything below.
 	/// - Every pixel matches the CPU upload of the same samples. That is the one
 	///   that catches a swapped chroma pair, a plane at the wrong offset, an
 	///   ignored row pitch, and a mismatched matrix, all at once.
