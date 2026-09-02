@@ -571,6 +571,7 @@ mod tests {
 			let surface = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
 				.await
 				.unwrap_or_else(|_| panic!("timed out waiting for frame {index}"))
+				.unwrap_or_else(|error| panic!("capture failed before frame {index}: {error}"))
 				.unwrap_or_else(|| panic!("capture ended before frame {index}"));
 			let Surface::DmaBuf(buffer) = &surface else {
 				panic!("frame {index} used shared memory instead of DMA-BUF");
