@@ -40,9 +40,11 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		return Ok(None);
 	}
 
+	// A device carrying the feature above is Vulkan-backed, so this is not a
+	// route anything takes. It is here for what it returns rather than for what
+	// it catches: `Ok(None)` sends the frame to the CPU path without the strike
+	// an `Err` from the import itself would cost.
 	// SAFETY: the guard is only asked whether it exists, and drops here.
-	// A device carrying the feature above is Vulkan-backed, so this is a
-	// belt-and-braces check rather than a route anything takes.
 	if unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }.is_none() {
 		return Ok(None);
 	}
@@ -57,8 +59,8 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		_ => Some(buffer.color().unwrap_or_else(|| Color::infer(size))),
 	};
 
-	// One export, and so one wait on the producer's write fence, however
-	// many import attempts follow it.
+	// One export, and so one wait on the producer's write fence, however many
+	// planes follow it.
 	let export = buffer
 		.export()
 		.map_err(|e| Error::Render(anyhow::Error::new(e).context("export DMA-BUF")))?;
@@ -68,7 +70,7 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 	// duplicates it per plane rather than consuming it. Export waited for
 	// producer writes, and the modifier, extent, stride, and offset of every
 	// plane come from the producer's own buffer metadata.
-	let direct = unsafe {
+	let source = unsafe {
 		adopt(
 			device,
 			fd.as_fd(),
@@ -76,11 +78,11 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 			shape.layout,
 			color,
 			&planes,
-			Some(Box::new(lease.clone())),
+			Some(Box::new(lease)),
 		)
-	};
+	}?;
 
-	direct.map(Some)
+	Ok(Some(source))
 }
 
 /// How a DRM format is sampled: the shader layout it feeds, and the Vulkan
@@ -321,6 +323,26 @@ pub(super) mod fixture {
 		}
 	}
 
+	/// The VA-API fourcc naming the same layout as a DRM format.
+	///
+	/// DRM spells a packed pixel from its most significant byte down and VA-API
+	/// from its first byte in memory, so one layout has two reversed names. The
+	/// planar formats' two vocabularies agree.
+	fn va_fourcc(format: DrmFormat) -> Result<u32, Error> {
+		match format {
+			DrmFormat::XRGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRX),
+			DrmFormat::ARGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRA),
+			DrmFormat::XBGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBX),
+			DrmFormat::ABGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBA),
+			DrmFormat::NV12 => Ok(moq_vaapi::VA_FOURCC_NV12),
+			DrmFormat::YUV420 => Ok(moq_vaapi::VA_FOURCC_I420),
+			format => Err(err(format!(
+				"no VA-API format for DMA-BUF format {:#x}",
+				format.as_raw()
+			))),
+		}
+	}
+
 	/// The rows and row length of each plane of `format` at `size`, tightly
 	/// packed, in the order the format lists them.
 	///
@@ -377,16 +399,27 @@ pub(super) mod fixture {
 	/// driver's padded allocation. The plane pitches and offsets are the
 	/// driver's either way, which is the whole point: they are what addresses a
 	/// row, and neither follows from the visible size.
+	///
+	/// # Panics
+	///
+	/// When the driver splits the surface across objects, which is a shape the
+	/// importer cannot read: the offsets would address memory it never sees, and
+	/// the comparison would fail somewhere far from the cause.
 	pub(in crate::render) fn adopt(
 		exported: &moq_vaapi::DrmPrimeSurfaceDescriptor,
 		format: DrmFormat,
 		size: Size,
 	) -> DmaBuf {
+		let [object] = exported.objects.as_slice() else {
+			panic!(
+				"the fixture needs one object holding every plane, got {}",
+				exported.objects.len()
+			);
+		};
 		let layer = exported.layers.first().expect("an exported layer");
 		let planes = (0..layer.num_planes as usize)
 			.map(|index| DmaBufPlane::new(layer.offset[index], layer.pitch[index]))
 			.collect();
-		let object = exported.objects.first().expect("an exported object");
 		let fd = object.fd.try_clone().expect("duplicate the exported descriptor");
 
 		DmaBuf::new(
@@ -443,27 +476,6 @@ pub(super) mod fixture {
 		drop(image);
 		surface.sync().expect("sync the uploaded surface");
 		Some(())
-	}
-}
-
-/// The VA-API fourcc naming the same layout as a DRM format.
-///
-/// DRM spells a packed pixel from its most significant byte down and VA-API from
-/// its first byte in memory, so one layout has two reversed names. The planar
-/// formats' two vocabularies agree.
-#[cfg(all(test, feature = "vaapi"))]
-fn va_fourcc(format: DrmFormat) -> Result<u32, Error> {
-	match format {
-		DrmFormat::XRGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRX),
-		DrmFormat::ARGB8888 => Ok(moq_vaapi::VA_FOURCC_BGRA),
-		DrmFormat::XBGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBX),
-		DrmFormat::ABGR8888 => Ok(moq_vaapi::VA_FOURCC_RGBA),
-		DrmFormat::NV12 => Ok(moq_vaapi::VA_FOURCC_NV12),
-		DrmFormat::YUV420 => Ok(moq_vaapi::VA_FOURCC_I420),
-		format => Err(err(format!(
-			"no VA-API format for DMA-BUF format {:#x}",
-			format.as_raw()
-		))),
 	}
 }
 

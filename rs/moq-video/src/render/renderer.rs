@@ -1145,7 +1145,7 @@ mod tests {
 	#[tokio::test]
 	#[ignore = "needs a Vulkan GPU and a VA-API device"]
 	async fn decoded_frames_reach_the_gpu_without_a_download() {
-		use crate::decode::backend::{self, Codec};
+		use crate::decode::backend::{self, Codec, vaapi};
 
 		let Some((device, queue)) = dmabuf_gpu().await else {
 			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
@@ -1155,7 +1155,10 @@ mod tests {
 			backend::open(
 				Codec::H264,
 				&crate::decode::Config {
-					kind: crate::decode::Kind::Named("vaapi".into()),
+					// By name rather than by literal: a `Named` that matches
+					// nothing fails to open, which reads here as absent hardware
+					// and skips the test.
+					kind: crate::decode::Kind::Named(vaapi::NAME.into()),
 					gpu_frames,
 					..crate::decode::Config::new()
 				},
