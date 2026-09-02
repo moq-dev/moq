@@ -19,9 +19,13 @@
 //! error rather than wrong pixels.
 //!
 //! Unlike NVDEC, which cuvid lets us pin to zero display delay, output trails the
-//! input by one picture even without B-frames: H.264's DPB releases a picture only
-//! once a later one needs its slot. The decoded frames still carry their own
-//! timestamps, so nothing downstream has to know.
+//! input even without B-frames: H.264's DPB releases a picture only once a later
+//! one needs its slot, and the slot count comes from the sequence's reference and
+//! reorder limits rather than the reorder depth actually used. A stream coded with
+//! three reference frames therefore keeps three pictures in hand, which is why
+//! this backend implements [`Backend::flush`] and the layers above call it when
+//! the track ends. The decoded frames carry their own timestamps, so the delay
+//! itself needs nothing downstream.
 //!
 //! The output is CPU I420 rather than a zero-copy [`Surface::DmaBuf`]: VA-API
 //! decode targets on Intel come back Y-tiled (DRM modifier `0x100000000000002`),
@@ -74,19 +78,37 @@ impl Backend for Vaapi {
 			.decode(&access_unit, timestamp.as_micros() as u64)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
-		decoded
-			.into_iter()
-			.map(|frame| {
-				let i420 = I420::from_nv12(&frame.data, frame.width, frame.height)?;
-				let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
-				Ok(Frame::new(Surface::I420(i420), timestamp))
-			})
-			.collect()
+		convert(decoded)
+	}
+
+	/// The tail of the stream, which is why this backend overrides the trait's
+	/// no-op: the DPB is holding as many pictures as the sequence's reference and
+	/// reorder limits allow, and nothing else will ever ask for them.
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		let decoded = self
+			.decoder
+			.flush()
+			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
+
+		convert(decoded)
 	}
 
 	fn name(&self) -> &str {
 		NAME
 	}
+}
+
+/// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
+/// crate speaks, keeping the timestamp the picture was coded with.
+fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> {
+	decoded
+		.into_iter()
+		.map(|frame| {
+			let i420 = I420::from_nv12(&frame.data, frame.width, frame.height)?;
+			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
+			Ok(Frame::new(Surface::I420(i420), timestamp))
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -188,5 +210,60 @@ mod tests {
 			assert!(mae(i420.u(), expected.u()) < 8, "U plane corrupt");
 			assert!(mae(i420.v(), expected.v()) < 8, "V plane corrupt");
 		}
+	}
+
+	/// Regression: every picture fed in comes back out, which needs the flush.
+	///
+	/// H.264 releases a picture from the DPB only once a later one needs its slot,
+	/// so a stream simply stopping leaves its tail there. How many depends on the
+	/// sequence's reference and reorder limits, not on the reorder depth the
+	/// stream used: openh264 codes one reference frame and loses the last picture,
+	/// x264's default three loses three. The `decode` half of the assertion is
+	/// what keeps this honest, since a decoder that held nothing back would pass
+	/// the rest of it without a flush ever running.
+	#[test]
+	fn flushing_returns_the_tail_the_dpb_holds() {
+		if !hw_available() {
+			return;
+		}
+		const FRAMES: u64 = 5;
+		let (w, h) = (320u32, 240u32);
+		let rgba = gradient_rgba(w, h);
+
+		let mut encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Software,
+			..EncodeConfig::new(w, h, 30)
+		})
+		.unwrap();
+		let mut decoder = Vaapi::open(Codec::H264, &decode_config()).expect("VAAPI H.264 decoder");
+
+		let mut streamed = Vec::new();
+		for i in 0..FRAMES {
+			if i == 0 {
+				encoder.keyframe();
+			}
+			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
+			for encoded in encoder.encode(&frame).unwrap() {
+				streamed.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			}
+		}
+		assert!(
+			(streamed.len() as u64) < FRAMES,
+			"the DPB held nothing back, so this test proves nothing"
+		);
+
+		let flushed = decoder.flush().unwrap();
+		let timestamps: Vec<u128> = streamed
+			.iter()
+			.chain(&flushed)
+			.map(|frame| frame.timestamp.as_micros())
+			.collect();
+		let expected: Vec<u128> = (0..FRAMES as u128).map(|i| i * 33_333).collect();
+		assert_eq!(timestamps, expected, "the stream lost pictures at its end");
+
+		// A second flush has nothing left to hand back, so the drain is idempotent
+		// and a caller that flushes twice does not see a picture twice.
+		assert!(decoder.flush().unwrap().is_empty());
 	}
 }
