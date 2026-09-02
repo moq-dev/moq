@@ -85,7 +85,8 @@ struct Fmp4Track {
 
 	/// Frames accumulated for the current fragment. Flushed as a single
 	/// moof+mdat at a GOP boundary (a keyframe on this track for video, the
-	/// keyframe of any video track for audio) or on the duration cap.
+	/// keyframe of any video track for audio), on the duration cap, or, for
+	/// audio, once the run spans [`MAX_AUDIO_SPAN`].
 	buffer: Vec<Frame>,
 
 	/// Whether the first frame of the current `buffer` was a keyframe, i.e. the
@@ -158,12 +159,13 @@ impl<S: Stream> Export<S> {
 	/// Cap the fragment (moof+mdat) duration.
 	///
 	/// By default video fragments roll over on each keyframe (one fragment per
-	/// GOP) and audio rolls with them; a broadcast with no video at all emits
-	/// one audio fragment per sample, having no GOP to follow. Setting this
+	/// GOP) and audio rolls with them, up to a five second backstop for when the
+	/// video stops drawing boundaries; a broadcast with no video at all
+	/// emits one audio fragment per sample, having no GOP to follow. Setting this
 	/// caps each fragment to roughly `duration` of frames, useful for
 	/// downstream consumers that throttle by fragment rate. [`Duration::ZERO`]
 	/// emits one fragment per frame (the historical behavior); otherwise the
-	/// cap applies in addition to GOP rollover.
+	/// cap applies in addition to GOP rollover, and replaces the audio backstop.
 	///
 	/// Accepts either `Duration` or `Option<Duration>` (where `None` restores
 	/// the per-GOP default).
@@ -661,11 +663,27 @@ pub(crate) fn extract_init(
 	Ok(())
 }
 
+/// How much presentation time an audio track's buffered run may span before it
+/// rolls a fragment of its own, when no explicit
+/// [`fragment_duration`](Export::with_fragment_duration) is set.
+///
+/// Audio is otherwise rolled by a video keyframe, and a video track that stops
+/// delivering without ending, or an encoder whose keyframe interval is
+/// effectively infinite (screen sharing), never draws that boundary again. The
+/// cap is what stops the buffer growing for the length of the session.
+///
+/// Five seconds sits above any keyframe interval a broadcast is likely to use
+/// (one to four seconds), so a healthy stream never reaches it and its audio
+/// fragments still cover exactly the spans its video fragments do. What it costs
+/// when a stall does reach it is one fragment per five seconds of audio, holding
+/// around 80 KB per track at 128 kb/s.
+const MAX_AUDIO_SPAN: Duration = Duration::from_secs(5);
+
 /// Should we flush `track.buffer` before appending the incoming `frame`?
-/// Triggers on a video keyframe (one fragment per GOP) or the duration cap.
-/// Audio has no keyframe of its own and is rolled by the video track instead,
-/// via [`Export::flush_audio`]. Per-frame modes never buffer and are handled
-/// before this check.
+/// Triggers on a video keyframe (one fragment per GOP), the duration cap, or
+/// [`MAX_AUDIO_SPAN`]. Audio has no keyframe of its own and is rolled by the
+/// video track instead, via [`Export::flush_audio`]. Per-frame modes never
+/// buffer and are handled before this check.
 fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
 	if track.buffer.is_empty() {
 		return false;
@@ -673,8 +691,12 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	if track.is_video && frame.keyframe {
 		return true;
 	}
-	let Some(cap) = fragment_duration else {
-		return false;
+	let cap = match fragment_duration {
+		Some(cap) => cap,
+		// A video track rolls on its own keyframes; audio depends on someone
+		// else's and needs a bound of its own for when none arrives.
+		None if track.is_video => return false,
+		None => MAX_AUDIO_SPAN,
 	};
 	// Frames within a track are in *decode* order; B-frames have non-monotonic
 	// PTS, so the span of the buffer is min..max of all PTS.

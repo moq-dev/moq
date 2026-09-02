@@ -899,6 +899,62 @@ async fn video_that_ends_first_writes_its_tail_in_order() {
 	assert_eq!(video_samples, 6, "every video frame must be written exactly once");
 }
 
+/// Audio must not buffer without bound while a video track stalls.
+///
+/// Rolling the audio at the video GOP boundary leaves it with no trigger of its
+/// own, and a video track that stops delivering without ending, or an encoder
+/// with an effectively infinite keyframe interval (screen sharing), never draws
+/// another boundary. The audio buffer would then grow for the length of the
+/// session, which is the failure the GOP rollover set out to remove.
+#[tokio::test(start_paused = true)]
+async fn audio_rolls_on_its_own_cap_when_the_video_stalls() {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let mut live = Live::avc3();
+	let mut audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// One keyframe, enough to build the init segment, and then the video stalls:
+	// it delivers nothing more and never ends.
+	live.track.write(video_frame(0, true)).unwrap();
+	// Twelve seconds of 20 ms Opus packets.
+	for i in 0..600u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+			.unwrap();
+	}
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = fragment_now(&mut exporter).await;
+	assert!(init.init);
+	let audio_id = track_ids(&init.data).1;
+
+	let fragments = drain_now(&mut exporter).await;
+	assert_ascending_starts(&init.data, &fragments);
+	for fragment in &fragments {
+		assert!(
+			fragment.duration <= 5.0,
+			"an audio fragment spanned {} seconds with no video to roll it",
+			fragment.duration,
+		);
+	}
+
+	// Two full runs of the cap; the last two seconds stay buffered, still able to
+	// roll with the video if it ever comes back.
+	let counts: Vec<(u32, usize)> = fragments
+		.iter()
+		.map(|fragment| {
+			let trafs = traf_samples(&fragment.data);
+			assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+			trafs[0]
+		})
+		.collect();
+	assert_eq!(counts, vec![(audio_id, 250), (audio_id, 250)]);
+}
+
 /// A simulcast ladder rolls each video track on its own keyframes: one
 /// rendition's GOP boundary must not split another's, or the second rendition's
 /// fragments stop being independently decodable. Audio rolls at whichever
