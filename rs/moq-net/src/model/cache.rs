@@ -358,11 +358,10 @@ impl Track {
 	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
 		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
-		let last = self.pool.stamp(0);
 		Charge {
 			track: Some(self.clone()),
 			bytes: ENTRY_OVERHEAD,
-			last: AtomicU64::new(last),
+			access: Arc::new(Access::new(self.pool.stamp(0))),
 			counted: false,
 		}
 	}
@@ -454,16 +453,51 @@ pub(crate) struct Charge {
 	track: Option<Arc<Track>>,
 	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
 	bytes: u64,
-	// Tick of the last cache access: creation, every write, and every read (group
-	// delivery, frame reads, FETCH hits, a fetched backfill's birth). Eviction
-	// protection and age expiry key off this. Atomic so the read paths can stamp
-	// it through a shared guard: a kio write guard's release notifies every parked
-	// consumer, which a mere access must not do. Accesses are still serialized by
-	// the owning state's lock, so `counted` can pair with it as a plain bool.
-	last: AtomicU64,
-	// Whether `last` is currently a sample in the pool's access mean, i.e. the
-	// group is in the evictable population.
+	// The group's last-access stamp, shared with the handles that read it during a
+	// track scan. Only ever written here, under the group's state lock.
+	access: Arc<Access>,
+	// Whether `access` is currently a sample in the pool's access mean, i.e. the
+	// group is in the evictable population. A plain bool: it is only read while
+	// updating the mean, which the owning state's lock already serializes.
 	counted: bool,
+}
+
+/// The tick of one cached group's last cache access: its creation, every write, and
+/// every read (group delivery, frame reads, FETCH hits, a fetched backfill's birth).
+/// Eviction protection and age expiry both key off it.
+///
+/// Shared, so a track scan can read it without entering the group's state. The
+/// eviction and expiry walks run under the track lock and weigh every candidate
+/// against [`Pool::average`], so reaching this through the group lock would nest one
+/// lock inside the other once per candidate.
+///
+/// Atomic for a second reason on the write side: a kio write guard's release notifies
+/// every parked consumer, and a mere cache access must not wake anyone, so [`Charge`]
+/// stamps this through a shared guard.
+#[derive(Default)]
+pub(crate) struct Access(AtomicU64);
+
+impl Access {
+	fn new(stamp: u64) -> Self {
+		Self(AtomicU64::new(stamp))
+	}
+
+	/// The stamp, tie-breaking bits included.
+	pub(crate) fn get(&self) -> u64 {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	/// The coarse clock tick alone, without the priority bits.
+	pub(crate) fn tick(&self) -> u64 {
+		self.get() >> ACCESS_SHIFT
+	}
+
+	/// Advance to `target` if it is newer, returning the previous stamp.
+	fn bump(&self, target: u64) -> u64 {
+		// `fetch_max` keeps the stamp monotone, and its prior value makes the
+		// paired mean update exact even for back-to-back accesses.
+		self.0.fetch_max(target, Ordering::Relaxed)
+	}
 }
 
 impl Charge {
@@ -499,14 +533,15 @@ impl Charge {
 		self.bytes
 	}
 
-	/// Tick of the group's last cache access.
-	pub(crate) fn accessed(&self) -> u64 {
-		self.last.load(Ordering::Relaxed)
+	/// The shared handle to this group's last-access stamp, so the group can read it
+	/// without taking the state lock this charge lives behind.
+	pub(crate) fn access(&self) -> Arc<Access> {
+		self.access.clone()
 	}
 
-	/// Coarse clock tick of the group's last cache access, without its priority bits.
-	pub(crate) fn accessed_tick(&self) -> u64 {
-		self.accessed() >> ACCESS_SHIFT
+	/// Tick of the group's last cache access.
+	pub(crate) fn accessed(&self) -> u64 {
+		self.access.get()
 	}
 
 	/// Enter the group into the evictable population (demoted from the live edge,
@@ -548,9 +583,7 @@ impl Charge {
 	fn touch(&self, boost: u64) -> Option<u64> {
 		let track = self.track.as_ref()?;
 		let target = track.pool.stamp(boost);
-		// `fetch_max` keeps the stamp monotone, and its prior value makes the
-		// paired mean update exact even for back-to-back accesses.
-		let prev = self.last.fetch_max(target, Ordering::Relaxed);
+		let prev = self.access.bump(target);
 		if target > prev && self.counted {
 			track.pool.access_refresh(prev, target);
 		}
@@ -733,7 +766,7 @@ mod test {
 		// A refresh in the same coarse tick still lifts the group above the mean.
 		c.refresh();
 		assert!(c.accessed() > average);
-		assert_eq!(c.accessed_tick(), pool.now(), "priority does not advance expiry time");
+		assert_eq!(c.access().tick(), pool.now(), "priority does not advance expiry time");
 		// Repeated same-tick refreshes are idempotent, not runaway.
 		let stamped = c.accessed();
 		c.refresh();

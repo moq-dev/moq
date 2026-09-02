@@ -82,15 +82,24 @@ fn back_to_back_groups_arrive_in_order() {
 	});
 }
 
-/// An abort flag may race a track scan. A scan that wins may hand out the group,
-/// while one that loses skips it; once the aborting thread joins, no new subscriber
-/// may observe the aborted group as live.
+/// A track scan reads the group's abort through a mirrored flag rather than the
+/// group's state, so the two can disagree. The direction that disagreement is allowed
+/// to run is the invariant: the mirror may lag the state (a scan hands out a group
+/// that is already aborting, and its consumer surfaces the abort), but it may never
+/// lead it (a scan drops a group a reader could still drain).
 ///
-/// The abort transition first takes the loom-backed group lock, while delivery takes
-/// the loom-backed track lock. Those independent critical sections let loom permute
-/// both sides of the flag handoff without instrumenting every cache scan in this suite.
+/// So the racing scan asserts against the group's *own state*, not against the flag it
+/// just read: whenever the scan skips the group, a consumer must agree the group is
+/// aborted. Only the abort transition takes the loom-backed group lock while delivery
+/// takes the loom-backed track lock, which is what lets loom permute the two sides.
+///
+/// The mirror itself is a bare `std` atomic, which loom does not instrument (see the
+/// module docs). It cannot be: any cross-thread look at the group's state has to take
+/// the group lock the abort is holding, so a store moved earlier *within* that guard
+/// is unobservable by construction. What is observable, and what this pins down, is a
+/// store escaping the guard entirely.
 #[test]
-fn group_abort_flag_is_monotone_for_track_scans() {
+fn group_abort_flag_never_leads_the_group_state() {
 	loom::model(|| {
 		let mut broadcast = broadcast::Info::new().produce();
 		let mut track = broadcast.create_track("video", None).expect("create track");
@@ -105,9 +114,26 @@ fn group_abort_flag_is_monotone_for_track_scans() {
 			std::task::Poll::Ready(Ok(Some(_)))
 		));
 
+		// The group holds no frames and the track is finished, so this consumer parks
+		// while the group is live and errors once the abort reaches the state itself.
+		let mut observer = group.consume();
 		let aborter = thread::spawn(move || group.abort(Error::Cancel).expect("abort group"));
-		let raced = racing.poll_recv_group(&kio::Waiter::noop());
-		assert!(raced.is_ready(), "a finalized track cannot park during the abort race");
+
+		match racing.poll_recv_group(&kio::Waiter::noop()) {
+			// Skipped, so the scan read the mirror as aborted. The state must already
+			// agree, or the mirror led it and this scan dropped a readable group.
+			std::task::Poll::Ready(Ok(None)) => assert!(
+				matches!(
+					observer.poll_next_frame(&kio::Waiter::noop()),
+					std::task::Poll::Ready(Err(_))
+				),
+				"a scan skipped a group whose own state is not aborted"
+			),
+			// Delivered, which the mirror is allowed to do right up until the abort
+			// commits; the consumer is what surfaces it.
+			std::task::Poll::Ready(Ok(Some(_))) => {}
+			_ => panic!("a finalized track cannot park during the abort race"),
+		}
 		aborter.join().unwrap();
 
 		assert!(matches!(

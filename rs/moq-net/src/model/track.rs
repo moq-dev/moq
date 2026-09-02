@@ -410,10 +410,8 @@ impl TrackState {
 	/// is a miss instead, so the fetch goes upstream for the frames that are missing.
 	fn covering_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Producer> {
 		let slot = self.lookup.get(&sequence)?;
-		if slot.group.is_aborted() || slot.group.first_frame() as u64 > frame_start {
-			return None;
-		}
-		Some(&slot.group)
+		let first = slot.group.live_first_frame()?;
+		(first as u64 <= frame_start).then_some(&slot.group)
 	}
 
 	/// The publisher's max age window, or `None` while the info is unknown (an
@@ -720,7 +718,14 @@ impl TrackState {
 	/// draining the old one keep their own handle.
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
 		if let Some(slot) = self.lookup.get(&sequence) {
-			if !slot.group.is_aborted() && slot.group.first_frame() as u64 <= frame_start {
+			// The same question `covering_group` asks: can this slot still answer from
+			// `frame_start`? If it can, the sequence is taken; if it can't, it is dead
+			// and the caller gets to replace it.
+			if slot
+				.group
+				.live_first_frame()
+				.is_some_and(|first| first as u64 <= frame_start)
+			{
 				return Err(Error::Duplicate);
 			}
 			self.lookup.remove(&sequence);
@@ -941,25 +946,18 @@ impl TrackState {
 		}
 
 		let max = self.latest_group?;
-		match self.lookup.get(&max) {
+		match self.lookup.get(&max).and_then(|slot| slot.group.resume_frame()) {
 			// Still open *and* carrying frames, so the replacement continues it
-			// frame-by-frame. This holds even for an aborted group: readers that already
-			// consumed its head want the tail, and the count outlives the released cache.
-			//
-			// The *committed* count, not the written one: a route dying midway through a
-			// chunked frame leaves that frame unusable, so the replacement has to send it
-			// again rather than start after it.
-			Some(slot) if !slot.group.is_finished() && slot.group.committed_frames() > slot.group.first_frame() => {
-				Some(Position {
-					group: max,
-					frame: slot.group.committed_frames() as u64,
-				})
-			}
+			// frame-by-frame.
+			Some(frame) => Some(Position {
+				group: max,
+				frame: frame as u64,
+			}),
 			// A copy that wrote nothing has no frames to splice onto, and the reader
 			// already holds its (empty) handle. Pointing a replacement at frame 0 would
 			// hand the same sequence out twice, so roll to the next group exactly as a
 			// finished one does.
-			_ => Some(Position::group(max.saturating_add(1))),
+			None => Some(Position::group(max.saturating_add(1))),
 		}
 	}
 
@@ -7424,6 +7422,42 @@ mod test {
 
 		let mut group = pending.await.unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"refetched");
+	}
+
+	/// An aborted group is dead whatever frame it starts at: the sequence is claimable
+	/// again, and a cache lookup misses rather than handing back a slot that can no
+	/// longer serve it.
+	///
+	/// The abort and the group's first frame decide this together, so they are read
+	/// under one guard. Read separately, the abort can land between them and the slot
+	/// answers as a live duplicate on the strength of an offset it only still has
+	/// because it died. That interleaving is what the single guard rules out; this
+	/// pins the committed semantics it has to preserve.
+	#[test]
+	fn an_aborted_group_releases_its_sequence() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+
+		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+
+		// While it lives the slot answers, so the sequence is taken.
+		assert!(matches!(
+			producer.create_group(group::Info { sequence: 3 }),
+			Err(Error::Duplicate)
+		));
+		assert!(consumer.peek_group(3).is_some());
+
+		group.abort(Error::Cancel).unwrap();
+
+		assert!(consumer.peek_group(3).is_none(), "an aborted slot is a cache miss");
+		producer
+			.create_group(group::Info { sequence: 3 })
+			.expect("an aborted slot releases its sequence")
+			.finish()
+			.unwrap();
 	}
 
 	/// A fetched (backfill) group is served by sequence but never replayed to
