@@ -47,3 +47,4 @@ regression test per Root Cause First.
 - [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against 32
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Open-GOP H.264: a regression fixture and a measured cold tune-in
 - [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
+- [Gradual recovery](/quest/m0/open-gop-gradual-recovery.md) - tune-in at a recovery point with `recovery_frame_cnt > 0` trims through the recovery picture

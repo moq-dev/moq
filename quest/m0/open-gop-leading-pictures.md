@@ -9,7 +9,8 @@ recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
 contribution case, and what the reference capture carries) and H.265 CRA
 pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: the
 splitter does not retain the count, and unsafe pictures there can sit at or
-after the keyframe timestamp, so it needs its own plan.
+after the keyframe timestamp, so it has its own quest,
+[gradual recovery](/quest/m0/open-gop-gradual-recovery.md).
 
 ## Plan
 
@@ -34,9 +35,15 @@ everyone.
   an equivalent non-continuous signal from `container::Consumer`, so native
   playback and the transcoder tune in the same way.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
-  deltas is trimmed on the first group and kept on the second, in both
-  languages.
+  deltas is trimmed on the first group and kept on the second; and a viewer
+  that plays continuously, then latency-skips into a later open GOP, has that
+  group's leading pictures trimmed too, so an implementation that only trims
+  the initial group fails. Both cases in both languages.
 
 ## Required
 
 - [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - decides whether the glitch is dropped frames, corrupt frames, or a decoder error, which sets what this has to prove
+
+## Related
+
+- [Gradual recovery](/quest/m0/open-gop-gradual-recovery.md) - the `recovery_frame_cnt > 0` case this rule does not cover
