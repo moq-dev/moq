@@ -41,11 +41,11 @@ Future<void> main(List<String> args) async {
   });
 }
 
-/// A resolved native library plus the files it was built from.
+/// A resolved native library plus anything else the hook must re-run for.
 ///
-/// Downloaded and overridden libraries have no tracked inputs; a library built
-/// from this checkout lists its Rust sources so Dart re-runs the hook when they
-/// change.
+/// A downloaded library has none: it is pinned by version and checksum. A
+/// library built from this checkout lists its Rust sources instead, so an edit
+/// there invalidates the cached asset.
 typedef _Resolved = ({Uri library, List<Uri> inputs});
 
 Future<_Resolved> _resolveLibrary(
@@ -66,7 +66,7 @@ Future<_Resolved> _resolveLibrary(
     if (!await file.exists()) {
       throw StateError('moq_ffi library user-define does not exist: $pinned');
     }
-    return (library: file.uri, inputs: <Uri>[file.uri]);
+    return (library: file.uri, inputs: const <Uri>[]);
   }
 
   final workspace = input.packageRoot.resolve('../../');
