@@ -24,5 +24,5 @@ subscriber's order must win, and a custom ladder order.
 
 ## Related
 
-- [#699](/quest/m1/699-better-prioritize-ties.md) - the other open question at
-  this seam: equal priorities sort by group number instead of interleaving
+- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - supplies the
+  fair subscription buckets beneath this rendition policy

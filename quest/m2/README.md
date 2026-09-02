@@ -20,7 +20,9 @@ dashboards, fleet rollout) stay downstream.
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m2/qos/README.md) - broadcast health counters: network backlog, publisher stats, viewer feedback
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
-- [Quiche](/quest/m2/quiche/README.md) - media-aware transport features in the moq-dev/quiche fork and their moq-uring adoption
+- [Custom QUIC](/quest/m2/quic/README.md) - a maintained Quinn-family fork
+  supplies reliable reset, hierarchical scheduling, qmux, and the next
+  moq-uring backend
 - [Relay memory](/quest/m2/relay-memory/README.md) - relay memory scales with what it serves, not what the fleet knows
 - [PoP skipping](/quest/m2/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt

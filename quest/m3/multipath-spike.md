@@ -64,9 +64,8 @@ Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 
 ## Related
 
-- [QUIC backend bakeoff](/quest/m3/quic-backend-bakeoff.md) - scores noq-proto
-  against quiche and quinn-proto, so what engine the stack settles on bears
-  directly on whether a noq-only capability is worth building
+- [Choose the QUIC parent](/quest/m2/quic/parent.md) - noq's multipath support
+  informs the parent choice, but this spike does not block it
 
 ## Closes
 
