@@ -409,12 +409,71 @@ _shell $ACTION:
             ;;
     esac
 
+# remark-cli has no `--check`. `--frail` raises the exit code on lint messages,
+# and only `--output` formats, so a file that is merely misformatted passes both
+# ways. Format a scratch mirror and diff that, so the check stays read-only
+# while `fix` still writes in place.
+
+# Run Markdown lints over the worktree, either checking formatting or applying it.
+[private]
+_markdown $ACTION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$ACTION" in
+        check) ;;
+        fix)
+            bun remark . --quiet --output
+            exit 0
+            ;;
+        *)
+            echo "invalid markdown action: $ACTION" >&2
+            exit 2
+            ;;
+    esac
+
+    mirror=$(mktemp -d)
+    trap 'rm -rf "$mirror"' EXIT
+
+    # Untracked files are in scope so a new doc is linted before it is staged;
+    # --exclude-standard keeps build output out.
+    files=()
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        files+=("$file")
+        mkdir -p "$mirror/$(dirname "$file")"
+        cp "$file" "$mirror/$file"
+    done < <(git ls-files -z --cached --others --exclude-standard -- '*.md')
+    ((${#files[@]})) || exit 0
+
+    # The config rides along so every .remarkignore pattern resolves against the
+    # mirror root exactly as it does here, and node_modules is where the plugins
+    # named by .remarkrc.mjs come from.
+    cp .remarkrc.mjs .remarkignore "$mirror/"
+    ln -s "$PWD/node_modules" "$mirror/node_modules"
+
+    status=0
+    (cd "$mirror" && bun remark . --quiet --frail --output) || status=$?
+
+    stale=()
+    for file in "${files[@]}"; do
+        cmp -s "$file" "$mirror/$file" || stale+=("$file")
+    done
+
+    if ((${#stale[@]})); then
+        echo "error: these files are not formatted, run 'just fix':" >&2
+        printf '       %s\n' "${stale[@]}" >&2
+        status=1
+    fi
+
+    exit "$status"
+
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
     just _changed-test
     bun install --frozen-lockfile
-    bun remark . --quiet --frail
+    just _markdown check
     just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
@@ -467,7 +526,7 @@ fix-all:
 [private]
 _fix-common:
     bun install
-    bun remark . --quiet --output
+    just _markdown fix
     just _shell fix
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
