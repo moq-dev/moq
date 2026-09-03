@@ -115,8 +115,8 @@ internally consistent, so absolute rate is not what this grades.
 | `sync` | hard | no invalid sync bytes / transport-error packets |
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
 | `pcr-single-pid` | hard | every PCR rides one PID |
-| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290) |
-| `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold (`--live` only) |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
+| `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
@@ -131,6 +131,22 @@ longer than the lag takes to build: measured against the grid-sliced exporter,
 the lag reaches ~480 ms over the first ~48 s and then holds to within 0.02 ms/s
 over the following 40 s, whereas a 20 s window catches it still filling at
 \~8.7 ms/s and cannot distinguish that from a slow pipe.
+
+Two conditions are legal and must not be reported as defects. ISO 13818-1 2.4.3.4
+lets a source declare a new time base by setting `discontinuity_indicator`, after
+which the next PCR is a fresh value rather than the next point on the old ramp, so
+the difference across that boundary measures nothing: the value and release checks
+drop that one interval and count it separately, drift is summed over the intervals
+actually graded, and the jump is not mistaken for a 33-bit wrap. Counting it read a
+signalled splice as an 820 ms repetition breach and a continuity error at once.
+
+Separately, "not measured" and "passed" are different answers and only one of them
+belongs to a file. A file carries no arrival stamps, so release timing genuinely
+cannot be graded and the check says so. Under `--live` the stamps were expected, and
+a sample too small to mean anything is a truncated capture rather than a clean
+stream, so it fails: without that, a producer which emitted two packets and exited
+turned the gate green, and an exporter exiting early is common enough that the route
+is a real one rather than a hypothetical.
 
 `pcr-position` is a shape check because `export ts` is VBR by design. It is worth
 reporting even so: a consumer holding only the byte stream, which is every

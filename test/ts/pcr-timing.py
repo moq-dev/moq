@@ -73,8 +73,10 @@ class Scan:
         self.cc_errors = []
         self.cc_on_empty = []
         self.wraps = 0
+        self.new_base = set()  # positions in self.pcr that state a new time base
         self._cc = {}
         self._dup = {}
+        self._new_base = set()  # PIDs whose next PCR states a new time base
         self._pcr_raw = {}
         self._pcr_offset = {}
 
@@ -88,6 +90,17 @@ class Scan:
             self.transport_error += 1
         pid = ((p[1] & 0x1F) << 8) | p[2]
 
+        # ISO 13818-1 2.4.3.3 allows the counter to jump when the adaptation field sets
+        # discontinuity_indicator, and allows one packet to be sent twice, repeating its
+        # counter. Both are legal, and treating either as an error fails a conforming
+        # stream on a hard check. Read the flag before the PCR, because 2.4.3.4 makes the
+        # same flag mean the clock may jump too, and the value and release checks both need
+        # to know which of their intervals spans that.
+        cc = p[3] & 0x0F
+        payload = bool((p[3] >> 4) & 0x1)
+        adaptation = bool((p[3] >> 4) & 0x2)
+        discontinuity = adaptation and p[4] > 0 and bool(p[5] & 0x80)
+
         ticks = parse_pcr(p)
         if ticks is not None:
             # Unwrap, so the checks see a monotone timeline. A capture crossing the
@@ -96,24 +109,27 @@ class Scan:
             # release check reads it as a day of lateness. A rollover drops the value by
             # nearly the whole modulus, so only a drop past halfway is treated as one and
             # a merely backwards PCR stays visible as the defect it is.
-            prev_raw = self._pcr_raw.get(pid)
-            if prev_raw is not None and ticks < prev_raw - PCR_MODULUS // 2:
-                self._pcr_offset[pid] = self._pcr_offset.get(pid, 0) + PCR_MODULUS
-                self.wraps += 1
+            #
+            # A signalled discontinuity is the exception in both directions: the next PCR
+            # states a new time base, so a drop across it is neither a wrap to unwrap nor a
+            # backwards clock to report, and the interval spanning it is not a measurement
+            # of anything. Mark it instead, and let the checks drop that one interval.
+            if discontinuity or pid in self._new_base:
+                self._new_base.discard(pid)
+                self.new_base.add(len(self.pcr))
+                self._pcr_raw.pop(pid, None)
+            else:
+                prev_raw = self._pcr_raw.get(pid)
+                if prev_raw is not None and ticks < prev_raw - PCR_MODULUS // 2:
+                    self._pcr_offset[pid] = self._pcr_offset.get(pid, 0) + PCR_MODULUS
+                    self.wraps += 1
             self._pcr_raw[pid] = ticks
             self.pcr.append((index, ticks + self._pcr_offset.get(pid, 0), arrival, pid))
+        elif discontinuity:
+            # The flag rode a packet with no PCR in it, so the new base arrives with the
+            # next PCR on this PID rather than with this packet.
+            self._new_base.add(pid)
 
-        # ISO 13818-1 2.4.3.3: the continuity counter advances only on a packet
-        # carrying a payload, so an adaptation-only PCR packet must repeat the
-        # previous value rather than increment it.
-        cc = p[3] & 0x0F
-        payload = bool((p[3] >> 4) & 0x1)
-        # The same clause allows the counter to jump when the adaptation field sets
-        # discontinuity_indicator, and allows one packet to be sent twice, repeating its
-        # counter. Both are legal, and treating either as an error fails a conforming
-        # stream on a hard check.
-        adaptation = bool((p[3] >> 4) & 0x2)
-        discontinuity = adaptation and p[4] > 0 and bool(p[5] & 0x80)
         prev = self._cc.get(pid)
         self._cc[pid] = cc
         if prev is None or pid == 0x1FFF:
@@ -246,8 +262,20 @@ def check_pcr_single_pid(scan, args):
 
 
 def check_value_interval(scan, args):
-    """PCR values must be spaced within the repetition limit."""
-    iv = [(b[1] - a[1]) / TICKS_PER_MS for a, b in zip(scan.pcr, scan.pcr[1:])]
+    """PCR values must be spaced within the repetition limit.
+
+    Within one time base. ISO 13818-1 2.4.3.4 lets a source declare a new one by setting
+    discontinuity_indicator, after which the next PCR is a fresh value rather than the next
+    point on the old ramp, so the difference across that boundary measures nothing. Counting
+    it fails a conforming stream: a signalled splice reads as one enormous interval, which is
+    the same class of false positive review found in the continuity check.
+    """
+    iv = [
+        (b[1] - a[1]) / TICKS_PER_MS
+        for i, (a, b) in enumerate(zip(scan.pcr, scan.pcr[1:]))
+        if (i + 1) not in scan.new_base
+    ]
+    spliced = sum(1 for i in range(1, len(scan.pcr)) if i in scan.new_base)
     if not iv:
         return ("pcr-value-interval", HARD, False, "no PCR intervals in the stream", {})
     over = [m for m in iv if m > args.repetition_ms]
@@ -268,8 +296,11 @@ def check_value_interval(scan, args):
         "sub_ms": sum(1 for m in iv if m < 1.0),
         "non_positive": len(backwards),
         "wraps_unwrapped": scan.wraps,
+        "signalled_discontinuities": spliced,
     }
     backwards_note = f", {len(backwards)} non-positive" if backwards else ""
+    if spliced:
+        backwards_note += f", {spliced} signalled discontinuity not counted"
     return (
         "pcr-value-interval",
         HARD,
@@ -299,13 +330,55 @@ def check_release(scan, args):
     lag's rate over the tail of the sample is reported beside it, which is what
     distinguishes a lag that has settled from one still growing.
     """
-    pts = [(ticks, arrival) for _, ticks, arrival, _ in scan.pcr if arrival is not None]
-    if len(pts) < 3:
-        return ("pcr-release-timing", HARD, True, "not measured (no arrival stamps)", {})
+    stamped = [i for i, (_, _, arrival, _) in enumerate(scan.pcr) if arrival is not None]
+    pts = [(scan.pcr[i][1], scan.pcr[i][2]) for i in stamped]
+    # scan.new_base indexes scan.pcr; pts drops the unstamped entries, so remap.
+    live_new_base = {j for j, i in enumerate(stamped) if i in scan.new_base}
+    # A file has no arrival stamps in it, so there is nothing to grade and saying so is
+    # the honest verdict. Live is the opposite case: arrivals were expected, and too few
+    # of them is a truncated capture rather than a clean stream. Passing that is how a
+    # gate reports success on a producer that died, which is the state this tool exists
+    # to catch, so the two have to be told apart rather than sharing one branch.
+    if not args.live:
+        if len(pts) < 3:
+            return ("pcr-release-timing", HARD, True, "not measured (no arrival stamps)", {})
+    else:
+        covered_ms = (pts[-1][0] - pts[0][0]) / TICKS_PER_MS if len(pts) >= 2 else 0.0
+        want_ms = 1000.0 * args.seconds * args.live_cover_pct / 100.0
+        short = len(pts) < args.live_min_pcr or covered_ms < want_ms
+        if short:
+            return (
+                "pcr-release-timing",
+                HARD,
+                False,
+                f"insufficient live sample: {len(pts)} PCR with arrival stamps spanning "
+                f"{covered_ms / 1000.0:.3f} s, against a floor of {args.live_min_pcr} PCR and "
+                f"{want_ms / 1000.0:g} s ({args.live_cover_pct:g} % of the {args.seconds:g} s "
+                f"window). A truncated capture cannot be graded and must not pass",
+                {
+                    "count": len(pts),
+                    "covered_s": round(covered_ms / 1000.0, 3),
+                    "required_pcr": args.live_min_pcr,
+                    "required_s": round(want_ms / 1000.0, 3),
+                },
+            )
 
-    err = [((b[1] - a[1]) * 1000.0) - ((b[0] - a[0]) / TICKS_PER_MS) for a, b in zip(pts, pts[1:])]
+    # Same exclusion as the value check: an interval spanning a signalled new time base is
+    # not a release measurement, and counting it reports a splice as seconds of lateness.
+    graded = [
+        (((b[1] - a[1]) * 1000.0) - ((b[0] - a[0]) / TICKS_PER_MS), (b[0] - a[0]) / TICKS_PER_MS)
+        for i, (a, b) in enumerate(zip(pts, pts[1:]))
+        if (i + 1) not in live_new_base
+    ]
+    err = [e for e, _ in graded]
+    span = [s for _, s in graded]
+    if not err:
+        return ("pcr-release-timing", HARD, False, "no gradable release intervals", {})
     magnitude = [abs(e) for e in err]
-    drift = ((pts[-1][1] - pts[0][1]) * 1000.0) - ((pts[-1][0] - pts[0][0]) / TICKS_PER_MS)
+    # Accumulated drift is the sum of the intervals actually graded. That telescopes to the
+    # endpoint difference on an unspliced sample, and stays correct on a spliced one, where
+    # the endpoints straddle a time base the stream never claimed to be running on.
+    drift = sum(err)
     late = [e for e in err if e > args.release_ms]
     early = [e for e in err if e < -args.release_ms]
     detail = {
@@ -324,11 +397,10 @@ def check_release(scan, args):
     # Whether the lag has settled is the difference between a buffer that filled and a
     # pipe running slow, and the two are only separable over a sample longer than the
     # fill. Grade the last third: a settled lag adds nothing to it.
-    tail = pts[max(1, (2 * len(pts)) // 3) :]
-    tail_span_ms = (tail[-1][0] - tail[0][0]) / TICKS_PER_MS if len(tail) >= 2 else 0.0
+    cut = (2 * len(err)) // 3
+    tail_span_ms = sum(span[cut:])
     if tail_span_ms > 0:
-        tail_drift = ((tail[-1][1] - tail[0][1]) * 1000.0) - tail_span_ms
-        detail["tail_drift_rate_ms_per_s"] = round(1000.0 * tail_drift / tail_span_ms, 3)
+        detail["tail_drift_rate_ms_per_s"] = round(1000.0 * sum(err[cut:]) / tail_span_ms, 3)
         detail["tail_span_s"] = round(tail_span_ms / 1000.0, 1)
     # Per-interval error and accumulated drift fail independently, and bounding only the
     # first leaves the second unbounded: a consistent 1 ms error on a 25 ms grid sits well
@@ -441,6 +513,20 @@ def main():
         type=float,
         default=0.0,
         help="share of intervals allowed outside the release tolerance (default 0)",
+    )
+    ap.add_argument(
+        "--live-min-pcr",
+        type=int,
+        default=20,
+        help="fewest PCR samples a --live run may grade before it is a truncated capture "
+        "rather than a result (default 20)",
+    )
+    ap.add_argument(
+        "--live-cover-pct",
+        type=float,
+        default=50.0,
+        help="share of the --seconds window a --live sample must span, or it is treated as "
+        "truncated (default 50)",
     )
     ap.add_argument(
         "--drift-ms",
