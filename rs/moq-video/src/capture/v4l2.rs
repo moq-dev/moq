@@ -6,8 +6,12 @@
 //! the pure-Rust [`zune_jpeg`], then converted). This is the CPU path feeding
 //! NVENC / VAAPI / openh264; there's no GPU surface here.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use v4l::buffer::Type as BufType;
 use v4l::capability::Flags;
+use v4l::frameinterval::FrameIntervalEnum;
+use v4l::framesize::FrameSizeEnum;
 use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -17,7 +21,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
-use super::{Config, Stream};
+use super::{Config, Mode, Stream};
 use crate::frame::{I420, Surface};
 use crate::{Error, Size};
 
@@ -55,6 +59,102 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 		})
 		.collect();
 	Ok(cameras)
+}
+
+/// List the modes a V4L2 camera reports, for the formats this backend converts.
+///
+/// `VIDIOC_ENUM_FRAMESIZES` and `VIDIOC_ENUM_FRAMEINTERVALS` describe a device
+/// without configuring it, which is what makes this answerable before the camera
+/// opens. `VIDIOC_S_FMT` cannot: it asks and applies in one step, which is why
+/// [`negotiate`] has to probe.
+///
+/// Only YUYV and MJPEG are enumerated, so what comes back is what [`open`] could
+/// negotiate rather than everything the driver advertises. Sizes reported for
+/// both formats are merged, and their rates with them: the encoder sees I420
+/// either way, so which format carried a mode is not something a caller can act
+/// on.
+pub(super) fn modes(selector: Option<&str>) -> Result<Vec<Mode>, Error> {
+	let (device, name) = open_device(selector)?;
+	let mut sizes: BTreeMap<(u32, u32), BTreeSet<u32>> = BTreeMap::new();
+
+	for candidate in Source::ALL {
+		let fourcc = candidate.fourcc();
+		let enumerated = match Capture::enum_framesizes(&device, fourcc) {
+			Ok(enumerated) => enumerated,
+			Err(error) => {
+				// A driver that offers a format need not enumerate sizes for it,
+				// and one that does not offer it at all answers the same way, so
+				// this is normal rather than a fault.
+				tracing::debug!(device = %name, %fourcc, %error, "V4L2 node enumerated no frame sizes");
+				continue;
+			}
+		};
+		for size in enumerated {
+			for (width, height) in reported_sizes(size.size) {
+				sizes
+					.entry((width, height))
+					.or_default()
+					.extend(framerates(&device, fourcc, width, height));
+			}
+		}
+	}
+
+	let mut modes: Vec<Mode> = sizes
+		.into_iter()
+		.map(|((width, height), framerates)| Mode {
+			width,
+			height,
+			// Highest first, so the rate a caller most often wants is the one it
+			// reads without scanning.
+			framerates: framerates.into_iter().rev().collect(),
+		})
+		.collect();
+	modes.sort_by_key(|mode| std::cmp::Reverse(u64::from(mode.width) * u64::from(mode.height)));
+	Ok(modes)
+}
+
+/// The sizes worth reporting from one `VIDIOC_ENUM_FRAMESIZES` entry.
+///
+/// A discrete entry is one size. A stepwise or continuous entry describes a
+/// whole rectangle of them, which on a driver with a one-pixel step is millions,
+/// so only its corners are reported. Those are the two a caller sizing a capture
+/// against the device needs; everything between them follows from the step.
+fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
+	match size {
+		FrameSizeEnum::Discrete(discrete) => vec![(discrete.width, discrete.height)],
+		FrameSizeEnum::Stepwise(stepwise) => {
+			let smallest = (stepwise.min_width, stepwise.min_height);
+			let largest = (stepwise.max_width, stepwise.max_height);
+			if smallest == largest {
+				vec![smallest]
+			} else {
+				vec![smallest, largest]
+			}
+		}
+	}
+}
+
+/// The frame rates the device lists for one format and size, in whole frames per
+/// second.
+///
+/// A stepwise or continuous interval is dropped. It says the device accepts
+/// anything in a range rather than naming modes, and turning that into a list
+/// would report rates the driver never advertised as such.
+fn framerates(device: &Device, fourcc: FourCC, width: u32, height: u32) -> Vec<u32> {
+	let intervals = match Capture::enum_frameintervals(device, fourcc, width, height) {
+		Ok(intervals) => intervals,
+		Err(_) => return Vec::new(),
+	};
+	intervals
+		.into_iter()
+		.filter_map(|interval| match interval.interval {
+			// The interval is seconds per frame, so the rate is its reciprocal.
+			FrameIntervalEnum::Discrete(fraction) if fraction.numerator != 0 => {
+				Some((fraction.denominator / fraction.numerator).max(1))
+			}
+			_ => None,
+		})
+		.collect()
 }
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
@@ -340,8 +440,46 @@ fn set_format(device: &Device, format: Format) -> Result<Format, Error> {
 mod tests {
 	use super::*;
 
+	use v4l::framesize::{Discrete, Stepwise};
+
 	fn reply(width: u32, height: u32, source: Source) -> (Format, Source) {
 		(Format::new(width, height, source.fourcc()), source)
+	}
+
+	fn stepwise(min: (u32, u32), max: (u32, u32), step: u32) -> FrameSizeEnum {
+		FrameSizeEnum::Stepwise(Stepwise {
+			min_width: min.0,
+			max_width: max.0,
+			step_width: step,
+			min_height: min.1,
+			max_height: max.1,
+			step_height: step,
+		})
+	}
+
+	/// A discrete entry is the one mode it names.
+	#[test]
+	fn a_discrete_frame_size_is_reported_as_itself() {
+		let size = FrameSizeEnum::Discrete(Discrete {
+			width: 1280,
+			height: 720,
+		});
+		assert_eq!(reported_sizes(size), vec![(1280, 720)]);
+	}
+
+	/// A one-pixel step over a 4K range is 8 million modes, and reporting them
+	/// would say nothing the two corners do not.
+	#[test]
+	fn a_stepwise_frame_size_is_reported_as_its_corners() {
+		let size = stepwise((32, 32), (3840, 2160), 1);
+		assert_eq!(reported_sizes(size), vec![(32, 32), (3840, 2160)]);
+	}
+
+	/// A range whose corners coincide is one mode, not the same one twice.
+	#[test]
+	fn a_stepwise_frame_size_of_one_mode_is_reported_once() {
+		let size = stepwise((640, 480), (640, 480), 1);
+		assert_eq!(reported_sizes(size), vec![(640, 480)]);
 	}
 
 	/// The case that motivates scoring at all, taken from a real UVC webcam:

@@ -146,6 +146,29 @@ impl Camera {
 	}
 }
 
+/// A capture mode a source reports: one frame size, and the frame rates it
+/// offers at that size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mode {
+	/// Frame width in pixels.
+	pub width: u32,
+	/// Frame height in pixels.
+	pub height: u32,
+	/// The frame rates offered at this size, in whole frames per second,
+	/// highest first.
+	///
+	/// Empty when the driver describes a continuous range instead of listing
+	/// rates: the size is supported, but nothing says at which rates.
+	pub framerates: Vec<u32>,
+}
+
+impl Mode {
+	/// The highest rate this mode offers, or `None` when the driver listed none.
+	pub fn max_framerate(&self) -> Option<u32> {
+		self.framerates.first().copied()
+	}
+}
+
 /// A display reported by [`displays`].
 #[derive(Clone, Debug)]
 pub struct Display {
@@ -437,6 +460,33 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 	{
 		Err(Error::Unsupported("listing cameras".to_string()))
+	}
+}
+
+/// List the modes a camera reports, largest size first.
+///
+/// `camera` selects the device exactly as [`Source::Camera`] does. Only the
+/// formats this crate can convert are enumerated, so the modes that come back
+/// are ones [`open`] could negotiate rather than everything the driver
+/// advertises.
+///
+/// Linux only. The other platforms' camera APIs report the mode they picked
+/// rather than the modes they have, so they answer with
+/// [`Error::Unsupported`] and a caller learns the geometry by opening the
+/// device and reading [`Stream::framerate`].
+///
+/// An empty list is not a failure: it means the driver enumerated nothing this
+/// crate can convert.
+pub async fn camera_modes(camera: Option<&str>) -> Result<Vec<Mode>, Error> {
+	let _ = camera;
+	#[cfg(target_os = "linux")]
+	{
+		let camera = camera.map(str::to_string);
+		blocking(move || v4l2::modes(camera.as_deref())).await
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		Err(Error::Unsupported("listing camera modes".to_string()))
 	}
 }
 
