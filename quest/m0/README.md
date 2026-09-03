@@ -32,5 +32,4 @@ regression test per Root Cause First.
 - [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority
 - [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group ends the subscription, so offered load silently decays mid-run
 - [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync leaves no trace, no log, no counter
-- [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
 - [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against 32
