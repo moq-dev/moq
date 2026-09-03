@@ -1181,9 +1181,7 @@ mod session_tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		// One rendition that streams, and one reserved by name that nobody ever accepts.
-		let mut video = broadcast
-			.create_track("video", hang::container::track_info())
-			.unwrap();
+		let mut video = broadcast.create_track("video", hang::container::track_info()).unwrap();
 		let _reserved = broadcast.reserve_track("audio").unwrap();
 		{
 			let mut guard = catalog.lock();
