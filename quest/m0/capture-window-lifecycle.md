@@ -35,4 +35,3 @@ on Windows and PR CI is Linux-only.
 ## Related
 
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - the other half of the resize story, on the probe-versus-subscriber path
-- [Windows window capture](/quest/m0/windows-window-capture-blank.md) - the other defect in the same backend
