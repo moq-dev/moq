@@ -16,7 +16,6 @@ regression test per Root Cause First.
 ## Quests
 
 - [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
-- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
 - [Rust log redaction](/quest/m0/rust-log-redaction.md) - moq-native logs relay URLs with their query and moq-rtmp logs stream keys
 - [Dart leaks](/quest/m0/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
