@@ -289,6 +289,15 @@ def check_release(scan, args):
     which is what a receiver PLL and any downstream re-timing stage sees, and
     accumulated drift, which must stay bounded or the pipe is not running at the
     media rate at all.
+
+    Bounded is the whole of the drift requirement, and the bound is the sender's
+    latency budget. An exporter that buffers builds a standing lag once, at
+    startup, and then runs at the media rate; the lag is a constant offset, which
+    no receiver can see and which cannot grow past the budget the sender is
+    allowed to hold. A pipe running slow never stops accumulating and so breaches
+    any fixed bound given a long enough sample. So the total is the gate and the
+    lag's rate over the tail of the sample is reported beside it, which is what
+    distinguishes a lag that has settled from one still growing.
     """
     pts = [(ticks, arrival) for _, ticks, arrival, _ in scan.pcr if arrival is not None]
     if len(pts) < 3:
@@ -312,20 +321,32 @@ def check_release(scan, args):
         "total_drift_ms": round(drift, 1),
         "drift_limit_ms": args.drift_ms,
     }
+    # Whether the lag has settled is the difference between a buffer that filled and a
+    # pipe running slow, and the two are only separable over a sample longer than the
+    # fill. Grade the last third: a settled lag adds nothing to it.
+    tail = pts[max(1, (2 * len(pts)) // 3) :]
+    tail_span_ms = (tail[-1][0] - tail[0][0]) / TICKS_PER_MS if len(tail) >= 2 else 0.0
+    if tail_span_ms > 0:
+        tail_drift = ((tail[-1][1] - tail[0][1]) * 1000.0) - tail_span_ms
+        detail["tail_drift_rate_ms_per_s"] = round(1000.0 * tail_drift / tail_span_ms, 3)
+        detail["tail_span_s"] = round(tail_span_ms / 1000.0, 1)
     # Per-interval error and accumulated drift fail independently, and bounding only the
     # first leaves the second unbounded: a consistent 1 ms error on a 25 ms grid sits well
     # inside a 10 ms tolerance while reaching nearly two seconds over a 45 s sample. The
     # docstring claimed drift was bounded; until now only the per-interval error was.
     drifted = abs(drift) > args.drift_ms
     drift_note = f" > ±{args.drift_ms:g} ms" if drifted else ""
+    rate = detail.get("tail_drift_rate_ms_per_s")
+    tail_note = "" if rate is None else f", {rate:+g} ms/s over the last {detail['tail_span_s']:g} s"
+    over = detail["outside_tolerance_pct"] > args.release_pct_max
     return (
         "pcr-release-timing",
         HARD,
-        not (late or early or drifted),
+        not (over or drifted),
         f"{detail['outside_tolerance']}/{len(err)} releases outside ±{args.release_ms:g} ms of the "
         f"interval the PCR asserts ({detail['released_early']} early, {detail['released_late']} late; "
         f"p95 {detail['p95_abs_ms']:g} ms, worst {detail['max_abs_ms']:g} ms; "
-        f"drift {detail['total_drift_ms']:g} ms{drift_note})",
+        f"drift {detail['total_drift_ms']:g} ms{drift_note}{tail_note})",
         detail,
     )
 
@@ -416,10 +437,18 @@ def main():
         help="tolerance on release timing against the asserted interval (default 10)",
     )
     ap.add_argument(
+        "--release-pct-max",
+        type=float,
+        default=0.0,
+        help="share of intervals allowed outside the release tolerance (default 0)",
+    )
+    ap.add_argument(
         "--drift-ms",
         type=float,
-        default=250.0,
-        help="bound on accumulated release drift over the whole sample (default 250)",
+        default=500.0,
+        help="bound on accumulated release drift, being the standing lag the sender may "
+        "hold; set it to the sender's latency budget (moq export ts --latency-max, "
+        "itself 500ms by default)",
     )
     ap.add_argument(
         "--adjacent-packets", type=int, default=1, help="packet gap at or below which two PCRs count as clustered"

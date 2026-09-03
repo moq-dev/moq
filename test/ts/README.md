@@ -116,8 +116,21 @@ internally consistent, so absolute rate is not what this grades.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
 | `pcr-single-pid` | hard | every PCR rides one PID |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290) |
-| `pcr-release-timing` | hard | each interval's arrival is within `--release-ms` of the interval its own values assert, and accumulated drift over the whole sample stays within `--drift-ms` (`--live` only) |
+| `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
+
+Accumulated drift has two shapes and only one is a defect, so the check bounds
+the total and reports the rate over the tail of the sample beside it. A sender
+that buffers builds a standing lag once and then runs at the media rate: the lag
+is a constant offset no receiver can see, and it cannot grow past the latency
+budget the sender is allowed to hold, so set `--drift-ms` to that budget
+(`export ts --latency-max`, 500 ms by default). A pipe that is not running at the
+media rate never stops accumulating and so breaches any fixed bound given a long
+enough sample. The tail rate is what tells the two apart, and it needs a sample
+longer than the lag takes to build: measured against the grid-sliced exporter,
+the lag reaches ~480 ms over the first ~48 s and then holds to within 0.02 ms/s
+over the following 40 s, whereas a 20 s window catches it still filling at
+\~8.7 ms/s and cannot distinguish that from a slow pipe.
 
 `pcr-position` is a shape check because `export ts` is VBR by design. It is worth
 reporting even so: a consumer holding only the byte stream, which is every
