@@ -310,6 +310,23 @@ check:
         echo "obs-studio is $spec_obs in buildspec.json but $flake_obs in flake.nix (libobs-headers)" >&2
         exit 1
     fi
+    # And a third: `just obs ci` links against nixpkgs' obs-studio, the one OBS
+    # this repo doesn't pick. Without this the released macOS/Windows binaries
+    # could be a whole libobs API apart from what CI ever compiles. Patch
+    # releases carry no API change, so only the major.minor has to agree; that
+    # also keeps the guard quiet until flake.lock actually moves OBS, which is
+    # the change that opens the gap and so the one that should fail.
+    # OBS_LINKED_VERSION comes from the dev shell (see flake.nix), so this leg
+    # is skipped outside it, where there is no nixpkgs obs-studio to compare.
+    if [ -n "${OBS_LINKED_VERSION:-}" ]; then
+        spec_api=$(echo "$spec_obs" | cut -d. -f1,2)
+        linked_api=$(echo "$OBS_LINKED_VERSION" | cut -d. -f1,2)
+        if [ "$spec_api" != "$linked_api" ]; then
+            echo "obs-studio is $spec_obs in buildspec.json but $OBS_LINKED_VERSION in nixpkgs, which is what 'just obs ci' links" >&2
+            echo "bump buildspec.json and flake.nix's libobs-headers to $OBS_LINKED_VERSION, or pin nixpkgs back" >&2
+            exit 1
+        fi
+    fi
     if command -v cmake >/dev/null; then
         build_dir=$(mktemp -d)
         trap 'rm -rf "$build_dir"' EXIT
