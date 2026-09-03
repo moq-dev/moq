@@ -228,7 +228,10 @@ pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Er
 /// candidate lists are platform-gated consts, so a test supplies its own
 /// attempts rather than depending on what the host GPU can do.
 fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, Error> {
-	let mut tried = Vec::new();
+	// Each entry is "name: why it refused". The names alone say which backends
+	// exist, which is what a reader already knows; the reasons say why this
+	// machine has none, which is the question being asked.
+	let mut tried: Vec<String> = Vec::new();
 	let mut refused = Vec::new();
 
 	for attempt in attempts {
@@ -237,7 +240,6 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 		}
 
 		let name = attempt.candidate.name;
-		tried.push(name);
 
 		match (attempt.candidate.open)(codec, config) {
 			Ok(backend) => {
@@ -255,6 +257,7 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 			}
 			Err(e) => {
 				tracing::debug!(decoder = name, error = %e, "decoder unavailable, trying next");
+				tried.push(format!("{name}: {e}"));
 				if attempt.hardware {
 					refused.push(format!("{name}: {e}"));
 				}
@@ -262,10 +265,39 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 		}
 	}
 
+	// Nothing was tried at all, so no candidate both matched and takes this
+	// codec. For a named request that is a name this build does not have: a
+	// typo, a feature that is off, or a backend that does not decode this
+	// codec. Naming what is here is most of the answer.
 	if tried.is_empty() {
-		return Err(Error::NoDecoder(format!("none support {}", codec.label())));
+		let available = available_names(codec);
+		return match &config.kind {
+			Kind::Named(name) => Err(Error::UnknownDecoder {
+				name: name.clone(),
+				codec: codec.label().to_string(),
+				available: available.join(", "),
+			}),
+			kind => Err(Error::NoDecoder(format!(
+				"nothing compiled in for {} at {kind:?} (this build has: {})",
+				codec.label(),
+				available.join(", "),
+			))),
+		};
 	}
 	Err(Error::NoDecoder(tried.join(", ")))
+}
+
+/// Returns the decoders this build has for `codec`, in priority order.
+///
+/// Only the ones a user could ask for: the test-only list is left out, since it
+/// exists to be named by a test rather than offered to anybody.
+fn available_names(codec: Codec) -> Vec<&'static str> {
+	HARDWARE
+		.iter()
+		.chain(std::iter::once(&SOFTWARE))
+		.filter(|candidate| (candidate.supports)(codec))
+		.map(|candidate| candidate.name)
+		.collect()
 }
 
 #[cfg(test)]
@@ -344,5 +376,43 @@ mod tests {
 		let attempts = vec![Attempt::hardware(&H265_ONLY), Attempt::software(&WORKING)];
 		select(Codec::H264, attempts, &Config::new()).unwrap();
 		assert!(!logs_contain("no hardware decoder available"));
+	}
+
+	/// A name no candidate answers to has to say so, and say what it could have
+	/// been asked for instead.
+	#[test]
+	fn an_unknown_name_names_itself_and_the_alternatives() {
+		let mut config = Config::new();
+		config.kind = Kind::Named("vappi".to_owned());
+
+		match open(Codec::H264, &config) {
+			Err(Error::UnknownDecoder { name, available, .. }) => {
+				assert_eq!(name, "vappi");
+				// openh264 is unconditional, so every build has one to offer.
+				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
+			}
+			Err(other) => panic!("expected UnknownDecoder, got {other:?}"),
+			Ok(backend) => panic!("expected UnknownDecoder, opened {}", backend.name()),
+		}
+	}
+
+	/// The reason each candidate refused belongs in the error. Only the DEBUG
+	/// line used to carry it, which is no use to a caller holding the `Err`.
+	#[test]
+	fn every_candidate_refusing_reports_why() {
+		let mut config = Config::new();
+		config.kind = Kind::Named("driverless".to_owned());
+
+		match select(Codec::H264, vec![Attempt::hardware(&REFUSING)], &config) {
+			Err(Error::NoDecoder(tried)) => {
+				assert!(tried.contains("driverless"), "does not name the backend: {tried}");
+				assert!(
+					tried.contains("driver libraries not found"),
+					"does not carry the reason: {tried}"
+				);
+			}
+			Err(other) => panic!("expected NoDecoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+		}
 	}
 }

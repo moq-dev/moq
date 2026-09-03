@@ -12,6 +12,32 @@ pub enum Error {
 	#[error("no usable video decoder found (tried: {0})")]
 	NoDecoder(String),
 
+	/// `Kind::Named` asked for an encoder this build does not have for that
+	/// codec: a name that is not a backend, one whose feature is off, or one
+	/// that does not encode the codec requested.
+	#[error("no encoder named {name} for {codec} (this build has: {available})")]
+	UnknownEncoder {
+		/// The name that was asked for.
+		name: String,
+		/// The codec it was asked for.
+		codec: String,
+		/// The encoders this build does have for that codec.
+		available: String,
+	},
+
+	/// `Kind::Named` asked for a decoder this build does not have for that
+	/// codec: a name that is not a backend, one whose feature is off, or one
+	/// that does not decode the codec requested.
+	#[error("no decoder named {name} for {codec} (this build has: {available})")]
+	UnknownDecoder {
+		/// The name that was asked for.
+		name: String,
+		/// The codec it was asked for.
+		codec: String,
+		/// The decoders this build does have for that codec.
+		available: String,
+	},
+
 	/// A track's codec is not supported by the native decoders.
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),

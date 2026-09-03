@@ -210,12 +210,14 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 /// consts: what `Auto` has to fall back *from* depends on the machine, so a test
 /// supplies its own attempts instead of hoping the host has the right GPU.
 fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, Error> {
-	let mut tried = Vec::new();
+	// Each entry is "name: why it refused". The names alone say which backends
+	// exist, which is what a reader already knows; the reasons say why this
+	// machine has none, which is the question being asked.
+	let mut tried: Vec<String> = Vec::new();
 	let mut refused = Vec::new();
 
 	for attempt in attempts {
 		let name = attempt.candidate.name;
-		tried.push(name);
 
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
@@ -239,6 +241,7 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 			}
 			Err(e) => {
 				tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+				tried.push(format!("{name}: {e}"));
 				if attempt.hardware {
 					refused.push(format!("{name}: {e}"));
 				}
@@ -246,7 +249,41 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 		}
 	}
 
+	// Nothing was tried at all, so no candidate matched. For a named request
+	// that is a name this build does not have: a typo, a feature that is off,
+	// or a backend that does not take this codec. Reporting it as "no usable
+	// encoder (tried: )" tells the caller nothing, and naming what is here is
+	// most of the answer.
+	if tried.is_empty() {
+		let available = available_names(config.codec);
+		return match &config.kind {
+			Kind::Named(name) => Err(Error::UnknownEncoder {
+				name: name.clone(),
+				codec: format!("{:?}", config.codec),
+				available: available.join(", "),
+			}),
+			kind => Err(Error::NoEncoder(format!(
+				"nothing compiled in for {:?} at {kind:?} (this build has: {})",
+				config.codec,
+				available.join(", "),
+			))),
+		};
+	}
+
 	Err(Error::NoEncoder(tried.join(", ")))
+}
+
+/// Returns the encoders this build has for `codec`, in priority order.
+///
+/// Only the ones a user could ask for: the test-only list is left out, since it
+/// exists to be named by a test rather than offered to anybody.
+fn available_names(codec: Codec) -> Vec<&'static str> {
+	HARDWARE
+		.iter()
+		.chain(SOFTWARE.iter())
+		.filter(|candidate| candidate.codecs.contains(&codec))
+		.map(|candidate| candidate.name)
+		.collect()
 }
 
 #[cfg(test)]
@@ -420,6 +457,44 @@ mod tests {
 		config.kind = Kind::Software;
 		select(vec![Attempt::software(&WORKING)], &config).unwrap();
 		assert!(!logs_contain("falling back to software"));
+	}
+
+	/// A name no candidate answers to has to say so. It used to come back as
+	/// `NoEncoder("")`, which names neither the mistake nor the alternatives.
+	#[test]
+	fn an_unknown_name_names_itself_and_the_alternatives() {
+		let mut config = config();
+		config.kind = Kind::Named("vappi".to_owned());
+
+		match open(&config) {
+			Err(Error::UnknownEncoder { name, available, .. }) => {
+				assert_eq!(name, "vappi");
+				// openh264 is unconditional, so every build has one to offer.
+				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
+			}
+			Err(other) => panic!("expected UnknownEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected UnknownEncoder, opened {}", backend.name()),
+		}
+	}
+
+	/// The reason each candidate refused belongs in the error. Only the DEBUG
+	/// line used to carry it, which is no use to a caller holding the `Err`.
+	#[test]
+	fn every_candidate_refusing_reports_why() {
+		let mut config = config();
+		config.kind = Kind::Named("driverless".to_owned());
+
+		match select(vec![Attempt::hardware(&REFUSING)], &config) {
+			Err(Error::NoEncoder(tried)) => {
+				assert!(tried.contains("driverless"), "does not name the backend: {tried}");
+				assert!(
+					tried.contains("driver libraries not found"),
+					"does not carry the reason: {tried}"
+				);
+			}
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
+		}
 	}
 
 	#[tracing_test::traced_test]
