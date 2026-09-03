@@ -345,6 +345,11 @@ no matter which rendition the catalog announces first. Pads appear once their re
 shows up in the catalog (sometimes-pads), so an application links them from a
 `pad-added` handler.
 
+Each pad sends EOS when its rendition ends. A publisher that closes its catalog is
+promising the announced set is final, so a rendition it named but never served is given
+up on at that point rather than held open, and the element finishes once the renditions
+that did arrive have drained.
+
 ## Debugging
 
 Enable GStreamer debug output:

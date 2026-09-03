@@ -422,9 +422,10 @@ async fn follow_catalog(
 					// That includes a pump still resolving its subscription, which is
 					// indistinguishable here from one that has simply not been polled yet:
 					// a final snapshot naming a track the publisher does serve arrives this
-					// way, and cancelling on "not live yet" would drop it. A rendition nobody
-					// ever answers therefore keeps the session alive until the broadcast ends
-					// or the element is stopped.
+					// way, and cancelling on "not live yet" would drop it. Whether a
+					// rendition will ever be served is the publisher's to answer, and a
+					// closing catalog is where it does: a name it never filled is rejected,
+					// which fails that pump's subscribe and ends it here.
 					None => catalog_closed = true,
 				}
 			}
@@ -642,9 +643,10 @@ impl Pump {
 			state,
 			mut cancel,
 		} = self;
-		// Resolves once the publisher answers with the track info. A catalog can name a track its
-		// publisher never serves, so this can wait forever; racing `cancel` keeps such a pump
-		// reapable, and holding the wait here rather than in `reconcile` keeps it off every other
+		// Resolves once the publisher answers, with the track info or with a rejection (which
+		// is what a catalog closing over a name nobody served produces). A publisher that
+		// answers neither leaves this waiting, so racing `cancel` keeps such a pump reapable,
+		// and holding the wait here rather than in `reconcile` keeps it off every other
 		// rendition.
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return,
@@ -1163,6 +1165,62 @@ mod session_tests {
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// The flip side of the test above: once the catalog is closed, a rendition the publisher
+	/// reserved and never served is finally answerable, because closing the catalog promises the
+	/// announced set is final. Its pump must end on its own so the session terminates when the
+	/// renditions that *did* arrive drain, rather than holding the connection open until the
+	/// element is stopped.
+	#[test]
+	fn a_rendition_nobody_served_ends_with_the_catalog() {
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		// One rendition that streams, and one reserved by name that nobody ever accepts.
+		let mut video = broadcast
+			.create_track("video", hang::container::track_info())
+			.unwrap();
+		let _reserved = broadcast.reserve_track("audio").unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		// Watch for the EOS on the served rendition, before anything can end its track.
+		let pad = await_pad(&element, "video_");
+		let eos = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let seen = eos.clone();
+		pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+			if let Some(gst::PadProbeData::Event(event)) = &info.data
+				&& event.type_() == gst::EventType::Eos
+			{
+				seen.store(true, Ordering::Relaxed);
+			}
+			gst::PadProbeReturn::Ok
+		});
+
+		// Close the catalog, which rejects the reserved rendition, then end the served one.
+		catalog.finish().unwrap();
+		video.finish().unwrap();
+
+		// No shutdown is sent: the session has to end on the media draining alone.
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.expect("the session outlived the renditions it was serving")
+			.unwrap()
+			.unwrap();
+		assert!(eos.load(Ordering::Relaxed), "the served rendition never emitted EOS");
+		drop(shutdown);
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually

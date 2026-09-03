@@ -266,6 +266,10 @@ impl TrackState {
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
 			Poll::Ready(Ok(info.clone()))
+		} else if let Some(err) = &self.abort {
+			// Aborted before anyone served it, so the info can never arrive: fail the
+			// waiting subscribes instead of parking them on a track nobody will fill.
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -1564,6 +1568,24 @@ impl TrackWeak {
 	/// refcount bump, and the same `Arc` is shared with the track's handles).
 	pub(crate) fn name(&self) -> &Arc<str> {
 		&self.name
+	}
+
+	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
+	///
+	/// A track whose [`Info`] arrived has a publisher, so it is left alone and this
+	/// returns false; so is one that already carries an abort reason.
+	pub(crate) fn reject(&self, err: Error) -> bool {
+		let Some(producer) = self.state.produce() else {
+			return false;
+		};
+		let Ok(mut state) = producer.write() else {
+			return false;
+		};
+		if state.info.is_some() || state.abort.is_some() {
+			return false;
+		}
+		state.abort = Some(err);
+		true
 	}
 
 	/// Whether anyone is consuming the track right now. A closed track doesn't

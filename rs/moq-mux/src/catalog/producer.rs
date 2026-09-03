@@ -329,7 +329,21 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Finish publishing to this catalog.
+	///
+	/// Closing the catalog promises that the announced set is final, so a media rendition
+	/// nothing has served by now never will be. Each such track is rejected with
+	/// [`Error::NotFound`](moq_net::Error::NotFound) so its subscribers resolve instead of
+	/// waiting for a `track::Info` the publisher is never going to send. A rendition that is
+	/// already publishing is untouched and keeps streaming until its own track ends.
+	///
+	/// Only the `video` and `audio` sections are covered; an extension's tracks are named by
+	/// a schema this producer can't read, so their publisher owns that promise.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		let catalog = self.current.lock().unwrap().clone();
+		for name in catalog.video.renditions.keys().chain(catalog.audio.renditions.keys()) {
+			self.broadcast.reject_track(name, moq_net::Error::NotFound);
+		}
+
 		self.hang.finish()?;
 		self.hangz.finish()?;
 		self.msf_track.finish()?;
@@ -675,6 +689,58 @@ mod test {
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
 		assert_eq!(track.latest(), Some(0));
+	}
+
+	/// Closing the catalog says the announced set is final, so a rendition it named that
+	/// nothing ever served can never arrive. Its subscribers have to resolve rather than
+	/// wait on a track that will never carry info.
+	#[test]
+	fn finish_rejects_a_rendition_nobody_served() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+
+		// Reserved by name, but the publisher never accepts it.
+		let _reserved = broadcast.reserve_track("audio0").unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard
+				.audio
+				.renditions
+				.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		}
+
+		let pending = consumer.track("audio0").unwrap().subscribe(None);
+		assert!(pending.poll_ok(&kio::Waiter::noop()).is_pending());
+
+		catalog.finish().unwrap();
+
+		let resolved = pending.poll_ok(&kio::Waiter::noop());
+		assert!(matches!(resolved, Poll::Ready(Err(moq_net::Error::NotFound))));
+	}
+
+	/// A rendition that is publishing keeps its track: the catalog ending says nothing new
+	/// will be announced, not that what is streaming should stop.
+	#[test]
+	fn finish_spares_a_rendition_that_is_publishing() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+
+		let mut track = broadcast.create_track("audio0", hang::container::track_info()).unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard
+				.audio
+				.renditions
+				.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		}
+
+		catalog.finish().unwrap();
+
+		let pending = consumer.track("audio0").unwrap().subscribe(None);
+		assert!(matches!(pending.poll_ok(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+		track.finish().unwrap();
 	}
 
 	#[test]

@@ -402,6 +402,31 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
+	///
+	/// Call this once the publisher knows a name it reserved (or a consumer asked for)
+	/// will never be filled, so subscribers fail instead of waiting for [`track::Info`]
+	/// that is never coming. It covers both an unaccepted [`track::Request`] and a
+	/// request still queued for a [`Dynamic`].
+	///
+	/// A track that already has its info has a publisher, so it is left untouched:
+	/// ending it is that publisher's call. Route-fed broadcasts serve nothing of their
+	/// own, so this is a no-op there.
+	///
+	/// Returns whether a track was rejected.
+	pub fn reject_track(&mut self, name: &str, err: Error) -> bool {
+		let mut state = self.state.lock();
+		if let Some(request) = state.requests.take(name) {
+			request.reject(err);
+			return true;
+		}
+		let Some(track) = state.tracks.get(name) else {
+			return false;
+		};
+		drop(state);
+		track.reject(err)
+	}
+
 	/// Produce a new track and insert it into the broadcast.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
@@ -441,6 +466,10 @@ impl Producer {
 	/// the producer can't pick the track's properties (e.g. timescale) until it has
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`Dynamic::requested_track`].
+	///
+	/// Subscribers wait on the name until it is accepted, so a reservation the producer
+	/// ends up never filling has to be dropped or rejected. [`Self::reject_track`] does
+	/// that by name when the request itself is out of reach.
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let request = track::Request::new(self.info.clone(), name).with_stats(self.stats.clone());
 		self.state.lock().insert_track(request.weak())?;
@@ -1652,5 +1681,106 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// A reserved name nobody accepts is the parking case a publisher has to be able to
+	/// end: `reject_track` resolves its waiting subscribes with the reason instead of
+	/// leaving them on a track that will never carry info.
+	#[tokio::test]
+	async fn reject_track_resolves_a_reserved_name() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let _request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		assert!(producer.reject_track("track1", Error::NotFound));
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+	}
+
+	/// The reason has to survive the rejection: it is how a publisher says *why*, and a
+	/// subscriber acts on that rather than on a generic failure.
+	#[tokio::test]
+	async fn reject_track_carries_the_reason() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let _request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		assert!(producer.reject_track("track1", Error::Cancel));
+		assert!(matches!(pending.await, Err(Error::Cancel)));
+	}
+
+	/// A request still queued for a handler is the same parking case reached from the
+	/// consumer side, so it ends through the same call.
+	#[tokio::test]
+	async fn reject_track_resolves_a_queued_request() {
+		let mut producer = Info::new().produce();
+		let dynamic = producer.dynamic();
+		let consumer = dynamic.consume();
+
+		let pending = subscribe_pending!(consumer, "track1");
+
+		assert!(producer.reject_track("track1", Error::NotFound));
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+		drop(dynamic);
+	}
+
+	/// A track someone is publishing has an owner, and ending it is that owner's call.
+	/// Rejecting it here would cut off a rendition that is streaming fine.
+	#[tokio::test]
+	async fn reject_track_spares_a_served_track() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let mut track = producer.create_track("track1", None).unwrap();
+		let mut subscriber = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
+
+		assert!(!producer.reject_track("track1", Error::NotFound));
+
+		track.append_group().unwrap();
+		subscriber.assert_group();
+		track.finish().unwrap();
+	}
+
+	/// An unknown name has nothing to reject, which is what a caller sweeping a catalog's
+	/// renditions hits for every one that was never reserved.
+	#[tokio::test]
+	async fn reject_track_ignores_an_unknown_name() {
+		let mut producer = Info::new().produce();
+		assert!(!producer.reject_track("nope", Error::NotFound));
+		producer.finish();
+	}
+
+	/// Dropping a `track::Request` is not a verdict about the name, so it resolves as
+	/// `Dropped` (a handler lost to a crashed publisher or a dead transport), never as
+	/// `NotFound`. Only an explicit rejection may claim the track is absent.
+	#[tokio::test]
+	async fn dropping_a_reserved_request_resolves_dropped() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		drop(request);
+		assert!(matches!(pending.await, Err(Error::Dropped)));
+		producer.finish();
+	}
+
+	/// `track::Request::reject` carries its reason the same way, which is what lets a
+	/// subscriber tell "no such track" from "the publisher went away".
+	#[tokio::test]
+	async fn rejecting_a_reserved_request_carries_the_reason() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		request.reject(Error::NotFound);
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+		producer.finish();
 	}
 }
