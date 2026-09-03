@@ -2,14 +2,13 @@ import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
-import { latencyBounds } from "../../sync";
 import { formatMillis } from "../format";
 import { bufferControl } from "./buffer-control";
 
-type Preset = { label: string; value: "real-time" | number };
+type Preset = { label: string; value: "auto" | number };
 
 const PRESETS: Preset[] = [
-	{ label: "Real-time", value: "real-time" },
+	{ label: "Auto", value: "auto" },
 	{ label: "100ms", value: 100 },
 	{ label: "250ms", value: 250 },
 	{ label: "500ms", value: 500 },
@@ -17,7 +16,7 @@ const PRESETS: Preset[] = [
 	{ label: "2s", value: 2000 },
 ];
 
-/** The Latency tab: choose a buffer target and watch the live buffer timeline. */
+/** The Latency tab: choose a playback delay and watch the live buffer timeline. */
 export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body latency" });
 
@@ -26,16 +25,16 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.latencyMin = preset.value === "real-time" ? "real-time" : Moq.Time.Milli(preset.value);
+			watch.delay = preset.value === "auto" ? "auto" : Moq.Time.Milli(preset.value);
 		});
 		chips.appendChild(chip);
 		return { preset, chip };
 	});
 
 	parent.run((effect) => {
-		const mode = latencyBounds(effect.get(watch.controls.latency)).min;
+		const mode = effect.get(watch.controls.delay);
 		for (const { preset, chip } of buttons) {
-			const active = preset.value === "real-time" ? mode === "real-time" : mode === preset.value;
+			const active = preset.value === "auto" ? mode === "auto" : mode === preset.value;
 			chip.classList.toggle("chip--active", active);
 		}
 	});
@@ -54,17 +53,17 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	readout.append(jitterStat, bufferStat);
 
 	parent.run((effect) => {
-		const mode = latencyBounds(effect.get(watch.controls.latency)).min;
+		const mode = effect.get(watch.controls.delay);
 		const jitter = effect.get(watch.sync.out.jitter);
-		const total = effect.get(watch.sync.out.buffer);
-		jitterVal.textContent = `${formatMillis(jitter)}${mode === "real-time" ? " (auto)" : ""}`;
+		const total = effect.get(watch.sync.out.delay);
+		jitterVal.textContent = `${formatMillis(jitter)}${mode === "auto" ? " (auto)" : ""}`;
 		bufferVal.textContent = formatMillis(total);
 	});
 
 	const hint = DOM.create(
 		"div",
 		{ className: "tab-hint" },
-		"A larger buffer smooths over network jitter at the cost of latency. Real-time tracks the connection RTT automatically. Drag the timeline to fine-tune.",
+		"A larger delay smooths over network jitter at the cost of latency. Auto tracks the connection RTT. Drag the timeline to fine-tune.",
 	);
 
 	container.append(chips, timeline, readout, hint);

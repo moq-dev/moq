@@ -71,10 +71,13 @@ a real bundler (the examples below).
 - `muted`: Mute audio (boolean)
 - `volume`: Audio volume (0 to 1, default: 1)
 - `reload`: Wait for (re)announcement before subscribing (default: true). Ignored when the relay does not support broadcast discovery, which subscribes immediately instead of waiting forever.
-- `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency). `"instant"` stops pacing off the clock, see [instant playback](#instant-playback).
-- `latency-min`: Latency floor (the jitter/startup buffer). Same units as `latency`; leaves the ceiling untouched.
-- `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency; a number caps at that many ms. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
+- `delay`: How far playback trails the live edge, the jitter/startup buffer. `"auto"` (default) sizes it from the connection RTT, or a duration like `"100ms"` fixes it. `"instant"` stops pacing off the clock, see [instant playback](#instant-playback).
+- `buffer`: Future-dated media held beyond the live edge before playback skips ahead, e.g. `"30s"`. Defaults to none, which minimizes latency. Anything above zero enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
 - `catalog-format`: Catalog format. One of `"hang"`, `"hangz"` (the [DEFLATE-compressed](/concept/layer/hang#compression) `catalog.json.z` track), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`. `"hangz"` is opt-in only and never auto-detected (it shares the `.hang` suffix).
+
+Durations (`delay`, `buffer`) carry a unit, either `ms` or `s`. A bare number is
+rejected rather than guessed at, since most players measure these in seconds while
+the matching DOM properties are in milliseconds; only `"0"` is accepted unitless.
 
 ## Catalog Formats
 
@@ -148,55 +151,47 @@ el.catalog = myCatalog;
 
 ## Buffered playback
 
-Latency is a **range**, `[latency-min, latency-max]`. By default the range is
-collapsed (`latency` sets both to one value) and `@moq/watch` minimizes latency:
-it anchors playback to the earliest frame seen relative to its timestamp and skips
-ahead whenever the buffer grows past the target. That is right for live
-conferencing, but wrong for content written *faster than real-time* with
-timestamps in the future, such as a text-to-speech response streamed all at once.
+`delay` and `buffer` sit on opposite sides of the live edge. `delay` is how far the
+playhead trails it, absorbing jitter. `buffer` is how much future-dated media is
+held beyond it before playback skips forward.
 
-Open the range, by setting a `latency-max` above the floor, to anchor playback to
-the first frame received and play through at the encoded pace. The buffer is
-allowed to float anywhere between the floor and the ceiling without skipping:
+By default `buffer` is zero and `@moq/watch` minimizes latency: it anchors playback
+to the earliest frame seen relative to its timestamp and skips ahead whenever the
+buffer grows past the target. That is right for live conferencing, but wrong for
+content written *faster than real-time* with timestamps in the future, such as a
+text-to-speech response streamed all at once.
+
+Set a `buffer` to anchor playback to the first frame received and play through at
+the encoded pace. Media is then allowed to float anywhere up to `delay + buffer`
+ahead of the playhead without skipping:
 
 ```html
 <moq-watch url="https://relay.example.com/anon" name="bot/tts.hang"
-    latency-min="100" latency-max="30000">
+    delay="100ms" buffer="30s">
     <canvas></canvas>
 </moq-watch>
 ```
 
-In JavaScript, `latency` takes either a scalar (collapsed, minimize) or a range
-object. The `latencyMin` / `latencyMax` properties are read-modify-write sugar
-over the same `latency` value:
+In JavaScript the two are independent properties, both in milliseconds:
 
 ```typescript
 const el = document.querySelector("moq-watch")!;
-el.latency = { min: 100, max: 30_000 }; // floor 100ms, ceiling 30s
-// equivalently, set the bounds independently:
-el.latencyMin = 100;     // floor: start after 100ms buffered
-el.latencyMax = 30_000;  // ceiling: never skip until 30s buffered
+el.delay = 100;      // trail the live edge by 100ms
+el.buffer = 30_000;  // hold up to 30s of future-dated media
 ```
 
-`latency-min` is the jitter/startup buffer (it can also be `"real-time"` for an
-adaptive floor). `latency-max` is the ceiling, and it has two forms:
+`delay` also takes `"auto"` for a jitter buffer that tracks the connection RTT, which
+is the default.
 
-- a **number** (ms): buffer freely up to the cap, then skip ahead, so latency
-  stays at most that far behind the newest frame.
-- **`"real-time"`** (the default) or any value `<= latency-min`: collapsed, i.e.
-  today's minimize-latency behavior.
+The buffer is always finite, so it can't grow without limit. The mechanism is the
+same in every case: the playhead is anchored on the first frame and only re-anchored
+(skipped forward) when keeping it would leave a frame more than `delay + buffer`
+ahead. Minimize is just the degenerate case where `buffer` is zero.
 
-The ceiling is always finite: the buffer is bounded by `latency-max` rather than
-growing without limit. The mechanism is the same in every case: the playhead is
-anchored on the first frame and only re-anchored (skipped forward) when keeping it
-would push latency past `latency-max`. Minimize is just the degenerate case where
-the ceiling equals the floor.
-
-The buffered lookahead is held cheaply. The decoded audio ring only holds the
-**floor** (`latency-min`) worth of PCM; everything above it stays upstream as
-encoded frames, and the decoder applies backpressure (stops decoding ahead) until
-the playhead nears each frame. So a large `latency-max` costs encoded bytes, not
-seconds of decoded PCM.
+The buffered lookahead is held cheaply. The decoded audio ring only holds `delay`
+worth of PCM; everything above it stays upstream as encoded frames, and the decoder
+applies backpressure (stops decoding ahead) until the playhead nears each frame. So
+a large `buffer` costs encoded bytes, not seconds of decoded PCM.
 
 At each new utterance, call `reset()` to flush the audio buffer and re-anchor
 playback to the next frame. The producer can interrupt by writing a new utterance
@@ -248,42 +243,41 @@ The component exposes everything via its `broadcast` property
 
 ## Instant playback
 
-`latency-min="0"` still de-jitters: playback is anchored to the first frame, so a
+`delay="0"` still de-jitters: playback is anchored to the first frame, so a
 frame that arrives early waits until its timestamp comes up. That's what keeps
 motion smooth, and it costs at least a frame interval.
 
-`latency="instant"` empties the buffer and stops pacing off the clock, rather than
+`delay="instant"` empties the buffer and stops pacing off the clock, rather than
 just shrinking the buffer. Frames paint the moment they decode, so latency drops to whatever the display costs
 (about half a refresh interval on average) and the canvas shows the newest frame at
 every repaint:
 
 ```html
-<moq-watch url="https://relay.moq.dev/anon" name="demo/bbb" latency="instant">
+<moq-watch url="https://relay.moq.dev/anon" name="demo/bbb" delay="instant">
     <canvas></canvas>
 </moq-watch>
 ```
 
-It is a value of `latency`, not a bound, so `latency-min="instant"` is rejected:
-there is no range to sit inside. Assigning `latency-min` or `latency-max` writes a
-range and therefore leaves the mode.
+It is a value of `delay`, and it overrides `buffer`: holding a lookahead would
+contradict holding nothing. Assigning a duration to `delay` leaves the mode.
 
 The tradeoff is motion: frames are presented at network cadence rather than at
 their timestamps, so delivery jitter shows up as judder. Reach for it when a fresh
 picture matters more than a smooth one, such as remote control or a camera
-viewfinder, and prefer `latency` otherwise.
+viewfinder, and prefer a paced `delay` otherwise.
 
 This disables audio. The audio ring needs a target depth to avoid underrunning,
 and unsynced video has nothing pulling it back toward the audio clock, so the two
 would drift apart.
 
-Note that `latency-min="0"` is not the same thing, and neither half of this is
+Note that `delay="0"` is not the same thing, and neither half of this is
 redundant. A zero floor still holds the selected rendition's own delay, a frame
 interval at 60fps, and it still sleeps, because the wait comes from the playback
 anchor rather than the buffer. `"instant"` drops both.
 
 The clock itself keeps running: video still reports every frame it receives and
 still resets it on a rewind. That keeps anything else reading the clock working, and
-it means switching back to a paced latency resumes from a current reference instead
+it means switching back to a paced delay resumes from a current reference instead
 of a stale one.
 
 Captions are one such reader, so they keep working. With nothing buffered they track

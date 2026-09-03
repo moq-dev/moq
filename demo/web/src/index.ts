@@ -119,9 +119,9 @@ function createTile(name: string): WatchTile {
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
 	watch.muted = true; // unmuted only while active (see below)
-	// Default to a fixed 100ms jitter buffer (instead of adaptive "real-time") so
-	// the latency visualization has something to show. Drag it in the panel.
-	watch.setAttribute("latency", "100");
+	// Default to a fixed 100ms jitter buffer (instead of adaptive "auto") so
+	// the delay visualization has something to show. Drag it in the panel.
+	watch.setAttribute("delay", "100ms");
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "width: 100%; height: auto;";
 	watch.appendChild(canvas);

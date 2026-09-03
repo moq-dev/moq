@@ -6,7 +6,7 @@ import { subscribeMedia } from "./media";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-test("media latency is present on the initial subscription and later updates", async () => {
+test("media max age is present on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const subscriber = {
@@ -21,18 +21,18 @@ test("media latency is present on the initial subscription and later updates", a
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const latency = new Signal(Time.Milli(250));
+	const maxAge = new Signal(Time.Milli(250));
 	const effect = new Effect();
 
 	subscribeMedia(effect, {
 		broadcast,
 		track: "media",
 		priority: 7,
-		latency,
+		maxAge,
 	});
 	expect(initial).toEqual({ priority: 7, maxAge: 250 });
 
-	latency.set(Time.Milli(500));
+	maxAge.set(Time.Milli(500));
 	await flush();
 	expect(updates.at(-1)).toEqual({ priority: 7, maxAge: 500 });
 
