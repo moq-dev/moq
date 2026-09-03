@@ -1262,6 +1262,11 @@ mod tests {
 			let texture = uploading.render(cpu).expect("draw the downloaded picture");
 			let cpu = readback(&device, &queue, &texture).await;
 
+			assert_eq!(
+				zero_copy.len(),
+				cpu.len(),
+				"picture {index} read back at a different size"
+			);
 			let mut worst = 0u8;
 			for (pixel, (&imported, &reference)) in zero_copy.iter().zip(&cpu).enumerate() {
 				let drift = (0..4).map(|c| imported[c].abs_diff(reference[c])).max().unwrap_or(0);

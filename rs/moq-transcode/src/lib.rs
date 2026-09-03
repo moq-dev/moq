@@ -592,6 +592,94 @@ mod tests {
 		moq_video::decode::Decoder::new(&video, &decode).is_ok()
 	}
 
+	#[cfg(feature = "vaapi")]
+	fn vaapi_decoder_available() -> bool {
+		let video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut decode = moq_video::decode::Config::new();
+		decode.kind = moq_video::decode::Kind::Named("vaapi".to_string());
+		moq_video::decode::Decoder::new(&video, &decode).is_ok()
+	}
+
+	/// A fetched group drains VAAPI before finishing, so its buffered tail is
+	/// encoded into that group rather than dropped with the decoder.
+	#[cfg(feature = "vaapi")]
+	#[tokio::test]
+	async fn vaapi_fetch_keeps_the_buffered_tail() {
+		let source = source_broadcast(1, 5);
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
+			source: None,
+			..Default::default()
+		};
+
+		if !vaapi_decoder_available() {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		}
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut fetched = track.fetch_group(0, None).await.unwrap();
+		let total = fetched.finished().await.unwrap();
+		assert_eq!(total, 5, "VAAPI dropped the fetched group's buffered tail");
+
+		transcoder.abort();
+	}
+
+	/// A live group drains VAAPI before its end marker, so its buffered tail does
+	/// not move past the boundary into the next group.
+	#[cfg(feature = "vaapi")]
+	#[tokio::test]
+	async fn vaapi_live_keeps_the_buffered_tail_in_its_group() {
+		if !vaapi_decoder_available() {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		}
+
+		let (source, producer_task) = source_broadcast_live(1, 5);
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
+			source: None,
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
+		let total = group.finished().await.unwrap();
+		assert_eq!(total, 5, "VAAPI moved the live group's buffered tail past its end");
+
+		producer_task.abort();
+		transcoder.abort();
+	}
+
 	/// The GPU pipeline end to end: hardware decode (NVDEC, scaling in the
 	/// decoder) into hardware encode (NVENC, consuming the CUDA frame in place).
 	/// Skips on machines without both; on a Linux + NVIDIA box this is the
