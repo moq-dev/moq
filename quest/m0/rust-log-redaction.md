@@ -21,12 +21,8 @@ with its own `set_query(None)` copy. `rs/moq-rtmp/src/dial.rs` logs
 - Test: the wrapper's `Display` of a URL carrying `?jwt=` and `user:pass@`
   contains neither.
 
-The browser half of the same finding is
-[#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md).
-
-## Required
-
-- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - the issue closes only once both halves are fixed, so the half that closes it goes second
+The browser half of the same finding is fixed: `js/net` redacts the relay URL
+through one formatter and gates its connect diagnostics on a `DEV` check.
 
 ## Closes
 
