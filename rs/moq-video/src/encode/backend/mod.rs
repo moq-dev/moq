@@ -83,6 +83,27 @@ pub(crate) trait Backend: Send {
 	fn name(&self) -> &str;
 }
 
+/// Every encoder backend this crate has a name for, on any platform.
+///
+/// Platform-complete on purpose, where the candidate lists this module selects
+/// from are gated to what this build compiled. A caller offering
+/// [`Kind::Named`](super::Kind) as a choice needs the whole vocabulary, because
+/// a name it does not offer is a name nobody can ask for, and whether a given
+/// machine has that backend is answered by trying it rather than by the list.
+///
+/// The test below asserts every candidate compiled into this build appears
+/// here, so a rename fails on the platform that renamed it rather than
+/// silently leaving a name nothing answers to.
+pub const NAMES: &[&str] = &[
+	"videotoolbox",
+	"mediafoundation",
+	"mediacodec",
+	"nvenc",
+	"vaapi",
+	"v4l2",
+	"openh264",
+];
+
 /// A backend constructor: name, the codecs it can emit, and an opener.
 struct Candidate {
 	name: &'static str,
@@ -506,5 +527,18 @@ mod tests {
 		)
 		.unwrap();
 		assert!(!logs_contain("falling back to software"));
+	}
+
+	/// Every backend this build compiled has to be in the public name list, or
+	/// a caller offering the list as a choice offers a name nothing answers to.
+	#[test]
+	fn every_compiled_backend_is_named_publicly() {
+		for candidate in HARDWARE.iter().chain(SOFTWARE.iter()) {
+			assert!(
+				NAMES.contains(&candidate.name),
+				"{} is compiled in but missing from NAMES",
+				candidate.name,
+			);
+		}
 	}
 }

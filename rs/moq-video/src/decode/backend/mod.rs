@@ -36,6 +36,8 @@ mod mediacodec;
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvdec;
 
+// Crate-visible so `decode::Consumer`'s end-of-track test can name the one
+// backend that holds pictures back; nothing outside the tests reaches for it.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub(crate) mod vaapi;
 
@@ -83,6 +85,20 @@ pub(crate) trait Backend: Send {
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;
 }
+
+/// Every decoder backend this crate has a name for, on any platform.
+///
+/// The decode counterpart of [`encode::backend::NAMES`](crate::encode::NAMES),
+/// and platform-complete for the same reason.
+pub const NAMES: &[&str] = &[
+	"videotoolbox",
+	"mediafoundation",
+	"mediacodec",
+	"nvdec",
+	"vaapi",
+	"v4l2",
+	"openh264",
+];
 
 /// A backend opener: builds a decoder for a codec and config.
 type Open = fn(Codec, &Config) -> Result<Box<dyn Backend>, Error>;
@@ -413,6 +429,18 @@ mod tests {
 			}
 			Err(other) => panic!("expected NoDecoder, got {other:?}"),
 			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+		}
+	}
+
+	/// The decode half of the same guarantee the encode side keeps.
+	#[test]
+	fn every_compiled_backend_is_named_publicly() {
+		for candidate in HARDWARE.iter().chain(std::iter::once(&SOFTWARE)) {
+			assert!(
+				NAMES.contains(&candidate.name),
+				"{} is compiled in but missing from NAMES",
+				candidate.name,
+			);
 		}
 	}
 }

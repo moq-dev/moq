@@ -34,6 +34,7 @@ mod sink;
 
 pub mod rate;
 
+pub use backend::NAMES;
 pub use encoded::Encoded;
 pub use encoder::{Codec, Config, Encoder, Kind};
 pub use producer::Producer;
