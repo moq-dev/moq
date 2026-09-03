@@ -141,11 +141,9 @@ impl<R> Drop for Worker<R> {
 }
 
 fn gone() -> Error {
-	Error::Codec(anyhow::anyhow!("codec thread stopped unexpectedly"))
+	Error::CodecGone("the codec thread stopped unexpectedly".to_owned())
 }
 
 fn abandoned() -> Error {
-	Error::Codec(anyhow::anyhow!(
-		"a cancelled call left the codec ahead of this stream; drop it and open another"
-	))
+	Error::CodecGone("a cancelled call left the codec ahead of this stream".to_owned())
 }
