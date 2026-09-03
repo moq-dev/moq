@@ -179,7 +179,11 @@ ingest produces. A rendition whose config declares HE-AAC fails when it opens,
 either spelling of it; one that carries SBR without declaring it plays as its
 AAC-LC core.
 `--latency-max` controls how far a stalled media group may lag before it is
-skipped and defaults to `500ms`. These flags all follow the `play` verb:
+skipped and defaults to `500ms`. It also bounds how long a hole in the audio is
+played as silence rather than closed up: a gap is missing media, so playing
+through it keeps the speaker on media time and the video with it, but a gap
+longer than this budget is one playback already chose to skip. These flags all
+follow the `play` verb:
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast conference.hang \

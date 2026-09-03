@@ -389,6 +389,22 @@ async fn play_audio(
 	// own ceiling.
 	let chunk = (sample_rate as usize * stride).max(stride);
 
+	// The longest hole worth playing through, in samples. A hole this player would
+	// rather sit through is one it is already willing to buffer, which is what the
+	// decoder's latency budget says: anything longer is what that budget chose to
+	// skip, so playing it as silence would hand back the delay the skip avoided.
+	// Past it the sink skips the hole and the clock re-anchors, as it does today.
+	let fill_max = (consumer.config().latency_max.unwrap_or_default().as_secs_f64() * sample_rate as f64) as u64;
+	let silence = vec![0u8; chunk];
+
+	// Media time of the first sample, and how many have gone to the speaker since.
+	// A hole is the difference between the two, so it is measured against the whole
+	// track rather than the last frame: timestamps carry a fraction of a sample of
+	// rounding either way, and closing each one on its own would ratchet that into
+	// real drift.
+	let mut origin: Option<Duration> = None;
+	let mut written = 0u64;
+
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
 	let mut dropping = false;
@@ -414,8 +430,30 @@ async fn play_audio(
 		dropping = false;
 
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
-		let end =
-			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
+		let start = timestamp(frame.timestamp);
+		let end = start.saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
+
+		// A hole in the media is a hole in the audio, not a splice. Handing the next
+		// frame straight to the speaker shortens the track by the missing duration,
+		// which leaves it running ahead of media time until the clock below
+		// re-anchors, taking the video with it. Play the hole instead.
+		let origin = *origin.get_or_insert(start);
+		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
+		if let Some(hole) = expected.checked_sub(written).filter(|hole| *hole > 0) {
+			let mut remaining = usize::try_from(hole.min(fill_max)).unwrap_or(usize::MAX) * stride;
+			while remaining > 0 {
+				if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
+					tokio::time::sleep(excess).await;
+				}
+				let part = remaining.min(silence.len());
+				sink.write(&silence[..part])?;
+				remaining -= part;
+			}
+			// Either way the speaker now stands where this frame does: a hole past the
+			// budget is skipped rather than played, and re-measuring it against the
+			// next frame would only fill the same budget again.
+			written = expected;
+		}
 
 		for part in frame.data.chunks(chunk) {
 			// Let the speaker catch up before handing it more than it can hold.
@@ -424,6 +462,7 @@ async fn play_audio(
 			}
 			sink.write(part)?;
 		}
+		written += samples as u64;
 
 		let previous = clock.lock().unwrap().replace(Clock {
 			media: end.saturating_sub(sink.buffered()),
