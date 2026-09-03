@@ -16,7 +16,6 @@ regression test per Root Cause First.
 ## Quests
 
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
-- [Rust log redaction](/quest/m0/rust-log-redaction.md) - moq-native logs relay URLs with their query and moq-rtmp logs stream keys
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
 - [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
 - [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: a media gap is a hole in the output, not a splice
