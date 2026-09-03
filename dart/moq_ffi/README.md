@@ -1,4 +1,4 @@
-# moq\_ffi
+# moq_ffi
 
 Raw Dart and Flutter bindings for the MoQ protocol stack. Most applications
 should use the higher-level [`moq`](https://pub.dev/packages/moq) package.
