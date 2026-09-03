@@ -9,10 +9,12 @@
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xfixes::{ConnectionExt as _, GetCursorImageReply};
 use x11rb::protocol::xproto::{
-	AtomEnum, ConnectionExt as _, Drawable, ImageFormat, ImageOrder, MapState, VisualClass, Window as XWindow,
+	AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, Drawable, EventMask, ImageFormat, ImageOrder, MapState,
+	VisualClass, Window as XWindow,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -214,6 +216,22 @@ impl Capture {
 			Target::Window(id) => {
 				let drawable =
 					u32::try_from(id).map_err(|_| Error::SourceUnavailable(format!("invalid X11 window id {id}")))?;
+				// An id is not an identity: X clients allocate window ids out of their
+				// own range and reuse freed ones, so a destroyed window can be replaced
+				// by one wearing the same id, which then answers `get_geometry` as if
+				// nothing happened. StructureNotify is what pins capture to the window
+				// the user picked, since DestroyNotify arrives whatever becomes of the
+				// id afterwards. Event masks are per-client, so the window's owner sees
+				// nothing. Subscribe before reading the window back, so everything
+				// below describes a window we are already watching.
+				connection
+					.change_window_attributes(
+						drawable,
+						&ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+					)
+					.map_err(source)?
+					.check()
+					.map_err(source)?;
 				let attributes = connection
 					.get_window_attributes(drawable)
 					.map_err(source)?
@@ -344,12 +362,37 @@ impl Capture {
 					.map_err(source)?
 					.reply()
 					.map_err(source)?;
+				// Drained after that round trip, not before: the server writes events
+				// and replies down one ordered stream, so a DestroyNotify it generated
+				// before this reply is already queued here. A destroyed window whose id
+				// nobody took makes the request above fail instead, which is equally
+				// terminal.
+				if self.destroyed()? {
+					return Ok(Some("window destroyed".to_string()));
+				}
 				let width = u32::from(geometry.width) & !1;
 				let height = u32::from(geometry.height) & !1;
 				Ok(((width, height) != (self.width, self.height))
 					.then(|| format!("resized from {}x{} to {width}x{height}", self.width, self.height)))
 			}
 		}
+	}
+
+	/// Whether the captured window has been destroyed, draining the events the
+	/// StructureNotify subscription queues up. Draining every frame is also what
+	/// keeps that queue from growing for the life of the stream.
+	///
+	/// `ConfigureNotify` rides the same subscription and could stand in for the
+	/// per-frame `get_geometry` round trip.
+	fn destroyed(&self) -> Result<bool, Error> {
+		let mut destroyed = false;
+		while let Some(event) = self.connection.poll_for_event().map_err(source)? {
+			// Nothing else on the queue is ours to act on: x11rb routes an error to
+			// the cookie waiting for it, so an `Event::Error` reaching here belongs
+			// to a request we already gave up on.
+			destroyed |= destroys(&event, self.drawable);
+		}
+		Ok(destroyed)
 	}
 
 	fn origin(&self) -> Result<(i32, i32), Error> {
@@ -448,6 +491,13 @@ fn select_monitor(monitors: &[Monitor], selector: Option<usize>) -> Option<usize
 				.flatten()
 		})
 		.or_else(|| selector.is_none().then_some(0).filter(|_| !monitors.is_empty()))
+}
+
+/// Whether an event says the captured window is gone. StructureNotify reports
+/// only the window it was selected on, but a recycled id is exactly what this
+/// guards against, so match the id rather than assume it.
+fn destroys(event: &Event, window: XWindow) -> bool {
+	matches!(event, Event::DestroyNotify(destroy) if destroy.window == window)
 }
 
 fn client_windows(connection: &RustConnection, root: XWindow) -> Result<Vec<XWindow>, Error> {
@@ -657,6 +707,8 @@ fn source(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
+	use x11rb::protocol::xproto::DestroyNotifyEvent;
+
 	use super::*;
 
 	fn monitor(primary: bool) -> Monitor {
@@ -695,6 +747,20 @@ mod tests {
 		primary_changed[0].primary = false;
 		primary_changed[1].primary = true;
 		assert!(!target.matches(&primary_changed));
+	}
+
+	#[test]
+	fn a_destroyed_window_ends_capture_even_when_its_id_lives_on() {
+		let destroy = |window| {
+			Event::DestroyNotify(DestroyNotifyEvent {
+				event: window,
+				window,
+				..Default::default()
+			})
+		};
+		assert!(destroys(&destroy(0x40_0001), 0x40_0001));
+		assert!(!destroys(&destroy(0x40_0002), 0x40_0001));
+		assert!(!destroys(&Event::Unknown(Vec::new()), 0x40_0001));
 	}
 
 	#[test]
