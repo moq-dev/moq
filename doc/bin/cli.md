@@ -370,10 +370,12 @@ moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
-screen capture are compiled in by default. To build `capture` without any of
-them (software openh264 + V4L2 camera capture only), drop the default features. `capture` itself still needs libclang and the V4L2 headers for
-the camera, and ALSA for the microphone:
+On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) codecs and the PipeWire screen
+capture are compiled in by default. The VAAPI decoder is hardware-validated,
+while its encoder is not yet. To build `capture` without any of them (software
+openh264 + V4L2 camera capture only), drop the default features. `capture` itself
+still needs libclang and the V4L2 headers for the camera, and ALSA for the
+microphone:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \

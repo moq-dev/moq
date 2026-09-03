@@ -73,6 +73,16 @@ impl Sink {
 	pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		self.0.decode(payload, timestamp, keyframe).await
 	}
+
+	/// Drain the decoder once the stream has ended, returning the frames it is
+	/// still holding. See [`Decoder::flush`](super::Decoder::flush).
+	///
+	/// A track that ends without this ends short wherever the backend buffers:
+	/// VAAPI hands back a picture only when a later one needs its DPB slot, so the
+	/// last few pictures of every stream never come out on their own.
+	pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		self.0.flush().await
+	}
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -86,14 +96,19 @@ mod threaded {
 	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
-	/// Work for the decode thread. One variant today; the enum is here so a
-	/// future request (a flush, a reset) lands in order with the frames around it
-	/// rather than racing them.
+	/// Work for the decode thread. Each variant lands in order with the frames
+	/// around it rather than racing them, which is what a flush needs: it has to
+	/// run after the last access unit, not alongside it.
 	enum Request {
 		Decode {
 			payload: Bytes,
 			timestamp: Timestamp,
 			keyframe: bool,
+			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
+		},
+		/// Drain the decoder at the end of the stream, returning the frames it
+		/// still holds.
+		Flush {
 			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
 		},
 	}
@@ -121,6 +136,9 @@ mod threaded {
 					resp,
 				} => {
 					let _ = resp.send(decoder.decode(&payload, timestamp, keyframe));
+				}
+				Request::Flush { resp } => {
+					let _ = resp.send(decoder.flush());
 				}
 			}
 		}
@@ -160,6 +178,10 @@ mod threaded {
 				})
 				.await
 		}
+
+		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+			self.0.request(|resp| Request::Flush { resp }).await
+		}
 	}
 }
 
@@ -193,6 +215,11 @@ mod inline {
 			keyframe: bool,
 		) -> Result<Vec<Frame>, Error> {
 			self.0.decode(&payload, timestamp, keyframe)
+		}
+
+		/// Async only to match the threaded `Inner`, as with `decode`.
+		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+			self.0.flush()
 		}
 	}
 }

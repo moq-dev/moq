@@ -126,12 +126,14 @@ moq-token-cli = { version = "0.5.46", path = "rs/moq-token-cli" }
 # default-features off (the NVIDIA hardware codecs) on moq-transcode and
 # moq-video so each consumer opts in. Binaries enable them, but a self-compiler
 # can leave them off to drop the CUDA dependencies. Both crates still default
-# them on when depended on directly. VAAPI is opt-in everywhere, since that
-# backend has never been validated on real hardware.
+# them on when depended on directly. VAAPI is opt-in everywhere; its decoder is
+# hardware-validated, while its encoder is not yet.
 moq-transcode = { version = "0.0.16", path = "rs/moq-transcode", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
-moq-vaapi = "0.0.3"
+# The decoder this crate's VAAPI backend calls is not in 0.0.3 yet; see
+# moq-dev/vaapi#2. Point this back at a release once one carries `decode`.
+moq-vaapi = { git = "https://github.com/Frando/vaapi", branch = "pr/decode" }
 # `default-features = false` is here for `capture` (V4L2, libclang), which the
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the

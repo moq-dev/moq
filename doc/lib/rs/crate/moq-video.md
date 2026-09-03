@@ -27,7 +27,7 @@ Four role modules, symmetric on both ends of the wire:
 | --- | --- | --- |
 | `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI/GDI (Windows) |
 | `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, openh264 |
-| `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, openh264 |
+| `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, VAAPI, openh264 |
 | `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
 
 A picture is a `Frame` wherever it crosses the API: a `moq_net::Timestamp` and a
@@ -66,7 +66,7 @@ cargo add moq-video --features pipewire
 | --- | --- | --- |
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
 | `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`), dlopen'd at runtime |
-| `vaapi` | yes | Intel/AMD encode on Linux (`moq-vaapi`), dlopen'd at runtime; not yet validated on hardware |
+| `vaapi` | yes | Intel/AMD H.264 encode and decode on Linux (`moq-vaapi`), dlopen'd at runtime; decoder hardware-validated |
 | `render` | yes | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
 | `pipewire` | no | Wayland screen capture via xdg-desktop-portal and DMA-BUF |
 
@@ -132,6 +132,10 @@ while let Some(frame) = video.read().await? {
 }
 ```
 
+VAAPI downloads to CPU I420 by default. Set `decode::Config::gpu_frames` before
+opening the consumer to receive DMA-BUF surfaces for zero-copy rendering. Every
+such surface still supports `Surface::into_i420()` for consumers that need bytes.
+
 ## Zero-copy
 
 `Surface` is a `#[non_exhaustive]` enum naming what actually holds a frame's
@@ -145,16 +149,15 @@ rather than a blanket promise:
 | Platform | Decode output | Zero-copy transcode | Zero-copy render |
 | --- | --- | --- | --- |
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
-| Linux | `Cuda` (NVDEC) | yes, straight into NVENC | decoded CUDA frames: no; packed PipeWire DMA-BUF capture: yes, via Vulkan |
+| Linux | `Cuda` (NVDEC), opt-in `DmaBuf` (VAAPI) | NVDEC to NVENC: yes; VAAPI: downloaded today | VAAPI NV12 DMA-BUF and packed PipeWire DMA-BUF: yes, via Vulkan |
 | Windows | `Texture` (Media Foundation / DXVA) | yes, through the Direct3D11 video processor | no, downloaded to I420 first |
 
 `Frame::resize` stays on the GPU through a `VTPixelTransferSession`, CUDA kernel,
 or Direct3D11 video processor. Call `Frame::resize_with` with
 `resize::Acceleration::Cpu` to force a download and CPU resize. A driver that
-rejects GPU resizing returns to CPU scaling and warns once. Linux Vulkan can
-import packed RGB DMA-BUF screen frames. Multi-plane NV12 import and retiling a
-modifier that Vulkan rejects remain tracked in
-[#2819](https://github.com/moq-dev/moq/issues/2819).
+rejects GPU resizing returns to CPU scaling and warns once. Linux Vulkan imports
+packed RGB screen frames and multi-plane NV12/YU12 DMA-BUFs one plane at a time.
+An unsupported modifier falls back to a CPU download and upload.
 
 Matching on `Surface` stays portable because every variant has a universal
 fallback in `Surface::into_i420()`: take the fast path you recognize and let the

@@ -35,11 +35,13 @@
 //!     [`encode::Producer`] publishes the results.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
-//!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
+//!   DXVA on Windows, NVDEC / VAAPI on Linux, openh264 software fallback for
+//!   H.264).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
-//!   [`decode::Config::resize`].
+//!   [`decode::Config::resize`]. A VAAPI decoder can return importable DMA-BUFs
+//!   when [`decode::Config::gpu_frames`] is enabled.
 //! - [`convert`] downloads any [`Surface`] to owned, tightly packed RGBA pixels
 //!   for CPU image and UI toolkits, honoring native color metadata when present.
 //! - `render` draws a [`Frame`] on the GPU and hands back a `wgpu` texture to
@@ -51,8 +53,8 @@
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a codec
-//! implementation. [`encode::Encoder`] takes a [`Frame`],
+//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / VAAPI) or
+//! a codec implementation. [`encode::Encoder`] takes a [`Frame`],
 //! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
 //! hardware decoded), and [`capture::Stream`] returns a [`Surface`]. So swapping
 //! or bumping any backend crate is not a breaking change for consumers. Config

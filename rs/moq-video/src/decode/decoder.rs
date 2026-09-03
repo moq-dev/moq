@@ -30,8 +30,8 @@ pub enum Kind {
 	Hardware,
 	/// Software (openh264) only.
 	Software,
-	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvdec"`,
-	/// `"openh264"`.
+	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvdec"`, `"vaapi"`,
+	/// or `"openh264"`.
 	Named(String),
 }
 
@@ -54,6 +54,23 @@ pub struct Config {
 	/// Check each [`Frame`](crate::Frame)'s dimensions and scale the remainder
 	/// yourself.
 	pub resize: Option<Size>,
+	/// Ask the decoder to leave each picture on the GPU, as the surface the
+	/// hardware decoded it into, rather than downloading it to CPU memory.
+	///
+	/// For a consumer that draws the frames, `render::Renderer` imports such a
+	/// surface directly, so the picture never touches system memory. Off by
+	/// default because it is not free to a consumer that does not draw: handing a
+	/// surface out retires it from the decoder's recycling pool, which costs an
+	/// allocation per picture, and a CPU consumer then pays the download it would
+	/// have paid anyway.
+	///
+	/// Best effort, like [`resize`](Self::resize): only the VAAPI backend honors
+	/// it today and the others ignore it, so match on each
+	/// [`Frame`](crate::Frame)'s surface rather than assuming. A frame that does
+	/// come back GPU-resident still answers
+	/// [`Surface::into_i420`](crate::Surface::into_i420), so nothing downstream
+	/// breaks on it.
+	pub gpu_frames: bool,
 }
 
 impl Config {
@@ -171,6 +188,24 @@ impl Decoder {
 		};
 
 		self.backend.decode(access_unit, timestamp, keyframe)
+	}
+
+	/// Return the frames the backend is still holding, in output order, once the
+	/// stream has ended.
+	///
+	/// Call this after the last access unit and before dropping the decoder, or a
+	/// backend that buffers ends its stream short: a VAAPI H.264 decoder holds the
+	/// tail of every stream in its DPB, as many pictures as the sequence's
+	/// reference and reorder limits allow. Backends that decode one-in one-out
+	/// return nothing here, so calling it is always safe and never necessary to
+	/// think about per backend.
+	///
+	/// The decoder stays usable but goes back to waiting for a keyframe, since a
+	/// flushed codec has no reference pictures left to decode a delta frame
+	/// against.
+	pub fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		self.got_keyframe = false;
+		self.backend.flush()
 	}
 }
 

@@ -28,7 +28,9 @@
 //! A hardware-decoded frame is imported by aliasing the decoder's surface as a
 //! texture rather than copying it: `CVMetalTextureCache` on macOS for the
 //! `PixelBuffer` variant of [`Surface`](crate::Surface), and Vulkan external
-//! memory on Linux for packed PipeWire DMA-BUFs.
+//! memory on Linux for DMA-BUFs, packed or planar. A planar one is imported a
+//! memory plane at a time, since Vulkan will not take an NV12 or YU12 buffer as
+//! a single image, and the shader was already sampling planes.
 // `PixelBuffer` is deliberately not a doc link: the variant is macOS-only, so a
 // link to it fails the `-D warnings` rustdoc build on every other platform.
 //!

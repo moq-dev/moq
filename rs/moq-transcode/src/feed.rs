@@ -198,6 +198,12 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				}
 			}
 		}
+		// A buffered decoder still owns this group's tail. Drain it before the
+		// boundary so those frames stay in this group rather than appearing after
+		// the next group's keyframe.
+		for decoded in decoder.flush().await? {
+			let _ = sender.send(Item::Frame(Arc::new(decoded)));
+		}
 		let _ = sender.send(Item::End);
 	}
 	Ok(())
