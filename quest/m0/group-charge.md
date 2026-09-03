@@ -22,8 +22,8 @@ Concretely, on a 1 GB nanode with `MOQ_CACHE_CAPACITY=50%`: 512 MB of budget at
 full, so the process dies first.
 
 Remeasure the real cost before touching the constant. The 1,637 B was taken when
-a `kio::State<()>` was 896 B and it is 224 B today, so a group should be roughly
-672 B cheaper now. That still leaves it well over the 406 B charged, and still
+a `kio::State<()>` was 896 B and it is 200 to 224 B today, so a group should be
+roughly 672 B cheaper now. That still leaves it well over the 406 B charged, and still
 over a 1 GB box at 1.26M groups, so the constant still has to move; only the
 multiple is unknown. Derive it from `size_of` rather than pasting a measured
 number, so it tracks the structs instead of rotting: a wrong `ENTRY_OVERHEAD` is

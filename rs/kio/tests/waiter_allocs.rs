@@ -6,7 +6,7 @@
 //! binary to itself, hence a test of its own rather than a unit test.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 use std::task::Waker;
 
 use kio::{Waiter, WaiterList};
@@ -15,14 +15,23 @@ use kio::{Waiter, WaiterList};
 /// real value fails the test rather than passing it quietly.
 const INLINE_WAITERS: usize = 4;
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+	/// Allocations made by *this* thread. Per-thread and not a global counter
+	/// because the test harness runs these tests concurrently, and a shared count
+	/// would fold one test's allocations into the other's measurement.
+	///
+	/// `const` initialised, so reading it from inside the allocator cannot allocate
+	/// and recurse.
+	static ALLOCS: Cell<usize> = const { Cell::new(0) };
+}
 
 struct Counting;
 
 // Counting only. Every call forwards to the system allocator unchanged.
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		ALLOCS.fetch_add(1, Ordering::Relaxed);
+		// `try_with`, because TLS is unavailable while a thread is being torn down.
+		let _ = ALLOCS.try_with(|allocs| allocs.set(allocs.get() + 1));
 		unsafe { System.alloc(layout) }
 	}
 
@@ -48,14 +57,14 @@ fn cycle_allocs(waiters: &[Waiter], cycles: usize) -> usize {
 		list.take().wake();
 	}
 
-	let before = ALLOCS.load(Ordering::Relaxed);
+	let before = ALLOCS.with(Cell::get);
 	for _ in 0..cycles {
 		for waiter in waiters {
 			waiter.register(&mut list);
 		}
 		list.take().wake();
 	}
-	ALLOCS.load(Ordering::Relaxed) - before
+	ALLOCS.with(Cell::get) - before
 }
 
 fn waiters(n: usize) -> Vec<Waiter> {

@@ -39,6 +39,9 @@ use crate::{
 /// | 4 | 72 B | 0 / 0 / 1 |
 /// | 2 | 56 B | 0 / 1 / 2 |
 ///
+/// Sizes are the layout without `smallvec/union`; a build where something else
+/// turns that on (glib, wgpu-hal) is 8 B smaller per list.
+///
 /// 4 keeps the steady state allocation-free for the small lists that dominate
 /// while giving back most of the memory. A genuinely hot fan-out list spills
 /// under any of these; it did at 32 too. `tests/waiter_allocs.rs` pins both halves
@@ -905,13 +908,20 @@ mod tests {
 
 	/// Three lists sit inside every kio channel's state cell, and that cell is paid
 	/// per announced broadcast and per cached group in moq-net whether or not
-	/// anything ever parks. Growing either is invisible at the call site, so pin
-	/// them: a diff that moves these numbers should say why.
+	/// anything ever parks. Growing either is invisible at the call site, so bound
+	/// them: a diff that has to raise these numbers should say why.
+	///
+	/// A bound and not an equality, because `SmallVec` stores its inline array in a
+	/// union or a tagged enum depending on whether anything else in the build graph
+	/// enabled `smallvec/union` (glib and wgpu-hal both do). That moves the list
+	/// between 64 B and 72 B for reasons that have nothing to do with kio.
 	#[test]
 	#[cfg(target_pointer_width = "64")]
 	fn the_list_stays_small() {
-		assert_eq!(std::mem::size_of::<WaiterList>(), 72);
-		assert_eq!(std::mem::size_of::<crate::State<()>>(), 224);
+		let list = std::mem::size_of::<WaiterList>();
+		let state = std::mem::size_of::<crate::State<()>>();
+		assert!(list <= 72, "WaiterList grew to {list} B");
+		assert!(state <= 224, "State<()> grew to {state} B");
 	}
 
 	#[test]

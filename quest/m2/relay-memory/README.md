@@ -26,11 +26,12 @@ before `T`.
 
 That lever is spent.
 [moq#2989](https://github.com/moq-dev/moq/pull/2989) cut the inline count to 4,
-which is 72 B and 224 B respectively. Going lower trades memory for an
-allocation on every wake, because `WaiterList::take()` hands its spilled buffer
-to the snapshot that wakes it, so a spilled list re-allocates per cycle rather
-than keeping capacity. `kio`'s `tests/waiter_allocs.rs` and `the_list_stays_small`
-now pin both sides of that trade.
+which is 64 to 72 B and 200 to 224 B respectively, the range depending on
+whether anything in the build graph enables `smallvec/union`. Going lower trades
+memory for an allocation on every wake, because `WaiterList::take()` hands its
+spilled buffer to the snapshot that wakes it, so a spilled list re-allocates per
+cycle rather than keeping capacity. `kio`'s `tests/waiter_allocs.rs` and
+`the_list_stays_small` now pin both sides of that trade.
 
 The remaining 48 B per cell is therefore gated on [cheaper parking and
 waking](/quest/m1/perf/kio-wake.md), which owns the buffer reuse that would make
