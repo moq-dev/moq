@@ -82,9 +82,9 @@ The filter reaches past `cpp/obs/` because this is the only place `libmoq.a` is 
 
 Three places name an OBS release, and `just obs check` compares all three:
 
-- `cpp/obs/buildspec.json` — the obs-deps bundle the macOS and Windows builds download, so this is what the released binaries link.
-- `flake.nix`'s `libobs-headers` — what `just obs compile` type-checks against on every platform. Must equal `buildspec.json` exactly; both unpack the same OBS tag.
-- nixpkgs' `obs-studio` — what `just obs ci` links on Linux. This one comes from `flake.lock` rather than from us, so only its `major.minor` has to match: a patch release carries no libobs API change, and the guard should fire on the nixpkgs bump that opens a real gap, not on every one.
+- `cpp/obs/buildspec.json` names the obs-deps bundle the macOS and Windows builds download, so this is what the released binaries link.
+- `flake.nix`'s `libobs-headers` is what `just obs compile` type-checks against on every platform. It must equal `buildspec.json` exactly; both unpack the same OBS tag.
+- nixpkgs' `obs-studio` is what `just obs ci` links on Linux. This one comes from `flake.lock` rather than from us, so only its `major.minor` has to match: a patch release carries no libobs API change, and the guard should fire on the nixpkgs bump that opens a real gap, not on every one.
 
 Bumping the first two together means new SHA-256 hashes for the OBS source archive (`.tar.gz` for macOS, `.zip` for Windows), the prebuilt obs-deps and Qt6 archives, and the nix `fetchzip` hash. The obs-deps version and hashes to use are the ones in the target OBS release's own `CMakePresets.json`, under the `dependencies` configure preset.
 
