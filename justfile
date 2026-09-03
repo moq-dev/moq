@@ -247,10 +247,15 @@ _tools $FILES="":
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
     scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
-    # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
-    # ffmpeg. Every platform: the plugin type-checks against headers, and the
-    # dev shell ships those even on Darwin, where obs-studio can't build.
-    scoped '^(cpp/obs/|rs/libmoq/)' && tools+=(clang-format gersemi pkg-config cargo)
+    # Two obs recipes with two dispatch scopes, so two lines: over-requiring
+    # would fail a diff that never runs the recipe. `just obs compile` needs
+    # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every
+    # platform: the plugin type-checks against headers, and the dev shell ships
+    # those even on Darwin, where obs-studio can't build.
+    scoped '^(cpp/obs/|rs/libmoq/|flake\.nix$)' && tools+=(pkg-config cargo)
+    # `just obs check` lints with clang-format and gersemi, and compares the
+    # three OBS pins, one of which moves on a flake.lock bump alone.
+    scoped '^(cpp/obs/|flake\.(nix|lock)$)' && tools+=(clang-format gersemi)
 
     # Scopes overlap (rs/moq-ffi/ is in five of them), so the same tool can land
     # in the list twice and be reported missing twice. Splitting on whitespace is
@@ -323,7 +328,10 @@ check $BASE="":
     	fi
     	# flake.nix is in scope because `just obs check` is what compares the OBS
     	# version pinned there against buildspec.json, and either side can move.
-    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.nix$)'; then
+    	# flake.lock too, because the third OBS the guard compares is nixpkgs'
+    	# obs-studio, the one `just obs ci` links: it moves on a lock bump alone,
+    	# and that bump is the change that opens the gap.
+    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.(nix|lock)$)'; then
     		just obs check
     	fi
     	# Validates flake eval + dev shell build; it no longer compiles the
