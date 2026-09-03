@@ -325,7 +325,9 @@ impl Capture {
 		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
 			u16::try_from(self.height).map_err(|_| Error::Codec(anyhow::anyhow!("X11 height is too large")))?;
-		let image = match self
+		// Bound to a local so the cookie, which borrows the connection, is dropped
+		// before the error arm asks the source what it is doing now.
+		let reply = self
 			.connection
 			.get_image(
 				ImageFormat::Z_PIXMAP,
@@ -337,8 +339,8 @@ impl Capture {
 				u32::MAX,
 			)
 			.map_err(source)?
-			.reply()
-		{
+			.reply();
+		let image = match reply {
 			Ok(image) => image,
 			// The check above and this request are separate round trips, so a
 			// resize or a minimize lands between them often enough to matter. Only
