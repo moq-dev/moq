@@ -185,7 +185,7 @@ struct Capture {
 	unmapped: bool,
 }
 
-/// What the backend watches for a change: the drawable's size for a window, or
+/// What the backend watches for a change: window size or destruction, or
 /// whether the selected monitor is still the one the stream opened with.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Observed {

@@ -400,7 +400,7 @@ mod tests {
 
 		for i in 0..5 {
 			let frame = cap.read().expect("read frame");
-			let Some(Surface::I420(i420)) = frame else {
+			let pump::Read::Frame(Surface::I420(i420)) = frame else {
 				panic!("frame {i} was not I420");
 			};
 			assert_eq!(i420.width, cap.width);
