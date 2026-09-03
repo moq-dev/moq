@@ -758,6 +758,100 @@ describe("buffered mode", () => {
 	});
 });
 
+describe("truncate races the reader", () => {
+	// The worklet snapshots WRITE, copies, and only then publishes, so a `truncate` on the main
+	// thread lands mid-read whenever the two threads overlap. Driving the retreat from inside one
+	// of the read's own atomics is the only way to put it there on purpose.
+	const WRITE = 0;
+	const LATENCY = 1;
+
+	// A successor takes over at 2100: [2000, 2100) is already due, [2100, 2200) is the tail the
+	// truncate drops. The output is sized to the whole buffered span, so a read that copies the
+	// tail fills every slot the assertions look at.
+	function stage(): { main: SharedRingBuffer; worklet: SharedRingBuffer; out: Float32Array[] } {
+		const init = allocSharedRingBuffer(1, 512, 1000, true);
+		const main = new SharedRingBuffer(init);
+		main.setLatency(50);
+		insert(main, 2000, 100, { channels: 1, value: 0.1 });
+		insert(main, 2100, 100, { channels: 1, value: 0.9 });
+
+		// Pre-filled with a sentinel and checked at full length: the `read` helper slices to the
+		// sample count, so an empty slice would pass whatever the ring left behind.
+		return { main, worklet: new SharedRingBuffer(init), out: [new Float32Array(200).fill(-1)] };
+	}
+
+	it("silences a quantum whose tail a concurrent truncate drops", () => {
+		const { main, worklet, out } = stage();
+
+		let fired = false;
+		const realLoad = Atomics.load;
+		const atomics = Atomics as { load: unknown };
+		atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
+			const value = realLoad(arr as Int32Array, idx);
+			// The last load before the copy: WRITE is already snapshotted, so the retreat lands in
+			// exactly the window where the reader would otherwise copy the tail it drops.
+			if (!fired && arr instanceof Int32Array && idx === LATENCY) {
+				fired = true;
+				main.truncate(Time.Micro.fromMilli(2100 as Time.Milli));
+			}
+			return value;
+		};
+
+		let result = 0;
+		try {
+			result = worklet.read(out);
+		} finally {
+			atomics.load = realLoad;
+		}
+		expect(fired).toBe(true);
+
+		// The quantum raced the retreat, so none of it is published or rendered.
+		expect(result).toBe(0);
+		expect(out[0]).toEqual(new Float32Array(200));
+
+		// The playhead never moved, so what survived the truncate still plays.
+		expect(read(worklet, 100, 1)[0]).toEqual(new Float32Array(100).fill(0.1));
+		expect(read(worklet, 100, 1)[0].length).toBe(0);
+	});
+
+	it("renders nothing while a truncate is mid-retreat", () => {
+		const { main, worklet, out } = stage();
+
+		let result = -1;
+		let fired = false;
+		const realExchange = Atomics.compareExchange;
+		const atomics = Atomics as { compareExchange: unknown };
+		atomics.compareExchange = (
+			arr: Int32Array | BigInt64Array,
+			idx: number,
+			expected: never,
+			replacement: never,
+		) => {
+			// Caught between the truncate's two epoch steps, with WRITE still describing the tail.
+			if (!fired && arr instanceof Int32Array && idx === WRITE) {
+				fired = true;
+				result = worklet.read(out);
+			}
+			return realExchange(arr as Int32Array, idx, expected, replacement);
+		};
+
+		try {
+			main.truncate(Time.Micro.fromMilli(2100 as Time.Milli));
+		} finally {
+			atomics.compareExchange = realExchange;
+		}
+		expect(fired).toBe(true);
+
+		// The reader could not tell the tail apart from the audio still due, so it copied nothing.
+		expect(result).toBe(0);
+		expect(out[0]).toEqual(new Float32Array(200).fill(-1));
+
+		// And the window closes: the next quantum plays what the truncate kept.
+		expect(read(worklet, 100, 1)[0]).toEqual(new Float32Array(100).fill(0.1));
+		expect(read(worklet, 100, 1)[0].length).toBe(0);
+	});
+});
+
 describe("packed state", () => {
 	it("does not replay samples consumed while the replacement message is in flight", () => {
 		// What the resize handoff exists for: the reader keeps draining the source until the
@@ -871,7 +965,8 @@ describe("re-anchor store ordering", () => {
 			if (!halfway) {
 				halfway = true;
 				// The first half of a re-anchor: new epoch and a zeroed cursor, WRITE untouched.
-				const epoch = (Number(realLoad(state, 0) >> 32n) | 0) + 1;
+				// Stepping by two matches `insert`, which leaves odd epochs to `truncate`.
+				const epoch = (Number(realLoad(state, 0) >> 32n) | 0) + 2;
 				Atomics.store(state, 0, BigInt(epoch >>> 0) << 32n);
 			}
 			return value;
