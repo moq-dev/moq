@@ -40,4 +40,4 @@ order.
 
 ## Required
 
-- [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md) - the non-continuous signal and first-group trimming this extends
+- [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - the non-continuous signal and first-group trimming this extends
