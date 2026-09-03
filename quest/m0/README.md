@@ -20,6 +20,5 @@ regression test per Root Cause First.
 - [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls SI tables, PCR, and pacing until the media clock catches up
-- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against 32

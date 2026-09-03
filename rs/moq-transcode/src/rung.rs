@@ -32,6 +32,30 @@ use crate::feed::{Feed, Item};
 /// nodes is the fleet's concern; this is the local backstop.
 const MAX_CONCURRENT_FETCHES: usize = 4;
 
+/// A rung's retirement signal: the receiving half of a flag the transcoder sets
+/// when the ladder no longer has room for this rung.
+///
+/// Retiring is a clean track end rather than a dropped task, so a subscriber
+/// sees the same thing it would on any other rendition going away and picks
+/// another one, instead of an abort it would read as a failure.
+#[derive(Clone)]
+pub(crate) struct Retire(tokio::sync::watch::Receiver<bool>);
+
+impl Retire {
+	/// The two halves of one rung's signal.
+	pub(crate) fn channel() -> (tokio::sync::watch::Sender<bool>, Self) {
+		let (sender, receiver) = tokio::sync::watch::channel(false);
+		(sender, Self(receiver))
+	}
+
+	/// Resolve once this rung is retired, immediately if it already was.
+	async fn fired(&mut self) {
+		// An error means the transcoder dropped the sending half, which only
+		// happens on its way out: retire rather than park here forever.
+		let _ = self.0.wait_for(|retired| *retired).await;
+	}
+}
+
 /// Everything a rung needs to build transcoding pipelines on demand.
 #[derive(Clone)]
 pub(crate) struct Rung {
@@ -52,6 +76,8 @@ pub(crate) struct Rung {
 	pub resize: moq_video::resize::Config,
 	/// Where to report that this rung is encoding.
 	pub active: crate::active::Producer,
+	/// Fires when the ladder resizes past this rung.
+	pub retire: Retire,
 }
 
 impl Rung {
@@ -114,7 +140,18 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 /// of this source; only the per-rung resize and encode happen here.
 async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<(), Error> {
 	let demand = producer.demand();
+	let mut retire = rung.retire.clone();
+	// Set once the ladder retires this rung. The track is finished at the next
+	// group boundary rather than mid-group, so the last thing a subscriber gets
+	// is a complete group and then a clean end.
+	let mut retiring = false;
+
 	loop {
+		if retiring {
+			producer.finish()?;
+			return Ok(());
+		}
+
 		tokio::select! {
 			used = demand.used() => if used.is_err() {
 				// The output track closed; nothing more to serve.
@@ -124,6 +161,12 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 				// The source went away while idle; end the rung with it.
 				producer.clone().abort(err)?;
 				return Ok(());
+			}
+			() = retire.fired() => {
+				// Retired while idle, which is the common case: the ladder is
+				// resized long before anyone asks for the rung it dropped.
+				retiring = true;
+				continue;
 			}
 		}
 
@@ -156,10 +199,27 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					}
 					break 'session;
 				}
+				() = retire.fired(), if !retiring => {
+					retiring = true;
+					// Mid-group: ride it out and end the track when it closes.
+					// Nothing new is opened, so this costs at most one group.
+					if current.is_none() {
+						break 'session;
+					}
+					continue;
+				}
 			};
 
 			match item {
 				Some(Item::Group(sequence)) => {
+					if retiring {
+						// The group we were riding out never ended, so it is
+						// incomplete however long we wait.
+						if let Some(output) = current.take() {
+							output.abort(moq_net::Error::Cancel)?;
+						}
+						break 'session;
+					}
 					// Empty the codec before opening the next group even though this one
 					// is being abandoned: a pipelined encoder still holding the previous
 					// group's tail would otherwise emit it into the new group, ahead of
@@ -231,12 +291,18 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						}
 						output.finish()?;
 					}
+					if retiring {
+						break 'session;
+					}
 				}
 				Some(Item::Lagged) => {
 					// Fell behind the feed: abandon the group and resume at the
 					// next boundary rather than stalling other rungs.
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
+					}
+					if retiring {
+						break 'session;
 					}
 				}
 				Some(Item::Finished) => {

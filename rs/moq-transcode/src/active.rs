@@ -57,29 +57,32 @@ pub struct Rendition(Arc<Meter>);
 impl Rendition {
 	fn new(rung: &Resolved) -> Self {
 		Self(Arc::new(Meter {
-			rung: rung.clone(),
-			counts: kio::Lock::new(Counts::default()),
+			name: rung.name.clone(),
+			counts: kio::Lock::new(Counts::new(rung)),
 		}))
 	}
 
 	/// The rendition/track name, e.g. `video/360p`.
 	pub fn name(&self) -> &str {
-		&self.0.rung.name
+		&self.0.name
 	}
 
 	/// The output resolution, derived from the source aspect ratio.
+	///
+	/// Follows the source: a source that changes resolution mid-stream resizes
+	/// the ladder under it, so read this when you use it rather than caching it.
 	pub fn size(&self) -> moq_video::Size {
-		self.0.rung.size
+		self.0.counts.lock().size
 	}
 
 	/// The target bitrate, in bits per second.
 	pub fn bitrate(&self) -> u64 {
-		self.0.rung.bitrate
+		self.0.counts.lock().bitrate
 	}
 
 	/// The output framerate, inherited from the source.
 	pub fn framerate(&self) -> u32 {
-		self.0.rung.framerate
+		self.0.counts.lock().framerate
 	}
 
 	/// How many frames this rendition has encoded, over every pipeline.
@@ -107,6 +110,18 @@ impl Rendition {
 		counts.frames += frames;
 		counts.bytes += bytes;
 	}
+
+	/// Adopt a re-resolved geometry, keeping the totals.
+	///
+	/// A rung retired and re-admitted at a new size under the same name is the
+	/// same rendition to a caller billing it, so the counters carry across while
+	/// the geometry follows the source.
+	fn resize(&self, rung: &Resolved) {
+		let mut counts = self.0.counts.lock();
+		counts.size = rung.size;
+		counts.bitrate = rung.bitrate;
+		counts.framerate = rung.framerate;
+	}
 }
 
 impl std::fmt::Debug for Rendition {
@@ -119,17 +134,35 @@ impl std::fmt::Debug for Rendition {
 }
 
 struct Meter {
-	rung: Resolved,
+	/// The track name, which keys the ladder and so never moves.
+	name: String,
 	counts: kio::Lock<Counts>,
 }
 
 /// Everything a caller bills against, behind one lock the cursors never touch.
-#[derive(Default)]
 struct Counts {
+	/// The output resolution, which follows the source.
+	size: moq_video::Size,
+	/// The target bitrate, in bits per second.
+	bitrate: u64,
+	/// The output framerate, inherited from the source.
+	framerate: u32,
 	/// Frames written to the output track.
 	frames: u64,
 	/// Bytes of encoded bitstream written to the output track.
 	bytes: u64,
+}
+
+impl Counts {
+	fn new(rung: &Resolved) -> Self {
+		Self {
+			size: rung.size,
+			bitrate: rung.bitrate,
+			framerate: rung.framerate,
+			frames: 0,
+			bytes: 0,
+		}
+	}
 }
 
 /// One rendition's entry in the shared ladder.
@@ -165,11 +198,19 @@ impl Producer {
 	}
 
 	/// Publish the resolved ladder, so a cursor holds every handle before any
-	/// rung can encode. Called once, before the first rung is served.
-	pub(crate) fn declare(&self, rungs: &[Resolved]) {
+	/// rung can encode.
+	///
+	/// Called again whenever the source resizes the ladder. A rung that survives
+	/// under a new geometry keeps its handle and its totals; a rung the new
+	/// picture has no room for keeps both too, since the bill for what it already
+	/// encoded outlives it.
+	pub(crate) fn declare<'a>(&self, rungs: impl IntoIterator<Item = &'a Resolved>) {
 		let Ok(mut state) = self.state.write() else { return };
 		for rung in rungs {
-			state.entry(rung);
+			// Only the ladder resizes a handle. A rung task outliving its own
+			// retirement still attaches with the geometry it was serving, and
+			// must not drag the entry back to it.
+			state.entry(rung).rendition.resize(rung);
 		}
 	}
 
@@ -388,6 +429,36 @@ mod tests {
 
 		drop(guard);
 		assert!(!cursor.next().await.unwrap().encoding);
+	}
+
+	/// A source that resizes re-resolves the ladder, and a rung of the same name
+	/// comes back at a new size. The handle a caller is already holding has to
+	/// follow it, or it bills the geometry the rung stopped encoding, while the
+	/// totals it accrued have to survive the move.
+	#[tokio::test]
+	async fn a_redeclared_rung_follows_the_ladder() {
+		let active = Producer::default();
+		let before = resolved("video/360p", 360);
+		active.declare(std::slice::from_ref(&before));
+
+		let mut cursor = active.consume();
+		let rendition = cursor.next().await.unwrap().rendition;
+		let guard = active.attach(&before);
+		guard.produced(2, 1_000);
+		drop(guard);
+
+		let mut after = resolved("video/360p", 360);
+		after.size = moq_video::Size::new(480, 360);
+		active.declare(std::slice::from_ref(&after));
+
+		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
+		assert_eq!(rendition.frames(), 2, "the resize reset the bill");
+
+		// A rung task outliving its own retirement still attaches with the
+		// geometry it was serving, which must not drag the ladder backwards.
+		let stale = active.attach(&before);
+		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
+		drop(stale);
 	}
 
 	/// A pipeline is billable when it produces, not when it attaches: a viewer

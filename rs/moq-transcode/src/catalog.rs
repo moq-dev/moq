@@ -17,6 +17,16 @@ pub(crate) struct Resolved {
 	pub framerate: u32,
 }
 
+/// A resolved rung together with the catalog entry advertising it.
+///
+/// The two are built and replaced as a unit, so an entry can never describe a
+/// geometry the rung no longer encodes.
+#[derive(Clone, Debug)]
+pub(crate) struct Published {
+	pub rung: Resolved,
+	pub entry: VideoConfig,
+}
+
 /// Pick the rendition to transcode from: the highest-resolution decodable
 /// (H.264/H.265/AV1) rendition local to the source broadcast.
 pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Error> {
@@ -35,6 +45,33 @@ pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Erro
 		.max_by_key(|(_, config)| (config.coded_height, config.coded_width, config.bitrate))
 		.map(|(name, config)| (name.clone(), config.clone()))
 		.ok_or(Error::NoSource)
+}
+
+/// Re-pick the source rendition for a new snapshot, preferring the one already
+/// chosen while it is still on offer.
+///
+/// Running [`choose_source`] afresh on every snapshot would hand the ladder to a
+/// taller rendition the moment a publisher advertises one, retiring every rung
+/// that was serving. Sticking to the current name follows the picture it now
+/// carries (the point of this path) without treating a momentary catalog edit as
+/// a source switch.
+pub(crate) fn follow_source(video: &Video, current: &str) -> Result<(String, VideoConfig), Error> {
+	match video.renditions.get(current) {
+		Some(config) if config.broadcast.is_none() && can_decode(config) && dimensions(config).is_some() => {
+			Ok((current.to_string(), config.clone()))
+		}
+		_ => choose_source(video),
+	}
+}
+
+/// Whether a rung decoding `old` can keep decoding `new` untouched.
+///
+/// Decoders are opened from the codec and container and read their geometry out
+/// of the bitstream, so a source that only resized is still the same stream: the
+/// shared decode and every rung that still fits carry on, and only the ladder
+/// moves.
+pub(crate) fn same_stream(old: &VideoConfig, new: &VideoConfig) -> bool {
+	old.codec == new.codec && old.container == new.container
 }
 
 /// The source geometry a ladder can be sized against, if it's known at all.
@@ -59,7 +96,7 @@ fn is_supported_av1(av1: &AV1) -> bool {
 
 /// Resolve the configured rungs against the source: derive geometry from the
 /// source aspect ratio and drop any rung that isn't strictly below the source.
-pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
+fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
 	let Some((source_width, source_height)) = dimensions(source) else {
 		return Err(Error::SourceDimensions(source_name.to_string()));
 	};
@@ -111,7 +148,7 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 /// asks for it), and nothing ever refines these entries from a bitstream the way an importer would.
 /// So the codec string has to be right the first time: it is read back out of the encoder that will
 /// serve the rung rather than guessed from the ladder.
-pub(crate) async fn rung_entry(
+async fn rung_entry(
 	rung: &Resolved,
 	source: &VideoConfig,
 	encoder: &moq_video::encode::Kind,
@@ -126,14 +163,45 @@ pub(crate) async fn rung_entry(
 	Ok(entry)
 }
 
+/// The ladder for `source`: every configured rung that fits, with the catalog
+/// entry advertising it.
+///
+/// `current` is the ladder already published, if any. A rung that comes out
+/// identical keeps its entry rather than paying for another probe, since a probe
+/// opens a real encoder and a source that resized usually leaves most of the
+/// ladder where it was.
+pub(crate) async fn publish_rungs(
+	rungs: &[Rung],
+	source_name: &str,
+	source: &VideoConfig,
+	encoder: &moq_video::encode::Kind,
+	current: &[Published],
+) -> Result<Vec<Published>, Error> {
+	let mut published = Vec::new();
+	for rung in resolve_rungs(rungs, source_name, source)? {
+		let entry = match current.iter().find(|other| other.rung == rung) {
+			Some(reused) => {
+				let mut entry = reused.entry.clone();
+				// Belongs to the source rather than the ladder, so it tracks the
+				// source even on a rung that skipped the probe.
+				entry.optimize_for_latency = source.optimize_for_latency;
+				entry
+			}
+			None => rung_entry(&rung, source, encoder).await?,
+		};
+		published.push(Published { rung, entry });
+	}
+	Ok(published)
+}
+
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
-/// update; the rung entries are fixed, the passthrough entries track the source.
+/// update, with whatever the ladder resolved to for that snapshot.
 pub(crate) fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
-	rungs: &[(String, VideoConfig)],
+	rungs: &[Published],
 	source_rel: Option<&PathRelativeOwned>,
 ) -> Result<(), Error> {
 	out.video = Video::default();
@@ -144,8 +212,8 @@ pub(crate) fn populate(
 	out.video.rotation = source.video.rotation;
 	out.video.flip = source.video.flip;
 
-	for (name, config) in rungs {
-		out.video.insert(name, config.clone())?;
+	for published in rungs {
+		out.video.insert(&published.rung.name, published.entry.clone())?;
 	}
 
 	let Some(rel) = source_rel else {

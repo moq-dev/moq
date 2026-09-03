@@ -161,10 +161,11 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang p
 ```
 
 `play` starts each media role as soon as the catalog offers a rendition it can
-decode, independently of the other, and keeps following catalog updates until
-both have started. Audio-only and video-only broadcasts play fine; playback ends
-once every track it started has ended. It doesn't switch renditions afterwards,
-so a publisher that replaces the one being played ends that role.
+decode, independently of the other, and follows catalog updates for as long as
+the catalog lasts. Audio-only and video-only broadcasts play fine. A publisher
+that retires the rendition being played ends its track, and that role picks a
+replacement out of a later catalog snapshot; playback ends once the catalog has
+ended and every track it started has too.
 
 Within a role it takes the first rendition it can decode, in track-name order,
 which is arbitrary as a quality choice. Pass `--video-name` / `--audio-name` to
@@ -459,6 +460,12 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang     tra
 # source references):
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
 ```
+
+The ladder is sized against the source picture, and follows it: a source that
+changes resolution mid-stream (a window capture renegotiated by a resize, a
+publisher reconnecting at a new size) resolves the rungs again. Rungs the new
+picture has no room for finish their tracks, so a viewer on one reselects the
+way it would on any other rendition change; rungs that still fit keep serving.
 
 Windows uses the Direct3D11 video processor by default. Pass
 `--resize-acceleration cpu` to force frames through CPU resizing.

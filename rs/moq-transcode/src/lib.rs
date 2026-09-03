@@ -27,6 +27,7 @@ mod catalog;
 mod config;
 mod error;
 mod feed;
+mod ladder;
 mod rung;
 
 pub use config::{Config, Rung};
@@ -129,64 +130,36 @@ impl Transcoder {
 				Err(_) => tracing::debug!("no transcodable rendition yet; waiting for a catalog update"),
 			}
 		};
-		let rungs = catalog::resolve_rungs(&config.rungs, &source_name, &source_config)?;
-		tracing::info!(source = %source_name, rungs = rungs.len(), "transcoding");
-		// Publish the ladder before any rung can be asked for, so a cursor holds
-		// every handle and can bill a pipeline too short to show up as an edge.
-		active.declare(&rungs);
-
-		// One shared live decode for every rung of this source: N active rungs
-		// share one subscription and one decoder instead of N.
-		let feed = feed::Feed::new(
-			source.track(&source_name)?,
-			source_config.clone(),
-			config.decoder.clone(),
-		);
+		// The ladder, the shared decode behind it, and the rungs serving off it.
+		// Resolved again on every source catalog snapshot, so a source that resizes
+		// mid-stream takes the ladder with it.
+		let mut ladder =
+			ladder::Ladder::new(source.clone(), config.clone(), active, source_name, source_config).await?;
 
 		// Publish the derivative catalog before any encoder exists, so subscribers
 		// can pick a rung immediately.
-		let mut entries = Vec::with_capacity(rungs.len());
-		for rung in &rungs {
-			let entry = catalog::rung_entry(rung, &source_config, &config.encoder).await?;
-			entries.push((rung.name.clone(), entry));
-		}
 		{
 			let mut guard = derived.lock();
-			catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
+			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 		}
 
-		// Serve rung requests and follow source catalog updates until the source
-		// ends. The rung set is fixed at startup: a source that changes resolution
-		// mid-stream keeps the ladder it started with, but the passthrough entries
-		// track the source.
+		// Serve rung requests and follow source catalog updates until the source ends.
 		let mut tasks = tokio::task::JoinSet::new();
 		loop {
 			tokio::select! {
 				request = dynamic.requested_track() => {
 					// Err means the broadcast closed; nothing left to serve.
 					let Ok(request) = request else { break };
-					match rungs.iter().find(|rung| rung.name == request.name()) {
-						Some(info) => {
-							let rung = rung::Rung {
-								source: source.track(&source_name)?,
-								feed: feed.clone(),
-								broadcast: source.clone(),
-								config: source_config.clone(),
-								encoder: config.encoder.clone(),
-								decoder: config.decoder.clone(),
-								resize: config.resize,
-								active: active.clone(),
-								info: info.clone(),
-							};
-							tasks.spawn(rung::serve(rung, request));
-						}
+					match ladder.rung(request.name())? {
+						Some(rung) => { tasks.spawn(rung::serve(rung, request)); }
 						None => request.reject(moq_net::Error::NotFound),
 					}
 				},
 				update = catalogs.next() => match update {
 					Ok(Some(snapshot)) => {
+						ladder.follow(&snapshot.video).await?;
 						let mut guard = derived.lock();
-						catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
+						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 					}
 					// The source ended (or its catalog track died): wind down.
 					Ok(None) => break,
@@ -226,8 +199,72 @@ mod tests {
 	/// for the duration of the test.
 	struct Source {
 		broadcast: moq_net::broadcast::Producer,
-		_catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer,
 		_track: moq_net::track::Producer,
+	}
+
+	impl Source {
+		/// Publish the source video rendition at `width`x`height`, replacing
+		/// whatever the catalog said before. An importer does exactly this when
+		/// the picture changes size: the next keyframe's SPS is republished.
+		fn resize(&mut self, width: u32, height: u32) {
+			let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+				inline: true,
+				profile: 0x42,
+				constraints: 0,
+				level: 30,
+			});
+			video.coded_width = Some(width);
+			video.coded_height = Some(height);
+			video.bitrate = Some(1_000_000);
+			video.framerate = Some(30.0);
+
+			let mut guard = self.catalog.lock();
+			guard.video = hang::catalog::Video::default();
+			guard.video.insert("video", video).unwrap();
+		}
+	}
+
+	/// A source broadcast carrying a catalog and an empty video track: enough to
+	/// resolve a ladder, since no rung encodes until someone asks.
+	fn source_catalog(width: u32, height: u32) -> Source {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let track = broadcast.create_track("video", hang::container::track_info()).unwrap();
+
+		let mut source = Source {
+			broadcast,
+			catalog,
+			_track: track,
+		};
+		source.resize(width, height);
+		source
+	}
+
+	/// Read derived catalog snapshots until one satisfies `ready`, so a test
+	/// doesn't race the transcoder's own catalog writes.
+	async fn await_catalog(
+		catalogs: &mut moq_mux::catalog::hang::Consumer<()>,
+		ready: impl Fn(&moq_mux::catalog::hang::Catalog) -> bool,
+	) -> moq_mux::catalog::hang::Catalog {
+		loop {
+			let snapshot = catalogs.next().await.unwrap().unwrap();
+			if ready(&snapshot) {
+				return snapshot;
+			}
+		}
+	}
+
+	/// Subscribe to a derived track, waiting for the transcoder to register it.
+	async fn subscribe(consumer: &moq_net::broadcast::Consumer, name: &str) -> moq_net::track::Subscriber {
+		let track = loop {
+			match consumer.track(name) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("track {name}: {err}"),
+			}
+		};
+		track.subscribe(None).await.unwrap()
 	}
 
 	/// H.264 NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
@@ -301,7 +338,7 @@ mod tests {
 
 		Source {
 			broadcast,
-			_catalog: catalog,
+			catalog,
 			_track: track,
 		}
 	}
@@ -331,7 +368,7 @@ mod tests {
 
 		let source = Source {
 			broadcast,
-			_catalog: catalog,
+			catalog,
 			// The producing task owns the real track producer; park a clone so
 			// the struct shape matches `source_broadcast`.
 			_track: track.clone(),
@@ -714,6 +751,108 @@ mod tests {
 		assert!(rendition.bytes() > 0);
 
 		driver.abort();
+	}
+
+	/// A source that resizes mid-stream takes the ladder with it.
+	///
+	/// `moq_video::encode::publish_capture` opens its source twice by design (once
+	/// to probe the mode, once when the first subscriber arrives), and a window
+	/// capture derives its geometry from the window on each open, so the picture a
+	/// transcoder advertises a ladder for is routinely not the one it ends up
+	/// carrying. The rungs that no longer fit have to retire, the ones that still
+	/// do have to keep serving, and the passthrough entry has to follow.
+	#[tokio::test]
+	async fn ladder_follows_a_source_resize() {
+		let mut source = source_catalog(640, 360);
+
+		let config = Config {
+			// 360p is admitted at 640x360 only because its bitrate undercuts the
+			// source's; 240p and 120p fit outright.
+			rungs: vec![
+				Rung::new(360, 900_000),
+				Rung::new(240, 300_000),
+				Rung::new(120, 100_000),
+			],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/360p")
+		})
+		.await;
+		assert!(derived.video.renditions.contains_key("video/240p"));
+		assert!(derived.video.renditions.contains_key("video/120p"));
+		assert_eq!(
+			derived.video.renditions.get("video").and_then(|v| v.coded_width),
+			Some(640),
+			"the passthrough entry should describe the source"
+		);
+
+		// Two live subscribers: one on a rung the smaller picture has no room for,
+		// one on a rung that survives it unchanged.
+		let mut retired = subscribe(&consumer, "video/240p").await;
+		let mut kept = subscribe(&consumer, "video/120p").await;
+
+		// 320x180 keeps the source aspect ratio, so 120p stays 212x120 while 360p
+		// and 240p are now taller than the source.
+		source.resize(320, 180);
+
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			!snapshot.video.renditions.contains_key("video/360p")
+		})
+		.await;
+		assert!(
+			!derived.video.renditions.contains_key("video/240p"),
+			"240p outlived the resize"
+		);
+		let rung = derived
+			.video
+			.renditions
+			.get("video/120p")
+			.expect("120p was retired too");
+		assert_eq!(rung.coded_width, Some(212));
+		assert_eq!(rung.coded_height, Some(120));
+		assert_eq!(
+			derived.video.renditions.get("video").and_then(|v| v.coded_width),
+			Some(320),
+			"the passthrough entry should follow the source"
+		);
+
+		// The retired rung ends its track, so a subscriber reselects the way it
+		// would on any other rendition going away, rather than stalling or seeing
+		// an abort it would read as a failure.
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.next_group())
+			.await
+			.expect("the retired rung never ended its track")
+			.expect("the retired rung aborted instead of finishing");
+		assert!(ended.is_none(), "expected a clean end, got a group");
+
+		// The rung the new picture still fits keeps serving: its subscriber sees
+		// nothing at all, since the source has no media.
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(100), kept.next_group())
+				.await
+				.is_err(),
+			"a rung that still fits was retired anyway"
+		);
+
+		transcoder.abort();
 	}
 
 	/// `run` must terminate (not hang in its shutdown drain) when the source
