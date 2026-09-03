@@ -379,6 +379,13 @@
           with pkgs;
           [
             obs-headers
+            # libobs' public headers include <simde/x86/sse2.h> as of OBS 32,
+            # which used to be vendored under libobs/util/ and so travelled with
+            # obs-headers. obs-deps ships it beside libobs for the macOS and
+            # Windows builds, and nixpkgs' obs-studio propagates it for the
+            # Linux one; listed here so the header-only path has it on Darwin
+            # too. Same 0.8.2 that obs-deps carries.
+            simde
             qt6.qtbase
             clang-tools
             gersemi

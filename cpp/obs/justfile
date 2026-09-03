@@ -175,6 +175,26 @@ _includes:
         exit 1
     fi
 
+    # obs.h reaches <simde/x86/sse2.h> as of OBS 32, which used to be vendored
+    # under libobs/util/ and so came along with the headers above. The dev shell
+    # carries it (see flake.nix); the obs-deps bundle ships its own copy beside
+    # libobs, which is how the macOS and Windows builds get it.
+    simde_include=""
+    if command -v pkg-config >/dev/null && pkg-config --exists simde; then
+        simde_include=$(pkg-config --variable=includedir simde)
+    else
+        for candidate in .deps/obs-deps-*/include; do
+            if [ -f "$candidate/simde/x86/sse2.h" ]; then
+                simde_include="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$simde_include" ]; then
+        echo "simde headers not found; run inside 'nix develop', which supplies them" >&2
+        exit 1
+    fi
+
     (cd ../.. && {{ cargo_compile }} check --locked --quiet -p libmoq)
 
     # Ask cargo where its build script ran rather than reconstructing the path.
@@ -199,7 +219,7 @@ _includes:
 
     # One flag per line, path glued to the -I, so a caller can rebuild the
     # arguments without splitting on the spaces in a path.
-    printf -- '-I%s\n' src "$obs_include" "$moq_include"
+    printf -- '-I%s\n' src "$obs_include" "$simde_include" "$moq_include"
 
 # Unit-test the plugin sources against stubbed libobs/libmoq/ffmpeg, under
 # ThreadSanitizer.
