@@ -13,19 +13,25 @@ keywords = ["quic", "http3", "webtransport", "media", "audio"]
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
 [features]
-# AAC-LC decode via symphonia, on by default. Pure Rust, so it costs no
-# toolchain: the trade this crate already refused for Opus. Only a subscriber to
-# an ingest-sourced broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all
-# publish AAC, while everything this crate encodes is Opus or PCM), so a
-# publish-only build can drop it and the two crates it pulls.
+# Everything is on by default. The features exist so a consumer can drop what
+# it cannot or does not want to build, not to hide code from the default
+# compile: `just check` lints default features only, so anything off here is
+# only ever compiled nightly. Workspace consumers opt out at the root manifest
+# (`default-features = false`) and pick per crate, which keeps cpal out of the
+# language bindings.
+default = ["aac", "capture", "playback", "aec"]
+# AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
+# this crate already refused for Opus. Only a subscriber to an ingest-sourced
+# broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all publish AAC, while
+# everything this crate encodes is Opus or PCM), so a publish-only build can
+# drop it and the two crates it pulls.
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
-default = ["aac"]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
-# puts it. Off by default so audio-only consumers (e.g. moq-ffi) don't pull cpal
-# and, on Linux, the ALSA build dependency. On macOS it also pulls AVFoundation
-# for the TCC permission pre-check (the objc deps below are target-gated, so this
-# is a no-op elsewhere).
+# puts it. On Linux cpal links libasound, the one system build dependency in
+# this crate; drop `capture` and `playback` for a box without it. On macOS it
+# also pulls AVFoundation for the TCC permission pre-check (the objc deps below
+# are target-gated, so this is a no-op elsewhere).
 capture = [
     "dep:cpal",
     "dep:kio",
@@ -42,9 +48,8 @@ capture = [
     "dep:objc2-screen-capture-kit",
 ]
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
-# stream (CoreAudio / WASAPI / ALSA). Off by default for the same reason as
-# `capture`: a consumer that only encodes shouldn't pull cpal, or the ALSA build
-# dependency on Linux.
+# stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
+# as `capture`.
 playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. cpal picks the host at runtime, so

@@ -13,11 +13,11 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# The NVIDIA codecs are on by default, mirroring moq-video: NVDEC -> NVENC is
+# The hardware codecs are on by default, mirroring moq-video: NVDEC -> NVENC is
 # the whole point of a GPU transcode fleet, and it is the zero-copy GPU pipeline
 # (NVDEC decodes and scales in hardware, NVENC encodes the CUDA frame in place).
-# Disable for a slimmer self-compiled Linux build. VAAPI remains an opt-in.
-default = ["nvidia"]
+# Both dlopen their driver at runtime, so disabling them only slims the compile.
+default = ["nvidia", "vaapi"]
 # NVENC + NVDEC (Linux, dlopen'd at runtime; a no-op elsewhere).
 nvidia = ["moq-video/nvidia"]
 # Compatibility aliases for the pre-consolidation names, kept so a manifest that
@@ -25,8 +25,7 @@ nvidia = ["moq-video/nvidia"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoder (Linux; opt-in because the backend is
-# unvalidated on hardware; libva dlopen'd at runtime).
+# Intel/AMD VAAPI hardware encoder (Linux; libva dlopen'd at runtime).
 vaapi = ["moq-video/vaapi"]
 
 [dependencies]

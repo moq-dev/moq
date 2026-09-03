@@ -104,7 +104,7 @@ linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
-moq-audio = { version = "0.0.22", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.22", path = "rs/moq-audio", default-features = false }
 moq-flate = { version = "0.1.2", path = "rs/moq-flate" }
 moq-hls = { version = "0.4.13", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.3.9", path = "rs/moq-json" }

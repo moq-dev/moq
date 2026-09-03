@@ -48,20 +48,20 @@ impl From<MoqVideoCodec> for moq_video::encode::Codec {
 
 /// Which encoder implementation to use.
 ///
-/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows), and
-/// openh264 (software, everywhere). NVENC/NVDEC are a libmoq-only build option
-/// and VAAPI is opt-in everywhere, so Linux here is software-only.
+/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows),
+/// openh264 (software, everywhere), and on Linux NVENC and VAAPI, which dlopen
+/// their driver at runtime and drop out of `Auto` when it is absent.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqVideoEncoderKind {
-	/// Prefer a platform hardware encoder, falling back to software. On Linux
-	/// that fallback is the only option these bindings have.
+	/// Prefer a platform hardware encoder, falling back to software.
 	Auto,
-	/// Hardware only; fails if none is available, which on Linux is always.
+	/// Hardware only; fails if none is available.
 	Hardware,
 	/// Software only (openh264, H.264 only).
 	Software,
 	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS),
-	/// `"mediafoundation"` (Windows), or `"openh264"` (software, everywhere).
+	/// `"mediafoundation"` (Windows), `"nvenc"` / `"vaapi"` (Linux), or
+	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
 	Named { name: String },

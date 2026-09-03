@@ -55,26 +55,25 @@ slow path. AV1 is decode-only, via NVDEC.
 cargo add moq-video
 ```
 
-Capture and NVIDIA hardware codecs are on by default. VAAPI is not, since that
-backend has never been validated on real hardware, and neither are rendering
-and PipeWire screen capture, which pull in a graphics stack and a `libpipewire`
-build dependency respectively:
+Capture, the Linux hardware codecs, and the GPU renderer are on by default.
+PipeWire screen capture is not, since it links `libpipewire-0.3` at build time:
 
 ```bash
-cargo add moq-video --features render,pipewire
+cargo add moq-video --features pipewire
 ```
 
 | Feature | Default | Pulls in |
 | --- | --- | --- |
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
-| `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`) |
-| `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
-| `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
+| `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`), dlopen'd at runtime |
+| `vaapi` | yes | Intel/AMD encode on Linux (`moq-vaapi`), dlopen'd at runtime; not yet validated on hardware |
+| `render` | yes | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
 | `pipewire` | no | Wayland screen capture via xdg-desktop-portal and DMA-BUF |
 
 `--no-default-features` gives a codec-only build that still encodes and decodes
-H.264 with openh264 but omits native capture and the Linux GPU dependencies. A
-relay or language binding that only handles supplied frames needs none of them.
+H.264 with openh264 but omits native capture, the renderer, and the Linux GPU
+backends. A relay or language binding that only handles supplied frames needs
+none of them.
 
 ## Publishing
 

@@ -91,10 +91,10 @@ Two public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The NVENC and VAAPI backends are Linux-only and gated behind their respective
-features. Both `dlopen` the vendor driver at runtime (and fall back to software
-where the driver is absent), so a feature-enabled binary still links on a
-GPU-less builder and still starts on a GPU-less machine.
+The NVENC and VAAPI backends are Linux-only, behind the default-on `nvidia` and
+`vaapi` features. Both `dlopen` the vendor driver at runtime (and fall back to
+software where the driver is absent), so the binary still links on a GPU-less
+builder and still starts on a GPU-less machine.
 
 ## Decode
 

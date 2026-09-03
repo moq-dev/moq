@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "quinn", "websocket", "nvidia", "pipewire"]
+default = ["iroh", "quinn", "websocket", "nvidia", "vaapi", "pipewire"]
 iroh = ["moq-native/iroh"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
@@ -60,8 +60,9 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoding (Linux). Off by default because the backend is
-# unvalidated on hardware; enable it explicitly alongside `capture` or `transcode`.
+# Intel/AMD VAAPI hardware encoding (Linux), on by default like `nvidia` and
+# trimmable the same way: libva is dlopen'd at runtime, so it costs the build
+# nothing. Only bites when `capture` or `transcode` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
 # on by default like the hardware codecs above and trimmable the same way. Only
@@ -82,7 +83,7 @@ bytes = { workspace = true }
 clap = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
-moq-audio = { workspace = true, optional = true }
+moq-audio = { workspace = true, optional = true, features = ["aac"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }

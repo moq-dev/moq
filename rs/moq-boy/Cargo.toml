@@ -30,7 +30,7 @@ moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
 # Enable the NVIDIA hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvidia"] }
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

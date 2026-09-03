@@ -50,15 +50,25 @@ rather than following it frame by frame.
 
 ## Installation
 
-Device I/O is off by default, so a service that only encodes or relays pulls in
-neither `cpal` nor (on Linux) the ALSA build dependency:
+Everything is on by default: AAC decode, device capture and playback, and echo
+cancellation. On Linux the device features link ALSA at build time (`libasound2-dev`
+on Debian and Ubuntu), so a service that only encodes or relays can drop them:
 
 ```bash
-cargo add moq-audio --features capture,playback,aec
+cargo add moq-audio --no-default-features --features aac
 ```
 
-`aec` implies both `capture` and `playback`, since the canceller taps the output
-mix as its reference.
+| Feature | Default | Pulls in |
+| --- | --- | --- |
+| `aac` | yes | AAC-LC decode via `symphonia`, pure Rust |
+| `capture` | yes | Microphones via `cpal`; macOS system audio via ScreenCaptureKit |
+| `playback` | yes | Speaker output via `cpal` |
+| `aec` | yes | Acoustic echo cancellation (`sonora`); implies `capture` and `playback`, since the canceller taps the output mix as its reference |
+| `pipewire` | no | cpal's native PipeWire host on Linux, linking `libpipewire-0.3` |
+| `pulseaudio` | no | cpal's native PulseAudio host on Linux, linking `libpulse` |
+
+Without a native host, cpal reaches a Linux sound server through ALSA's `default`
+device, which desktops route to PipeWire or PulseAudio via their ALSA plugin.
 
 ## Publishing
 

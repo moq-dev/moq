@@ -13,11 +13,14 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# The NVIDIA codecs are enabled by default. Disable them (e.g.
-# `--no-default-features`) for a slimmer self-compiled Linux build that drops the
-# CUDA dependencies. Openh264 stays as the always-compiled software fallback;
-# disable only `capture` to omit the device stack while retaining codecs.
-default = ["capture", "nvidia"]
+# Everything that costs no system library at build time is on by default; the
+# features exist so a consumer can drop what it does not want, not to hide code
+# from the default compile (`just check` lints default features only). Openh264
+# stays as the always-compiled software fallback. `pipewire` is the exception:
+# it links libpipewire at build time. Workspace consumers opt out at the root
+# manifest (`default-features = false`) and pick per crate, so the relay and the
+# language bindings never build the device or render stacks.
+default = ["capture", "nvidia", "vaapi", "render"]
 # Native camera and screen capture. Enabled by default for direct consumers,
 # but workspace consumers opt in so codec-only bindings avoid device build
 # dependencies such as V4L2 and libclang.
@@ -35,21 +38,20 @@ nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoder (Linux). Off by default because the backend has
-# never been validated on real hardware, not because of anything it costs the
-# build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at
-# build time and still starts on a libva-less host, where automatic backend
-# selection falls back to the next encoder like the NVENC backend does.
+# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi dlopen's libva, so the
+# build needs no libva and still starts on a libva-less host, where automatic
+# backend selection falls back to the next encoder like the NVENC backend does.
+# The backend has not been validated on real hardware yet; `Kind::Named`
+# ("openh264") sidesteps it if it misbehaves.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
-# converts a frame to RGBA and hands back a texture the caller presents. Off by
-# default because wgpu pulls a graphics stack (and its backend drivers) that a
-# relay or a headless publisher has no use for; only an application that actually
-# draws video turns it on. `dmabuf` adds the Linux surface vocabulary; Vulkan
-# itself still comes from wgpu.
+# converts a frame to RGBA and hands back a texture the caller presents. wgpu
+# loads Vulkan / Metal / D3D at runtime, so this costs compile time and nothing
+# else; a relay or headless publisher drops it. `dmabuf` adds the Linux surface
+# vocabulary; Vulkan itself still comes from wgpu.
 render = [
     "dmabuf",
     "dep:bytemuck",
