@@ -148,6 +148,9 @@ impl DmaBufPlane {
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub struct DmaBufExport {
 	fd: OwnedFd,
+	// The producer's lease, held so its buffer outlives the descriptor. Only the
+	// renderer ever reads it back out, through `into_parts`.
+	#[cfg_attr(not(feature = "render"), expect(dead_code))]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -211,6 +214,9 @@ impl DmaBufExport {
 		std::os::fd::AsFd::as_fd(&self.fd)
 	}
 
+	/// Split the descriptor from the lease that keeps the producer's buffer alive,
+	/// for a consumer that has to own the two separately. Only the renderer does.
+	#[cfg_attr(not(feature = "render"), expect(dead_code))]
 	pub(crate) fn into_parts(self) -> (OwnedFd, Arc<dyn DmaBufFrame>) {
 		(self.fd, self.inner)
 	}
