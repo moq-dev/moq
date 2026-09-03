@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from moq_ffi import (
+    MoqAnnounce,
     MoqAnnounced,
     MoqAnnouncedBroadcast,
     MoqAnnouncement,
@@ -12,43 +13,78 @@ from moq_ffi import (
     MoqOriginOptions,
     MoqOriginProducer,
 )
+from moq_ffi import (
+    MoqRoute as Route,
+)
 
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 
 
 class Announcement:
-    """A single broadcast discovered via :meth:`OriginConsumer.announced`.
+    """A route announcement (or retraction) from :meth:`OriginConsumer.announced`.
 
-    Read its :attr:`path` and get a :attr:`broadcast` consumer to subscribe to it.
+    A route claims that paths under :attr:`path` can be served; it carries no
+    broadcast. Resolve a specific path with :meth:`OriginConsumer.request_broadcast`.
+    By convention a publisher announces each broadcast's exact path, so
+    subscribers can enumerate broadcasts from routes.
     """
 
     def __init__(self, inner: MoqAnnouncement) -> None:
         self._inner = inner
-        self._broadcast: BroadcastConsumer | None = None
 
     @property
     def path(self) -> str:
-        """The path this broadcast is announced at."""
+        """The announced route's prefix, relative to the ``announced`` prefix."""
         return self._inner.path()
 
     @property
-    def broadcast(self) -> BroadcastConsumer:
-        """The broadcast's consumer, one shared instance per announcement.
+    def active(self) -> bool:
+        """Whether the route is active (``True``) or was retracted (``False``).
 
-        Cached so stateful accessors (like the ``route_changed`` cursor)
-        survive repeated property access.
+        A repeated active announcement for the same path is a metadata update.
         """
-        if self._broadcast is None:
-            self._broadcast = BroadcastConsumer(self._inner.broadcast())
-        return self._broadcast
+        return self._inner.active()
+
+    @property
+    def route(self) -> Route:
+        """The route serving the prefix: its relay hops and cost."""
+        return self._inner.route()
+
+
+class Announce:
+    """A live route advertisement, from :meth:`OriginProducer.announce`.
+
+    The route stays advertised until :meth:`cancel` (or garbage collection).
+    Usable as a context manager, retracting on exit.
+    """
+
+    def __init__(self, inner: MoqAnnounce) -> None:
+        self._inner = inner
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.cancel()
+
+    def update(self, route: Route) -> None:
+        """Re-price the route in place: replace its hops and cost.
+
+        The prefix is fixed at announce time; announce again to move it.
+        """
+        self._inner.update(route)
+
+    def cancel(self) -> None:
+        """Retract the route."""
+        self._inner.cancel()
 
 
 class Announced:
-    """Async-iterable stream of :class:`Announcement` broadcasts as they appear.
+    """Async-iterable stream of :class:`Announcement` route updates as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
-    yielding new broadcasts until cancelled.
+    yielding announcements and retractions until cancelled.
     """
 
     def __init__(self, inner: MoqAnnounced) -> None:
@@ -75,7 +111,7 @@ class Announced:
 
 
 class AnnouncedBroadcast:
-    """Awaitable that resolves when the broadcast at a specific path is announced.
+    """Awaitable that resolves once a route covers a specific path.
 
     ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
     once the broadcast becomes available. Usable as an async context manager.
@@ -91,7 +127,7 @@ class AnnouncedBroadcast:
         self.cancel()
 
     async def available(self) -> BroadcastConsumer:
-        """Await the broadcast becoming available and return its consumer."""
+        """Await a covering route and return the resolved broadcast consumer."""
         return BroadcastConsumer(await self._inner.available())
 
     def __await__(self):
@@ -155,20 +191,21 @@ class OriginConsumer:
         self._inner = inner
 
     def announced(self, prefix: str = "") -> Announced:
-        """Async-iterate broadcasts announced under ``prefix`` (empty matches all)."""
+        """Async-iterate route announcements under ``prefix`` (empty matches all)."""
         return Announced(self._inner.announced(prefix))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await announcement of the broadcast at exactly ``path``."""
+        """Await a route covering ``path``, then resolve the broadcast there."""
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served.
 
-        Returns an existing exact-path broadcast immediately, whether announced or
-        not, otherwise falls back to a dynamic handler on the origin (if any), or
-        raises if neither can serve it. Unlike `announced_broadcast`, this does not
-        wait indefinitely for a future announcement.
+        Resolution order: a local broadcast at the exact path, then the best
+        announced route covering the path (served on demand by the session that
+        announced it), then a dynamic handler on the origin (if any); raises if
+        nothing can serve it. Unlike `announced_broadcast`, this does not wait
+        for a future announcement.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 
@@ -201,11 +238,21 @@ class OriginProducer:
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.
 
-        The broadcast starts live: the origin announces the path so subscribers can
-        discover it, becoming visible shortly after this returns. Toggle
-        discoverability with :meth:`BroadcastProducer.set_announce`; ``finish()``
-        unpublishes immediately, while dropping the producer without finishing
-        also unpublishes but reads to subscribers as a failure rather than a
-        deliberate end.
+        The broadcast starts announced: the origin advertises the exact path as a
+        route so subscribers can discover it, becoming visible shortly after this
+        returns. Toggle discoverability with :meth:`BroadcastProducer.set_announce`;
+        ``finish()`` unpublishes immediately, while dropping the producer without
+        finishing also unpublishes but reads to subscribers as a failure rather
+        than a deliberate end.
         """
         return BroadcastProducer._from_inner(self._inner.create_broadcast(path))
+
+    def announce(self, prefix: str, route: Route | None = None) -> Announce:
+        """Advertise a route: a claim that paths under ``prefix`` can be served.
+
+        Hold the returned :class:`Announce` for as long as the route should stay
+        advertised; ``route`` carries the optional metadata (relay hops and cost).
+        Announcing is independent of :meth:`create_broadcast`: announce one short
+        prefix and serve requests beneath it with :meth:`dynamic`.
+        """
+        return Announce(self._inner.announce(prefix, route if route is not None else Route()))

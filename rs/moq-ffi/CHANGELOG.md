@@ -36,6 +36,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `publish_media` and `publish_media_stream` reject a `MoqInit` label or video hint on a container
   format, and an audio format rejects a video hint, instead of silently dropping either.
+
+## [0.3.15](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.14...moq-ffi-v0.3.15) - 2026-09-01
+
+### Added
+
+- *(py)* add ergonomic route update iterator ([#3229](https://github.com/moq-dev/moq/pull/3229))
+
+### Fixed
+
+- *(ffi)* default optional record fields ([#3227](https://github.com/moq-dev/moq/pull/3227))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
+## [0.3.14](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.13...moq-ffi-v0.3.14) - 2026-08-26
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux, moq-native, moq-video, hang, moq-json, moq-audio
+
 ## [0.3.13](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.12...moq-ffi-v0.3.13) - 2026-08-24
 
 ### Added

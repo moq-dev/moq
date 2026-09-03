@@ -1,0 +1,116 @@
+name: Release Dart
+
+# Publishes the ergonomic `moq` wrapper from a moq-dart-v* tag. Pub.dev OIDC
+# requires a tag-triggered workflow, so this package cannot use the branch-push
+# release gate used by registries that accept branch identities.
+
+on:
+  push:
+    tags:
+      - "moq-dart-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-dart.yml"
+      - "dart/moq/**"
+      - "dart/scripts/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dart
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Check package
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+
+      - name: Resolve version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            VERSION=$(sed -n 's/^version: //p' dart/moq/pubspec.yaml | head -1)
+          else
+            .github/scripts/release.sh parse-version moq-dart
+            exit 0
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check source package (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: dart/moq
+        run: |
+          if [ -f pubspec.lock ]; then
+            dart pub get --enforce-lockfile
+          else
+            dart pub get
+          fi
+          dart analyze
+          dart pub publish --dry-run
+
+      - name: Stage package
+        if: github.event_name == 'push'
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./dart/scripts/package.sh \
+            --package moq \
+            --version "$BUILD_VERSION" \
+            --output release-out
+
+      - name: Check staged package
+        if: github.event_name == 'push'
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd "release-out/moq-$BUILD_VERSION"
+          if [ -f pubspec.lock ]; then
+            dart pub get --enforce-lockfile
+          else
+            dart pub get
+          fi
+          dart analyze
+          dart pub publish --dry-run
+
+      - name: Upload package
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dart-package
+          path: release-out/*
+
+  publish:
+    name: Publish moq to pub.dev
+    needs: [package]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: pub.dev
+      url: https://pub.dev/packages/moq
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dart-package
+          path: package
+
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+
+      - name: Publish
+        env:
+          BUILD_VERSION: ${{ needs.package.outputs.version }}
+        run: cd "package/moq-$BUILD_VERSION" && dart pub publish --force

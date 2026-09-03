@@ -81,6 +81,11 @@ mod client;
 mod coding;
 mod error;
 pub mod goaway;
+// Not part of the public API: compiled only for the crate's own tests and for the
+// `fuzz/` harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 mod ietf;
 mod lite;
 mod model;

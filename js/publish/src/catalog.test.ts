@@ -41,7 +41,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const subscriber = track.subscribe();
+	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
 	expect(first?.sequence).toBe(0);

@@ -712,13 +712,9 @@ async fn serve_announced(
 	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some(moq_net::announce::Update {
-		path: suffix,
-		broadcast,
-	}) = announced.try_next()
-	{
-		if broadcast.is_some() {
-			broadcasts.push(suffix);
+	while let Some(update) = announced.try_next() {
+		if update.active {
+			broadcasts.push(update.prefix);
 		}
 	}
 
@@ -772,13 +768,10 @@ async fn serve_fetch(
 
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
-		// Block until the broadcast has been announced (within the fetch deadline) so
+		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
-		let broadcast = origin
-			.consume()
-			.announced_broadcast("")
-			.await
-			.ok_or(StatusCode::NOT_FOUND)?;
+		let consumer = origin.consume();
+		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let group = match params.group {
 			// "latest" needs a live subscription to learn the newest sequence, since a
 			// fetch can only retrieve a sequence you already know. Once it's known, fetch

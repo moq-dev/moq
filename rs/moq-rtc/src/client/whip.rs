@@ -10,6 +10,7 @@
 use str0m::{
 	Candidate,
 	change::SdpAnswer,
+	format::Codec,
 	media::{Direction, MediaKind},
 };
 use url::Url;
@@ -39,11 +40,20 @@ pub(crate) async fn dial(
 		rtc.add_local_candidate(cand);
 	}
 
-	// Advertise sendonly audio + video; `rtc_with_codecs` already pinned
-	// the offer's codec list to what the catalog can source.
+	// Only advertise media kinds the catalog can source. str0m emits a rejected
+	// m-line with no payload types when a kind has no enabled codecs, which is not
+	// valid SDP and cannot be parsed by the WHIP server.
 	let mut api = rtc.sdp_api();
-	api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
-	api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+	let mut mids = Vec::new();
+	if codecs.iter().any(|codec| matches!(codec, Codec::Opus)) {
+		mids.push(api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None));
+	}
+	if codecs
+		.iter()
+		.any(|codec| matches!(codec, Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1))
+	{
+		mids.push(api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None));
+	}
 	let (offer, pending) = api
 		.apply()
 		.ok_or_else(|| Error::Other(anyhow::anyhow!("no SDP changes to apply")))?;
@@ -75,7 +85,10 @@ pub(crate) async fn dial(
 	// The session tags each datagram with the advertised candidate matching its
 	// family (str0m matches the destination against a host candidate, not the bind).
 	let inbound = session::spawn_socket_reader(socket.clone());
-	let session = session::Session::egress(rtc, socket, candidates, inbound, source);
+	let mut session = session::Session::egress(rtc, socket, candidates, inbound, source);
+	for mid in mids {
+		session.open_media(mid)?;
+	}
 	tokio::spawn(async move {
 		let result = session.run().await;
 		session::log_session_end("whip client", &result);

@@ -61,7 +61,8 @@ impl<S: moq_net::transport::poll::Boxable> moq_net::Runtime for Runtime<S> {
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		// The session surfaces the result through `closed()`; the task's own
 		// result is nothing to keep.
-		tokio::spawn(machine);
+		use tracing::Instrument;
+		tokio::spawn(machine.instrument(tracing::Span::current()));
 	}
 }
 

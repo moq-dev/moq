@@ -44,6 +44,8 @@ pub(crate) struct Producer {
 struct State {
 	/// Rows within the window, oldest first. Every row is a complete segment.
 	rows: VecDeque<Row>,
+	/// The first listed segment, or the segment that would follow an empty trimmed window.
+	sequence: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
 }
@@ -51,6 +53,8 @@ struct State {
 /// One playlist segment: its aligned number, timing, and this rendition's group ranges.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
+	/// The source timeline record index, used to mirror exact window trims.
+	pub index: u64,
 	/// The aligned segment number (its URI: `seg/{segment}.m4s`), shared across renditions.
 	pub segment: u64,
 	/// This rendition's group ranges within the segment. Empty means the rendition has no
@@ -94,7 +98,7 @@ impl State {
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	fn window(&self) -> Window {
 		Window {
-			sequence: self.rows.front().map(|s| s.segment).unwrap_or(0),
+			sequence: self.sequence,
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
 		}
@@ -128,6 +132,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State {
 				rows: VecDeque::new(),
+				sequence: 0,
 				ended: false,
 			}),
 			broadcast: broadcast.map(OnceLock::from).unwrap_or_default(),
@@ -148,6 +153,9 @@ impl Producer {
 				state.rows.clear();
 			}
 		}
+		if state.rows.is_empty() {
+			state.sequence = row.segment;
+		}
 
 		state.rows.push_back(row);
 
@@ -158,6 +166,33 @@ impl Producer {
 				break;
 			}
 			state.rows.pop_front();
+		}
+		state.sequence = state.rows.front().unwrap().segment;
+	}
+
+	/// Remove rows whose source timeline indices fall within `range`.
+	pub fn pop(&self, range: std::ops::Range<u64>) {
+		if let Ok(mut state) = self.state.write() {
+			let after = state
+				.rows
+				.iter()
+				.filter(|row| range.contains(&row.index))
+				.map(|row| row.segment.saturating_add(1))
+				.max();
+			state.rows.retain(|row| !range.contains(&row.index));
+			state.sequence = state
+				.rows
+				.front()
+				.map(|row| row.segment)
+				.or(after)
+				.unwrap_or(state.sequence);
+		}
+	}
+
+	/// Clear every retained row after an unrecoverable gap in the source timeline.
+	pub fn clear(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.rows.clear();
 		}
 	}
 
@@ -311,7 +346,7 @@ impl Consumer {
 			};
 			// A gap opened if the segment we're about to emit isn't the successor the previous
 			// one recorded (rows between them evicted unseen).
-			let gap = self.gap || self.expected.is_some_and(|expected| expected != row.segment);
+			let gap = discontinuity(self.gap, self.after, self.expected, row.segment);
 
 			match self.rendition.segment(row.segment).await? {
 				Some(media) => {
@@ -353,6 +388,12 @@ impl Consumer {
 	}
 }
 
+fn discontinuity(gap: bool, after: Option<u64>, expected: Option<u64>, segment: u64) -> bool {
+	gap || expected
+		.or_else(|| after.map(|after| after.saturating_add(1)))
+		.is_some_and(|expected| expected != segment)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -360,6 +401,7 @@ mod tests {
 	fn row(segment: u64, group: u64, pts_ms: u64, duration_ms: u64) -> Row {
 		let pts = moq_net::Timestamp::from_millis(pts_ms).unwrap();
 		Row {
+			index: segment,
 			segment,
 			ranges: vec![Range::new(group, group)],
 			duration: duration_ms as f64 / 1000.0,
@@ -403,6 +445,49 @@ mod tests {
 	}
 
 	#[test]
+	fn source_window_pop_removes_playlist_rows() {
+		let live = Producer::new(None);
+		let window = Duration::from_secs(30);
+		for i in 0..4u64 {
+			let mut row = row(i, i, i * 2_000, 2_000);
+			row.index = i + 10;
+			live.push(row, window);
+		}
+
+		live.pop(10..12);
+		let snapshot = live.window();
+		assert_eq!(snapshot.sequence, 2);
+		assert_eq!(
+			snapshot.segments.iter().map(|row| row.segment).collect::<Vec<_>>(),
+			vec![2, 3]
+		);
+
+		live.pop(12..14);
+		let snapshot = live.window();
+		assert_eq!(snapshot.sequence, 4);
+		assert!(snapshot.segments.is_empty());
+	}
+
+	#[test]
+	fn a_skipped_source_range_clears_rows_before_the_next_segment() {
+		let live = Producer::new(None);
+		live.push(row(4, 4, 8_000, 2_000), Duration::from_secs(10));
+		live.clear();
+		live.push(row(10, 10, 20_000, 2_000), Duration::from_secs(10));
+
+		let snapshot = live.window();
+		assert_eq!(snapshot.sequence, 10);
+		assert_eq!(
+			snapshot.segments.iter().map(|row| row.segment).collect::<Vec<_>>(),
+			vec![10]
+		);
+		assert!(
+			discontinuity(false, Some(4), None, snapshot.segments[0].segment),
+			"a cursor caught up before the skip marks the next segment discontinuous"
+		);
+	}
+
+	#[test]
 	fn segment_ranges_and_gaps() {
 		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
@@ -410,6 +495,7 @@ mod tests {
 		// Segment 1 is a gap for this rendition: no ranges.
 		live.push(
 			Row {
+				index: 1,
 				segment: 1,
 				ranges: Vec::new(),
 				duration: 1.0,

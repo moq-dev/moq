@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
+use arrayvec::ArrayVec;
 use bytes::Bytes;
 
 use crate::group::{self, GroupState};
@@ -42,6 +43,88 @@ pub struct Frame {
 	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
+}
+
+/// A reusable batch of frames, filled by [`group::Consumer::read_frames`] and drained
+/// by [`group::Producer::write_frames`].
+///
+/// A fixed-capacity inline buffer: `N` frames of stack storage, never a heap
+/// allocation and never a spill. Allocate one per task and reuse it for the life of
+/// the group rather than one per read.
+///
+/// `N` defaults to 8. Most reads are not big batches: at the live edge a frame arrives
+/// at a time, so the capacity past the first frame or two is idle stack, and a
+/// publisher holds one buffer per in-flight group. 8 costs 384 bytes and still reads
+/// ~5x faster than a frame at a time (`benches/group.rs`). Ask for a larger `N` when
+/// you know you are draining a backlog: 32 is ~8x, for 1.5 KB.
+///
+/// A default on a const parameter only applies in type position, so name the type to
+/// get it: `let buf: frame::Buffer = Buffer::new()`.
+///
+/// A fill stamps the group's cache access once for the whole batch, which bounds
+/// frames rather than elapsed time. A reader that may take longer than the track's
+/// `latency_max` to work through one batch calls
+/// [`group::Consumer::keep_alive`] between frames, or the rest of the group is
+/// expired out from under it.
+#[derive(Debug, Default)]
+pub struct Buffer<const N: usize = 8>(ArrayVec<Frame, N>);
+
+impl<const N: usize> Buffer<N> {
+	/// An empty buffer with room for `N` frames.
+	pub fn new() -> Self {
+		Self(ArrayVec::new())
+	}
+
+	/// How many frames a single fill can hold.
+	pub const fn capacity(&self) -> usize {
+		N
+	}
+
+	/// How many frames the buffer currently holds.
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	/// Whether the buffer holds no frames.
+	pub fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	/// Whether the buffer is at capacity, so [`Self::push`] would refuse.
+	pub fn is_full(&self) -> bool {
+		self.0.is_full()
+	}
+
+	/// The frames from the most recent fill, in order.
+	pub fn filled(&self) -> &[Frame] {
+		&self.0
+	}
+
+	/// The frames from the most recent fill, mutably (to take payloads out, say).
+	pub fn filled_mut(&mut self) -> &mut [Frame] {
+		&mut self.0
+	}
+
+	/// Append a frame, handing it back if the buffer is already full.
+	///
+	/// Fill a buffer this way to hand a whole batch to
+	/// [`group::Producer::write_frames`].
+	pub fn push(&mut self, frame: Frame) -> std::result::Result<(), Frame> {
+		self.0.try_push(frame).map_err(|err| err.element())
+	}
+
+	/// Move every frame out, leaving the buffer empty.
+	///
+	/// Frames left in the iterator when it drops are dropped with it, so the buffer
+	/// ends up empty either way.
+	pub fn drain(&mut self) -> impl ExactSizeIterator<Item = Frame> + '_ {
+		self.0.drain(..)
+	}
+
+	/// Drop the current batch, leaving the buffer empty.
+	pub fn clear(&mut self) {
+		self.0.clear();
+	}
 }
 
 /// Payload storage for the single in-flight frame, shared between the writing
@@ -248,7 +331,6 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 		} else {
 			self.buf.append(chunk.as_ref());
 		}
-		self.group.borrow_mut().frame_notify();
 		Ok(())
 	}
 
@@ -337,7 +419,9 @@ impl<'a> Producer<'a> {
 	///
 	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
 	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.0.write(chunk)
+		self.0.write(chunk)?;
+		self.0.group.frame_notify();
+		Ok(())
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
@@ -391,9 +475,21 @@ impl ProducerOwned {
 		self.0.remaining()
 	}
 
-	/// Write a chunk of data to the frame.
-	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
+	///
+	/// The wake is split out because the wire ingest drains every chunk the transport
+	/// has already buffered in one poll turn, and a consumer parked on the group cannot
+	/// run until that turn yields. Waking per chunk pays a group lock and a clock read
+	/// to publish bytes nobody can observe yet.
+	///
+	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
+	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.0.write(chunk)
+	}
+
+	/// Publish what has been written so far, waking consumers parked on the group.
+	pub(crate) fn notify(&self) {
+		self.0.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
@@ -460,9 +556,8 @@ pub struct Consumer {
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
-	// Egress payload meter. Set only for frames read directly from the group (not
-	// from the prefetch batch, whose bytes were already counted at fill), so chunks
-	// bump `bytes` exactly once. Empty (no-op) otherwise.
+	// Egress payload meter, so chunks bump `bytes` exactly once as they're read out.
+	// Empty (no-op) for an untagged group.
 	stats: stats::Meter,
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
@@ -521,13 +616,7 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		// A half-read payload sits at its own frame's presentation time, not at the
-		// start of the group that carries it.
-		let at = group::Position {
-			presentation: Some(self.info.timestamp),
-			activity: self.state.read().activity,
-		};
-		if !expiry.policy.is_expired(waiter, at) {
+		if !expiry.policy.is_expired(waiter) {
 			return false;
 		}
 

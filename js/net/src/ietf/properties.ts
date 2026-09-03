@@ -13,6 +13,12 @@ const TIMESCALE = 0x08n;
 // subscriber states its own preference.
 const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
 
+/**
+ * DEFAULT_PUBLISHER_GROUP_ORDER's descending value: the newest group first, which is what
+ * we serve, matching moq-lite.
+ */
+export const DESCENDING = 0x02;
+
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 export interface Properties {
 	/// The track's Timescale, which declares the units of every object Timestamp on it.

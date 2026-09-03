@@ -370,6 +370,14 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
+	/// A whole-frame write was refused because a frame is already open on the group.
+	///
+	/// A [`crate::group::Producer`] streaming a frame with `create_frame` blocks the
+	/// whole-frame writes on every clone of that producer until it finishes, since
+	/// appending around it would reorder the group.
+	#[error("frame already open")]
+	FrameOpen,
+
 	/// A frame's timestamp doesn't match its track's negotiated timescale: it's
 	/// missing on a timed track, present on an untimed track, or carries a
 	/// different scale than the track advertised.
@@ -437,6 +445,8 @@ impl Error {
 			Self::Closed => 25,
 			Self::Lagged => 26,
 			Self::FrameTooLarge => 27,
+			// 22 was unused in the 0-31 library range.
+			Self::FrameOpen => 22,
 			// 28 is reserved (was per-frame decompression, removed in draft-05).
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,

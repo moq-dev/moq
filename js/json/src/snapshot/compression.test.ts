@@ -18,7 +18,7 @@ async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {
 }
 
 // The raw (stored) bytes of a track's first frame, without reconstructing JSON.
-async function firstFrame(track: Track.Subscriber): Promise<Uint8Array> {
+async function firstFrame(track: Track.Ordered): Promise<Uint8Array> {
 	const group = await track.nextGroup();
 	if (!group) throw new Error("expected a group");
 	const frame = await group.readFrame();
@@ -27,7 +27,7 @@ async function firstFrame(track: Track.Subscriber): Promise<Uint8Array> {
 }
 
 // Count the groups a (finished) track published, draining each so the reads terminate.
-async function groupCount(track: Track.Subscriber): Promise<number> {
+async function groupCount(track: Track.Ordered): Promise<number> {
 	let groups = 0;
 	for (;;) {
 		const group = await track.nextGroup();
@@ -44,8 +44,9 @@ test("compressed snapshot per group round-trips", async () => {
 	producer.update({ a: 2 });
 	producer.finish();
 
-	// Deltas off: one compressed snapshot per group, reconstructed in order.
-	expect(await drainCompressed(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 1 }, { a: 2 }]);
+	// Deltas off: one compressed snapshot per group. A consumer joining after the fact
+	// collapses the backlog to the newest value (mirrors the Rust consumer).
+	expect(await drainCompressed(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
@@ -92,7 +93,9 @@ test("a group's snapshot decodes from a fresh decoder", async () => {
 	producer.finish();
 
 	const decoder = new Decoder();
-	expect(JSON.parse(dec.decode(decoder.frame(await firstFrame(track.subscribe()))))).toEqual({ hello: "world" });
+	expect(JSON.parse(dec.decode(decoder.frame(await firstFrame(track.subscribe().ordered()))))).toEqual({
+		hello: "world",
+	});
 });
 
 test("compressed deltas reuse the window", async () => {
@@ -104,7 +107,7 @@ test("compressed deltas reuse the window", async () => {
 	producer.update({ note: phrase, echo: phrase });
 	producer.finish();
 
-	const group = await track.subscribe().nextGroup();
+	const group = await track.subscribe().ordered().nextGroup();
 	if (!group) throw new Error("expected a group");
 	await group.readFrame(); // snapshot
 	const delta = await group.readFrame();
@@ -122,8 +125,8 @@ test("compression shrinks a repetitive frame", async () => {
 	const compressed = new Track.Producer("compressed");
 	new Producer<Value>({ track: compressed, deltaRatio: 0, compression: true }).update(value);
 
-	const plainLen = (await firstFrame(plain.subscribe())).length;
-	const compressedLen = (await firstFrame(compressed.subscribe())).length;
+	const plainLen = (await firstFrame(plain.subscribe().ordered())).length;
+	const compressedLen = (await firstFrame(compressed.subscribe().ordered())).length;
 	expect(compressedLen).toBeLessThan(plainLen);
 });
 
@@ -140,7 +143,7 @@ test("compressed deltas roll on the compressed budget", async () => {
 	};
 
 	const layout = new Track.Producer("layout");
-	const layoutSub = layout.subscribe({ maxAge: REPLAY_LATENCY });
+	const layoutSub = layout.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
 	fill(layout);
 	expect(await groupCount(layoutSub)).toBeGreaterThan(1);
 

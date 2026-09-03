@@ -25,7 +25,7 @@ Four role modules, symmetric on both ends of the wire:
 
 | Module | Does | Platform |
 | --- | --- | --- |
-| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + PipeWire (Linux), Media Foundation + DXGI (Windows) |
+| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI/GDI (Windows) |
 | `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, openh264 |
 | `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, openh264 |
 | `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
@@ -70,7 +70,7 @@ cargo add moq-video --features render,pipewire
 | `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`) |
 | `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
 | `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
-| `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal and DMA-BUF |
+| `pipewire` | no | Wayland screen capture via xdg-desktop-portal and DMA-BUF |
 
 `--no-default-features` gives a codec-only build that still encodes and decodes
 H.264 with openh264 but omits native capture and the Linux GPU dependencies. A
@@ -164,6 +164,12 @@ failing retires itself after a few frames instead of paying for the attempt
 forever. Set `render::Config::zero_copy` to `false` to force the download path
 when comparing output or working around a driver.
 
+For an image or UI toolkit that needs packed pixels rather than YUV,
+`Surface::into_rgba()` is the total CPU rendering exit. It downloads native
+surfaces as needed, honors their color metadata, and returns an owned,
+tightly-packed RGBA8 image. Use `into_rgba_with()` to override the color space
+when the decoded bitstream did not carry it through to the platform surface.
+
 ## Rendering
 
 `render::Renderer` takes a `wgpu` device and queue and hands back a
@@ -209,12 +215,32 @@ Each enumerator returns ids that go straight back into `capture::Config::source`
 ```rust
 moq_video::capture::cameras().await?;   // webcams
 moq_video::capture::displays().await?;  // monitors
-moq_video::capture::windows().await?;   // single windows (macOS)
+moq_video::capture::windows().await?;   // single windows (macOS, Windows, X11)
 moq_video::capture::apps().await?;      // every window of an app (macOS)
 ```
 
 The [`moq devices`](/bin/cli) subcommand prints the same lists from the command
 line.
+
+An embedded application can open the selected source directly. Capture keeps
+one unconsumed frame, replacing it when the application is slower than the
+source, so latency stays bounded:
+
+```rust
+let mut config = moq_video::capture::Config::default();
+config.source = moq_video::capture::Source::Display(None);
+
+let mut capture = moq_video::capture::open(&config).await?;
+while let Some(surface) = capture.read().await? {
+    // Encode, render, or process `surface`.
+}
+```
+
+`read` ends with `None` when the source stopped for a benign reason, such as a
+window resize or a compositor format renegotiation; reopen to follow it. An
+error is terminal for that selection: `Error::PermissionDenied` reports an
+operating-system capture denial, and `Error::SourceUnavailable` reports a
+selected source that is missing or was removed while the stream was live.
 
 ## API Reference
 

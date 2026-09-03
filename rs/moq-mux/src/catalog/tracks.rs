@@ -82,6 +82,30 @@ pub trait RenditionConfig<E: CatalogExt>: Sized + 'static {
 	fn set_estimate(&mut self, _estimate: Estimate) {}
 }
 
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.json.tracks.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.json.tracks.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.json.tracks.remove(name);
+	}
+}
+
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.binary.tracks.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.binary.tracks.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.binary.tracks.remove(name);
+	}
+}
+
 /// Caller-provided catalog fields for a video track: a starting point for what the importer detects.
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream reveals (the
@@ -376,13 +400,21 @@ pub type TextTrack<E = ()> = Rendition<E, hang::catalog::TextConfig>;
 
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
+		Self::owned(reserved.catalog.clone(), Some(reserved), name)
+	}
+
+	pub(super) fn live(catalog: Producer<E>, name: String) -> crate::Result<Self> {
+		Self::owned(catalog, None, name)
+	}
+
+	fn owned(catalog: Producer<E>, gate: Option<Reserved<E>>, name: String) -> crate::Result<Self> {
 		// Take the name now, not at `set`: a lazily-configured importer (H.264 before its first SPS)
 		// has no catalog entry until much later, and the name has to be ours for that whole window.
-		reserved.catalog.acquire::<C>(&name)?;
+		catalog.acquire::<C>(&name)?;
 
 		Ok(Self {
-			catalog: reserved.catalog.clone(),
-			gate: Some(reserved),
+			catalog,
+			gate,
 			name,
 			present: false,
 			supplied: Estimate::default(),

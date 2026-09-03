@@ -175,9 +175,10 @@ broadcast.set_video_properties(
 
 ```python
 async for announcement in client.announced("prefix/"):
-    catalog = await announcement.broadcast.catalog()
+    broadcast = await client.request_broadcast("prefix/" + announcement.path)
+    catalog = await broadcast.catalog()
     track_name, track = next(iter(catalog.audio.items()))
-    consumer = await announcement.broadcast.subscribe_media(track_name, track)
+    consumer = await broadcast.subscribe_media(track_name, track)
 
     async for frame in consumer:
         ...
@@ -192,10 +193,10 @@ actually lives in `live/source`. `decode_audio` and `decode_video` follow it for
 so resolve first:
 
 ```python
-catalog = await announcement.broadcast.catalog()
+catalog = await broadcast.catalog()
 track_name, track = next(iter(catalog.video.items()))
 
-source = await announcement.broadcast.resolve(track.broadcast)
+source = await broadcast.resolve(track.broadcast)
 consumer = await source.subscribe_media(track_name, track)
 ```
 
@@ -217,7 +218,8 @@ broadcast = client.create_broadcast("my-stream")
 broadcast.set_catalog_section("transcript", {"track": "transcript.json"})
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
-catalog = await announcement.broadcast.catalog()
+consumer = await client.request_broadcast("my-stream")
+catalog = await consumer.catalog()
 if "transcript" in catalog.sections:
     info = json.loads(catalog.sections["transcript"])
 ```
@@ -240,7 +242,7 @@ track = await broadcast_consumer.subscribe_track(
     subscription=moq.Subscription(priority=10),
 )
 info = track.info()
-track.update(moq.Subscription(priority=20, ordered=False))
+track.update(moq.Subscription(priority=20))
 async for group in track:
     async for frame in group:
         print(frame.timestamp_us, frame.payload)
@@ -248,8 +250,7 @@ async for group in track:
 
 `write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, carrying `payload` and `timestamp_us`. (Media tracks yield a `MediaFrame`, which adds the codec-derived `keyframe` flag.) Use `append_group()` for multi-frame groups (e.g., a video GOP).
 Use `create_group(sequence)` for sparse or replayed groups. `finish_at(final_sequence)` declares the exclusive end while still permitting lower groups to arrive, and `abort(error_code)` terminates a track or group with an application error.
-`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering priority), and `update()` changes this subscriber's delivery preferences without resubscribing.
-`ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
+`TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority), and `update()` changes this subscriber's delivery preferences without resubscribing.
 
 ### Fetching raw groups
 
@@ -373,21 +374,23 @@ The served broadcast is not announced. It only resolves consumers that call `req
 
 ```python
 async for announcement in client.announced("live/"):
-    print(announcement.path)
-    print(announcement.broadcast.route.hops)  # relay origin ids, oldest first
+    print(announcement.path)        # the route's prefix, relative to "live/"
+    print(announcement.route.hops)  # relay origin ids, oldest first
     ...
 
-# Or wait for a specific path to be announced:
+# Or wait for a route covering a specific path:
 broadcast = await client.announced_broadcast("live/cam1")
 
-# Or request a path: resolves an existing exact-path broadcast, announced or not,
-# then falls back to a dynamic handler. Does not wait for a future announcement.
+# Or request a path: resolves a local broadcast, a covering route, or a dynamic
+# handler. Does not wait for a future announcement.
 broadcast = await client.request_broadcast("live/cam1")
 ```
 
-Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live but not reachable locally yet. Await `announced_broadcast(path)` first when you know the path you want; use `request_broadcast` for a path already reachable locally, whether announced or not, or one a dynamic handler serves.
+Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live but not routed locally yet. Await `announced_broadcast(path)` first when you know the path you want; use `request_broadcast` for a path already served locally or covered by a route.
 
-Each broadcast carries a `Route`: `route.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first, and `route.cost` is the publisher's advertised preference (lower wins). The route is dynamic; `await broadcast.route_changed()` returns the current route first, then blocks for each change (e.g. an upstream failover), and returns `None` once the broadcast ends. A publisher advertises its own route with `producer.set_route(moq.Route(hops=[], cost=10))`, for example a standby transcoder that lowers its cost to 0 once it is warm.
+An announcement is a route, not a broadcast: a claim that paths under `announcement.path` can be served. By convention a publisher announces each broadcast's exact path, so iterating announcements still enumerates broadcasts; it is up to you to resolve one with `request_broadcast`. Each route carries `route.hops`, the chain of relay origin ids (as `list[int]`) the announcement passed through to reach you, oldest first, and `route.cost`, the advertised preference (lower wins). A repeated announcement for the same path is a metadata update; `announcement.active` is `False` when the route was retracted.
+
+A publisher can also announce a route directly, covering a whole prefix without creating a broadcast per path: `producer.announce("live/")` returns a handle that keeps the route advertised until cancelled, with `update()` to re-price its hops and cost (pass a `moq.Route` as the second argument to set them up front). Pair it with `producer.dynamic()` to serve whatever paths are requested beneath the prefix.
 
 ## Examples
 

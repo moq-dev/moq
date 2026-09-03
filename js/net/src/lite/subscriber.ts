@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
-import type { Origin } from "../hop.ts";
+import { type Hop, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -62,7 +62,7 @@ function supportsTrackStream(version: Version): boolean {
 export interface AnnouncedOptions {
 	/**
 	 * If true, skip announcements whose hop chain contains this connection's
-	 * own origin id. Useful for meshes that reflect announces back. Defaults
+	 * own Hop ID. Useful for meshes that reflect announces back. Defaults
 	 * to false for backwards compatibility: existing code (notably hang.live)
 	 * relies on seeing its own publishes as the signal that a namespace
 	 * published successfully.
@@ -120,7 +120,7 @@ export class Subscriber {
 
 	// Shared with the Publisher so callers can optionally filter out their
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
-	readonly origin: Origin;
+	readonly hop: Hop;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
 	// lite-05+, or implicit defaults on older drafts); group streams block on it
@@ -149,7 +149,7 @@ export class Subscriber {
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
-	 * @param origin - Origin id shared with the Publisher
+	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 *
@@ -158,13 +158,13 @@ export class Subscriber {
 	constructor(
 		quic: WebTransport,
 		version: Version,
-		origin: Origin,
+		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
-		this.origin = origin;
+		this.hop = hop;
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 	}
@@ -183,11 +183,11 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		// Lite04/05: send our own session-level origin id so the peer can skip announces
+		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceRequest(prefix, this.origin);
+		const msg = new AnnounceRequest(prefix, this.hop);
 
 		// Drop reflected announces so callers asking for "someone else's broadcasts"
 		// don't re-see their own publishes. A caller can always ask for this, and it is
@@ -211,13 +211,17 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Announce);
 			await msg.encode(stream.writer, this.version);
 
-			// Lite05+: the publisher reports its own origin id before any announces.
+			// Lite05+: the publisher reports its own Hop ID before any announces.
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the ignoreSelf loop check seeing the full chain.
-			let responderOrigin: Origin | undefined;
+			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
-				responderOrigin = ok.origin;
+				// A responder that withholds its identity sends the reserved 0. It names
+				// nobody, so folding it into a chain would stamp a placeholder that cannot
+				// close a loop or tell two publishers apart. Treat it as absent instead,
+				// which is the loop-blind route the draft describes.
+				responderOrigin = ok.hop === UNKNOWN_HOP ? undefined : ok.hop;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one
@@ -232,7 +236,7 @@ export class Subscriber {
 			// `publisher` is what lets a restart tell a route change (same publisher,
 			// subscriptions resume) from a replacement (a new generation took the path,
 			// nothing carries over).
-			type Advertisement = { publisher: Origin | undefined; live: boolean };
+			type Advertisement = { publisher: Hop | undefined; live: boolean };
 			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
@@ -253,7 +257,7 @@ export class Subscriber {
 						}
 						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path: suffix, active: true });
+						announced.append({ prefix: suffix, active: true });
 					}
 					break;
 				}
@@ -281,7 +285,7 @@ export class Subscriber {
 				let suffix: Path.Valid;
 				let active: boolean;
 				// Present on active/restart; ended messages never carry hops worth checking.
-				let hops: Origin[] | undefined;
+				let hops: Hop[] | undefined;
 
 				switch (announce.status) {
 					case "active":
@@ -344,14 +348,14 @@ export class Subscriber {
 					if (!previous?.live) return;
 					this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${path} active=false`);
-					announced.append({ path: suffix, active: false });
+					announced.append({ prefix: suffix, active: false });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
-					if (full.includes(this.origin)) {
+					if (full.includes(this.hop)) {
 						// A reflected restart means the peer's remaining route loops back through
 						// us, so the route is gone even though the message says active. The
 						// advertisement stays live: the peer still holds the path and its id still
@@ -367,13 +371,20 @@ export class Subscriber {
 					// peer itself originated it. See `restart_announce` in the Rust subscriber.
 					const publisher = hops?.[0] ?? responderOrigin;
 
+					// A publisher with no identity (an empty chain from a peer that withheld its
+					// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
+					// advertisements can be unrelated publishers. Mirrors the
+					// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
+					const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
+
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
 					const previous = advertised.get(suffix);
 					if (previous?.live) {
-						if (previous.publisher === publisher) {
+						if (identified && previous.publisher === publisher) {
 							// Same publisher, new route. In-flight subscriptions resume across it,
-							// so there is nothing for a consumer to react to.
+							// so there is nothing for a consumer to react to. An unidentified
+							// publisher falls through to the replacement path below instead.
 							console.debug(`announced: broadcast=${path} rerouted`);
 							continue;
 						}
@@ -393,7 +404,7 @@ export class Subscriber {
 				}
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ path: suffix, active: true });
+				announced.append({ prefix: suffix, active: true });
 			}
 
 			announced.close();
@@ -460,7 +471,6 @@ export class Subscriber {
 			broadcast,
 			track: request.name,
 			priority: subscription.priority ?? 0,
-			ordered: subscription.ordered,
 			maxAge: subscription.maxAge,
 			startGroup: subscription.startGroup,
 			endGroup: subscription.endGroup,
@@ -611,7 +621,6 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge,
 			priority: info.priority,
-			ordered: info.ordered,
 		};
 	}
 
@@ -768,7 +777,6 @@ export class Subscriber {
 		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
-			ordered: msg.ordered,
 			maxAge: msg.maxAge,
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
@@ -787,7 +795,6 @@ export class Subscriber {
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxAge/etc.
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
-				ordered: current.ordered,
 				maxAge: current.maxAge,
 				startGroup: current.startGroup,
 				endGroup: current.endGroup,
@@ -801,7 +808,6 @@ export class Subscriber {
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
-			(a.ordered ?? false) === (b.ordered ?? false) &&
 			(a.maxAge ?? 0) === (b.maxAge ?? 0) &&
 			a.startGroup === b.startGroup &&
 			a.endGroup === b.endGroup

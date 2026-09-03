@@ -13,6 +13,7 @@
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -61,8 +62,8 @@ pub enum Error {
 	NoRoots,
 
 	/// A configured fingerprint isn't valid hex.
-	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
-	Fingerprint(#[source] hex::FromHexError),
+	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256): {0}")]
+	Fingerprint(String),
 
 	/// A configured fingerprint is valid hex but the wrong size for a SHA-256 digest.
 	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
@@ -151,8 +152,8 @@ pub enum Error {
 
 	/// Generating a self-signed certificate failed.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-	#[error(transparent)]
-	Rcgen(#[from] rcgen::Error),
+	#[error("failed to generate a self-signed certificate: {0}")]
+	Rcgen(String),
 
 	/// The crate was built without a crypto provider, so no TLS is possible.
 	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
@@ -164,12 +165,17 @@ pub enum Error {
 	Deprecated(crate::Deprecated),
 }
 
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+crate::error::from_message! {
+	rcgen::Error => Rcgen,
+}
+
 /// Convenience alias for results produced by this module.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Parse a hex-encoded SHA-256 certificate fingerprint.
 pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
-	let bytes = hex::decode(value.trim()).map_err(Error::Fingerprint)?;
+	let bytes = hex::decode(value.trim()).map_err(|err| Error::Fingerprint(crate::error::message(err)))?;
 	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 
@@ -361,6 +367,7 @@ pub struct Connect {
 	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(name = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
@@ -417,6 +424,7 @@ pub struct Connect {
 	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
@@ -425,6 +433,7 @@ pub struct Connect {
 	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
@@ -1130,12 +1139,14 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 pub struct Listen {
 	/// Load the given certificate from disk.
 	#[usage(long = "listen-tls-cert", name = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
 	#[usage(long = "listen-tls-key", name = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
@@ -1194,6 +1205,7 @@ pub struct Listen {
 		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_ROOT"
 	)]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
@@ -1442,9 +1454,16 @@ impl PeerIdentity {
 		Some(Self { chain: *chain })
 	}
 
-	/// Wrap a certificate chain already exposed by a QUIC backend.
-	#[cfg(feature = "quiche")]
-	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
+	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
+	///
+	/// For a listener living outside this crate (the io_uring workers, say)
+	/// that ran its own mTLS handshake and wants the relay's authenticated-peer
+	/// path. Only pass a chain TLS accepted: nothing here re-verifies it.
+	///
+	/// Takes [`rustls::pki_types::CertificateDer`], already part of this
+	/// crate's public API via [`chain`](Self::chain), so a major `rustls` bump
+	/// is a breaking change for callers of this too.
+	pub fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
 		Self { chain }
 	}
 
@@ -1482,9 +1501,9 @@ impl PeerIdentity {
 /// The certificates a server is currently serving.
 ///
 /// Only a QUIC backend serves TLS of its own, so nothing else populates this.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 #[derive(Debug, Default)]
 pub(crate) struct Info {
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub(crate) fingerprints: Vec<String>,
 }
@@ -1496,12 +1515,10 @@ pub(crate) struct Info {
 /// lifetime. Obtained from [`crate::Server::certificates`].
 #[derive(Clone, Debug)]
 pub struct Certificates {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	info: Arc<RwLock<Info>>,
 }
 
 impl Certificates {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn new(info: Arc<RwLock<Info>>) -> Self {
 		Self { info }
 	}
@@ -1509,9 +1526,37 @@ impl Certificates {
 	/// An empty set, used when no TLS-bearing backend is configured.
 	pub(crate) fn empty() -> Self {
 		Self {
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			info: Arc::new(RwLock::new(Info::default())),
 		}
+	}
+
+	/// A fixed handle reporting the certificates in the PEM `chain`, one
+	/// fingerprint each and in file order.
+	///
+	/// For a listener living outside this crate that serves TLS of its own and
+	/// has to publish what it serves (the io_uring workers hold their
+	/// certificate rather than the shared server). Nothing hot reloads here:
+	/// such a listener fixes its TLS material when it is built, so the
+	/// fingerprints are computed once and never change.
+	pub fn from_pem(chain: &[u8]) -> Result<Self> {
+		use rustls::pki_types::pem::PemObject;
+
+		let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain)
+			.collect::<std::result::Result<_, _>>()
+			.map_err(Error::Read)?;
+		if certs.is_empty() {
+			return Err(Error::Empty);
+		}
+		let provider = crypto::provider();
+		let fingerprints = certs
+			.iter()
+			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
+			.collect();
+		Ok(Self::new(Arc::new(RwLock::new(Info {
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			certs: Vec::new(),
+			fingerprints,
+		}))))
 	}
 
 	/// The SHA-256 fingerprints of the certificates being served right now, hex
@@ -1520,15 +1565,10 @@ impl Certificates {
 	/// Empty when the server has no TLS-bearing backend. Re-read this per use
 	/// rather than caching it: a cert rotation on disk changes the values.
 	pub fn fingerprints(&self) -> Vec<String> {
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-		{
-			// A panicking writer can't leave the cert list half-updated (it is
-			// replaced wholesale), so a poisoned lock is still safe to read.
-			let info = self.info.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-			info.fingerprints.clone()
-		}
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
-		Vec::new()
+		// A panicking writer can't leave the cert list half-updated (it is
+		// replaced wholesale), so a poisoned lock is still safe to read.
+		let info = self.info.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+		info.fingerprints.clone()
 	}
 }
 

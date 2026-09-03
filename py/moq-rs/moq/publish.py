@@ -36,7 +36,6 @@ from .types import (
     AudioEncoderOutput,
     AudioFrame,
     Frame,
-    Route,
     Subscription,
     TrackInfo,
     VideoEncoderInput,
@@ -262,7 +261,7 @@ class TrackProducer:
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
 
-        ``subscription`` tunes delivery priority, group ordering priority, and group range; omit for defaults.
+        ``subscription`` tunes delivery priority, group range, and staleness; omit for defaults.
         """
         from .subscribe import TrackConsumer
 
@@ -299,7 +298,7 @@ class TrackRequest:
     def accept(self, info: TrackInfo | None = None) -> TrackProducer:
         """Accept the request as a raw track.
 
-        ``info`` fixes the track's timescale, priority, ordering priority, and cache; omit for defaults.
+        ``info`` fixes the track's timescale, priority, and cache; omit for defaults.
         """
         return TrackProducer(self._inner.accept(info))
 
@@ -536,17 +535,8 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
-    def set_route(self, route: Route) -> None:
-        """Update the broadcast's route: the hop chain, cost, and liveness it advertises.
-
-        Use this as conditions shift (e.g. a standby transcoder lowering its
-        ``cost`` once warm); consumers observe the change via
-        :meth:`BroadcastConsumer.route_changed`.
-        """
-        self._inner.set_route(route)
-
     def set_announce(self, announce: bool) -> None:
-        """Set whether the broadcast is announced, keeping the rest of its route.
+        """Set whether the broadcast's exact path is announced as a route.
 
         The origin advertises the path only while announced; an unannounced
         broadcast stays reachable by exact path for subscribes and fetches. This is

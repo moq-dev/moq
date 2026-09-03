@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
 import { type Config, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
@@ -31,6 +31,29 @@ export class Producer<T> {
 		this.#deltas = (config.deltaRatio ?? DEFAULT_DELTA_RATIO) !== 0;
 	}
 
+	/**
+	 * Finish the open group, so the deltas already written stop being provisional.
+	 *
+	 * No replacement group opens until the next {@link update}, which emits a full snapshot as its
+	 * first frame even when the value is unchanged. A consumer joining at that group therefore reads
+	 * the whole value without the deltas that preceded it.
+	 *
+	 * Idempotent: cutting when no group is open does nothing, so a caller can cut on its own schedule
+	 * without tracking what has been published since the last one. Inert when deltas are disabled,
+	 * where every frame already gets its own group.
+	 */
+	cut(): void {
+		if (!this.#group) return;
+
+		// Reset first: the group closes either way below, and a throw must not leave the encoder
+		// emitting deltas against a snapshot whose group is gone.
+		this.#encoder.reset();
+
+		const group = this.#group;
+		this.#group = undefined;
+		group.close();
+	}
+
 	/** Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged. */
 	update(value: T): void {
 		const frame = this.#encoder.update(value);
@@ -43,6 +66,12 @@ export class Producer<T> {
 	}
 
 	#write(encoded: Encoded): void {
+		// Check before touching a group. A keyframe closes the previous group and publishes its
+		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
+		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
+		// good value would vanish even though this update reported an error.
+		if (encoded.payload.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Group.FrameTooLarge();
+
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.

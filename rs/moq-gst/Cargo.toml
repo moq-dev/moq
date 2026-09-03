@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/kixelated/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 rust-version.workspace = true
 publish = true
@@ -16,17 +16,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 
-anyhow = { version = "1", features = ["backtrace"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
 gst = { package = "gstreamer", version = "0.23" }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-url = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8"

@@ -102,7 +102,7 @@ leftover process and rebuild:
 
 ```bat
 taskkill /IM moq-relay.exe /F
-taskkill /IM moq-cli.exe /F
+taskkill /IM moq.exe /F
 ```
 
 :::

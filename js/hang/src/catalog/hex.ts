@@ -1,4 +1,4 @@
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /**
  * A hex-encoded byte string, the catalog's encoding for WebCodecs `Uint8Array` fields.

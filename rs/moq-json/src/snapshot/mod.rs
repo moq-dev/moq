@@ -16,6 +16,11 @@
 //! Deltas are controlled by [`ProducerConfig::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
 //!
+//! The encoder rolls a group on its own budget, but a caller can roll one for its own reasons with
+//! [`Producer::cut`]: it closes the open group and leaves the next update to open the replacement
+//! with a full snapshot, so the deltas already written stop being provisional without publishing an
+//! empty group.
+//!
 //! # Choosing a layer
 //!
 //! [`Producer`] and [`Consumer`] own a track: hand one a
@@ -91,6 +96,84 @@ mod test {
 	}
 
 	#[test]
+	fn a_cut_makes_the_next_update_a_snapshot_group() {
+		let (mut producer, track) = producer(cfg(100));
+		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
+		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
+		producer.cut().unwrap();
+		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
+		producer.finish().unwrap();
+
+		// The ratio would have kept every update in one group; the cut rolled it anyway. A consumer
+		// joining at the new group reads the whole value from its first frame, with none of the deltas
+		// that preceded the cut.
+		assert_eq!(track.latest(), Some(1));
+		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 1, "b": 3 }));
+	}
+
+	#[test]
+	fn a_cut_republishes_an_unchanged_value() {
+		let (mut producer, track) = producer(cfg(100));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.cut().unwrap();
+
+		// An unchanged value normally writes nothing. After a cut it must still open the replacement
+		// group, or the value would only exist in a group no new consumer reads.
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(track.latest(), Some(1));
+		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	#[test]
+	fn a_cut_opens_no_replacement_group() {
+		let (mut producer, track) = producer(cfg(100));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.cut().unwrap();
+		producer.finish().unwrap();
+
+		// Cutting closes the open group and stops there: no empty group for a consumer to advance into
+		// and wait on.
+		assert_eq!(track.latest(), Some(0));
+		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	#[test]
+	fn a_cut_is_idempotent() {
+		let (mut producer, track) = producer(cfg(100));
+
+		// Nothing published yet, so there is no group to cut.
+		producer.cut().unwrap();
+		producer.cut().unwrap();
+		producer.update(&json!({ "a": 1 })).unwrap();
+		assert_eq!(track.latest(), Some(0));
+
+		// And a repeated cut rolls once, not once per call.
+		producer.cut().unwrap();
+		producer.cut().unwrap();
+		producer.update(&json!({ "a": 2 })).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(track.latest(), Some(1));
+		assert_eq!(drain(track), vec![json!({ "a": 2 })]);
+	}
+
+	#[test]
+	fn a_cut_is_inert_without_deltas() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+
+		// With deltas off every frame already closes its own group, so there is never one to cut.
+		producer.cut().unwrap();
+		producer.update(&json!({ "a": 2 })).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(track.latest(), Some(1));
+		assert_eq!(drain(track), vec![json!({ "a": 2 })]);
+	}
+
+	#[test]
 	fn deltas_off_snapshot_per_group() {
 		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
@@ -116,6 +199,24 @@ mod test {
 				other => panic!("expected value, got {other:?}"),
 			}
 		}
+	}
+
+	/// `write_snapshot` closes the previous group and publishes a new one before writing the frame,
+	/// so rejecting an oversize frame inside `write_frame` would leave an empty newest group behind.
+	/// A snapshot consumer jumps to the newest, so the last good value would vanish on a failed
+	/// update.
+	#[test]
+	fn a_rejected_update_leaves_the_previous_value_readable() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "keep": true })).unwrap();
+
+		// Serializes past the group cache limit, so the frame cannot be published.
+		let oversized = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		assert!(producer.update(&oversized).is_err());
+		producer.finish().unwrap();
+
+		// A reader arriving now still finds the last good value, not an empty superseding group.
+		assert_eq!(drain(track), vec![json!({ "keep": true })]);
 	}
 
 	#[test]
@@ -348,7 +449,7 @@ mod test {
 	#[test]
 	fn a_rejected_snapshot_does_not_strand_an_empty_group() {
 		let track = rejecting_track();
-		let mut subscriber = track.subscribe(None);
+		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, cfg(0));
 
 		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
@@ -562,7 +663,7 @@ mod test {
 	fn compressed_deltas_reuse_window() {
 		// The shared per-group window is the whole point: a delta that restates content already in
 		// the snapshot compresses to far fewer bytes than the raw patch.
-		let (mut producer, mut track) = producer(cfg_deflate(100));
+		let (mut producer, track) = producer(cfg_deflate(100));
 		let phrase = "Media over QUIC delivers real-time latency at massive scale";
 		producer.update(&json!({ "note": phrase })).unwrap();
 		producer.update(&json!({ "note": phrase, "echo": phrase })).unwrap();
@@ -570,6 +671,7 @@ mod test {
 
 		// Both frames land in group 0; read the delta (frame 1) verbatim.
 		let waiter = kio::Waiter::noop();
+		let mut track = track.ordered();
 		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
 			panic!("expected a group");
 		};
@@ -632,11 +734,12 @@ mod test {
 
 	/// Publish a single value and return the byte length of the resulting (frame 0) wire frame.
 	fn wire_frame_len(config: ProducerConfig, value: &Value) -> usize {
-		let (mut producer, mut track) = producer(config);
+		let (mut producer, track) = producer(config);
 		producer.update(value).unwrap();
 		producer.finish().unwrap();
 
 		let waiter = kio::Waiter::noop();
+		let mut track = track.ordered();
 		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
 			panic!("expected a group");
 		};

@@ -123,7 +123,7 @@ public final class TrackProducer: Sendable {
     }
 
     /// A read handle for this track (local pub/sub, no origin needed).
-    /// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
+    /// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
     public func consume(subscription: Subscription? = nil) throws -> TrackConsumer {
         TrackConsumer(try ffi.consume(subscription: subscription))
     }

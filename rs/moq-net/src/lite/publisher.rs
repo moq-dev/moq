@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, Error, Origin, OriginList,
+	AsPath, Error, Hop, Hops,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
@@ -18,38 +18,6 @@ use crate::{
 };
 
 use super::Version;
-
-/// Publisher-side bookkeeping for one announced path, so upstream route changes
-/// forward as a restart. `sent` is the hop chain last written to the peer, or
-/// `None` while the announce is filtered (reflected or excluded).
-struct WatchedRoute {
-	consumer: crate::broadcast::Consumer,
-	/// Demand edges re-price the route without a route change, so the announce
-	/// loop watches this alongside `route_changed`.
-	demand: crate::broadcast::Demand,
-	path: crate::PathOwned,
-	sent: Option<SentRoute>,
-	/// When demand drained while a zero cost was advertised. The restart that
-	/// restores the cold cost is deferred by [`COST_LINGER`] past this, so
-	/// viewer churn doesn't flap routing across the mesh; demand returning in
-	/// the window cancels the restore.
-	idle_at: Option<crate::runtime::Instant>,
-}
-
-/// What the peer currently holds for a path: the forwarded hop chain plus, on
-/// lite-06+, the route cost. A fresh route that differs in either is worth a wire
-/// message; one that matches is not.
-#[derive(Clone)]
-struct SentRoute {
-	hops: OriginList,
-	cost: crate::broadcast::Cost,
-	/// Whether this is the route we actually serve from (the table's first
-	/// entry) rather than a standby selected because the serving chain flows
-	/// through the peer. Only a serving advertisement carries the demand
-	/// discount, so only it re-prices on demand edges; watching demand for a
-	/// standby would fire forever without ever changing the advertised cost.
-	serving: bool,
-}
 
 pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// The runtime that arms the publisher's timers.
@@ -65,24 +33,24 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
 	pub goaway: crate::goaway::Protocol,
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_origin`.
-	pub peer_origin: Option<Origin>,
+	/// declare one itself. See `Client::with_peer_hop`.
+	pub peer_hop: Option<Hop>,
 }
 
 /// Context shared by every control-stream child.
 struct Shared<S: crate::transport::poll::Session> {
 	session: S,
 	origin: origin::Consumer,
-	self_origin: Origin,
+	self_origin: Hop,
 	// The peer's SETUP, read for the origin id it declared. Used to serve the
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
-	// The identity assigned to the peer by the caller (`Client::with_peer_origin`, or
+	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
 	// the per-session default a server hands every request), standing in wherever the
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
-	peer_origin: Option<Origin>,
+	peer_hop: Option<Hop>,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
@@ -108,6 +76,27 @@ fn serving_max_age(version: Version, requested: Duration) -> Duration {
 	}
 }
 
+/// Position a subscription's read cursor for the wire serving it.
+///
+/// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
+/// subscription itself, at the oldest group its own Max Age still considers fresh, floored
+/// at the group it named.
+///
+/// Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
+/// latest group, so say so explicitly rather than letting the budget reach back. Lite03-05
+/// carry a Max Age, but there it is a staleness tolerance only; Lite01/02 additionally get
+/// an unbounded budget so nothing is dropped under them (see [`serving_max_age`]), which
+/// must not read as a request to replay the whole cache on join.
+fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>) {
+	if version.resolves_start() || start_group.is_some() {
+		return;
+	}
+
+	if let Some(latest) = track.latest() {
+		track.start_at(latest);
+	}
+}
+
 impl<S: crate::transport::poll::Session> Shared<S> {
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer, so a subscription is never served data that flowed
@@ -123,10 +112,10 @@ impl<S: crate::transport::poll::Session> Shared<S> {
 		}
 		// Pre-SETUP versions never declare an id, so only the assigned one applies.
 		let declared = match self.version.has_setup_stream() {
-			true => ready!(self.peer_setup.poll_origin(waiter)),
+			true => ready!(self.peer_setup.poll_hop(waiter)),
 			false => None,
 		};
-		let origin = match declared.or(self.peer_origin) {
+		let origin = match declared.or(self.peer_hop) {
 			Some(peer) => self.origin.clone().excluding(peer),
 			None => self.origin.clone(),
 		};
@@ -161,7 +150,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				origin: config.origin,
 				self_origin,
 				peer_setup: config.peer_setup,
-				peer_origin: config.peer_origin,
+				peer_hop: config.peer_hop,
 				serving: std::sync::OnceLock::new(),
 				priority: Default::default(),
 				version: config.version,
@@ -206,18 +195,15 @@ where
 #[cfg(test)]
 impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S, R> {
 	/// Test shim: drive one announce-interest stream like the old `run_announce`.
-	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
-		runtime: R,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
-		self_origin: Origin,
-		exclude_hop: u64,
+		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut run = AnnounceRun::new(runtime, prefix.as_path().to_owned(), exclude_hop, self_origin, version);
+		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -238,7 +224,7 @@ enum ControlState<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	Start {
 		stream: Stream<S, Version>,
 	},
-	Announce(AnnounceServe<S, R>),
+	Announce(AnnounceServe<S>),
 	Subscribe(SubscribeServe<S>),
 	Fetch(FetchServe<S>),
 	TrackInfo(TrackInfoServe<S>),
@@ -271,11 +257,9 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Control<S, 
 						unreachable!()
 					};
 					self.state = match kind {
-						lite::ControlType::Announce => ControlState::Announce(AnnounceServe::new(
-							self.shared.clone(),
-							self.runtime.clone(),
-							stream,
-						)),
+						lite::ControlType::Announce => {
+							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
+						}
 						lite::ControlType::Subscribe => {
 							ControlState::Subscribe(SubscribeServe::new(self.shared.clone(), stream))
 						}
@@ -462,18 +446,16 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 
 /// Serves one announce-interest stream: the initial set, then updates as routes,
 /// demand, and the origin change.
-struct AnnounceServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+struct AnnounceServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
-	// Cloned into the run loop, whose linger deadline it arms.
-	runtime: R,
 	stream: Option<Stream<S, Version>>,
-	state: AnnounceState<R>,
+	state: AnnounceState,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum AnnounceState<R: crate::runtime::Runtime> {
+enum AnnounceState {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
 	/// Waiting on the peer's SETUP for the session-wide excluded origin
@@ -483,15 +465,14 @@ enum AnnounceState<R: crate::runtime::Runtime> {
 	Run {
 		origin: origin::Consumer,
 		announced: announce::Consumer,
-		run: AnnounceRun<R>,
+		run: AnnounceRun,
 	},
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceServe<S, R> {
-	fn new(shared: Arc<Shared<S>>, runtime: R, stream: Stream<S, Version>) -> Self {
+impl<S: crate::transport::poll::Session> AnnounceServe<S> {
+	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
 		Self {
 			shared,
-			runtime,
 			stream: Some(stream),
 			state: AnnounceState::Decode,
 		}
@@ -507,11 +488,11 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceSer
 					let prefix = interest.prefix.to_owned();
 
 					// The identity whose routes we filter out. Lite-04/05 carry it per
-					// announce stream; lite-06+ reads the session-wide SETUP Origin
+					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
 					// declares nothing falls back to the identity the caller assigned it
-					// (`with_peer_origin`), if any.
-					let assigned = self.shared.peer_origin.map(|origin| origin.id()).unwrap_or(0);
+					// (`with_peer_hop`), if any.
+					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
 							0 => assigned,
@@ -525,8 +506,8 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceSer
 					}
 				}
 				AnnounceState::ExcludeHop { prefix } => {
-					let assigned = self.shared.peer_origin.map(|origin| origin.id()).unwrap_or(0);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_origin(waiter))
+					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
+					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
 						.map(|origin| origin.id())
 						.unwrap_or(assigned);
 					let prefix = prefix.clone();
@@ -565,64 +546,30 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceSer
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = match Origin::new(exclude_hop) {
+		let origin = match Hop::new(exclude_hop) {
 			Ok(peer) => origin.excluding(peer),
 			Err(_) => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(
-			self.runtime.clone(),
-			prefix,
-			exclude_hop,
-			self.shared.self_origin,
-			self.shared.version,
-		);
+		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
 
-/// One announce-loop turn: either an (un)announce from the origin, a route
-/// change on an already-announced broadcast, or a demand edge re-pricing
-/// one. A route turn re-reads the broadcast's route table and re-runs the
-/// per-peer selection; `Err` means the broadcast is gone.
-enum Op {
-	Announce(Option<crate::announce::Update>),
-	Route(crate::PathOwned, Result<(), Error>),
-	Idle(crate::PathOwned),
-	/// The linger sleep fired without an expired entry (it was canceled,
-	/// or a later deadline remains): restart the turn so the next
-	/// deadline arms a fresh sleep.
-	Linger,
-}
-
 /// The announce loop's state, minus the handles it borrows per poll so the test
 /// shim can supply its own.
-struct AnnounceRun<R: crate::runtime::Runtime> {
-	// Arms the linger deadline and stamps idle instants.
-	runtime: R,
+struct AnnounceRun {
 	prefix: crate::PathOwned,
-	exclude_hop: u64,
-	self_origin: Origin,
+	self_origin: Hop,
 	version: Version,
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 	// per-stream ordinal, and `ended` references the id instead of repeating the
-	// path. Keyed by suffix; only announces that actually hit the wire get an id
-	// (filtered ones were never seen by the peer).
+	// path. Only announces that actually hit the wire get an id (filtered ones
+	// were never seen by the peer).
 	next_announce_id: u64,
-	announce_ids: HashMap<crate::PathOwned, u64>,
-	// Lite05+: watch every announced broadcast's route and forward changes as a
-	// restart, so an upstream failover re-advertises downstream instead of the
-	// peer keeping a stale hop chain. Keyed by suffix; filtered announces are
-	// watched too, since an update can cross the forwarding filter either way.
-	watched: HashMap<crate::PathOwned, WatchedRoute>,
-	// Pre-restart versions (Lite01-04) never populate `watched`, but the
-	// broadcast consumer handed out by an excluding cursor carries the
-	// ExclusionGuard that keeps the front marked as exposed to this peer. Hold
-	// it for as long as the peer holds the advertisement, or the guard releases
-	// right after the Active is written and a reflected UNKNOWN route can
-	// replace the incumbent after all.
-	held: HashMap<crate::PathOwned, crate::broadcast::Consumer>,
-	linger: crate::runtime::Deadline<R>,
+	// The routes the peer currently holds, keyed by suffix. The value is the
+	// announce id on versions that assign them.
+	live: HashMap<crate::PathOwned, Option<u64>>,
 	phase: AnnouncePhase,
 }
 
@@ -634,21 +581,87 @@ enum AnnouncePhase {
 	Closing,
 }
 
-impl<R: crate::runtime::Runtime> AnnounceRun<R> {
-	fn new(runtime: R, prefix: crate::PathOwned, exclude_hop: u64, self_origin: Origin, version: Version) -> Self {
+impl AnnounceRun {
+	fn new(prefix: crate::PathOwned, self_origin: Hop, version: Version) -> Self {
 		Self {
 			prefix,
-			exclude_hop,
 			self_origin,
 			version,
 			next_announce_id: 0,
-			announce_ids: HashMap::new(),
-			watched: HashMap::new(),
-			held: HashMap::new(),
-			linger: crate::runtime::Deadline::new(&runtime),
-			runtime,
+			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
 		}
+	}
+
+	/// The suffix an update travels under on this stream.
+	fn suffix(&self, prefix: &crate::origin::Prefix) -> crate::PathOwned {
+		prefix
+			.as_path()
+			.strip_prefix(&self.prefix)
+			.expect("origin returned invalid prefix")
+			.to_owned()
+	}
+
+	/// The chain and cost to put on the wire for `route`, or `None` when it must
+	/// not be forwarded.
+	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+		let mut hops = route.hops.clone();
+
+		// A route that already passed through us is a reflection. The origin
+		// filters these on receive, so this is defensive.
+		if self.self_origin != Hop::UNKNOWN && hops.contains(&self.self_origin) {
+			tracing::debug!(route = %absolute, "dropping reflected route");
+			return None;
+		}
+
+		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
+		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
+		// chain is full.
+		if !self.version.has_announce_ok() && hops.push(self.self_origin).is_err() {
+			tracing::warn!(route = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
+			return None;
+		}
+
+		// Pre-lite-06 wires carry no cost at all, leaving hop count as the
+		// effective metric exactly as before.
+		let cost = match self.version.has_route_cost() {
+			true => route.cost.clamped(),
+			false => crate::origin::Cost::UNKNOWN,
+		};
+		Some((hops, cost))
+	}
+
+	/// The next announce id, on versions that assign them.
+	fn assign_id(&mut self) -> Option<u64> {
+		if !self.version.has_announce_id() {
+			return None;
+		}
+		let id = self.next_announce_id;
+		self.next_announce_id += 1;
+		Some(id)
+	}
+
+	/// Retract the peer's advertisement for `suffix`, if it holds one.
+	fn retract<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		suffix: crate::PathOwned,
+		absolute: &crate::Path,
+	) -> Result<(), Error> {
+		let Some(id) = self.live.remove(&suffix) else {
+			// Filtered on the way out; the peer never saw it.
+			return Ok(());
+		};
+		tracing::debug!(route = %absolute, "unannounce");
+		match id {
+			Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?,
+			// An ended announce doesn't need hops; the receiver matches on path only.
+			None => stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
+				suffix: suffix.as_path(),
+				hops: Hops::new(),
+			})?,
+		}
+		Ok(())
 	}
 
 	/// Buffer the version-specific initial burst: ANNOUNCE_INIT (Lite01/02) or
@@ -663,37 +676,23 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
 
-				// Send ANNOUNCE_INIT as the first message with all currently active paths
+				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
-					let suffix = path
-						.strip_prefix(&self.prefix)
-						.expect("origin returned invalid path")
-						.to_owned();
-					let absolute = origin.absolute(&path).to_owned();
+				while let Some(update) = announced.try_next() {
+					let suffix = self.suffix(&update.prefix);
+					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
 
-					if let Some(broadcast) = broadcast {
-						// The same per-peer selection as the live loop: an initial path
-						// with no advertisable route (a reflection, or every hop through
-						// the peer's assigned identity) is filtered like a live announce.
-						let selected = select_route(
-							&broadcast.routes(),
-							&broadcast.demand(),
-							self.self_origin,
-							self.exclude_hop,
-							self.version,
-							&absolute,
-						);
-						if selected.is_none() {
+					if update.active {
+						if self.outgoing(&update.route, &absolute.as_path()).is_none() {
 							continue;
 						}
-						tracing::debug!(broadcast = %absolute, "announce");
+						tracing::debug!(route = %absolute, "announce");
 						if !init.contains(&suffix) {
 							init.push(suffix);
 						}
 					} else {
-						// A potential race.
-						tracing::debug!(broadcast = %absolute, "unannounce");
+						// A potential race: a just-announced route already retracted.
+						tracing::debug!(route = %absolute, "unannounce");
 						init.retain(|p| p != &suffix);
 					}
 				}
@@ -706,52 +705,22 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, SentRoute)> = Vec::new();
-				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
-					let suffix = path
-						.strip_prefix(&self.prefix)
-						.expect("origin returned invalid path")
-						.to_owned();
-					let absolute = origin.absolute(&path).to_owned();
+				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
+				while let Some(update) = announced.try_next() {
+					let suffix = self.suffix(&update.prefix);
+					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
 
-					match broadcast {
-						Some(broadcast) => {
-							let routes = broadcast.routes();
-							let demand = broadcast.demand();
-							// Watch even the announces we filter below: a later route update
-							// can cross the forwarding filter in either direction.
-							self.watched.insert(
-								suffix.clone(),
-								WatchedRoute {
-									consumer: broadcast.clone(),
-									demand: demand.clone(),
-									path: path.clone(),
-									sent: None,
-									idle_at: None,
-								},
-							);
-							// The same per-peer selection as the live loop, so the count
-							// matches exactly what we send.
-							let Some(route) = select_route(
-								&routes,
-								&demand,
-								self.self_origin,
-								self.exclude_hop,
-								self.version,
-								&absolute,
-							) else {
-								continue;
-							};
-							tracing::debug!(broadcast = %absolute, "announce");
-							initial.retain(|(s, _)| s != &suffix);
-							initial.push((suffix, route));
-						}
-						None => {
-							// A potential race: a just-announced path already unannounced.
-							tracing::debug!(broadcast = %absolute, "unannounce");
-							self.watched.remove(&suffix);
-							initial.retain(|(s, _)| s != &suffix);
-						}
+					if update.active {
+						let Some((hops, cost)) = self.outgoing(&update.route, &absolute.as_path()) else {
+							continue;
+						};
+						tracing::debug!(route = %absolute, "announce");
+						initial.retain(|(s, ..)| s != &suffix);
+						initial.push((suffix, hops, cost));
+					} else {
+						// A potential race: a just-announced route already retracted.
+						tracing::debug!(route = %absolute, "unannounce");
+						initial.retain(|(s, ..)| s != &suffix);
 					}
 				}
 
@@ -762,18 +731,13 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;
-				for (suffix, route) in &initial {
-					if self.version.has_announce_id() {
-						self.announce_ids.insert(suffix.clone(), self.next_announce_id);
-						self.next_announce_id += 1;
-					}
-					if let Some(entry) = self.watched.get_mut(suffix) {
-						entry.sent = Some(route.clone());
-					}
+				for (suffix, hops, cost) in initial {
+					let id = self.assign_id();
+					self.live.insert(suffix.clone(), id);
 					stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
-						hops: route.hops.clone(),
-						cost: route.cost,
+						hops,
+						cost,
 					})?;
 				}
 			}
@@ -794,8 +758,6 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 		announced: &mut announce::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
-		use crate::broadcast::COST_LINGER;
-
 		let mut cx = Context::from_waker(waiter.waker());
 
 		if matches!(self.phase, AnnouncePhase::Init) {
@@ -811,348 +773,66 @@ impl<R: crate::runtime::Runtime> AnnounceRun<R> {
 				return stream.writer.poll_closed(&mut cx);
 			}
 
-			// The earliest deferred cost-restore, if any entry's linger is running.
-			self.linger.set(
-				self.watched
-					.values()
-					.filter_map(|entry| entry.idle_at)
-					.min()
-					.map(|at| at + COST_LINGER),
-			);
-
-			let op = 'turn: {
-				if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
-					return Poll::Ready(res);
-				}
-				if let Poll::Ready(next) = announced.poll_next(waiter) {
-					break 'turn Op::Announce(next);
-				}
-				// Stamped per turn rather than kept: the turn always ends in an op
-				// below once it fires, so it never has to survive.
-				let fired = self.linger.poll(waiter).is_ready().then(|| self.runtime.now());
-				// Poll every watched broadcast for a route-table change; each
-				// wake rescans the map, which announce-control rates make fine.
-				for (suffix, entry) in self.watched.iter_mut() {
-					if let Poll::Ready(res) = entry.consumer.poll_routes_changed(waiter) {
-						break 'turn Op::Route(suffix.clone(), res);
-					}
-					// Demand edges re-price the route without a route change:
-					// watch the direction opposite the advertised cost. Closure
-					// is ignored here; the route watch above surfaces it.
-					if !self.version.has_route_cost() {
-						continue;
-					}
-					let Some(sent) = &entry.sent else { continue };
-					// The demand discount only applies to the serving route:
-					// a standby advertised to an excluded peer keeps its own
-					// cost, so demand edges can never re-price it.
-					if !sent.serving {
-						continue;
-					}
-					if sent.cost.warm != 0 {
-						if let Poll::Ready(Ok(())) = entry.demand.poll_used(waiter) {
-							break 'turn Op::Route(suffix.clone(), Ok(()));
-						}
-						continue;
-					}
-					match entry.idle_at {
-						// Demand coming back within the linger cancels the
-						// restore; fall through to re-arm the unused watch.
-						Some(_) if entry.demand.is_used() => entry.idle_at = None,
-						// The linger expired: re-price via the route path.
-						Some(at) if fired.is_some_and(|now| now >= at + COST_LINGER) => {
-							entry.idle_at = None;
-							break 'turn Op::Route(suffix.clone(), Ok(()));
-						}
-						// Still lingering: the sleep owns the wakeup, and
-						// `poll_used` re-arms the cancel check above.
-						Some(_) => {
-							let _ = entry.demand.poll_used(waiter);
-							continue;
-						}
-						None => {}
-					}
-					if let Poll::Ready(Ok(())) = entry.demand.poll_unused(waiter) {
-						break 'turn Op::Idle(suffix.clone());
-					}
-				}
-				match fired {
-					Some(_) => Op::Linger,
-					None => return Poll::Pending,
-				}
+			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+				return Poll::Ready(res);
+			}
+			let Poll::Ready(next) = announced.poll_next(waiter) else {
+				return Poll::Pending;
 			};
 
-			match op {
-				Op::Announce(None) => {
-					// The buffer is empty (flushed at the loop top), so FIN now and
-					// wait for the acknowledgement.
-					stream.writer.finish()?;
-					self.phase = AnnouncePhase::Closing;
-				}
-				Op::Announce(Some(crate::announce::Update { path, broadcast })) => {
-					let suffix = path
-						.strip_prefix(&self.prefix)
-						.expect("origin returned invalid path")
-						.to_owned();
-					let absolute = origin.absolute(&path).to_owned();
+			let Some(update) = next else {
+				// The buffer is empty (flushed at the loop top), so FIN now and
+				// wait for the acknowledgement.
+				stream.writer.finish()?;
+				self.phase = AnnouncePhase::Closing;
+				continue;
+			};
 
-					match broadcast {
-						Some(active) => {
-							let routes = active.routes();
-							let demand = active.demand();
-							if lite::restart_supported(self.version) {
-								// Watch even if filtered below: a route update can cross
-								// the forwarding filter in either direction.
-								self.watched.insert(
-									suffix.clone(),
-									WatchedRoute {
-										consumer: active.clone(),
-										demand: demand.clone(),
-										path: path.clone(),
-										sent: None,
-										idle_at: None,
-									},
-								);
-							}
-							let Some(route) = select_route(
-								&routes,
-								&demand,
-								self.self_origin,
-								self.exclude_hop,
-								self.version,
-								&absolute,
-							) else {
-								continue;
-							};
-							tracing::debug!(broadcast = %absolute, "announce");
-							if self.version.has_announce_id() {
-								let prev = self.announce_ids.insert(suffix.clone(), self.next_announce_id);
-								debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
-								self.next_announce_id += 1;
-							}
-							if let Some(entry) = self.watched.get_mut(&suffix) {
-								entry.sent = Some(route.clone());
-							}
-							if !lite::restart_supported(self.version) {
-								self.held.insert(suffix.clone(), active.clone());
-							}
-							stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-								suffix,
-								hops: route.hops,
-								cost: route.cost,
-							})?;
-						}
-						None => {
-							tracing::debug!(broadcast = %absolute, "unannounce");
-							// A watched entry with `sent: None` means the peer holds no live
-							// advertisement (a route-filter retract already sent its Ended);
-							// repeating the Ended would be a spurious wire message. Pre-watch
-							// versions never populate `watched`, so they keep sending the
-							// Ended even for announces filtered above.
-							let retracted = self.watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
-							self.held.remove(&suffix);
-							if self.version.has_announce_id() {
-								// Retract by id; nothing to send if the announce was filtered and
-								// the peer never saw it (an unknown id is a protocol violation).
-								if let Some(id) = self.announce_ids.remove(&suffix) {
-									stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?;
-								}
-							} else if !retracted {
-								// An ended announce doesn't need hops; the receiver matches on path only.
-								stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
-									suffix,
-									hops: OriginList::new(),
-								})?;
-							}
+			let suffix = self.suffix(&update.prefix);
+			let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+
+			if !update.active {
+				self.retract(stream, suffix, &absolute.as_path())?;
+				continue;
+			}
+
+			match self.outgoing(&update.route, &absolute.as_path()) {
+				Some((hops, cost)) => match self.live.get(&suffix) {
+					// A metadata update on a live advertisement: restart it in
+					// place (lite-05 restarts via a duplicate ANNOUNCE).
+					Some(&id) if lite::restart_supported(self.version) => {
+						tracing::debug!(route = %absolute, "reannounce");
+						match id {
+							Some(id) => stream
+								.writer
+								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
+							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+								suffix: suffix.as_path(),
+								hops,
+								cost,
+							})?,
 						}
 					}
-				}
-				Op::Route(suffix, res) => {
-					if res.is_err() {
-						// The broadcast is gone; the origin delivers the Ended itself.
-						self.watched.remove(&suffix);
-						continue;
+					// Pre-restart versions have no way to update a live
+					// advertisement; the peer keeps the original chain.
+					Some(_) => {}
+					None => {
+						tracing::debug!(route = %absolute, "announce");
+						let id = self.assign_id();
+						self.live.insert(suffix.clone(), id);
+						stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+							suffix: suffix.as_path(),
+							hops,
+							cost,
+						})?;
 					}
-					let Some(entry) = self.watched.get_mut(&suffix) else {
-						continue;
-					};
-					// Any re-price supersedes a pending cost-restore; a stale
-					// timestamp would spin the linger sleep forever.
-					entry.idle_at = None;
-					let absolute = origin.absolute(&entry.path).to_owned();
-					let routes = entry.consumer.routes();
-					let hops = select_route(
-						&routes,
-						&entry.demand,
-						self.self_origin,
-						self.exclude_hop,
-						self.version,
-						&absolute,
-					);
-					let sent = entry.sent.clone();
-					match (hops, sent) {
-						// Neither the forwarded chain nor the cost moved: nothing to
-						// send. The serving flag may still have flipped (a failover
-						// onto the already-advertised standby), so store it for the
-						// demand watches without a wire message.
-						(Some(route), Some(sent)) if route.hops == sent.hops && route.cost == sent.cost => {
-							entry.sent = Some(route);
-						}
-						// The chain or the cost changed (an upstream failover, a repriced
-						// link, or a broadcast going hot): restart, so the peer updates its
-						// route in place instead of re-resolving.
-						(Some(route), Some(_)) => {
-							tracing::debug!(broadcast = %absolute, "reannounce");
-							if self.version.has_announce_id() {
-								// The id exists for every live advertisement; a panic here would
-								// silently kill the announce loop (the peer keeps stale routes),
-								// so a bookkeeping bug degrades to a skipped restart instead.
-								let Some(id) = self.announce_ids.get(&suffix).copied() else {
-									debug_assert!(false, "announced path without an announce id");
-									tracing::warn!(broadcast = %absolute, "restart without an announce id; skipping");
-									continue;
-								};
-								entry.sent = Some(route.clone());
-								stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
-									id,
-									hops: route.hops,
-									cost: route.cost,
-								})?;
-							} else {
-								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
-								entry.sent = Some(route.clone());
-								stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-									suffix,
-									hops: route.hops,
-									cost: route.cost,
-								})?;
-							}
-						}
-						// Previously filtered, now forwardable: a fresh announce.
-						(Some(route), None) => {
-							tracing::debug!(broadcast = %absolute, "announce");
-							if self.version.has_announce_id() {
-								self.announce_ids.insert(suffix.clone(), self.next_announce_id);
-								self.next_announce_id += 1;
-							}
-							entry.sent = Some(route.clone());
-							stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-								suffix,
-								hops: route.hops,
-								cost: route.cost,
-							})?;
-						}
-						// The new chain must not be forwarded (it now loops through the
-						// peer, or the peer excluded it): retract.
-						(None, Some(_)) => {
-							tracing::debug!(broadcast = %absolute, "unannounce (filtered route)");
-							entry.sent = None;
-							if self.version.has_announce_id() {
-								if let Some(id) = self.announce_ids.remove(&suffix) {
-									stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?;
-								}
-							} else {
-								stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
-									suffix,
-									hops: OriginList::new(),
-								})?;
-							}
-						}
-						// Still filtered: keep watching.
-						(None, None) => {}
-					}
-				}
-				// Demand drained while advertising zero: start the linger. The
-				// restore rides the deadline unless demand returns first.
-				Op::Idle(suffix) => {
-					if let Some(entry) = self.watched.get_mut(&suffix) {
-						entry.idle_at = Some(self.runtime.now());
-					}
-				}
-				// The linger sleep's job is done; the next turn arms the next
-				// deadline (or none).
-				Op::Linger => {}
+				},
+				// The chain must not be forwarded (reflected, or full): retract
+				// whatever the peer holds.
+				None => self.retract(stream, suffix, &absolute.as_path())?,
 			}
 		}
 	}
-}
-
-/// Pick the route to advertise to this peer: the most preferred announced
-/// route whose hop chain avoids both the peer (`exclude_hop`) and ourselves
-/// (a reflection), with the outgoing chain and cost ready for the wire.
-///
-/// `routes` is the broadcast's table in preference order with the serving
-/// (active) route first, so the peer usually receives exactly what we serve
-/// everyone; a peer that the active chain flows through receives the best
-/// standby instead of nothing. The subscribe path picks its source by the
-/// same exclusion (see `origin::Consumer::excluding`), which is what keeps
-/// the advertised chain truthful and the mesh loop-free.
-///
-/// Returns `None` when no route qualifies: every chain loops through the
-/// peer or us, or none is announced.
-fn select_route(
-	routes: &[crate::broadcast::Route],
-	demand: &crate::broadcast::Demand,
-	self_origin: Origin,
-	exclude_hop: u64,
-	version: Version,
-	absolute: &crate::Path,
-) -> Option<SentRoute> {
-	let exclude = match exclude_hop {
-		0 => Origin::UNKNOWN,
-		id => Origin::new(id).unwrap_or(Origin::UNKNOWN),
-	};
-
-	for (route, serving) in crate::broadcast::advertisable_routes(routes, self_origin, exclude) {
-		let mut hops = route.hops.clone();
-		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
-		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
-		// chain is full.
-		if !version.has_announce_ok() && hops.push(self_origin).is_err() {
-			tracing::warn!(broadcast = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
-			continue;
-		}
-		let cost = outgoing_cost(version, demand, route, serving);
-		return Some(SentRoute { hops, cost, serving });
-	}
-	tracing::debug!(broadcast = %absolute, %exclude_hop, "no advertisable route for this peer");
-	None
-}
-
-/// The cost to advertise for a route, alongside its outgoing hop chain.
-///
-/// While the broadcast has demand, the *serving* (active) route costs zero:
-/// our ingress is already paid for (or, for a local standby publisher, the
-/// work is already running), so one more subscriber only pays the link to
-/// reach us. A standby advertised to a peer the active chain flows through
-/// keeps its own accumulated cost: serving that peer means opening a fresh
-/// ingest, which is not already paid for. Otherwise we forward the
-/// accumulated route cost unchanged, which for a standby publisher is its
-/// production cost and for a pure forwarder is the price of the fetch a
-/// subscription would trigger.
-///
-/// A ceiling-cost route pierces the carrying discount. For a drain (the
-/// ceiling's primary producer) the paid-for ingress is going away, so
-/// advertising zero would keep pulling subscribers onto a path about to
-/// vanish when a peer with any other edge should move now, while the seam is
-/// seamless. The rule keys on the value, not the reason: the reason does not
-/// travel on the wire, and a cost that saturated through charges marks a
-/// path of last resort all the same.
-///
-/// The receiving side adds its own link price on top, so we never account for
-/// the link we are sending over. Pre-lite-06 peers get nothing (the field isn't
-/// on their wire), leaving hop count as the metric exactly as before.
-fn outgoing_cost(
-	version: Version,
-	demand: &crate::broadcast::Demand,
-	route: &crate::broadcast::Route,
-	serving: bool,
-) -> crate::broadcast::Cost {
-	if !version.has_route_cost() {
-		return crate::broadcast::Cost::UNKNOWN;
-	}
-
-	crate::broadcast::outgoing_cost(demand, route, serving)
 }
 
 /// Serves one TRACK stream: resolve the track, answer with its TRACK_INFO, FIN.
@@ -1168,7 +848,7 @@ struct TrackInfoServe<S: crate::transport::poll::Session> {
 enum TrackInfoState {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Track<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -1232,15 +912,14 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.absolute = self.shared.origin.absolute(&msg.broadcast).to_owned();
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
-					self.state = TrackInfoState::Origin { msg };
+					self.state = TrackInfoState::Hop { msg };
 				}
-				TrackInfoState::Origin { .. } => {
+				TrackInfoState::Hop { .. } => {
 					// The peer requested this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
 					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let TrackInfoState::Origin { msg } = std::mem::replace(&mut self.state, TrackInfoState::Decode)
-					else {
+					let TrackInfoState::Hop { msg } = std::mem::replace(&mut self.state, TrackInfoState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -1260,7 +939,6 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					let stream = self.stream.as_mut().expect("stream present");
 					stream.writer.buffer(&lite::TrackInfo {
 						priority: info.priority,
-						ordered: info.ordered,
 						max_age: info.max_age,
 						timescale: info.timescale,
 					})?;
@@ -1296,7 +974,7 @@ struct SubscribeServe<S: crate::transport::poll::Session> {
 enum SubscribeState<S: crate::transport::poll::Session> {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Subscribe<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -1371,17 +1049,16 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					self.track = msg.track.to_string();
 					tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed started");
 
-					self.state = SubscribeState::Origin { msg };
+					self.state = SubscribeState::Hop { msg };
 				}
-				SubscribeState::Origin { .. } => {
+				SubscribeState::Hop { .. } => {
 					// We just received a subscribe for this exact path, so by definition the
 					// peer has already seen an announcement for it. `request_broadcast`
 					// resolves an announced broadcast immediately; if it isn't announced it
 					// falls back to an `origin::Dynamic` handler (or resolves to an error
 					// when there is none).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let SubscribeState::Origin { msg } = std::mem::replace(&mut self.state, SubscribeState::Decode)
-					else {
+					let SubscribeState::Hop { msg } = std::mem::replace(&mut self.state, SubscribeState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -1399,7 +1076,6 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 
 					let subscription = crate::track::Subscription {
 						priority: msg.priority,
-						ordered: msg.ordered,
 						max_age: serving_max_age(self.shared.version, msg.max_age),
 						..Bounds::from(&msg).positions()
 					};
@@ -1439,7 +1115,6 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					if !self.shared.version.has_track_stream() {
 						let info = lite::SubscribeOk {
 							priority: msg.priority,
-							ordered: false,
 							max_age: Duration::ZERO,
 							start_group: None,
 							end_group: None,
@@ -1460,7 +1135,6 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						priority: self.shared.priority.clone(),
 						track_priority: track_priority_tx.consume(),
 						track_priority_seen: msg.priority,
-						ordered: msg.ordered,
 						version: self.shared.version,
 						timescale,
 					};
@@ -1523,7 +1197,7 @@ struct FetchServe<S: crate::transport::poll::Session> {
 enum FetchState {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
-	Origin {
+	Hop {
 		msg: lite::Fetch<'static>,
 	},
 	/// Resolving the broadcast (may wait on a dynamic handler).
@@ -1545,6 +1219,8 @@ enum FetchState {
 		prev_ts: u64,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
+		batch: Box<frame::Buffer>,
+		batch_pos: usize,
 	},
 	/// FIN and wait for the acknowledgement.
 	Finish {
@@ -1604,14 +1280,14 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.group = msg.group;
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
-					self.state = FetchState::Origin { msg };
+					self.state = FetchState::Hop { msg };
 				}
-				FetchState::Origin { .. } => {
+				FetchState::Hop { .. } => {
 					// The peer fetched this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
 					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
-					let FetchState::Origin { msg } = std::mem::replace(&mut self.state, FetchState::Decode) else {
+					let FetchState::Hop { msg } = std::mem::replace(&mut self.state, FetchState::Decode) else {
 						unreachable!()
 					};
 					let requesting = origin.request_broadcast(&msg.broadcast).into_inner();
@@ -1664,6 +1340,8 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 						prev_ts: 0,
 						frame: None,
 						chunk: None,
+						batch: Box::new(frame::Buffer::new()),
+						batch_pos: 0,
 					};
 				}
 				FetchState::Serve {
@@ -1672,6 +1350,8 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					prev_ts,
 					frame,
 					chunk,
+					batch,
+					batch_pos,
 				} => {
 					let stream = self.stream.as_mut().expect("stream present");
 					let mut cx = Context::from_waker(waiter.waker());
@@ -1687,11 +1367,40 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 								Some(next) => *chunk = Some(next),
 								None => *frame = None,
 							}
+						} else if *batch_pos < batch.len() {
+							let batched = &mut batch.filled_mut()[*batch_pos];
+							buffer_frame_info(
+								&mut stream.writer,
+								batched.timestamp,
+								batched.payload.len() as u64,
+								*timescale,
+								prev_ts,
+							)?;
+							let payload = std::mem::take(&mut batched.payload);
+							if !payload.is_empty() {
+								*chunk = Some(payload);
+							}
+							*batch_pos += 1;
+							group.keep_alive();
 						} else {
+							match group.poll_read_frames(waiter, batch) {
+								Poll::Ready(Ok(count)) if count > 0 => {
+									*batch_pos = 0;
+									continue;
+								}
+								Poll::Ready(Ok(_)) => break,
+								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+								Poll::Pending => {}
+							}
 							match ready!(group.poll_next_frame(waiter))? {
 								Some(next) => {
-									buffer_frame_timing(&mut stream.writer, &next, *timescale, prev_ts)?;
-									stream.writer.buffer(&next.size)?;
+									buffer_frame_info(
+										&mut stream.writer,
+										next.timestamp,
+										next.size,
+										*timescale,
+										prev_ts,
+									)?;
 									*frame = Some(next);
 								}
 								None => break,
@@ -1722,6 +1431,62 @@ mod test {
 
 	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
 		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+	}
+
+	/// A pre-06 wire is served from the live edge when it names no start: those drafts
+	/// define an absent `Group Start` as the latest group, and Lite01/02 additionally get
+	/// an unbounded budget (so nothing is dropped under them) that must not read as a
+	/// request to replay the whole cache.
+	#[test]
+	fn a_pre06_wire_is_pinned_to_the_live_edge() {
+		use futures::FutureExt;
+
+		let mut producer = track_producer("test");
+		for second in 0..3 {
+			let mut group = producer.append_group().unwrap();
+			group
+				.write_frame(Timestamp::from_millis(second * 1000).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		// What run_subscribe hands the model for a peer that sent no budget at all.
+		let served = |version| {
+			producer.subscribe(
+				track::Subscription::default().with_max_age(serving_max_age(version, std::time::Duration::ZERO)),
+			)
+		};
+		let drain = |subscriber: &mut track::Subscriber| {
+			let mut sequences = Vec::new();
+			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
+				sequences.push(group.sequence);
+			}
+			sequences
+		};
+
+		let mut unpinned = served(Version::Lite01);
+		assert_eq!(
+			drain(&mut unpinned),
+			vec![0, 1, 2],
+			"the unbounded budget alone resolves to the whole cache"
+		);
+
+		let mut legacy = served(Version::Lite01);
+		position_cursor(&mut legacy, Version::Lite01, None);
+		assert_eq!(drain(&mut legacy), vec![2]);
+
+		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
+		// and an absent start as the latest group, so they are pinned all the same.
+		let mut tolerant =
+			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+		position_cursor(&mut tolerant, Version::Lite05, None);
+		assert_eq!(drain(&mut tolerant), vec![2]);
+
+		// On lite-06 the declared budget is what resolves the start, so it stands.
+		let mut declared =
+			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+		position_cursor(&mut declared, Version::Lite06Wip, None);
+		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
 	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
@@ -1852,10 +1617,8 @@ mod test {
 	}
 }
 
-/// The announce loop's demand/linger state machine: a drained broadcast keeps
-/// advertising zero for `COST_LINGER` before the restart that restores its cold
-/// cost, demand returning in the window cancels the restore, and a route change
-/// supersedes it. Time is paused, so the 5s linger is deterministic.
+/// The announce loop: forwarding route announcements, metadata restarts, and
+/// retractions onto the wire.
 #[cfg(test)]
 mod announce_test {
 	use super::*;
@@ -1866,23 +1629,13 @@ mod announce_test {
 
 	/// The tokio-backed test runtime, matching the fake transport.
 	type TestRuntime = crate::runtime::tokio_test::Tokio<SinkSession>;
+	type TestPublisher = Publisher<SinkSession, TestRuntime>;
 
 	const VERSION: Version = Version::Lite06Wip;
 
-	/// The broadcast's cold cost: what the route advertises without demand.
-	const COLD: u64 = 7;
-
-	/// What the harness route advertises with no demand, and with it: the carrying
-	/// discount zeroes the warm half only, so the cold path keeps flowing and peers
-	/// can still rank this relay against another warm one.
-	const COLD_COST: crate::broadcast::Cost = crate::broadcast::Cost::new(COLD);
-	const WARM_COST: crate::broadcast::Cost = crate::broadcast::Cost { warm: 0, cold: COLD };
-
-	/// The original publisher stamped on every harness route: content identity is
-	/// keyed on the first hop, so a route change that should ride through as a
-	/// restart must keep it.
-	fn pub_hops() -> OriginList {
-		OriginList::try_from(vec![Origin::new(9).unwrap()]).unwrap()
+	/// The hops stamped on every harness route.
+	fn pub_hops() -> Hops {
+		Hops::try_from(vec![Hop::new(9).unwrap()]).unwrap()
 	}
 
 	/// A cursor over the captured announce-stream bytes, decoding messages
@@ -1945,13 +1698,11 @@ mod announce_test {
 	}
 
 	struct Harness {
-		/// Held for the whole test: dropping the origin producer unannounces
-		/// every broadcast under it, which would end the announce loop.
+		/// Held for the whole test: dropping the origin producer retracts every
+		/// route under it, which would end the announce loop.
 		origin: origin::Producer,
-		/// The publishing side: route changes go in here.
-		source: crate::broadcast::Producer,
-		/// A downstream viewer: its `track()` handles are the broadcast's demand.
-		downstream: crate::broadcast::Consumer,
+		/// The initial announcement; drop to retract, update to restart.
+		announcement: crate::announce::Producer,
 		wire: Wire,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
@@ -1964,63 +1715,21 @@ mod announce_test {
 			self.wire.assert_quiet();
 			assert!(!self.task.is_finished(), "the announce loop ended unexpectedly");
 		}
-
-		/// Announce a second broadcast once the loop is already running, with a
-		/// viewer attached so it advertises warm. Returns the producer (kept
-		/// alive by the caller) and the viewer handle whose drop drains demand.
-		async fn announce(&mut self, name: &str) -> (crate::broadcast::Producer, track::Consumer) {
-			let source = self
-				.origin
-				.create_broadcast(
-					name,
-					crate::broadcast::Route::new()
-						.with_hops(pub_hops())
-						.with_cost(COLD)
-						.with_announce(true),
-				)
-				.unwrap();
-			let downstream = self.origin.consume().announced_broadcast(name).await.unwrap();
-			let track = downstream.track("video").unwrap();
-			settle().await;
-
-			// It announces cold, then immediately re-prices warm for the viewer.
-			match self.wire.take_announces().as_slice() {
-				[
-					lite::AnnounceBroadcast::Active { cost: first, .. },
-					lite::AnnounceBroadcast::Restart { cost: second, .. },
-				] => {
-					assert_eq!(*first, COLD_COST);
-					assert_eq!(*second, WARM_COST);
-				}
-				// The viewer may already be attached when the announce is built.
-				[lite::AnnounceBroadcast::Active { cost, .. }] => assert_eq!(*cost, WARM_COST),
-				other => panic!("expected {name} to announce, got {other:?}"),
-			}
-
-			(source, track)
-		}
 	}
 
 	async fn settle() {
 		tokio::time::sleep(Duration::from_millis(1)).await;
 	}
 
-	/// Announce one broadcast with cold cost [`COLD`] and run the announce loop
-	/// against it, optionally with a viewer already attached (so the initial
-	/// announce goes out warm, at cost zero).
-	async fn harness(demand: bool) -> (Harness, Option<track::Consumer>) {
-		let origin = Origin::new(1).unwrap().produce();
-		let source = origin
-			.create_broadcast(
+	/// Announce one route with cost 7 and run the announce loop against it.
+	async fn harness() -> Harness {
+		let origin = Hop::new(1).unwrap().produce();
+		let announcement = origin
+			.announce(
 				"cam",
-				crate::broadcast::Route::new()
-					.with_hops(pub_hops())
-					.with_cost(COLD)
-					.with_announce(true),
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
 			)
 			.unwrap();
-		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
-		let track = demand.then(|| downstream.track("video").unwrap());
 
 		let log = Log::default();
 		let writes = log.writes.clone();
@@ -2032,208 +1741,103 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::run_announce(
-				TestRuntime::new(),
-				&mut stream,
-				&consumer,
-				&mut announced,
-				"",
-				self_origin,
-				0,
-				VERSION,
-			)
-			.await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
 		});
 		settle().await;
 
 		let mut wire = Wire { writes, cursor: 0 };
 		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
-		let expected = if demand { WARM_COST } else { COLD_COST };
 		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { cost, .. }] => assert_eq!(*cost, expected),
+			[lite::AnnounceBroadcast::Active { suffix, hops, cost }] => {
+				assert_eq!(suffix.as_str(), "cam");
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, crate::origin::Cost::new(7));
+			}
 			other => panic!("expected the initial announce, got {other:?}"),
 		}
 
-		(
-			Harness {
-				origin,
-				source,
-				downstream,
-				wire,
-				task,
-			},
-			track,
-		)
-	}
-
-	/// Demand draining while zero is advertised must not re-price immediately:
-	/// the restore waits out the linger, so viewer churn doesn't flap routing.
-	#[tokio::test(start_paused = true)]
-	async fn drain_defers_the_cold_restore() {
-		let (h, track) = harness(true).await;
-
-		drop(track);
-		settle().await;
-		h.assert_idle();
-
-		// Still inside the linger window: still quiet.
-		tokio::time::sleep(Duration::from_secs(3)).await;
-		h.assert_idle();
-	}
-
-	/// Demand returning within the linger cancels the pending restore, and the
-	/// next drain starts a fresh window rather than inheriting the old deadline.
-	///
-	/// The second drain is what makes the cancellation observable. Silence alone
-	/// can't distinguish "the deadline was cleared" from "it fired but re-priced
-	/// to the same zero cost, so nothing went out": both are quiet. By draining
-	/// again at t=4s, an uncancelled t=0 deadline would fire at t=5s with demand
-	/// already gone, sending the restart a full four seconds early.
-	#[tokio::test(start_paused = true)]
-	async fn demand_return_cancels_the_restore() {
-		let (mut h, track) = harness(true).await;
-
-		// t=0: demand drains, arming the restore for t=5s.
-		drop(track);
-		tokio::time::sleep(Duration::from_secs(3)).await;
-
-		// t=3s: a new viewer inside the window cancels it.
-		let track = h.downstream.track("video").unwrap();
-		tokio::time::sleep(Duration::from_secs(1)).await;
-
-		// t=4s: drained again, so the restore is due at t=9s, not t=5s.
-		drop(track);
-		tokio::time::sleep(Duration::from_secs(2)).await;
-
-		// t=6s: past the stale deadline. A restart here means it was never cleared.
-		h.assert_idle();
-
-		// t=10s: past the fresh deadline, so the restore finally lands.
-		tokio::time::sleep(Duration::from_secs(4)).await;
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, COLD_COST),
-			other => panic!("expected the restore on the fresh deadline, got {other:?}"),
+		Harness {
+			origin,
+			announcement,
+			wire,
+			task,
 		}
 	}
 
-	/// Each lingering broadcast restores on its own deadline: the loop sleeps
-	/// until the *earliest* pending restore, not the latest.
-	///
-	/// With one broadcast the deadline scan is trivially correct, so this stages
-	/// two with staggered drains. Taking the maximum instead would hold the first
-	/// broadcast's restore back until the second's deadline.
+	/// A live announce goes out as an Active with a fresh id; its retraction
+	/// references the id.
 	#[tokio::test(start_paused = true)]
-	async fn staggered_lingers_restore_independently() {
-		let (mut h, first) = harness(true).await;
-		let (_second_source, second) = h.announce("cam2").await;
+	async fn announce_and_retract() {
+		let mut h = harness().await;
 
-		// t=0: the first drains, due at t=5s.
-		drop(first);
-		tokio::time::sleep(Duration::from_secs(2)).await;
-		h.assert_idle();
-
-		// t=2s: the second drains, due at t=7s.
-		drop(second);
-		tokio::time::sleep(Duration::from_secs(4)).await;
-
-		// t=6s: only the first has expired.
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, COLD_COST),
-			other => panic!("expected only the first restore, got {other:?}"),
-		}
-
-		// t=8s: now the second's own deadline has passed.
-		tokio::time::sleep(Duration::from_secs(2)).await;
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 1, cost, .. }] => assert_eq!(*cost, COLD_COST),
-			other => panic!("expected the second restore, got {other:?}"),
-		}
-	}
-
-	/// An expired linger sends exactly one restart restoring the cold cost.
-	#[tokio::test(start_paused = true)]
-	async fn linger_expiry_restores_the_cold_cost() {
-		let (mut h, track) = harness(true).await;
-
-		drop(track);
-		tokio::time::sleep(Duration::from_secs(6)).await;
-
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, COLD_COST),
-			other => panic!("expected one cold-cost restart, got {other:?}"),
-		}
-
-		// The restore is a one-shot: the loop settles back to idle.
-		tokio::time::sleep(Duration::from_secs(30)).await;
-		h.assert_idle();
-	}
-
-	/// A route change during the linger supersedes the pending restore: the
-	/// restart it triggers carries the new chain (and, with demand still gone,
-	/// the cold cost), and the old deadline then passes without a second one.
-	#[tokio::test(start_paused = true)]
-	async fn route_change_supersedes_the_linger() {
-		let (mut h, track) = harness(true).await;
-
-		drop(track);
-		tokio::time::sleep(Duration::from_secs(3)).await;
-		h.wire.assert_quiet();
-
-		// An upstream failover mid-linger: a new chain with the same first hop
-		// (the same original publisher reached another way).
-		let hops = OriginList::try_from(vec![Origin::new(9).unwrap(), Origin::new(12).unwrap()]).unwrap();
-		h.source
-			.set_route(
-				crate::broadcast::Route::new()
-					.with_hops(hops.clone())
-					.with_cost(COLD)
-					.with_announce(true),
-			)
+		let late = h
+			.origin
+			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
-
 		match h.wire.take_announces().as_slice() {
-			[
-				lite::AnnounceBroadcast::Restart {
-					id: 0,
-					hops: sent,
-					cost,
-				},
-			] => {
-				assert_eq!(sent, &hops);
-				assert_eq!(*cost, COLD_COST);
-			}
-			other => panic!("expected the failover restart, got {other:?}"),
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "mic"),
+			other => panic!("expected an announce, got {other:?}"),
 		}
 
-		// The pending restore went with it: the old deadline passes silently.
-		tokio::time::sleep(Duration::from_secs(30)).await;
+		drop(late);
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			// "cam" took id 0 in the initial burst, so "mic" is id 1.
+			[lite::AnnounceBroadcast::EndedId { id: 1 }] => {}
+			other => panic!("expected the retraction, got {other:?}"),
+		}
 		h.assert_idle();
 	}
 
-	/// The warm edge has no hysteresis: a viewer arriving on a cold
-	/// advertisement re-prices to zero immediately.
+	/// A metadata update restarts the advertisement in place, keeping its id.
 	#[tokio::test(start_paused = true)]
-	async fn demand_reprices_warm_immediately() {
-		let (mut h, _) = harness(false).await;
+	async fn update_restarts_in_place() {
+		let mut h = harness().await;
 
-		let _track = h.downstream.track("video").unwrap();
+		h.announcement
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
+			.unwrap();
 		settle().await;
-
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, WARM_COST),
-			other => panic!("expected the warm restart, got {other:?}"),
+			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, crate::origin::Cost::new(3));
+			}
+			other => panic!("expected a restart, got {other:?}"),
 		}
+		h.assert_idle();
 	}
 
-	/// Spawn `run_announce` against the origin with the given `exclude_hop`,
-	/// capturing the wire. The per-peer variant of the `harness` setup.
-	fn spawn_announce(
-		consumer: origin::Consumer,
-		exclude_hop: u64,
-	) -> (Wire, tokio::task::JoinHandle<Result<(), Error>>) {
+	/// An identical update never reaches the wire: the origin coalesces it away.
+	#[tokio::test(start_paused = true)]
+	async fn identical_update_is_quiet() {
+		let h = harness().await;
+		h.announcement
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(7))
+			.unwrap();
+		settle().await;
+		h.assert_idle();
+	}
+
+	/// A route whose chain contains the excluded peer is invisible to that peer's
+	/// announce stream (control-plane split horizon via the cursor).
+	#[tokio::test(start_paused = true)]
+	async fn excluded_routes_are_filtered() {
+		let peer = Hop::new(42).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+
+		let tainted = Hops::try_from(vec![peer]).unwrap();
+		let _tainted = origin
+			.announce("echoed", crate::origin::Route::default().with_hops(tainted))
+			.unwrap();
+		let _clean = origin
+			.announce("local", crate::origin::Route::default().with_hops(pub_hops()))
+			.unwrap();
+
 		let log = Log::default();
 		let writes = log.writes.clone();
+		let consumer = origin.consume().excluding(peer);
 		let mut stream = Stream::<SinkSession, Version> {
 			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
@@ -2241,265 +1845,37 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::run_announce(
-				TestRuntime::new(),
-				&mut stream,
-				&consumer,
-				&mut announced,
-				"",
-				self_origin,
-				exclude_hop,
-				VERSION,
-			)
-			.await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
 		});
-		(Wire { writes, cursor: 0 }, task)
+		settle().await;
+
+		let mut wire = Wire { writes, cursor: 0 };
+		assert_eq!(wire.take_ok().active, 1, "only the clean route is announced");
+		match wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "local"),
+			other => panic!("expected the clean announce, got {other:?}"),
+		}
+		task.abort();
 	}
 
-	/// A peer the active chain flows through receives the best clean standby
-	/// instead of nothing, and at the standby's own cost: the warm discount
-	/// applies only to the route we would actually serve everyone else from,
-	/// since serving this peer means opening a fresh ingest.
+	/// A cost past the wire ceiling is clamped rather than rejected.
 	#[tokio::test(start_paused = true)]
-	async fn excluded_peer_receives_the_standby() {
-		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
-
-		// Active: free, but its chain flows through the peer. Standby: the same
-		// publisher reached directly, at its cold cost.
-		let tainted = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
-		let _a = origin
-			.create_broadcast(
-				"cam",
-				crate::broadcast::Route::new()
-					.with_hops(tainted.clone())
-					.with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-		let _b = origin
-			.create_broadcast(
-				"cam",
-				crate::broadcast::Route::new()
+	async fn cost_clamps_to_the_wire_ceiling() {
+		let mut h = harness().await;
+		h.announcement
+			.update(
+				crate::origin::Route::default()
 					.with_hops(pub_hops())
-					.with_cost(COLD)
-					.with_announce(true),
+					.with_cost(u64::MAX),
 			)
 			.unwrap();
 		settle().await;
-
-		// A viewer warms the broadcast, so the serving route advertises zero.
-		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
-		let _track = downstream.track("video").unwrap();
-		settle().await;
-
-		// An ordinary peer gets the active route, discounted for the demand.
-		let (mut wire, _task) = spawn_announce(origin.consume(), 0);
-		settle().await;
-		assert_eq!(wire.take_ok().active, 1);
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, cost, .. }] => {
-				assert_eq!(hops, &tainted);
-				assert_eq!(*cost, crate::broadcast::Cost::default());
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
+				assert_eq!(*cost, crate::origin::Cost::new(crate::origin::MAX_COST));
 			}
-			other => panic!("expected the active route, got {other:?}"),
+			other => panic!("expected a clamped restart, got {other:?}"),
 		}
-
-		// The peer in the active chain gets the standby, undiscounted.
-		let (mut wire, _task) = spawn_announce(origin.consume(), peer.id());
-		settle().await;
-		assert_eq!(wire.take_ok().active, 1);
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, cost, .. }] => {
-				assert_eq!(hops, &pub_hops());
-				assert_eq!(*cost, COLD_COST);
-			}
-			other => panic!("expected the standby route, got {other:?}"),
-		}
-	}
-
-	/// A relay carrying a broadcast via its peer initially has nothing to
-	/// advertise to that peer; a standby with the same original publisher
-	/// attaching later must go out as a fresh announce, giving the peer the
-	/// route it needs to fail over (#2473, e2e finding 1). The active source
-	/// dying afterward changes nothing on this stream: the standby is already
-	/// the advertised route, so the failover is invisible to the peer.
-	#[tokio::test(start_paused = true)]
-	async fn standby_attach_announces_to_excluded_peer() {
-		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
-
-		// The active route: the broadcast as carried via the peer itself.
-		let via_peer = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
-		let source_a = origin
-			.create_broadcast(
-				"cam",
-				crate::broadcast::Route::new().with_hops(via_peer).with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-
-		// The peer sees nothing: its own hop is on the only route.
-		let (mut wire, task) = spawn_announce(origin.consume(), peer.id());
-		settle().await;
-		assert_eq!(wire.take_ok().active, 0);
-		wire.assert_quiet();
-
-		// The standby (same first hop, reached directly) attaches later: a
-		// fresh announce toward the peer.
-		let _source_b = origin
-			.create_broadcast(
-				"cam",
-				crate::broadcast::Route::new()
-					.with_hops(pub_hops())
-					.with_cost(COLD)
-					.with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, cost, .. }] => {
-				assert_eq!(hops, &pub_hops());
-				assert_eq!(*cost, COLD_COST);
-			}
-			other => panic!("expected the standby announce, got {other:?}"),
-		}
-
-		// The active source dying promotes the standby locally; the peer's
-		// advertisement is already that standby, so the wire stays quiet.
-		source_a.abort(Error::Dropped).unwrap();
-		settle().await;
-		wire.assert_quiet();
-		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
-	}
-
-	/// The route swinging into the peer's chain retracts the announce (no clean
-	/// standby remains), and swinging back out re-announces fresh.
-	#[tokio::test(start_paused = true)]
-	async fn retracts_when_route_swings_through_peer() {
-		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
-		let mut source = origin
-			.create_broadcast(
-				"cam",
-				crate::broadcast::Route::new()
-					.with_hops(pub_hops())
-					.with_cost(COLD)
-					.with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-
-		let (mut wire, task) = spawn_announce(origin.consume(), peer.id());
-		settle().await;
-		assert_eq!(wire.take_ok().active, 1);
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, .. }] => assert_eq!(hops, &pub_hops()),
-			other => panic!("expected the initial announce, got {other:?}"),
-		}
-
-		// The same publisher, now reached through the peer: nothing left to
-		// advertise to them.
-		let through_peer = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
-		source
-			.set_route(
-				crate::broadcast::Route::new()
-					.with_hops(through_peer)
-					.with_cost(COLD)
-					.with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
-			other => panic!("expected the retract, got {other:?}"),
-		}
-
-		// Swinging back out is a fresh announce with the next id.
-		source
-			.set_route(
-				crate::broadcast::Route::new()
-					.with_hops(pub_hops())
-					.with_cost(COLD)
-					.with_announce(true),
-			)
-			.unwrap();
-		settle().await;
-		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, .. }] => assert_eq!(hops, &pub_hops()),
-			other => panic!("expected the re-announce, got {other:?}"),
-		}
-		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
-	}
-
-	/// A locally created route may set `Route::cost` past what a varint can carry,
-	/// since nothing validates the public field. The advertised cost has to clamp,
-	/// or forwarding the announce fails to encode and takes the announce stream
-	/// with it.
-	#[test]
-	fn outgoing_cost_clamps_to_the_wire_ceiling() {
-		use crate::broadcast;
-
-		let mut producer = broadcast::Info::new().produce();
-		producer
-			.set_route(broadcast::Route::announced().with_cost(u64::MAX))
-			.unwrap();
-		let consumer = producer.consume();
-		let route = consumer.route();
-		let demand = consumer.demand();
-
-		let cost = outgoing_cost(Version::Lite06Wip, &demand, &route, false);
-		assert_eq!(cost, broadcast::Cost::new(broadcast::MAX_COST));
-
-		let mut buf = Vec::new();
-		cost.encode(&mut buf, Version::Lite06Wip)
-			.expect("an advertised cost must always encode");
-	}
-
-	/// A draining serving route must advertise its drain cost even while the
-	/// broadcast has demand. The carrying discount exists because the ingress is
-	/// already paid for; a draining ingress is going away, and masking it with
-	/// zero would keep downstream peers glued to a path about to vanish instead
-	/// of migrating to another edge while the handover is seamless.
-	#[test]
-	fn outgoing_cost_advertises_a_drain_despite_demand() {
-		use crate::broadcast;
-
-		let mut producer = broadcast::Info::new().produce();
-		producer
-			.set_route(broadcast::Route::announced().with_cost(broadcast::DRAIN_COST))
-			.unwrap();
-		let consumer = producer.consume();
-		let route = consumer.route();
-		let demand = consumer.demand();
-
-		// A consumed track: demand.is_used() is true, which is exactly the case
-		// that used to collapse the cost to zero.
-		let track = producer.create_track("video", None).unwrap();
-		let _reader = track.consume();
-		assert!(demand.is_used(), "the consumed track should register demand");
-
-		let cost = outgoing_cost(Version::Lite06Wip, &demand, &route, true);
-		assert_eq!(cost, broadcast::Cost::DRAIN);
-
-		// A drain that arrived over the wire propagates through a carrying relay:
-		// the upstream's ceiling plus our link price saturates back to the
-		// ceiling, which pierces this hop's discount too. Without that, each
-		// carrying hop would re-mask the drain as cost 0.
-		let forwarded = broadcast::Cost::DRAIN.charged(5);
-		producer
-			.set_route(broadcast::Route::announced().with_cost(forwarded))
-			.unwrap();
-		let route = consumer.route();
-		let cost = outgoing_cost(Version::Lite06Wip, &demand, &route, true);
-		assert_eq!(cost, broadcast::Cost::DRAIN);
-
-		// A healthy serving route with demand still gets the carrying discount, on
-		// the warm half only: the cold path is what a peer ranks us by.
-		producer.set_route(broadcast::Route::announced().with_cost(7)).unwrap();
-		let route = consumer.route();
-		let cost = outgoing_cost(Version::Lite06Wip, &demand, &route, true);
-		assert_eq!(cost, broadcast::Cost { warm: 0, cold: 7 });
 	}
 }
 
@@ -2512,19 +1888,17 @@ mod announce_test {
 /// model layer (`group::Producer::create_frame`) already converted the timestamp
 /// into the track timescale, so its raw value goes straight onto the wire. Mirrors
 /// the decode in the subscriber's `run_group`.
-fn buffer_frame_timing<W: crate::transport::poll::SendStream>(
+fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &frame::Consumer,
+	timestamp: crate::Timestamp,
+	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 ) -> Result<(), Error> {
-	if timescale.is_none() {
-		return Ok(());
+	if timescale.is_some() {
+		buffer_zigzag_delta(writer, timestamp.value(), prev_ts)?;
 	}
-
-	let ts = frame.timestamp.value();
-	buffer_zigzag_delta(writer, ts, prev_ts)?;
-
+	writer.buffer(&size)?;
 	Ok(())
 }
 
@@ -2580,18 +1954,16 @@ fn poll_recv_next(
 ) -> Poll<Result<Recv, Error>> {
 	{
 		let mut groups_finished = false;
-		match track.poll_recv_group(waiter) {
-			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
-			Poll::Ready(Ok(None)) => groups_finished = true,
-			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+		match track.poll_recv_group(waiter)? {
+			Poll::Ready(Some(group)) => return Poll::Ready(Ok(Recv::Group(group))),
+			Poll::Ready(None) => groups_finished = true,
 			Poll::Pending => {}
 		}
 		if datagrams {
-			match track.poll_recv_datagram(waiter) {
-				Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
+			match track.poll_recv_datagram(waiter)? {
+				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
 				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
-				Poll::Ready(Ok(None)) => {}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(None) => {}
 				Poll::Pending => {}
 			}
 		}
@@ -2726,10 +2098,6 @@ struct Subscription<S: crate::transport::poll::Session> {
 	track_priority: kio::Consumer<u8>,
 	/// Last track priority observed by this clone, so a change only fires once.
 	track_priority_seen: u8,
-	/// The subscriber's `Ordered` preference: rank older groups first so they
-	/// transmit in sequence order, instead of the live default of newest first.
-	/// Applied to groups as they are queued; refreshed by SUBSCRIBE_UPDATE.
-	ordered: bool,
 	version: Version,
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
@@ -2830,10 +2198,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		bounds: Bounds,
 		track_priority_tx: kio::Producer<u8>,
 	) -> Self {
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = bounds.start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
+		position_cursor(&mut track, ctx.version, bounds.start_group);
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
@@ -2881,21 +2246,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				if let Ok(mut value) = self.track_priority_tx.write() {
 					*value = upd.priority;
 				}
-				// Re-rank the backlog too, not just the groups queued from here on.
-				// The preference is about which of the groups we are holding to send
-				// first, so leaving the queued ones on the old direction would let
-				// every new group outrank exactly the ones the subscriber just asked
-				// to receive first, starving them until they expire.
-				if self.ctx.ordered != upd.ordered {
-					self.ctx.ordered = upd.ordered;
-					self.ctx.priority.set_ordered(self.ctx.id, self.ctx.ordered);
-				}
 				// Feed the full update into the model subscriber so the producer's
 				// aggregate reflects it (and a relay re-forwards it upstream).
 				let bounds = Bounds::from(&upd);
 				let _ = self.track.update(crate::track::Subscription {
 					priority: upd.priority,
-					ordered: upd.ordered,
 					max_age: serving_max_age(self.ctx.version, upd.max_age),
 					..bounds.positions()
 				});
@@ -2949,11 +2304,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						// The subscribe id scopes the group tie-break: one queue serves every
 						// subscription on the session, and only groups of the same one may be
 						// ranked against each other by sequence.
-						let priority = match self.ctx.ordered {
-							true => Priority::ordered(current_priority, self.ctx.id, sequence),
-							false => Priority::new(current_priority, self.ctx.id, sequence),
-						};
-						let handle = self.ctx.priority.insert(priority);
+						let handle = self
+							.ctx
+							.priority
+							.insert(Priority::new(current_priority, self.ctx.id, sequence));
 						self.children
 							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 					}
@@ -2992,6 +2346,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	state: GroupState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum GroupState<S: crate::transport::poll::Session> {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,
@@ -3001,6 +2358,8 @@ enum GroupState<S: crate::transport::poll::Session> {
 		writer: Writer<S::SendStream, Version>,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
+		batch: Box<frame::Buffer>,
+		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
 	/// late cancel can still reset the stream.
@@ -3066,16 +2425,24 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						writer,
 						frame: None,
 						chunk: None,
+						batch: Box::new(frame::Buffer::new()),
+						batch_pos: 0,
 					};
 				}
-				GroupState::Serve { writer, frame, chunk } => {
+				GroupState::Serve {
+					writer,
+					frame,
+					chunk,
+					batch,
+					batch_pos,
+				} => {
 					let mut cx = Context::from_waker(waiter.waker());
 
 					// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass,
 					// whatever the write pipeline is blocked on. The rank is re-read as
 					// a send order when handled, since the two conventions are inverted.
-					while self.priority.poll_next(waiter).is_ready() {
-						writer.set_priority(self.priority.send_order());
+					while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
+						writer.set_priority(PriorityHandle::send_order_of(rank));
 					}
 					let seen = self.ctx.track_priority_seen;
 					// A dropped producer just disables this arm, like the queue arm above.
@@ -3087,8 +2454,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					}) {
 						self.ctx.track_priority_seen = value;
-						self.priority.set_track(value);
-						writer.set_priority(self.priority.send_order());
+						let rank = self.priority.set_track(value);
+						writer.set_priority(PriorityHandle::send_order_of(rank));
 					}
 
 					let outcome = 'serve: {
@@ -3137,12 +2504,44 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
+							} else if *batch_pos < batch.len() {
+								let batched = &mut batch.filled_mut()[*batch_pos];
+								let buffered = buffer_frame_info(
+									writer,
+									batched.timestamp,
+									batched.payload.len() as u64,
+									self.ctx.timescale,
+									&mut self.prev_ts,
+								);
+								if let Err(err) = buffered {
+									break 'serve Err(err);
+								}
+								let payload = std::mem::take(&mut batched.payload);
+								if !payload.is_empty() {
+									*chunk = Some(payload);
+								}
+								*batch_pos += 1;
+								self.group.keep_alive();
 							} else {
+								match self.group.poll_read_frames(waiter, batch) {
+									Poll::Ready(Ok(count)) if count > 0 => {
+										*batch_pos = 0;
+										continue;
+									}
+									Poll::Ready(Ok(_)) => break 'serve Ok(()),
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => {}
+								}
+
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
-										let buffered =
-											buffer_frame_timing(writer, &next, self.ctx.timescale, &mut self.prev_ts)
-												.and_then(|()| writer.buffer(&next.size));
+										let buffered = buffer_frame_info(
+											writer,
+											next.timestamp,
+											next.size,
+											self.ctx.timescale,
+											&mut self.prev_ts,
+										);
 										if let Err(err) = buffered {
 											break 'serve Err(err);
 										}
@@ -3334,7 +2733,6 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3375,7 +2773,6 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3420,7 +2817,6 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3483,7 +2879,6 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3553,7 +2948,6 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3597,32 +2991,21 @@ mod tests {
 	/// it, which is the loop the announce filter exists to prevent.
 	#[tokio::test(start_paused = true)]
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let upstream = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+		let upstream = crate::Hop::new(778).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 
-		let mut echoed_hops = OriginList::new();
+		let mut echoed_hops = Hops::new();
 		echoed_hops.push(assigned).unwrap();
-		let _echoed = origin
-			.create_broadcast(
-				"echoed",
-				crate::broadcast::Route::new()
-					.with_hops(echoed_hops)
-					.with_announce(true),
-			)
+		let (_echoed, _echoed_server) = origin
+			.announce_served("echoed", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
-		let mut local_hops = OriginList::new();
+		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
-		let _local = origin
-			.create_broadcast(
-				"local",
-				crate::broadcast::Route::new().with_hops(local_hops).with_announce(true),
-			)
+		let (_local, _local_server) = origin
+			.announce_served("local", crate::origin::Route::default().with_hops(local_hops))
 			.unwrap();
-
-		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
 		let peer_setup = crate::lite::PeerSetup::default();
@@ -3636,16 +3019,17 @@ mod tests {
 			version: Version::Lite06Wip,
 			peer_setup,
 			goaway,
-			peer_origin: Some(assigned),
+			peer_hop: Some(assigned),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
+		use futures::FutureExt;
 		assert!(
-			serving.get_broadcast("echoed").is_none(),
+			serving.request_broadcast("echoed/x").now_or_never().unwrap().is_err(),
 			"served the peer its own route"
 		);
 		assert!(
-			serving.get_broadcast("local").is_some(),
+			serving.request_broadcast("local/x").now_or_never().is_none(),
 			"withheld an independent route"
 		);
 	}
@@ -3653,52 +3037,39 @@ mod tests {
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only
 	/// route flows through the excluded hop (here the peer's assigned identity,
-	/// `Client::with_peer_origin`) is filtered from the initial set too.
+	/// `Client::with_peer_hop`) is filtered from the initial set too.
 	#[tokio::test]
 	async fn announce_init_applies_route_selection() {
-		let assigned = crate::Origin::new(777).unwrap();
-		let clean_publisher = crate::Origin::new(778).unwrap();
-		let self_origin = crate::Origin::new(1).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
+		let clean_publisher = crate::Hop::new(778).unwrap();
+		let self_origin = crate::Hop::new(1).unwrap();
 		let origin = crate::origin::Info::new(self_origin).produce();
 
-		let mut tainted_hops = OriginList::new();
+		let mut tainted_hops = Hops::new();
 		tainted_hops.push(assigned).unwrap();
 		let _tainted = origin
-			.create_broadcast(
-				"echoed",
-				crate::broadcast::Route::new()
-					.with_hops(tainted_hops)
-					.with_announce(true),
-			)
+			.announce("echoed", crate::origin::Route::default().with_hops(tainted_hops))
 			.unwrap();
 
-		let mut clean_hops = OriginList::new();
+		let mut clean_hops = Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let _clean = origin
-			.create_broadcast(
-				"local",
-				crate::broadcast::Route::new().with_hops(clean_hops).with_announce(true),
-			)
+			.announce("local", crate::origin::Route::default().with_hops(clean_hops))
 			.unwrap();
-
-		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 		let mut stream = Stream::open(&mut session.clone(), Version::Lite01).await.unwrap();
 
-		let consumer = origin.consume();
+		let consumer = origin.consume().excluding(assigned);
 		let mut announced = consumer.announced();
-		let mut run = std::pin::pin!(Publisher::run_announce(
-			TestRuntime::new(),
+		let mut run = std::pin::pin!(Publisher::<SinkSession, TestRuntime>::run_announce(
 			&mut stream,
 			&consumer,
 			&mut announced,
 			crate::Path::new(""),
 			self_origin,
-			assigned.id(),
 			Version::Lite01,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -3736,7 +3107,7 @@ mod tests {
 		stream: Stream<SinkSession, Version>,
 		version: Version,
 	) -> ProbeServe<SinkSession, TestRuntime> {
-		let origin = Origin::random().produce();
+		let origin = Hop::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: TestRuntime::new(),
@@ -3745,7 +3116,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
-			peer_origin: None,
+			peer_hop: None,
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}

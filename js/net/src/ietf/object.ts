@@ -15,8 +15,9 @@ const PROP_TIMESTAMP = 0x10n;
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
-// 11.4.2. moq-lite always starts subgroups at object 0, so the bit carries no
-// extra information for us: set it on emit, strip it on parse.
+// 11.4.2. Set on emit unless a filter trimmed the group's head; on parse a
+// cleared bit is the peer saying its stream starts partway through a group,
+// which the subscriber drops.
 const FIRST_OBJECT_BIT = 0x40;
 
 function hasFirstObjectBit(version: IetfVersion): boolean {
@@ -143,6 +144,14 @@ export interface GroupFlags {
 	// v15: whether priority is present in the header.
 	// When false (0x30 base), priority inherits from the control message.
 	hasPriority: boolean;
+	/**
+	 * Whether this stream carries the subgroup from its first published object.
+	 *
+	 * A subgroup that starts partway through has a hole at the front, which moq-lite cannot
+	 * represent. Always true on the drafts that predate the FIRST_OBJECT bit (before
+	 * draft-18), where there is no such signal to read.
+	 */
+	firstObject: boolean;
 }
 
 /**
@@ -195,7 +204,7 @@ export class Group {
 		if (this.flags.hasEnd) {
 			id |= 0x08;
 		}
-		if (hasFirstObjectBit(version)) {
+		if (this.flags.firstObject && hasFirstObjectBit(version)) {
 			id |= FIRST_OBJECT_BIT;
 		}
 		await w.u53(id);
@@ -211,8 +220,12 @@ export class Group {
 
 	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
 		const raw = await r.u53();
-		// Strip the draft-18 FIRST_OBJECT bit before the range check.
-		const id = hasFirstObjectBit(version) ? raw & ~FIRST_OBJECT_BIT : raw;
+		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
+		// it is the only signal that a subgroup starts partway through. Drafts that predate
+		// it carry no such signal, so they are taken at their word.
+		const legacy = !hasFirstObjectBit(version);
+		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
+		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
 		let hasPriority: boolean;
 		let baseId: number;
@@ -232,6 +245,7 @@ export class Group {
 			hasSubgroup: (baseId & 0x04) !== 0,
 			hasEnd: (baseId & 0x08) !== 0,
 			hasPriority,
+			firstObject,
 		};
 
 		const trackAlias = await r.u62();
@@ -255,9 +269,14 @@ export class Frame {
 		this.timestamp = timestamp;
 	}
 
-	/** Encode this frame using the group flags and negotiated IETF version. */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version): Promise<void> {
-		await w.u53(0); // id_delta = 0
+	/**
+	 * Encode this frame using the group flags and negotiated IETF version.
+	 *
+	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
+	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
+	 */
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
+		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
 			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
@@ -286,9 +305,13 @@ export class Frame {
 		timescale: Timescale | undefined,
 		version = r.version,
 	): Promise<Frame> {
+		// The first object's delta is its absolute Object ID; every later one is the prior ID
+		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
+		// a sequential group is a zero delta throughout, and any other value means the group
+		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = await r.u53();
 		if (delta !== 0) {
-			throw new Error(`object ID delta is not supported: ${delta}`);
+			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
 		}
 
 		let timestamp: Timestamp | undefined;
@@ -320,5 +343,70 @@ export class Frame {
 		}
 
 		throw new Error(`Unsupported object status: ${status}`);
+	}
+}
+
+// Serialization Flags for a fetch object: the two low bits encode the subgroup (00 =
+// subgroup zero), then one presence bit per field.
+const FETCH_OBJECT_ID = 0x04;
+const FETCH_GROUP_ID = 0x08;
+const FETCH_PRIORITY = 0x10;
+const FETCH_PROPERTIES = 0x20;
+
+/** Where a {@link FetchFrame} sits in the track, and whether it opens the stream. */
+export interface FetchPosition {
+	/** The group's sequence number. */
+	group: number;
+	/** The object's id within that group. */
+	object: number;
+	/** Whether this is the stream's first object, which is what carries the absolute ids. */
+	first: boolean;
+}
+
+/**
+ * A moq-transport object inside a fetch stream, which a publisher writes to serve a fill.
+ *
+ * The first object carries its absolute Group and Object IDs plus the priority; every later
+ * one inherits them and increments the Object ID, so only the properties and the payload go
+ * on the wire. A fetch object has no status field: a zero payload length is simply an empty
+ * object.
+ */
+export class FetchFrame {
+	/** The object payload. */
+	payload: Uint8Array;
+	/** The presentation timestamp carried in object properties, when present. */
+	timestamp?: Timestamp;
+
+	constructor({ payload, timestamp }: { payload: Uint8Array; timestamp?: Timestamp }) {
+		this.payload = payload;
+		this.timestamp = timestamp;
+	}
+
+	/** Encode this object at `position`, stamping it in the track's timescale. */
+	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
+		if (position.first) {
+			// Include the priority too: "same as the prior object" has no prior to refer to.
+			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;
+			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | properties);
+			await w.u53(position.group);
+			await w.u53(position.object);
+			await w.u8(0);
+		} else {
+			// Same group and priority; the Object ID is the prior one plus one.
+			await w.u53(this.timestamp !== undefined ? FETCH_PROPERTIES : 0);
+		}
+
+		// Omitted entirely rather than written empty when the object carries no timestamp:
+		// the track declared no units, so there is no property to send.
+		if (this.timestamp !== undefined) {
+			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
+			await w.u53(extensions.byteLength);
+			await w.write(extensions);
+		}
+
+		await w.u53(this.payload.byteLength);
+		if (this.payload.byteLength > 0) {
+			await w.write(this.payload);
+		}
 	}
 }

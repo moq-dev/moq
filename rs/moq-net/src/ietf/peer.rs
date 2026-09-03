@@ -69,7 +69,7 @@ mod tests {
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {
-				origin: Some(crate::Origin::new(42).unwrap()),
+				hop: Some(crate::Hop::new(42).unwrap()),
 				cost: Some(3),
 			},
 			solicit: None,
@@ -79,7 +79,7 @@ mod tests {
 		slot.set(first);
 		slot.set(Peer {
 			cluster: cluster::Peer {
-				origin: Some(crate::Origin::new(99).unwrap()),
+				hop: Some(crate::Hop::new(99).unwrap()),
 				cost: Some(0),
 			},
 			solicit: Some(true),

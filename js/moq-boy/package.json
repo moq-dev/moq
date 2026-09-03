@@ -28,7 +28,8 @@
 		"@moq/net": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"zod": "^4.4.3"
+		"@zod/mini": "^4.5.4",
+		"zod": "^4.5.4"
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
 	"devDependencies": {

@@ -173,6 +173,13 @@ pub struct GroupFlags {
 	// v15: whether priority is present in the header.
 	// When false (0x30 base), priority inherits from the control message.
 	pub has_priority: bool,
+
+	/// Whether this stream carries the subgroup from its first published object.
+	///
+	/// A subgroup that starts partway through has a hole at the front, which moq-lite cannot
+	/// represent. Always true on the drafts that predate the FIRST_OBJECT bit (before
+	/// draft-18), where there is no such signal to read.
+	pub first_object: bool,
 }
 
 impl GroupFlags {
@@ -211,29 +218,29 @@ impl GroupFlags {
 		if self.has_end {
 			id |= 0x08;
 		}
-		// Draft-18+: set FIRST_OBJECT. moq-lite always starts subgroups at object 0
-		// and never has gaps, so this is unconditionally true on the publisher side.
-		if !matches!(
-			version,
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-		) {
+		// Draft-18+: moq-lite always starts subgroups at object 0 and never has gaps, so
+		// the publisher side sets this on everything it produces.
+		if self.first_object
+			&& !matches!(
+				version,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+			) {
 			id |= Self::FIRST_OBJECT_BIT;
 		}
 		Ok(id)
 	}
 
 	pub fn decode(id: u64, version: Version) -> Result<Self, DecodeError> {
-		// Draft-18+ allows bit 0x40 (FIRST_OBJECT). Strip it before range check;
-		// moq-lite already assumes every subgroup starts at object 0, so the bit
-		// value carries no extra information for us.
-		let id = if matches!(
+		// Draft-18+ allows bit 0x40 (FIRST_OBJECT), which says the stream carries the
+		// subgroup from its first published object. Strip it before the range check, but
+		// keep the value: it is the only signal that a subgroup starts partway through.
+		// The drafts that predate it carry no such signal, so they are taken at their word.
+		let legacy = matches!(
 			version,
 			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-		) {
-			id
-		} else {
-			id & !Self::FIRST_OBJECT_BIT
-		};
+		);
+		let first_object = legacy || (id & Self::FIRST_OBJECT_BIT) != 0;
+		let id = if legacy { id } else { id & !Self::FIRST_OBJECT_BIT };
 
 		let (has_priority, base_id) = if (Self::START..=Self::END).contains(&id) {
 			(true, id)
@@ -253,6 +260,7 @@ impl GroupFlags {
 		}
 
 		Ok(Self {
+			first_object,
 			has_extensions,
 			has_subgroup,
 			has_subgroup_object,
@@ -270,6 +278,7 @@ impl Default for GroupFlags {
 			has_subgroup_object: false,
 			has_end: true,
 			has_priority: true,
+			first_object: true,
 		}
 	}
 }
@@ -616,6 +625,43 @@ mod tests {
 		assert!(GroupFlags::decode(v17 | GroupFlags::FIRST_OBJECT_BIT, Version::Draft17).is_err());
 	}
 
+	/// FIRST_OBJECT says the stream carries the subgroup from its first published object.
+	/// It is the only signal that a group arrived with its head missing, so the value has
+	/// to survive decode rather than being stripped with the bit.
+	#[test]
+	fn first_object_round_trips() {
+		for version in [Version::Draft18, Version::Draft19, Version::Draft20] {
+			for first_object in [true, false] {
+				let flags = GroupFlags {
+					first_object,
+					..Default::default()
+				};
+				let encoded = flags.encode(version).unwrap();
+				assert_eq!(
+					(encoded & GroupFlags::FIRST_OBJECT_BIT) != 0,
+					first_object,
+					"{version} {first_object}"
+				);
+				assert_eq!(GroupFlags::decode(encoded, version).unwrap().first_object, first_object);
+			}
+		}
+	}
+
+	/// The bit arrived in draft-18. Earlier drafts carry no such signal, so a group there
+	/// is taken at its word rather than read as starting partway through.
+	#[test]
+	fn older_drafts_have_no_first_object_signal() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			let flags = GroupFlags {
+				first_object: false,
+				..Default::default()
+			};
+			let encoded = flags.encode(version).unwrap();
+			assert_eq!(encoded & GroupFlags::FIRST_OBJECT_BIT, 0, "{version}");
+			assert!(GroupFlags::decode(encoded, version).unwrap().first_object, "{version}");
+		}
+	}
+
 	/// Draft-19 makes no changes to the subgroup header wire format, so the flags
 	/// byte must be byte-identical to draft-18 on both encode and decode.
 	#[test]
@@ -628,6 +674,7 @@ mod tests {
 				has_end: true,
 				has_subgroup_object: false,
 				has_priority: false,
+				first_object: true,
 			},
 		] {
 			let v18 = flags.encode(Version::Draft18).unwrap();

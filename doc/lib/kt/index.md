@@ -41,9 +41,11 @@ import kotlinx.coroutines.flow.collect
 
 Moq.connect("https://relay.example.com").use { moq ->
     moq.announcements("demos/").collect { announcement ->
-        println("got broadcast ${announcement.path()}")
+        // The announced path is relative to the prefix.
+        println("got route ${announcement.path()}")
 
-        announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
+        val broadcast = moq.requestBroadcast("demos/" + announcement.path())
+        broadcast.subscribeCatalog().updates().collect { catalog ->
             println("catalog: $catalog")
         }
     }

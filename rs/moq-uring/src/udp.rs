@@ -11,10 +11,18 @@
 //! A completed buffer is handed out as a [`Packet`] and returns to the kernel
 //! once every packet borrowing it drops.
 //!
-//! Send stages datagrams in a fixed pool of buffers owned by id and released
+//! Send stages datagrams in a pool of buffers owned by id and released
 //! explicitly on completion, the shape `SENDMSG_ZC`'s deferred-reclaim NOTIF
 //! model needs later. Every GSO `sendmsg` carries its `UDP_SEGMENT` control
 //! message explicitly; the socket default is never relied on.
+//!
+//! Both pools are queues of concurrent operations, not byte budgets: one send
+//! buffer holds one GSO train and one receive buffer holds one completion,
+//! however little either carries. So the depth a socket needs is set by how
+//! many of its connections want the socket at once, which no caller can
+//! predict. Both start small and grow on demand when they starve, bounded by
+//! the ceilings in [`Config`]; a pool never shrinks, so it settles at the
+//! socket's high-water concurrency and the memory comes back when it drops.
 //!
 //! The `gro`/`gso`/`multishot` toggles in [`Config`] exist for the ablation
 //! benchmarks; production callers keep the defaults (all on).
@@ -48,6 +56,20 @@ const MAX_GSO_SEGMENTS: usize = 64;
 /// The largest receive pool: the provided-buffer ring holds a power-of-two
 /// number of entries and the kernel caps it here.
 const MAX_RX_BUFFERS: u16 = 1 << 15;
+/// Receive buffers allocated before any starvation. Enough for an idle socket;
+/// the pool grows from here.
+const INITIAL_RX_BUFFERS: u16 = 16;
+/// Send buffers allocated before any starvation.
+const INITIAL_TX_BUFFERS: u16 = 64;
+
+/// Double a pool, bounded by its ceiling.
+fn grown(len: usize, max: u16) -> Option<u16> {
+	let max = usize::from(max);
+	match len < max {
+		true => Some(len.saturating_mul(2).clamp(1, max) as u16),
+		false => None,
+	}
+}
 
 /// How a socket uses the ring. The defaults are the production path; the
 /// toggles exist so the benchmarks can ablate one mechanism at a time.
@@ -62,14 +84,21 @@ pub struct Config {
 	/// Receive through one persistent multishot `recvmsg` and the provided
 	/// buffer ring, instead of re-armed oneshot receives.
 	pub multishot: bool,
-	/// Receive pool: buffer count (rounded up to a power of two, at most
-	/// 32768). Each receive completion consumes one buffer, so this is the
-	/// queue depth.
-	pub rx_buffers: u16,
+	/// Receive pool ceiling: at most this many buffers, and at most 32768.
+	///
+	/// Each receive completion consumes one buffer whatever its size, so the
+	/// pool is a queue depth in packets rather than in bytes: GRO coalescing
+	/// collapses as connections multiply, and the depth a socket needs follows
+	/// that, not its bitrate. Buffers are allocated on demand, so this bounds
+	/// the memory rather than reserving it.
+	pub rx_buffers_max: u16,
 	/// Receive pool: bytes per buffer. Must hold one worst-case receive.
 	pub rx_buffer_len: usize,
-	/// Send pool: buffer count.
-	pub tx_buffers: u16,
+	/// Send pool ceiling: at most this many buffers, allocated on demand.
+	///
+	/// One buffer stages one GSO train, so the pool is the socket's in-flight
+	/// send concurrency. Set it to 1 to serialize sends.
+	pub tx_buffers_max: u16,
 	/// Send pool: bytes per buffer, the ceiling for one GSO train.
 	pub tx_buffer_len: usize,
 }
@@ -80,9 +109,11 @@ impl Default for Config {
 			gro: true,
 			gso: true,
 			multishot: true,
-			rx_buffers: 16,
+			// 16 MiB and 64 MiB of headroom at the default buffer lengths,
+			// reached only by a socket that actually starves for them.
+			rx_buffers_max: 256,
 			rx_buffer_len: MAX_RECV + RECV_OVERHEAD,
-			tx_buffers: 64,
+			tx_buffers_max: 1024,
 			tx_buffer_len: 64 * 1024,
 		}
 	}
@@ -133,6 +164,69 @@ fn recycle_if_idle(rx: &mut Rx, bid: u16) -> bool {
 	if let Some(ring) = &mut rx.ring {
 		ring.add(bid, addr, len);
 		ring.publish();
+	}
+	true
+}
+
+/// Whether the receive pool has proven too shallow to arm against as it is.
+///
+/// A recorded starvation counts on its own: a buffer recycled between the
+/// kernel's `ENOBUFS` and this re-arm masks the shortfall without answering
+/// it, and arming into that one buffer just starves again.
+fn should_grow(rx: &Rx, multishot: bool) -> bool {
+	if rx.starved {
+		return true;
+	}
+	match multishot {
+		// Nothing left in the provided ring for the kernel to receive into.
+		true => !rx.bufs.iter().any(|buf| !buf.kernel_done),
+		// Every buffer is claimed by a receive or borrowed by a packet.
+		false => !rx.bufs.iter().any(|buf| !buf.claimed && buf.outstanding == 0),
+	}
+}
+
+/// Allocate more receive buffers and hand them straight to the kernel, up to
+/// [`Config::rx_buffers_max`]. Returns whether the pool grew.
+///
+/// Only the `RxBuf` structs move; [`Packet`] and the provided ring both point
+/// at the `Box<[u8]>` allocations, which stay put.
+fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
+	let Some(target) = grown(rx.bufs.len(), config.rx_buffers_max) else {
+		return false;
+	};
+	while rx.bufs.len() < usize::from(target) {
+		let bid = rx.bufs.len() as u16;
+		rx.bufs.push(RxBuf {
+			data: vec![0u8; config.rx_buffer_len].into_boxed_slice(),
+			outstanding: 0,
+			kernel_done: false,
+			claimed: false,
+		});
+		if let Some(ring) = &mut rx.ring {
+			let buf = &mut rx.bufs[bid as usize];
+			let addr = buf.data.as_mut_ptr();
+			let len = buf.data.len();
+			ring.add(bid, addr, len);
+		}
+	}
+	if let Some(ring) = &mut rx.ring {
+		ring.publish();
+	}
+	true
+}
+
+/// Allocate more send buffers, up to [`Config::tx_buffers_max`]. Returns
+/// whether the pool grew.
+///
+/// The `Box<[u8]>` allocations are stable across the `Vec` growth, which is
+/// what lets a live [`TxBuf`] keep a raw pointer into one.
+fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
+	let Some(target) = grown(tx.bufs.len(), config.tx_buffers_max) else {
+		return false;
+	};
+	while tx.bufs.len() < usize::from(target) {
+		tx.free.push(tx.bufs.len() as u16);
+		tx.bufs.push(TxSlot::new(config.tx_buffer_len));
 	}
 	true
 }
@@ -198,17 +292,40 @@ struct Rx {
 	waiters: kio::WaiterList,
 	/// The slab key of the armed receive, if one is in flight.
 	armed: Option<u64>,
+	/// The kernel ran the pool dry since the last arm. Held rather than acted
+	/// on immediately because the re-arm is what can grow the pool.
+	starved: bool,
 	/// Terminal failure, surfaced by `poll_recv` once the queue drains.
 	error: Option<i32>,
 }
 
 /// Send-side state.
 struct Tx {
-	bufs: Vec<Box<[u8]>>,
+	bufs: Vec<TxSlot>,
 	free: Vec<u16>,
 	waiters: kio::WaiterList,
 	/// Terminal failure, surfaced by `poll_acquire`.
 	error: Option<i32>,
+}
+
+/// Stable storage reused by every checkout of one transmit slot: the payload
+/// the kernel reads and the `sendmsg` headers pointing into it.
+struct TxSlot {
+	data: Box<[u8]>,
+	headers: Vec<SendHdr>,
+	/// Sends staged from this slot that the kernel has not completed. The slot
+	/// returns to the free list when it hits zero.
+	in_flight: usize,
+}
+
+impl TxSlot {
+	fn new(len: usize) -> Self {
+		Self {
+			data: vec![0u8; len].into_boxed_slice(),
+			headers: Vec::new(),
+			in_flight: 0,
+		}
+	}
 }
 
 /// Everything both the [`Socket`] handle and in-flight ops keep alive.
@@ -250,8 +367,24 @@ impl SockShared {
 
 	fn release_tx(&self, id: u16) {
 		let mut tx = self.tx.borrow_mut();
+		debug_assert_eq!(tx.bufs[id as usize].in_flight, 0);
 		tx.free.push(id);
 		tx.waiters.wake();
+	}
+
+	fn stage_tx(&self, id: u16) {
+		self.tx.borrow_mut().bufs[id as usize].in_flight += 1;
+	}
+
+	fn complete_tx(&self, id: u16) {
+		let mut tx = self.tx.borrow_mut();
+		let slot = &mut tx.bufs[id as usize];
+		debug_assert!(slot.in_flight > 0);
+		slot.in_flight -= 1;
+		if slot.in_flight == 0 {
+			tx.free.push(id);
+			tx.waiters.wake();
+		}
 	}
 
 	fn fail_rx(&self, code: i32) {
@@ -289,9 +422,15 @@ pub struct Socket {
 }
 
 impl Socket {
+	/// A test-only observer for whether every kernel operation released this socket.
+	#[cfg(test)]
+	pub(crate) fn downgrade(&self) -> Weak<SockShared> {
+		Rc::downgrade(&self.shared)
+	}
+
 	pub(crate) fn bind(shared: &Rc<Shared>, io: UdpSocket, config: Config) -> Result<Self, Error> {
 		let floor = if config.gro { MAX_RECV + RECV_OVERHEAD } else { 2048 };
-		if config.rx_buffer_len < floor || config.rx_buffers == 0 || config.tx_buffers == 0 {
+		if config.rx_buffer_len < floor || config.rx_buffers_max == 0 || config.tx_buffers_max == 0 {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
 				format!(
@@ -301,12 +440,12 @@ impl Socket {
 			.into());
 		}
 		// Rounding up past `u16::MAX` would wrap to a zero-entry ring.
-		if config.rx_buffers > MAX_RX_BUFFERS {
+		if config.rx_buffers_max > MAX_RX_BUFFERS {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
 				format!(
 					"receive pool holds at most {MAX_RX_BUFFERS} buffers, got {}",
-					config.rx_buffers
+					config.rx_buffers_max
 				),
 			)
 			.into());
@@ -329,7 +468,10 @@ impl Socket {
 			}
 		}
 
-		let rx_count = config.rx_buffers.next_power_of_two();
+		// The ring's entry count is fixed at registration, so it is sized for
+		// the ceiling; the buffers behind it are allocated as the pool grows.
+		let rx_cap = config.rx_buffers_max.next_power_of_two();
+		let rx_count = INITIAL_RX_BUFFERS.min(config.rx_buffers_max);
 		let mut bufs = Vec::with_capacity(rx_count as usize);
 		for _ in 0..rx_count {
 			bufs.push(RxBuf {
@@ -346,7 +488,7 @@ impl Socket {
 			.set(bgid.checked_add(1).expect("buffer group ids exhausted"));
 
 		let ring = if config.multishot {
-			let mut ring = BufRing::new(rx_count);
+			let mut ring = BufRing::new(rx_cap);
 			{
 				let io_ring = shared.ring.borrow_mut();
 				// SAFETY: the ring allocation lives in `SockShared`, which the
@@ -355,7 +497,7 @@ impl Socket {
 				unsafe {
 					io_ring
 						.submitter()
-						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_count, bgid, 0)?;
+						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)?;
 				}
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
@@ -373,11 +515,9 @@ impl Socket {
 		hdr.msg_namelen = NAME_LEN as libc::socklen_t;
 		hdr.msg_controllen = CONTROL_LEN;
 
-		let tx_count = config.tx_buffers;
+		let tx_count = INITIAL_TX_BUFFERS.min(config.tx_buffers_max);
 		let tx = Tx {
-			bufs: (0..tx_count)
-				.map(|_| vec![0u8; config.tx_buffer_len].into_boxed_slice())
-				.collect(),
+			bufs: (0..tx_count).map(|_| TxSlot::new(config.tx_buffer_len)).collect(),
 			free: (0..tx_count).collect(),
 			waiters: kio::WaiterList::new(),
 			error: None,
@@ -396,6 +536,7 @@ impl Socket {
 				queue: VecDeque::new(),
 				waiters: kio::WaiterList::new(),
 				armed: None,
+				starved: false,
 				error: None,
 			}),
 			tx: RefCell::new(tx),
@@ -457,12 +598,17 @@ impl Socket {
 		if self.shared.worker_gone() {
 			return Poll::Ready(Err(Shared::gone_error()));
 		}
+		if tx.free.is_empty() {
+			// Starved: every buffer is in flight, so the socket needs a deeper
+			// send window than it has. Grow rather than serialize behind it.
+			grow_tx(&mut tx, &self.shared.config);
+		}
 		if let Some(id) = tx.free.pop() {
-			let buf = &mut tx.bufs[id as usize];
+			let slot = &mut tx.bufs[id as usize];
 			// SAFETY: `id` was exclusively checked out of the free list; the
 			// allocation is stable (see TxBuf).
-			let ptr = unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) };
-			let cap = buf.len();
+			let ptr = unsafe { NonNull::new_unchecked(slot.data.as_mut_ptr()) };
+			let cap = slot.data.len();
 			return Poll::Ready(Ok(TxBuf {
 				sock: self.shared.clone(),
 				id,
@@ -489,11 +635,7 @@ impl Drop for Socket {
 			drop(rx);
 			// Fire-and-forget: the cancel's own CQE is consumed by the worker,
 			// and the receive's terminal CQE releases the socket state.
-			let cancel_key = shared.insert(Op::Cancel);
-			let entry = opcode::AsyncCancel::new(key).build().user_data(cancel_key);
-			if shared.push(&entry).is_err() {
-				shared.ops.borrow_mut().remove(cancel_key as usize);
-			}
+			let _ = shared.cancel(key);
 		}
 	}
 }
@@ -583,6 +725,11 @@ impl TxBuf {
 	/// `segment` bytes (the last may be short). Fire-and-forget: the buffer
 	/// returns to the pool when the kernel completes, and a failed send
 	/// surfaces on the next pool acquire.
+	///
+	/// This only stages an SQE, so the datagram reaches the kernel when the
+	/// worker next enters the ring. Dropping the worker makes a bounded attempt
+	/// to submit staged datagrams and drain their completions, but does not
+	/// guarantee kernel completion or delivery.
 	pub fn send(mut self, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.
@@ -619,21 +766,32 @@ impl TxBuf {
 
 		self.armed = true;
 		let sock = self.sock.clone();
-		let lease = Rc::new(TxLease {
+		let base = self.ptr.as_ptr();
+		let headers = {
+			let mut tx = sock.tx.borrow_mut();
+			let headers = &mut tx.bufs[self.id as usize].headers;
+			if headers.len() < segments {
+				headers.resize_with(segments, SendHdr::zeroed);
+			}
+			// SAFETY: the slot is checked out, so it cannot be sent from again
+			// (and its headers cannot grow again) until every send below
+			// completes and returns it to the free list.
+			unsafe { NonNull::new_unchecked(headers.as_mut_ptr()) }
+		};
+		let staging = Staging {
 			sock: sock.clone(),
 			id: self.id,
-		});
-		let base = self.ptr.as_ptr();
+			headers,
+		};
 
 		if sock.config.gso {
-			send_one(&shared, &sock, &lease, base, len, to, Some(segment as u16))?;
+			send_one(&shared, &staging, 0, base, len, to, Some(segment as u16))?;
 		} else {
-			let mut offset = 0;
-			while offset < len {
+			for index in 0..segments {
+				let offset = index * segment;
 				let chunk = segment.min(len - offset);
 				// SAFETY: offset stays within the leased buffer.
-				send_one(&shared, &sock, &lease, unsafe { base.add(offset) }, chunk, to, None)?;
-				offset += chunk;
+				send_one(&shared, &staging, index, unsafe { base.add(offset) }, chunk, to, None)?;
 			}
 		}
 		Ok(())
@@ -670,19 +828,6 @@ impl std::fmt::Debug for TxBuf {
 	}
 }
 
-/// The claim on one send-staging buffer, shared by the sends flying from it;
-/// the last completion releases the buffer.
-pub(crate) struct TxLease {
-	sock: Rc<SockShared>,
-	id: u16,
-}
-
-impl Drop for TxLease {
-	fn drop(&mut self) {
-		self.sock.release_tx(self.id);
-	}
-}
-
 /// Control-message space, aligned like `cmsghdr` demands.
 #[repr(C, align(8))]
 struct Control([u8; CONTROL_LEN]);
@@ -695,25 +840,48 @@ struct SendHdr {
 	control: Control,
 }
 
-/// One in-flight `sendmsg`; the slab entry owns everything the kernel reads.
+impl SendHdr {
+	fn zeroed() -> Self {
+		// SAFETY: all-zero is valid for these C structs.
+		unsafe { std::mem::zeroed() }
+	}
+}
+
+/// What every send from one [`TxBuf::send`] call stages against.
+struct Staging {
+	sock: Rc<SockShared>,
+	id: u16,
+	/// The slot's headers, one per datagram this call stages.
+	headers: NonNull<SendHdr>,
+}
+
+/// One in-flight `sendmsg`. The socket owns the header and payload it points
+/// the kernel at; dropping this releases the claim on that transmit slot.
 pub(crate) struct SendOp {
-	lease: Rc<TxLease>,
-	/// Boxed so the pointers inside stay put; referenced by the SQE.
-	_hdr: Box<SendHdr>,
+	sock: Rc<SockShared>,
+	id: u16,
 	expect: usize,
+}
+
+impl Drop for SendOp {
+	fn drop(&mut self) {
+		self.sock.complete_tx(self.id);
+	}
 }
 
 fn send_one(
 	shared: &Rc<Shared>,
-	sock: &Rc<SockShared>,
-	lease: &Rc<TxLease>,
+	staging: &Staging,
+	index: usize,
 	base: *mut u8,
 	len: usize,
 	to: SocketAddr,
 	segment: Option<u16>,
 ) -> io::Result<()> {
-	// SAFETY: all-zero is valid for these C structs.
-	let mut hdr: Box<SendHdr> = Box::new(unsafe { std::mem::zeroed() });
+	// SAFETY: `index` is within the headers `TxBuf::send` reserved, and every
+	// operation gets its own.
+	let hdr = unsafe { &mut *staging.headers.as_ptr().add(index) };
+	*hdr = SendHdr::zeroed();
 	hdr.iov = libc::iovec {
 		iov_base: base.cast(),
 		iov_len: len,
@@ -737,20 +905,18 @@ fn send_one(
 			std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<u16>(), segment);
 		}
 	}
+	let hdr_ptr = &raw const hdr.hdr;
 
+	// Count the send before the slab owns it, so the `SendOp` below is the only
+	// thing that can release the slot. Completions only run from the worker's
+	// pump, so the count cannot reach zero while this call is still staging.
+	staging.sock.stage_tx(staging.id);
 	let key = shared.insert(Op::Send(SendOp {
-		lease: lease.clone(),
+		sock: staging.sock.clone(),
+		id: staging.id,
 		expect: len,
-		_hdr: hdr,
 	}));
-	let hdr_ptr = {
-		let ops = shared.ops.borrow();
-		match &ops[key as usize] {
-			Op::Send(op) => &raw const op._hdr.hdr,
-			_ => unreachable!(),
-		}
-	};
-	let entry = opcode::SendMsg::new(types::Fd(sock.io.as_raw_fd()), hdr_ptr)
+	let entry = opcode::SendMsg::new(types::Fd(staging.sock.io.as_raw_fd()), hdr_ptr)
 		.build()
 		.user_data(key);
 	if let Err(err) = shared.push(&entry) {
@@ -768,6 +934,14 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 	let mut rx = sock.rx.borrow_mut();
 	if rx.armed.is_some() || rx.error.is_some() {
 		return;
+	}
+
+	// Grow before arming when the pool has proven too shallow, so the next
+	// receive has somewhere to land instead of waiting on a live packet to be
+	// released and dropping every datagram until then.
+	if should_grow(&rx, sock.config.multishot) {
+		rx.starved = false;
+		grow_rx(&mut rx, &sock.config);
 	}
 
 	let entry = if sock.config.multishot {
@@ -793,7 +967,8 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 			.position(|buf| !buf.claimed && buf.outstanding == 0)
 			.map(|bid| bid as u16)
 		else {
-			// Every buffer is borrowed; a release re-arms us.
+			// Every buffer is borrowed and the pool is at its ceiling; a
+			// release re-arms us.
 			return;
 		};
 		rx.bufs[bid as usize].claimed = true;
@@ -860,8 +1035,9 @@ pub(crate) fn on_recv(
 			rx.bufs[one.bid as usize].claimed = false;
 		}
 		match code {
-			// The receive pool is exhausted; a packet release re-arms.
-			libc::ENOBUFS => {}
+			// The receive pool is exhausted. Record it: by the time the re-arm
+			// looks, a recycled buffer may hide that the kernel ran dry.
+			libc::ENOBUFS => sock.rx.borrow_mut().starved = true,
 			// Socket teardown; nothing to surface.
 			libc::ECANCELED => return,
 			_ => {
@@ -995,11 +1171,11 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			return;
 		}
 		if code != libc::ECANCELED {
-			op.lease.sock.fail_tx(code);
+			op.sock.fail_tx(code);
 		}
 	} else if cqe.result as usize != op.expect {
 		tracing::warn!(sent = cqe.result, expected = op.expect, "short UDP send");
-		op.lease.sock.fail_tx(libc::EIO);
+		op.sock.fail_tx(libc::EIO);
 	}
 }
 
@@ -1128,5 +1304,56 @@ mod tests {
 		let ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
 		let addr = SocketAddr::V6(SocketAddrV6::new(ip, 4443, 0x12345, 3));
 		assert_eq!(roundtrip(addr), Some(addr));
+	}
+
+	/// A receive pool with nothing allocated yet and a ring of its own.
+	fn empty_rx() -> Rx {
+		Rx {
+			bufs: Vec::new(),
+			// Never registered, so this one is ours alone to publish into.
+			ring: Some(BufRing::new(64)),
+			// SAFETY: all-zero is valid for `msghdr`, and nothing reads it here.
+			hdr: Box::new(unsafe { std::mem::zeroed() }),
+			queue: VecDeque::new(),
+			waiters: kio::WaiterList::new(),
+			armed: None,
+			starved: false,
+			error: None,
+		}
+	}
+
+	/// A recorded `ENOBUFS` outlives the buffer that recycled after it: the
+	/// kernel ran the pool dry, so the pool is too shallow however full the
+	/// ring looks by the time the re-arm gets to it. Growing off the ring's
+	/// state alone leaves a bursting socket re-arming at its floor forever.
+	#[test]
+	fn a_recycled_buffer_does_not_mask_a_recorded_starvation() {
+		let config = Config::default();
+		let mut rx = empty_rx();
+		grow_rx(&mut rx, &config);
+		assert!(!should_grow(&rx, true), "a buffer is in the ring");
+
+		rx.starved = true;
+		assert!(should_grow(&rx, true), "the kernel ran dry, recycle or not");
+		assert!(should_grow(&rx, false), "and the oneshot path reads it too");
+	}
+
+	/// A starved receive pool doubles into its ceiling, offering every new
+	/// buffer to the kernel as it goes.
+	#[test]
+	fn the_receive_pool_doubles_to_its_ceiling() {
+		let config = Config {
+			rx_buffers_max: 40,
+			..Default::default()
+		};
+		let mut rx = empty_rx();
+
+		for expected in [1u16, 2, 4, 8, 16, 32, 40] {
+			assert!(grow_rx(&mut rx, &config), "growth stopped short of {expected}");
+			assert_eq!(rx.bufs.len(), usize::from(expected));
+			// Every buffer reaches the kernel exactly once.
+			assert_eq!(rx.ring.as_ref().expect("ring").tail, expected);
+		}
+		assert!(!grow_rx(&mut rx, &config), "grew past the ceiling");
 	}
 }

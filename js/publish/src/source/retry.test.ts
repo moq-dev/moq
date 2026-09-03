@@ -103,12 +103,23 @@ function device(deviceId: string): MediaDeviceInfo {
 	return { deviceId, label: deviceId, groupId: deviceId, kind: "videoinput", toJSON: () => ({}) };
 }
 
-function install<T extends EventTarget>(media: T): T {
-	Object.defineProperty(globalThis, "navigator", { configurable: true, value: { mediaDevices: media } });
+function install<T extends EventTarget>(media: T): T & Disposable {
+	const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+	Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: media });
 
 	// Screen capture probes self.CaptureController.
+	const originalSelf = Object.getOwnPropertyDescriptor(globalThis, "self");
 	Object.defineProperty(globalThis, "self", { configurable: true, value: globalThis });
-	return media;
+
+	return Object.assign(media, {
+		[Symbol.dispose]() {
+			if (originalMediaDevices) Object.defineProperty(navigator, "mediaDevices", originalMediaDevices);
+			else Reflect.deleteProperty(navigator, "mediaDevices");
+
+			if (originalSelf) Object.defineProperty(globalThis, "self", originalSelf);
+			else Reflect.deleteProperty(globalThis, "self");
+		},
+	});
 }
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -165,7 +176,7 @@ function published(source: Audio.Source | Video.Source | undefined): unknown {
 }
 
 test("a microphone re-opens when its track dies", async () => {
-	const media = install(new FakeMediaDevices());
+	using media = install(new FakeMediaDevices());
 
 	const mic = new Microphone({ enabled: true });
 	await settle();
@@ -182,7 +193,7 @@ test("a microphone re-opens when its track dies", async () => {
 });
 
 test("a camera re-opens when its track dies", async () => {
-	const media = install(new FakeMediaDevices());
+	using media = install(new FakeMediaDevices());
 
 	const camera = new Camera({ enabled: true });
 	await settle();
@@ -198,7 +209,7 @@ test("a camera re-opens when its track dies", async () => {
 });
 
 test("running out of retries clears the source instead of publishing a corpse", async () => {
-	const media = install(new FakeMediaDevices());
+	using media = install(new FakeMediaDevices());
 
 	const mic = new Microphone({ enabled: true });
 	await settle();
@@ -226,7 +237,7 @@ test("running out of retries clears the source instead of publishing a corpse", 
 });
 
 test("a track that arrives dead is not published", async () => {
-	const media = install(new FakeMediaDevices());
+	using media = install(new FakeMediaDevices());
 	media.bornDead = true;
 
 	const mic = new Microphone({ enabled: true });
@@ -240,7 +251,7 @@ test("a track that arrives dead is not published", async () => {
 test(
 	"a replug recovers a capture whose retries all failed",
 	async () => {
-		const media = install(new FakeMediaDevices());
+		using media = install(new FakeMediaDevices());
 
 		const camera = new Camera({ enabled: true });
 		await settle();
@@ -273,7 +284,7 @@ test(
 test(
 	"picking a different device revives a capture whose retries all failed",
 	async () => {
-		const media = install(new FakeMediaDevices());
+		using media = install(new FakeMediaDevices());
 		media.devices = [device("cam"), device("cam2")];
 
 		const camera = new Camera({ enabled: true });
@@ -305,7 +316,7 @@ test(
 test(
 	"changing the constraints revives a capture whose retries all failed",
 	async () => {
-		const media = install(new FakeMediaDevices());
+		using media = install(new FakeMediaDevices());
 
 		const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
 		await settle();
@@ -335,7 +346,7 @@ test(
 );
 
 test("unrelated device churn does not disturb a healthy capture", async () => {
-	const media = install(new FakeMediaDevices());
+	using media = install(new FakeMediaDevices());
 
 	const camera = new Camera({ enabled: true });
 	await settle();
@@ -352,7 +363,7 @@ test("unrelated device churn does not disturb a healthy capture", async () => {
 });
 
 test("screen capture releases every track when the video ends", async () => {
-	const media = install(new FakeScreenDevices());
+	using media = install(new FakeScreenDevices());
 
 	const screen = new Screen({ enabled: true });
 	await settle();
@@ -374,7 +385,7 @@ test("screen capture releases every track when the video ends", async () => {
 });
 
 test("screen capture releases every track when the audio ends", async () => {
-	const media = install(new FakeScreenDevices());
+	using media = install(new FakeScreenDevices());
 
 	const screen = new Screen({ enabled: true });
 	await settle();
@@ -390,7 +401,7 @@ test("screen capture releases every track when the audio ends", async () => {
 });
 
 test("screen capture releases a share whose track arrives dead", async () => {
-	const media = install(new FakeScreenDevices(true));
+	using media = install(new FakeScreenDevices(true));
 
 	const screen = new Screen({ enabled: true });
 	await settle();
@@ -405,7 +416,7 @@ test("screen capture releases a share whose track arrives dead", async () => {
 });
 
 test("screen capture prompts again after being switched off and on", async () => {
-	const media = install(new FakeScreenDevices());
+	using media = install(new FakeScreenDevices());
 	const enabled = new Signal(true);
 
 	const screen = new Screen({ enabled });

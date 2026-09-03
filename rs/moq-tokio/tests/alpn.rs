@@ -24,7 +24,7 @@ async fn connect_with_version(version: &str) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// Provide a dummy origin so the MoQ handshake has something to negotiate.
-	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 	// ── client ──────────────────────────────────────────────────────
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -75,7 +75,7 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 	// ── client ──────────────────────────────────────────────────────
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -171,6 +171,12 @@ async fn version_moq_transport_19() {
 	connect_with_version("moq-transport-19").await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn version_moq_transport_20() {
+	connect_with_version("moq-transport-20").await;
+}
+
 // ── WebTransport: sub-protocol negotiation ──────────────────────────
 // Browser clients use WebTransport (h3 ALPN) and negotiate the MoQ
 // protocol version via sub-protocols in the HTTP CONNECT request.
@@ -233,4 +239,10 @@ async fn webtransport_moq_transport_18() {
 #[tokio::test]
 async fn webtransport_moq_transport_19() {
 	connect_with_webtransport(Some("moq-transport-19")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn webtransport_moq_transport_20() {
+	connect_with_webtransport(Some("moq-transport-20")).await;
 }

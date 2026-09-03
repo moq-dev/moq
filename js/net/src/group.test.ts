@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Lagged, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { FrameTooLarge, Lagged, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
 import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
@@ -86,6 +86,34 @@ test("reading a group whose frames were evicted throws Lagged", async () => {
 
 	// The reader fell behind the eviction window: it must error, not skip the gap.
 	expect(consumer.readFrame()).rejects.toBeInstanceOf(Lagged);
+});
+
+test("a read that starts above the eviction window skips the gap instead of throwing", async () => {
+	const { producer, consumer } = pair(0);
+
+	// Overflow the frame cap without reading, evicting frames 0 through `extra - 1`.
+	const extra = 100;
+	for (let i = 0; i < MAX_GROUP_FRAMES + extra; i++) {
+		producer.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
+	}
+
+	// `extra - 1` was the last frame evicted, so a reader that wanted it still has a gap; one
+	// above it is the lowest start that stays clear. Both are taken before the reads below,
+	// which drain the buffer a consume() handle shares with the producer.
+	const lagged = producer.mirror();
+	const clear = producer.mirror();
+
+	// Nothing at or above `from` was evicted, so the reader lost nothing it asked for and the
+	// frames below it are dropped rather than returned.
+	const from = 200;
+	expect(await consumer.readFrameSequence({ from })).toMatchObject({
+		sequence: from,
+		payload: new Uint8Array([from & 0xff]),
+	});
+	expect(await consumer.readFrameSequence({ from })).toMatchObject({ sequence: from + 1 });
+
+	await expect(lagged.readFrameSequence({ from: extra - 1 })).rejects.toBeInstanceOf(Lagged);
+	await expect(clear.readFrameSequence({ from: extra })).resolves.toMatchObject({ sequence: extra });
 });
 
 test("a group with no eviction reads every frame without error", async () => {
@@ -188,4 +216,18 @@ test("buffered frames are still readable after the group closes", async () => {
 	// Closing doesn't discard buffered frames; the blocking reader drains them before ending.
 	expect(await consumer.readString()).toBe("a");
 	expect(await consumer.readFrame()).toBeUndefined();
+});
+
+test("a frame larger than the cache is rejected rather than silently dropped", () => {
+	// Appending it would evict it in the same call, so a silent success would report a write that
+	// nothing can ever read. Rust rejects the same frame up front with `Error::FrameTooLarge`.
+	const producer = new Producer(0);
+	const oversized = new Uint8Array(MAX_GROUP_CACHE_BYTES + 1);
+
+	expect(() => producer.writeFrame({ payload: oversized, timestamp: Timestamp.now() })).toThrow(FrameTooLarge);
+
+	// Nothing was appended, so the group is still empty rather than holding a phantom frame.
+	const consumer = producer.consume();
+	producer.close();
+	expect(consumer.tryReadFrame()).toBeUndefined();
 });

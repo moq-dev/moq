@@ -54,10 +54,7 @@ async fn opus_round_trip_48k_stereo() {
 	for _ in 0..10 {
 		let pcm = sine_f32_interleaved(440.0, 48_000, 2, frames_per_chunk);
 		producer
-			.write(&Frame {
-				timestamp: Timestamp::from_micros(0).unwrap(),
-				data: f32_bytes(&pcm),
-			})
+			.write(&Frame::new(f32_bytes(&pcm), Timestamp::from_micros(0).unwrap()))
 			.unwrap();
 	}
 
@@ -128,10 +125,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 		let pcm = sine_f32_interleaved(440.0, 44_100, 1, frames_per_chunk);
 		let s16 = Format::S16.from_interleaved_f32(&pcm, 1).unwrap();
 		producer
-			.write(&Frame {
-				timestamp: Timestamp::from_micros(0).unwrap(),
-				data: Bytes::from(s16),
-			})
+			.write(&Frame::new(Bytes::from(s16), Timestamp::from_micros(0).unwrap()))
 			.unwrap();
 	}
 
@@ -189,10 +183,10 @@ async fn pcm_round_trip_is_lossless() {
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 	let samples = sine_f32_interleaved(440.0, 48_000, 2, 960);
 	producer
-		.write(&Frame {
-			timestamp: Timestamp::from_micros(123_000).unwrap(),
-			data: f32_bytes(&samples),
-		})
+		.write(&Frame::new(
+			f32_bytes(&samples),
+			Timestamp::from_micros(123_000).unwrap(),
+		))
 		.unwrap();
 
 	let snapshot = catalog_consumer.next().await.unwrap().unwrap();

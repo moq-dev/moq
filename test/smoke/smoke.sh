@@ -415,18 +415,22 @@ run_subscriber() {
             "$C_SMOKE" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         gst)
-            # moqsrc exposes the broadcast's video as a Sometimes pad (video_%u);
-            # gst-launch links it to filesink once it appears. We grab one byte,
-            # the same "bytes moved" bar as the rust subscriber (no decode). head
-            # closing the pipe SIGPIPEs gst-launch, so success returns at once; no
-            # data just runs out the timeout. Our plugin dir rides on top of the
-            # system path (which provides filesink); a private registry keeps the
-            # scan off the user's cache. buffer-mode=2 makes filesink unbuffered so
-            # the first frame reaches head immediately.
+            # moqsrc exposes each rendition as a Sometimes pad (video_%u / audio_%u),
+            # named so the first of each kind is always video_0 / audio_0. Link
+            # video_0 by name: a bare `moqsrc ! filesink` would take whichever pad
+            # appears first, so a publisher with audio (the browser) could pass this
+            # cell on audio bytes without video ever flowing. We grab one byte, the
+            # same "bytes moved" bar as the rust subscriber (no decode). head closing
+            # the pipe SIGPIPEs gst-launch, so success returns at once; no data just
+            # runs out the timeout. Our plugin dir rides on top of the system path
+            # (which provides filesink); a private registry keeps the scan off the
+            # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
+            # reaches head immediately.
             local n
             n=$(GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$TMP/gst-run-registry.bin" \
                 timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                moqsrc url="$URL" broadcast="$broadcast" ! filesink location=/dev/stdout buffer-mode=2 \
+                moqsrc name=s url="$URL" broadcast="$broadcast" \
+                s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
@@ -471,7 +475,20 @@ run_round() {
             overall=1
             continue
         fi
-        (run_subscriber "$sub" "$broadcast" "$pub") >"$TMP/$pub-$sub.log" 2>&1 &
+        # Record how long each cell took. Every subscriber shares one budget, so the
+        # spread is the diagnostic: a cell that burns the whole timeout while its
+        # siblings finish in a couple of seconds is stalled, not merely slow, and one
+        # creeping up on $TIMEOUT is a near-miss worth seeing before it fails.
+        (
+            started=$SECONDS
+            # `|| status=$?` rather than a bare call: under `set -e` a failing subscriber
+            # would exit the subshell before it recorded anything, and a failure is exactly
+            # when the duration is worth reading.
+            status=0
+            run_subscriber "$sub" "$broadcast" "$pub" || status=$?
+            echo "$((SECONDS - started))" >"$TMP/$pub-$sub.secs"
+            exit "$status"
+        ) >"$TMP/$pub-$sub.log" 2>&1 &
         pids+=("$!")
         names+=("$sub")
     done
@@ -481,17 +498,18 @@ run_round() {
         echo "  WARN  publisher '$pub' exited early:"
         sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
     fi
-    local want_pass=1 got round_pass=0
+    local want_pass=1 got round_pass=0 elapsed
     [[ "$NEGATIVE" -eq 1 ]] && want_pass=0
     # ${arr[@]+...} guard: a round may have no live subscribers (all broken),
     # and bash 3.2 (macOS) errors on "${!pids[@]}" for an empty array under `set -u`.
     for i in ${pids[@]+"${!pids[@]}"}; do
         if wait "${pids[$i]}"; then got=1; else got=0; fi
+        elapsed=$(cat "$TMP/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
         if [[ "$got" -eq "$want_pass" ]]; then
-            echo "  PASS  $pub -> ${names[$i]}"
+            echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"
             round_pass=1
         else
-            echo "  FAIL  $pub -> ${names[$i]}"
+            echo "  FAIL  $pub -> ${names[$i]} (${elapsed}s of ${TIMEOUT}s)"
             sed 's/^/        /' "$TMP/$pub-${names[$i]}.log" 2>/dev/null || true
             overall=1
         fi

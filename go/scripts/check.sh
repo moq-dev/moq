@@ -50,7 +50,7 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "go check: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+"${RUST_CARGO:-cargo}" build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -110,6 +110,12 @@ uniffi-bindgen-go --library "$CDYLIB" --out-dir "$STAGE_BINDINGS"
 if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
     cp -R "$STAGE_BINDINGS/uniffi/moq" "$STAGE_BINDINGS/moq"
 fi
+
+echo "go check: checking error sentinels..."
+bash "$SCRIPT_DIR/check-errors.sh" \
+    "$STAGE_BINDINGS/moq/moq.go" \
+    "$GO_DIR/wrapper/errors.go" \
+    "$GO_DIR/wrapper/errors_test.go"
 
 echo "go check: assembling ffi module..."
 # --skip-size-check because the lib above is a plain host build, unrelated to

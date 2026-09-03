@@ -14,6 +14,7 @@ use unsafe_libopus::{
 	opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
+use super::Encoded;
 use crate::opus;
 use crate::pcm;
 use crate::{Error, Format};
@@ -111,6 +112,11 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
 	/// because its bitrate is fixed by the sample rate and channel count.
+	///
+	/// Rates too low for Opus to code anything at the chosen
+	/// [`frame_duration`](Self::frame_duration) are rejected. The floor is 1200
+	/// bps at the default 20 ms, rises for shorter frames, and is 2400 bps for
+	/// frames of 10 ms and longer.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// Enable Opus in-band forward error correction.
 	pub fec: bool,
@@ -179,13 +185,13 @@ unsafe impl Send for Opus {}
 
 /// Packets emitted by [`Encoder::finish`] and the decoded padding at their end.
 pub struct Finish {
-	packets: Vec<Bytes>,
+	packets: Vec<Encoded>,
 	discard_padding: usize,
 }
 
 impl Finish {
 	/// Encoded packets in decode order.
-	pub fn packets(&self) -> &[Bytes] {
+	pub fn packets(&self) -> &[Encoded] {
 		&self.packets
 	}
 
@@ -195,7 +201,7 @@ impl Finish {
 	}
 
 	/// Consume the result and return its encoded packets.
-	pub fn into_packets(self) -> Vec<Bytes> {
+	pub fn into_packets(self) -> Vec<Encoded> {
 		self.packets
 	}
 }
@@ -233,7 +239,7 @@ impl Encoder {
 			return Err(opus::error(err, "opus_encoder_create"));
 		}
 
-		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels);
+		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels, frame_size);
 		let (bitrate, lookahead, pre_skip) = match configured {
 			Ok(configured) => configured,
 			Err(err) => {
@@ -303,10 +309,10 @@ impl Encoder {
 		config: &Config,
 		codec_rate: u32,
 		codec_channels: u32,
+		frame_size: usize,
 	) -> Result<(u64, usize, u16), Error> {
 		if let Some(bitrate) = config.bitrate {
-			// libopus takes a plain integer, so the unit is unwrapped at this seam.
-			Self::set_opus_bitrate(inner, codec_channels, bitrate.as_bps())?;
+			Self::set_opus_bitrate(inner, codec_channels, bitrate.as_bps(), codec_rate, frame_size)?;
 		}
 		Self::set_opus_ctl(
 			inner,
@@ -330,11 +336,18 @@ impl Encoder {
 		Ok((bitrate, lookahead, pre_skip))
 	}
 
-	fn set_opus_bitrate(inner: *mut OpusEncoder, channels: u32, bitrate: u64) -> Result<(), Error> {
+	fn set_opus_bitrate(
+		inner: *mut OpusEncoder,
+		channels: u32,
+		bitrate: u64,
+		codec_rate: u32,
+		frame_size: usize,
+	) -> Result<(), Error> {
 		let max = 300_000 * channels as u64;
-		if !(500..=max).contains(&bitrate) {
+		let min = opus::bitrate_floor(codec_rate, frame_size).max(500);
+		if !(min..=max).contains(&bitrate) {
 			return Err(Error::Unsupported(format!(
-				"Opus bitrate must be between 500 and {max} bits per second for {channels} channel(s), got {bitrate}"
+				"Opus bitrate must be between {min} and {max} bits per second for {channels} channel(s) at {frame_size} samples, got {bitrate}"
 			)));
 		}
 		Self::set_opus_ctl(inner, OPUS_SET_BITRATE_REQUEST, bitrate as i32, "OPUS_SET_BITRATE")
@@ -400,8 +413,13 @@ impl Encoder {
 			return Err(Error::Unsupported("pcm bitrate is fixed".into()));
 		};
 		if bitrate.as_bps() != self.bitrate {
-			// libopus wants a plain integer, so the unit is unwrapped at this seam.
-			Self::set_opus_bitrate(opus.inner, self.codec_channels, bitrate.as_bps())?;
+			Self::set_opus_bitrate(
+				opus.inner,
+				self.codec_channels,
+				bitrate.as_bps(),
+				self.codec_rate,
+				self.frame_size,
+			)?;
 			self.bitrate = bitrate.as_bps();
 			self.config.bitrate = Some(bitrate);
 		}
@@ -428,7 +446,7 @@ impl Encoder {
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// [`Producer`](super::Producer) handles format conversion and resampling
 	/// before calling this; for direct use, the caller does the same.
-	pub fn encode(&mut self, pcm: &[f32]) -> Result<Bytes, Error> {
+	pub fn encode(&mut self, pcm: &[f32]) -> Result<Encoded, Error> {
 		let expected = self.frame_size * self.codec_channels as usize;
 		if pcm.len() != expected {
 			return Err(Error::Misaligned {
@@ -436,7 +454,7 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		let packet = match &mut self.backend {
+		let encoded = match &mut self.backend {
 			Backend::Opus(opus) => {
 				// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
 				// are bounded by the lengths we pass.
@@ -452,18 +470,20 @@ impl Encoder {
 				if n < 0 {
 					return Err(crate::opus::error(n, "opus_encode_float"));
 				}
-				Bytes::copy_from_slice(&opus.scratch[..n as usize])
+				let payload = Bytes::copy_from_slice(&opus.scratch[..n as usize]);
+				let activity = crate::opus::activity(&payload, false);
+				Encoded { payload, activity }
 			}
 			Backend::Pcm => {
 				let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
 				for sample in pcm {
 					payload.extend_from_slice(&sample.to_le_bytes());
 				}
-				payload.into()
+				Encoded::new(payload.into())
 			}
 		};
 		self.started = true;
-		Ok(packet)
+		Ok(encoded)
 	}
 
 	/// Finish encoding, zero-padding `pcm` as the final partial frame and
@@ -618,15 +638,15 @@ mod tests {
 		let frame = sine(440.0, 48_000, 2, enc.frame_size());
 		for _ in 0..5 {
 			let pkt = enc.encode(&frame).unwrap();
-			let _ = dec.decode(&pkt).unwrap();
+			let _ = dec.decode(&pkt.payload).unwrap();
 		}
 
 		let pkt = enc.encode(&frame).unwrap();
-		let decoded = dec.decode(&pkt).unwrap();
-		assert_eq!(decoded.len(), frame.len());
+		let decoded = dec.decode(&pkt.payload).unwrap();
+		assert_eq!(decoded.samples.len(), frame.len());
 
 		let energy_in: f32 = frame.iter().map(|s| s * s).sum();
-		let energy_out: f32 = decoded.iter().map(|s| s * s).sum();
+		let energy_out: f32 = decoded.samples.iter().map(|s| s * s).sum();
 		let ratio = energy_out / energy_in;
 		assert!(
 			(0.5..2.0).contains(&ratio),
@@ -673,14 +693,14 @@ mod tests {
 		let mut dec = Decoder::new(&enc.catalog()).unwrap();
 		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
 
-		let first = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
+		let first = dec.decode(&enc.encode(&frame).unwrap().payload).unwrap();
 		assert_eq!(
-			first.len(),
+			first.samples.len(),
 			(enc.frame_size() - enc.pre_skip as usize) * enc.codec_channels() as usize
 		);
 
-		let second = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
-		assert_eq!(second.len(), frame.len());
+		let second = dec.decode(&enc.encode(&frame).unwrap().payload).unwrap();
+		assert_eq!(second.samples.len(), frame.len());
 	}
 
 	#[test]
@@ -732,8 +752,11 @@ mod tests {
 		let next = vec![0.0; enc.frame_size()];
 		let actual = enc.encode(&next).unwrap();
 		let mut decoder = Decoder::new(&enc.catalog()).unwrap();
-		let decoded = decoder.decode(&actual).unwrap();
-		let peak = decoded.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+		let decoded = decoder.decode(&actual.payload).unwrap();
+		let peak = decoded
+			.samples
+			.iter()
+			.fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 		assert!(peak < 0.001, "pre-reset impulse leaked into the next epoch: {peak}");
 
 		enc.reset();
@@ -835,9 +858,9 @@ mod tests {
 		let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
 
 		let packet = enc.encode(&input).unwrap();
-		let output = dec.decode(&packet).unwrap();
+		let output = dec.decode(&packet.payload).unwrap();
 
-		assert_eq!(output, input);
+		assert_eq!(output.samples, input);
 	}
 
 	#[test]

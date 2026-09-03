@@ -42,20 +42,20 @@ pub enum Error {
 	FingerprintUnsupported,
 
 	/// The `http://` fingerprint bootstrap could not reach the relay.
-	#[error("failed to fetch certificate fingerprint")]
-	FetchFingerprint(#[source] reqwest::Error),
+	#[error("failed to fetch certificate fingerprint: {0}")]
+	FetchFingerprint(String),
 
 	/// The relay answered the fingerprint bootstrap with a non-success status.
-	#[error("certificate fingerprint request failed")]
-	FingerprintStatus(#[source] reqwest::Error),
+	#[error("certificate fingerprint request failed with status {0}")]
+	FingerprintStatus(u16),
 
 	/// The fingerprint response body could not be read.
-	#[error("failed to read certificate fingerprint")]
-	ReadFingerprint(#[source] reqwest::Error),
+	#[error("failed to read certificate fingerprint: {0}")]
+	ReadFingerprint(String),
 
 	/// The fetched fingerprint was not valid hex.
-	#[error("invalid certificate fingerprint")]
-	InvalidFingerprint(#[source] hex::FromHexError),
+	#[error("invalid certificate fingerprint: {0}")]
+	InvalidFingerprint(String),
 
 	/// The fetched fingerprint decoded to the wrong length, so it isn't a SHA-256.
 	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
@@ -113,16 +113,24 @@ pub enum Error {
 	Connect(#[source] std::io::Error),
 
 	/// An established connection failed, including when accepting an incoming one.
-	#[error(transparent)]
-	Connection(#[from] web_transport_quiche::ez::ConnectionError),
+	#[error("{0}")]
+	Connection(String),
 
 	/// The QUIC handshake failed, most often TLS verification or a timeout.
-	#[error("failed to establish quiche connection")]
-	Establish(#[source] web_transport_quiche::ez::ConnectionError),
+	#[error("failed to establish quiche connection: {0}")]
+	Establish(String),
 
 	/// The WebTransport CONNECT failed over an otherwise healthy QUIC connection.
-	#[error("failed to connect to quiche server")]
-	ClientConnect(#[from] web_transport_quiche::ClientError),
+	#[error("failed to connect to quiche server: {message}")]
+	ClientConnect {
+		/// What the handshake reported.
+		message: String,
+		/// The HTTP status the server answered the CONNECT with, when it answered with one.
+		///
+		/// Read at conversion time rather than kept as a `web-transport-quiche` error, so the
+		/// classification survives without that crate appearing in this crate's public API.
+		status: Option<u16>,
+	},
 
 	/// The server refused the WebTransport CONNECT with a recognized status, such as
 	/// an auth failure. See [`crate::ConnectError`].
@@ -134,16 +142,16 @@ pub enum Error {
 	ServerBuild(#[source] std::io::Error),
 
 	/// The client never sent a usable WebTransport CONNECT request.
-	#[error("failed to accept WebTransport request")]
-	AcceptRequest(#[source] web_transport_quiche::ServerError),
+	#[error("failed to accept WebTransport request: {0}")]
+	AcceptRequest(String),
 
 	/// The `200 OK` response to a WebTransport CONNECT could not be sent.
-	#[error("failed to accept quiche WebTransport")]
-	Accept(#[source] web_transport_quiche::ServerError),
+	#[error("failed to accept quiche WebTransport: {0}")]
+	Accept(String),
 
 	/// The rejection response to a WebTransport CONNECT could not be sent.
-	#[error("failed to close quiche WebTransport request")]
-	Reject(#[source] web_transport_quiche::ServerError),
+	#[error("failed to close quiche WebTransport request: {0}")]
+	Reject(String),
 
 	/// The TLS configuration was invalid. See [`crate::tls::Error`].
 	#[error(transparent)]
@@ -167,6 +175,19 @@ impl crate::failover::Aggregate for Error {
 		match error {
 			Some(error) => Self::DnsLookup(error),
 			None => Self::NoDnsEntries,
+		}
+	}
+}
+
+crate::error::from_message! {
+	web_transport_quiche::ez::ConnectionError => Connection,
+}
+
+impl From<web_transport_quiche::ClientError> for Error {
+	fn from(err: web_transport_quiche::ClientError) -> Self {
+		Self::ClientConnect {
+			status: client_status(&err),
+			message: crate::error::message(err),
 		}
 	}
 }
@@ -378,7 +399,7 @@ impl QuicheClient {
 					.map_err(Error::Connect)?
 					.established()
 					.await
-					.map_err(Error::Establish)?;
+					.map_err(|err| Error::Establish(crate::error::message(err)))?;
 				Ok::<_, Error>(conn)
 			}
 		})
@@ -473,11 +494,14 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 
 	let resp = reqwest::get(fp.as_str())
 		.await
-		.map_err(Error::FetchFingerprint)?
-		.error_for_status()
-		.map_err(Error::FingerprintStatus)?;
-	let text = resp.text().await.map_err(Error::ReadFingerprint)?;
-	let bytes = hex::decode(text.trim()).map_err(Error::InvalidFingerprint)?;
+		.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
+	let status = resp.status().as_u16();
+	let resp = resp.error_for_status().map_err(|_| Error::FingerprintStatus(status))?;
+	let text = resp
+		.text()
+		.await
+		.map_err(|err| Error::ReadFingerprint(crate::error::message(err)))?;
+	let bytes = hex::decode(text.trim()).map_err(|err| Error::InvalidFingerprint(crate::error::message(err)))?;
 	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
 }
 
@@ -485,7 +509,9 @@ impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
-			Self::ClientConnect(err) => classify_client_error(err),
+			Self::ClientConnect {
+				status: Some(status), ..
+			} => crate::ConnectError::from_status_u16(*status),
 			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
@@ -497,10 +523,8 @@ impl Error {
 	/// WebTransport CONNECT response. See [`crate::Error::status`].
 	pub(crate) fn status(&self) -> Option<u16> {
 		match self {
-			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
-				err.status().map(|status| status.as_u16())
-			}
-			Self::ClientConnect(err) => client_status(err),
+			Self::FingerprintStatus(status) => Some(*status),
+			Self::ClientConnect { status, .. } => *status,
 			// Every raced address has to have answered, and answered with something not worth
 			// repeating, before the set counts as settled: one address refusing says nothing about
 			// the others, which may simply have been unroutable.
@@ -520,21 +544,16 @@ impl Error {
 }
 
 fn map_client_error(err: web_transport_quiche::ClientError) -> Error {
-	if let Some(err) = classify_client_error(&err) {
-		return err.into();
+	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+		Some(rejected) => rejected.into(),
+		None => err.into(),
 	}
-
-	err.into()
-}
-
-fn classify_client_error(err: &web_transport_quiche::ClientError) -> Option<crate::ConnectError> {
-	client_status(err).and_then(crate::ConnectError::from_status_u16)
 }
 
 /// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
 /// all (as opposed to the connection failing underneath the request).
 ///
-/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// Read once, when the error is converted: [`Error::connect_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
 /// the status. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
@@ -761,7 +780,7 @@ pub(crate) async fn accept(
 			// WebTransport over HTTP/3
 			let request = web_transport_quiche::h3::Request::accept(conn)
 				.await
-				.map_err(Error::AcceptRequest)?;
+				.map_err(|err| Error::AcceptRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
 
 			let mut response = web_transport_quiche::proto::ConnectResponse::OK;
@@ -770,7 +789,10 @@ pub(crate) async fn accept(
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
 			}
-			let session = request.respond(response).await.map_err(Error::Accept)?;
+			let session = request
+				.respond(response)
+				.await
+				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, url, identity))
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),

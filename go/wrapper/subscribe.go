@@ -12,34 +12,6 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
-// Route returns the route the broadcast currently takes to reach this origin:
-// relay hop ids (oldest first) plus the publisher's advertised cost (lower wins).
-func (b *BroadcastConsumer) Route() Route {
-	return b.inner.Route()
-}
-
-// RouteUpdates watches the broadcast's route. Next yields the current route
-// first, then every change (e.g. an upstream failover).
-func (b *BroadcastConsumer) RouteUpdates() *RouteWatch {
-	return &RouteWatch{inner: b.inner.RouteUpdates()}
-}
-
-// RouteWatch is a stream of route updates for one broadcast.
-type RouteWatch struct {
-	inner *ffi.MoqRouteWatch
-}
-
-// Next returns the next route: the current one on the first call, then each
-// change, or (nil, nil) when the broadcast ends.
-func (r *RouteWatch) Next(ctx context.Context) (*Route, error) {
-	return runCancellable(ctx, r.inner.Cancel, r.inner.Next)
-}
-
-// Cancel stops the watch, unblocking any in-flight Next.
-func (r *RouteWatch) Cancel() {
-	r.inner.Cancel()
-}
-
 // SubscribeCatalog subscribes to the broadcast's catalog track.
 func (b *BroadcastConsumer) SubscribeCatalog() (*CatalogConsumer, error) {
 	inner, err := b.inner.SubscribeCatalog()
@@ -50,7 +22,7 @@ func (b *BroadcastConsumer) SubscribeCatalog() (*CatalogConsumer, error) {
 }
 
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
-// subscription tunes delivery priority, group ordering priority, and group range; pass nil for defaults.
+// subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(name string, subscription *Subscription) (*TrackConsumer, error) {
 	inner, err := b.inner.SubscribeTrack(name, subscription)
 	if err != nil {
@@ -81,7 +53,7 @@ func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, contai
 }
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
-// subscription tunes delivery priority, group ordering priority, group range, and
+// subscription tunes delivery priority, group range, and
 // the max age; pass nil for defaults. Raise Subscription.MaxAgeMs to
 // buffer instead of skipping a stalled group.
 func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, subscription *Subscription) (*MediaConsumer, error) {

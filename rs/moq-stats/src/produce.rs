@@ -615,6 +615,8 @@ impl<T: Serialize + Default> TrackFamily<T> {
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
 	broadcast: broadcast::Producer,
+	/// The route advertising this group's broadcast; dropping it retracts.
+	_announcement: moq_net::announce::Producer,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// tier track no drain has created yet parks (served next tick) instead of
 	/// being rejected `NotFound` on the spot.
@@ -633,10 +635,17 @@ struct GroupPublisher {
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
 		let advertised = advertised_path(prefix, group, node);
-		let mut broadcast = match origin.create_broadcast(&advertised, broadcast::Route::new().with_announce(true)) {
+		let mut broadcast = match origin.create_broadcast(&advertised) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
+				return None;
+			}
+		};
+		let announcement = match origin.announce(&advertised, origin::Route::default()) {
+			Ok(announcement) => announcement,
+			Err(err) => {
+				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats announce");
 				return None;
 			}
 		};
@@ -674,6 +683,7 @@ impl GroupPublisher {
 
 		Some(Self {
 			broadcast,
+			_announcement: announcement,
 			dynamic,
 			requested: HashSet::new(),
 			traffic,
@@ -878,7 +888,7 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -911,6 +921,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
+		route: announce::Producer,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
@@ -936,18 +947,13 @@ mod tests {
 		let egress = origin.consume().with_stats(ctx);
 
 		let mut announced = egress.announced();
-		let mut source = origin
-			.create_broadcast(path, broadcast::Route::announced())
-			.expect("create_broadcast");
+		let mut source = origin.create_broadcast(path).expect("create_broadcast");
+		let route = origin.announce(path, origin::Route::default()).expect("announce");
 		let mut producer = source.create_track("video", None).expect("create_track");
 
-		// Let the origin's source watcher attach and announce (paused time advances
-		// instantly and yields to the spawned tasks).
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
-		let consumer = broadcast.expect("active");
+		let update = announced.next().await.expect("announce");
+		assert!(update.active);
+		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -976,6 +982,7 @@ mod tests {
 
 		Feed {
 			announced,
+			route,
 			source,
 			consumer,
 			sub,
@@ -986,8 +993,14 @@ mod tests {
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let announce::Update { path, broadcast } = consumer.next().await.expect("expected announce");
-		(path.as_str().to_string(), broadcast.expect("active"))
+		let update = consumer.next().await.expect("expected announce");
+		assert!(update.active);
+		let broadcast = origin
+			.consume()
+			.request_broadcast(update.prefix.as_path())
+			.await
+			.expect("resolve");
+		(update.prefix.as_path().as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.
@@ -1004,7 +1017,7 @@ mod tests {
 	/// wire format (a full JSON object per frame, no compression).
 	async fn read_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Traffic> {
 		let mut track = subscribe(broadcast, name).await;
-		let frame = track.read_frame().await.expect("ok").expect("frame");
+		let frame = next_frame(&mut track).await;
 		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 
@@ -1012,10 +1025,9 @@ mod tests {
 	/// immediate first (often empty) frame at time zero, so a test that records
 	/// traffic asynchronously reads the accumulated state rather than that stale one.
 	async fn read_last_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Traffic> {
-		use futures::FutureExt;
 		let mut track = subscribe(broadcast, name).await;
-		let mut last = track.read_frame().await.expect("ok").expect("frame");
-		while let Some(Ok(Some(frame))) = track.read_frame().now_or_never() {
+		let mut last = next_frame(&mut track).await;
+		while let Some(frame) = try_next_frame(&mut track) {
 			last = frame;
 		}
 		serde_json::from_slice(&last.payload).expect("json parse")
@@ -1023,17 +1035,32 @@ mod tests {
 
 	async fn read_session_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Presence> {
 		let mut track = subscribe(broadcast, name).await;
-		let frame = track.read_frame().await.expect("ok").expect("frame");
+		let frame = next_frame(&mut track).await;
 		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 
-	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, name: &str) -> track::Subscriber {
+	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, name: &str) -> track::Ordered {
 		broadcast
 			.track(name)
 			.expect("track")
 			.subscribe(None)
 			.await
 			.expect("subscribe")
+			.ordered()
+	}
+
+	/// The next group's first frame. Stats tracks are one frame per group, so this is
+	/// one published sample.
+	async fn next_frame(track: &mut track::Ordered) -> moq_net::frame::Frame {
+		let mut group = track.next_group().await.expect("ok").expect("group");
+		group.read_frame().await.expect("ok").expect("frame")
+	}
+
+	/// The same, without blocking: `None` once nothing more is buffered.
+	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
+		use futures::FutureExt;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?;
+		group.read_frame().now_or_never()?.expect("ok")
 	}
 
 	/// The advertised path normalizes a messy node suffix and drops an
@@ -1217,8 +1244,8 @@ mod tests {
 			.expect("logical track")
 			.subscribe(None);
 		drive_tick().await;
-		let mut sub = subscribing.await.expect("an idle tier's track is held open");
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let mut sub = subscribing.await.expect("an idle tier's track is held open").ordered();
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
 		assert!(parsed.is_empty(), "an idle tier serves zeros, got {parsed:?}");
 	}
@@ -1293,15 +1320,15 @@ mod tests {
 		// Nothing has recorded on the rtmp tier: the track does not exist yet.
 		let subscribing = broadcast.track("rtmp/publisher.json").expect("track").subscribe(None);
 		drive_tick().await;
-		let mut sub = subscribing.await.expect("held open, not rejected");
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let mut sub = subscribing.await.expect("held open, not rejected").ordered();
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
 		assert!(parsed.is_empty(), "an idle tier serves zeros");
 
 		// The tier records: the same subscription carries the data.
 		let _rtmp = feed(producer.registry(), Tier::new("rtmp"), "foo/live", true, 1, 7).await;
 		drive_tick().await;
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
 		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 7);
 	}
@@ -1333,8 +1360,8 @@ mod tests {
 
 		let subscribing = broadcast.track("webrtc/sessions.json").expect("track").subscribe(None);
 		drive_tick().await;
-		let mut sub = subscribing.await.expect("held open, not rejected");
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let mut sub = subscribing.await.expect("held open, not rejected").ordered();
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Presence> = serde_json::from_slice(&frame.payload).expect("json");
 		assert!(parsed.is_empty());
 	}
@@ -1376,8 +1403,11 @@ mod tests {
 		drive_tick().await;
 
 		// The queued subscription resolves and carries the tier's first data.
-		let mut sub = subscribing.await.expect("fulfilled by the tick's own creation");
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let mut sub = subscribing
+			.await
+			.expect("fulfilled by the tick's own creation")
+			.ordered();
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
 		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 7);
 	}
@@ -1459,8 +1489,8 @@ mod tests {
 		// The tier records while the request is parked: the flush adopts it.
 		let _rt = feed(producer.registry(), Tier::new("rt"), "foo/live", true, 1, 9).await;
 		drive_tick().await;
-		let mut sub = subscribing.await.expect("adopted by the flush");
-		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let mut sub = subscribing.await.expect("adopted by the flush").ordered();
+		let frame = next_frame(&mut sub).await;
 		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
 		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 9);
 	}

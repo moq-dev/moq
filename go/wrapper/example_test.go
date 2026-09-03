@@ -32,6 +32,9 @@ func ExampleClient_Announced() {
 			}
 			log.Fatal(err)
 		}
+		if !ann.Active() {
+			continue
+		}
 		fmt.Println("broadcast:", ann.Path())
 	}
 }

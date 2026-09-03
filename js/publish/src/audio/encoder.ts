@@ -201,7 +201,7 @@ export class Encoder {
 			reader.cancel().catch(() => {});
 		});
 
-		const gain = new Gain();
+		const gain = new Gain(this.muted.peek() ? 0 : this.volume.peek());
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -213,8 +213,8 @@ export class Encoder {
 
 				// Every rendition shares the captured frame, so gain returns a copy rather than
 				// scaling in place; muting one rendition must not silence the rest.
-				const frame = gain.apply(next.value, format.sampleRate);
 				gain.set(this.muted.peek() ? 0 : this.volume.peek());
+				const frame = gain.apply(next.value, format.sampleRate);
 
 				// The config rebuilds when the channel count moves, so skip anything that arrives
 				// mid-swap rather than framing it wrong.

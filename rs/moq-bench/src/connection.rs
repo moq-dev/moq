@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_tokio::Status;
-use moq_tokio::moq_net::{self, Origin, bytes::Bytes};
+use moq_tokio::moq_net::{self, Hop, bytes::Bytes};
 use moq_tokio::moq_net::{broadcast, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -96,9 +96,9 @@ pub async fn run(ctx: Connection) {
 	let url = config.client.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
-	let publish = moq_tokio::origin::spawn(Origin::random());
+	let publish = moq_tokio::origin::spawn(Hop::random());
 	// Consume side: the session fills this with peer announcements.
-	let consume = moq_tokio::origin::spawn(Origin::random());
+	let consume = moq_tokio::origin::spawn(Hop::random());
 
 	let namespace = format!("{}/{run_id:08x}", config.name());
 	let discovery = if config.publishes() {
@@ -108,6 +108,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	let mut broadcasts = Vec::new();
+	let mut announcements = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
@@ -124,7 +125,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_announce(true)) {
+		let mut broadcast = match publish.create_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
@@ -138,9 +139,18 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
+		let announcement = match publish.announce(&path, Default::default()) {
+			Ok(announcement) => announcement,
+			Err(err) => {
+				tracing::error!(connection, %err, "failed to announce broadcast");
+				continue;
+			}
+		};
 		own.insert(relative);
-		// Hold the broadcast producer for the connection's lifetime so it stays announced.
+		// Hold the broadcast producer and its announcement for the connection's
+		// lifetime so it stays published and advertised.
 		broadcasts.push(broadcast);
+		announcements.push(announcement);
 
 		let stats = stats.clone();
 		tasks.spawn(produce(connection, path, rolled, track, stats));
@@ -278,20 +288,20 @@ async fn produce(
 /// The relay announces its own broadcasts too (`.stats/...` when stats publishing
 /// is on, which production relays enable), and a subscription slot burned on one
 /// of those is never retried, so an unscoped consumer starves the subscribe side.
-fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announce::Consumer {
+fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::origin::Consumer {
 	consume
 		.consume()
 		.with_root(name)
 		.expect("origin must permit the bench namespace")
-		.announced()
 }
 
 /// Wait for one exact broadcast and drain it for the lifetime of the source.
 async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats: Arc<Stats>) -> anyhow::Result<()> {
-	let broadcast = consume
-		.announced_broadcast(path.as_str())
+	consume
+		.routed(path.as_str())
 		.await
 		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
+	let broadcast = consume.request_broadcast(path.as_str()).await?;
 	drain(broadcast, &stats).await
 }
 
@@ -308,12 +318,13 @@ async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats
 /// second startup window of the run, and the whole swarm is subscribed within
 /// two of them.
 async fn subscribe(
-	mut announced: moq_net::announce::Consumer,
+	consume: moq_net::origin::Consumer,
 	own: HashSet<String>,
 	want: u64,
 	startup: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
+	let mut announced = consume.announced();
 	let mut tasks = JoinSet::new();
 	let mut seen: HashSet<String> = HashSet::new();
 	let mut pool = Vec::new();
@@ -329,36 +340,44 @@ async fn subscribe(
 			biased;
 			_ = &mut deadline => break,
 			update = announced.next() => {
-				let Some(moq_net::announce::Update { path, broadcast }) = update else { break };
-				let Some(broadcast) = broadcast else { continue };
-				let path = path.as_str().to_string();
+				let Some(update) = update else { break };
+				if !update.active {
+					continue;
+				}
+				let path = update.prefix.as_path().as_str().to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
 				eligible += 1;
-				reservoir_push(&mut pool, want as usize, eligible, (path, broadcast));
+				reservoir_push(&mut pool, want as usize, eligible, path);
 			}
 		}
 	}
 
 	let mut selected = pool.len() as u64;
-	for (path, broadcast) in pool {
+	for path in pool {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+			continue;
+		};
 		spawn_drain(&mut tasks, path, broadcast, stats.clone());
 	}
 
 	// Top up from late announcements, first-come: the pool was too small, so
 	// there is nothing to spread over.
 	while selected < want {
-		let Some(moq_net::announce::Update { path, broadcast }) = announced.next().await else {
+		let Some(update) = announced.next().await else {
 			break;
 		};
-		let Some(broadcast) = broadcast else {
+		if !update.active {
 			continue;
-		};
-		let path = path.as_str().to_string();
+		}
+		let path = update.prefix.as_path().as_str().to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
+		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+			continue;
+		};
 		selected += 1;
 		spawn_drain(&mut tasks, path, broadcast, stats.clone());
 	}
@@ -556,7 +575,13 @@ mod tests {
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
+		let mut sub = consumer
+			.track(TRACK)
+			.unwrap()
+			.subscribe(replay())
+			.await
+			.unwrap()
+			.ordered();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
@@ -591,7 +616,13 @@ mod tests {
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
+		let mut sub = consumer
+			.track(TRACK)
+			.unwrap()
+			.subscribe(replay())
+			.await
+			.unwrap()
+			.ordered();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.
@@ -623,7 +654,7 @@ mod tests {
 		));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
@@ -650,7 +681,7 @@ mod tests {
 		let task = tokio::spawn(produce(3, "bench/test".into(), rolled(10, 50, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
@@ -670,28 +701,24 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let _internal = origin
-			.create_broadcast(".stats/node/host", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let _internal = origin.create_broadcast(".stats/node/host").unwrap();
+		let _announce_internal = origin.announce(".stats/node/host", Default::default()).unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let _previous = origin
-			.create_broadcast("bench/previous/0/0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let _previous = origin.create_broadcast("bench/previous/0/0").unwrap();
+		let _announce_previous = origin.announce("bench/previous/0/0", Default::default()).unwrap();
 
-		let _own = origin
-			.create_broadcast("bench/current/9/9", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let _own = origin.create_broadcast("bench/current/9/9").unwrap();
+		let _announce_own = origin.announce("bench/current/9/9", Default::default()).unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let mut peer = origin
-			.create_broadcast("bench/current/0/0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let mut peer = origin.create_broadcast("bench/current/0/0").unwrap();
+		let _announce_peer = origin.announce("bench/current/0/0", Default::default()).unwrap();
 		let mut track = peer.create_track(TRACK, None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
@@ -713,13 +740,12 @@ mod tests {
 	#[tokio::test]
 	async fn named_subscription_waits_for_the_exact_broadcast() {
 		let stats = Arc::new(Stats::default());
-		let origin = moq_tokio::origin::spawn(Origin::random());
+		let origin = moq_tokio::origin::spawn(Hop::random());
 		let consume = origin.consume();
 		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
 
-		let mut broadcast = origin
-			.create_broadcast("bench/run/chat", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let mut broadcast = origin.create_broadcast("bench/run/chat").unwrap();
+		let _announce_broadcast = origin.announce("bench/run/chat", Default::default()).unwrap();
 		let mut track = broadcast.create_track(TRACK, None).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();

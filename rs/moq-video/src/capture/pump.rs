@@ -5,7 +5,7 @@
 //! dedicated thread that pushes frames into the channel; the encode loop awaits
 //! them like any other backend. The device is built on the thread (so a `!Send`
 //! handle such as `IMFSourceReader` is fine) and dropped when the thread exits.
-//! [`PumpGuard`] stops and joins the thread when the [`FrameStream`](super::FrameStream)
+//! [`PumpGuard`] stops and joins the thread when the [`Stream`](super::Stream)
 //! drops, releasing the device. The stop flag is checked between reads, so on a
 //! live device (which delivers a frame per interval) shutdown is prompt; the join
 //! is what guarantees the device fd is closed before a subsequent reopen, so we
@@ -26,7 +26,7 @@ pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: Option<u32>,
-	pub device: String,
+	pub label: String,
 }
 
 /// Stops and joins the pump thread on drop, releasing the device.
@@ -83,7 +83,7 @@ where
 					Ok(Some(frame)) => chan.push(frame),
 					Ok(None) => break, // device stopped producing frames
 					Err(err) => {
-						tracing::warn!(error = %err, "capture read failed; stopping");
+						chan.fail(err);
 						break;
 					}
 				}

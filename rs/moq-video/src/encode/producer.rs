@@ -403,6 +403,13 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
+#[cfg(any(feature = "capture", test))]
+fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
+	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
+	// for demand again so the next timestamp does not stretch the previous frame across the gap.
+	producer.discontinuity()
+}
+
 /// Async capture/encode loop. Opens the camera while at least one viewer is
 /// watching and releases it when the last one leaves.
 ///
@@ -452,7 +459,7 @@ async fn capture_loop<E: CatalogExt>(
 		// Force an IDR on the first frame of each (re)open so a viewer subscribing
 		// after an idle gap can start decoding immediately.
 		let mut force_keyframe = true;
-		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
+		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// A reopen can negotiate a different mode (a display resized while nothing was
 		// subscribed), and the claim follows it: the old ceiling would otherwise cap a
@@ -487,10 +494,12 @@ async fn capture_loop<E: CatalogExt>(
 					apply_estimate(&mut encoder, &mut rate, estimate).await;
 					continue;
 				}
-				frame = camera.read() => frame,
+				// A read error is terminal for this selection (the source is gone
+				// or was refused); `None` just ends the stream, so reopen below.
+				frame = camera.read() => frame?,
 			};
 
-			let Some(surface) = frame else { break }; // device stopped producing frames
+			let Some(surface) = frame else { break };
 
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
@@ -504,7 +513,9 @@ async fn capture_loop<E: CatalogExt>(
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
-		tracing::info!("no viewers: released camera");
+		drop(encoder);
+		capture_stopped(producer)?;
+		tracing::info!("capture stopped; released source");
 	}
 }
 
@@ -563,6 +574,81 @@ mod tests {
 		let snapshot = catalog.snapshot();
 		let (name, config) = snapshot.video.renditions.iter().next()?;
 		Some((name.clone(), config.clone()))
+	}
+
+	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+		let mut groups = Vec::new();
+		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while group.next_frame().await.unwrap().is_some() {
+				frames += 1;
+			}
+			groups.push(frames);
+		}
+		groups
+	}
+
+	/// An on-demand capture resumes on the same wall clock after releasing its camera and encoder,
+	/// so the idle transition must publish an empty group between the two runs. This uses synthetic
+	/// frames and the software encoder to exercise the transition without capture hardware.
+	#[tokio::test]
+	async fn idle_capture_publishes_a_discontinuity_before_resume() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		// The synthetic clock jumps ten seconds. Keep every fixture group readable until the
+		// assertion instead of letting the default five-second publisher window evict the marker.
+		let replay = std::time::Duration::from_secs(11);
+		let track = broadcast
+			.create_track(
+				"video",
+				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
+			)
+			.unwrap();
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(replay));
+
+		let mut config = Config::new(320, 240, 30);
+		config.kind = encoder::Kind::Software;
+		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+
+		for timestamp in [0, 10_000_000] {
+			if timestamp > 0 {
+				capture_stopped(&mut producer).unwrap();
+			}
+			encoder.keyframe();
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		}
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![1, 0, 1]);
+	}
+
+	#[tokio::test]
+	async fn source_resize_updates_the_published_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut initial = Config::new(320, 240, 30);
+		initial.kind = encoder::Kind::Software;
+		let mut producer = Producer::new(broadcast, catalog.clone(), initial.probe().await.unwrap()).unwrap();
+
+		for (timestamp, config) in [(0, initial), (33_333, Config::new(640, 360, 30))] {
+			let mut config = config;
+			config.kind = encoder::Kind::Software;
+			let mut encoder = Encoder::new(&config).unwrap();
+			encoder.keyframe();
+			let rgba = vec![0x80u8; usize::try_from(config.width * config.height * 4).unwrap()];
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			capture_stopped(&mut producer).unwrap();
+		}
+
+		let (_, rendition) = rendition(&catalog).expect("the resized rendition should be published");
+		assert_eq!(rendition.coded_width, Some(640));
+		assert_eq!(rendition.coded_height, Some(360));
 	}
 
 	/// Regression: a caller's container selection has to survive the config -> hint conversion.

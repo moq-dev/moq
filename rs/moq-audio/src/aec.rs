@@ -137,6 +137,7 @@ impl Canceller {
 		let inner = Arc::new(Inner {
 			id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
 			enabled: AtomicBool::new(true),
+			discontinuous: AtomicBool::new(false),
 			config,
 			state: Arc::new(Mutex::new(State::default())),
 			shared: shared.clone(),
@@ -219,12 +220,30 @@ impl Canceller {
 	/// echo.
 	///
 	/// Interleaved at the format passed to [`open`](Self::open). Runs on the
-	/// microphone callback thread, so it locks rather than allocates: the
-	/// buffers are sized in `open` for callbacks up to [`MAX_CALLBACK`] frames,
-	/// and only a larger one grows them.
+	/// microphone callback thread, so it never waits for the playback driver.
+	/// Contention during a reference switch passes this buffer through; the
+	/// next callback resumes cancellation.
 	pub(crate) fn process(&self, buf: &mut [f32]) {
 		let enabled = self.enabled();
-		self.inner.state.lock().unwrap().process(buf, enabled);
+		let Ok(mut state) = self.inner.state.try_lock() else {
+			self.mark_discontinuous();
+			return;
+		};
+		if self.inner.discontinuous.swap(false, Ordering::Relaxed) {
+			state.reset();
+		}
+		state.process(buf, enabled);
+	}
+
+	/// Discard partial frames before processing the next capture buffer.
+	pub(crate) fn mark_discontinuous(&self) {
+		self.inner.discontinuous.store(true, Ordering::Relaxed);
+	}
+
+	/// Number of microphone samples waiting for a complete AEC frame.
+	#[cfg(test)]
+	pub(crate) fn pending_samples(&self) -> usize {
+		self.inner.state.lock().unwrap().pending.len()
 	}
 }
 
@@ -243,6 +262,8 @@ struct Inner {
 	/// so dropping the first doesn't take the second's tap with it.
 	id: u64,
 	enabled: AtomicBool,
+	/// Whether capture continuity broke since the last processed callback.
+	discontinuous: AtomicBool,
 	config: Config,
 	/// Behind its own `Arc` so the playback driver can reach it without holding
 	/// a handle on this `Inner`. Dropping such a handle from inside the driver's
@@ -258,10 +279,10 @@ impl Drop for Inner {
 	}
 }
 
-/// Everything the microphone callback owns while it holds the lock.
+/// Everything the microphone callback accesses while it holds the lock.
 ///
-/// Uncontended in practice: only that callback takes it, plus the playback
-/// driver on a device switch.
+/// Only the playback driver on a reference switch contends, and the callback
+/// passes that buffer through rather than waiting.
 struct State {
 	/// `None` until a microphone opens and reports its format.
 	processor: Option<AudioProcessing>,
@@ -560,6 +581,7 @@ fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 #[cfg(test)]
 mod tests {
 	use std::collections::VecDeque;
+	use std::time::Duration;
 
 	use super::*;
 
@@ -678,6 +700,52 @@ mod tests {
 		let mut buf = vec![0.5f32; 960 * 2];
 		canceller.process(&mut buf);
 		assert!(buf.iter().all(|s| *s == 0.5), "passthrough altered the samples");
+	}
+
+	#[test]
+	fn reference_switch_contention_never_waits_on_the_callback() {
+		let canceller = opened(48_000, 1);
+		let locked = canceller.inner.state.lock().unwrap();
+		let callback = canceller.clone();
+		let (done, finished) = std::sync::mpsc::sync_channel(1);
+
+		let thread = std::thread::spawn(move || {
+			let mut buf = vec![0.5f32; 480];
+			callback.process(&mut buf);
+			done.send(buf).unwrap();
+		});
+
+		let buf = finished
+			.recv_timeout(Duration::from_millis(100))
+			.expect("the microphone callback waited for the reference lock");
+		assert!(buf.iter().all(|sample| *sample == 0.5));
+
+		drop(locked);
+		thread.join().unwrap();
+	}
+
+	#[test]
+	fn reference_switch_contention_discards_partial_frames() {
+		let canceller = opened(48_000, 1);
+		let frame = frame(48_000);
+
+		let mut first = vec![0.5f32; frame + 32];
+		canceller.process(&mut first);
+		assert_eq!(canceller.inner.state.lock().unwrap().pending.len(), 32);
+
+		let locked = canceller.inner.state.lock().unwrap();
+		let mut bypassed = vec![0.25f32; frame + 32];
+		canceller.process(&mut bypassed);
+		drop(locked);
+		assert!(bypassed.iter().all(|sample| *sample == 0.25));
+
+		let mut resumed = vec![0.75f32; frame - 32];
+		canceller.process(&mut resumed);
+		assert_eq!(
+			canceller.inner.state.lock().unwrap().pending.len(),
+			frame - 32,
+			"samples buffered before contention leaked across the passthrough"
+		);
 	}
 
 	/// Turning it off must drop the partial frame that was in flight, which would

@@ -32,18 +32,22 @@ impl Deprecated {
 	/// `env` is the released variable, which is the half a rename usually misses:
 	/// a deployment configured through the environment never typed the flag, so a
 	/// message naming only the flag reads as unrelated to its problem.
-	pub(crate) fn flag(&mut self, old: &str, env: Option<&str>, new: &str) {
+	///
+	/// Public because a binary flattening these configs has renamed flags of its own
+	/// (`moq-cli` does), and they belong in the same message: a process that refuses
+	/// twice makes the caller fix one rename, rerun, and hit the next.
+	pub fn flag(&mut self, old: &str, env: Option<&str>, new: &str) {
 		self.entry(&Self::spelling(old, env), new, None);
 	}
 
 	/// Record a released flag whose replacement does not mean the same thing, with
 	/// a note saying how it differs.
-	pub(crate) fn changed(&mut self, old: &str, env: Option<&str>, new: &str, note: &str) {
+	pub fn changed(&mut self, old: &str, env: Option<&str>, new: &str, note: &str) {
 		self.entry(&Self::spelling(old, env), new, Some(note));
 	}
 
 	/// Record a released config-file key or table, which has no environment variable.
-	pub(crate) fn toml(&mut self, old: &str, new: &str, note: Option<&str>) {
+	pub fn toml(&mut self, old: &str, new: &str, note: Option<&str>) {
 		self.entry(old, new, note);
 	}
 

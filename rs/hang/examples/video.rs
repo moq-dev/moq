@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_tokio::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
@@ -82,9 +82,10 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Create a broadcast on the origin; the live route announces it.
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
-	let mut broadcast = origin
-		.create_broadcast("", moq_net::broadcast::Route::new().with_announce(true))
-		.context("failed to create broadcast")?;
+	let mut broadcast = origin.create_broadcast("").context("failed to create broadcast")?;
+	let _announcement = origin
+		.announce("", Default::default())
+		.context("failed to announce broadcast")?;
 	let track = create_track(&mut broadcast)?;
 
 	// Wrap in a Producer for keyframe-based group management.

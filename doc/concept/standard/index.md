@@ -1,49 +1,32 @@
 ---
 title: Standards
-description: IETF drafts and protocol specifications
+description: IETF drafts and protocol specifications used by MoQ
 ---
 
 # Standards
 
-MoQ is a big tent, full of many different opinions and ideas.
-I consider any media protocol that uses QUIC to be part of MoQ, even if it's part of a standards body or organization.
-
-Additionally, MoQ is experimental and not yet battle-tested, so expect all of these standards to change.
-If you're interested in participating, join any of these communities and get involved.
+MoQ is still evolving. This project implements a focused protocol stack while
+remaining compatible with the broader IETF work where practical.
 
 ## IETF MoQ Working Group
 
-The IETF MoQ Working Group is the official standardization body for MoQ.
-The group is primarily focusing on the [MoqTransport](/concept/standard/moq-transport) specification, but there's a number of other drafts too.
+The [IETF MoQ Working Group](https://datatracker.ietf.org/group/moq/about/)
+develops the MoqTransport protocol and related media specifications.
 
-There's no membership fee or criteria to join.
-If you want to participate, you should show up to the regular online (and in-person) meetings.
-Once you get more involved, jump into the excessive number of [GitHub issues](https://github.com/moq-wg/moq-transport/issues) and join the [mailing list](https://mailarchive.ietf.org/arch/browse/moq/).
+- [Working group documents](https://datatracker.ietf.org/group/moq/documents/)
+- [MoqTransport repository](https://github.com/moq-wg/moq-transport)
+- [Working group mailing list](https://mailarchive.ietf.org/arch/browse/moq/)
 
-- [Working Group](https://datatracker.ietf.org/group/moq/about/)
-- [Documents](https://datatracker.ietf.org/group/moq/documents/)
-- [GitHub](https://github.com/moq-wg/moq-transport)
+The main specifications described in this documentation are
+[MoqTransport](/concept/standard/moq-transport),
+[MSF](/concept/standard/msf), and [LOC](/concept/standard/loc).
 
-## moq.dev
+## moq.dev specifications
 
-[moq.dev](https://moq.dev) is an open-source implementation of MoQ primarily focused on production usage.
+The primary moq.dev stack uses [moq-lite](/concept/layer/moq-lite), a smaller
+forward-compatible transport profile, and [hang](/concept/layer/hang), its media
+catalog and container format. The normative specifications are maintained as
+[Internet-Drafts](/draft/) alongside the implementation.
 
-The goal is to support compatibility with the IETF drafts, but not a full implementation.
-The IETF process is slow and involves a lot of debate, discussion, and negotiation.
-All of this is *on purpose* and produces a better standard in the end.
-
-But the standard is too immature, full of bloat, and there's too much churn.
-If we had to gate every change behind IETF approval, it would take months to make even the smallest change.
-
-To that end, we've created a forwards-compatible subset of [MoqTransport](/concept/standard/moq-transport) called [moq-lite](/concept/layer/moq-lite).
-moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn)).
-
-On the media side, there are the [MSF](/concept/standard/msf) (catalog) and [LOC](/concept/standard/loc) (container) drafts.
-They are too early/unstable to be useful, so we're using a custom [hang](/concept/layer/hang) media format instead.
-
-Our own specifications are written as Internet-Drafts and rendered under [Drafts](/draft/).
-
-- [Website](https://moq.dev)
-- [GitHub](https://github.com/moq-dev/moq)
-- [Documentation](https://doc.moq.dev)
-- [Discord](https://discord.moq.dev)
+See [interoperability](/concept/standard/interop) for commands and current
+compatibility notes.

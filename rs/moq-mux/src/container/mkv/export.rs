@@ -228,8 +228,8 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			loop {
-				match track.source.poll_read(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
+				match track.source.poll_read(waiter)? {
+					Poll::Ready(Some(frame)) => {
 						let geometry_ready = track.kind == TrackKind::Audio
 							|| self
 								.catalog_snapshot
@@ -243,11 +243,10 @@ impl<S: Stream> Export<S> {
 						track.pending = Some(frame);
 						break;
 					}
-					Poll::Ready(Ok(None)) => {
+					Poll::Ready(None) => {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					Poll::Pending => break,
 				}
 			}

@@ -124,6 +124,17 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	pub(crate) fn from_escaped(s: String) -> PathOwned {
+		if s.is_empty() {
+			Path::empty()
+		} else {
+			Path(Repr::Shared {
+				buf: s.into(),
+				start: 0,
+			})
+		}
+	}
+
 	// A copy of this path skipping the first `n` bytes, reusing the shared buffer when possible.
 	fn slice_from(&'a self, n: usize) -> Path<'a> {
 		match &self.0 {

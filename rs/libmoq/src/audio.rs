@@ -349,11 +349,9 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		let owned = moq_audio::Frame {
-			// The C ABI carries plain microseconds; scale them at the boundary.
-			timestamp: moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?,
-			data: Bytes::copy_from_slice(data),
-		};
+		// The C ABI carries plain microseconds; scale them at the boundary.
+		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?;
+		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), timestamp);
 
 		let producer = State::lock().audio.producer(producer)?;
 		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.write(&owned)?;

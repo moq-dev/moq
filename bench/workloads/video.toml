@@ -1,0 +1,6 @@
+connections = 16
+broadcasts = 1
+subscribe = 2
+fps = 30
+frame_size = 1200
+group_size = 59

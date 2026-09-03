@@ -8,6 +8,9 @@
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
 
+/** Placeholder for a teardown slot that was cancelled while it was being drained. */
+const noop: Dispose = () => {};
+
 type Subscriber<T> = (value: T) => void;
 
 // @ts-ignore - Some environments don't recognize import.meta.env
@@ -370,6 +373,12 @@ export class Effect {
 
 	#fn?: (effect: Effect) => void;
 	#dispose?: Dispose[] = [];
+
+	// The teardown list a drain is walking, and how far it has got. Shared by the rerun and close
+	// paths so a `close` landing inside a rerun's drain continues that pass instead of starting a
+	// second one over callbacks that already ran. Set only while a drain is running.
+	#draining?: Dispose[];
+	#drained = 0;
 	#unwatch: Dispose[] = [];
 	#async: Promise<void>[] = [];
 
@@ -433,8 +442,13 @@ export class Effect {
 		this.#unwatch.length = 0;
 
 		// Run the cleanup functions for the previous run.
-		for (const fn of this.#dispose) fn();
-		this.#dispose.length = 0;
+		const dispose = this.#dispose;
+		this.#drain(dispose);
+
+		// A cleanup may have closed the effect, which drained the rest of the list and finished
+		// teardown already. There is no next run to open.
+		if (this.#dispose === undefined) return;
+		dispose.length = 0;
 
 		// Wait for every task this run spawned. Opening the next run while one is still in flight
 		// would hand that task's cleanup registrations, and its `abort` signal, to a run it never
@@ -549,10 +563,6 @@ export class Effect {
 	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
-		const promise = fn().catch((error) => {
-			console.error("spawn error", error);
-		});
-
 		if (this.#dispose === undefined) {
 			if (DEV) {
 				console.warn("Effect.spawn called when closed");
@@ -560,6 +570,14 @@ export class Effect {
 
 			return;
 		}
+
+		const promise = fn().catch((error) => {
+			console.error("spawn error", error);
+		});
+
+		// `fn` can close the effect before it first awaits. `close()` empties `#async` and only the
+		// rerun path drains it, so pushing now would pin the task on an effect that can never rerun.
+		if (this.#dispose === undefined) return;
 
 		this.#async.push(promise);
 	}
@@ -578,7 +596,7 @@ export class Effect {
 			timeout = undefined;
 			fn();
 		}, ms);
-		this.cleanup(() => timeout && clearTimeout(timeout));
+		this.cleanup(() => timeout !== undefined && clearTimeout(timeout));
 	}
 
 	/**
@@ -603,7 +621,7 @@ export class Effect {
 		}, ms);
 
 		this.#dispose.push(() => {
-			if (timeout) {
+			if (timeout !== undefined) {
 				clearTimeout(timeout);
 				effect.close();
 			}
@@ -624,7 +642,7 @@ export class Effect {
 			animate = undefined;
 		});
 		this.cleanup(() => {
-			if (animate) cancelAnimationFrame(animate);
+			if (animate !== undefined) cancelAnimationFrame(animate);
 		});
 	}
 
@@ -668,10 +686,17 @@ export class Effect {
 
 		return () => {
 			effect.close();
+
 			// Drop our disposer from the parent so repeated run()/dispose() cycles don't pile up.
 			const disposers = this.#dispose;
 			const index = disposers?.indexOf(dispose) ?? -1;
-			if (index !== -1) disposers?.splice(index, 1);
+			if (disposers === undefined || index === -1) return;
+
+			// Removing shifts every later entry down, which would step an active drain's cursor
+			// straight over a cleanup that has not run yet. Blank the slot while one is running
+			// and let the drain skip it; the list is cleared when that drain finishes anyway.
+			if (this.#draining === disposers) disposers[index] = noop;
+			else disposers.splice(index, 1);
 		};
 	}
 
@@ -804,8 +829,44 @@ export class Effect {
 	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
 	 * therefore enough to own a resource, with no staleness check needed first.
 	 */
+	/**
+	 * Run every callback in `list` exactly once, including ones registered while draining.
+	 *
+	 * Iterative, so a cascade of any depth stays flat rather than nesting a stack frame per link.
+	 * Re-entrant: a `close` from inside a rerun's teardown resumes this pass at the cursor instead
+	 * of replaying it. A callback that throws is reported and the rest still run, since teardown
+	 * that stops half way leaks whatever the remaining callbacks owned.
+	 */
+	#drain(list: Dispose[]): void {
+		const owner = this.#draining !== list;
+		if (owner) {
+			this.#draining = list;
+			this.#drained = 0;
+		}
+
+		try {
+			while (this.#drained < list.length) {
+				const fn = list[this.#drained++];
+				try {
+					fn();
+				} catch (error) {
+					console.error("cleanup error", error, this.#stack);
+				}
+			}
+		} finally {
+			if (owner) this.#draining = undefined;
+		}
+	}
+
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
+			// Teardown that cascades joins the drain in progress rather than running nested inside
+			// the callback that registered it, which would turn a long chain into a stack overflow.
+			if (this.#draining !== undefined) {
+				this.#draining.push(fn);
+				return;
+			}
+
 			fn();
 			return;
 		}
@@ -815,16 +876,21 @@ export class Effect {
 
 	/** Stops the effect permanently, running all cleanup and unsubscribing from every signal. */
 	close(): void {
-		if (this.#dispose === undefined) {
+		const dispose = this.#dispose;
+		if (dispose === undefined) {
 			return;
 		}
+
+		// Mark closed before running teardown. A cleanup that calls back into this effect has to
+		// hit the closed guard: otherwise `spawn`/`timer`/`animate` register work against a list
+		// this call is about to discard, and the task keeps running with nothing tracking it.
+		this.#dispose = undefined;
 
 		this.#closed.resolve();
 		this.#stopped.resolve();
 		this.#abort.abort();
 
-		for (const fn of this.#dispose) fn();
-		this.#dispose = undefined;
+		this.#drain(dispose);
 
 		for (const signal of this.#unwatch) signal();
 		this.#unwatch.length = 0;

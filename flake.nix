@@ -298,6 +298,37 @@
           uniffi-bindgen-go
         ];
 
+        # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
+        # carries the uniffi 0.32 port and library-mode CLI while those changes
+        # remain open upstream.
+        uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-dart";
+          version = "0.3.0+v0.32.0";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "kixelated";
+            repo = "uniffi-dart";
+            rev = "v${version}";
+            hash = "sha256-jvVEZVZLorj+GPUXL6Y4riCLsbJcWWbQgIIUoK/ZSEo=";
+          };
+
+          # The upstream repository ignores Cargo.lock so cargo installs test
+          # the unlocked resolver. Nix still consumes committed lock data.
+          cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
+          postPatch = ''
+            cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
+          '';
+          buildFeatures = [ "binary" ];
+          cargoBuildFlags = [ "--bin=uniffi_bindgen_dart" ];
+          doCheck = false;
+        };
+
+        # Dart bindings plus the pinned external generator.
+        dartDeps = [
+          pkgs.dart
+          uniffi-bindgen-dart
+        ];
+
         # The libobs headers, unpacked from the same OBS release
         # cpp/obs/buildspec.json downloads. Headers only: nothing here links, so
         # it works on Darwin even though obs-studio itself does not build there,
@@ -382,6 +413,8 @@
             moq-gst
             ;
 
+          inherit uniffi-bindgen-dart;
+
           # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
           # CI builds this and prepends its bin/ to $PATH so subsequent steps
           # use the same versions a local `nix develop` user would.
@@ -415,11 +448,32 @@
             ++ obsDeps
             ++ ktDeps
             ++ goDeps
+            ++ dartDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
+
+          # The pinned Rust toolchain goes on PATH ahead of everything the
+          # host had, which shadows the Cargo shim `mbx setup` installs. Put it
+          # back in front, so a bare `cargo` in this shell reaches the same
+          # wrapper it reaches outside. `setup --status` is what knows where
+          # that shim lives; it exits non-zero when the host has none, which is
+          # every machine that made a different caching choice.
+          #
+          # Never in CI, where check.yml enters this shell and the `target/`
+          # the workflow restored is the one the job has to build in. A shim
+          # would silently move it into a machine-wide managed target instead,
+          # on whichever runner happens to have been set up that way.
+          shellHook = ''
+            if [ -z "''${CI:-}" ] && status=$(mbx setup --status 2>/dev/null); then
+              shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
+              if [ -x "$shim" ]; then
+                export PATH="$(dirname "$shim"):$PATH"
+              fi
+            fi
+          '';
 
           env = {
             # Where `just obs compile` and `just obs test` look for libobs. Set
@@ -434,19 +488,18 @@
 
         formatter = pkgs.nixfmt-tree;
 
-        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just
-        # check` and `just test` (see rs/justfile), no longer through crane.
+        # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
+        # test` (see rs/justfile). CI and local commands default to plain Cargo;
+        # local development can select a compatible wrapper with RUST_CARGO.
+        # Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #
-        # On the self-hosted runner those cargo checks transparently reuse a
-        # per-crate compiler cache (rustc is wrapped by sccache via the runner
-        # environment), so a Cargo.lock change recompiles only the changed crate
-        # + its reverse-deps. That's a runner-side concern -- nothing here or in
-        # the workflows configures it.
+        # Which compiler cache those runs get is a workflow concern
+        # (`.github/actions/rust-cache`); nothing here configures it.
         checks = {
           package-source-assets = pkgs.runCommand "package-source-assets" { } ''
             for asset in \

@@ -11,11 +11,12 @@ use unsafe_libopus::{
 #[cfg(feature = "aac")]
 use symphonia_core::codecs::audio::AudioDecoder;
 
+use super::Decoded;
 #[cfg(feature = "aac")]
 use crate::aac;
 use crate::opus;
 use crate::pcm;
-use crate::{Error, Format};
+use crate::{Activity, Error, Format};
 
 /// Opus packets cap at 120 ms (RFC 6716 §2.1.4).
 const MAX_FRAME_MS: usize = 120;
@@ -82,6 +83,7 @@ struct Opus {
 	inner: *mut OpusDecoder,
 	pre_skip_remaining: usize,
 	max_frame_size: usize,
+	in_dtx: bool,
 }
 
 // SAFETY: see Encoder.
@@ -139,6 +141,7 @@ impl Decoder {
 				inner,
 				pre_skip_remaining,
 				max_frame_size,
+				in_dtx: false,
 			}),
 			sample_rate,
 			channel_count,
@@ -235,6 +238,7 @@ impl Decoder {
 					return Err(crate::opus::error(rc, "OPUS_RESET_STATE"));
 				}
 				opus.pre_skip_remaining = self.delay;
+				opus.in_dtx = false;
 			}
 			Backend::Pcm { .. } => {}
 			#[cfg(feature = "aac")]
@@ -248,8 +252,11 @@ impl Decoder {
 		self.delay
 	}
 
-	/// Decode one packet into interleaved `f32` PCM.
-	pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>, Error> {
+	/// Decode one packet into interleaved `f32` PCM and report its codec activity.
+	///
+	/// Empty Opus packets invoke packet-loss concealment. Loss during DTX remains
+	/// classified as DTX, while loss during active audio remains active.
+	pub fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
 		match &mut self.backend {
 			Backend::Opus(opus) => {
 				let mut out = vec![0.0f32; opus.max_frame_size * self.channel_count as usize];
@@ -276,7 +283,9 @@ impl Decoder {
 					out.truncate(out.len() - trim_samples);
 					opus.pre_skip_remaining -= trim_frames;
 				}
-				Ok(out)
+				let activity = crate::opus::activity(packet, opus.in_dtx);
+				opus.in_dtx = activity.is_dtx();
+				Ok(Decoded { samples: out, activity })
 			}
 			Backend::Pcm { bytes_per_frame } => {
 				if packet.is_empty() || !packet.len().is_multiple_of(*bytes_per_frame) {
@@ -286,10 +295,14 @@ impl Decoder {
 					});
 				}
 
-				Ok(packet
+				let out = packet
 					.chunks_exact(pcm::BYTES_PER_SAMPLE)
 					.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-					.collect())
+					.collect();
+				Ok(Decoded {
+					samples: out,
+					activity: Activity::Active,
+				})
 			}
 			#[cfg(feature = "aac")]
 			Backend::Aac(aac) => {
@@ -310,7 +323,10 @@ impl Decoder {
 
 				let mut out = Vec::new();
 				decoded.copy_to_vec_interleaved(&mut out);
-				Ok(out)
+				Ok(Decoded {
+					samples: out,
+					activity: Activity::Active,
+				})
 			}
 		}
 	}
@@ -361,7 +377,10 @@ mod tests {
 		assert_eq!(decoder.sample_rate(), 44_100);
 		assert_eq!(decoder.channel_count(), 1);
 
-		let decoded: Vec<Vec<f32>> = AAC_FRAMES.iter().map(|frame| decoder.decode(frame).unwrap()).collect();
+		let decoded: Vec<Vec<f32>> = AAC_FRAMES
+			.iter()
+			.map(|frame| decoder.decode(frame).unwrap().samples)
+			.collect();
 
 		// AAC-LC frames are 1024 samples each, whatever the packet size.
 		for pcm in &decoded {
@@ -394,7 +413,7 @@ mod tests {
 
 		let mut decoder = Decoder::new(&catalog).unwrap();
 		assert_eq!(decoder.sample_rate(), 44_100);
-		assert_eq!(decoder.decode(AAC_FRAMES[0]).unwrap().len(), 1024);
+		assert_eq!(decoder.decode(AAC_FRAMES[0]).unwrap().samples.len(), 1024);
 	}
 
 	/// A packet libopus rejects is that packet's problem, not the

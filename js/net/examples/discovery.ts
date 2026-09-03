@@ -12,10 +12,10 @@ async function main() {
 		const announcement = await announced.next();
 		if (!announcement) break;
 
-		console.log("New stream available:", announcement.path);
+		console.log("New stream available:", announcement.prefix);
 
 		// Subscribe to new streams
-		const _broadcast = connection.consume(announcement.path);
+		const _broadcast = connection.consume(announcement.prefix);
 
 		// Do something with the broadcast
 	}

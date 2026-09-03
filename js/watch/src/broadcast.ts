@@ -192,8 +192,8 @@ export class Broadcast {
 				if (!entry) break;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (entry.active) active.add(entry.path);
-					else active.delete(entry.path);
+					if (entry.active) active.add(entry.prefix);
+					else active.delete(entry.prefix);
 				});
 			}
 		});
@@ -209,15 +209,20 @@ export class Broadcast {
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
-	// Whether `path` is currently announced, for `relativeBroadcast`'s cross-broadcast refs.
-	// Opens the announcement stream on first use. The blind cases (reload off, no discovery)
-	// never reach here; see `#relativeTarget`.
+	// Whether `path` is covered by an announced route, for `relativeBroadcast`'s
+	// cross-broadcast refs. Announcements are prefix routes, so a route at "room/" covers
+	// "room/alice/cam.hang" without naming it. Opens the announcement stream on first use.
+	// The blind cases (reload off, no discovery) never reach here; see `#relativeTarget`.
 	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
 		this.#wantAnnounced.set(true);
 
 		const active = effect.get(this.#announced);
 		if (!active) return false; // stream not open yet: wait rather than subscribe to a maybe-absent path
-		return active.has(path);
+		if (active.has(path)) return true;
+		for (const prefix of active) {
+			if (Path.hasPrefix(prefix, path)) return true;
+		}
+		return false;
 	}
 
 	// Resolve `path` without waiting for an announcement. The request is table-first, so a
@@ -306,8 +311,9 @@ export class Broadcast {
 			});
 			fetchNext = () => consumer.next();
 		} else {
+			const ordered = track.ordered();
 			fetchNext = async () => {
-				const update = await Msf.fetch(track);
+				const update = await Msf.fetch(ordered);
 				return update ? toHang(update) : undefined;
 			};
 		}

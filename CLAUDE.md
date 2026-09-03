@@ -16,17 +16,28 @@ nix develop --command just fix          # Auto-fix lint/formatting, same scope
 nix develop --command just check-all    # Same as check, over every package
 nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
+nix develop --command just bench        # Benchmark the current tree
+nix develop --command just bench BASE   # Compare BASE with the current tree
+nix develop --command just bench-runtime  # Compare relay runtime topologies
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
-`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. See [Workflow](#workflow) for how the base is resolved.
+`just bench` runs every Criterion target plus fixed video and 1:N fanout
+workloads against a temporary local relay. Pass a commit or ref to benchmark that
+revision first and print base-to-current changes. Timing changes are informational;
+benchmark crashes, zero delivery, and invalid samples still fail the command. Relay
+CPU and RSS are included on Linux, where `moq-bench-host` can read `/proc`.
+
+`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. They also switch to it themselves once the changed-file list outgrows what a single argv/env string can hold (64 KiB, roughly 1500 paths), because the list is passed to each per-language recipe as one argument. See [Workflow](#workflow) for how the base is resolved.
 
 To force a base, `just check origin/dev` and `just fix origin/dev` take it positionally. `just test` can't: it's a module, so `just test origin/dev` looks for a *recipe* named `origin/dev`. Name the recipe to get past that: `just test default origin/dev`.
 
 **CI runs exactly these recipes: `just check` and `just test`, with `MOQ_STRICT=1`.** There is no separate `just ci`, so there is no second definition of "checked" to drift from this one. The split is by cost, not by environment: `check` lints and compiles (plus `tsc -b` and the Python docs, which catch what `--noEmit` and autodoc can't), while `test` links and runs the test binaries, which is the expensive half. They run as concurrent jobs in `check.yml`, because clippy emits rmeta without codegen while nextest codegens and links, so there is nearly nothing for one to reuse from the other.
 
-The Rust build cache is written by `main` and read by pull requests, never the other way around (`.github/workflows/cache.yml`). Actions scopes cache reads to the current branch plus the default branch, so a PR-only workflow can never leave anything a *later* PR can restore. Both jobs in `check.yml` therefore restore under `shared-key: rust` with `save-if: false`. Don't add a save to a PR job: each one is gigabytes, the repository budget is 10 GB, and PR-scoped entries evict each other while remaining unreadable to everyone else.
+The Rust build cache is written by `main` and read by pull requests, never the other way around (`.github/workflows/cache.yml`). Actions scopes cache reads to the current branch plus the default branch, so a PR-only workflow can never leave anything a *later* PR can restore, while each entry is gigabytes against a 10 GB repository budget. That is why `main` is the single writer, and why the PR jobs must stay restore-only even though the cache action already refuses to publish from a pull request. Don't add a second target-directory cache on top: it spends the same budget twice and hides whether the first one restored anything.
+
+The main Rust check, test, OBS, and WASM jobs go through `.github/actions/rust-cache`, which owns their Swatinem action pin and cache policy. CI uses plain Cargo and restores the `target/` cache warmed by `main`; pull requests never write cache entries. Compiling recipes also accept `RUST_CARGO`, so local development can swap a `target/` per worktree for a compatible shared-store wrapper such as mr boxington. `rs/justfile` documents the three recipes that deliberately ignore it.
 
 `MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the required set into an up-front precondition (`_tools` in the root justfile). Required is per scope, mirroring what the diff actually dispatches, so a docs-only PR doesn't have to have gradle.
 
@@ -34,7 +45,7 @@ One tool stays unrequired: `swift` exists only on macOS, so swift.yml is its gat
 
 Two path-filtered workflows run recipes of their own alongside `check.yml`, each for something the Linux `just check` can't reach: swift.yml (`swift/scripts/check.sh`, on a Mac) and obs.yml (`just obs ci`, which links the OBS plugin against nixpkgs' libobs/Qt6 -- Linux is the only platform where that needs no obs-deps download).
 
-Three gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one, and `just obs ci` because obs.yml's path filter can't be complete (a build script can change what linking `libmoq.a` needs without touching a manifest). A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
+Three workspace-wide gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one, and `just obs ci` because obs.yml's path filter can't be complete (a build script can change what linking `libmoq.a` needs without touching a manifest). The PR check makes one scoped exception: when `moq-tokio` is selected, it compiles that crate alone with no, default, and all features because workspace feature unification otherwise hides its zero-feature build. A break in any other feature permutation lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
 
 ## Architecture
 
@@ -60,8 +71,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 Top-level layout only. Per-crate and per-package detail lives in the nested guides (see [Per-Directory Guides](#per-directory-guides)), which sit next to the code and don't rot here.
 
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
+- `/bench/` - Repository-level benchmark orchestration, workload fixtures, and methodology. Rust benchmark binaries and microbenchmarks stay under `/rs/`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
-- `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
+- `/py/`, `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. `just check` type-checks it via `just obs compile`, which needs headers rather than an obs-deps download, and obs.yml links it on Linux for `cpp/obs/` and `rs/libmoq/` PRs. Still manual, like `just rs macos`: `just obs build` (a loadable plugin, and the only path on macOS/Windows) and `just obs test` (`cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer). See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - test harnesses that span more than one language or need a server. `test/smoke/` is the cross-language interop matrix (`just test smoke[-full]`); `test/wasm/` runs the `@moq/wasm` bindings in headless Chromium against a real relay (`just test wasm`), which is the only behavioral coverage `rs/moq-wasm` has.
@@ -70,7 +82,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 
 ## Language Bindings
 
-`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
+`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, `/go`, and `/dart` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central, and Dart publishes `moq` and `moq_ffi` to pub.dev. For Python, Dart, and other wrapped bindings, most callers want the ergonomic package rather than the generated bindings directly.
 
 ## Per-Directory Guides
 
@@ -79,10 +91,17 @@ Language-specific conventions, crate/package maps, and patterns live in nested `
 - **`rs/CLAUDE.md`** - Rust workspace: crate map, Producer/Consumer model, `poll_*` plumbing, error handling, config/TOML merge, Version matching, testing.
 - **`js/CLAUDE.md`** - TypeScript/JS workspace: package map, the signals + Effect reactivity model and its lifecycle rules, Web Components UI, `bun`/Biome tooling.
 - **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
+- **`quest/AGENTS.md`** - long-term project memory: quests.
 
 The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi`; see each directory's `README.md` rather than a dedicated guide.
 
 This root file holds only cross-cutting rules that apply everywhere (writing style, root-cause and maintainability rules, cross-package sync, public-API scrutiny, comment/doc conventions). When editing any of these guides, reference code by file path and symbol name, never by line number; line numbers rot with every edit. The mechanics of landing a change (branch targeting, commit messages, PR descriptions, reviews, releases) live in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+History belongs in commits and PRs; pending work belongs in a quest. Read
+[`quest/AGENTS.md`](quest/AGENTS.md) whenever work mentions a quest or
+questline, and use the `$plan-quest` or `$start-quest` skills when available.
+GitHub issues remain the public front door, while quests carry durable plans
+and dependency edges alongside the code.
 
 ## Dependencies
 
@@ -187,7 +206,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-token` | `js/token` |
@@ -208,7 +227,7 @@ For wire, `moq-ffi`, or gateway changes, also run the cross-language interop mat
 
 ## Branch Targeting
 
-PRs target `main` by default, however large the change: bug fixes, new behavior, additive APIs, docs, refactors, and wire-protocol work. `dev` is reserved for one thing, a semver break in a published API: a renamed, removed, or signature-changed `pub`/exported item in the core libraries or language wrappers. Adding an item is additive, so it goes to `main`. When in doubt, target `main`. Full rules in [CONTRIBUTING.md](CONTRIBUTING.md#branch-targeting).
+PRs target `main` by default, however large the change: bug fixes, new behavior, additive APIs, docs, refactors, and wire-protocol work. `dev` is reserved for one thing, a semver break in a published API: a renamed, removed, or signature-changed `pub`/exported item, or anything else that stops existing caller code compiling, in any package someone can depend on a released version of. Adding an item is additive, so it goes to `main`. `0.0.x` packages are exempt, since every `0.0.x` release is already its own incompatible version, so break those on `main` too. Check the version, not the crate name. Full rules in [CONTRIBUTING.md](CONTRIBUTING.md#branch-targeting).
 
 ## Workflow
 

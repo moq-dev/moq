@@ -1,0 +1,21 @@
+[package]
+name = "quest"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+authors = ["Luke Curley"]
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Structural validator for the quest tree: the interlinked Markdown plans under quest/, whose contract is quest/AGENTS.md. Enforces link resolution, the questline index, the heading vocabulary, and an acyclic Required graph, so a structural mistake fails the PR instead of the next reader."
+
+[[bin]]
+name = "quest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+pulldown-cmark.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

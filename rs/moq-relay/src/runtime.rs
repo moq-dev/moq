@@ -44,6 +44,23 @@ pub struct RuntimeConfig {
 		require_equals = true,
 	)]
 	pub pin: Option<bool>,
+
+	/// Drive the QUIC workers with io_uring instead of tokio.
+	///
+	/// Each worker owns a `SINGLE_ISSUER` ring, batched UDP (multishot receive
+	/// with `UDP_GRO`, `UDP_SEGMENT` send), userspace timers, and a local task
+	/// set; sessions are moq-lite only (native raw QUIC and browser
+	/// WebTransport alike), and everything else (HTTP, WebSocket, cluster
+	/// dials, stats) stays on the shared runtime. Requires `runtime-workers`,
+	/// Linux 6.12+, and refuses to start anywhere it cannot deliver.
+	#[usage(
+		long = "runtime-io-uring",
+		env = "MOQ_RUNTIME_IO_URING",
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
+	)]
+	pub io_uring: Option<bool>,
 }
 
 impl RuntimeConfig {
@@ -55,5 +72,10 @@ impl RuntimeConfig {
 	pub fn workers(&self) -> Option<moq_tokio::worker::Config> {
 		let count = self.workers.filter(|count| *count > 0)?;
 		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin.unwrap_or(true)))
+	}
+
+	/// Whether the workers should run on io_uring instead of tokio.
+	pub fn io_uring(&self) -> bool {
+		self.io_uring.unwrap_or(false)
 	}
 }

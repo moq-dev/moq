@@ -344,14 +344,10 @@ codec metadata.
 ## Raw Track Options
 
 `moq_publish_track` accepts optional publisher-side track properties:
-`ordered` controls prioritization only. When true, groups are prioritized in
-sequence order. Groups may always arrive out-of-order (or not at all) over the
-network.
 
 ```c
 struct moq_track_info info = {0};
 info.priority = 3;
-info.ordered = true;
 info.max_age_ms = 1000;
 info.max_age_present = true;
 info.timescale = 1000000;
@@ -371,7 +367,6 @@ Fields ending in `_present` decide whether the matching optional value is set:
 ```c
 struct moq_subscription sub = {0};
 sub.priority = 5;
-sub.ordered = true;
 sub.max_age_ms = 25;
 sub.group_start = 10;
 sub.group_start_present = true;

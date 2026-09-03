@@ -1,0 +1,23 @@
+[package]
+name = "moq-sock"
+description = "Socket and thread-per-core listener plumbing shared by the native MoQ runtimes"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "networking", "reuseport"]
+categories = ["network-programming"]
+
+[dependencies]
+core_affinity = "0.8"
+libc = { workspace = true }
+rand = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-test = "0.2"

@@ -51,10 +51,44 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 ```bash
 git clone https://github.com/moq-dev/moq
 cd moq
-cargo build --release --bin moq-cli
+cargo build --release -p moq-cli --bin moq
 ```
 
-The binary will be in `target/release/moq-cli`.
+The binary will be in `target/release/moq`.
+
+### Shell completions
+
+`moq completion <shell>` writes the script that makes a shell ask `moq` what fits
+at the cursor. `--install` puts it where that shell looks, and prints any line you
+still have to add yourself for a shell that can't autoload one:
+
+```bash
+# bash, elvish, fish, nu, powershell, zsh
+moq completion zsh --install
+
+# or write it wherever you keep them
+moq completion bash > ~/.local/share/bash-completion/completions/moq
+```
+
+Most of what completes is static: verbs, flags, codecs, and the file paths a flag
+takes. These are looked up when you press Tab:
+
+| Flag | Completes from |
+|---|---|
+| `--broadcast` | the broadcasts announced on the `--connect` relay |
+| `--video-name` / `--audio-name` | the renditions in that broadcast's catalog |
+| `--camera`, `--display`, `--window`, `--app`, `--microphone` | this machine's capture sources |
+
+The first two rows open a short subscribe-only connection, and **only** when a
+`--connect` URL is already on the line, so Tab never dials a relay you have not
+named. An exported `MOQ_CONNECT` deliberately does not count: it configures a dial
+but does not authorize one, and that URL can carry a `?jwt=` credential. Every
+lookup is capped at half a second and stays silent about failure: an unreachable
+relay means no candidates, never an error in your prompt.
+
+`--camera`, `--display`, and `--microphone` take an optional value (bare
+`--camera` opens the default), so a shell can't tell whether the next word belongs
+to them. Write those attached to complete them: `--camera=<TAB>`.
 
 ### Heap profiling
 
@@ -95,7 +129,7 @@ moq <MoQ side>  play [playback options]
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
 Any combination may be given at once (e.g. dial a relay *and* accept incoming
-sessions). `--origin <id>` pins the process's origin id (default: fresh and
+sessions). `--hop <id>` pins the process's Hop ID (default: fresh and
 random per run); see [Redundant Publishers](#redundant-publishers-11).
 
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
@@ -313,7 +347,7 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080
 ```
 
-Every stage shares one connection, one origin id, and one Origin, and each keeps
+Every stage shares one connection, one Hop ID, and one Origin, and each keeps
 its own `--help` (`moq import rtmp --help`). A stage without `--broadcast` falls
 back to the process-wide one, so a single-stage command can keep naming the
 broadcast before the verb.
@@ -340,36 +374,35 @@ Rules worth knowing:
 
 ### Redundant Publishers (1+1)
 
-Relays key a broadcast's content identity on the publisher's origin id (the
-first hop of its announcements). Two publishers of the same broadcast that
-share an id are treated as interchangeable sources: relays hold both routes
-and fail over between them at a group boundary, so killing one leaves viewers
-running off the other.
+An announcement's route names the publisher's Hop ID as its first hop.
+Two publishers of the same broadcast that share an id (and cost) advertise
+identical routes, which relays deduplicate: the mesh sees one route while
+either publisher is alive, so killing one retracts nothing and the survivor
+keeps serving.
 
-Sharing an id is a promise: the publishers MUST produce the same broadcast,
-meaning the same track names carrying the same content, with group sequences
-aligned on the same boundaries. Relays may switch between same-id sources
-whenever routing prefers another (not only on failure), splicing at the next
-group boundary, so encoders that drift (for example segment-numbered tracks
-from processes started at different times) tear down subscribers on the
-switch. Independent publishers with different tracks or timelines MUST use
-different origin ids; the newcomer then takes the broadcast over instead of
-joining. Run the same command from two aligned encoders, pinning the same id
-on both:
+A relay resumes a live subscription across routes that name the same first
+hop. When the publisher serving a subscription goes away, the relay
+re-splices it through the best remaining route with that first hop at a group
+boundary, and the viewer keeps watching. So 1+1 with a shared id buys a
+seamless handover, and the two encoders must produce equivalent broadcasts
+(same track names, aligned group sequences, comparable timelines) so the
+spliced stream keeps decoding. Publishers with different ids (or none) never
+splice: that subscription ends and the viewer re-subscribes, landing on the
+best remaining route. Run the same command from two encoders, pinning the
+same id on both:
 
 ```bash
-moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
-moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --hop 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
-Leave `--origin` unset everywhere else. The default fresh id per run is what
-makes a restarted encoder look like new content (ending subscriptions and
-invalidating caches) instead of silently splicing mid-stream. A publisher with
-a *different* id takes the broadcast over the moment it announces, ending the
-incumbent rather than waiting behind it, so a reconnect is live again without
-waiting for the relay's transport to time out the connection it replaced. The
-last publisher to announce a path owns it, so use authorization to decide who
-may publish where.
+Leave `--hop` unset everywhere else. The Hop ID also feeds loop
+detection: a relay drops announcements whose route already contains its own
+id, so reusing one id across unrelated publishers can make their routes
+invisible to each other. New subscriptions always resolve through the best
+current route, newest first on a tie, so a restarted publisher serves new
+viewers the moment it announces; use authorization to decide who may publish
+where.
 
 ### Capture a Webcam
 
@@ -394,7 +427,7 @@ moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 # Pick devices, resolution, and bitrates:
 moq --connect https://relay.example.com/anon --broadcast cam.hang \
     import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
-                   --microphone "MacBook Pro Microphone" --audio-bitrate 64000
+                   --microphone coreaudio:BuiltInMicrophoneDevice --audio-bitrate 64000
 
 # One medium only:
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
@@ -439,7 +472,7 @@ Microphones:
 ```
 
 ```bash
-# A single window, followed as it moves and resizes (macOS only):
+# Capture a single window (macOS, Windows, or X11):
 moq --connect https://relay.example.com/anon --broadcast win.hang \
     import capture --window 39193 --no-audio
 
@@ -862,7 +895,7 @@ curl http://relay.example.com:4443/announced/
 
 - The relay needs a valid TLS certificate
 - For development, use the fingerprint method
-- See [TLS Setup](/bin/relay/#tls-setup)
+- See [Production TLS setup](/setup/prod#networking-and-tls)
 
 ### "Permission denied"
 

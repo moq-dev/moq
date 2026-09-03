@@ -1,0 +1,22 @@
+name: Rust cache
+description: Restore the Cargo build cache cache.yml warms on the default branch.
+
+inputs:
+  save-on-dispatch:
+    description: Let a trusted workflow_dispatch seed the cache (cache.yml only).
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # One shared key lets differently named jobs restore the cache warmed by
+    # cache.yml. Pull requests stay read-only, while a trusted manual run can
+    # explicitly seed a cold cache.
+    - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      with:
+        # Build scripts link against Nix store paths from the dev shell. Roll
+        # the cache when that shell changes so Cargo never restores executables
+        # whose dynamic linker has disappeared.
+        shared-key: rust-${{ hashFiles('flake.nix', 'flake.lock') }}
+        cache-on-failure: true
+        save-if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.save-on-dispatch == 'true') }}

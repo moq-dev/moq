@@ -16,6 +16,14 @@ function ones(samples: number, channels = 1): AudioFrame {
 }
 
 describe("Gain", () => {
+	test("starts at the requested level", () => {
+		const muted = new Gain(0);
+		const quiet = new Gain(0.25);
+
+		expect([...muted.apply(ones(128), RATE).channels[0]]).toEqual(Array.from({ length: 128 }, () => 0));
+		expect([...quiet.apply(ones(128), RATE).channels[0]]).toEqual(Array.from({ length: 128 }, () => 0.25));
+	});
+
 	test("leaves audio untouched at unity", () => {
 		const gain = new Gain();
 		const frame = ones(128);

@@ -1,0 +1,1048 @@
+//! The connection: shared state, the driver task, and the session handle.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::rc::Rc;
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use rustc_hash::FxHashMap;
+
+use super::{Error, RawConnection, SEGMENT};
+use crate::{Handle, udp};
+
+/// The state shared by every handle and the driver, single-threaded behind
+/// `Rc<RefCell>`.
+pub(crate) type Shared = Rc<Inner>;
+
+/// One GSO train is at most 64 segments; stay a hair under the kernel cap.
+const TRAIN_SEGMENTS: usize = 63;
+/// How many received datagrams to hold for the application before dropping
+/// the oldest.
+const DGRAM_QUEUE: usize = 64;
+/// The urgency a locally opened stream starts with, until the application
+/// sets one: quiche's own default, the middle of the range.
+const DEFAULT_URGENCY: u8 = 127;
+
+/// Everything the handles and the driver share, single-threaded.
+///
+/// The connection and the bookkeeping live in separate `RefCell`s so a stream
+/// operation can mutate the connection, drop that borrow, and then register a
+/// waiter without ever holding both.
+pub(crate) struct Inner {
+	pub(crate) conn: RefCell<RawConnection>,
+	pub(crate) state: RefCell<State>,
+}
+
+pub(crate) struct State {
+	/// Wakes the driver; handles kick it after mutating the connection so
+	/// fresh egress reaches the wire.
+	driver: kio::WaiterList,
+
+	/// The endpoint fed us packets since the driver's last sweep.
+	ingested: bool,
+	#[cfg(test)]
+	non_ingress_sweeps: usize,
+
+	established: bool,
+	establish_waiters: kio::WaiterList,
+
+	/// Peer-initiated streams not yet handed out, and the next ids expected.
+	/// QUIC creates every lower-numbered stream of a type implicitly, so a
+	/// readable id queues everything up to it.
+	accept_bi: VecDeque<u64>,
+	accept_uni: VecDeque<u64>,
+	next_accept_bi: u64,
+	next_accept_uni: u64,
+	accept_bi_waiters: kio::WaiterList,
+	accept_uni_waiters: kio::WaiterList,
+
+	/// The next locally initiated ids, and whoever is blocked on the peer's
+	/// MAX_STREAMS credit.
+	next_open_bi: u64,
+	next_open_uni: u64,
+	open_waiters: kio::WaiterList,
+
+	/// Per-stream read/write parking, keyed by stream id.
+	///
+	/// FxHash rather than SipHash on all four of these: they sit on the
+	/// driver's per-event path. A peer does shape which of its ids stay parked
+	/// here, but only by opening them in order, so clustering enough of them
+	/// into one bucket costs millions of stream opens for a cluster the
+	/// stream limit caps anyway.
+	readable: FxHashMap<u64, kio::WaiterList>,
+	writable: FxHashMap<u64, kio::WaiterList>,
+	/// Send streams waiting for their end (FIN acknowledged, a STOP, or a
+	/// reset); the driver probes these after connection events since quiche has
+	/// no event for stream collection.
+	finishing: FxHashMap<u64, kio::WaiterList>,
+	/// How each send stream ended, for the ones the driver saw collected while
+	/// the connection was still up: `None` for a FIN the peer acknowledged,
+	/// `Some(code)` for a `STOP_SENDING` the probe consumed on our behalf.
+	/// That is what makes a later close mean "already delivered" rather than
+	/// "we never found out". Cleared when the stream drops.
+	pub(crate) collected: FxHashMap<u64, Option<u64>>,
+
+	/// Received datagrams, oldest first; over [`DGRAM_QUEUE`] the oldest drop.
+	datagrams: VecDeque<Bytes>,
+	datagram_recv_waiters: kio::WaiterList,
+	datagram_send_waiters: kio::WaiterList,
+
+	/// The terminal error, set exactly once; everything fails with it after.
+	closed: Option<Error>,
+	closed_waiters: kio::WaiterList,
+}
+
+impl State {
+	fn new(is_server: bool) -> Self {
+		// Stream ids: bit 0 is the initiator (0 = client), bit 1 the
+		// directionality (set = uni).
+		let (next_accept_bi, next_accept_uni, next_open_bi, next_open_uni) = if is_server {
+			(0b00, 0b10, 0b01, 0b11)
+		} else {
+			(0b01, 0b11, 0b00, 0b10)
+		};
+		Self {
+			driver: kio::WaiterList::new(),
+			ingested: false,
+			#[cfg(test)]
+			non_ingress_sweeps: 0,
+			established: false,
+			establish_waiters: kio::WaiterList::new(),
+			accept_bi: VecDeque::new(),
+			accept_uni: VecDeque::new(),
+			next_accept_bi,
+			next_accept_uni,
+			accept_bi_waiters: kio::WaiterList::new(),
+			accept_uni_waiters: kio::WaiterList::new(),
+			next_open_bi,
+			next_open_uni,
+			open_waiters: kio::WaiterList::new(),
+			readable: FxHashMap::default(),
+			writable: FxHashMap::default(),
+			finishing: FxHashMap::default(),
+			collected: FxHashMap::default(),
+			datagrams: VecDeque::new(),
+			datagram_recv_waiters: kio::WaiterList::new(),
+			datagram_send_waiters: kio::WaiterList::new(),
+			closed: None,
+			closed_waiters: kio::WaiterList::new(),
+		}
+	}
+
+	/// Drop send stream `id`'s bookkeeping, parking included.
+	fn forget_send(&mut self, id: u64) {
+		self.collected.remove(&id);
+		self.finishing.remove(&id);
+		self.writable.remove(&id);
+	}
+
+	/// The same for the read half. Only its own table: the two halves of a
+	/// bidirectional stream are separate handles, and the other one may still
+	/// be parked.
+	fn forget_recv(&mut self, id: u64) {
+		self.readable.remove(&id);
+	}
+
+	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
+	/// the driver included: an externally failed driver has to notice.
+	fn fail(&mut self, err: Error) {
+		if self.closed.is_none() {
+			self.closed = Some(err);
+		}
+		self.driver.wake();
+		self.closed_waiters.wake();
+		self.establish_waiters.wake();
+		self.accept_bi_waiters.wake();
+		self.accept_uni_waiters.wake();
+		self.open_waiters.wake();
+		self.datagram_recv_waiters.wake();
+		self.datagram_send_waiters.wake();
+		for waiters in self.readable.values_mut() {
+			waiters.wake();
+		}
+		for waiters in self.writable.values_mut() {
+			waiters.wake();
+		}
+		for waiters in self.finishing.values_mut() {
+			waiters.wake();
+		}
+	}
+}
+
+impl Inner {
+	/// The terminal error, if the connection has one.
+	pub(crate) fn closed(&self) -> Option<Error> {
+		self.state.borrow().closed.clone()
+	}
+
+	/// Wake the driver so it flushes what a handle just queued.
+	pub(crate) fn kick(&self) {
+		self.state.borrow_mut().driver.wake();
+	}
+
+	/// The endpoint fed packets into the connection; the driver's next sweep
+	/// treats them as ingress.
+	pub(crate) fn mark_ingested(&self) {
+		self.state.borrow_mut().ingested = true;
+	}
+
+	#[cfg(test)]
+	fn take_non_ingress_sweeps(&self) -> usize {
+		std::mem::take(&mut self.state.borrow_mut().non_ingress_sweeps)
+	}
+
+	/// Terminate from outside (the endpoint's socket died): everything fails
+	/// with `err`, and the driver exits on its next poll.
+	pub(crate) fn fail(&self, err: Error) {
+		self.state.borrow_mut().fail(err);
+	}
+
+	/// Park `waiter` until stream `id` is writable again.
+	pub(crate) fn park_writable(&self, id: u64, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.writable.entry(id).or_default());
+	}
+
+	/// Park `waiter` until stream `id` is readable again.
+	pub(crate) fn park_readable(&self, id: u64, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.readable.entry(id).or_default());
+	}
+
+	/// Park `waiter` until send stream `id` reaches its end.
+	pub(crate) fn park_finishing(&self, id: u64, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.finishing.entry(id).or_default());
+	}
+
+	/// How send stream `id` ended, if the driver saw it collected on a live
+	/// connection: `Some(None)` for an acknowledged FIN, `Some(Some(code))`
+	/// for a `STOP_SENDING`.
+	pub(crate) fn collected(&self, id: u64) -> Option<Option<u64>> {
+		self.state.borrow().collected.get(&id).copied()
+	}
+
+	/// Forget send stream `id`'s bookkeeping; called when its handle drops.
+	///
+	/// The parking table goes with it. A stream shut down on the way out is
+	/// never reported writable again, so nothing else would ever remove the
+	/// entry, and a peer withholding flow control credit could have streams
+	/// opened and cancelled against it without bound.
+	pub(crate) fn forget_send(&self, id: u64) {
+		self.state.borrow_mut().forget_send(id);
+	}
+
+	/// The same for the read half, which parks on its own table.
+	pub(crate) fn forget_recv(&self, id: u64) {
+		self.state.borrow_mut().forget_recv(id);
+	}
+
+	/// Wake anyone parked on stream `id` being readable.
+	pub(crate) fn wake_readable(&self, id: u64) {
+		let mut state = self.state.borrow_mut();
+		if let Some(mut waiters) = state.readable.remove(&id) {
+			waiters.wake();
+		}
+	}
+
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		// Err(Done) means already closed, which is what the caller wanted.
+		let _ = self.conn.borrow_mut().close(true, code, reason.as_bytes());
+		self.kick();
+	}
+}
+
+/// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
+///
+/// Created by [`Endpoint`](super::Endpoint) (or its
+/// [`client::connect`](super::client::connect) /
+/// [`server::accept`](super::server::accept) shorthands), already
+/// established. Clones share the connection; each carries its own parking so
+/// concurrent pending operations don't trample each other's wakeups. Dropping
+/// every handle (and every stream) drops the driver's `Rc` peers, but the
+/// driver itself keeps the connection alive until it ends; close explicitly
+/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
+/// session machine does).
+///
+/// That close only records the code: the driver task is what frames the
+/// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
+/// [`poll_closed`](web_transport_trait::poll::Session::poll_closed) resolves
+/// before stopping it, or the packet is never built and the peer idles out
+/// instead.
+pub struct Connection {
+	shared: Shared,
+	// Retains this clone's waiter registrations across polls.
+	park: kio::Park,
+	/// The negotiated ALPN, cached at establishment so `protocol()` can
+	/// borrow from the handle.
+	alpn: Option<String>,
+}
+
+impl Connection {
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		self.shared.close_code(code, reason);
+	}
+
+	/// The peer's certificate chain in DER, leaf first, or `None` if it
+	/// presented none.
+	///
+	/// A server only sees one when it asked
+	/// ([`ClientAuth`](super::server::ClientAuth)), and TLS already validated
+	/// it against the configured roots by the time this connection exists: an
+	/// invalid chain fails the handshake instead. So a `Some` here is an
+	/// authenticated peer, and the chain is what names it.
+	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
+		let conn = self.shared.conn.borrow();
+		Some(conn.peer_cert_chain()?.into_iter().map(<[u8]>::to_vec).collect())
+	}
+}
+
+impl Clone for Connection {
+	fn clone(&self) -> Self {
+		Self {
+			shared: self.shared.clone(),
+			park: kio::Park::default(),
+			alpn: self.alpn.clone(),
+		}
+	}
+}
+
+/// Build a connection's shared state and its driver.
+///
+/// The driver future does timers, event sweeps, and egress; ingress arrives
+/// from the endpoint's demux task, which feeds quiche directly and
+/// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
+/// the connection's routes once it resolves.
+pub(crate) fn launch(
+	handle: &Handle,
+	socket: Rc<udp::Socket>,
+	conn: RawConnection,
+	keep_alive: Option<std::time::Duration>,
+) -> (Shared, impl Future<Output = ()> + use<>) {
+	let is_server = conn.is_server();
+	let shared = Rc::new(Inner {
+		conn: RefCell::new(conn),
+		state: RefCell::new(State::new(is_server)),
+	});
+
+	let mut driver = Driver {
+		shared: shared.clone(),
+		socket,
+		deadline: moq_net::runtime::Deadline::new(handle),
+		keep_alive: match keep_alive {
+			Some(every) => moq_net::runtime::Deadline::after(handle, every),
+			None => moq_net::runtime::Deadline::new(handle),
+		},
+		keep_alive_every: keep_alive,
+		carry: None,
+	};
+	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
+	(shared, future)
+}
+
+/// Wait out the handshake, yielding the connection's public handle.
+pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
+	kio::wait(|waiter| {
+		let mut state = shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		if state.established {
+			return Poll::Ready(Ok(()));
+		}
+		waiter.register(&mut state.establish_waiters);
+		Poll::Pending
+	})
+	.await?;
+
+	let alpn = {
+		let conn = shared.conn.borrow();
+		let proto = conn.application_proto();
+		(!proto.is_empty()).then(|| String::from_utf8_lossy(proto).into_owned())
+	};
+
+	Ok(Connection {
+		shared,
+		park: kio::Park::default(),
+		alpn,
+	})
+}
+
+impl web_transport_trait::poll::Session for Connection {
+	type SendStream = super::SendStream;
+	type RecvStream = super::RecvStream;
+	type Error = Error;
+
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(id) = state.accept_uni.pop_front() {
+			return Poll::Ready(Ok(super::RecvStream::new(self.shared.clone(), id)));
+		}
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.accept_uni_waiters);
+		Poll::Pending
+	}
+
+	fn poll_accept_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(id) = state.accept_bi.pop_front() {
+			return Poll::Ready(Ok((
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)));
+		}
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.accept_bi_waiters);
+		Poll::Pending
+	}
+
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		let id = self.shared.state.borrow().next_open_uni;
+		// Materialize the stream in quiche so the peer's MAX_STREAMS credit is
+		// what gates us, not our own bookkeeping.
+		match self
+			.shared
+			.conn
+			.borrow_mut()
+			.stream_priority(id, DEFAULT_URGENCY, false)
+		{
+			Ok(()) => {
+				self.shared.state.borrow_mut().next_open_uni += 4;
+				Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id)))
+			}
+			Err(quiche::Error::StreamLimit) => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.open_waiters);
+				Poll::Pending
+			}
+			Err(err) => Poll::Ready(Err(err.into())),
+		}
+	}
+
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		let id = self.shared.state.borrow().next_open_bi;
+		match self
+			.shared
+			.conn
+			.borrow_mut()
+			.stream_priority(id, DEFAULT_URGENCY, false)
+		{
+			Ok(()) => {
+				self.shared.state.borrow_mut().next_open_bi += 4;
+				Poll::Ready(Ok((
+					super::SendStream::new(self.shared.clone(), id),
+					super::RecvStream::new(self.shared.clone(), id),
+				)))
+			}
+			Err(quiche::Error::StreamLimit) => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.open_waiters);
+				Poll::Pending
+			}
+			Err(err) => Poll::Ready(Err(err.into())),
+		}
+	}
+
+	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		match self.shared.conn.borrow_mut().dgram_send(payload) {
+			Ok(()) => {
+				self.shared.kick();
+				Poll::Ready(Ok(()))
+			}
+			// The send queue is full; a flush frees space.
+			Err(quiche::Error::Done) => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.datagram_send_waiters);
+				Poll::Pending
+			}
+			Err(err) => Poll::Ready(Err(err.into())),
+		}
+	}
+
+	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(datagram) = state.datagrams.pop_front() {
+			return Poll::Ready(Ok(datagram));
+		}
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.datagram_recv_waiters);
+		Poll::Pending
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		self.shared.conn.borrow().dgram_max_writable_len().unwrap_or(0)
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		self.alpn.as_deref()
+	}
+
+	fn close(&mut self, code: u32, reason: &str) {
+		// Err(Done) means already closed, which is what the caller wanted.
+		let _ = self
+			.shared
+			.conn
+			.borrow_mut()
+			.close(true, u64::from(code), reason.as_bytes());
+		self.shared.kick();
+	}
+
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(err.clone());
+		}
+		waiter.register(&mut state.closed_waiters);
+		Poll::Pending
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		let conn = self.shared.conn.borrow();
+		let stats = conn.stats();
+		let path = conn.path_stats().next();
+		Stats {
+			bytes_sent: stats.sent_bytes,
+			bytes_received: stats.recv_bytes,
+			bytes_lost: stats.lost_bytes,
+			packets_sent: stats.sent as u64,
+			packets_received: stats.recv as u64,
+			packets_lost: stats.lost as u64,
+			rtt: path.as_ref().map(|path| path.rtt),
+			// Bytes per second on the wire; the trait wants bits.
+			send_rate: path.as_ref().map(|path| path.delivery_rate.saturating_mul(8)),
+		}
+	}
+}
+
+impl std::fmt::Debug for Connection {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Connection").field("alpn", &self.alpn).finish()
+	}
+}
+
+/// A snapshot of quiche's counters in [`web_transport_trait::Stats`] shape.
+struct Stats {
+	bytes_sent: u64,
+	bytes_received: u64,
+	bytes_lost: u64,
+	packets_sent: u64,
+	packets_received: u64,
+	packets_lost: u64,
+	rtt: Option<std::time::Duration>,
+	send_rate: Option<u64>,
+}
+
+impl web_transport_trait::Stats for Stats {
+	fn bytes_sent(&self) -> Option<u64> {
+		Some(self.bytes_sent)
+	}
+
+	fn bytes_received(&self) -> Option<u64> {
+		Some(self.bytes_received)
+	}
+
+	fn bytes_lost(&self) -> Option<u64> {
+		Some(self.bytes_lost)
+	}
+
+	fn packets_sent(&self) -> Option<u64> {
+		Some(self.packets_sent)
+	}
+
+	fn packets_received(&self) -> Option<u64> {
+		Some(self.packets_received)
+	}
+
+	fn packets_lost(&self) -> Option<u64> {
+		Some(self.packets_lost)
+	}
+
+	fn rtt(&self) -> Option<std::time::Duration> {
+		self.rtt
+	}
+
+	fn estimated_send_rate(&self) -> Option<u64> {
+		self.send_rate
+	}
+}
+
+/// The per-connection task: timers, event sweeps, and packets out. Packets in
+/// come from the endpoint's demux task, which feeds quiche directly and kicks
+/// this driver.
+struct Driver {
+	shared: Shared,
+	socket: Rc<udp::Socket>,
+	deadline: moq_net::runtime::Deadline<Handle>,
+	/// Fires when the connection owes the peer an ack-eliciting packet, so an
+	/// idle path (and whatever NAT sits on it) stays open. Disarmed when the
+	/// caller asked for no keep-alive.
+	keep_alive: moq_net::runtime::Deadline<Handle>,
+	keep_alive_every: Option<std::time::Duration>,
+	/// A packet quiche handed us for a different path than the train being
+	/// packed; it opens the next one.
+	carry: Option<(SocketAddr, Vec<u8>)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Sweep {
+	Ingress,
+	Timeout,
+}
+
+impl Sweep {
+	fn after_ingress(ingested: bool) -> Option<Self> {
+		ingested.then_some(Self::Ingress)
+	}
+
+	fn ingested(self) -> bool {
+		self == Self::Ingress
+	}
+}
+
+impl Driver {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// The endpoint fails the connection from outside when its socket dies.
+		let ingested = {
+			let mut state = self.shared.state.borrow_mut();
+			if state.closed.is_some() {
+				return Poll::Ready(());
+			}
+			// Register the kick first: a handle mutating the connection after
+			// this turn's sweeps still re-polls us.
+			waiter.register(&mut state.driver);
+			std::mem::take(&mut state.ingested)
+		};
+		let mut sweep = Sweep::after_ingress(ingested);
+
+		loop {
+			if let Some(sweep) = sweep.take() {
+				self.sweep(sweep.ingested());
+			}
+
+			if let Poll::Ready(err) = self.flush(waiter) {
+				self.fail(err);
+				return Poll::Ready(());
+			}
+
+			// A flush frees datagram-send queue space.
+			self.shared.state.borrow_mut().datagram_send_waiters.wake();
+
+			{
+				let conn = self.shared.conn.borrow();
+				self.deadline.set(conn.timeout_instant());
+				if conn.is_closed() {
+					let err = terminal(&conn);
+					drop(conn);
+					self.fail(err);
+					return Poll::Ready(());
+				}
+			}
+
+			// Arm, *then* poll: the poll is what registers the waiter, so
+			// polling before the set would leave the firing to wake nobody
+			// (fatal on a dial nobody answers, where no ingress ever re-polls
+			// us). Elapsed means the timer is due right now; restart the turn
+			// so its effects flush and the next deadline arms.
+			let timeout = self.deadline.poll(waiter);
+			let keep_alive = self.keep_alive.poll(waiter);
+			if timeout.is_pending() && keep_alive.is_pending() {
+				return Poll::Pending;
+			}
+			if timeout.is_ready() {
+				self.shared.conn.borrow_mut().on_timeout();
+				// A timeout can close the connection or change stream events.
+				sweep = Some(Sweep::Timeout);
+			}
+			if keep_alive.is_ready() {
+				// With nothing else queued quiche emits a PING, which is the
+				// point; with traffic in flight the flag just rides along.
+				let _ = self.shared.conn.borrow_mut().send_ack_eliciting();
+				self.arm_keep_alive();
+			}
+		}
+	}
+
+	/// Everything event-shaped: establishment, new and readable streams,
+	/// writability, finished sends, received datagrams.
+	fn sweep(&mut self, ingested: bool) {
+		let mut conn = self.shared.conn.borrow_mut();
+		let mut state = self.shared.state.borrow_mut();
+		#[cfg(test)]
+		{
+			state.non_ingress_sweeps += usize::from(!ingested);
+		}
+
+		if !state.established && conn.is_established() {
+			state.established = true;
+			state.establish_waiters.wake();
+		}
+
+		// Waking removes the entry: a still-interested poller re-registers on
+		// its next poll, so the maps only hold streams somebody is parked on.
+		for id in conn.readable() {
+			queue_accept(&mut state, id);
+			if let Some(mut waiters) = state.readable.remove(&id) {
+				waiters.wake();
+			}
+		}
+		for id in conn.writable() {
+			if let Some(mut waiters) = state.writable.remove(&id) {
+				waiters.wake();
+			}
+		}
+
+		// MAX_STREAMS (and everything else) only arrives with ingress.
+		if ingested {
+			state.open_waiters.wake();
+		}
+
+		// quiche has no stream-collected event, so probe: a send stream whose
+		// capacity query errors has ended one way or another. Record the result
+		// before a terminal error can be published this turn, so a close racing
+		// the acknowledgement cannot turn a delivered FIN into a failure.
+		let State {
+			finishing, collected, ..
+		} = &mut *state;
+		finishing.retain(|id, waiters| match conn.stream_capacity(*id) {
+			Ok(_) => true,
+			// This probe is the only reader of the stop code, so record it
+			// rather than letting the collection look like a clean delivery.
+			Err(quiche::Error::StreamStopped(code)) => {
+				collected.insert(*id, Some(code));
+				waiters.wake();
+				false
+			}
+			Err(_) => {
+				collected.insert(*id, None);
+				waiters.wake();
+				false
+			}
+		});
+
+		let mut received = false;
+		// The buffer factory already hands these out as `Bytes`, so moving one
+		// from quiche's queue to ours copies nothing, and no scratch buffer can
+		// be too small for a datagram and silently drop it.
+		while let Ok(dgram) = conn.dgram_recv_buf() {
+			if state.datagrams.len() >= DGRAM_QUEUE {
+				state.datagrams.pop_front();
+			}
+			state.datagrams.push_back(dgram);
+			received = true;
+		}
+		if received {
+			state.datagram_recv_waiters.wake();
+		}
+	}
+
+	/// Stage one GSO train, then yield so another connection sharing the
+	/// socket gets a chance at the transmit pool.
+	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		match self.flush_one(waiter) {
+			Poll::Ready(Ok(())) => {}
+			Poll::Ready(Err(err)) => return Poll::Ready(err),
+			// Backpressure, or nothing left to stage.
+			Poll::Pending => return Poll::Pending,
+		}
+		// Requeue behind the other ready tasks. If quiche is drained, the next
+		// poll costs one empty acquire and then parks normally.
+		waiter.waker().wake_by_ref();
+		Poll::Pending
+	}
+
+	/// Fill one transmit buffer and stage it. Ignores quiche's pacing hint;
+	/// the congestion controller still bounds each train.
+	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut tx = match self.socket.poll_acquire(waiter) {
+			Poll::Ready(Ok(tx)) => tx,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::Io(err.to_string()))),
+			// Backpressure: a completed send re-polls us.
+			Poll::Pending => return Poll::Pending,
+		};
+
+		let mut filled = 0;
+		let mut dest = None;
+		// One train, one destination, so a packet left over from the last one
+		// leads this one.
+		if let Some((to, packet)) = self.carry.take() {
+			tx[..packet.len()].copy_from_slice(&packet);
+			filled = packet.len();
+			dest = Some(to);
+		}
+		// A short packet must ride last in a GSO send, so a short carry goes
+		// out alone.
+		if filled == 0 || filled == SEGMENT {
+			let mut conn = self.shared.conn.borrow_mut();
+			// Pack uniform SEGMENT-sized packets back to back; a short packet
+			// ends the train (it must ride last in a GSO send).
+			while filled + SEGMENT <= tx.len() && filled / SEGMENT < TRAIN_SEGMENTS {
+				match conn.send(&mut tx[filled..filled + SEGMENT]) {
+					Ok((n, info)) => {
+						// Path validation and NAT rebinding make quiche alternate
+						// destinations; this packet must lead another train.
+						if dest.is_some_and(|to| to != info.to) {
+							self.carry = Some((info.to, tx[filled..filled + n].to_vec()));
+							break;
+						}
+						dest = Some(info.to);
+						filled += n;
+						if n < SEGMENT {
+							break;
+						}
+					}
+					Err(quiche::Error::Done) => break,
+					Err(err) => return Poll::Ready(Err(err.into())),
+				}
+			}
+		}
+
+		let Some(to) = dest else {
+			// Nothing to send; the buffer returns to the pool on drop.
+			return Poll::Pending;
+		};
+		if let Err(err) = tx.send(filled, to, SEGMENT) {
+			return Poll::Ready(Err(Error::Io(err.to_string())));
+		}
+		Poll::Ready(Ok(()))
+	}
+
+	/// Re-arm the keep-alive timer, if this connection asked for one.
+	fn arm_keep_alive(&mut self) {
+		let at = self
+			.keep_alive_every
+			.and_then(|every| std::time::Instant::now().checked_add(every));
+		self.keep_alive.set(at);
+	}
+
+	fn fail(&mut self, err: Error) {
+		self.shared.state.borrow_mut().fail(err);
+	}
+}
+
+/// Queue a peer-initiated stream (and every implicitly created lower one).
+fn queue_accept(state: &mut State, id: u64) {
+	let uni = id & 0b10 == 0b10;
+	let (next, queue, waiters) = if uni {
+		(
+			&mut state.next_accept_uni,
+			&mut state.accept_uni,
+			&mut state.accept_uni_waiters,
+		)
+	} else {
+		(
+			&mut state.next_accept_bi,
+			&mut state.accept_bi,
+			&mut state.accept_bi_waiters,
+		)
+	};
+	// Locally initiated ids (a different low-bit pattern) never match `next`'s
+	// parity walk, so this also filters our own streams out.
+	if id & 0b11 != *next & 0b11 || id < *next {
+		return;
+	}
+	let mut queued = false;
+	while *next <= id {
+		queue.push_back(*next);
+		*next += 4;
+		queued = true;
+	}
+	if queued {
+		waiters.wake();
+	}
+}
+
+/// The terminal error of a closed connection.
+fn terminal(conn: &RawConnection) -> Error {
+	let err = conn.peer_error().or_else(|| conn.local_error());
+	match err {
+		Some(err) if err.is_app => Error::App {
+			code: err.error_code,
+			reason: String::from_utf8_lossy(&err.reason).into_owned(),
+		},
+		Some(err) => Error::Transport {
+			code: err.error_code,
+			reason: String::from_utf8_lossy(&err.reason).into_owned(),
+		},
+		None => Error::TimedOut,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::super::BytesFactory;
+	use super::*;
+	use std::net::UdpSocket;
+	use web_transport_trait::poll::{SendStream as _, Session as _};
+
+	#[test]
+	fn transmit_continuation_skips_event_sweep() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(crate::Error::Unsupported(reason)) => {
+				eprintln!("skipping io_uring connection test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+
+		let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("certificate");
+		let certs = tempfile::tempdir().expect("certificate directory");
+		let cert = certs.path().join("cert.pem");
+		let key = certs.path().join("key.pem");
+		std::fs::write(&cert, signed.cert.pem()).expect("write certificate");
+		std::fs::write(&key, signed.signing_key.serialize_pem()).expect("write key");
+
+		let mut server_config =
+			crate::quic::server::Config::new(crate::quic::Identity::open(&cert, &key).expect("identity"));
+		server_config.alpn = vec!["moq-uring-sweep-test".to_string()];
+		let server_socket = handle
+			.udp(
+				UdpSocket::bind("127.0.0.1:0").expect("bind server"),
+				udp::Config::default(),
+			)
+			.expect("server socket");
+		let endpoint = crate::quic::Endpoint::new(
+			&handle,
+			server_socket,
+			crate::quic::endpoint::Config::default().with_server(server_config),
+		)
+		.expect("endpoint");
+
+		worker
+			.block_on(async {
+				let client_socket = handle
+					.udp(
+						UdpSocket::bind("127.0.0.1:0").expect("bind client"),
+						udp::Config::default(),
+					)
+					.expect("client socket");
+				let mut client_config = crate::quic::client::Config::new(endpoint.local_addr(), "localhost");
+				client_config.alpn = vec!["moq-uring-sweep-test".to_string()];
+				client_config.verify = false;
+
+				let client = crate::quic::client::connect(&handle, client_socket, &client_config)
+					.await
+					.expect("connect");
+				let server = endpoint.accept().await.expect("accept");
+				let mut session = crate::quic::web::Session::raw(server.clone());
+				let mut send = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+					.await
+					.expect("open stream");
+
+				BytesFactory::reset_stream_copies();
+				std::future::poll_fn(|cx| send.poll_write(cx, b"copied"))
+					.await
+					.expect("queue copied stream data");
+				assert_eq!(
+					BytesFactory::stream_copies(),
+					1,
+					"slice write allocates a quiche buffer"
+				);
+
+				BytesFactory::reset_stream_copies();
+				let mut owned = Bytes::from_static(b"owned");
+				std::future::poll_fn(|cx| send.poll_write_buf(cx, &mut owned))
+					.await
+					.expect("queue owned stream data");
+				assert!(owned.is_empty(), "owned write consumes the buffer");
+				assert_eq!(
+					BytesFactory::stream_copies(),
+					0,
+					"owned write reuses the caller's buffer"
+				);
+
+				let payload = vec![0x5a; TRAIN_SEGMENTS * SEGMENT * 2];
+				let mut offset = 0;
+				while offset < payload.len() {
+					offset += std::future::poll_fn(|cx| send.poll_write(cx, &payload[offset..]))
+						.await
+						.expect("queue stream data");
+				}
+
+				server.shared.take_non_ingress_sweeps();
+				let mut yielded = false;
+				std::future::poll_fn(|cx| {
+					if std::mem::replace(&mut yielded, true) {
+						return Poll::Ready(());
+					}
+					cx.waker().wake_by_ref();
+					Poll::Pending
+				})
+				.await;
+
+				assert_eq!(
+					server.shared.take_non_ingress_sweeps(),
+					0,
+					"transmit-only wakes must resume at flush"
+				);
+				drop(client);
+			})
+			.expect("worker");
+	}
+
+	/// A dropped handle takes its parking with it.
+	///
+	/// Nothing else can: a stream shut down on the way out is never reported
+	/// writable or readable again, so an entry left behind sits there for the
+	/// life of the connection, one per cancelled stream.
+	#[test]
+	fn forgetting_a_handle_clears_its_parking() {
+		let mut state = State::new(false);
+		let id = 0;
+		state.writable.entry(id).or_default();
+		state.readable.entry(id).or_default();
+		state.finishing.entry(id).or_default();
+		state.collected.insert(id, None);
+
+		state.forget_send(id);
+		assert!(state.writable.is_empty(), "the write half's parking");
+		assert!(state.finishing.is_empty(), "the finish watch");
+		assert!(state.collected.is_empty(), "the end bookkeeping");
+		// The read half is a separate handle, which may still be parked.
+		assert!(!state.readable.is_empty(), "the read half's parking survives");
+
+		state.forget_recv(id);
+		assert!(state.readable.is_empty(), "the read half's parking");
+	}
+}

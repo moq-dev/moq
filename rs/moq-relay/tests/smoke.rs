@@ -10,7 +10,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_relay::{AuthConfig, Cluster, ClusterConfig, Config, Connection, PublicConfig, Relay, Web, WebConfig};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -176,9 +176,10 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -199,8 +200,9 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -214,13 +216,18 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
+	let path = update.prefix.as_path().to_owned();
+	assert!(update.active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = sub_consumer
+		.request_broadcast(&path)
+		.await
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -369,9 +376,10 @@ async fn relay_websocket_root_path_upgrades() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}").parse().expect("parse url");
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -389,8 +397,9 @@ async fn relay_websocket_root_path_upgrades() {
 	.expect("publisher connect failed (root-path WS upgrade)");
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -400,12 +409,17 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
 	// own name with no prefix.
-	let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
+	let path = update.prefix.as_path().to_owned();
+	assert!(update.active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = sub_consumer
+		.request_broadcast(&path)
+		.await
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -436,10 +450,9 @@ async fn two_publish_only_clients_coexist() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
 
 	// ── two publish-only publishers, each serving a distinct broadcast ──
-	let pub_a = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast_a = pub_a
-		.create_broadcast("alpha", moq_net::broadcast::Route::new().with_announce(true))
-		.expect("create broadcast a");
+	let pub_a = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
+	let _announce_broadcast_a = pub_a.announce("alpha", Default::default()).expect("create broadcast a");
 	let mut track_a = broadcast_a.create_track("video", None).expect("create track a");
 	track_a
 		.append_group()
@@ -447,10 +460,9 @@ async fn two_publish_only_clients_coexist() {
 		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
 		.expect("write frame a");
 
-	let pub_b = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast_b = pub_b
-		.create_broadcast("beta", moq_net::broadcast::Route::new().with_announce(true))
-		.expect("create broadcast b");
+	let pub_b = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
+	let _announce_broadcast_b = pub_b.announce("beta", Default::default()).expect("create broadcast b");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track b");
 	track_b
 		.append_group()
@@ -474,8 +486,9 @@ async fn two_publish_only_clients_coexist() {
 	.expect("publisher b connect failed");
 
 	// ── one subscriber should see broadcasts from both publish-only clients ──
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -484,12 +497,12 @@ async fn two_publish_only_clients_coexist() {
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
-		let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+		let update = tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
-		if bc.is_some() {
-			seen.insert(path.as_str().to_owned());
+		if update.active {
+			seen.insert(update.prefix.as_path().as_str().to_owned());
 		}
 	}
 	assert!(
@@ -594,9 +607,10 @@ async fn internal_tcp_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -619,8 +633,9 @@ async fn internal_tcp_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -630,12 +645,17 @@ async fn internal_tcp_round_trip() {
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
 	// at its own name with no path prefix.
-	let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
+	let path = update.prefix.as_path().to_owned();
+	assert!(update.active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = sub_consumer
+		.request_broadcast(&path)
+		.await
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -707,9 +727,10 @@ async fn internal_unix_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -732,8 +753,9 @@ async fn internal_unix_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -741,17 +763,21 @@ async fn internal_unix_round_trip() {
 			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
-	let moq_net::announce::Update {
-		path: announced_path,
-		broadcast: bc,
-	} = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(announced_path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	assert_eq!(update.prefix.as_path().as_str(), "test");
+	assert!(update.active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+		.await
+		.expect("request timeout")
+		.expect("announced broadcast resolves");
 
-	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
+	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
+		.await
+		.expect("subscribe timeout")
+		.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
@@ -795,9 +821,10 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// whether the request path reached the server (it scopes the publisher's grant
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut bc = pub_origin
-		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_announce(true))
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
+	let _announce_bc = pub_origin
+		.announce(broadcast, Default::default())
 		.expect("create broadcast");
 	let mut track = bc.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -812,18 +839,20 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
 
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
-	let mut announcements = sub_origin.consume().announced();
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_consumer = sub_origin.consume();
+	let mut announcements = sub_consumer.announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
 	let (_client, sub_connection) = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
-	let moq_net::announce::Update { path, .. } = tokio::time::timeout(TIMEOUT, announcements.next())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
+	let path = update.prefix.as_path().to_owned();
 
 	drop(track);
 	drop(bc);
@@ -980,7 +1009,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let pub_origin = moq_tokio::origin::spawn(Origin::random());
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 
 	// The lite-05 client resolves `connect()` optimistically, so it may return Ok
 	// before the relay's verdict lands. Either the connect fails outright, or the
@@ -1012,7 +1041,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
@@ -1068,7 +1097,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 	let (port, handle) = spawn_publish_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 
 	// Like the publisher case, `connect()` may resolve optimistically; either it fails
 	// outright, or the session the relay hands back closes shortly after.

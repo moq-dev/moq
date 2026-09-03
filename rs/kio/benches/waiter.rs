@@ -35,6 +35,21 @@ fn populated(n: usize) -> (WaiterList, Vec<Waiter>) {
 	(list, waiters)
 }
 
+/// Register the first waiter on a newly constructed list, including lazy list
+/// initialization in the measured path.
+fn bench_register_first(c: &mut Criterion) {
+	c.bench_function("waiter_register_first", |b| {
+		b.iter_batched(
+			|| (WaiterList::new(), Waiter::new(Waker::noop().clone())),
+			|(mut list, waiter)| {
+				waiter.register(&mut list);
+				(list, waiter)
+			},
+			BatchSize::SmallInput,
+		)
+	});
+}
+
 /// Register a fresh waiter into a list of N live entries: the dedup scan misses,
 /// the dead-slot probe finds nothing, and the entry is appended.
 fn bench_register(c: &mut Criterion) {
@@ -186,6 +201,7 @@ fn bench_fanout_cycle_parked(c: &mut Criterion) {
 
 criterion_group!(
 	benches,
+	bench_register_first,
 	bench_register,
 	bench_reregister,
 	bench_register_dead,

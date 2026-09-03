@@ -162,7 +162,7 @@ fn envs(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashMap<String, String> {
 
 #[test]
 fn released_flags_still_parse() {
-	let cmd = moq_relay::Config::spec().root;
+	let cmd = moq_relay::spec().root;
 	let flags = flags(cmd);
 
 	let missing: Vec<&str> = RELEASED
@@ -179,7 +179,7 @@ fn released_flags_still_parse() {
 
 #[test]
 fn released_env_vars_are_still_read() {
-	let cmd = moq_relay::Config::spec().root;
+	let cmd = moq_relay::spec().root;
 	let envs = envs(cmd);
 
 	let missing: Vec<&str> = RELEASED

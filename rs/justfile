@@ -9,13 +9,30 @@
 
 set working-directory := '..'
 
+# Plain `cargo` unless set. A developer can select a compatible wrapper such as
+# mbx to share build artifacts across worktrees instead of using one target/
+# per worktree.
+#
+# Every recipe that compiles reads it, with three exceptions. `package` hands
+# nfpm a literal target/release path, and a managed target/ is a symlink.
+# `fix`/`wasm-fix` run `cargo fix`, which drops rustc wrappers. `fuzz` puts
+# nightly on PATH so a bare cargo/rustc resolve to it, and the sanitizer flags
+# are what break if anything else sits in front.
+# Empty counts as unset: `RUST_CARGO= just build` is how you opt one command out
+# of a shell that exports it, and just would otherwise hand the recipes an empty
+# program name.
+_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
+cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
+
 default:
     just check
 
-# Default features only, here and in CI. The permutations (`--all-features`,
-# `--no-default-features`) each cost a full extra workspace compile that shares
-# almost nothing with this one, which is too slow for a per-PR gate; `features`
-# below covers them nightly.
+# Default features for the selected workspace packages, here and in CI. The full
+# workspace permutations (`--all-features`, `--no-default-features`) each cost a
+# separate compile that shares almost nothing with this one, so `features` below
+# covers them nightly. `check-changed` makes one scoped exception for moq-tokio,
+# whose feature-gated transport surface must compile in isolation to avoid
+# workspace feature unification hiding a broken configuration.
 #
 # No `cargo check` pass: clippy is a superset of it, and the two use different
 # rustc wrappers, so running both means compiling the workspace twice.
@@ -30,11 +47,89 @@ default:
 check *args:
     just rs _select-test
     just rs _publish-test
-    cargo clippy --locked --all-targets {{ args }} -- -D warnings
+    just rs _doc-names-test
+    rs/scripts/package-nfpm.test.sh
+    {{ cargo_compile }} clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
+    just rs _doc-names
+    RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
+
+# Two targets whose names differ only by `-` vs `_` render to the same
+# `target/doc/<name>`, and a `cargo doc` that selects both races to clean it: the
+# collision warning escalates to `error: failed to remove directory` depending on
+# which rustdoc process gets there first. That reads as a flake, and because the doc
+# pass above is diff-scoped it surfaces on whichever unrelated PR happens to select
+# both crates. Resolve a pair by setting `doc = false` on whichever target has no
+# published API to render (usually the binary).
+#
+# Metadata only, so this costs no compilation and can sit in the PR gate. Takes an
+# optional metadata file so `_doc-names-test` can feed it synthetic workspaces.
+_doc-names metadata="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ -n "{{ metadata }}" ]]; then
+        collisions=$(jq -r -f rs/scripts/doc-names.jq < "{{ metadata }}")
+    else
+        collisions=$(cargo metadata --locked --no-deps --format-version 1 | jq -r -f rs/scripts/doc-names.jq)
+    fi
+
+    if [[ -n "$collisions" ]]; then
+        echo "rs: these targets render to the same doc directory:" >&2
+        echo "$collisions" >&2
+        echo "set doc = false on whichever has no published API." >&2
+        exit 1
+    fi
+
+# Both directions of `_doc-names`, since the interesting half is what it must NOT
+# report: cargo documents only the library when a binary shares its own package's
+# name, so flagging that would reject the conventional src/lib.rs + src/main.rs layout.
+_doc-names-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+
+    # Same package, same name: cargo suppresses the bin, so this must pass.
+    cat > "$scratch/ok.json" <<'JSON'
+    {"packages":[{"name":"solo","targets":[
+      {"name":"solo","kind":["lib"],"doc":true},
+      {"name":"solo","kind":["bin"],"doc":true}]}]}
+    JSON
+    just rs _doc-names "$scratch/ok.json"
+
+    # Same package, differing only by `-` vs `_`: cargo folds before suppressing, so
+    # this must pass too. Comparing the names as spelled would report it.
+    cat > "$scratch/folded.json" <<'JSON'
+    {"packages":[{"name":"folded","targets":[
+      {"name":"foo_bar","kind":["lib"],"doc":true},
+      {"name":"foo-bar","kind":["bin"],"doc":true}]}]}
+    JSON
+    just rs _doc-names "$scratch/folded.json"
+
+    # Different packages: a real collision, must be reported.
+    cat > "$scratch/bad.json" <<'JSON'
+    {"packages":[
+      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
+      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":true}]}]}
+    JSON
+    if just rs _doc-names "$scratch/bad.json" 2>/dev/null; then
+        echo "rs: _doc-names missed a cross-package collision" >&2
+        exit 1
+    fi
+
+    # `doc = false` is how a pair gets resolved, so it must stop being reported.
+    cat > "$scratch/fixed.json" <<'JSON'
+    {"packages":[
+      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
+      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":false}]}]}
+    JSON
+    just rs _doc-names "$scratch/fixed.json"
+
+    echo "rs: _doc-names ok"
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
@@ -153,6 +248,14 @@ _wants-wasm $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-tokio, whose zero-feature build is hidden
+# by workspace feature unification whenever any dependent enables a transport.
+[private]
+_wants-tokio-features $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-tokio' <<< "$(just rs _names "$PACKAGES")"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -192,6 +295,13 @@ _select-test:
     relay=$(just rs _select "rs/moq-relay/src/web.rs")
     if just rs _wants-wasm "$relay"; then
     	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
+    fi
+
+    tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
+    just rs _wants-tokio-features "$tokio" \
+        || fail "a moq-tokio diff must drive its feature matrix: $(just rs _names "$tokio")"
+    if just rs _wants-tokio-features "$relay"; then
+        fail "a moq-relay-only selection must not drive the moq-tokio feature matrix"
     fi
 
     # A non-crate directory under rs/ seeds a name that is not a package. It must
@@ -246,6 +356,10 @@ check-changed $FILES:
     	*)     echo "rs: checking $(just rs _names "$packages")"; just rs check $packages ;;
     esac
 
+    if [[ "$packages" == "ALL" ]] || just rs _wants-tokio-features "$packages"; then
+        just rs tokio-features
+    fi
+
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
     # however it got selected the host-target pass above compiled it to nothing
     # and saw no errors in it. This wasm32 pass is what actually checks it.
@@ -257,6 +371,33 @@ check-changed $FILES:
     if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm
     fi
+
+# Compile moq-tokio by itself at the feature extremes and with each QUIC backend.
+# Its default-feature build is already part of the ordinary clippy pass above.
+tokio-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cargo check --locked -p moq-tokio --no-default-features
+    cargo check --locked -p moq-tokio --all-features
+    cargo check --locked -p moq-tokio --no-default-features --features quiche
+    cargo check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
+    cargo check --locked -p moq-tokio --no-default-features --features quinn,ring
+    cargo check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
+    cargo check --locked -p moq-tokio --no-default-features --features noq,ring
+
+    want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
+    for backend in quinn noq; do
+        if output=$(cargo check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
+            echo "rs: moq-tokio with only $backend should reject its missing crypto provider" >&2
+            exit 1
+        fi
+        if ! grep -qF "$want" <<< "$output"; then
+            echo "rs: moq-tokio with only $backend should fail on: $want" >&2
+            echo "$output" | grep -E '^error' >&2 || true
+            exit 1
+        fi
+    done
 
 # Same as `fix`, but scoped the same way as `check-changed`.
 fix-changed $FILES:
@@ -296,7 +437,23 @@ fix-changed $FILES:
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
-    cargo check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+    {{ cargo_compile }} check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+
+# Compile and test the io_uring relay path, which is off the default feature set.
+# Linux-only, and the tests below the 6.12 kernel floor skip themselves.
+#
+# The remaining pairs run the same suite over the alternative QUIC backends.
+# moq-uring compiles exactly one, so each gets its own invocation: feature
+# unification would otherwise fold the builds back together.
+uring *args:
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
+    cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
+    cargo clippy --locked -p moq-relay --features io-uring-quinn --all-targets {{ args }} -- -D warnings
+    cargo clippy --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }}
+    cargo clippy --locked -p moq-relay --features io-uring-quiche --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
@@ -318,7 +475,7 @@ windows *args:
 
 # Compile the Apple-only code paths. Must run ON macOS.
 macos *args:
-    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    {{ cargo_compile }} check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
 # Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
 # `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
@@ -340,7 +497,7 @@ macos *args:
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 wasm *args:
-    cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
+    {{ cargo_compile }} clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
 
 # The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
 # because this runs alongside `fix`, which already formats everything else.
@@ -371,10 +528,10 @@ audit:
 
 # Compile the workspace at the feature extremes.
 features:
-    cargo check --locked --workspace --no-default-features
-    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
-    cargo nextest run --locked --workspace --all-targets --all-features
+    {{ cargo_compile }} check --locked --workspace --no-default-features
+    {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
+    RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
+    {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features
 
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is
@@ -407,7 +564,7 @@ features:
 
 # Run the test suite, reporting clippy findings from the same compile.
 test *args:
-    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
+    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" {{ cargo_compile }} nextest run --locked --all-targets {{ args }}
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.
@@ -430,7 +587,7 @@ test-changed $FILES:
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
-    cargo test --locked --doc {{ args }}
+    {{ cargo_compile }} test --locked --doc {{ args }}
 
 # Permutation-test the concurrent handoffs with loom.
 #
@@ -449,16 +606,57 @@ doctest *args:
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.
 loom *args:
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: {{ args }}
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom {{ args }}
+    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p kio --lib loom:: {{ args }}
+    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p moq-net --test loom {{ args }}
+
+# Coverage-guided fuzzing of the moq-net wire codecs (libFuzzer, via cargo-fuzz).
+#
+# The one recipe that steps off the pinned toolchain: libFuzzer needs `-Zsanitizer`,
+# which is nightly-only, so this stays out of `check` and `test` the same way `loom`
+# does. What CI gets instead is the replay: the target bodies live in moq-net's hidden
+# `fuzz` module, and its own tests run the generated corpus plus everything committed
+# under `fuzz/regressions/` on stable. A crash found here becomes a regression test
+# nobody has to install cargo-fuzz to run.
+#
+# Seeds are regenerated first so the corpus follows the dispatch rather than a stale
+# run, and libFuzzer writes what it discovers to the FIRST corpus directory, which is
+# why the generated seeds are passed second and stay read-only.
+#
+# TARGET is lite, ietf, varint, or path. Arguments pass through, so
+# `just rs fuzz lite -- -max_total_time=300` bounds a run. See rs/moq-net/fuzz/README.md.
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! command -v cargo-fuzz > /dev/null 2>&1; then
+    	echo "rs: cargo-fuzz is missing: cargo install --locked cargo-fuzz" >&2
+    	exit 1
+    fi
+
+    if ! rustup run nightly rustc --version > /dev/null 2>&1; then
+    	echo "rs: the nightly toolchain is missing: rustup toolchain install nightly" >&2
+    	exit 1
+    fi
+
+    cargo run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds
+    mkdir -p rs/moq-net/fuzz/corpus/{{ target }}
+
+    # Nightly by PATH rather than by `cargo +nightly`: the dev shell puts a
+    # Nix-provided cargo ahead of the rustup shim, so the `+` form is not
+    # understood, and cargo-fuzz shells out to a bare `cargo` and `rustc` anyway.
+    # Both have to be the nightly ones or the sanitizer flags are rejected.
+    export PATH="$(rustup run nightly rustc --print sysroot)/bin:$PATH"
+
+    cargo fuzz run --fuzz-dir rs/moq-net/fuzz {{ target }} \
+    	rs/moq-net/fuzz/corpus/{{ target }} rs/moq-net/fuzz/seeds/{{ target }} {{ args }}
 
 build:
-    cargo build --locked
+    {{ cargo_compile }} build --locked
 
 # Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
 # Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
 bench preset url *args:
-    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
+    {{ cargo_compile }} run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
 
 # Measure the Linux Tokio/epoll UDP syscall path. Extra args pass to Criterion,
 # e.g. `just rs bench-udp-tokio --quick`.
@@ -488,7 +686,7 @@ bench-session *args:
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:
-    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
+    {{ cargo_compile }} run --release -p moq-bench --bin moq-bench-host -- {{ args }}
 
 # Remove the Rust target directory.
 clean:
@@ -548,7 +746,5 @@ package crate packager:
     cargo build --locked --release -p {{ crate }}
     mkdir -p dist
     VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
-    	nfpm pkg --packager {{ packager }} \
-    		--config packaging/{{ crate }}/nfpm.yaml \
-    		--target dist/
+        rs/scripts/package-nfpm.sh packaging/{{ crate }}/nfpm.yaml {{ packager }} dist/
     ls -1 dist/

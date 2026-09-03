@@ -71,8 +71,11 @@ pub struct MoqAudioEncoderInput {
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
 	pub codec: MoqAudioCodec,
+	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
+	#[uniffi(default = None)]
 	pub channels: Option<u32>,
+	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in milliseconds. Opus accepts
 	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
@@ -84,8 +87,10 @@ pub struct MoqAudioEncoderOutput {
 pub struct MoqAudioDecoderOutput {
 	pub format: MoqAudioSampleFormat,
 	/// `None` delivers samples at the codec's native rate.
+	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
 	/// `None` delivers samples at the codec's native channel count.
+	#[uniffi(default = None)]
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
@@ -96,6 +101,7 @@ pub struct MoqAudioDecoderOutput {
 	/// `min_buffer_ms` (jitter-buffer floor), which is a distinct knob: this
 	/// one bounds how stale a group may be, that one how much to hold before
 	/// presenting.
+	#[uniffi(default = None)]
 	pub max_age_ms: Option<u64>,
 }
 
@@ -130,10 +136,10 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 	type Error = moq_audio::Error;
 
 	fn try_from(f: MoqAudioFrame) -> Result<Self, Self::Error> {
-		Ok(Self {
-			timestamp: moq_net::Timestamp::from_micros(f.timestamp_us)?,
-			data: f.data.into(),
-		})
+		Ok(Self::new(
+			f.data.into(),
+			moq_net::Timestamp::from_micros(f.timestamp_us)?,
+		))
 	}
 }
 

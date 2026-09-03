@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.5"
+version = "0.2.7"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,16 +16,16 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # subcommand); a relay can also embed `moq_srt::run` / `Server` against its own
 # origin.
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-bytes = "1"
-futures = "0.3"
+anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
+futures = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Pure-Rust SRT (no libsrt / ffmpeg). SRT carries MPEG-TS, demuxed by moq-mux.
 srt-tokio = "0.4"
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
 moq-tokio = { workspace = true }

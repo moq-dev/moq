@@ -13,7 +13,7 @@
 //! existing `description` (for already-out-of-band sources) or the synthesized
 //! avcC/hvcC (for Annex-B sources).
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
@@ -222,11 +222,7 @@ impl ExportSource {
 				let SourceState::Requesting(pending, name) = &self.state else {
 					unreachable!("just matched Requesting");
 				};
-				match pending.poll_ok(waiter) {
-					Poll::Ready(Ok(broadcast)) => (broadcast, name.clone()),
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-					Poll::Pending => return Poll::Pending,
-				}
+				(ready!(pending.poll_ok(waiter))?, name.clone())
 			};
 			let subscription = moq_net::track::Subscription::default().with_max_age(self.max_age);
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
@@ -239,11 +235,7 @@ impl ExportSource {
 				let SourceState::Subscribing(pending) = &self.state else {
 					unreachable!("just matched Subscribing");
 				};
-				match pending.poll_ok(waiter) {
-					Poll::Ready(Ok(track)) => track,
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-					Poll::Pending => return Poll::Pending,
-				}
+				ready!(pending.poll_ok(waiter))?
 			};
 			let media = self
 				.media
@@ -259,12 +251,10 @@ impl ExportSource {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
-				match consumer.poll_read(waiter) {
-					Poll::Ready(Ok(Some(f))) => f,
-					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-					Poll::Pending => return Poll::Pending,
-				}
+				let Some(frame) = ready!(consumer.poll_read(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				frame
 			};
 
 			let Some(transform) = self.transform.as_mut() else {

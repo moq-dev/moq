@@ -109,9 +109,9 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const node = entry.path as string;
+			const node = entry.prefix as string;
 			if (!node) continue;
-			const path = Net.Path.join(prefix, entry.path);
+			const path = Net.Path.join(prefix, entry.prefix);
 
 			if (entry.active) {
 				if (subs.has(node)) continue;
@@ -145,7 +145,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 	if (!consumer) return;
 
 	const sub = <K extends keyof NodeStats>(trackName: string, key: K) => {
-		const track = consumer.subscribe(trackName);
+		const track = consumer.subscribe(trackName).ordered();
 		effect.cleanup(() => track.close());
 		effect.spawn(async () => {
 			for (;;) {

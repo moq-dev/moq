@@ -8,9 +8,10 @@ use moq_mux::catalog::hang::CatalogExt;
 use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
+use super::encoded::Encoded;
 use super::encoder::{Codec, Config, Encoder, Input};
 use crate::resample::Resampler;
-use crate::{Error, Frame};
+use crate::{Activity, Error, Frame};
 
 /// Source-agnostic encode knobs for [`Producer`] and `publish_capture`, where
 /// the input PCM layout comes from the caller's frames or the capture source
@@ -119,25 +120,61 @@ pub struct Producer<E: CatalogExt = ()> {
 	pending_discontinuity: bool,
 	/// Whether an empty group already separates the next packet from prior codec state.
 	decoder_boundary: bool,
+	/// How the encoder classified the packet it published most recently.
+	activity: Activity,
 }
 
 struct Terminal {
-	packets: Vec<Bytes>,
+	packets: Vec<Encoded>,
 	end: Timestamp,
 	start: Timestamp,
 	frame_size: usize,
 	codec_rate: u32,
 }
 
-impl<E: CatalogExt> Producer<E> {
-	/// Publish a track encoding `input` into `broadcast`, registering its
-	/// rendition in `catalog` immediately.
-	pub fn new(
+/// A published track whose PCM layout is not known yet.
+///
+/// The track exists in the broadcast immediately, so its name and subscriber
+/// state are available, while the catalog rendition waits for
+/// [`encode`](Self::encode) to supply the layout it describes. Unlike a catalog
+/// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
+/// subscribers see the broadcast without this rendition until it resolves.
+pub(crate) struct Reserved<E: CatalogExt = ()> {
+	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+	rendition: moq_mux::catalog::AudioTrack<E>,
+}
+
+impl<E: CatalogExt> Reserved<E> {
+	pub(crate) fn new(
 		broadcast: &mut moq_net::broadcast::Producer,
 		mut catalog: moq_mux::catalog::Producer<E>,
-		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
+		let track = match &options.track {
+			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
+			// Lite05 subscribers know what scale to expect and the model layer accepts
+			// Frame::timestamp on append, plus whatever retention the broadcast declared.
+			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
+			// Mirrors the video side, which derives a unique name from the codec
+			// rather than making every caller invent one.
+			None => broadcast.unique_track(
+				&format!(".{}", options.codec),
+				catalog.track_info(hang::catalog::PRIORITY.audio),
+			)?,
+		};
+		let name = track.name().to_string();
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
+		let rendition = catalog.rendition(&name)?;
+
+		Ok(Self { track, rendition })
+	}
+
+	/// Build the encoder for `input` and register the rendition describing it.
+	///
+	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
+	/// codec rejects (more channels than Opus takes, a mismatch with
+	/// [`Options::channels`]) leaves the reservation intact for another input.
+	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
 		let encoder = Encoder::new(&options.config(input))?;
 		let input = &encoder.config().input;
 
@@ -156,37 +193,74 @@ impl<E: CatalogExt> Producer<E> {
 			)?)
 		};
 
-		let track = match &options.track {
-			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
-			// Lite05 subscribers know what scale to expect and the model layer accepts
-			// Frame::timestamp on append, plus whatever retention the broadcast declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
-			// Mirrors the video side, which derives a unique name from the codec
-			// rather than making every caller invent one.
-			None => broadcast.unique_track(
-				&format!(".{}", options.codec),
-				catalog.track_info(hang::catalog::PRIORITY.audio),
-			)?,
-		};
-		let name = track.name().to_string();
-		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
+		self.rendition.set(encoder.catalog());
 
-		// The rendition handle owns the name for as long as this producer lives, and retires the
-		// entry however the producer ends.
-		let mut rendition = catalog.reserve().audio(&name)?;
-		rendition.set(encoder.catalog());
+		Ok(Registered { encoder, resampler })
+	}
 
-		Ok(Self {
-			encoder,
-			resampler,
-			track,
-			rendition,
+	/// Spend the reservation on a registered encoder, publishing through the track.
+	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
+		Producer {
+			encoder: registered.encoder,
+			resampler: registered.resampler,
+			track: self.track,
+			rendition: self.rendition,
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
 			pending_discontinuity: false,
 			decoder_boundary: true,
-		})
+			activity: Activity::Active,
+		}
+	}
+}
+
+/// A registered rendition, waiting for its [`Reserved`] to be spent on it.
+///
+/// Proof that [`Reserved::register`] succeeded, so [`Reserved::encode`] takes no
+/// fallible step and cannot strand the track it consumes.
+pub(crate) struct Registered {
+	encoder: Encoder,
+	resampler: Option<Resampler>,
+}
+
+/// What a capture publication needs while its layout is still undiscovered.
+#[cfg(feature = "capture")]
+impl<E: CatalogExt> Reserved<E> {
+	/// The resolved track name, available before the layout is.
+	pub(crate) fn name(&self) -> &str {
+		self.rendition.name()
+	}
+
+	/// The underlying track producer, e.g. to watch subscriber state.
+	pub(crate) fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
+	}
+
+	/// Finalize a track that never got a rendition.
+	pub(crate) fn finish(mut self) -> Result<(), Error> {
+		self.track.finish()?;
+		Ok(())
+	}
+
+	/// Abort a track that never got a rendition, so subscribers see `err`.
+	pub(crate) fn abort(self, err: moq_net::Error) {
+		self.track.abort(err);
+	}
+}
+
+impl<E: CatalogExt> Producer<E> {
+	/// Publish a track encoding `input` into `broadcast`, registering its
+	/// rendition in `catalog` immediately.
+	pub fn new(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		input: Input,
+		options: &Options,
+	) -> Result<Self, Error> {
+		let mut reserved = Reserved::new(broadcast, catalog, options)?;
+		let registered = reserved.register(input, options)?;
+		Ok(reserved.encode(registered))
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.
@@ -198,6 +272,18 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`used`](moq_net::track::Producer::used) / [`unused`](moq_net::track::Producer::unused).
 	pub fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
+	}
+
+	/// Whether the packet published most recently coded audio, or withheld it
+	/// because the input was silent.
+	///
+	/// A local "am I talking" indicator without running a second voice detector
+	/// over the microphone, though a silent run is punctuated by coded frames
+	/// that read [`Activity::Active`], so hold the indicator across those rather
+	/// than following it packet by packet. [`Activity::Active`] until the first
+	/// packet, and for codecs without a discontinuous mode.
+	pub fn activity(&self) -> Activity {
+		self.activity
 	}
 
 	/// Current encoder target bitrate.
@@ -226,6 +312,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	fn reset_state(&mut self) {
 		self.epoch_us = None;
+		self.activity = Activity::Active;
 		self.frames_produced = 0;
 		self.pending.clear();
 		self.encoder.reset();
@@ -249,6 +336,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// call [`reset_epoch`](Self::reset_epoch) on resume (which re-anchors from
 	/// the next frame's wall-clock stamp); writing straight across a gap without
 	/// resetting compresses it out.
+	///
+	/// [`Frame::activity`] is ignored: the encoder classifies what it actually
+	/// produced, which [`activity`](Self::activity) reports.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
 		if self.pending_discontinuity {
 			self.track.discontinuity()?;
@@ -283,6 +373,7 @@ impl<E: CatalogExt> Producer<E> {
 
 			let timestamp = Self::timestamp(epoch_us, self.frames_produced, self.encoder.codec_rate())?;
 			self.frames_produced += self.encoder.frame_size() as u64;
+			self.activity = packet.activity;
 			Self::publish(&mut self.track, packet, timestamp)?;
 			self.decoder_boundary = false;
 		}
@@ -298,7 +389,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	fn publish(
 		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
-		payload: Bytes,
+		encoded: Encoded,
 		timestamp: Timestamp,
 	) -> Result<(), Error> {
 		// Publish each audio packet as its own moq-lite group: write it as a keyframe, then cut
@@ -306,7 +397,7 @@ impl<E: CatalogExt> Producer<E> {
 		// independently after a dropped group.
 		let mux_frame = MuxFrame {
 			timestamp,
-			payload,
+			payload: encoded.payload,
 			keyframe: true,
 			duration: None,
 		};
@@ -334,7 +425,7 @@ impl<E: CatalogExt> Producer<E> {
 				.convert(terminal.start.scale())?;
 			track.write(MuxFrame {
 				timestamp: terminal.start.checked_add(offset)?,
-				payload: packet,
+				payload: packet.payload,
 				keyframe: false,
 				duration: None,
 			})?;
@@ -397,6 +488,7 @@ impl<E: CatalogExt> Producer<E> {
 		} else {
 			for packet in packets {
 				let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+				self.activity = packet.activity;
 				Self::publish(&mut self.track, packet, timestamp)?;
 				self.frames_produced += frame_size as u64;
 			}
@@ -416,8 +508,8 @@ impl<E: CatalogExt> Producer<E> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Format;
 	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
+	use crate::{Activity, Format};
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
@@ -455,12 +547,7 @@ mod tests {
 			let impulse = pcm.len() - 100;
 			pcm[impulse] = 1.0;
 			let data: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-			producer
-				.write(&Frame {
-					timestamp: Timestamp::ZERO,
-					data: Bytes::from(data),
-				})
-				.unwrap();
+			producer.write(&Frame::new(Bytes::from(data), Timestamp::ZERO)).unwrap();
 			producer.finish().unwrap();
 
 			let mut decoded = Vec::new();
@@ -510,10 +597,7 @@ mod tests {
 		// remainder and its filter delay drops back under ten, costing a packet.
 		let data: Vec<u8> = vec![0.25f32; 8_838].iter().flat_map(|s| s.to_le_bytes()).collect();
 		producer
-			.write(&Frame {
-				timestamp: moq_net::Timestamp::ZERO,
-				data: data.into(),
-			})
+			.write(&Frame::new(data.into(), moq_net::Timestamp::ZERO))
 			.unwrap();
 		producer.finish().unwrap();
 
@@ -557,10 +641,7 @@ mod tests {
 		// Too little to publish a packet, so it all sits in the resampler.
 		let data: Vec<u8> = vec![0.25f32; 441].iter().flat_map(|s| s.to_le_bytes()).collect();
 		producer
-			.write(&Frame {
-				timestamp: moq_net::Timestamp::ZERO,
-				data: data.into(),
-			})
+			.write(&Frame::new(data.into(), moq_net::Timestamp::ZERO))
 			.unwrap();
 
 		producer.reset_epoch();
@@ -654,17 +735,63 @@ mod tests {
 		assert_eq!(resumed_frames, 960, "the resumed epoch must trim its own pre-skip once");
 	}
 
+	#[tokio::test]
+	async fn producer_and_consumer_keep_activity_on_the_audio_stream() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
+			dtx: true,
+			..Options::default()
+		};
+		let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let mut consumer = AudioConsumer::new(&subscriber, &decoder_config, "audio", DecodeConfig::new())
+			.await
+			.unwrap();
+
+		let silence = vec![0.0; 960];
+		let mut entered_dtx = false;
+		for index in 0..100 {
+			producer.write(&pcm_frame(&silence, index * 20_000)).unwrap();
+			let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+			assert_eq!(producer.activity(), consumed.activity);
+			if consumed.activity.is_dtx() {
+				entered_dtx = true;
+				break;
+			}
+		}
+		assert!(entered_dtx, "silence should enter Opus DTX");
+
+		let active: Vec<f32> = (0..960)
+			.map(|sample| {
+				let phase = sample as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0;
+				phase.sin() * 0.5
+			})
+			.collect();
+		producer.write(&pcm_frame(&active, 2_000_000)).unwrap();
+		let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+		assert_eq!(producer.activity(), Activity::Active);
+		assert_eq!(consumed.activity, Activity::Active);
+	}
+
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
 	// `write` of this drains precisely one packet (no resampler, no leftover).
 	fn full_frame(timestamp_us: u64) -> Frame {
-		let mut data = Vec::with_capacity(960 * 4);
-		for _ in 0..960 {
-			data.extend_from_slice(&0.1f32.to_le_bytes());
-		}
-		Frame {
-			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
-			data: data.into(),
-		}
+		pcm_frame(&vec![0.1; 960], timestamp_us)
+	}
+
+	fn pcm_frame(samples: &[f32], timestamp_us: u64) -> Frame {
+		let data: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		Frame::new(Bytes::from(data), Timestamp::from_micros(timestamp_us).unwrap())
 	}
 
 	/// Publish each frame and read back the resulting packet PTS (microseconds).

@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 
 use crate::Error;
 
-use super::{Samples, channel};
+use super::{Layout, Samples, channel};
 
 /// SCK's audio defaults, used when the caller doesn't pin a format.
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
@@ -58,6 +58,7 @@ pub(crate) struct SystemAudio {
 	/// The first buffer, captured during [`open`](Self::open) so a missing screen
 	/// recording grant is an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
+	layout: Layout,
 	_guard: StreamGuard,
 }
 
@@ -65,16 +66,17 @@ impl SystemAudio {
 	/// The format system audio will be captured at. SCK resamples to whatever we
 	/// ask for, so this is exactly what `config` requested (or the defaults), and
 	/// needs no open.
-	pub(super) fn format(sample_rate: Option<u32>, channels: Option<u32>) -> (u32, u32) {
-		(
-			sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
-			channels.unwrap_or(DEFAULT_CHANNELS),
-		)
+	pub(super) fn format(sample_rate: Option<u32>, channels: Option<u32>) -> Layout {
+		Layout {
+			sample_rate: sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
+			channels: channels.unwrap_or(DEFAULT_CHANNELS),
+		}
 	}
 
 	/// Open (and start) system audio capture.
 	pub(super) async fn open(sample_rate: Option<u32>, channels: Option<u32>) -> Result<Self, Error> {
-		let (sample_rate, channels) = Self::format(sample_rate, channels);
+		let layout = Self::format(sample_rate, channels);
+		let (sample_rate, channels) = (layout.sample_rate, layout.channels);
 
 		// The filter picks which audio is captured; a display filter means
 		// "everything playing on that screen", i.e. the whole system.
@@ -149,22 +151,25 @@ impl SystemAudio {
 		Ok(Self {
 			rx,
 			pending: Some(pending.samples),
+			layout,
 			_guard: guard,
 		})
+	}
+
+	/// The PCM layout requested from ScreenCaptureKit.
+	pub(super) fn layout(&self) -> Layout {
+		self.layout
 	}
 
 	/// Await the next buffer, or `None` once the stream stops. Cancel-safe: drop
 	/// the future to stop reading.
 	pub(super) async fn read(&mut self) -> Option<Samples> {
 		if let Some(data) = self.pending.take() {
-			return Some(Samples { data, gap: false });
+			return Some(Samples::plain(data, false));
 		}
 
 		let buffer = self.rx.recv().await?;
-		Some(Samples {
-			data: buffer.samples,
-			gap: self.rx.gap(),
-		})
+		Some(Samples::plain(buffer.samples, self.rx.gap()))
 	}
 }
 

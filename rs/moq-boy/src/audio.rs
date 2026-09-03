@@ -62,10 +62,10 @@ impl AudioEncoder {
 		for sample in samples {
 			data.extend_from_slice(&sample.to_le_bytes());
 		}
-		let frame = moq_audio::Frame {
-			timestamp: moq_net::Timestamp::from_micros(elapsed.as_micros() as u64)?,
-			data: Bytes::from(data),
-		};
+		let frame = moq_audio::Frame::new(
+			Bytes::from(data),
+			moq_net::Timestamp::from_micros(elapsed.as_micros() as u64)?,
+		);
 		self.producer.write(&frame)?;
 		Ok(())
 	}

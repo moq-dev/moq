@@ -17,7 +17,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
-use super::{Config, FrameStream};
+use super::{Config, Stream};
 use crate::Error;
 use crate::frame::{I420, Surface};
 
@@ -58,7 +58,7 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 }
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
 	let config = config.clone();
 	// The camera opens on the pump thread, so the selector has to be owned.
 	let device = device.map(str::to_string);
@@ -71,7 +71,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				width: camera.width,
 				height: camera.height,
 				framerate: camera.framerate,
-				device: camera.name.clone(),
+				label: camera.name.clone(),
 			};
 			Ok((camera, geometry))
 		},
@@ -79,12 +79,12 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	)
 	.await?;
 
-	Ok(FrameStream::new(
+	Ok(Stream::new(
 		chan,
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		None,
 		Box::new(guard),
 	))
@@ -176,8 +176,8 @@ impl Camera {
 	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
 	/// in a loop and checks its stop flag between calls.
 	fn read(&mut self) -> Result<Option<Surface>, Error> {
-		let (buf, meta) =
-			CaptureStream::next(&mut self.stream).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 capture: {e}")))?;
+		let (buf, meta) = CaptureStream::next(&mut self.stream)
+			.map_err(|error| Error::SourceUnavailable(format!("V4L2 camera {}: {error}", self.name)))?;
 
 		let i420 = match self.source {
 			Source::Yuyv => I420::from_yuyv(buf, self.stride, self.width, self.height)?,
@@ -204,20 +204,27 @@ impl Camera {
 fn open_device(device: Option<&str>) -> Result<(Device, String), Error> {
 	match device {
 		None => {
-			let device = Device::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("open /dev/video0: {e}")))?;
+			let device = Device::new(0).map_err(|error| open_error("/dev/video0", error))?;
 			Ok((device, "/dev/video0".to_string()))
 		}
 		Some(spec) => match spec.parse::<usize>() {
 			Ok(index) => {
-				let device =
-					Device::new(index).map_err(|e| Error::Codec(anyhow::anyhow!("open /dev/video{index}: {e}")))?;
+				let name = format!("/dev/video{index}");
+				let device = Device::new(index).map_err(|error| open_error(&name, error))?;
 				Ok((device, format!("/dev/video{index}")))
 			}
 			Err(_) => {
-				let device = Device::with_path(spec).map_err(|e| Error::Codec(anyhow::anyhow!("open {spec}: {e}")))?;
+				let device = Device::with_path(spec).map_err(|error| open_error(spec, error))?;
 				Ok((device, spec.to_string()))
 			}
 		},
+	}
+}
+
+fn open_error(device: &str, error: std::io::Error) -> Error {
+	match error.kind() {
+		std::io::ErrorKind::PermissionDenied => Error::PermissionDenied(format!("{device}: {error}")),
+		_ => Error::SourceUnavailable(format!("{device}: {error}")),
 	}
 }
 

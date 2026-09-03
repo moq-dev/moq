@@ -1,5 +1,5 @@
-import { h } from "vue";
 import DefaultTheme from "vitepress/theme";
+import { h } from "vue";
 import Banner from "./Banner.vue";
 import "./custom.css";
 

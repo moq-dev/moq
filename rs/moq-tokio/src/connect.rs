@@ -150,7 +150,8 @@ pub(crate) struct Legacy {
 			"moq-transport-16",
 			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19"
+			"moq-transport-19",
+			"moq-transport-20"
 		),
 		hide = true
 	)]
@@ -487,7 +488,8 @@ pub struct Config {
 			"moq-transport-16",
 			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19"
+			"moq-transport-19",
+			"moq-transport-20"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
@@ -602,7 +604,10 @@ impl Config {
 
 	/// Build the [`crate::Client`] this config describes.
 	pub fn init(self, quic: crate::quic::Config) -> crate::Result<crate::Client> {
-		crate::Client::new(self, quic)
+		crate::client::Config::default()
+			.with_connect(self)
+			.with_quic(quic)
+			.init()
 	}
 
 	/// The local address a dial sends from, resolving the default.

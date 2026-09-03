@@ -20,9 +20,10 @@
 	},
 	"dependencies": {
 		"@hexagon/base64": "^2.0.4",
+		"@zod/mini": "^4.5.4",
 		"commander": "^15.0.0",
 		"jose": "^6.2.9",
-		"zod": "^4.4.3"
+		"zod": "^4.5.4"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3.14",

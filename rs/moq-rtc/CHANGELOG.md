@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.6...moq-rtc-v0.2.7) - 2026-09-01
+
+### Fixed
+
+- *(rtc)* complete client media negotiation ([#3195](https://github.com/moq-dev/moq/pull/3195))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
+## [0.2.6](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.5...moq-rtc-v0.2.6) - 2026-08-26
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux, hang
+
 ## [0.2.5](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.4...moq-rtc-v0.2.5) - 2026-08-20
 
 ### Other

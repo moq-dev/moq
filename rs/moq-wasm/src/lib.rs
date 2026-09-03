@@ -74,7 +74,7 @@ impl Session {
 	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
-		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		web_async::spawn(origin_driver.run(runtime::Runtime));
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
@@ -97,10 +97,15 @@ impl Session {
 		Err(js_err(self.inner.closed().await))
 	}
 
-	/// Subscribe to a broadcast by path, waiting until it is announced.
+	/// Subscribe to a broadcast by path, waiting until a route covers it.
 	pub async fn consume(&self, path: String) -> Result<Option<Broadcast>, JsValue> {
-		let broadcast = self.consumer.announced_broadcast(path.as_str()).await;
-		Ok(broadcast.map(|inner| Broadcast { inner }))
+		if self.consumer.routed(path.as_str()).await.is_none() {
+			return Ok(None);
+		}
+		match self.consumer.request_broadcast(path.as_str()).await {
+			Ok(inner) => Ok(Some(Broadcast { inner })),
+			Err(_) => Ok(None),
+		}
 	}
 }
 

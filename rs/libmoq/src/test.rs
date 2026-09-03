@@ -1206,7 +1206,6 @@ fn publish_track_invalid_broadcast() {
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) } < 0);
 	let info = moq_track_info {
 		priority: 1,
-		ordered: true,
 		max_age_ms: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -1221,7 +1220,6 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		ordered: true,
 		max_age_ms: 0,
 		group_start: 0,
 		group_start_present: false,
@@ -1238,7 +1236,6 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let name = b"data";
 	let info = moq_track_info {
 		priority: 0,
-		ordered: false,
 		max_age_ms: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -1247,36 +1244,6 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
-}
-
-#[test]
-fn raw_track_options_preserve_ordering_priority() {
-	let mut info = moq_track_info {
-		priority: 0,
-		ordered: false,
-		max_age_ms: 0,
-		max_age_present: false,
-		timescale: 0,
-		timescale_present: false,
-	};
-
-	assert!(!moq_net::track::Info::try_from(&info).unwrap().ordered);
-	info.ordered = true;
-	assert!(moq_net::track::Info::try_from(&info).unwrap().ordered);
-
-	let mut subscription = moq_subscription {
-		priority: 0,
-		ordered: false,
-		max_age_ms: 0,
-		group_start: 0,
-		group_start_present: false,
-		group_end: 0,
-		group_end_present: false,
-	};
-
-	assert!(!moq_net::track::Subscription::from(&subscription).ordered);
-	subscription.ordered = true;
-	assert!(moq_net::track::Subscription::from(&subscription).ordered);
 }
 
 #[test]
@@ -1303,7 +1270,6 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		ordered: false,
 		max_age_ms: 1_000,
 		group_start: 0,
 		group_start_present: false,
@@ -1485,7 +1451,6 @@ fn raw_track_subscription_options_and_update() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		ordered: false,
 		max_age_ms: 1_000,
 		max_age_present: true,
 		timescale: 1_000_000,
@@ -1507,7 +1472,6 @@ fn raw_track_subscription_options_and_update() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 5,
-		ordered: true,
 		max_age_ms: 25,
 		group_start: 1,
 		group_start_present: true,

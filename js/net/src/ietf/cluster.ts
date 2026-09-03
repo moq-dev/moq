@@ -24,7 +24,7 @@
  */
 
 import { ProtocolViolation, reason } from "../error.ts";
-import { MAX_HOPS, type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
+import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { Parameters, SetupOption, type SetupOptions } from "./parameters.ts";
@@ -50,7 +50,7 @@ export function supported(version: IetfVersion): boolean {
  */
 export interface Hops {
 	/** Our own Hop ID, declared in SETUP and stamped onto every advertisement we send. */
-	self: Origin;
+	self: Hop;
 
 	/**
 	 * The peer's Hop ID, or `undefined` when it declared no RELAY_HOPS.
@@ -61,7 +61,7 @@ export interface Hops {
 	 * message. A peer that declared the reserved 0 negotiated the extension but withheld its
 	 * identity, so the parameters flow and there is simply nothing to exclude.
 	 */
-	peer?: Origin;
+	peer?: Hop;
 }
 
 /**
@@ -74,7 +74,7 @@ export interface Hops {
  */
 export interface Advert {
 	/** HOP_PATH: the path this advertisement traversed, publisher first, sender last. */
-	hops: Origin[];
+	hops: Hop[];
 
 	/** ROUTE_COST: the marginal cost of subscribing via this advertisement. Absent on the
 	 * wire means 0, so an endpoint that prices nothing sends nothing. */
@@ -86,7 +86,7 @@ export interface Advert {
  *
  * @internal
  */
-export function fromSetup(params: SetupOptions, version: IetfVersion): Origin | undefined {
+export function fromSetup(params: SetupOptions, version: IetfVersion): Hop | undefined {
 	if (!supported(version)) return undefined;
 
 	// RELAY_HOPS is odd, so its value is a length-prefixed byte string holding the sender's
@@ -97,7 +97,7 @@ export function fromSetup(params: SetupOptions, version: IetfVersion): Origin | 
 
 	const [origin, rest] = Varint.decodeLeadingOnes(value);
 	if (rest.length !== 0) throw new Error("trailing bytes in RELAY_HOPS");
-	return OriginSchema.parse(origin);
+	return HopSchema.parse(origin);
 }
 
 /**
@@ -105,7 +105,7 @@ export function fromSetup(params: SetupOptions, version: IetfVersion): Origin | 
  *
  * @internal
  */
-export function intoSetup(params: SetupOptions, self: Origin, version: IetfVersion) {
+export function intoSetup(params: SetupOptions, self: Hop, version: IetfVersion) {
 	if (!supported(version)) return;
 	params.setBytes(SetupOption.RelayHops, Varint.encodeLeadingOnes(self));
 }
@@ -145,8 +145,8 @@ export function advertise(ids: Hops | undefined): Advert | undefined {
  *
  * @internal
  */
-export function loops(advert: Advert, self: Origin): boolean {
-	return self !== UNKNOWN_ORIGIN && advert.hops.includes(self);
+export function loops(advert: Advert, self: Hop): boolean {
+	return self !== UNKNOWN_HOP && advert.hops.includes(self);
 }
 
 /**
@@ -211,12 +211,12 @@ export function fromParams(params: Parameters): Advert {
 		const value = params.hopPath;
 		if (value === undefined) throw new Error("advertisement is missing HOP_PATH");
 
-		const hops: Origin[] = [];
+		const hops: Hop[] = [];
 		let rest = value;
 		while (rest.length > 0) {
 			// A short read here means the entries did not exactly fill the length.
 			const [hop, remain] = Varint.decodeLeadingOnes(rest);
-			hops.push(OriginSchema.parse(hop));
+			hops.push(HopSchema.parse(hop));
 			rest = remain;
 
 			// Bail before the buffer does: a hostile length would otherwise cost us one
@@ -236,14 +236,14 @@ export function fromParams(params: Parameters): Advert {
  * than we accept, or a non-zero Hop ID appearing twice (a loop). Duplicate zeros are legal,
  * since 0 identifies nothing.
  */
-function validate(hops: Origin[]) {
+function validate(hops: Hop[]) {
 	if (hops.length === 0) throw new Error("hop path is empty");
 	if (hops.length > MAX_HOPS) throw new Error(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
 
 	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
 	for (let i = 0; i < hops.length; i++) {
 		const hop = hops[i];
-		if (hop === UNKNOWN_ORIGIN) continue;
+		if (hop === UNKNOWN_HOP) continue;
 		if (hops.indexOf(hop, i + 1) !== -1) throw new Error(`hop ${hop} appears twice in the hop path`);
 	}
 }

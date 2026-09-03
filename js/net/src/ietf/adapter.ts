@@ -1,5 +1,6 @@
 import { Mutex } from "async-mutex";
 import { Reader, Stream, type Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import * as Varint from "../varint.ts";
 import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -444,16 +445,15 @@ export class ControlStreamAdapter implements Session {
 	 * Parse a namespace from raw bytes and register it for reverse lookup.
 	 */
 	#parseAndRegisterNamespace(buf: Uint8Array, requestId: bigint) {
-		const decoder = new TextDecoder();
 		const [partCount, afterCount] = Varint.decode(buf);
 		let cursor = afterCount;
 		const parts: string[] = [];
 		for (let i = 0; i < partCount; i++) {
 			const [len, afterLen] = Varint.decode(cursor);
-			parts.push(decoder.decode(afterLen.subarray(0, len)));
+			parts.push(decodeUtf8(afterLen.subarray(0, len)));
 			cursor = afterLen.subarray(len);
 		}
-		const namespace = parts.join("/");
+		const namespace = Namespace.fromTuple(parts);
 		this.#namespaces.set(namespace, requestId);
 		this.#namespacesByRequestId.set(requestId, namespace);
 	}

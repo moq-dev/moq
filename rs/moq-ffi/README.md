@@ -2,7 +2,7 @@
 
 UniFFI bindings for Media over QUIC (MoQ).
 
-This crate provides Kotlin, Swift, and Python bindings for the MoQ protocol stack via [UniFFI](https://mozilla.github.io/uniffi-rs/). All exported async methods must be called from an appropriate async context (e.g., a Kotlin coroutine scope or Swift `Task`/`async` context).
+This crate provides Kotlin, Swift, Python, Go, and Dart bindings for the MoQ protocol stack via [UniFFI](https://mozilla.github.io/uniffi-rs/). All exported async methods must be called from an appropriate async context (for example, a Kotlin coroutine scope, Swift `Task`, or Dart `Future`).
 
 ## Building
 
@@ -34,7 +34,10 @@ The library extension depends on your platform: `.dylib` (macOS/iOS), `.so` (Lin
 cargo run --bin uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language kotlin --out-dir out/
 cargo run --bin uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language swift --out-dir out/
 cargo run --bin uniffi-bindgen -- generate --library target/release/libmoq_ffi.{dylib,so} --language python --out-dir out/
+uniffi_bindgen_dart --library target/release/libmoq_ffi.{dylib,so} --out-dir out/
 ```
+
+The Dart generator is pinned in `flake.nix`; run `nix develop --command just dart generate` to regenerate the committed package bindings.
 
 ## Architecture
 

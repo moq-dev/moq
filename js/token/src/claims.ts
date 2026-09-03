@@ -4,7 +4,7 @@
  * @module
  */
 
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 import * as Path from "./path.ts";
 
 /** A `put`/`get` claim is one path or many; normalize it to a list. */

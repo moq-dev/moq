@@ -456,7 +456,7 @@ mod tests {
 
 	fn lan(credential: &str) -> Lan {
 		Lan {
-			origin: moq_tokio::origin::spawn(moq_net::Origin::random()),
+			origin: moq_tokio::origin::spawn(moq_net::Hop::random()),
 			credential: credential.to_string(),
 			client: moq_tokio::connect::Config::default(),
 		}
@@ -598,12 +598,13 @@ mod tests {
 	/// so the test needs no multicast and stays CI-safe.
 	#[tokio::test]
 	async fn session_shares_origin_bidirectionally() {
-		let origin_a = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin_a = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin_b = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 		// Published before the session exists; announcements flow once it connects.
-		let _from_a = origin_a
-			.create_broadcast("from-a", moq_net::broadcast::Route::new().with_announce(true))
+		let _from_a = origin_a.create_broadcast("from-a").expect("failed to create broadcast");
+		let _announce_from_a = origin_a
+			.announce("from-a", Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -632,12 +633,13 @@ mod tests {
 			.await
 			.expect("timed out waiting for announcement")
 			.expect("origin closed");
-		assert_eq!(update.path.as_str(), "from-a");
+		assert_eq!(update.prefix.as_path().as_str(), "from-a");
 
 		// And the reverse direction over the same session. This stream replays a's
 		// own "from-a" first, so read until the remote broadcast shows up.
-		let _from_b = origin_b
-			.create_broadcast("from-b", moq_net::broadcast::Route::new().with_announce(true))
+		let _from_b = origin_b.create_broadcast("from-b").expect("failed to create broadcast");
+		let _announce_from_b = origin_b
+			.announce("from-b", Default::default())
 			.expect("failed to create broadcast");
 		let mut announced_on_a = origin_a.consume().announced();
 		loop {
@@ -645,7 +647,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for announcement")
 				.expect("origin closed");
-			if update.path.as_str() == "from-b" {
+			if update.prefix.as_path().as_str() == "from-b" {
 				break;
 			}
 		}
@@ -655,10 +657,11 @@ mod tests {
 	/// origin is attached: reaching the listener is not membership.
 	#[tokio::test]
 	async fn mesh_rejects_a_dial_without_the_proof() {
-		let origin_a = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let _from_b = origin_b
-			.create_broadcast("from-b", moq_net::broadcast::Route::new().with_announce(true))
+		let origin_a = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin_b = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let _from_b = origin_b.create_broadcast("from-b").expect("failed to create broadcast");
+		let _announce_from_b = origin_b
+			.announce("from-b", Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -696,9 +699,12 @@ mod tests {
 	/// user who passed `--listen` did ask to serve, so that case still does.
 	#[tokio::test]
 	async fn a_mesh_only_listener_refuses_ordinary_clients() {
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let _published = origin
-			.create_broadcast("secret-stream", moq_net::broadcast::Route::new().with_announce(true))
+			.create_broadcast("secret-stream")
+			.expect("failed to create broadcast");
+		let _announce_published = origin
+			.announce("secret-stream", Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -722,7 +728,7 @@ mod tests {
 		config.tls = moq_tokio::tls::Connect::default();
 		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
 		config.once = Some(true);
-		let stolen = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let stolen = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let url = peer.urls.into_iter().next().expect("an address");
 		let connection = config
 			.init(Default::default())

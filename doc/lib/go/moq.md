@@ -49,9 +49,14 @@ for ann, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	fmt.Println("got broadcast", ann.Path())
+	// An announcement is a route; its path is relative to the prefix.
+	fmt.Println("got route", ann.Path())
 
-	catalog, err := ann.Broadcast().Catalog(ctx)
+	broadcast, err := client.RequestBroadcast("demos/" + ann.Path())
+	if err != nil {
+		log.Fatal(err)
+	}
+	catalog, err := broadcast.Catalog(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -222,7 +227,7 @@ err := broadcast.SetVideoProperties(moq.VideoProperties{
 
 ## Error handling
 
-A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
+A server can reject the connection on auth grounds: `moq.ErrUnauthorized` (HTTP 401) or `moq.ErrForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
 
 ```go
 session, err := client.Connect("https://relay.example.com")

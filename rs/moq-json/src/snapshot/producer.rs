@@ -115,6 +115,19 @@ impl<T: Serialize> Producer<T> {
 		}
 	}
 
+	/// Finish the open group, so the deltas already written stop being provisional.
+	///
+	/// No replacement group opens until the next [`update`](Self::update), which emits a full
+	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
+	/// therefore reads the whole value without the deltas that preceded it.
+	///
+	/// Idempotent: cutting when no group is open does nothing, so a caller can cut on its own
+	/// schedule without tracking what has been published since the last one. Inert when deltas are
+	/// disabled, where every frame already gets its own group.
+	pub fn cut(&mut self) -> Result<()> {
+		self.inner.lock().unwrap().cut()
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
@@ -188,6 +201,20 @@ struct Inner<T> {
 	encoder: Encoder<T>,
 }
 
+impl<T> Inner<T> {
+	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
+	fn cut(&mut self) -> Result<()> {
+		if self.track.group.is_none() {
+			return Ok(());
+		}
+
+		// The group closes either way below, so reset first: a `finish` error must not leave the
+		// encoder emitting deltas against a snapshot whose group is gone.
+		self.encoder.reset();
+		self.track.cut()
+	}
+}
+
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, value: &T) -> Result<()> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
@@ -228,8 +255,24 @@ struct Track {
 }
 
 impl Track {
+	/// Finish the open group without opening a replacement.
+	fn cut(&mut self) -> Result<()> {
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		Ok(())
+	}
+
 	/// Write one encoded frame, rolling a group when it's a snapshot.
 	fn write(&mut self, encoded: &Encoded) -> Result<()> {
+		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
+		// new one before the frame is written, so discovering the limit inside `write_frame` would
+		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
+		// value would be lost even though this update reported an error.
+		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+
 		match encoded.keyframe {
 			true => self.write_snapshot(encoded.payload.clone()),
 			false => self.write_delta(encoded.payload.clone()),

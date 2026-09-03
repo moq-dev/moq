@@ -144,19 +144,19 @@ enum Command {
 		id: Option<String>,
 
 		/// Write the key to a file path. Use `-` for stdout.
-		#[usage(long)]
+		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
 		out: Option<PathBuf>,
 
 		/// Write the key to a directory as {kid}.jwk.
-		#[usage(long, conflicts = "--out")]
+		#[usage(long, conflicts = "--out", value_hint = usage::ValueHint::DirPath)]
 		out_dir: Option<PathBuf>,
 
 		/// Write the public key to a file path (asymmetric algorithms only). Use `-` for stdout.
-		#[usage(long)]
+		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
 		public: Option<PathBuf>,
 
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
-		#[usage(long, conflicts = "--public")]
+		#[usage(long, conflicts = "--public", value_hint = usage::ValueHint::DirPath)]
 		public_dir: Option<PathBuf>,
 
 		/// Root path for the optional key scope. Only applied alongside --publish or --subscribe.
@@ -175,7 +175,7 @@ enum Command {
 	/// Sign a token, writing it to stdout.
 	Sign {
 		/// Path to the signing key file. Use `-` for stdin.
-		#[usage(long)]
+		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// The root path for the token.
@@ -202,11 +202,11 @@ enum Command {
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
-		#[usage(long)]
+		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// Path to read the token from. Use `-` for stdin.
-		#[usage(long = "in", default = "-")]
+		#[usage(long = "in", default = "-", value_hint = usage::ValueHint::FilePath)]
 		token: PathBuf,
 	},
 }

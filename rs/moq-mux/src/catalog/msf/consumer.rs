@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use base64::Engine;
 use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
@@ -14,7 +14,7 @@ use crate::catalog::msf::Error;
 /// so the rest of the pipeline only deals with hang types.
 pub struct Consumer {
 	/// Access to the underlying track consumer.
-	pub track: moq_net::track::Subscriber,
+	pub track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 }
 
@@ -23,7 +23,10 @@ impl Consumer {
 	///
 	/// The track is expected to carry MSF catalog payloads (track name [`moq_msf::DEFAULT_NAME`]).
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
-		Self { track, group: None }
+		Self {
+			track: track.ordered(),
+			group: None,
+		}
 	}
 
 	/// Poll for the next catalog update, returned as a [`hang::Catalog`].
@@ -39,8 +42,8 @@ impl Consumer {
 		};
 
 		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match ready!(group.poll_read_frame(waiter)?) {
+				Some(frame) => {
 					self.group = None;
 					let json = std::str::from_utf8(&frame.payload).map_err(|_| Error::InvalidUtf8)?;
 					let msf = match moq_msf::Catalog::from_str(json) {
@@ -53,8 +56,7 @@ impl Consumer {
 					let catalog = from_msf(&msf)?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
-				Poll::Ready(None) => self.group = None,
-				Poll::Pending => return Poll::Pending,
+				None => self.group = None,
 			}
 		}
 

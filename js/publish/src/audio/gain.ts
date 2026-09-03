@@ -11,8 +11,14 @@ const FADE = 0.2; // seconds
  * audio came from.
  */
 export class Gain {
-	#current = 1;
-	#target = 1;
+	#current: number;
+	#target: number;
+
+	/** Start at `initial`, avoiding a ramp from unity before the first frame. */
+	constructor(initial = 1) {
+		this.#current = initial;
+		this.#target = initial;
+	}
 
 	/** Set the level to ramp toward, where 1 is unity and 0 is silence. */
 	set(value: number): void {

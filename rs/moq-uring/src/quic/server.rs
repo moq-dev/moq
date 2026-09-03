@@ -1,14 +1,13 @@
 //! Accepting: everything one incoming connection needs.
 
-use super::{Connection, Error, Identity, Trust};
+use super::{Connection, Error, Identity};
 use crate::{Handle, udp};
 
 /// Whether connecting clients are asked for a certificate, and against what.
 ///
-/// `SSL_VERIFY_PEER` on its own asks for a certificate and validates one that
-/// arrives, but still admits a client that presents none; only
-/// [`Required`](Self::Required) turns a missing certificate into a failed
-/// handshake.
+/// Asking for a certificate and validating one that arrives still admits a
+/// client that presents none; only [`Required`](Self::Required) turns a
+/// missing certificate into a failed handshake.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum ClientAuth {
@@ -20,6 +19,18 @@ pub enum ClientAuth {
 	Optional(Vec<std::path::PathBuf>),
 	/// Require every client to present a certificate chaining to these roots.
 	Required(Vec<std::path::PathBuf>),
+}
+
+impl ClientAuth {
+	/// The roots a presented certificate is checked against, and whether one
+	/// is mandatory.
+	pub(crate) fn roots(&self) -> Option<(&[std::path::PathBuf], bool)> {
+		match self {
+			Self::None => None,
+			Self::Optional(roots) => Some((roots, false)),
+			Self::Required(roots) => Some((roots, true)),
+		}
+	}
 }
 
 /// What to present, what to speak, and who may connect.
@@ -34,8 +45,9 @@ pub struct Config {
 	pub alpn: Vec<String>,
 	/// Whether to ask connecting clients for a certificate.
 	pub client_auth: ClientAuth,
-	/// Close the connection after this long without activity.
-	pub idle_timeout: std::time::Duration,
+	/// The per-connection transport settings (timeouts, stream limits,
+	/// congestion control).
+	pub transport: super::Transport,
 }
 
 impl Config {
@@ -46,33 +58,21 @@ impl Config {
 			identity,
 			alpn: Vec::new(),
 			client_auth: ClientAuth::default(),
-			idle_timeout: std::time::Duration::from_secs(10),
+			transport: super::Transport::default(),
 		}
 	}
 
-	pub(crate) fn quiche(&self) -> Result<quiche::Config, Error> {
-		use boring::ssl::SslVerifyMode;
-
-		let (roots, verify) = match &self.client_auth {
-			ClientAuth::None => (Vec::new(), SslVerifyMode::NONE),
-			ClientAuth::Optional(roots) => (roots.clone(), SslVerifyMode::PEER),
-			ClientAuth::Required(roots) => (roots.clone(), SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT),
-		};
-		// An empty store rejects every chain, so asking for a certificate with
-		// nothing to check it against refuses exactly the clients that obey.
-		if !matches!(self.client_auth, ClientAuth::None) && roots.is_empty() {
+	/// Refuse a configuration no client could satisfy.
+	///
+	/// An empty store rejects every chain, so asking for a certificate with
+	/// nothing to check it against refuses exactly the clients that obey.
+	pub(crate) fn check(&self) -> Result<(), Error> {
+		if self.client_auth.roots().is_some_and(|(roots, _)| roots.is_empty()) {
 			return Err(Error::Tls(
 				"client authentication needs at least one root certificate".to_string(),
 			));
 		}
-		let trust = Trust {
-			roots,
-			// Client certificates chain to the roots configured here, never to
-			// the platform store for public sites.
-			system: false,
-			verify,
-		};
-		super::tls(&self.alpn, Some(&self.identity), trust, self.idle_timeout)
+		Ok(())
 	}
 }
 

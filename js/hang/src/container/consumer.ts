@@ -167,21 +167,18 @@ export class Consumer {
 				this.#active = consumer.sequence;
 			}
 
-			// Normally we drop anything behind the cursor. With an active reset the cursor isn't
-			// a valid floor (a late new-epoch group can sit below it); defer to the boundary and
-			// admit ambiguous groups so #runGroup can rule on them once their timestamps arrive.
-			let drop: boolean;
-			if (this.#rewind.boundary) {
-				const verdict = this.#rewind.boundary.bySequence(consumer.sequence);
-				if (verdict === undefined) drop = false;
-				else if (verdict) drop = true;
-				else drop = consumer.sequence < this.#active;
-			} else {
-				drop = consumer.sequence < this.#active;
-			}
-
-			if (drop) {
-				console.warn(`skipping old group: track=${this.#track.name} ${consumer.sequence}`);
+			// Arriving below the delivery cursor is not a reason to drop a group. Groups are
+			// sent newest-first, so the head of a subscription arrives after the live edge it
+			// was served alongside, and both consumers can still place one: audio writes into
+			// a timestamp-indexed ring, video drops a late frame at render. How far back one
+			// may be is the subscription's own max age, applied before it ever reaches here.
+			//
+			// A group the reset boundary proves reneged is different, and still dropped: it
+			// belongs to a timeline the publisher withdrew rather than one that arrived late.
+			// An ambiguous one is admitted so #runGroup can rule on it once its timestamps
+			// arrive.
+			if (this.#rewind.boundary?.bySequence(consumer.sequence) === true) {
+				console.warn(`skipping reneged group: track=${this.#track.name} ${consumer.sequence}`);
 				consumer.close();
 				continue;
 			}
@@ -589,12 +586,14 @@ export class Consumer {
 					return { frame, group: seq, discontinuity: this.#rewind.discontinuity, continuous };
 				}
 
-				// Check if the group is done and then remove it.
-				// A group is removable when #active has advanced past it, OR when
-				// its #runGroup task has finished (done) and all frames are consumed.
-				// The latter handles the case where #runGroup finished before
-				// #active reached this group (e.g. after a latency skip).
-				if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
+				// Check if the group is done and then remove it. A group is removable only
+				// once its #runGroup task has finished (done) and all frames are consumed:
+				// a below-#active group (a backlog group admitted behind the live edge) may
+				// still be downloading when its buffer momentarily drains, and removing it
+				// then silently truncates its tail. #runGroup notifies whenever the head
+				// group gains a frame, so waiting here is woken, and #checkLatency bounds
+				// how long a stalled head can hold delivery up.
+				if (this.#groups[0].done) {
 					if (this.#groups[0].consumer.sequence === this.#active) {
 						// The cursor moves past this group here rather than in #runGroup's finally
 						// block whenever the group finished before it became active, so this is the

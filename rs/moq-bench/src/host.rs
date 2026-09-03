@@ -64,7 +64,7 @@ mod linux {
 		pub duration: Option<moq_tokio::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
-		#[usage(long)]
+		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jsonl", "json"))]
 		pub output: Option<std::path::PathBuf>,
 
 		/// Include a per-thread breakdown in every sample. Costs one /proc read per

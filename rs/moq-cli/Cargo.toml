@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.9.13"
+version = "0.9.15"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,9 +16,14 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [[bin]]
 name = "moq"
 path = "src/main.rs"
+# `libmoq`'s staticlib is also named `moq`, so a `cargo doc` selecting both renders
+# them to `target/doc/moq` and the two rustdoc processes race to clean it (#3094).
+# This binary's page is the one to give up: nothing links it, and a bin target has
+# no public API to render, whereas docs.rs/libmoq is the published C API reference.
+doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "quinn", "websocket", "nvidia", "pipewire"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia", "pipewire"]
 iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -50,7 +55,7 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
 # dependencies, drop it:
-#   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
+#   cargo build -p moq-cli --no-default-features --features "iroh noq websocket capture"
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # Compatibility aliases for the pre-consolidation names, kept so a manifest that
 # already asks for the old split still resolves. Undocumented on purpose: the
@@ -63,13 +68,19 @@ vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
 # on by default like the hardware codecs above and trimmable the same way. Only
 # bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.
-pipewire = ["moq-video?/pipewire"]
+# Also reaches audio, so `devices`, microphone capture and playback go through
+# the sound server rather than its ALSA plugin on a machine running one.
+pipewire = ["moq-video?/pipewire", "moq-audio?/pipewire"]
+# The other Linux sound server. Off by default, unlike `pipewire`: PulseAudio is
+# what a machine runs when it is not running PipeWire, so enabling both by
+# default would link a client library most builds never reach for.
+pulseaudio = ["moq-audio?/pulseaudio"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+axum = { workspace = true }
+axum-server = { workspace = true }
+bytes = { workspace = true }
 hang = { workspace = true }
 moq-audio = { workspace = true, optional = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
@@ -83,19 +94,23 @@ moq-token-cli = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
-pollster = { version = "1.0", optional = true }
+pollster = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.7", features = ["cors"] }
-tracing = "0.1"
-url = "2"
+tower-http = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
 usage = { workspace = true, features = ["completions"] }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.5"
+sd-notify = { workspace = true }
 
 [dev-dependencies]
+# Authors an MSF-only catalog, which is the one shape that tells a completer reading
+# the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
+# publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
+moq-msf = { workspace = true }
 tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.

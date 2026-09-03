@@ -6,10 +6,13 @@
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(feature = "aec")]
 use std::sync::mpsc::TrySendError;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -37,6 +40,13 @@ const RETRY_MAX: Duration = Duration::from_secs(4);
 const UNDERRUN_LIMIT: u32 = 20;
 const ERROR_LIMIT: u32 = 3;
 const ERROR_WINDOW: Duration = Duration::from_secs(5);
+
+/// Device switches waiting while the driver is inside a host operation.
+///
+/// Switches are the only work with a payload, so this is a hard bound on both
+/// the mailbox's storage and the number of callers awaiting a reply. Everything
+/// else the driver waits on is a flag that coalesces.
+const DRIVER_QUEUE: usize = 16;
 
 /// Sink updates the mixer's command queue holds. Preallocated, since draining it
 /// happens on the audio thread. Deep enough that only a burst of registrations
@@ -87,13 +97,13 @@ struct State {
 	/// command queue was full. Retried by [`Shared::sync`].
 	#[cfg(feature = "aec")]
 	detaching_reference: bool,
-	/// Posts [`Command::Sync`] so a retry actually happens. A plain sender, not
+	/// Posts a driver sync so a retry actually happens. A plain sender, not
 	/// a [`Handle`](super::Handle): a canceller must not keep the output device
-	/// open, and shutdown is an explicit message rather than a disconnect.
+	/// open, and shutdown is explicit state rather than a disconnect.
 	///
 	/// `None` in tests that drive [`Shared`] without a driver behind it.
 	#[cfg(feature = "aec")]
-	waker: Option<Sender<Command>>,
+	waker: Option<Commands>,
 }
 
 impl Shared {
@@ -146,10 +156,10 @@ impl Shared {
 		}
 	}
 
-	/// Remember the channel that posts [`Command::Sync`], so a send the mixer's
+	/// Remember the channel that posts a driver sync, so a send the mixer's
 	/// command queue was too full to take gets retried.
 	#[cfg(feature = "aec")]
-	pub(super) fn wake_with(&self, waker: Sender<Command>) {
+	pub(super) fn wake_with(&self, waker: Commands) {
 		self.state.lock().unwrap().waker = Some(waker);
 	}
 
@@ -161,7 +171,7 @@ impl Shared {
 	#[cfg(feature = "aec")]
 	fn wake(state: &State) {
 		if let Some(waker) = &state.waker {
-			let _ = waker.send(Command::Sync);
+			waker.sync();
 		}
 	}
 
@@ -314,28 +324,354 @@ fn attach_reference(reference: &mut crate::aec::Reference, mixer: &SyncSender<mi
 }
 
 /// What the driver thread waits on.
-pub(super) enum Command {
+///
+/// Not a queue of messages. Only a switch carries a payload; everything else
+/// coalesces into a flag, so the mailbox derives one of these from whatever is
+/// pending.
+enum Work {
 	/// Move to another output device, or back to the system default with `None`.
 	Switch {
 		device: Option<String>,
 		reply: tokio::sync::oneshot::Sender<Result<(), Error>>,
 	},
-	/// The audio thread reported a problem. Sent from cpal's error callback,
-	/// which is why the driver wakes on it instead of polling.
-	///
-	/// `generation` is the stream that raised it. A stream that has already been
-	/// replaced can still have an error sitting in this queue, and acting on it
-	/// would tear down the healthy stream that replaced it.
-	Failed { generation: u64, error: cpal::Error },
+	/// The live stream reported problems worth inspecting.
+	Failed,
 	/// A sink was added or dropped. Drops whatever the mixer retired and retries
 	/// anything its command queue was too full to take.
 	Sync,
-	/// The last [`Engine`](super::Engine) and [`Sink`] are gone.
-	///
-	/// An explicit message rather than watching the channel disconnect: every
-	/// live stream's error callback holds a sender of its own, so the channel
-	/// only closes once the driver has already dropped the device.
+	/// A failed start's backoff has run out.
+	Retry,
+	/// The last [`Engine`](super::Engine) and [`Sink`](super::Sink) are gone.
 	Shutdown,
+}
+
+/// A caller waiting to be moved to another output device.
+struct Switch {
+	/// The device to open, or the system default with `None`.
+	device: Option<String>,
+	/// Dropped rather than answered if the driver stops first, which is how the
+	/// caller learns the thread is gone.
+	reply: tokio::sync::oneshot::Sender<Result<(), Error>>,
+}
+
+/// The driver's mailbox, split by who is allowed to write which half.
+///
+/// cpal's error callback is not a normal thread. On CoreAudio it *is* the
+/// render callback, and JACK, PipeWire, WASAPI and AAudio all raise it from
+/// their process threads; cpal hands those paths `try_emit_error` precisely so
+/// they never block. So everything reachable from a failure report is an atomic
+/// plus [`Thread::unpark`], which allocates nothing and cannot wait on another
+/// thread. Only a switch takes a lock, and no callback ever raises one.
+///
+/// `unpark` is also what makes a wake impossible to lose. It leaves a permit
+/// behind, so a signal raised between the driver's last check and its `park`
+/// makes that `park` return at once rather than sleeping through it.
+#[derive(Default)]
+struct Mailbox {
+	/// Callers waiting on a device switch.
+	switches: Mutex<Switches>,
+	signals: Signals,
+	/// The driver thread, so a sender can wake it. Registered before the driver
+	/// can park, so a signal raised before it lands is still caught by the
+	/// first check rather than slept through.
+	driver: OnceLock<Thread>,
+}
+
+#[derive(Default)]
+struct Switches {
+	/// Capped at [`DRIVER_QUEUE`].
+	waiting: VecDeque<Switch>,
+	/// Latched under this lock together with the drain in
+	/// [`Commands::shutdown`], so a switch cannot slip into a queue the driver
+	/// has already stopped serving.
+	closed: bool,
+}
+
+#[derive(Default)]
+struct Signals {
+	/// Written from cpal's error callback, which is why this is an atomic.
+	failed: AtomicBool,
+	sync: AtomicBool,
+	shutdown: AtomicBool,
+}
+
+/// The sending half of the driver's mailbox.
+#[derive(Clone, Default)]
+pub(super) struct Commands {
+	mailbox: Arc<Mailbox>,
+}
+
+impl Commands {
+	/// Queue a device switch, or refuse it if the driver is already carrying its
+	/// fixed maximum.
+	///
+	/// Refusing before the caller awaits is the point: a queue deep enough to
+	/// never say no is a queue with no memory bound.
+	pub(super) fn switch(
+		&self,
+		device: Option<String>,
+		reply: tokio::sync::oneshot::Sender<Result<(), Error>>,
+	) -> Result<(), Error> {
+		let mut switches = self.mailbox.switches.lock().unwrap();
+
+		if switches.closed {
+			return Err(Error::Playback("the playback thread stopped".into()));
+		} else if switches.waiting.len() >= DRIVER_QUEUE {
+			return Err(Error::Playback("the playback thread is busy".into()));
+		}
+
+		switches.waiting.push_back(Switch { device, reply });
+		drop(switches);
+
+		self.mailbox.wake();
+		Ok(())
+	}
+
+	/// Ask the driver to collect retired sinks and retry anything the mixer's
+	/// command queue was too full to take.
+	pub(super) fn sync(&self) {
+		self.mailbox.signals.sync.store(true, Ordering::Release);
+		self.mailbox.wake();
+	}
+
+	/// Stop the driver. A flag rather than a queued message, so saturation
+	/// cannot delay or drop it.
+	pub(super) fn shutdown(&self) {
+		self.mailbox.signals.shutdown.store(true, Ordering::Release);
+
+		// Answer everyone still waiting. The driver stops serving these, so
+		// dropping the replies here is what tells those callers the thread is
+		// gone instead of leaving them parked forever.
+		let mut switches = self.mailbox.switches.lock().unwrap();
+		switches.closed = true;
+		switches.waiting.clear();
+		drop(switches);
+
+		self.mailbox.wake();
+	}
+
+	/// Tell the driver its live stream has failures waiting.
+	///
+	/// Reached from cpal's error callback, so this must stay lock-free.
+	fn failed(&self) {
+		self.mailbox.signals.failed.store(true, Ordering::Release);
+		self.mailbox.wake();
+	}
+}
+
+impl Mailbox {
+	/// Wake the driver, or leave a permit if it has not parked yet.
+	///
+	/// Lock-free and allocation-free: safe to call from an audio callback.
+	fn wake(&self) {
+		if let Some(driver) = self.driver.get() {
+			driver.unpark();
+		}
+	}
+}
+
+/// The receiving half of the driver's mailbox. Only the driver thread holds one.
+pub(super) struct Requests {
+	mailbox: Arc<Mailbox>,
+}
+
+impl Requests {
+	/// Let senders wake this thread.
+	///
+	/// Called before the driver can park. A signal raised before this lands
+	/// wakes nobody, which is harmless only because the wait below always
+	/// re-checks every signal before parking.
+	fn attach(&self) {
+		let _ = self.mailbox.driver.set(std::thread::current());
+	}
+
+	/// Whatever is pending right now, or `None` if the driver would have to wait.
+	///
+	/// The order here is the driver's whole priority policy, in one place so a
+	/// probe and a blocking wait cannot disagree about it.
+	fn poll(&self, deadline: Option<Instant>) -> Option<Work> {
+		let signals = &self.mailbox.signals;
+
+		// Shutdown wins over everything: once the last handle is gone there is
+		// no point opening a device. Nothing is stranded by that, since a
+		// shutdown answers the switches it overtakes and refuses any that follow.
+		if signals.shutdown.load(Ordering::Acquire) {
+			return Some(Work::Shutdown);
+		}
+
+		// Ahead of the retry: a switch reopens the device itself, which is what
+		// the retry was waiting to do anyway. Switches are capped and
+		// caller-driven, so they cannot crowd it out.
+		if let Some(Switch { device, reply }) = self.mailbox.switches.lock().unwrap().waiting.pop_front() {
+			return Some(Work::Switch { device, reply });
+		}
+
+		// A due retry outranks the signals below, which re-arm themselves.
+		// Serving those first would let steady sink churn keep a dead device
+		// from ever being reopened.
+		if deadline.is_some_and(|at| Instant::now() >= at) {
+			return Some(Work::Retry);
+		}
+
+		if signals.failed.swap(false, Ordering::AcqRel) {
+			return Some(Work::Failed);
+		}
+		if signals.sync.swap(false, Ordering::AcqRel) {
+			return Some(Work::Sync);
+		}
+
+		None
+	}
+
+	/// Block until there is something to do, or until `deadline` passes.
+	fn wait(&self, deadline: Option<Instant>) -> Work {
+		loop {
+			if let Some(work) = self.poll(deadline) {
+				return work;
+			}
+
+			// Nothing pending. A sender that raced the poll above either
+			// unparked us already, leaving a permit that returns from the park
+			// below at once, or has yet to signal and will unpark us after it
+			// does. Either way the loop polls again before sleeping, so an
+			// early wake costs a lap rather than a spurious retry.
+			match deadline {
+				Some(at) => std::thread::park_timeout(at.saturating_duration_since(Instant::now())),
+				None => std::thread::park(),
+			}
+		}
+	}
+}
+
+/// Closing the mailbox behind a driver that is gone, so a caller gets the
+/// stopped error instead of awaiting a reply nobody is left to send.
+///
+/// Covers an unexpected exit as much as an orderly one: only [`Commands::shutdown`]
+/// closes the queue on the way out, and a driver that unwound never called it.
+impl Drop for Requests {
+	fn drop(&mut self) {
+		// The driver may have unwound while holding this, and a panic inside a
+		// drop would abort.
+		let mut switches = self.mailbox.switches.lock().unwrap_or_else(|err| err.into_inner());
+		switches.closed = true;
+		switches.waiting.clear();
+	}
+}
+
+/// Build the driver's mailbox.
+pub(super) fn channel() -> (Commands, Requests) {
+	let mailbox = Arc::new(Mailbox::default());
+	(
+		Commands {
+			mailbox: mailbox.clone(),
+		},
+		Requests { mailbox },
+	)
+}
+
+/// Unclassified error kinds worth naming in a log, indexed by the code
+/// [`Failures::last`] holds. Zero means nothing recorded.
+///
+/// A code rather than the `cpal::Error` itself: the error owns a message, so
+/// keeping one would mean freeing the previous one on the audio thread.
+const UNCLASSIFIED: [cpal::ErrorKind; 9] = [
+	cpal::ErrorKind::DeviceBusy,
+	cpal::ErrorKind::HostUnavailable,
+	cpal::ErrorKind::InvalidInput,
+	cpal::ErrorKind::PermissionDenied,
+	cpal::ErrorKind::ResourceExhausted,
+	cpal::ErrorKind::UnsupportedConfig,
+	cpal::ErrorKind::UnsupportedOperation,
+	cpal::ErrorKind::BackendError,
+	cpal::ErrorKind::Other,
+];
+
+fn code(kind: cpal::ErrorKind) -> u8 {
+	// `ErrorKind` is `#[non_exhaustive]`, so a kind added upstream simply has no
+	// code and logs as the count alone.
+	UNCLASSIFIED.iter().position(|k| *k == kind).map_or(0, |i| i as u8 + 1)
+}
+
+fn named(code: u8) -> Option<cpal::ErrorKind> {
+	UNCLASSIFIED.get(usize::from(code.checked_sub(1)?)).copied()
+}
+
+/// Failures the live stream has reported since the driver last looked.
+///
+/// Every field is an atomic because cpal's error callback writes them from the
+/// audio thread. Fixed size too: the counters saturate at the limits that act
+/// on them and only the latest unclassified kind is kept, so a storm costs no
+/// more storage than one failure. Replacing a stream replaces this state, so a
+/// retired callback can only write somewhere the driver never reads again.
+#[derive(Default)]
+struct Failures {
+	unavailable: AtomicBool,
+	invalidated: AtomicBool,
+	changed: AtomicBool,
+	realtime_denied: AtomicBool,
+	xruns: AtomicU32,
+	unclassified: AtomicU32,
+	last: AtomicU8,
+}
+
+impl Failures {
+	fn record(&self, kind: cpal::ErrorKind) {
+		match kind {
+			cpal::ErrorKind::DeviceNotAvailable => self.unavailable.store(true, Ordering::Release),
+			cpal::ErrorKind::StreamInvalidated => self.invalidated.store(true, Ordering::Release),
+			cpal::ErrorKind::DeviceChanged => self.changed.store(true, Ordering::Release),
+			cpal::ErrorKind::RealtimeDenied => self.realtime_denied.store(true, Ordering::Release),
+			cpal::ErrorKind::Xrun => {
+				self.xruns.fetch_add(1, Ordering::AcqRel);
+			}
+			_ => {
+				self.unclassified.fetch_add(1, Ordering::AcqRel);
+				self.last.store(code(kind), Ordering::Release);
+			}
+		}
+	}
+
+	fn take(&self) -> FailureBatch {
+		FailureBatch {
+			unavailable: self.unavailable.swap(false, Ordering::AcqRel),
+			invalidated: self.invalidated.swap(false, Ordering::AcqRel),
+			changed: self.changed.swap(false, Ordering::AcqRel),
+			realtime_denied: self.realtime_denied.swap(false, Ordering::AcqRel),
+			// Clamped here rather than on the way in: `fetch_add` is one
+			// instruction, where a saturating compare-exchange loop could spin
+			// on the audio thread.
+			xruns: self.xruns.swap(0, Ordering::AcqRel).min(UNDERRUN_LIMIT + 1),
+			unclassified: self.unclassified.swap(0, Ordering::AcqRel).min(ERROR_LIMIT),
+			last: named(self.last.swap(0, Ordering::AcqRel)),
+		}
+	}
+}
+
+struct FailureBatch {
+	unavailable: bool,
+	invalidated: bool,
+	changed: bool,
+	realtime_denied: bool,
+	xruns: u32,
+	unclassified: u32,
+	last: Option<cpal::ErrorKind>,
+}
+
+/// Handed to one stream's error callback.
+struct FailureReporter {
+	failures: Arc<Failures>,
+	commands: Commands,
+}
+
+impl FailureReporter {
+	/// Record a failure and wake the driver.
+	///
+	/// cpal raises this from the audio thread on most backends, so nothing here
+	/// may allocate, lock, or block.
+	fn report(&self, error: &cpal::Error) {
+		self.failures.record(error.kind());
+		self.commands.failed();
+	}
 }
 
 /// Run the output device until every [`Engine`](super::Engine) and
@@ -345,25 +681,27 @@ pub(super) enum Command {
 /// [`Engine::open`](super::Engine::open) can fail fast on a machine with no
 /// output rather than handing back a handle that plays into nothing.
 pub(super) fn run(
-	commands: Receiver<Command>,
-	failures: Sender<Command>,
+	requests: Requests,
+	commands: Commands,
 	shared: Arc<Shared>,
 	device: Option<String>,
 	opened: tokio::sync::oneshot::Sender<Result<(), Error>>,
 ) {
 	let mut driver = Driver {
 		shared,
-		failures,
+		commands,
 		device,
 		stream: None,
 		retired: None,
-		generation: 0,
+		failures: None,
 		retry: RETRY_MIN,
 		retry_at: None,
 		underruns: 0,
 		unclassified: 0,
 		window: Instant::now(),
 	};
+
+	requests.attach();
 
 	let first = driver.start();
 	let started = first.is_ok();
@@ -375,51 +713,40 @@ pub(super) fn run(
 
 	loop {
 		// A failed start leaves a deadline to wake on; otherwise just block.
-		let command = match driver.retry_at {
-			Some(at) => driver.commands_until(&commands, at),
-			None => commands.recv().map_err(|_| Timeout::Disconnected),
-		};
-
-		match command {
-			Ok(Command::Switch { device, reply }) => {
+		match requests.wait(driver.retry_at) {
+			Work::Switch { device, reply } => {
 				driver.device = device;
 				let _ = reply.send(driver.restart());
 			}
-			Ok(Command::Failed { generation, error }) => {
-				if driver.should_restart(generation, &error) {
+			Work::Failed => {
+				if driver.should_restart() {
 					let _ = driver.restart();
 				}
 			}
-			Ok(Command::Sync) => driver.sync(),
-			Ok(Command::Shutdown) => break,
-			Err(Timeout::Elapsed) => {
+			Work::Sync => driver.sync(),
+			Work::Retry => {
 				if driver.restart().is_ok() {
 					tracing::info!("audio output recovered");
 				}
 			}
-			Err(Timeout::Disconnected) => break,
+			Work::Shutdown => break,
 		}
 	}
 }
 
-enum Timeout {
-	Elapsed,
-	Disconnected,
-}
-
 struct Driver {
 	shared: Arc<Shared>,
-	/// Handed to each stream's error callback so failures arrive as commands.
-	failures: Sender<Command>,
+	/// Posts coalesced wakes for failures from the live stream.
+	commands: Commands,
 	device: Option<String>,
 	/// The live stream. Dropping it stops the audio thread.
 	stream: Option<cpal::Stream>,
 	/// Sinks the mixer has finished with, dropped here so the audio thread never
 	/// has to free one.
 	retired: Option<Receiver<mixer::Retired>>,
-	/// Bumped on every stream, so an error from a retired one can be told apart
-	/// from one the live stream raised.
-	generation: u64,
+	/// Failure state for the live stream only. Replaced with the stream, so a
+	/// retired callback's writes are never read.
+	failures: Option<Arc<Failures>>,
 	/// Delay before reopening a device that would not start, doubling per failure.
 	retry: Duration,
 	/// When a failed start may be retried, and what the command wait times out
@@ -432,14 +759,6 @@ struct Driver {
 }
 
 impl Driver {
-	fn commands_until(&self, commands: &Receiver<Command>, at: Instant) -> Result<Command, Timeout> {
-		match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
-			Ok(command) => Ok(command),
-			Err(RecvTimeoutError::Timeout) => Err(Timeout::Elapsed),
-			Err(RecvTimeoutError::Disconnected) => Err(Timeout::Disconnected),
-		}
-	}
-
 	/// Open the device, start mixing into it, and move every sink onto it.
 	fn start(&mut self) -> Result<(), Error> {
 		let device = super::device::open(self.device.as_deref())?;
@@ -468,14 +787,19 @@ impl Driver {
 		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
 		let mixer = Mixer::new(rx, retired_tx, rate, channels);
 
-		self.generation += 1;
-		let stream = self.build(&device, config, format, mixer)?;
+		let failures = Arc::new(Failures::default());
+		let reporter = FailureReporter {
+			failures: failures.clone(),
+			commands: self.commands.clone(),
+		};
+		let stream = self.build(&device, config, format, mixer, reporter)?;
 		stream
 			.play()
 			.map_err(|err| Error::Playback(format!("cannot start output stream: {err}")))?;
 
 		self.shared.rebind(rate, tx);
 		self.stream = Some(stream);
+		self.failures = Some(failures);
 		// Replaces the previous receiver, dropping anything the old stream
 		// retired and never got drained.
 		self.retired = Some(retired_rx);
@@ -493,12 +817,13 @@ impl Driver {
 		config: cpal::StreamConfig,
 		format: cpal::SampleFormat,
 		mixer: Mixer,
+		failures: FailureReporter,
 	) -> Result<cpal::Stream, Error> {
 		match format {
-			cpal::SampleFormat::F32 => self.build_as::<f32>(device, config, mixer),
-			cpal::SampleFormat::I16 => self.build_as::<i16>(device, config, mixer),
-			cpal::SampleFormat::U16 => self.build_as::<u16>(device, config, mixer),
-			cpal::SampleFormat::I32 => self.build_as::<i32>(device, config, mixer),
+			cpal::SampleFormat::F32 => self.build_as::<f32>(device, config, mixer, failures),
+			cpal::SampleFormat::I16 => self.build_as::<i16>(device, config, mixer, failures),
+			cpal::SampleFormat::U16 => self.build_as::<u16>(device, config, mixer, failures),
+			cpal::SampleFormat::I32 => self.build_as::<i32>(device, config, mixer, failures),
 			other => Err(Error::Unsupported(format!("output sample format {other:?}"))),
 		}
 	}
@@ -508,13 +833,11 @@ impl Driver {
 		device: &cpal::Device,
 		config: cpal::StreamConfig,
 		mut mixer: Mixer,
+		failures: FailureReporter,
 	) -> Result<cpal::Stream, Error>
 	where
 		T: cpal::SizedSample + cpal::FromSample<f32>,
 	{
-		let failures = self.failures.clone();
-		let generation = self.generation;
-
 		// The mixer works in `f32`, so anything else needs a staging buffer.
 		// Allocated once and a whole number of frames long, so however big a
 		// buffer the device asks for, the callback loops over this rather than
@@ -535,9 +858,7 @@ impl Driver {
 					}
 				},
 				move |error| {
-					// This is cpal's error callback, not the audio callback, so
-					// an allocating send is fine here.
-					let _ = failures.send(Command::Failed { generation, error });
+					failures.report(&error);
 				},
 				None,
 			)
@@ -570,6 +891,7 @@ impl Driver {
 	/// Tear the stream down and detach every sink from it.
 	fn stop(&mut self) {
 		self.shared.unbind();
+		self.failures = None;
 		self.stream = None;
 		// Dropping the receiver drops whatever the mixer retired, here rather
 		// than on the audio thread.
@@ -606,59 +928,48 @@ impl Driver {
 		Instant::now() + wait
 	}
 
-	/// Whether a failure reported by stream `generation` should rebuild the
-	/// stream.
-	///
-	/// Errors outlive the stream that raised them: cpal's error callback posts
-	/// into the same queue the driver reads, so a switch or a restart can leave
-	/// one behind. Acting on it would tear down the healthy stream that replaced
-	/// it, which is a dropout caused entirely by our own bookkeeping.
-	fn should_restart(&mut self, generation: u64, error: &cpal::Error) -> bool {
-		if generation != self.generation {
-			tracing::debug!(%error, generation, "ignoring an error from a replaced audio output");
-			return false;
-		}
-
-		self.fatal(error)
-	}
-
-	/// Whether this error means the stream has to be rebuilt.
-	fn fatal(&mut self, err: &cpal::Error) -> bool {
+	/// Whether the failures the live stream has reported require a rebuild.
+	fn should_restart(&mut self) -> bool {
+		let Some(failures) = &self.failures else { return false };
+		let failures = failures.take();
 		self.roll_window();
 
-		match err.kind() {
-			cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
-				tracing::warn!(%err, "audio output lost");
-				true
-			}
-			// cpal documents both as survivable: the stream keeps running and
-			// needs no rebuild.
-			cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
-				tracing::debug!(%err, "audio output changed underneath us");
-				false
-			}
-			// One underrun is a glitch, not a broken device. Only a sustained
-			// run of them is worth interrupting playback to fix.
-			cpal::ErrorKind::Xrun => {
-				self.underruns += 1;
-				let restart = self.underruns > UNDERRUN_LIMIT;
-				if restart {
-					self.underruns = 0;
-					tracing::warn!("restarting audio output after repeated underruns");
-				}
-				restart
-			}
-			_ => {
-				tracing::warn!(%err, "audio output error");
-				self.unclassified += 1;
-				let restart = self.unclassified >= ERROR_LIMIT;
-				if restart {
-					self.unclassified = 0;
-					tracing::warn!("restarting audio output after repeated unclassified errors");
-				}
-				restart
-			}
+		// Count everything before deciding anything. One batch can hold errors
+		// that arrived before a fatal one, and those still belong to the
+		// escalation window: dropping them lets a stream that keeps failing
+		// after the rebuild sit dead longer than it otherwise would.
+		self.underruns = self.underruns.saturating_add(failures.xruns);
+		self.unclassified = self.unclassified.saturating_add(failures.unclassified);
+
+		// cpal documents both as survivable: the stream keeps running and needs
+		// no rebuild.
+		if failures.changed || failures.realtime_denied {
+			tracing::debug!("audio output changed underneath us");
 		}
+		if let Some(kind) = failures.last {
+			tracing::warn!(%kind, count = failures.unclassified, "audio output error");
+		}
+
+		if failures.unavailable || failures.invalidated {
+			tracing::warn!("audio output lost");
+			return true;
+		}
+
+		// One underrun is a glitch, not a broken device. Only a sustained run
+		// of them is worth interrupting playback to fix.
+		if self.underruns > UNDERRUN_LIMIT {
+			self.underruns = 0;
+			tracing::warn!("restarting audio output after repeated underruns");
+			return true;
+		}
+
+		if self.unclassified >= ERROR_LIMIT {
+			self.unclassified = 0;
+			tracing::warn!("restarting audio output after repeated unclassified errors");
+			return true;
+		}
+
+		false
 	}
 
 	/// Start a fresh counting window once the old one has run out.
@@ -673,8 +984,6 @@ impl Driver {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::mpsc::channel;
-
 	use super::*;
 	use crate::playback::sink::{self, Input};
 
@@ -685,7 +994,7 @@ mod tests {
 		shared: Arc<Shared>,
 		handle: Arc<super::super::Handle>,
 		mixer: Receiver<mixer::Command>,
-		driver: Receiver<Command>,
+		driver: Requests,
 	}
 
 	fn wired(depth: usize) -> Wired {
@@ -708,10 +1017,14 @@ mod tests {
 		shared.add(|id, rate| sink::new(id, rate, Input::default(), shared.clone(), handle.clone()))
 	}
 
-	fn syncs(driver: &Receiver<Command>) -> usize {
-		std::iter::from_fn(|| driver.try_recv().ok())
-			.filter(|c| matches!(c, Command::Sync))
-			.count()
+	/// Long enough that only a lost wake, rather than a loaded machine, trips a
+	/// test that waits this out.
+	const PATIENCE: Duration = Duration::from_secs(5);
+
+	fn queue_switch(commands: &Commands) -> tokio::sync::oneshot::Receiver<Result<(), Error>> {
+		let (reply, response) = tokio::sync::oneshot::channel();
+		commands.switch(None, reply).unwrap();
+		response
 	}
 
 	/// A registration the mixer's queue was too full to take must not be
@@ -748,10 +1061,16 @@ mod tests {
 		};
 
 		let sink = engine.sink(Input::default()).unwrap();
-		assert_eq!(syncs(&w.driver), 1, "adding a sink did not wake the driver");
+		assert!(
+			matches!(w.driver.poll(None), Some(Work::Sync)),
+			"adding a sink did not wake the driver"
+		);
 
 		drop(sink);
-		assert_eq!(syncs(&w.driver), 1, "dropping a sink did not wake the driver");
+		assert!(
+			matches!(w.driver.poll(None), Some(Work::Sync)),
+			"dropping a sink did not wake the driver"
+		);
 	}
 
 	/// Same for removals. Dropping one would leave the mixer reading a sink
@@ -791,20 +1110,314 @@ mod tests {
 		add(&w.shared, &w.handle).expect("a slot freed by the dropped sink");
 	}
 
-	/// A stream that has already been replaced can still have an error queued.
-	/// Acting on it tears down the healthy stream that replaced it.
+	/// Every notification class has fixed storage however hard it is hit, and a
+	/// flood collapses into one wake per class.
 	#[test]
-	fn ignores_errors_from_a_replaced_stream() {
-		let w = wired(8);
-		let (failures, _requests) = channel();
+	fn notification_floods_are_coalesced() {
+		let (commands, requests) = channel();
+		let failures = Arc::new(Failures::default());
+		let reporter = FailureReporter {
+			failures: failures.clone(),
+			commands: commands.clone(),
+		};
+
+		for _ in 0..1_000 {
+			commands.sync();
+			for kind in [
+				cpal::ErrorKind::DeviceNotAvailable,
+				cpal::ErrorKind::StreamInvalidated,
+				cpal::ErrorKind::DeviceChanged,
+				cpal::ErrorKind::RealtimeDenied,
+				cpal::ErrorKind::Xrun,
+				cpal::ErrorKind::BackendError,
+			] {
+				reporter.report(&cpal::Error::new(kind));
+			}
+		}
+
+		assert!(requests.mailbox.switches.lock().unwrap().waiting.is_empty());
+		assert!(matches!(requests.poll(None), Some(Work::Failed)));
+		assert!(matches!(requests.poll(None), Some(Work::Sync)));
+		assert!(requests.poll(None).is_none(), "a flood outlived its coalesced wakes");
+
+		let failures = failures.take();
+		assert!(failures.unavailable);
+		assert!(failures.invalidated);
+		assert!(failures.changed);
+		assert!(failures.realtime_denied);
+		assert_eq!(failures.xruns, UNDERRUN_LIMIT + 1);
+		assert_eq!(failures.unclassified, ERROR_LIMIT);
+		assert_eq!(failures.last, Some(cpal::ErrorKind::BackendError));
+	}
+
+	/// cpal raises the error callback from the audio thread on most backends, so
+	/// a report must never wait on a lock another thread is holding. Reporting
+	/// while the switch queue is locked would deadlock the audio thread if the
+	/// failure path touched it.
+	#[test]
+	fn reporting_a_failure_never_waits_on_the_mailbox() {
+		let (commands, requests) = channel();
+		let failures = Arc::new(Failures::default());
+		let reporter = FailureReporter {
+			failures: failures.clone(),
+			commands: commands.clone(),
+		};
+
+		// Held for the whole report. If the failure path took this lock, the
+		// audio thread would be stuck here until another thread let go.
+		let held = requests.mailbox.switches.lock().unwrap();
+		reporter.report(&cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable));
+		commands.sync();
+		drop(held);
+
+		assert!(failures.take().unavailable, "the failure never landed");
+		assert!(requests.mailbox.signals.sync.load(Ordering::Acquire));
+	}
+
+	/// A switch either takes one of the fixed slots or reports overload before
+	/// its caller starts awaiting a response.
+	#[test]
+	fn switches_complete_or_reject_overload() {
+		let (commands, requests) = channel();
+		let responses: Vec<_> = (0..DRIVER_QUEUE).map(|_| queue_switch(&commands)).collect();
+
+		let (reply, _response) = tokio::sync::oneshot::channel();
+		let error = commands.switch(None, reply).unwrap_err();
+		assert!(matches!(error, Error::Playback(message) if message.contains("busy")));
+
+		for response in responses {
+			let Some(Work::Switch { reply, .. }) = requests.poll(None) else {
+				panic!("a switch went missing");
+			};
+			reply.send(Ok(())).unwrap();
+			assert!(matches!(response.blocking_recv(), Ok(Ok(()))));
+		}
+	}
+
+	/// A sync raised while every switch slot is taken still reaches the driver.
+	/// It has no slot to compete for, so saturation cannot drop it.
+	#[test]
+	fn sync_survives_a_saturated_driver() {
+		let (commands, requests) = channel();
+		let _responses: Vec<_> = (0..DRIVER_QUEUE).map(|_| queue_switch(&commands)).collect();
+
+		commands.sync();
+
+		for _ in 0..DRIVER_QUEUE {
+			assert!(matches!(requests.poll(None), Some(Work::Switch { .. })));
+		}
+		assert!(
+			matches!(requests.poll(None), Some(Work::Sync)),
+			"saturation lost a sync"
+		);
+	}
+
+	/// The last handle must stop a saturated driver rather than leaking the
+	/// thread and the device with it.
+	#[test]
+	fn final_handle_shuts_down_a_saturated_driver() {
+		let (commands, requests) = channel();
+		let handle = Arc::new(super::super::Handle {
+			commands: commands.clone(),
+		});
+		let responses: Vec<_> = (0..DRIVER_QUEUE).map(|_| queue_switch(&commands)).collect();
+
+		drop(handle);
+		assert!(
+			matches!(requests.poll(None), Some(Work::Shutdown)),
+			"saturation lost shutdown"
+		);
+
+		// The driver returns rather than serving the backlog, so every waiting
+		// caller learns the thread stopped instead of hanging on its reply.
+		for response in responses {
+			assert!(response.blocking_recv().is_err());
+		}
+		let (reply, _response) = tokio::sync::oneshot::channel();
+		let error = commands.switch(None, reply).unwrap_err();
+		assert!(matches!(error, Error::Playback(message) if message.contains("stopped")));
+	}
+
+	/// A driver parked with nothing pending has to be woken by the next
+	/// notification, whatever else raced with it. Losing this wake stranded a
+	/// sink registration, or the shutdown that closes the device.
+	#[test]
+	fn a_parked_driver_is_woken() {
+		let (commands, requests) = channel();
+		let (sent, arrived) = std::sync::mpsc::channel();
+
+		let waker = commands.clone();
+		let driver = std::thread::spawn(move || {
+			requests.attach();
+
+			// Deadlines rather than a plain park, so a lost wake fails the test
+			// instead of hanging it.
+			let woken = matches!(requests.wait(Some(Instant::now() + PATIENCE)), Work::Sync);
+			sent.send(()).unwrap();
+
+			// Syncs racing in behind the first are fine; only silence is not.
+			let deadline = Instant::now() + PATIENCE;
+			let stopped = loop {
+				match requests.wait(Some(deadline)) {
+					Work::Shutdown => break true,
+					Work::Retry => break false,
+					_ => continue,
+				}
+			};
+			(woken, stopped)
+		});
+
+		// Let the driver reach `park` with an empty mailbox, then race a flood
+		// of notifications against it.
+		std::thread::sleep(Duration::from_millis(10));
+		std::thread::scope(|s| {
+			for _ in 0..8 {
+				s.spawn(|| waker.sync());
+			}
+		});
+
+		arrived.recv_timeout(PATIENCE).expect("a sync never woke the driver");
+		commands.shutdown();
+
+		let (woken, stopped) = driver.join().unwrap();
+		assert!(woken, "a sync never woke the driver");
+		assert!(stopped, "a shutdown never woke the driver");
+	}
+
+	/// A signal raised before the driver registers itself wakes nobody, so the
+	/// first check has to find it rather than parking through it.
+	#[test]
+	fn a_signal_racing_startup_is_not_slept_through() {
+		let (commands, requests) = channel();
+		commands.sync();
+
+		let driver = std::thread::spawn(move || {
+			requests.attach();
+			requests.wait(Some(Instant::now() + PATIENCE))
+		});
+
+		assert!(
+			matches!(driver.join().unwrap(), Work::Sync),
+			"a signal raised before attach was slept through"
+		);
+	}
+
+	/// A device that failed to open has to get its retry even while sinks churn.
+	/// Sync and failure re-arm themselves, so serving them first would leave
+	/// playback down for as long as the churn lasted.
+	#[test]
+	fn a_due_retry_outranks_reasserted_signals() {
+		let (commands, requests) = channel();
+		let due = Instant::now();
+
+		for _ in 0..8 {
+			commands.sync();
+			assert!(
+				matches!(requests.wait(Some(due)), Work::Retry),
+				"steady sink churn starved the device retry"
+			);
+		}
+	}
+
+	/// An early wake costs a lap, not a retry: the deadline is what decides,
+	/// not the fact that the park returned.
+	#[test]
+	fn an_early_wake_does_not_fake_a_retry() {
+		let (commands, requests) = channel();
+
+		let waker = commands.clone();
+		let driver = std::thread::spawn(move || {
+			requests.attach();
+			// A deadline far enough out that only the unpark below can end the
+			// park, so a Retry here would mean the deadline was misread.
+			requests.wait(Some(Instant::now() + PATIENCE))
+		});
+
+		std::thread::sleep(Duration::from_millis(10));
+		waker.sync();
+
+		assert!(
+			matches!(driver.join().unwrap(), Work::Sync),
+			"an early wake was reported as a retry"
+		);
+	}
+
+	/// A driver that unwinds takes the mailbox down with it. Without that, a
+	/// switch is queued for a receiver that no longer exists and its caller
+	/// awaits a reply forever.
+	#[test]
+	fn losing_the_driver_releases_switch_callers() {
+		let (commands, requests) = channel();
+		let queued = queue_switch(&commands);
+
+		drop(requests);
+
+		assert!(queued.blocking_recv().is_err(), "a queued switch outlived its driver");
+
+		let (reply, _response) = tokio::sync::oneshot::channel();
+		let error = commands.switch(None, reply).unwrap_err();
+		assert!(matches!(error, Error::Playback(message) if message.contains("stopped")));
+	}
+
+	/// Errors that arrive before a fatal one in the same batch still count.
+	/// Coalescing must not reset the escalation window that a stream failing
+	/// again after the rebuild depends on.
+	#[test]
+	fn a_fatal_batch_keeps_the_counts_that_preceded_it() {
+		let (commands, _requests) = channel();
+		let failures = Arc::new(Failures::default());
 
 		let mut driver = Driver {
-			shared: w.shared,
-			failures,
+			shared: Arc::new(Shared::default()),
+			commands,
 			device: None,
 			stream: None,
 			retired: None,
-			generation: 7,
+			failures: Some(failures.clone()),
+			retry: RETRY_MIN,
+			retry_at: None,
+			underruns: 0,
+			unclassified: 0,
+			window: Instant::now(),
+		};
+
+		// Two survivable errors, then the fatal one, all in one batch.
+		failures.record(cpal::ErrorKind::BackendError);
+		failures.record(cpal::ErrorKind::BackendError);
+		failures.record(cpal::ErrorKind::DeviceNotAvailable);
+		assert!(driver.should_restart(), "a lost device did not restart the stream");
+
+		// The replacement fails once more. That is the third unclassified error
+		// in the window, so it has to escalate rather than start over.
+		let replacement = Arc::new(Failures::default());
+		driver.failures = Some(replacement.clone());
+		replacement.record(cpal::ErrorKind::BackendError);
+		assert!(
+			driver.should_restart(),
+			"the fatal restart threw away the errors before it"
+		);
+	}
+
+	/// A stream that has already been replaced can still report an error. Acting
+	/// on it tears down the healthy stream that replaced it.
+	#[test]
+	fn ignores_errors_from_a_replaced_stream() {
+		let w = wired(8);
+		let (commands, _requests) = channel();
+		let stale = Arc::new(Failures::default());
+		let current = Arc::new(Failures::default());
+		let stale_reporter = FailureReporter {
+			failures: stale,
+			commands: commands.clone(),
+		};
+
+		let mut driver = Driver {
+			shared: w.shared,
+			commands: commands.clone(),
+			device: None,
+			stream: None,
+			retired: None,
+			failures: Some(current.clone()),
 			retry: RETRY_MIN,
 			retry_at: None,
 			underruns: 0,
@@ -813,7 +1426,10 @@ mod tests {
 		};
 
 		let lost = cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable);
-		assert!(!driver.should_restart(6, &lost), "acted on a retired stream's error");
-		assert!(driver.should_restart(7, &lost), "ignored the live stream's error");
+		stale_reporter.report(&lost);
+		assert!(!driver.should_restart(), "acted on a retired stream's error");
+
+		current.record(lost.kind());
+		assert!(driver.should_restart(), "ignored the live stream's error");
 	}
 }

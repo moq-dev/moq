@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.13"
+version = "0.14.14"
 edition = "2024"
 # sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
 # workspace floor. moq-relay is lib+bin, so this applies to its library target
@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "quinn", "websocket", "uds"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -39,49 +39,67 @@ websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
+# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only, in one of
+# three flavors. All are off by default: the relay is useful without io_uring.
+# `io-uring` uses noq-proto over rustls, matching the default tokio backend;
+# the suffixed features retain quinn-proto and quiche as explicit alternatives.
+#
+# Cargo features are additive, so asking for several compiles them and runs noq,
+# which is what the nightly `--all-features` pass does. `just rs uring` builds
+# each on its own.
+io-uring = ["_uring", "moq-uring/noq"]
+io-uring-quinn = ["_uring", "moq-uring/quinn"]
+io-uring-quiche = ["_uring", "moq-uring/quiche"]
+# The listener all flavors share. Not one to enable on its own: moq-uring has
+# no `quic` module without a backend, so this alone does not build.
+_uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+axum = { workspace = true }
+axum-server = { workspace = true }
+bytes = { workspace = true }
 bytesize = "2.4.2"
-futures = "0.3"
+futures = { workspace = true }
 hex = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
-jsonwebtoken = "11"
+jsonwebtoken = { workspace = true }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
-rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_with = { version = "3", features = ["json", "base64"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["json", "base64"] }
 sha2 = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-rustls = { version = "0.26", default-features = false }
-toml = "1.1"
-tower-http = { version = "0.7", features = ["cors"] }
+tokio-rustls = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
 tower-service = "0.3"
-tracing = "0.1"
-url = { version = "2", features = ["serde"] }
+tracing = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 usage = { workspace = true, features = ["completions"] }
 web-transport-trait = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+moq-sock = { workspace = true, optional = true }
+moq-uring = { workspace = true, optional = true }
+
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.5"
+sd-notify = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.14"
-tempfile = "3"
+tempfile = { workspace = true }
 wiremock = "0.6"
 
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal

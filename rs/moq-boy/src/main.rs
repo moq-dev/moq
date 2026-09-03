@@ -48,7 +48,7 @@ mod video;
 #[usage(completion)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[usage(long)]
+	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("gb", "gbc"))]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.
@@ -225,7 +225,7 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init(config.quic.clone())?;
 
 	// Publish origin: the game session broadcast.
-	let publish_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let publish_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let default_game_prefix = format!("{}/game", config.prefix);
 	let default_viewer_prefix = format!("{}/viewer", config.prefix);
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
@@ -234,18 +234,20 @@ async fn run(config: &Config) -> Result<()> {
 	// Create the broadcast on the publish origin; the live route announces it.
 	let broadcast_path = format!("{game_prefix}/{name}");
 	let mut broadcast = publish_origin
-		.create_broadcast(&broadcast_path, moq_net::broadcast::Route::new().with_announce(true))
+		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
+	let _announce_broadcast = publish_origin
+		.announce(&broadcast_path, Default::default())
+		.context("failed to announce broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
 	let viewer_path = format!("{viewer_prefix}/{name}");
-	let consume_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-	let mut viewer_consumer = consume_origin
+	let consume_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+	let viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")
-		.consume()
-		.announced();
+		.consume();
 
 	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
 
@@ -300,7 +302,7 @@ async fn run(config: &Config) -> Result<()> {
 			Err(join) => Err(join.into()),
 		},
 		res = reconnect.closed() => res.map_err(Into::into),
-		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
+		res = input::handle_viewers(&viewer_consumer, &cmd_tx) => res,
 	};
 
 	// Cleanly close the broadcast so subscribers see a normal end rather than

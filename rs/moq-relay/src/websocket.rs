@@ -246,7 +246,7 @@ const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::
 
 /// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
 /// Mirrors `js/net`'s `connect.ts` and moq-tokio's `websocket_subprotocols`.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
@@ -332,14 +332,14 @@ fn map_axum_error(err: axum::Error) -> tungstenite::Error {
 
 fn axum_to_tungstenite(message: axum::extract::ws::Message) -> tungstenite::Message {
 	match message {
-		axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(text.to_string().into()),
-		axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(Vec::from(bin).into()),
-		axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(Vec::from(ping).into()),
-		axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(Vec::from(pong).into()),
+		axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(axum_text_to_tungstenite(text)),
+		axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(bin),
+		axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(ping),
+		axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(pong),
 		axum::extract::ws::Message::Close(close) => {
 			tungstenite::Message::Close(close.map(|c| tungstenite::protocol::CloseFrame {
 				code: c.code.into(),
-				reason: c.reason.to_string().into(),
+				reason: axum_text_to_tungstenite(c.reason),
 			}))
 		}
 	}
@@ -347,18 +347,30 @@ fn axum_to_tungstenite(message: axum::extract::ws::Message) -> tungstenite::Mess
 
 fn tungstenite_to_axum(message: tungstenite::Message) -> axum::extract::ws::Message {
 	match message {
-		tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
-		tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
-		tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
-		tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
+		tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(tungstenite_text_to_axum(text)),
+		tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(bin),
+		tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(ping),
+		tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(pong),
 		tungstenite::Message::Frame(_frame) => unreachable!(),
 		tungstenite::Message::Close(close) => {
 			axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
 				code: c.code.into(),
-				reason: c.reason.to_string().into(),
+				reason: tungstenite_text_to_axum(c.reason),
 			}))
 		}
 	}
+}
+
+fn axum_text_to_tungstenite(text: axum::extract::ws::Utf8Bytes) -> tungstenite::Utf8Bytes {
+	axum::body::Bytes::from(text)
+		.try_into()
+		.expect("axum text is valid UTF-8")
+}
+
+fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::Utf8Bytes {
+	axum::body::Bytes::from(text)
+		.try_into()
+		.expect("tungstenite text is valid UTF-8")
 }
 
 #[cfg(test)]
@@ -413,6 +425,50 @@ mod tests {
 		assert!(matches!(close, Err(tungstenite::Error::ConnectionClosed)));
 	}
 
+	#[test]
+	fn websocket_binary_conversion_is_zero_copy() {
+		let payload = axum::body::Bytes::from(vec![1, 2, 3]);
+		let retained = payload.clone();
+		let tungstenite::Message::Binary(converted) = axum_to_tungstenite(axum::extract::ws::Message::Binary(payload))
+		else {
+			panic!("expected binary message");
+		};
+		assert_eq!(converted, retained);
+		assert_eq!(converted.as_ptr(), retained.as_ptr());
+
+		let payload = axum::body::Bytes::from(vec![4, 5, 6]);
+		let retained = payload.clone();
+		let axum::extract::ws::Message::Binary(converted) = tungstenite_to_axum(tungstenite::Message::Binary(payload))
+		else {
+			panic!("expected binary message");
+		};
+		assert_eq!(converted, retained);
+		assert_eq!(converted.as_ptr(), retained.as_ptr());
+	}
+
+	#[test]
+	fn websocket_text_conversion_is_zero_copy() {
+		let payload = axum::body::Bytes::from("hello from axum");
+		let retained = payload.clone();
+		let text = axum::extract::ws::Utf8Bytes::try_from(payload).expect("valid UTF-8");
+		let tungstenite::Message::Text(converted) = axum_to_tungstenite(axum::extract::ws::Message::Text(text)) else {
+			panic!("expected text message");
+		};
+		let converted = axum::body::Bytes::from(converted);
+		assert_eq!(converted, retained);
+		assert_eq!(converted.as_ptr(), retained.as_ptr());
+
+		let payload = axum::body::Bytes::from("hello from tungstenite");
+		let retained = payload.clone();
+		let text = tungstenite::Utf8Bytes::try_from(payload).expect("valid UTF-8");
+		let axum::extract::ws::Message::Text(converted) = tungstenite_to_axum(tungstenite::Message::Text(text)) else {
+			panic!("expected text message");
+		};
+		let converted = axum::body::Bytes::from(converted);
+		assert_eq!(converted, retained);
+		assert_eq!(converted.as_ptr(), retained.as_ptr());
+	}
+
 	#[tokio::test]
 	async fn websocket_auth_applies_subdomain_routing() {
 		let config: AuthConfig = serde_json::from_value(serde_json::json!({
@@ -451,7 +507,7 @@ mod tests {
 				.iter()
 				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
 				.collect::<Vec<_>>(),
-			vec![Some(0xff000012), Some(0xff000013)]
+			vec![Some(0xff000012), Some(0xff000013), Some(0xff000014)]
 		);
 
 		let list = supported_subprotocols(moq_net::ALPNS);

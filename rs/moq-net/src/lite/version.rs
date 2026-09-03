@@ -108,13 +108,13 @@ impl Version {
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the Exclude Hop field: the subscriber's own
-	/// origin id, which the publisher uses to skip announces whose hop chain already
+	/// Hop ID, which the publisher uses to skip announces whose hop chain already
 	/// passed through the subscriber. Present in lite-04 and lite-05 only.
 	///
 	/// The receiver's own reflected-announce check drops those announces anyway (and
 	/// catches loops of any length, not just the two-hop case), so lite-06 drops the
 	/// field and keeps the check. Lite-06 also declares the same identity session-wide
-	/// in the SETUP `Origin` parameter, which filters announcements and subscriptions
+	/// in the SETUP `Hop` parameter, which filters announcements and subscriptions
 	/// alike rather than one announce stream.
 	///
 	/// Unlike the gates above, this lists the versions that *have* the field: it was
@@ -131,6 +131,35 @@ impl Version {
 	/// next group before it can resume.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_frame_bounds(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
+	/// carry the retired `Ordered` byte.
+	///
+	/// The field is gone from the model: a publisher transmits newest-first within a
+	/// track, always. Deployed drafts still have the byte in their layout, so it is
+	/// written as 0 and ignored on read rather than shifting every field behind it.
+	pub(crate) fn has_group_order(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => true,
+			Self::Lite06Wip => false,
+		}
+	}
+
+	/// Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a
+	/// start from: the raw minimum group sequence (default 0), with `Subscriber Max Age`
+	/// as the only gate on how far back delivery begins. Changed in lite-06.
+	///
+	/// Older versions encode `Group Start` as the sequence + 1, with 0 meaning the
+	/// latest group, so an absent start there pins the cursor to the live edge instead
+	/// of resolving it from the budget.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn resolves_start(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,

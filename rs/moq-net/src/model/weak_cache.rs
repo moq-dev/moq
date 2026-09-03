@@ -102,6 +102,13 @@ where
 		None
 	}
 
+	/// Iterate every entry, closed ones included, for a teardown walk. A closed
+	/// entry may still carry side state the walk must settle (a cancelled front's
+	/// parked requesters), so nothing is filtered here.
+	pub fn values(&self) -> impl Iterator<Item = &V> {
+		self.map.values()
+	}
+
 	/// Remove and return the entry for `key`, if any.
 	pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
 	where

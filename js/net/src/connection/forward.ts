@@ -1,5 +1,5 @@
 /**
- * Feeds a session's announced broadcasts into an origin; the `subscribe` connect option.
+ * Feeds a session's announced routes into an origin; the `subscribe` connect option.
  *
  * @module
  */
@@ -10,13 +10,14 @@ import type { Established } from "./established.ts";
 
 /**
  * Wire a session into `origin` for the session's lifetime: forward the peer's announced
- * broadcasts into the table, and answer the origin's open requests with blind
+ * routes into the table, and answer the origin's open requests with blind
  * subscriptions.
  *
- * Each active announcement inserts a lazily-subscribing front, so nothing touches the wire
- * until somebody consumes the path. A retraction removes the entry, and so does the session
- * dying (the announce stream ends with it), which is what scopes remote entries to the
- * session that discovered them. A reconnect wires a fresh session to the same origin and
+ * Each active announcement inserts a route covering the announced prefix, served
+ * lazily through this connection, so nothing touches the wire until somebody requests
+ * a path under it. A retraction removes the entry, and so does the session dying (the
+ * announce stream ends with it), which is what scopes remote routes to the session
+ * that announced them. A reconnect wires a fresh session to the same origin and
  * re-populates it.
  *
  * Without discovery there are no announcements to forward, so the table stays empty and
@@ -58,12 +59,12 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				if (!event) break;
 
 				if (event.active) {
-					// A same-path re-announce supersedes: retract the old front first.
-					inserted.get(event.path)?.();
-					inserted.set(event.path, origin.insertRemote(event.path, conn.consume(event.path)));
+					// A same-prefix re-announce supersedes: retract the old route first.
+					inserted.get(event.prefix)?.();
+					inserted.set(event.prefix, origin.announce(event.prefix, conn));
 				} else {
-					const dispose = inserted.get(event.path);
-					inserted.delete(event.path);
+					const dispose = inserted.get(event.prefix);
+					inserted.delete(event.prefix);
 					dispose?.();
 				}
 			}

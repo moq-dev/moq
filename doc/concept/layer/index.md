@@ -1,99 +1,60 @@
 ---
-title: Layering
-description: It's like a cake; you choose if you want frosting.
+title: Layers
+description: How the MoQ protocol stack fits together
 ---
 
 # Layers
 
-The design philosophy of MoQ is to make things simple, composable, and customizable.
-We don't want you to hit a brick wall if you deviate from the standard path (*ahem* WebRTC).
-We also want to benefit from economies of scale (like HTTP), utilizing generic libraries and tools whenever possible.
+MoQ separates transport, live data delivery, media packaging, and application
+behavior. A relay only needs the delivery layer, while media clients use the
+whole stack.
 
-To accomplish this, MoQ is broken into layers stacked on top of each other.
-It's like a cake; you choose whether you want frosting or not.
+| Layer | Role |
+| --- | --- |
+| Application | Defines product behavior and any custom tracks. |
+| [hang](/concept/layer/hang) | Describes media tracks, codecs, and frame timestamps. |
+| [moq-lite](/concept/layer/moq-lite) | Publishes and subscribes to generic broadcasts, tracks, groups, and frames. |
+| Transport | Carries independent streams over QUIC, WebTransport, WebSocket, or iroh. |
 
-## QUIC
+## Transport
 
-[QUIC](/concept/layer/quic) is the core protocol that powers HTTP/3, designed to fix the head-of-line blocking that plagues TCP.
+[QUIC](/concept/layer/quic) provides encrypted connections, independent streams,
+congestion control, and connection migration. Avoiding connection-wide
+head-of-line blocking is the main reason MoQ uses QUIC.
 
-Think of it like:
+Browsers access QUIC through [WebTransport](/concept/layer/web-transport).
+Clients can race it against the [WebSocket fallback](/concept/layer/web-socket)
+when UDP or WebTransport is unavailable. Native peers can use QUIC directly or
+connect through [iroh](/concept/layer/iroh) on a local network.
 
-- **TCP 2.0**: connections with congestion control, flow control, and retransmissions. But now with independent streams and prioritization to avoid head-of-line blocking.
-- **UDP 2.0**: optional reliability and datagrams, allowing stuff to get dropped during congestion.
+## Live delivery
 
-It's a web standard, available in all major browsers, battle-tested by huge CDNs, and with great open-source implementations from every major tech company.
+[moq-lite](/concept/layer/moq-lite) is the generic pub/sub layer. It is a
+forward-compatible subset of [MoqTransport](/concept/standard/moq-transport)
+and does not assign media meaning to payloads.
 
-## WebTransport (optional)
+A session can publish and subscribe at the same time:
 
-[WebTransport](/concept/layer/web-transport) is a small layer that shares a QUIC connection with HTTP/3.
+- A **broadcast** contains one or more named **tracks**.
+- A **track** is an ordered sequence of independently delivered **groups**.
+- A **group** contains reliably ordered **frames** and can be canceled without
+  blocking other groups.
 
-Basically it's like WebSocket but for QUIC instead of TCP.
-Browsers need it because not using HTTP would be some cardinal sin or something.
-Everybody else can use QUIC directly instead.
+Relays use these boundaries for caching, fan-out, and prioritization without
+parsing codecs or application data.
 
-## WebSocket (optional)
+## Media
 
-[WebSocket](/concept/layer/web-socket) is a TCP fallback for when QUIC is blocked (corporate firewalls) or unsupported (Safari).
+[hang](/concept/layer/hang) defines the media information endpoints need to
+share: a track catalog, codec configuration, timestamps, and frame containers.
+The relay remains unaware of those details.
 
-MoQ clients will automatically race the QUIC and WebSocket connections in parallel, using whatever wins the race.
-It sucks but sometimes *media over QUIC* isn't actually an option.
+## Application data
 
-## iroh (optional)
+Applications can add tracks for control messages, metadata, telemetry, or other
+live data. Unknown tracks do not change relay behavior or interfere with media
+tracks.
 
-[iroh](/concept/layer/iroh) is a peer-to-peer alternative to dialing a server.
-
-You dial a public key instead of a hostname, and iroh handles discovery and hole punching.
-It's still QUIC underneath, so nothing above this layer changes.
-Native only, since a browser can't hole punch.
-
-Reach for it on a local network, where two peers can talk without anything in the middle.
-Across the internet, run a [MoQ relay](/bin/relay/) instead: iroh's own relay forwards opaque
-packets like WebRTC's TURN, so it costs you a hop without the caching and fanout that hop
-should be buying.
-
-Note that only the media path can be kept local. An endpoint publishes its address to n0's
-discovery servers whichever way it's configured.
-
-## MoQ Transport
-
-[moq-lite](/concept/layer/moq-lite) is a forwards-compatible subset of the [MoqTransport](/concept/standard/moq-transport) specification.
-moq-lite clients work with any moq-transport CDN, so you're not locked in.
-
-The goal is a generic pub/sub protocol that can be scaled up via a CDN (see [moq-relay](/bin/relay/)).
-The CDN doesn't know anything about media, it just knows track/group/frame boundaries and what it should do during congestion.
-Think of it like HTTP but for live content.
-
-MoQ is bidirectional, so a **session** can be both a **publisher** and a **subscriber**:
-
-- A publisher produces **broadcasts**, split into one or more **tracks**.
-- A subscriber discovers available broadcasts and can choose to subscribe to tracks.
-
-Each subscription is split into QUIC streams:
-
-- A **group** is a QUIC stream (independent, unordered) that can be closed or reset (congestion).
-- A **frame** is a chunk of bytes with an upfront size, delivered reliably and in order *within a group*.
-
-## Media Format
-
-[hang](/concept/layer/hang) is a simple media format running on top of moq-lite.
-The relay doesn't care about media details, but the end clients need to agree on something: a catalog of tracks, a container for each frame, and codec configuration.
-
-The IETF is working on a [suite of drafts](/concept/standard/msf) but the ideas are similar.
-
-## Application
-
-MoQ tracks are additive.
-You can create new tracks for whatever purpose and it doesn't interfere with the function of a relay or media client.
-Go ahead, create a `controller` track to stream button presses and it will be treated like any other opaque sequence of bytes.
-
-MoQ is implemented in application space, not built into the browser like WebRTC.
-If you don't like something, fork it and ship your own web and native apps.
-
-## More Info
-
-I'd recommend starting with the minimal:
-
-- [moq-lite](/concept/layer/moq-lite)
-- [hang](/concept/layer/hang)
-
-Then read more about the various [IETF standards](/concept/standard/).
+Start with [moq-lite](/concept/layer/moq-lite) and
+[hang](/concept/layer/hang), then use the [standards overview](/concept/standard/)
+to understand the wider protocol ecosystem.

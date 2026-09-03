@@ -43,7 +43,7 @@ use futures::stream::FuturesUnordered;
 use hang::catalog::{AudioCodec, VideoCodec};
 use moq_mux::catalog::{CatalogFormat, Stream as CatalogStream};
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
-use moq_net::{broadcast, origin};
+use moq_net::origin;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -678,9 +678,9 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			broadcast = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.announced_broadcast(&path)) => {
-				match broadcast {
-					Ok(broadcast) => broadcast,
+			resolved = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.routed_broadcast(&path)) => {
+				match resolved {
+					Ok(resolved) => resolved,
 					Err(_) => {
 						tracing::debug!(peer = %self.peer, %path, "play broadcast resolve timed out");
 						return self.reject("stream not found").await;
@@ -688,7 +688,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Some(broadcast) = broadcast else {
+		let Ok(broadcast) = broadcast else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
 		};
@@ -1244,13 +1244,16 @@ struct Publisher {
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// The route advertising the path; dropping it retracts.
+	_announcement: moq_net::announce::Producer,
 }
 
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
-		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
+		let mut broadcast = origin.create_broadcast(path)?;
+		let announcement = origin.announce(path, moq_net::origin::Route::default())?;
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
@@ -1262,6 +1265,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			_announcement: announcement,
 		})
 	}
 
@@ -1586,11 +1590,13 @@ mod tests {
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
-		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
+		let consumer = origin.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
@@ -1616,10 +1622,9 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let _announcement = origin.announce("live/cam0", Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -1665,10 +1670,9 @@ mod tests {
 	async fn play_enhanced_codec_rejects_legacy_client() {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let _announcement = origin.announce("live/cam0", Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -1788,10 +1792,9 @@ mod tests {
 		let nalu = |b: u8| vec![0, 0, 0, 0, 0, 5, 0x65, b, 0x84, 0x21, 0x00];
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let _announcement = origin.announce("live/cam0", Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
@@ -1850,7 +1853,7 @@ mod tests {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let consumer = origin.consume();
 
 		let stream = TcpStream::connect(addr).await.unwrap();

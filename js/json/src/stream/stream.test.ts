@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
-import { Consumer, Producer } from "./index.ts";
+import { Time, Track } from "@moq/net";
+import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };
 
@@ -41,7 +41,7 @@ test("the whole log rides one group, never rolled", async () => {
 	producer.finish();
 
 	// A single group holds everything, and the consumer reads it all in order.
-	const subscriber = track.subscribe();
+	const subscriber = track.subscribe().ordered();
 	const group0 = await subscriber.nextGroup();
 	expect(group0?.sequence).toBe(0);
 	const group1 = await subscriber.nextGroup();
@@ -65,4 +65,48 @@ test("records with embedded newlines round-trip (JSON escapes the newline)", asy
 		out.push(record);
 	}
 	expect(out).toEqual([value, value, value, value]);
+});
+
+test("a second group is reported while the first is still open", async () => {
+	// A stream is one group. A publisher that opens a second lost whatever would have completed the
+	// first, so the read reports that rather than handing back the remainder as a continuous log.
+	// A boundary-only check would never look at the track again while the first group is open, so
+	// this parks forever without the eager check. Written by hand because this producer never rolls.
+	const track = new Track.Producer("test");
+	const encode = (record: Rec) => new TextEncoder().encode(JSON.stringify(record));
+
+	// Both groups stay open, the way a publisher writing to two at once leaves them.
+	const first = track.appendGroup();
+	first.writeFrame({ payload: encode({ n: 0 }), timestamp: Time.Timestamp.now() });
+	const second = track.appendGroup();
+	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.now() });
+
+	// Ask for a replay window, so the first group is delivered rather than skipped by the
+	// subscriber's default max-age budget once a newer group exists.
+	const consumer = new Consumer<Rec>(track.subscribe({ maxAge: 30_000 }));
+	expect(await consumer.next()).toEqual({ n: 0 });
+	await expect(consumer.next()).rejects.toThrow(Rolled);
+
+	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
+	// first group, keeping this consumer's subscription reachable after the caller drops it.
+	expect(first.used.peek()).toBe(false);
+	expect(second.used.peek()).toBe(false);
+
+	// Sticky: a later read must not report the rest of the first group as a whole log.
+	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toThrow(Rolled);
+});
+
+test("a second concurrent read is refused rather than served the first one's group", async () => {
+	// Both calls would await the same in-flight `recvGroup`, and the loser would take the winner's
+	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>(track);
+	producer.append({ n: 0 });
+	producer.finish();
+
+	const consumer = new Consumer<Rec>(track.subscribe());
+	const first = consumer.next();
+	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	expect(await first).toEqual({ n: 0 });
 });

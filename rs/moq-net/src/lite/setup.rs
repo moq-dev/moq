@@ -13,8 +13,8 @@ const PARAM_PATH: u64 = 0x2;
 const PARAM_ROLE: u64 = 0x3;
 /// Setup Parameter id for the link cost the dialer assigns to this connection.
 const PARAM_COST: u64 = 0x4;
-/// Setup Parameter id for the endpoint's origin (hop) id.
-const PARAM_ORIGIN: u64 = 0x5;
+/// Setup Parameter id for the endpoint's Hop ID.
+const PARAM_HOP: u64 = 0x5;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -176,12 +176,12 @@ pub struct Setup {
 	/// Directional: it prices the sender's own egress, so both ends declare their own
 	/// and the two need not match. `None` means the default cost of 1.
 	pub cost: Option<u64>,
-	/// This endpoint's origin (hop) id, the identity it stamps onto forwarded
+	/// This endpoint's Hop ID, the identity it stamps onto forwarded
 	/// announcements. The peer uses it to serve this endpoint's subscriptions from
 	/// a route that does not flow through it (the same split horizon the announce
 	/// filter applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
-	pub origin: Option<crate::Origin>,
+	pub hop: Option<crate::Hop>,
 }
 
 impl Message for Setup {
@@ -207,16 +207,14 @@ impl Message for Setup {
 		let cost = params.get_varint(PARAM_COST)?;
 		// 0 is legal on the wire but carries no identity (it can't be excluded),
 		// so it decodes as "not declared" rather than an error.
-		let origin = params
-			.get_varint(PARAM_ORIGIN)?
-			.and_then(|id| crate::Origin::new(id).ok());
+		let hop = params.get_varint(PARAM_HOP)?.and_then(|id| crate::Hop::new(id).ok());
 
 		Ok(Self {
 			probe,
 			path,
 			role,
 			cost,
-			origin,
+			hop,
 		})
 	}
 
@@ -241,8 +239,8 @@ impl Message for Setup {
 		if let Some(cost) = self.cost {
 			params.set_varint(PARAM_COST, cost);
 		}
-		if let Some(origin) = self.origin {
-			params.set_varint(PARAM_ORIGIN, origin.id());
+		if let Some(hop) = self.hop {
+			params.set_varint(PARAM_HOP, hop.id());
 		}
 
 		params.encode(w, version)
@@ -274,10 +272,10 @@ impl PeerSetup {
 		self.poll_get(waiter, |setup| setup.cost)
 	}
 
-	/// Poll for the origin (hop) id the peer declared in its SETUP. `None` when it
-	/// declared none: a leaf with no identity worth excluding.
-	pub fn poll_origin(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Origin>> {
-		self.poll_get(waiter, |setup| setup.origin)
+	/// Poll for the [`Hop`](crate::Hop) id the peer declared in its SETUP `Hop`
+	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
+	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
+		self.poll_get(waiter, |setup| setup.hop)
 	}
 
 	/// Poll for a field of the peer's SETUP.
@@ -376,9 +374,9 @@ mod tests {
 	}
 
 	#[test]
-	fn origin_round_trip() {
+	fn hop_round_trip() {
 		let msg = Setup {
-			origin: Some(crate::Origin::new(42).unwrap()),
+			hop: Some(crate::Hop::new(42).unwrap()),
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -387,12 +385,12 @@ mod tests {
 	// A declared id of 0 carries no identity (it cannot be excluded), so it
 	// decodes as absent rather than erroring.
 	#[test]
-	fn origin_zero_decodes_as_none() {
+	fn hop_zero_decodes_as_none() {
 		use crate::coding::Encode;
 
 		let version = Version::Lite05;
 		let mut params = Parameters::default();
-		params.set_varint(super::PARAM_ORIGIN, 0);
+		params.set_varint(super::PARAM_HOP, 0);
 		let mut body = bytes::BytesMut::new();
 		params.encode(&mut body, version).unwrap();
 		// Frame the body with the Message Length prefix `Setup::decode` expects.
@@ -401,7 +399,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 		let mut slice = &buf[..];
 		let got = Setup::decode(&mut slice, version).unwrap();
-		assert_eq!(got.origin, None);
+		assert_eq!(got.hop, None);
 	}
 
 	#[test]

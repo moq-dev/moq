@@ -237,19 +237,18 @@ impl Export {
 				continue;
 			}
 			loop {
-				match track.source.poll_read(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
+				match track.source.poll_read(waiter)? {
+					Poll::Ready(Some(frame)) => {
 						if waiting_for_header && !track.source.header_ready() {
 							continue;
 						}
 						track.pending = Some(frame);
 						break;
 					}
-					Poll::Ready(Ok(None)) => {
+					Poll::Ready(None) => {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 					Poll::Pending => break,
 				}
 			}

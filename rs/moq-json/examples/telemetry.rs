@@ -91,7 +91,7 @@ fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
 	// Drain the raw stored frames (compressed if the producer compressed them) and sum their sizes.
 	let waiter = kio::Waiter::noop();
 	let mut total = 0;
-	let mut track = consumer;
+	let mut track = consumer.ordered();
 	while let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) {
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
 			total += frame.payload.len();

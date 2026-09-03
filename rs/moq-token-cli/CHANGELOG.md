@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.46](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.45...moq-token-cli-v0.5.46) - 2026-09-01
+
+### Fixed
+
+- *(rs)* gate doc output-name collisions instead of hitting them in CI ([#3157](https://github.com/moq-dev/moq/pull/3157))
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
 ## [0.5.45](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.44...moq-token-cli-v0.5.45) - 2026-08-24
 
 ### Other

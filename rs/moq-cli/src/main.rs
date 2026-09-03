@@ -7,6 +7,7 @@
 mod args;
 #[cfg(feature = "cluster-lan")]
 mod cluster;
+mod complete;
 #[cfg(feature = "capture")]
 mod devices;
 mod hls;
@@ -18,6 +19,8 @@ mod rtc;
 mod rtmp;
 mod srt;
 mod subscribe;
+#[cfg(test)]
+mod test_env;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -180,23 +183,29 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let cli = Invocation::parse();
+	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
 	cli.validate()?;
 
 	// The local verbs never touch the network, so answer them before binding any
 	// transport. `validate` has already refused to pair them with another stage, so
 	// the single stage here is the whole invocation.
-	let mut stages = cli.stages;
+	// Taken rather than moved out: the local verbs below still ask `cli` whether the
+	// command line named a MoQ side.
+	let mut stages = std::mem::take(&mut cli.stages);
 	if stages.len() == 1 {
 		match stages.remove(0) {
 			Command::Token(token) => {
-				cli.moq.reject("token")?;
+				cli.reject("token")?;
 				return token.run();
+			}
+			Command::Completion(completion) => {
+				cli.reject("completion")?;
+				return completion.run();
 			}
 			#[cfg(feature = "capture")]
 			Command::Devices => {
-				cli.moq.reject("devices")?;
+				cli.reject("devices")?;
 				return devices::run().await;
 			}
 			// Put it back: it needs the transport bound below.
@@ -264,11 +273,11 @@ impl Directions {
 /// An invocation that both imports and exports attaches both directions to the
 /// same session rather than opening two, which is how a relay peers with another
 /// relay. Loops are the network's problem, not ours: an announcement carries the
-/// hops it crossed, and our own origin id is one of them, so a broadcast we
+/// hops it crossed, and our own Hop ID is one of them, so a broadcast we
 /// publish is never announced back to us.
 ///
 /// Returns an allocator over the uplink's bandwidth estimate, for the sources that
-/// can encode to fit it. Only an outbound client has one: a `--server-bind`
+/// can encode to fit it. Only an outbound client has one: a `--listen`
 /// publisher's sessions are inbound and never surfaced here, so it gets an
 /// [`unlimited`](moq_net::bandwidth::Allocator::unlimited) allocator and those
 /// sources encode at their configured rate.
@@ -464,10 +473,13 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let broadcast = origin
-			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
-			.context("failed to create broadcast")?;
-		local = Some(Publish::new(broadcast, &format, max_age)?);
+		let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
+		let publish = Publish::new(broadcast, &format, max_age)?.with_announcement(
+			origin
+				.announce(&name, Default::default())
+				.context("failed to announce broadcast")?,
+		);
+		local = Some(publish);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
@@ -510,10 +522,13 @@ fn spawn_import(
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let broadcast = origin
-					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
-					.context("failed to create broadcast")?;
-				local = Some(Publish::capture(broadcast, &capture, bandwidth, max_age)?);
+				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
+				let publish = Publish::capture(broadcast, &capture, bandwidth, max_age)?.with_announcement(
+					origin
+						.announce(&name, Default::default())
+						.context("failed to announce broadcast")?,
+				);
+				local = Some(publish);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}
@@ -600,7 +615,7 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
 	// e.g. "./source") through the origin.
 	consumer
-		.announced_broadcast(&name)
+		.routed(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
@@ -732,5 +747,40 @@ mod tests {
 		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
 		assert!(!ready.get(), "readiness must be withheld after a bind failure");
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
+	}
+
+	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
+	#[tokio::test]
+	async fn tcp_only_moq_side_starts_a_server() {
+		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
+			.expect("parse TCP-only invocation");
+		let origin = invocation.moq.origin().expect("create origin");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+
+		spawn_server(
+			&mut tasks,
+			&invocation.moq,
+			&origin,
+			&net,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+		)
+		.await
+		.expect("start TCP-only server");
+
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(50), tasks.join_next())
+				.await
+				.is_err(),
+			"the server task should still be accepting connections"
+		);
+		tasks.abort_all();
 	}
 }

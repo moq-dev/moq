@@ -10,6 +10,50 @@ use std::net::SocketAddr;
 use std::task::Poll;
 use std::time::Duration;
 
+/// A `Send` [`moq_net::runtime::Timers`] over tokio, for the origin drivers
+/// the session tests run on a tokio thread.
+#[derive(Clone, Default)]
+pub struct TokioTimers;
+
+impl moq_net::runtime::Timers for TokioTimers {
+	type Timer = TokioTimer;
+
+	fn timer(&self) -> Self::Timer {
+		TokioTimer { at: None, sleep: None }
+	}
+
+	fn now(&self) -> moq_net::runtime::Instant {
+		tokio::time::Instant::now().into_std()
+	}
+}
+
+pub struct TokioTimer {
+	at: Option<moq_net::runtime::Instant>,
+	// Allocated on the first poll after arming, then re-armed in place;
+	// construction panics without a live tokio time driver.
+	sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl moq_net::runtime::Timer for TokioTimer {
+	fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
+		self.at = at;
+		if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
+			sleep.as_mut().reset(tokio::time::Instant::from_std(at));
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(at) = self.at else { return Poll::Pending };
+		let sleep = self
+			.sleep
+			.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
+		if sleep.is_elapsed() {
+			return Poll::Ready(());
+		}
+		waiter.poll_future(sleep.as_mut())
+	}
+}
+
 use anyhow::Context as _;
 use moq_net::runtime::Deadline;
 use moq_uring::{Handle, udp};
@@ -37,7 +81,53 @@ pub fn certs() -> anyhow::Result<Certs> {
 	Ok(Certs { dir, cert, key })
 }
 
-fn config(certs: Option<&Certs>) -> anyhow::Result<quiche::Config> {
+/// A CA-signed server certificate plus a root file holding two CAs, only the
+/// second of which signed it.
+pub struct Bundle {
+	pub dir: tempfile::TempDir,
+	pub cert: std::path::PathBuf,
+	pub key: std::path::PathBuf,
+	/// Both CAs concatenated, in that order.
+	pub roots: std::path::PathBuf,
+}
+
+/// Build one, for a test that a root file is loaded whole rather than to its
+/// first certificate.
+pub fn bundle() -> anyhow::Result<Bundle> {
+	let ca = |name: &str| -> anyhow::Result<rcgen::CertifiedIssuer<'static, rcgen::KeyPair>> {
+		let key = rcgen::KeyPair::generate()?;
+		let mut params = rcgen::CertificateParams::new(Vec::new())?;
+		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+		params.distinguished_name.push(rcgen::DnType::CommonName, name);
+		Ok(rcgen::CertifiedIssuer::self_signed(params, key)?)
+	};
+	let unrelated = ca("moq unrelated ca")?;
+	let signer = ca("moq signing ca")?;
+
+	let key = rcgen::KeyPair::generate()?;
+	let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+	params.use_authority_key_identifier_extension = true;
+	let cert = params.signed_by(&key, &signer)?;
+
+	let dir = tempfile::tempdir()?;
+	let cert_path = dir.path().join("cert.pem");
+	let key_path = dir.path().join("key.pem");
+	let roots_path = dir.path().join("roots.pem");
+	std::fs::write(&cert_path, cert.pem())?;
+	std::fs::write(&key_path, key.serialize_pem())?;
+	// The signer is second on purpose: reading only the first certificate
+	// leaves the store unable to verify anything this server presents.
+	std::fs::write(&roots_path, format!("{}{}", unrelated.pem(), signer.pem()))?;
+	Ok(Bundle {
+		dir,
+		cert: cert_path,
+		key: key_path,
+		roots: roots_path,
+	})
+}
+
+fn config(certs: Option<&Certs>, alpn: &[&[u8]]) -> anyhow::Result<quiche::Config> {
 	let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 	if let Some(certs) = certs {
 		config.load_cert_chain_from_pem_file(certs.cert.to_str().context("cert path")?)?;
@@ -46,12 +136,15 @@ fn config(certs: Option<&Certs>) -> anyhow::Result<quiche::Config> {
 		// The client trusts our self-signed server blindly; this is loopback.
 		config.verify_peer(false);
 	}
-	config.set_application_protos(&[b"moq-uring-echo"])?;
+	config.set_application_protos(alpn)?;
 	// Generous windows so the echo never stalls on flow control.
 	config.set_initial_max_data(64 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_local(32 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_remote(32 * 1024 * 1024);
 	config.set_initial_max_streams_bidi(16);
+	// Enough for a test that deliberately opens a lot of them.
+	config.set_initial_max_stream_data_uni(1024 * 1024);
+	config.set_initial_max_streams_uni(1024);
 	config.set_max_recv_udp_payload_size(SEGMENT);
 	config.set_max_send_udp_payload_size(SEGMENT);
 	config.set_max_idle_timeout(10_000);
@@ -74,8 +167,46 @@ pub struct Peer {
 impl Peer {
 	/// A client half-connected to `server`, first flight not yet sent.
 	pub fn connect(handle: &Handle, sock: udp::Socket, server: SocketAddr) -> anyhow::Result<Self> {
+		Self::connect_alpn(handle, sock, server, &[b"moq-uring-echo"])
+	}
+
+	/// A client offering `alpn`, for a test that needs to reach something
+	/// other than the echo server.
+	pub fn connect_alpn(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+	) -> anyhow::Result<Self> {
+		Self::dial(handle, sock, server, alpn, None)
+	}
+
+	/// A client offering `alpn` that advertises only `max_data` bytes of
+	/// connection-level flow control, for a test that needs the server to run
+	/// out of credit. Reading a stream is what returns it, so a peer that
+	/// stops reading holds the server there.
+	pub fn connect_throttled(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+		max_data: u64,
+	) -> anyhow::Result<Self> {
+		Self::dial(handle, sock, server, alpn, Some(max_data))
+	}
+
+	fn dial(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+		max_data: Option<u64>,
+	) -> anyhow::Result<Self> {
 		let local = sock.local_addr()?;
-		let mut config = config(None)?;
+		let mut config = config(None, alpn)?;
+		if let Some(max_data) = max_data {
+			config.set_initial_max_data(max_data);
+		}
 		let conn = quiche::connect(Some("localhost"), &connection_id(), local, server, &mut config)?;
 		Ok(Self {
 			sock,
@@ -88,7 +219,7 @@ impl Peer {
 	/// A server that will accept the first connection arriving on `sock`.
 	pub fn accept(handle: &Handle, sock: udp::Socket, certs: &Certs, from: SocketAddr) -> anyhow::Result<Self> {
 		let local = sock.local_addr()?;
-		let mut config = config(Some(certs))?;
+		let mut config = config(Some(certs), &[b"moq-uring-echo"])?;
 		let conn = quiche::accept(&connection_id(), None, local, from, &mut config)?;
 		Ok(Self {
 			sock,

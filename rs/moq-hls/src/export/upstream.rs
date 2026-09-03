@@ -4,7 +4,7 @@
 /// [`moq_mux::Source`] it came from so a rendition can still follow a cross-broadcast reference.
 ///
 /// The two travel together because resolving the catalog path by name is not idempotent. A
-/// same-path republish is a takeover (`Origin::UNKNOWN` never counts as the same publisher, so
+/// same-path republish is a takeover (`Hop::UNKNOWN` never counts as the same publisher, so
 /// every ordinary publisher reconnect qualifies), and that installs a brand new broadcast at the
 /// leaf. A rendition that looked its media up by path would then serve the replacement's groups
 /// under the manifest, segment numbering, and `PROGRAM-DATE-TIME` of the broadcast it replaced.

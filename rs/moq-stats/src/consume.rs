@@ -103,7 +103,7 @@ impl SessionsConsumer {
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -138,6 +138,7 @@ mod tests {
 		track: track::Producer,
 		sub: track::Subscriber,
 		_announced: announce::Consumer,
+		_route: announce::Producer,
 		_source: broadcast::Producer,
 		_ctx: moq_net::stats::Session,
 	}
@@ -160,22 +161,20 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let mut source = feed_origin
-			.create_broadcast(path, broadcast::Route::announced())
-			.unwrap();
-		let track = source.create_track("video", None).unwrap();
+		let source = feed_origin.create_broadcast(path).unwrap();
+		let route = feed_origin.announce(path, origin::Route::default()).unwrap();
+		let track = source.clone().create_track("video", None).unwrap();
 
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
-		let consumer = broadcast.expect("active");
+		let update = announced.next().await.expect("announce");
+		assert!(update.active);
+		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
 			track,
 			sub,
 			_announced: announced,
+			_route: route,
 			_source: source,
 			_ctx: ctx,
 		}
@@ -184,8 +183,13 @@ mod tests {
 	async fn announced(origin: &origin::Producer) -> moq_net::broadcast::Consumer {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let announce::Update { broadcast, .. } = consumer.next().await.expect("expected announce");
-		broadcast.expect("active")
+		let update = consumer.next().await.expect("expected announce");
+		assert!(update.active);
+		origin
+			.consume()
+			.request_broadcast(update.prefix.as_path())
+			.await
+			.expect("resolve")
 	}
 
 	async fn drive_tick() {

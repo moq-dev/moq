@@ -5,58 +5,32 @@ description: Ready-to-use tools built on MoQ
 
 # Applications
 
-These are the applications you can run today.
-Some are servers, some are command-line tools, and some are web apps.
+Use these tools to operate MoQ or bridge it to an existing media workflow.
 
-## [moq-relay](/bin/relay/)
+## Core tools
 
-The relay server that routes broadcasts between publishers and subscribers.
-This is the heart of any MoQ deployment that relies on fanout.
-Run it yourself, or pay for an external service (ex. Cloudflare).
+| Tool | Use it to |
+| --- | --- |
+| [moq-relay](/bin/relay/) | Route, cache, and fan out broadcasts. Relays can also form multi-region clusters. |
+| [moq-cli](/bin/cli) | Publish, subscribe, play, transcode, or convert media from the command line. |
+| [Web demo](/bin/web) | Publish and watch from a browser with the project web components. |
 
-- [Configuration](/bin/relay/config) - TOML reference and examples
-- [Authentication](/bin/relay/auth) - JWT-based access control
-- [HTTP Endpoints](/bin/relay/http) - Debugging and diagnostics
-- [Clustering](/bin/relay/cluster) - Multi-region deployment
+## Protocol gateways
 
-## [moq-cli](/bin/cli)
+| Gateway | Direction |
+| --- | --- |
+| [moq-hls](/bin/hls) | Import HLS into MoQ or serve a MoQ broadcast as HLS. |
+| [moq-rtmp](/bin/rtmp) | Accept RTMP and enhanced RTMP publishers and forward them into MoQ. |
+| [moq-rtc](/bin/rtc) | Bridge WHIP/WHEP and MoQ in either client or server roles. |
 
-A CLI for publishing to media streams.
-Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media into MoQ.
+These pages document gateway endpoints exposed by `moq-cli` and the libraries
+that implement them.
 
-```bash
-# Publish your webcam
-ffmpeg -f avfoundation -i "0" -f mpegts - | moq --connect https://relay.example.com/anon --broadcast my-stream import ts
-```
+## Media integrations
 
-## [moq-rtc](/bin/rtc)
+| Integration | Use it to |
+| --- | --- |
+| [OBS plugin](/bin/obs) | Publish a scene to MoQ or use a MoQ broadcast as an OBS source. |
+| [GStreamer plugin](/bin/gstreamer) | Add MoQ source and sink elements to a GStreamer pipeline. |
 
-A WebRTC <-> MoQ gateway. Speaks WHIP (publish) and WHEP (subscribe) in either
-HTTP role, so it can accept incoming peers (OBS, browsers) or dial out to a
-remote WebRTC server. Ingest and egress both work for H.264, VP8, VP9, and Opus.
-
-## [moq-hls](/bin/hls)
-
-An HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS (fetching media on demand) and
-Low-Latency HLS over HTTP, or imports a remote HLS playlist into MoQ.
-
-## [moq-rtmp](/bin/rtmp)
-
-An RTMP / enhanced-RTMP -> MoQ ingest gateway. Accepts RTMP from any encoder
-(OBS, ffmpeg) and publishes it into MoQ, supporting H.264/HEVC/AV1/VP9 and
-AAC/Opus/AC-3.
-
-## [OBS Plugin](/bin/obs)
-
-Real-time latency with the familiar OBS interface.
-Supports both publishing and subscribing.
-
-## [GStreamer Plugin](/bin/gstreamer)
-
-Integrate MoQ into GStreamer pipelines for advanced media workflows.
-Supports both publishing and subscribing.
-
-## [Web Demo](/bin/web)
-
-A demo web application showcasing MoQ in the browser.
-Watch streams, publish from your camera, and explore the API.
+To embed MoQ directly in another application, choose a [library](/lib/) instead.

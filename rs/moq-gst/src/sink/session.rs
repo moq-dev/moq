@@ -5,12 +5,13 @@
 //! streaming thread. This task only owns connect, the transport's lifetime, and stats; it touches no
 //! media.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Result;
 use gst::glib;
 use gst::prelude::*;
+use gst::subclass::prelude::*;
 
 use hang::moq_net;
 
@@ -50,9 +51,8 @@ pub enum ConnectionStatus {
 
 /// The connect/version surface behind the `status`, `connected`, and `moq-version` properties. One per
 /// session: the element swaps in a fresh `Arc` on every start, so a previous session's task (which may
-/// still be unwinding) writes only its own detached copy and can never clobber the live status. No
-/// generation bookkeeping needed. The bitrate properties read a [`moq_net::bandwidth::Consumer`] directly,
-/// so they aren't mirrored here.
+/// still be unwinding) writes only its own detached copy and can never clobber the live status. The
+/// bitrate properties read a [`moq_net::bandwidth::Consumer`] directly, so they aren't mirrored here.
 #[derive(Default)]
 struct StatusInner {
 	status: ConnectionStatus,
@@ -127,6 +127,89 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	config
 }
 
+/// Whether the publication is still open, and if not, how it ended.
+///
+/// Monotonic: `Open` moves once, and the first terminal transition wins. `Eos` beating a later error
+/// is deliberate, not a tie-break: by then the producers and the catalog were consumed cleanly, so the
+/// failure happened after the publication was already complete and must not rewrite it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Completion {
+	/// Request pads, negotiation, publication and flow resets are allowed.
+	Open,
+	/// Every pad ended cleanly and the producers were consumed.
+	Eos,
+	/// A session or finalize error ended the publication.
+	Failed,
+}
+
+/// The atomic behind a [`CompletionHandle`], reached only through the typed methods so no caller can
+/// write a state the transition rules forbid.
+pub(crate) struct CompletionState(AtomicU8);
+
+/// One publication's completion, shared by its session task and by its pads.
+///
+/// Every clone belongs to one exact session, so this doubles as the session's identity: a task that
+/// outlived its session still holds only that session's handle, and `Arc::ptr_eq` answers whether a
+/// deferred message still belongs to the live publication. A terminal error staying inside its own
+/// session falls out of the topology rather than being checked against a separate id.
+pub(crate) type CompletionHandle = Arc<CompletionState>;
+
+impl CompletionState {
+	const OPEN: u8 = 0;
+	const EOS: u8 = 1;
+	const FAILED: u8 = 2;
+
+	pub(crate) fn new() -> CompletionHandle {
+		Arc::new(Self(AtomicU8::new(Self::OPEN)))
+	}
+
+	pub(crate) fn get(&self) -> Completion {
+		match self.0.load(Ordering::Relaxed) {
+			Self::EOS => Completion::Eos,
+			Self::FAILED => Completion::Failed,
+			_ => Completion::Open,
+		}
+	}
+
+	pub(crate) fn is_open(&self) -> bool {
+		self.0.load(Ordering::Relaxed) == Self::OPEN
+	}
+
+	/// Take the clean terminal state, returning whether this call is the one that took it.
+	pub(crate) fn finish(&self) -> bool {
+		self.take(Self::EOS)
+	}
+
+	/// Take the failed terminal state, returning whether this call is the one that took it.
+	pub(crate) fn fail(&self) -> bool {
+		self.take(Self::FAILED)
+	}
+
+	/// Compare-exchange rather than a store: a loser that overwrote the winner would turn an EOS the
+	/// element already earned into a bus error.
+	fn take(&self, terminal: u8) -> bool {
+		self.0
+			.compare_exchange(Self::OPEN, terminal, Ordering::Relaxed, Ordering::Relaxed)
+			.is_ok()
+	}
+}
+
+/// Permission for one session's task to report a terminal failure on the bus.
+///
+/// Held between creating the session and completing `READY -> PAUSED`. Marking it releases the task;
+/// dropping it unmarked leaves the task parked, which is what a rolled-back transition wants, since
+/// the session it belonged to is torn down with it.
+pub(crate) struct SessionRegistration {
+	gate: Arc<tokio::sync::Notify>,
+}
+
+impl SessionRegistration {
+	/// Release the task: the element installed this session, so its errors now have somewhere to land.
+	pub(crate) fn mark_registered(self) {
+		self.gate.notify_one();
+	}
+}
+
 /// A running session: the connect/lifecycle task plus the state the property getters read. Dropping the
 /// `Session` (or the producers held by the element) tears it down.
 pub(crate) struct Session {
@@ -138,8 +221,11 @@ pub(crate) struct Session {
 	/// The live recv-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-recv-bitrate` getter.
 	recv_bandwidth: moq_net::bandwidth::Consumer,
-	/// Set by the task on a fatal transport error so the pad streaming threads stop feeding a dead session.
-	errored: Arc<AtomicBool>,
+	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
+	/// pad streaming threads stop feeding a dead session without consulting the element.
+	completion: CompletionHandle,
+	/// The route advertising the broadcast; dropping it retracts.
+	_announcement: moq_net::announce::Producer,
 }
 
 impl Session {
@@ -148,19 +234,22 @@ impl Session {
 	pub fn start(
 		settings: ResolvedSettings,
 		element: glib::WeakRef<Element>,
-	) -> Result<(Self, moq_net::broadcast::Producer, moq_mux::catalog::Producer)> {
+	) -> Result<(
+		Self,
+		SessionRegistration,
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let mut broadcast = origin.create_broadcast(
-			&settings.broadcast,
-			moq_net::broadcast::Route::new().with_announce(true),
-		)?;
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let mut broadcast = origin.create_broadcast(&settings.broadcast)?;
+		let announcement = origin.announce(&settings.broadcast, moq_net::origin::Route::default())?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let status = Arc::new(Status::default());
-		let errored = Arc::new(AtomicBool::new(false));
+		let completion = CompletionState::new();
 
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
@@ -178,7 +267,17 @@ impl Session {
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
 
-		let join = RUNTIME.spawn(forward(reconnect, origin, status.clone(), errored.clone(), element));
+		// The task is spawned parked. An immediate auth rejection would otherwise race the element
+		// installing this session, and its bus error would be discarded for belonging to no live one.
+		let gate = Arc::new(tokio::sync::Notify::new());
+		let join = RUNTIME.spawn(forward(
+			reconnect,
+			origin,
+			status.clone(),
+			completion.clone(),
+			element,
+			gate.clone(),
+		));
 
 		Ok((
 			Self {
@@ -186,8 +285,10 @@ impl Session {
 				status,
 				send_bandwidth,
 				recv_bandwidth,
-				errored,
+				completion,
+				_announcement: announcement,
 			},
+			SessionRegistration { gate },
 			broadcast,
 			catalog,
 		))
@@ -208,9 +309,9 @@ impl Session {
 		self.recv_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
 	}
 
-	/// Whether the transport has hit a fatal error (the pad streaming threads stop feeding it on this).
-	pub fn errored(&self) -> bool {
-		self.errored.load(Ordering::Relaxed)
+	/// Share this publication's completion with a pad's buffer path.
+	pub fn completion(&self) -> CompletionHandle {
+		self.completion.clone()
 	}
 
 	/// Stop the session: a clean local close, never an error. [`Drop`] aborts the task, cancelling the
@@ -238,10 +339,28 @@ impl Drop for Session {
 /// [`Session`]'s `Drop` aborts this task, which drops the `Connection` handle and quietly tears the loop
 /// down.
 async fn forward(
+	reconnect: moq_tokio::Connection,
+	origin: moq_net::origin::Producer,
+	status: Arc<Status>,
+	completion: CompletionHandle,
+	element: glib::WeakRef<Element>,
+	registered: Arc<tokio::sync::Notify>,
+) {
+	wait_for_registration(registered).await;
+	forward_registered(reconnect, origin, status, completion, element).await;
+}
+
+async fn wait_for_registration(registered: Arc<tokio::sync::Notify>) {
+	// `Notify` keeps the permit, so marking before the task parks here is not a lost wakeup. A session
+	// rolled back instead of marked is aborted by `Session`'s `Drop`, which unparks nothing.
+	registered.notified().await;
+}
+
+async fn forward_registered(
 	mut reconnect: moq_tokio::Connection,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
-	errored: Arc<AtomicBool>,
+	completion: CompletionHandle,
 	element: glib::WeakRef<Element>,
 ) {
 	// Hold the origin producer for the task's lifetime so the broadcast created on it stays routable:
@@ -275,13 +394,13 @@ async fn forward(
 				}
 				Err(err) => {
 					// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
-					// bounded backoff's give-up). Flag `errored` so the pad threads stop feeding a dead
-					// session, and post a fatal element error.
+					// bounded backoff's give-up). Ending the publication stops the pad threads feeding a
+					// dead session; losing that race means it already ended, so there is nothing to report.
+					let won = completion.fail();
 					status.set(ConnectionStatus::Failed, None);
 					notify(&element, &["status", "connected", "moq-version"]);
-					errored.store(true, Ordering::Relaxed);
-					if let Some(obj) = element.upgrade() {
-						gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
+					if won && let Some(obj) = element.upgrade() {
+						obj.imp().post_session_error(&completion, format!("{err:?}"));
 					}
 					return;
 				}
@@ -309,5 +428,31 @@ fn notify(element: &glib::WeakRef<Element>, props: &[&str]) {
 		for prop in props {
 			obj.notify(prop);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_terminal_result_waits_until_the_session_is_registered() {
+		let gate = Arc::new(tokio::sync::Notify::new());
+		let registration = SessionRegistration { gate: gate.clone() };
+		let completion = CompletionState::new();
+		let task_completion = completion.clone();
+		let (entered, reached) = tokio::sync::oneshot::channel();
+
+		let task = tokio::spawn(async move {
+			entered.send(()).unwrap();
+			wait_for_registration(gate).await;
+			task_completion.fail();
+		});
+		reached.await.unwrap();
+		assert_eq!(completion.get(), Completion::Open, "the terminal result stayed parked");
+
+		registration.mark_registered();
+		task.await.unwrap();
+		assert_eq!(completion.get(), Completion::Failed, "registration released it");
 	}
 }

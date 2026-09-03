@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, SessionError,
+	Error, Hop, SessionError,
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -36,9 +36,9 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id to assign the peer when it declares none itself. See
-	/// `Client::with_peer_origin`; a peer that negotiates the MoQ Cluster extension
+	/// `Client::with_peer_hop`; a peer that negotiates the MoQ Cluster extension
 	/// declares its own, which wins.
-	pub peer_origin: Option<Origin>,
+	pub peer_hop: Option<Hop>,
 
 	/// What crossing this link costs. Declared in our SETUP (see
 	/// [`cluster::RELAY_COST`]) for the peer to charge, and charged locally on what the
@@ -82,7 +82,7 @@ where
 		client,
 		publish,
 		subscribe,
-		peer_origin,
+		peer_hop,
 		cost,
 		version,
 		path,
@@ -107,8 +107,8 @@ where
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
-		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
+		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
+		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
 
 		// What the peer declared in its SETUP. Seeded now when that stream was already
 		// read (the legacy handshake, or a gated server accept), and filled by the uni
@@ -139,7 +139,7 @@ where
 					adapter.clone(),
 					publish,
 					control.clone(),
-					peer_origin,
+					peer_hop,
 					peer_setup.clone(),
 					version,
 				);
@@ -149,7 +149,7 @@ where
 					adapter.clone(),
 					subscribe,
 					control,
-					peer_origin,
+					peer_hop,
 					peer_setup.clone(),
 					self_origin,
 					cost,
@@ -289,7 +289,7 @@ where
 					session.clone(),
 					publish,
 					control.clone(),
-					peer_origin,
+					peer_hop,
 					peer_setup.clone(),
 					version,
 				);
@@ -299,7 +299,7 @@ where
 					session.clone(),
 					subscribe,
 					control,
-					peer_origin,
+					peer_hop,
 					peer_setup.clone(),
 					self_origin,
 					cost,
@@ -440,11 +440,11 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 /// Both halves of a session share the process's origin identity, so either one names
 /// it; the publish half is just the usual one to be set. A session with neither half
 /// has no content to route, so a throwaway id is all it can offer.
-fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Origin {
+fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Hop {
 	publish
 		.map(|origin| **origin)
 		.or_else(|| subscribe.map(|origin| **origin))
-		.unwrap_or_else(Origin::random)
+		.unwrap_or_else(Hop::random)
 }
 
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
@@ -519,7 +519,7 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	mut session: S,
 	version: Version,
 	path: Option<String>,
-	self_origin: Origin,
+	self_origin: Hop,
 	cost: Option<u64>,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
@@ -725,6 +725,9 @@ where
 	}
 
 	match kind {
+		// We never request a fill, so a fetch stream answers a request we did not make. Its
+		// objects would duplicate a group the live subscription is already delivering, and
+		// two producers for one sequence is a `Duplicate` error, so refuse the stream.
 		FetchHeader::TYPE => Err(Error::Unsupported),
 		_ => Err(Error::UnexpectedStream),
 	}
@@ -926,7 +929,7 @@ mod tests {
 		// bound it: paused time makes the deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -938,7 +941,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
-			peer_origin: None,
+			peer_hop: None,
 			cost: None,
 			version: VERSION,
 			path: None,
@@ -947,7 +950,7 @@ mod tests {
 			// makes the cluster parameters mandatory in both directions.
 			peer_declared: Some(peer::Peer {
 				cluster: cluster::Peer {
-					origin: Some(crate::Origin::new(2).unwrap()),
+					hop: Some(crate::Hop::new(2).unwrap()),
 					cost: None,
 				},
 				..Default::default()
@@ -975,7 +978,7 @@ mod tests {
 	/// called `run_subscribe_namespace` itself.
 	#[tokio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
@@ -993,7 +996,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(scoped),
-			peer_origin: None,
+			peer_hop: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -1027,10 +1030,8 @@ mod tests {
 	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let _cam = origin
-			.create_broadcast("solo-cam", crate::broadcast::Route::new().with_announce(true))
-			.unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -1045,7 +1046,7 @@ mod tests {
 			client: true,
 			publish: Some(origin.consume()),
 			subscribe: None,
-			peer_origin: None,
+			peer_hop: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -1113,7 +1114,7 @@ mod tests {
 	/// here would never be recognized as a loop.
 	#[test]
 	fn the_hop_id_comes_from_whichever_origin_the_caller_set() {
-		let ours = crate::Origin::new(42).unwrap();
+		let ours = crate::Hop::new(42).unwrap();
 
 		let publish = crate::origin::Info::new(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), None), ours, "the publish half");
@@ -1141,7 +1142,7 @@ mod tests {
 		// deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
@@ -1152,7 +1153,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
-			peer_origin: None,
+			peer_hop: None,
 			cost: None,
 			version: VERSION,
 			path: None,

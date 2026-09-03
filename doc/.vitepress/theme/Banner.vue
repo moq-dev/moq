@@ -2,17 +2,15 @@
 /**
  * Site-wide notice shown at the top of every page.
  *
- * Reminds readers that MoQ is pre-1.0, so both the APIs/protocols and these
- * (mostly AI-generated) docs are still in flux.
+ * Reminds readers that MoQ is pre-1.0 and its public surfaces may change.
  */
 </script>
 
 <template>
 	<div class="moq-banner">
 		<p>
-			<strong>btw:</strong> MoQ is under active development. The APIs and
-			protocols are still evolving and will change. Most of this documentation
-			is AI generated until things get more stable.
+			<strong>MoQ is under active development.</strong> APIs and protocols may
+			change between releases.
 		</p>
 	</div>
 </template>

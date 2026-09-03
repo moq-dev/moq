@@ -1,195 +1,94 @@
 ---
 title: moq-relay
-description: A server that connects MoQ publishers and subscribers.
+description: Route MoQ broadcasts between publishers and subscribers
 ---
 
 # moq-relay
 
-A server that routes broadcasts between publishers and subscribers, performing caching, deduplication, and fan-out.
+`moq-relay` routes, caches, and fans out broadcasts without parsing their media
+payloads. Run one relay for a small deployment or connect several relays into a
+cluster.
 
-## Overview
+## Install
 
-`moq-relay` is designed to run in datacenters, relaying media across multiple hops to improve quality of service and enable massive scale.
-
-**Features:**
-
-- Fan-out to multiple subscribers
-- Caching and deduplication
-- Cross-region clustering
-- JWT-based authentication
-- HTTP debugging endpoints
-
-## Installation
-
-### From Source
+Choose one installation method:
 
 ```bash
-git clone https://github.com/moq-dev/moq
-cd moq
-cargo build --release --bin moq-relay
-```
-
-The binary will be in `target/release/moq-relay`.
-
-### Using Cargo
-
-```bash
+# Cargo
 cargo install moq-relay
-```
 
-### Using winget (Windows)
+# Nix
+nix run github:moq-dev/moq#moq-relay -- relay.toml
 
-```powershell
+# Windows
 winget install moq-dev.moq-relay
 ```
 
-### Using Nix
+Container images for `linux/amd64` and `linux/arm64` are published on
+[Docker Hub](https://hub.docker.com/r/moqdev/moq-relay):
 
 ```bash
-# Run directly
-nix run github:moq-dev/moq#moq-relay
-
-# Or build and find the binary in ./result/bin/
-nix build github:moq-dev/moq#moq-relay
+docker run -p 4443:4443/udp -p 4443:4443/tcp \
+  -v "$(pwd)/relay.toml:/app/relay.toml:ro" \
+  moqdev/moq-relay -- /app/relay.toml
 ```
 
-### Using Docker
+To build from source, clone the repository and run
+`cargo build --release --bin moq-relay`.
 
-```bash
-docker pull moqdev/moq-relay
-docker run -p 4443:4443/udp -v "$(pwd)/relay.toml:/app/relay.toml:ro" moqdev/moq-relay -- /app/relay.toml
-```
+## Configure and run
 
-Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay).
-
-## Configuration
-
-Create a `relay.toml` configuration file:
-
-```toml
-[listen]
-bind = "[::]:4443"  # Listen on all interfaces, port 4443
-
-[listen.tls]
-cert = "/path/to/cert.pem"  # TLS certificate
-key = "/path/to/key.pem"    # TLS private key
-
-[auth]
-public = "anon"     # Allow anonymous access to anon/**
-key = "root.jwk"    # JWT key for authenticated paths
-```
-
-See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localhost.toml) for a complete example.
-
-## Running
-
-Pass the config path as the only positional argument:
+The relay takes one TOML configuration path:
 
 ```bash
 moq-relay relay.toml
 ```
 
-## HTTP Endpoints
-
-The relay exposes HTTP/HTTPS endpoints for debugging, health checks, and late-join. See [HTTP](/bin/relay/http) for details.
-
-## TLS Setup
-
-The relay requires TLS certificates. Use [Let's Encrypt](https://letsencrypt.org/):
-
-```bash
-# Install certbot
-sudo apt install certbot  # Ubuntu/Debian
-brew install certbot      # macOS
-
-# Generate certificate
-sudo certbot certonly --standalone -d relay.example.com
-```
-
-Update `relay.toml`:
+A local-only configuration can use a generated certificate and anonymous access:
 
 ```toml
-[listen.tls]
-cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
-key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+[server]
+listen = "127.0.0.1:4443"
+tls.generate = ["localhost"]
+
+[web.http]
+listen = "127.0.0.1:4443"
+
+[auth]
+public = ""
 ```
 
-## Monitoring
+The HTTP listener serves the certificate fingerprint used to verify the local
+QUIC endpoint. Do not use generated certificates or unrestricted anonymous
+access for a public deployment.
 
-### Logging
+See the [configuration reference](/bin/relay/config) for every option and the
+[`demo/relay`](https://github.com/moq-dev/moq/tree/main/demo/relay) directory for
+working configurations.
 
-Set log level via environment variable:
+## Operate a relay
+
+| Task | Guide |
+| --- | --- |
+| Restrict publish and subscribe paths | [Authentication](/bin/relay/auth) |
+| Connect multiple relays | [Clustering](/bin/relay/cluster) |
+| Inspect broadcasts, health, and metrics | [HTTP endpoints](/bin/relay/http) |
+| Configure TLS, networking, and host tuning | [Production deployment](/setup/prod) |
+
+Set `RUST_LOG` to adjust logging without changing the configuration:
 
 ```bash
 RUST_LOG=info moq-relay relay.toml
-RUST_LOG=debug moq-relay relay.toml
 RUST_LOG=moq_relay=trace moq-relay relay.toml
 ```
 
-### Metrics
-
-Metrics (Prometheus format) are planned but not yet implemented.
-
-Current visibility:
-
-- Check logs for connection count
-- Use [HTTP endpoints](/bin/relay/http) for track inspection
-- Monitor system resources (CPU, memory, bandwidth)
-
-## Performance
-
-### Current Status
-
-- **Single-threaded** - Quinn uses one UDP receive thread
-- **In-memory caching** - Recent groups stored in RAM
-- **Mesh clustering** - All relays connect to all others
-
-### Scaling
-
-- **Vertical** - Fast CPU matters more than core count
-- **Horizontal** - Deploy multiple relays in different regions
-- **Cluster size** - 3-5 nodes optimal with current implementation
-
-### Future Improvements
-
-- Multi-threaded UDP processing
-- Tree-based clustering topology
-- Improved memory management
-- Metrics and observability
-
 ## Troubleshooting
 
-### Port Already in Use
-
-```bash
-# Check what's using port 4443
-lsof -i :4443
-
-# Kill the process or use a different port
-```
-
-### Certificate Errors
-
-Ensure:
-
-- Certificate is valid and not expired
-- Certificate matches domain name
-- Private key has correct permissions
-- Certificate includes full chain
-
-### Connection Timeouts
-
-Check:
-
-- UDP port is open in firewall
-- Cloud provider allows UDP traffic
-- TLS certificate is valid
-- Relay is actually running
-
-## Next Steps
-
-- Set up [Authentication](/bin/relay/auth)
-- Configure [Clustering](/bin/relay/cluster)
-- Deploy to [Production](/bin/relay/prod)
-- Use [moq-net](/lib/rs/crate/moq-net) client library
-- Build media apps with [hang](/lib/rs/crate/hang)
+- **Address already in use:** check that no other process is listening on the
+  configured UDP or TCP port.
+- **Certificate failure:** verify the hostname, certificate chain, private key,
+  and file permissions.
+- **Connection timeout:** verify that UDP reaches the relay and that the client
+  URL uses the configured hostname and port.
+- **Authorization failure:** inspect the connection path and token permissions
+  using the [authentication guide](/bin/relay/auth).

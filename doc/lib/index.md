@@ -1,6 +1,6 @@
 ---
 title: Libraries
-description: MoQ libraries for Rust, TypeScript, C, Python, Kotlin, Swift, and Go
+description: MoQ libraries for Rust, TypeScript, C, Python, Kotlin, Swift, Go, and Dart
 ---
 
 # Libraries
@@ -31,7 +31,7 @@ The browser implementation. Uses [WebTransport](/concept/layer/web-transport), W
 
 ## FFI bindings
 
-Python, Kotlin, Swift, and Go are generated from the same [`moq-ffi`](https://crates.io/crates/moq-ffi) UniFFI crate, then wrapped with idiomatic APIs. C uses the separate [`libmoq`](/lib/rs/crate/libmoq) ABI over the same Rust protocol and media crates.
+Python, Kotlin, Swift, Go, and Dart are generated from the same [`moq-ffi`](https://crates.io/crates/moq-ffi) UniFFI crate, then wrapped with idiomatic APIs. C uses the separate [`libmoq`](/lib/rs/crate/libmoq) ABI over the same Rust protocol and media crates.
 
 ### [C](/lib/c/)
 
@@ -53,6 +53,10 @@ Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distribut
 
 cgo bindings with prebuilt static libraries per platform. Published as [`moq.dev/moq`](https://pkg.go.dev/moq.dev/moq) (the ergonomic wrapper), atop the raw [`moq.dev/moq-ffi`](https://pkg.go.dev/moq.dev/moq-ffi) bindings.
 
+### [Dart and Flutter](/lib/dart/)
+
+Futures and streams for Dart and Flutter. Published as [`moq`](https://pub.dev/packages/moq), atop the raw [`moq_ffi`](https://pub.dev/packages/moq_ffi) bindings with native assets for Android, iOS, Linux, macOS, and Windows.
+
 ## Picking a language
 
 - **Server, CLI, or anything native** → [Rust](/lib/rs/)
@@ -61,6 +65,7 @@ cgo bindings with prebuilt static libraries per platform. Published as [`moq.dev
 - **Android app or JVM service** → [Kotlin](/lib/kt/)
 - **Scripts, ML pipelines, prototypes** → [Python](/lib/py/)
 - **Go service or tooling** → [Go](/lib/go/)
+- **Cross-platform Flutter app** → [Dart](/lib/dart/)
 - **Anything else with a C ABI** → [C](/lib/c/)
 
 Every binding uses the same wire protocol, so a publisher in Python can be consumed by a Swift subscriber.

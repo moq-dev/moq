@@ -71,7 +71,7 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
-	let publisher = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let publisher = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
 	serve(server.subscribe_router(), "WHEP", listen).await
 }
@@ -88,8 +88,14 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	let name = &target.name;
 	let producer = target
 		.origin
-		.create_broadcast(name, moq_net::broadcast::Route::new().with_announce(true))
+		.create_broadcast(name)
 		.context("failed to create broadcast")?;
+	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
+	// can discover the broadcast while it connects.
+	let _announcement = target
+		.origin
+		.announce(name, Default::default())
+		.context("failed to announce broadcast")?;
 
 	tracing::info!(%url, %name, "WHEP client pulling");
 	notify_ready();
@@ -105,7 +111,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
 	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
 	origin
-		.announced_broadcast(&name)
+		.routed(&name)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 

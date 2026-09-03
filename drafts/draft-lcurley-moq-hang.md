@@ -113,6 +113,8 @@ type Catalog = {
   "video": VideoSchema | undefined,
   "timeline": TimelineSchema | undefined,
   "text": TextSchema | undefined,
+  "json": JsonTracks | undefined,
+  "binary": BinaryTracks | undefined,
   // ... any custom fields ...
 }
 ~~~
@@ -120,10 +122,11 @@ type Catalog = {
 Additional fields MAY be added based on the application.
 The catalog SHOULD be mostly static, delegating any dynamic content to other tracks.
 
-For example, a `"chat"` section should include the name of a chat track, not individual chat messages.
+For example, a chat entry should name a chat track, not carry individual chat messages.
 This way catalog updates are rare and a client MAY choose to not subscribe.
+The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, plus an optional timeline track ({{timeline}}) indexing their segments.
+This specification defines audio, video, and text media tracks, plus an optional timeline track ({{timeline}}) indexing their segments and the application data tracks in {{data}}.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -321,6 +324,107 @@ For example:
 }
 ~~~
 
+## Data Tracks {#data}
+Beyond media, a broadcast MAY publish application data tracks: a chat log, a telemetry feed, a thumbnail, a serialized state blob.
+The catalog lists them in two sections, split by payload encoding:
+
+~~~
+type JsonTracks = {
+  "tracks": Map<TrackName, JsonSchema>,
+}
+
+type BinaryTracks = {
+  "tracks": Map<TrackName, BinarySchema>,
+}
+~~~
+
+A `json` track's frames are UTF-8 JSON values; a `binary` track's frames are opaque to everything but the application.
+The split is by what a generic consumer can do without knowing the application: parse, inspect, and re-serialize a JSON track, but only copy a binary one.
+
+Each map is keyed by track name, so an entry's key is the name to subscribe to.
+Unlike the media sections these are not rendition sets: entries are distinct tracks, not alternatives to choose between.
+A publisher MUST omit a section that holds no tracks.
+
+A consumer discovers these tracks the same way it discovers media, by reading the catalog; nothing else in the broadcast announces them.
+
+### JSON {#json-tracks}
+~~~
+type JsonSchema = {
+  "mode": Mode,
+  "compression": Compression | undefined,
+  "schema": string | undefined,
+  "broadcast": string | undefined,
+  "timeline": TimelineSchema | undefined,
+}
+~~~
+
+The `schema` field is an optional identifier for the shape of each value, typically the URL of a JSON Schema.
+It is descriptive: a consumer that does not recognize it MUST still be able to read the track.
+
+### Binary {#binary-tracks}
+~~~
+type BinarySchema = {
+  "mode": Mode,
+  "compression": Compression | undefined,
+  "mime": string | undefined,
+  "broadcast": string | undefined,
+  "timeline": TimelineSchema | undefined,
+}
+~~~
+
+The `mime` field is an optional media type ({{!RFC6838}}) for each payload, for example `image/jpeg`.
+It is descriptive, the same as `schema` above.
+
+### mode {#field-mode}
+~~~
+type Mode = "snapshot" | "stream"
+~~~
+
+The `mode` field says how a track's groups compose its frames into what a consumer sees.
+It is REQUIRED and has no default: reading an append log as a latest-value document silently discards every payload but the last.
+A consumer MUST ignore a track whose `mode` it does not recognize.
+
+A `snapshot` track is lossy.
+Each group is self-contained and supersedes the previous one, so a consumer reads only the newest group and a publisher MAY drop older ones.
+A group's first frame is a complete value.
+A `json` track MAY follow it with JSON Merge Patch ({{!RFC7396}}) deltas applied in order; a `binary` track MUST write exactly one frame per group, since an opaque payload has no delta form.
+
+A `stream` track is lossless in the sense that nothing supersedes anything else.
+It is a single group, never rolled, carrying one self-contained payload per frame, delivered in order.
+
+A publisher that cannot write a payload MUST close the track rather than continue the log in a second group.
+A second group would present a gap as if it were a complete log; ending the track surfaces the failure instead, and a publisher with more to say opens a new track.
+
+A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
+It reads the one group the track carries, and MUST fail the read if the track carries a second, since whatever would have completed the first group is gone and yielding the remainder would present that gap as a continuous log.
+This is why a consumer takes groups in arrival order rather than by ascending sequence: groups are separate streams, so a second group MAY arrive with a lower sequence than the first, and skipping it would report a truncated log as a whole one.
+
+A consumer MUST NOT wait for the first group to end before it looks for a second.
+A publisher that opens a second group while the first is still open is broken in exactly the way this rule exists to catch, and a consumer that only checks at the group boundary waits forever on a group that publisher may never finish.
+A consumer MAY yield payloads it has already received from the first group before it fails, since those payloads precede the gap, but it MUST fail rather than block once they run out.
+
+Retention is bounded, and this is the limit of "lossless".
+A group's cache is finite, so a publisher that writes more than it holds evicts the log's earliest frames.
+A consumer that has not kept up, or that subscribes later, then cannot read the log at all: the read fails once it reaches the evicted prefix, rather than silently resuming at whatever the cache still holds.
+That is the intended behaviour, since a partial log presented as a whole one is exactly what this mode exists to prevent, and under compression ({{compression}}) the retained frames are undecodable anyway without the evicted prefix as context.
+A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
+
+### compression {#field-compression}
+~~~
+type Compression = "deflate"
+~~~
+
+The `compression` field names the compression applied to the track's frames.
+If absent, the frames are uncompressed.
+A consumer MUST ignore a track whose `compression` it does not recognize, since it cannot decode the frames.
+
+The `deflate` value is the group-scoped DEFLATE of {{compression}}.
+A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
+
+### broadcast and timeline {#data-shared}
+The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+The `timeline` field advertises a companion timeline track indexing this track's groups, with the same schema as the catalog's root `timeline` field ({{timeline-catalog}}).
+
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
@@ -427,7 +531,12 @@ Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property b
 
 
 # Compression {#compression}
-Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
+Some metadata tracks are compressed.
+
+Compression is signalled per track, never inferred from the track's name.
+A data track ({{data}}) declares it with the `compression` field ({{field-compression}}).
+The two tracks this specification defines as always compressed, `catalog.json.z` ({{catalog}}) and the timeline track ({{timeline}}), are identified by their role instead.
+The `.z` suffix on those names is a naming convention, and a consumer MUST NOT treat it as a signal.
 
 Each group is one raw DEFLATE stream ({{!RFC1951}}), sync-flushed at each frame boundary.
 Each frame is therefore a self-delimited, byte-aligned slice, while later frames compress against the earlier ones in the same group.
@@ -479,15 +588,32 @@ A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix 
 The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
 
 ## Track Framing {#timeline-framing}
-The timeline track is an append-log: a single group that is never rolled, with one record per frame, every record preserved in order.
-Each record is a UTF-8 JSON object.
+The timeline track is a sliding window of records.
+An unbounded publisher only appends records, while a DVR publisher also removes records from the front as they expire.
 
-The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each record compresses against all earlier ones.
-The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally with one shared window.
+The first frame of each group is a UTF-8 JSON object containing a checkpoint of the retained window:
+
+~~~
+{
+  "offset": number,
+  "start"?: number,
+  "records": TimelineRecord[],
+}
+~~~
+
+The `offset` is the absolute index of the oldest retained record.
+`start` is the absolute index of `records[0]` and defaults to `offset` when omitted.
+A publisher MAY omit a retained prefix from a checkpoint; a consumer that did not receive that prefix reports `offset` through `start` as skipped.
+Each subsequent frame is one UTF-8 JSON operation, either `{ "push": TimelineRecord }` to append a record at the next absolute index, or `{ "pop": number }` to remove that many records from the front.
+Indices MUST NOT exceed 2^53 - 1.
+
+A publisher MAY roll groups to bound late-join cost or improve compression.
+Each new group restates a decodable suffix of the retained window, so group boundaries are an encoding detail and MUST NOT surface as duplicate records to the application.
+A consumer that missed records reports their absolute index range as skipped before continuing with the retained suffix.
+
+The frames are DEFLATE-compressed ({{!RFC1951}}) within each group.
+The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally from the group's first frame.
 The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
-
-A consumer MUST start reading from the group's first frame; the shared window makes a mid-group join undecodable.
-The live group is therefore bounded history; deep history is served from a recording.
 
 ## Records {#timeline-records}
 Each record describes one complete segment:
@@ -654,7 +780,6 @@ For the same reason a publisher SHOULD NOT combine tracks into a single object, 
 ~~~
 Track Object {
   Publisher Priority (8)
-  Publisher Ordered (8)
   Timescale (i)
 }
 ~~~
@@ -699,15 +824,31 @@ The timeline is needed to *find* an object, not to read one.
 Segment objects are immutable once written.
 
 ## The Timeline Object {#recording-metadata}
-`.timeline` holds the timeline records in order, using the track's framing ({{timeline-framing}}).
+`.timeline` holds the timeline track's complete groups in order:
+
+~~~
+Timeline Object {
+  Group {
+    Sequence (i)
+    Length (i)
+    Frame (..) ...
+  } ...
+}
+~~~
+
+The group encoding is the same as in a segment object ({{recording-segments}}).
+Preserving the boundaries is required because the track uses `moq-json` Window framing
+({{timeline-framing}}): each group starts with a checkpoint and, when compressed, has its own
+DEFLATE window.
 It is the one track not addressed by segment, because it is the index that names the segments.
 
-An unbounded archive re-encodes each source record into a recording-owned timeline stream.
-The object grows as the broadcast does, and its content is append-only: bytes once written never change.
-Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) while keeping one coherent compression window for the recording.
+An unbounded archive pushes each source record through a recording-owned `moq-json` Window.
+It appends a group to the object only after that group is complete, so bytes once written never change.
+Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) before the record becomes visible.
 
-A reader starting fresh reads the object from the beginning, which the shared DEFLATE window requires anyway.
-A reader following a live recording issues a ranged GET from the offset it last read and feeds the new bytes to the decompressor it already holds: each frame's sync-flush block terminates its own compressed data, so the appended bytes decode without re-reading earlier ones.
+A reader starting fresh reads the groups from the beginning and applies their Window checkpoints and operations in order.
+A reader following a live recording issues a ranged GET from the offset after its last complete group.
+Each appended group starts with its own checkpoint and fresh DEFLATE window, so it decodes without re-reading earlier bytes.
 
 A duration-bounded recording instead stores a complete encoding of its current retained timeline suffix.
 When the oldest segment expires, the writer atomically replaces `.timeline` with a new standalone encoding that starts at the oldest retained record.
@@ -728,8 +869,8 @@ Since the timeline record itself is only published once the segment is complete 
 
 If any object for a segment cannot be made durable, the writer MUST record an atomic gap for that segment rather than publish a partial set of tracks.
 The gap is the same timeline record with `tracks` absent or empty, so it preserves the segment number and timing but references no objects.
-The writer encodes that gap and every subsequent record through the recording's own DEFLATE encoder, whose shared dictionary therefore contains the gap rather than the source record it replaced.
-It MUST NOT append a later source frame compressed against the source timeline's different dictionary.
+The writer pushes that gap and every subsequent record through the recording's own Window encoder.
+It MUST NOT copy a later source frame whose Window position or group-local DEFLATE dictionary depends on the source record it replaced.
 The writer then continues with the next segment.
 
 A group that arrives after its segment object has been written is not recorded.
@@ -780,7 +921,7 @@ TODO Security
 
 A consumer parsing a recording ({{recording}}) is parsing data at rest that it did not necessarily write.
 It MUST bounds-check a segment object's group `Length` and each frame's `Message Length` against the bytes actually retrieved, rather than trusting either to describe the object, and it MUST treat a malformed object as a missing segment rather than letting it invalidate the recording.
-It MUST reject a track object with an invalid `Publisher Ordered` value or a zero `Timescale`.
+It MUST reject a track object with a zero `Timescale`.
 Varint fields are subject to the same limits as moq-lite {{moql}}.
 A recording inherits the confidentiality and integrity properties of the storage holding it; encryption at rest is transparent to the format and out of scope.
 

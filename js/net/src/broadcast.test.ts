@@ -26,8 +26,8 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	const consumer = new TestConsumer();
 
 	// Two subscriptions to the same track share one upstream subscription...
-	const a = consumer.track("video").subscribe();
-	const b = consumer.subscribe("video");
+	const a = consumer.track("video").subscribe().ordered();
+	const b = consumer.subscribe("video").ordered();
 
 	const request = await pendingRequest(consumer);
 	expect(request?.name).toBe("video");
@@ -129,13 +129,12 @@ test("closing a broadcast preserves dequeued request sequences", async () => {
 test("a request exposes the aggregate subscription options", async () => {
 	const consumer = new TestConsumer();
 
-	consumer.subscribe("video", { priority: 3, ordered: true, maxAge: 100, startGroup: 10, endGroup: 20 });
-	consumer.subscribe("video", { priority: 7, ordered: true, maxAge: 250, startGroup: 0, endGroup: 30 });
+	consumer.subscribe("video", { priority: 3, maxAge: 100, startGroup: 10, endGroup: 20 });
+	consumer.subscribe("video", { priority: 7, maxAge: 250, startGroup: 0, endGroup: 30 });
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		ordered: true,
 		maxAge: 250,
 		startGroup: 0,
 		endGroup: 30,
@@ -189,8 +188,8 @@ test("consumer track subscriptions fan out and close independently", async () =>
 	const consumer = new TestConsumer();
 
 	// Two subscriptions to one track dedupe onto a single upstream request...
-	const a = consumer.subscribe("video");
-	const b = consumer.subscribe("video");
+	const a = consumer.subscribe("video").ordered();
+	const b = consumer.subscribe("video").ordered();
 
 	const request = await pendingRequest(consumer);
 	if (!request) throw new Error("expected request");
@@ -215,7 +214,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	track1.appendGroup().close();
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
-	const sub1 = broadcast.track("track1").subscribe();
+	const sub1 = broadcast.track("track1").subscribe().ordered();
 	expect((await sub1.nextGroup())?.sequence).toBe(0);
 
 	// No on-demand request was emitted for it.
@@ -225,7 +224,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	const track2 = new TrackProducer("track2").accept();
 	broadcast.insertTrack(track2);
 
-	const sub2 = broadcast.track("track2").subscribe();
+	const sub2 = broadcast.track("track2").subscribe().ordered();
 	track2.appendGroup().close();
 	expect((await sub2.nextGroup())?.sequence).toBe(0);
 });
@@ -234,8 +233,8 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 
-	const a = broadcast.track("video").subscribe({ maxAge: 5000 });
-	const b = broadcast.track("video").subscribe({ maxAge: 5000 });
+	const a = broadcast.track("video").subscribe({ maxAge: 5000 }).ordered();
+	const b = broadcast.track("video").subscribe({ maxAge: 5000 }).ordered();
 
 	producer.writeString("hello");
 	producer.writeString("world");
@@ -254,7 +253,7 @@ test("a late subscriber replays the cached window", async () => {
 	// Written before anyone subscribes; retained in the cache for replay.
 	producer.writeString("early");
 
-	const late = broadcast.track("video").subscribe();
+	const late = broadcast.track("video").subscribe().ordered();
 	expect(await late.readString()).toBe("early");
 
 	producer.writeString("later");
@@ -264,7 +263,7 @@ test("a late subscriber replays the cached window", async () => {
 test("a read throws Lagged on a gap, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
-	const sub = broadcast.track("video").subscribe({ maxAge: 5000 });
+	const sub = broadcast.track("video").subscribe({ maxAge: 5000 }).ordered();
 
 	// Group 0 overflows its frame cap without being read, evicting the front: a gap.
 	const g0 = producer.appendGroup();
@@ -375,4 +374,28 @@ test("close rejects a still-pending track request so its subscriber unblocks", a
 	broadcast.close();
 
 	await expect(info).rejects.toThrow();
+});
+
+// A fetch parks for a group that has yet to be published, which is what the consuming wire
+// layer's coalescing relies on. The publisher's fill deliberately does not use this path: it
+// wants a group that already exists, and waiting for one that is gone would never return.
+test("a fetch waits for a group still to come", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+
+	const pending = broadcast.fetchGroup("video", 1);
+
+	const first = track.appendGroup();
+	first.writeFrame({ payload: new TextEncoder().encode("0"), timestamp: Timestamp.now() });
+	first.close();
+
+	const second = track.appendGroup();
+	second.writeFrame({ payload: new TextEncoder().encode("1"), timestamp: Timestamp.now() });
+	second.close();
+
+	const group = await pending;
+	expect(group.sequence).toBe(1);
+	expect(await group.readString()).toBe("1");
+
+	broadcast.close();
 });

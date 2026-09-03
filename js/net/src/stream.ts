@@ -2,6 +2,7 @@ import { fromTransport, StreamCode, StreamError, toTransport } from "./error.ts"
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
+import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
 // Forwarding a peer's reset must keep its code, or a relay flattens it to 0 (INTERNAL_ERROR).
@@ -270,7 +271,7 @@ export class Reader {
 	async string(): Promise<string> {
 		const length = await this.u53();
 		const buffer = await this.read(length);
-		return new TextDecoder().decode(buffer);
+		return decodeUtf8(buffer);
 	}
 
 	async bool(): Promise<boolean> {
@@ -294,13 +295,10 @@ export class Reader {
 	}
 
 	// Returns a Number using 53-bits, the max Javascript can use for integer math.
-	// Values > 2^53-1 are coerced to a Number (precision is lost) and logged. We
-	// downgrade overflow from throw to warn so a stray u64 field on the wire (e.g.
-	// a peer's session-level Origin id) doesn't tear down the whole stream/session.
 	async u53(): Promise<number> {
 		const v = await this.u62();
 		if (v > Varint.MAX_U53) {
-			console.warn(`value larger than 53-bits; use u62 instead (precision lost): ${v.toString()}`);
+			throw new Error(`value larger than 53-bits: ${v.toString()}`);
 		}
 
 		return Number(v);

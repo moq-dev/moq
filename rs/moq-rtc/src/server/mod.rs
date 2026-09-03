@@ -65,6 +65,9 @@ struct AcceptedSession {
 	// WHIP only: a clone of the ingest broadcast, so a deliberate DELETE can
 	// finish() it: a clean end instead of an abort error.
 	broadcast: Option<moq_net::broadcast::Producer>,
+	// WHIP only: the route advertising the broadcast; dropping it retracts.
+	// Held for the session's lifetime, released (retracting) when it ends.
+	_announcement: Option<moq_net::announce::Producer>,
 }
 
 impl AcceptedSession {
@@ -295,7 +298,7 @@ pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {

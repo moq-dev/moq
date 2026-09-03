@@ -226,7 +226,7 @@ enum SiState {
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups.
-	Active(moq_net::track::Subscriber),
+	Active(moq_net::track::Ordered),
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -290,7 +290,7 @@ impl SiTrack {
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(track),
+				Ok(track) => SiState::Active(track.ordered()),
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done
@@ -466,8 +466,8 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			let is_video = matches!(track.kind, Kind::Video(_));
 			loop {
-				match track.source.poll_read(waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
+				match track.source.poll_read(waiter)? {
+					Poll::Ready(Some(frame)) => {
 						if waiting_for_header && !track.source.header_ready() {
 							continue;
 						}
@@ -481,11 +481,10 @@ impl<E: catalog::Catalog> Export<E> {
 						track.pending = Some(frame);
 						break;
 					}
-					Poll::Ready(Ok(None)) => {
+					Poll::Ready(None) => {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					Poll::Pending => break,
 				}
 			}

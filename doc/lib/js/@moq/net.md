@@ -75,6 +75,8 @@ request.close(); // when done
 
 Use `origin.announced(prefix)` to discover what is available rather than asking for a path you already know.
 
+`origin.announce(prefix, provider)` is the other half: advertise that paths under a prefix can be served, handing back a broadcast from `provider.consume(path)` for whatever is requested beneath it. Publishing a broadcast announces its exact path already, so reach for this when one service covers a whole subtree. The returned dispose retracts the route.
+
 ### Broadcasts
 
 A collection of related tracks.

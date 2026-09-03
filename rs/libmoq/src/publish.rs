@@ -16,6 +16,12 @@ use crate::{Error, Id, NonZeroSlab};
 /// which is what keeps the two from writing over each other.
 struct Broadcast {
 	producer: moq_net::broadcast::Producer,
+	/// How to (re-)announce the exact path: the origin handle and path this
+	/// broadcast was published under, so `set_announce` can toggle the route.
+	origin: moq_net::origin::Producer,
+	path: moq_net::PathOwned,
+	/// The live route advertisement, absent while unannounced.
+	announcement: Option<moq_net::announce::Producer>,
 	catalog: moq_mux::catalog::Producer<Extra>,
 	video: BTreeMap<String, Rendition<Extra, hang::catalog::VideoConfig>>,
 	audio: BTreeMap<String, Rendition<Extra, hang::catalog::AudioConfig>>,
@@ -70,14 +76,23 @@ pub struct Publish {
 }
 
 impl Publish {
-	/// Store an origin-created broadcast producer, attaching the catalog track every
-	/// libmoq broadcast carries.
-	pub fn create(&mut self, mut broadcast: moq_net::broadcast::Producer) -> Result<Id, Error> {
+	/// Store an origin-created broadcast producer (with its announcement),
+	/// attaching the catalog track every libmoq broadcast carries.
+	pub fn create(
+		&mut self,
+		mut broadcast: moq_net::broadcast::Producer,
+		origin: moq_net::origin::Producer,
+		path: moq_net::PathOwned,
+		announcement: moq_net::announce::Producer,
+	) -> Result<Id, Error> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 
 		let id = self.broadcasts.insert(Broadcast {
 			producer: broadcast,
+			origin,
+			path,
+			announcement: Some(announcement),
 			catalog,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
@@ -85,12 +100,18 @@ impl Publish {
 		Ok(id)
 	}
 
-	/// Set whether the broadcast is announced (announced by its origin), keeping the rest
-	/// of its route (hops, cost).
+	/// Set whether the broadcast's exact path is announced as a route. The
+	/// broadcast itself stays reachable by exact path either way.
 	pub fn set_announce(&mut self, broadcast: Id, announce: bool) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let route = broadcast.producer.consume().route();
-		broadcast.producer.set_route(route.with_announce(announce))?;
+		match (announce, broadcast.announcement.is_some()) {
+			(true, false) => {
+				let route = moq_net::origin::Route::default();
+				broadcast.announcement = Some(broadcast.origin.announce(&broadcast.path, route)?);
+			}
+			(false, true) => broadcast.announcement = None,
+			_ => {}
+		}
 		Ok(())
 	}
 
@@ -129,6 +150,7 @@ impl Publish {
 			mut catalog,
 			video,
 			audio,
+			..
 		} = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
 		// Retire the caller's renditions while the catalog track is still open, so their removal is
 		// published rather than warned about once `finish` has closed it.

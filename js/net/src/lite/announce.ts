@@ -1,4 +1,5 @@
-import { MAX_HOPS, type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
+import { ProtocolViolation } from "../error.ts";
+import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -47,7 +48,7 @@ export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. */
-	| { status: "active"; suffix: Path.Valid; hops: Origin[]; cost?: Cost }
+	| { status: "active"; suffix: Path.Valid; hops: Hop[]; cost?: Cost }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
@@ -55,15 +56,31 @@ export type AnnounceBroadcast =
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
 	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "restart"; id: bigint; hops: Origin[]; cost?: Cost };
+	| { status: "restart"; id: bigint; hops: Hop[]; cost?: Cost };
 
-function checkHops(hops: Origin[]) {
+// Both wire rules on a hop chain, applied to what we send and to what we receive: a
+// chain that revisits a hop looped, so neither forwarding it nor subscribing through it
+// is safe, and a receiver must end the session over one. `UNKNOWN_HOP` identifies
+// nothing, so any number of hops may be unknown.
+//
+// `ProtocolViolation` so a receipt takes the session down rather than the one stream,
+// matching what `ietf/cluster.ts` throws for the identical rule.
+function checkHops(hops: Hop[]) {
 	if (hops.length > MAX_HOPS) {
-		throw new Error(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
+		throw new ProtocolViolation(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
+	}
+
+	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
+	for (let i = 0; i < hops.length; i++) {
+		const hop = hops[i];
+		if (hop === UNKNOWN_HOP) continue;
+		if (hops.indexOf(hop, i + 1) !== -1) {
+			throw new ProtocolViolation(`hop ${hop} appears twice in the chain`);
+		}
 	}
 }
 
-async function encodeHops(w: Writer, version: Version, hops: Origin[]) {
+async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
 	checkHops(hops);
 	switch (version) {
 		case Version.DRAFT_01:
@@ -73,7 +90,7 @@ async function encodeHops(w: Writer, version: Version, hops: Origin[]) {
 			await w.u53(hops.length);
 			break;
 		default:
-			// Lite04+: hop count + individual Origin varints.
+			// Lite04+: hop count + individual Hop varints.
 			await w.u53(hops.length);
 			for (const origin of hops) {
 				await w.u62(origin);
@@ -82,7 +99,7 @@ async function encodeHops(w: Writer, version: Version, hops: Origin[]) {
 	}
 }
 
-async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
+async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
@@ -92,16 +109,17 @@ async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
 			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 			// Lite03 carries only a hop count, not individual ids, so every entry is
 			// the reserved "no identity" id.
-			return new Array<Origin>(count).fill(UNKNOWN_ORIGIN);
+			return new Array<Hop>(count).fill(UNKNOWN_HOP);
 		}
 		default: {
-			// Lite04+: hop count + individual Origin varints.
+			// Lite04+: hop count + individual Hop varints.
 			const count = await r.u53();
 			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-			const hops: Origin[] = [];
+			const hops: Hop[] = [];
 			for (let i = 0; i < count; i++) {
-				hops.push(OriginSchema.parse(await r.u62()));
+				hops.push(HopSchema.parse(await r.u62()));
 			}
+			checkHops(hops);
 			return hops;
 		}
 	}
@@ -246,7 +264,7 @@ export async function decodeAnnounceBroadcastMaybe(
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
-	/** Lite04/05 only: the 62-bit Origin id of the peer asking for announces, which the
+	/** Lite04/05 only: the 62-bit Hop id of the peer asking for announces, which the
 	 * publisher uses to skip announces that already passed through it. Zero means "no
 	 * exclusion". Not on the wire elsewhere, so a value set here is ignored when encoding
 	 * for another version and decodes as zero.
@@ -331,15 +349,16 @@ export class AnnounceInit {
 /// Sent by the publisher as the first message on an announce stream, before any
 /// individual Announce messages. Lite05+ only; the successor to AnnounceInit.
 ///
-/// `origin` is the responder's origin id, which the subscriber stamps onto each
-/// announce's hop chain (the publisher no longer stamps itself). `active` is the
-/// number of initial Announce messages that follow immediately.
+/// `origin` is the responder's Hop ID, which the subscriber stamps onto each
+/// announce's hop chain (the publisher no longer stamps itself), or the reserved
+/// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is
+/// the number of initial Announce messages that follow immediately.
 export class AnnounceOk {
-	origin: Origin;
+	hop: Hop;
 	active: number;
 
-	constructor(origin: Origin, active: number) {
-		this.origin = origin;
+	constructor(hop: Hop, active: number) {
+		this.hop = hop;
 		this.active = active;
 	}
 
@@ -350,15 +369,15 @@ export class AnnounceOk {
 	}
 
 	async #encode(w: Writer) {
-		await w.u62(this.origin);
+		await w.u62(this.hop);
 		await w.u53(this.active);
 	}
 
 	static async #decode(r: Reader): Promise<AnnounceOk> {
-		const raw = await r.u62();
-		// A zero responder id is never legitimate; it would stamp a placeholder onto chains.
-		if (raw === 0n) throw new Error("announce ok origin must be non-zero");
-		const origin = OriginSchema.parse(raw);
+		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
+		// withholds it to obscure its routing. It names nobody, so callers must not stamp
+		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
+		const origin = HopSchema.parse(await r.u62());
 		const active = await r.u53();
 		return new AnnounceOk(origin, active);
 	}

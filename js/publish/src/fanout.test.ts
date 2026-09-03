@@ -21,6 +21,16 @@ function pushable<T>(): { stream: ReadableStream<T>; push: (value: T) => void; c
 // contents isn't racing it.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
 
+const INVALID_QUEUES = [
+	0,
+	-1,
+	1.5,
+	Number.NaN,
+	Number.POSITIVE_INFINITY,
+	Number.NEGATIVE_INFINITY,
+	Number.MAX_SAFE_INTEGER + 1,
+];
+
 // Read up to `count` values, giving up once the stream goes quiet.
 async function take<T>(stream: ReadableStream<T>, count: number): Promise<T[]> {
 	const reader = stream.getReader();
@@ -40,6 +50,28 @@ async function take<T>(stream: ReadableStream<T>, count: number): Promise<T[]> {
 }
 
 describe("Fanout", () => {
+	test("rejects invalid default queue limits before locking the source", () => {
+		for (const queue of INVALID_QUEUES) {
+			const source = new ReadableStream<number>();
+
+			expect(() => new Fanout(source, { queue })).toThrow(RangeError);
+			expect(source.locked).toBe(false);
+		}
+	});
+
+	test("rejects invalid per-reader queue limits", () => {
+		const source = pushable<number>();
+		const fanout = new Fanout(source.stream);
+		const effect = new Effect();
+
+		for (const queue of INVALID_QUEUES) {
+			expect(() => fanout.subscribe(effect, queue)).toThrow(RangeError);
+		}
+
+		effect.close();
+		fanout.close();
+	});
+
 	// The whole point: one source, several encoders, none of them stealing from the others.
 	test("delivers every value to every reader", async () => {
 		const source = pushable<number>();

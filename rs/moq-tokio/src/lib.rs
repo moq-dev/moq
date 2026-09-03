@@ -9,14 +9,25 @@
 //! - Iroh P2P (requires `iroh` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
-//! connections. [`mdns`] finds peers to connect to on the local network.
+//! connections. The `mdns` feature finds peers to connect to on the local network.
+//!
+//! With `default-features = false`, the `quinn` and `noq` backends must be paired
+//! with the `aws-lc-rs` or `ring` crypto-provider feature.
 
 #![warn(missing_docs)]
 
+// The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
+// installed at runtime cannot supply constructors removed by their compile-time feature gates.
+#[cfg(all(
+	any(feature = "quinn", feature = "noq"),
+	not(any(feature = "aws-lc-rs", feature = "ring"))
+))]
+compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
+
 pub mod accept;
-pub mod bind;
+pub use moq_sock::bind;
 pub mod cli;
-mod client;
+pub mod client;
 pub mod connect;
 mod connection;
 mod crypto;
@@ -38,14 +49,22 @@ pub mod quinn;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 mod resolve;
 pub mod runtime;
-mod server;
-mod steer;
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp"
+))]
+pub mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;
 pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
@@ -65,6 +84,14 @@ pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use error::{Error, Result};
 pub use log::Log;
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp"
+))]
 pub use server::{Listener, Request, Server, Transport};
 
 // Re-export these crates.
@@ -91,8 +118,12 @@ pub mod iroh;
 pub mod mdns;
 
 /// The QUIC backend to use for connections.
-#[derive(Clone, Debug, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
-#[usage(ignore_case)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+	any(feature = "quinn", feature = "quiche", feature = "noq"),
+	derive(usage::ValueEnum)
+)]
+#[cfg_attr(any(feature = "quinn", feature = "quiche", feature = "noq"), usage(ignore_case))]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum QuicBackend {
@@ -107,6 +138,15 @@ pub enum QuicBackend {
 	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
 	#[cfg(feature = "noq")]
 	Noq,
+}
+
+#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "noq")))]
+impl usage::argv::spec::ValueEnum for QuicBackend {
+	const CHOICES: &'static [&'static str] = &[];
+
+	fn from_choice(_value: &str) -> Option<Self> {
+		None
+	}
 }
 
 /// Parses the same spellings the CLI and TOML accept (`quinn`, `quiche`, `noq`),
@@ -168,15 +208,15 @@ pub fn qlog_supported() -> bool {
 /// reaches for a default, since `QuicBackend` has no variants there.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 fn default_quic_backend() -> QuicBackend {
-	#[cfg(feature = "quinn")]
-	{
-		QuicBackend::Quinn
-	}
-	#[cfg(all(feature = "noq", not(feature = "quinn")))]
+	#[cfg(feature = "noq")]
 	{
 		QuicBackend::Noq
 	}
-	#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
+	#[cfg(all(feature = "quinn", not(feature = "noq")))]
+	{
+		QuicBackend::Quinn
+	}
+	#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
 	{
 		QuicBackend::Quiche
 	}
@@ -184,9 +224,9 @@ fn default_quic_backend() -> QuicBackend {
 
 #[cfg(test)]
 mod tests {
-	#[cfg(feature = "quinn")]
+	#[cfg(feature = "noq")]
 	#[test]
-	fn quinn_is_the_default_backend() {
-		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Quinn));
+	fn noq_is_the_default_backend() {
+		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Noq));
 	}
 }

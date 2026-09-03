@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,6 +13,6 @@ keywords = ["deflate", "compression", "streaming", "live"]
 categories = ["compression"]
 
 [dependencies]
-bytes = "1"
+bytes = { workspace = true }
 flate2 = { workspace = true }
-thiserror = "2"
+thiserror = { workspace = true }

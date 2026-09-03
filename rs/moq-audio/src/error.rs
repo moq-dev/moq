@@ -1,5 +1,8 @@
 /// Errors returned by `moq-audio`.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Clone` so a failure can be reported to more than one observer, matching
+/// `hang::Error`, `moq_mux::Error`, and `moq_net::Error`.
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	/// The requested configuration is outside what the codec supports, e.g. a

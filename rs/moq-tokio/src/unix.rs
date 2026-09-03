@@ -28,6 +28,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 pub struct Config {
 	/// Bind a plaintext qmux Unix-socket listener at this path.
 	#[usage(long = "listen-unix-bind", name = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
+	#[usage(value_hint = usage::ValueHint::AnyPath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
@@ -200,12 +201,12 @@ pub enum Error {
 	MissingPath,
 
 	/// The qmux handshake failed while dialing.
-	#[error("qmux connect failed")]
-	Connect(#[source] qmux::Error),
+	#[error("qmux connect failed: {0}")]
+	Connect(String),
 
 	/// The qmux handshake failed while accepting.
-	#[error("qmux accept failed")]
-	Accept(#[source] qmux::Error),
+	#[error("qmux accept failed: {0}")]
+	Accept(String),
 
 	/// The bind path already exists and is not a socket, so we refuse to unlink it.
 	#[error("refusing to replace existing non-socket file at {0}")]
@@ -240,7 +241,7 @@ pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Sessio
 		.protocols(protocols.iter().copied())
 		.connect(path)
 		.await
-		.map_err(Error::Connect)
+		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
 
 fn socket_path(url: &Url) -> Option<PathBuf> {
@@ -352,7 +353,7 @@ impl Listener {
 			.protocols(self.protocols.iter().map(String::as_str))
 			.accept(stream)
 			.await
-			.map_err(Error::Accept);
+			.map_err(|err| Error::Accept(crate::error::message(err)));
 		Some(session.map(|session| (session, cred)))
 	}
 

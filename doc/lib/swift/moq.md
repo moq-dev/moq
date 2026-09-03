@@ -109,7 +109,9 @@ Every consumer is an `AsyncSequence`, so iterate directly:
 let announced = try session.consumer.announced(prefix: "demos/")
 
 for try await announcement in announced {
-    let catalog = try announcement.broadcast.subscribeCatalog()
+    // An announcement is a route; resolve its path into a broadcast.
+    let broadcast = try await session.consumer.requestBroadcast(path: "demos/" + announcement.path)
+    let catalog = try broadcast.subscribeCatalog()
     for try await update in catalog {
         print("catalog: \(update)")
     }
@@ -119,14 +121,12 @@ for try await announcement in announced {
 Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:
 
 ```swift
-let track = try await announcement.broadcast.subscribeTrack(
+let track = try await broadcast.subscribeTrack(
     name: "events",
     subscription: Subscription(priority: 10))
 let info = try track.info()
-track.update(subscription: Subscription(priority: 20, ordered: false))
+track.update(subscription: Subscription(priority: 20))
 ```
-
-`ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
 A catalog rendition may name a *different* broadcast: `Video.broadcast` / `Audio.broadcast` is a path
 relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a
@@ -135,7 +135,7 @@ track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` foll
 a rendition, so resolve first:
 
 ```swift
-let source = try await announcement.broadcast.resolve(rendition.broadcast)
+let source = try await broadcast.resolve(rendition.broadcast)
 let consumer = try await source.subscribeMedia(name: name, container: rendition.container)
 ```
 

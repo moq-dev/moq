@@ -99,10 +99,10 @@ impl Server {
 			}
 		}
 
-		// Confirm the broadcast is announced (and in scope) before building a broadcaster;
-		// `Broadcaster::new` re-resolves it through the origin, which also lets a rendition's
-		// catalog `broadcast` field reference a sibling broadcast.
-		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.announced_broadcast(name))
+		// Confirm a route covers the broadcast (and it is in scope) before building a
+		// broadcaster; `Broadcaster::new` re-resolves it through the origin, which also
+		// lets a rendition's catalog `broadcast` field reference a sibling broadcast.
+		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
 			.await
 			.ok()
 			.flatten()?;
@@ -144,7 +144,7 @@ async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcas
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -241,9 +241,8 @@ mod tests {
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = produce_origin();
-		let mut producer = origin
-			.create_broadcast("gone", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut producer = origin.create_broadcast("gone").expect("publish allowed");
+		let _announce_producer = origin.announce("gone", Default::default()).expect("publish allowed");
 		settle().await;
 		let source = moq_mux::Source::new(origin.consume(), "gone");
 		let broadcaster = Broadcaster::new(source, Config::default())
@@ -267,9 +266,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.insert("live".to_string(), stale.clone());
-		let _producer = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let _producer = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_producer = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
@@ -283,9 +281,8 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
-		let mut new_producer = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut new_producer = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_new_producer = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())
 			.await

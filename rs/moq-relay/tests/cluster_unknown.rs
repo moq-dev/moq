@@ -1,10 +1,10 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
-//! The relay records that publisher as `Origin::UNKNOWN`; reflected cluster paths
+//! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
 //! must not replace it while gossiping around a redundant mesh.
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_net::Origin;
+use moq_net::Hop;
 use moq_relay::{Config, PublicConfig, Relay};
 use url::Url;
 
@@ -67,6 +67,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 
 struct Publisher {
 	_broadcast: moq_net::broadcast::Producer,
+	_announcement: moq_net::announce::Producer,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -82,10 +83,9 @@ impl Drop for Publisher {
 
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = origin
-		.create_broadcast(PATH, moq_net::broadcast::Route::new().with_announce(true))
-		.expect("create broadcast");
+	let origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = origin.create_broadcast(PATH).expect("create broadcast");
+	let announcement = origin.announce(PATH, Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
@@ -117,6 +117,7 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 
 	Publisher {
 		_broadcast: broadcast,
+		_announcement: announcement,
 		_session: session,
 		streamer,
 	}
@@ -133,7 +134,7 @@ async fn publish_unknown(port: u16) -> Publisher {
 /// broke rather than just "no frame".
 async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let consumer = origin.consume();
 	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
@@ -143,10 +144,14 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	// Wait for the announcement rather than asking the moment the session connects:
 	// `request_broadcast` answers on the spot, so it would race the announcement that
 	// makes the path routable.
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.announced_broadcast(PATH))
+	tokio::time::timeout(TIMEOUT, consumer.routed(PATH))
 		.await
-		.map_err(|_| "announced_broadcast timed out".to_string())?
+		.map_err(|_| "routed timed out".to_string())?
 		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
+	let broadcast = consumer
+		.request_broadcast(PATH)
+		.await
+		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
@@ -179,7 +184,7 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 
 async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Origin::random());
+	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut announced = origin.consume().announced();
 	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
@@ -189,7 +194,7 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
 	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.path.as_str().to_string(), update.broadcast.is_some()));
+		updates.push((update.prefix.as_path().as_str().to_string(), update.active));
 	}
 	updates
 }

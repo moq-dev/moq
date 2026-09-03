@@ -107,40 +107,35 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.url
 		.clone()
 		.context("`transcode` requires a relay: pass --connect <url>")?;
-	let publish = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let publish = moq_tokio::origin::spawn(moq_net::Hop::random());
 	// A session drop closes the source broadcast and ends the run: the outage is
 	// surfaced rather than transcoded over. The reconnect loop covers the dial;
 	// restarting after a mid-run drop is the caller's call.
-	let remote = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let remote = moq_tokio::origin::spawn(moq_net::Hop::random());
 	let session = net
 		.client(moq.client.clone())?
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
 		.connect(url);
 
-	// Wait for the source to be announced rather than for the session to connect:
-	// `request_broadcast` answers on the spot, so asking the moment a session exists
-	// races the announcement that makes the path routable.
+	// Wait for the source to be announced and resolve it: `request_broadcast` on its
+	// own answers on the spot, so asking the moment a session exists races the
+	// announcement that makes the path routable; `routed_broadcast` also rides out a
+	// covering route retracting mid-resolution (failover churn).
 	//
 	// Raced against the session ending, since the wait itself never fails: the origin
 	// outlives the session here, so a rejected token or an exhausted retry budget would
 	// otherwise leave us waiting for an announcement that can never arrive.
 	let consumer = remote.consume();
-	tokio::select! {
-		announced = consumer.announced_broadcast(&source_path) => {
-			announced.context("origin closed before the source broadcast was announced")?;
+	let source = tokio::select! {
+		source = consumer.routed_broadcast(&source_path) => {
+			source.context("source broadcast unavailable")?
 		}
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;
 			anyhow::bail!("session closed before the source broadcast was announced");
 		}
-	}
-
-	// Resolve it for real; the session subscribes upstream on demand.
-	let source = consumer
-		.request_broadcast(&source_path)
-		.await
-		.context("source broadcast unavailable")?;
+	};
 
 	let mut config = moq_transcode::Config::default();
 	if !args.rungs.is_empty() {
@@ -165,8 +160,11 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
 	let output = publish
-		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
+		.create_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
+	let _announce_output = publish
+		.announce(&output_path, Default::default())
+		.context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {

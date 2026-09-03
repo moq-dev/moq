@@ -2,7 +2,7 @@ import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason, StreamCode, toTransport } from "../error.ts";
 import type * as group from "../group.ts";
-import type { Origin } from "../hop.ts";
+import type { Hop } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -25,7 +25,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -270,8 +270,31 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
 function servingMaxAge(version: Version, requested: number | undefined): number {
-	const carriesMaxAge = version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
-	return carriesMaxAge ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+}
+
+/** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
+function carriesMaxAge(version: Version): boolean {
+	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
+}
+
+/**
+ * Position a subscription's read cursor for the wire serving it.
+ *
+ * On lite-06 there is nothing to do: the cursor is floored at the group the subscription
+ * named (or 0), and its Max Age decides what above the floor is worth delivering.
+ *
+ * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
+ * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
+ * carry a Max Age, but there it is a staleness tolerance only; lite-01/02 additionally get
+ * an unbounded budget so nothing is dropped under them (see {@link servingMaxAge}), which
+ * must not read as a request to replay the whole cache on join.
+ */
+function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
+	if (resolvesStart(version) || startGroup !== undefined) return;
+
+	const latest = track.latest();
+	if (latest !== undefined) track.startAt(latest);
 }
 
 /**
@@ -287,7 +310,7 @@ export class Publisher {
 	// can detect loops and prefer shorter paths. Created by Connection and
 	// shared with Subscriber, which can optionally use it to filter out its
 	// own announcements.
-	readonly origin: Origin;
+	readonly hop: Hop;
 
 	#quic: WebTransport;
 
@@ -312,15 +335,15 @@ export class Publisher {
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
-	 * @param origin - Origin id shared with the Subscriber
+	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin, publish?: OriginConsumer) {
+	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.version = version;
-		this.origin = origin;
+		this.hop = hop;
 		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
@@ -373,16 +396,16 @@ export class Publisher {
 					for (const suffix of active.keys()) {
 						await encodeAnnounceBroadcast(
 							stream.writer,
-							{ status: "active", suffix, hops: [this.origin] },
+							{ status: "active", suffix, hops: [this.hop] },
 							this.version,
 						);
 					}
 					break;
 				}
 
-				// Report our origin id once via AnnounceOk and the count of initial announces
+				// Report our Hop ID once via AnnounceOk and the count of initial announces
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
-				const ok = new AnnounceOk(this.origin, active.size);
+				const ok = new AnnounceOk(this.hop, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active.keys()) {
 					if (hasAnnounceId(this.version)) {
@@ -438,7 +461,7 @@ export class Publisher {
 			for (const [added, front] of newActive) {
 				if (active.get(added) === front) continue;
 				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				const hops = hasAnnounceOk(this.version) ? [] : [this.hop];
 				if (hasAnnounceId(this.version)) {
 					announceIds.set(added, nextAnnounceId++);
 				}
@@ -466,13 +489,11 @@ export class Publisher {
 
 		const track = broadcast.subscribe(msg.track, {
 			priority: msg.priority,
-			ordered: msg.ordered,
 			maxAge: servingMaxAge(this.version, msg.maxAge),
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
-		const startGroup = msg.startGroup ?? track.latest();
-		if (startGroup !== undefined) track.startAt(startGroup);
+		positionCursor(track, this.version, msg.startGroup);
 		track.endAt(msg.endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
@@ -500,7 +521,6 @@ export class Publisher {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
 					priority: msg.priority,
-					ordered: msg.ordered,
 					maxAge: msg.maxAge,
 					startGroup: msg.startGroup,
 					endGroup: msg.endGroup,
@@ -523,7 +543,6 @@ export class Publisher {
 				apply: (update) => {
 					track.update({
 						priority: update.priority,
-						ordered: update.ordered,
 						maxAge: servingMaxAge(this.version, update.maxAge),
 						startGroup: update.startGroup,
 						endGroup: update.endGroup,
@@ -782,7 +801,6 @@ export class Publisher {
 			const info = await published.track(track).info();
 			return new TrackInfoMessage({
 				priority: info.priority,
-				ordered: info.ordered,
 				// Publisher Max Age: the publisher's retention bound, advertised so
 				// relays re-serve with the same window.
 				maxAge: info.maxAge,
@@ -937,12 +955,12 @@ export class Publisher {
 						if (timestamps) {
 							// Convert each frame to the track's advertised timescale.
 							const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-							await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)), read.position);
+							await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
 							prevTs = ts;
 						}
 
-						await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength), read.position);
-						await hooks.guardGroup(group, stream.write(read.frame.payload), read.position);
+						await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
+						await hooks.guardGroup(group, stream.write(read.frame.payload));
 					} finally {
 						read.complete();
 					}

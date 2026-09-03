@@ -1,17 +1,23 @@
 import { expect, test } from "bun:test";
-import { Producer as GroupProducer } from "../group.ts";
-import { type Origin, OriginSchema } from "../hop.ts";
+import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import { error } from "../error.ts";
+import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream } from "../stream.ts";
+import { Reader, Stream } from "../stream.ts";
 import { Timestamp } from "../time.ts";
+import type { Producer as TrackProducer } from "../track.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { FetchHeader } from "./fetch.ts";
+import { Group as GroupMessage } from "./object.ts";
+import { PublishDone } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -176,6 +182,14 @@ test("a blocked group header is reset when the group expires", async () => {
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
 		edge.close();
 		track.writeGroup(edge);
+
+		// A group beyond the edge, so group 0's reach (10s, where group 1 begins) is
+		// provably past the budget. A group is bounded by where its successor starts, so
+		// the successor alone never convicts it: nothing yet proves group 0 ends sooner.
+		const later = new GroupProducer(2);
+		later.writeFrame({ payload: new TextEncoder().encode("later"), timestamp: Timestamp.fromMillis(20_000) });
+		later.close();
+		track.writeGroup(later);
 
 		const resetBeforeRelease = await Promise.race([
 			streamReset.then(() => true),
@@ -506,9 +520,9 @@ test("closing the session ends the unsolicited announce loop", async () => {
  * not read ours either, so sending it the parameters would be a protocol violation.
  */
 test("an advertisement carries our hop id once the peer declared one", async () => {
-	const self: Origin = OriginSchema.parse(7n);
+	const self: Hop = HopSchema.parse(7n);
 
-	for (const peer of [OriginSchema.parse(9n), undefined]) {
+	for (const peer of [HopSchema.parse(9n), undefined]) {
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 		origin.publish(Path.from("mine"));
@@ -532,5 +546,674 @@ test("an advertisement carries our hop id once the peer declared one", async () 
 		}
 
 		origin.close();
+	}
+});
+
+test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
+	const versions = [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+	] as const;
+
+	for (const version of versions) {
+		for (const abort of [undefined, new Error("failed")]) {
+			const pair = createMockTransportPair(ALPN.DRAFT_19);
+			const session = new NativeSession(pair.server, version, true);
+			const path = Path.from("test");
+			const { pub, origin } = publisher(pair.server, { session });
+			const broadcast = origin.publish(path);
+			const track = broadcast.createTrack("video");
+
+			const client = await Stream.open(pair.client, { version });
+			const server = await Stream.accept(pair.server, version);
+			if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+			const requestId = 7n;
+			const running = pub.runSubscribe(
+				new Subscribe({ requestId, trackNamespace: path, trackName: "video", subscriberPriority: 0 }),
+				server,
+			);
+
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			track.close(abort);
+
+			expect(await client.reader.u53()).toBe(PublishDone.id);
+			const done = await PublishDone.decode(client.reader, version);
+			expect(done.requestId).toBe(version <= Version.DRAFT_16 ? requestId : undefined);
+			expect(done.statusCode).toBe(abort ? 0x0 : 0x2);
+
+			await running;
+			client.close();
+			broadcast.close();
+			origin.close();
+		}
+	}
+});
+
+/** Draft-20 is the only version whose Location Filters and fills the publisher acts on. */
+const V20 = Version.DRAFT_20;
+
+/** The PUBLISH_DONE status for a subscription the track itself ended. */
+const TRACK_ENDED_STATUS = 0x2;
+
+/** A group stream the publisher opened, decoded down to its objects. */
+interface ServedGroup {
+	/** The group's sequence number. */
+	sequence: number;
+	/** Whether the header claimed the stream starts at the group's first object. */
+	firstObject: boolean;
+	/** Each object's absolute id (reconstructed from its delta) and payload. */
+	objects: { id: number; payload: string }[];
+}
+
+/** A fill's fetch stream, decoded down to its objects. */
+interface ServedFill {
+	/** The request id the FETCH_HEADER named, when it survived a reset. */
+	requestId?: bigint;
+	/** Each object's group, absolute id, and payload. */
+	objects: { group: number; id: number; payload: string }[];
+	/**
+	 * The error the stream ended with, when the publisher reset it instead of finishing.
+	 *
+	 * Carried rather than reduced to a flag so a test can assert *why* the publisher gave
+	 * up: a reset arrives here as the reason the publisher chose, so a decoder failure in
+	 * this helper cannot pass for one.
+	 */
+	reset?: Error;
+}
+
+/**
+ * A publisher serving one broadcast over draft-20, with the subscribe stream already open.
+ *
+ * The uni reader is taken up front: a group stream opened before the test asks for one still
+ * queues, but taking the reader late races the publisher rather than the test.
+ */
+function fixture(): {
+	pair: ReturnType<typeof createMockTransportPair>;
+	pub: Publisher;
+	broadcast: BroadcastProducer;
+	uni: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
+	close: () => void;
+} {
+	const pair = createMockTransportPair(ALPN.DRAFT_20);
+	const session = new NativeSession(pair.server, V20, true);
+	const { pub, origin } = publisher(pair.server, { session });
+	const broadcast = origin.publish(Path.from("test"));
+	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
+		ReadableStream<Uint8Array>
+	>;
+
+	return {
+		pair,
+		pub,
+		broadcast,
+		uni,
+		close: () => {
+			uni.releaseLock();
+			origin.close();
+		},
+	};
+}
+
+/** Write `frames` numbered payloads into a new closed group. */
+function writeGroup(track: TrackProducer, frames: number): void {
+	const group = track.appendGroup();
+	for (let i = 0; i < frames; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`${group.sequence}.${i}`), timestamp: Timestamp.now() });
+	}
+	group.close();
+}
+
+/** Send `msg` on a fresh subscribe stream and read the publisher's SUBSCRIBE_OK. */
+async function runSubscribe(
+	fx: ReturnType<typeof fixture>,
+	msg: Subscribe,
+): Promise<{ client: Stream; ok: SubscribeOk }> {
+	const client = await Stream.open(fx.pair.client, { version: V20 });
+	const server = await Stream.accept(fx.pair.server, V20);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	void fx.pub.runSubscribe(msg, server);
+
+	expect(await client.reader.u53()).toBe(SubscribeOk.id);
+	return { client, ok: await SubscribeOk.decode(client.reader, V20) };
+}
+
+/** Take the next uni stream the publisher opened, or undefined if it opened none. */
+async function nextUni(
+	uni: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>,
+): Promise<ReadableStream<Uint8Array> | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const next = await Promise.race([
+			uni.read(),
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
+			}),
+		]);
+		if (!next || next.done) return undefined;
+		return next.value;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Read a group stream to its end. */
+async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGroup> {
+	const reader = new Reader(stream, undefined, V20);
+	const header = await GroupMessage.decode(reader, V20);
+
+	// Decoded by hand rather than through Frame: a filter that trims a group's head puts the
+	// first object's absolute id in the delta, which Frame.decode refuses on principle.
+	const objects: { id: number; payload: string }[] = [];
+	let id = 0;
+	let first = true;
+	while (!(await reader.done())) {
+		const delta = await reader.u53();
+		id = first ? delta : id + delta + 1;
+		first = false;
+		await reader.read(await reader.u53()); // object properties
+		const payload = await reader.read(await reader.u53());
+		objects.push({ id, payload: new TextDecoder().decode(payload) });
+	}
+
+	return { sequence: header.groupId, firstObject: header.flags.firstObject, objects };
+}
+
+/**
+ * Read a fill's fetch stream to its end, reporting a reset rather than throwing.
+ *
+ * A reset discards data the peer has not acknowledged, so a refused fill may lose its
+ * FETCH_HEADER along with the rest: the request id is only reported when it arrived.
+ */
+async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill> {
+	const reader = new Reader(stream, undefined, V20);
+	const objects: { group: number; id: number; payload: string }[] = [];
+	let group = 0;
+	let id = 0;
+
+	// Guarded on its own, so the assertion below lands outside every catch. Folding it into
+	// the object loop's would report a wrong stream type as a publisher reset.
+	let header: { type: number; requestId: bigint } | undefined;
+	try {
+		const type = await reader.u53();
+		header = { type, requestId: (await FetchHeader.decode(reader, V20)).requestId };
+	} catch (err) {
+		return { objects, reset: error(err) };
+	}
+	expect(header.type).toBe(FetchHeader.type);
+	const requestId = header.requestId;
+
+	try {
+		while (!(await reader.done())) {
+			const flags = await reader.u53();
+			if (flags & 0x08) group = await reader.u53();
+			if (flags & 0x04) {
+				id = await reader.u53();
+			} else {
+				id += 1;
+			}
+			if (flags & 0x10) await reader.u8();
+			if (flags & 0x20) await reader.read(await reader.u53());
+			const payload = await reader.read(await reader.u53());
+			objects.push({ group, id, payload: new TextDecoder().decode(payload) });
+		}
+	} catch (err) {
+		return { requestId, objects, reset: error(err) };
+	}
+
+	return { requestId, objects, reset: undefined };
+}
+
+/**
+ * An absolute filter names the objects it wants, so the boundary groups are trimmed to it
+ * and the groups outside it are never opened. The first object written carries its absolute
+ * id, or the subscriber would read a silently renumbered group.
+ */
+test("draft-20: an absolute filter trims the range it serves", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	for (let i = 0; i < 4; i++) writeGroup(track, 3);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 1n, startObject: 1n, endGroup: 2n, endObject: 0n },
+		}),
+	);
+
+	try {
+		const first = await nextUni(fx.uni);
+		if (!first) throw new Error("the filter's start group was never served");
+		expect(await readGroup(first)).toEqual({
+			sequence: 1,
+			// The head was trimmed, so the stream does not start at the group's first object.
+			firstObject: false,
+			objects: [
+				{ id: 1, payload: "1.1" },
+				{ id: 2, payload: "1.2" },
+			],
+		});
+
+		const second = await nextUni(fx.uni);
+		if (!second) throw new Error("the filter's end group was never served");
+		expect(await readGroup(second)).toEqual({
+			sequence: 2,
+			firstObject: true,
+			objects: [{ id: 0, payload: "2.0" }],
+		});
+
+		// Groups 0 and 3 are outside the range, so nothing more is opened.
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * The draft's own current-group join: a Next Object subscription for the live tail, plus a
+ * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
+ * arrives once, on the fetch stream, and the subscription picks up at the next object.
+ */
+test("draft-20: a fill serves the current group's head on a fetch stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	const group = track.appendGroup();
+	for (let i = 0; i < 2; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+
+	try {
+		// A fill-requesting subscriber sizes its backfill against this.
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
+
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		expect(await readFill(fill)).toEqual({
+			requestId: 7n,
+			objects: [
+				{ group: 0, id: 0, payload: "0.0" },
+				{ group: 0, id: 1, payload: "0.1" },
+			],
+			reset: undefined,
+		});
+
+		// Everything past the snapshot belongs to the subscription, not the fill.
+		group.writeFrame({ payload: new TextEncoder().encode("0.2"), timestamp: Timestamp.now() });
+		group.close();
+
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("the subscription never served the live tail");
+		expect(await readGroup(live)).toEqual({
+			sequence: 0,
+			firstObject: false,
+			objects: [{ id: 2, payload: "0.2" }],
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A group that outgrows its cache evicts its own front. A Next Object subscriber joins above
+ * that evicted prefix, so it lost nothing it asked for: evicting objects the filter already
+ * excludes must not forfeit the live tail it did request.
+ */
+test("draft-20: an open group that outgrew its cache still serves the live tail", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Past the frame cap, so the oldest objects are gone before anyone subscribes.
+	const group = track.appendGroup();
+	const published = MAX_GROUP_FRAMES + 10;
+	for (let i = 0; i < published; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+		}),
+	);
+
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(published - 1) });
+
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${published}`), timestamp: Timestamp.now() });
+		group.close();
+
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("the subscription never served the live tail");
+		expect(await readGroup(live)).toEqual({
+			sequence: 0,
+			// The join is mid-group, so the stream does not start at the group's first object.
+			firstObject: false,
+			objects: [{ id: published, payload: `0.${published}` }],
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * An absolute filter naming one group with `startObject` above `endObject` selects nothing.
+ * Nothing rejects it on the wire, so the serving loop has to recognize the empty range and
+ * end the stream, rather than waiting on a start object the range itself excludes.
+ */
+test("draft-20: a backwards range within one group serves nothing and ends the stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Deliberately left open: a hang here would outlive the group rather than end with it.
+	const group = track.appendGroup();
+	for (let i = 0; i < 3; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	}
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 0n, endObject: 2n },
+		}),
+	);
+
+	try {
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group stream never opened");
+		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, objects: [] });
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * Multi-group fetch serialization depends on a negotiated group order we do not implement.
+ * A fill is a promise once requested, so the stream still opens and is reset right after the
+ * FETCH_HEADER, which is the draft's fill-failure signal.
+ */
+test("draft-20: a fill spanning several groups resets its stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	for (let i = 0; i < 3; i++) writeGroup(track, 2);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 2n }, rangeFilters: false },
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("a refused fill still owes the subscriber a reset stream");
+		// The reason the publisher chose, so a decode failure in readFill cannot pass for it.
+		const served = await readFill(fill);
+		expect(served.reset?.message).toContain("several groups");
+		expect(served.objects).toEqual([]);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/** A fill against a track with nothing published has an empty range: no stream is owed. */
+test("draft-20: an empty track opens no fill stream", async () => {
+	const fx = fixture();
+	fx.broadcast.createTrack("video");
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+
+	try {
+		expect(ok.largest).toBeUndefined();
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
+ * out of timestamps: with no declared Timescale there are no units to read one in.
+ */
+test("draft-20: an opt-out peer gets no track properties", async () => {
+	for (const propertiesWanted of [true, false]) {
+		const fx = fixture();
+		const track = fx.broadcast.createTrack("video");
+
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				propertiesWanted,
+			}),
+		);
+
+		expect(ok.properties.timescale !== undefined).toBe(propertiesWanted);
+		expect(ok.properties.groupOrder !== undefined).toBe(propertiesWanted);
+
+		// With no TIMESCALE declared there are no units to read a timestamp in, so the objects
+		// must not carry one either: a bare value invites a peer to read it as some default.
+		writeGroup(track, 1);
+
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group was never served");
+		const reader = new Reader(served, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect(header.flags.hasExtensions).toBe(propertiesWanted);
+
+		await reader.u53(); // object id delta
+		if (propertiesWanted) {
+			const length = await reader.u53();
+			expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
+			await reader.read(length);
+		}
+		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
+
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
+ * keeps serving until the track does. Groups published above the end are dropped rather
+ * than held: parking them would leave the serving loop waiting for a cap that never rises,
+ * and PUBLISH_DONE would never go out.
+ */
+test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	writeGroup(track, 1); // group 0, the whole requested range
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+		}),
+	);
+
+	try {
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the requested group was never served");
+		expect((await readGroup(served)).sequence).toBe(0);
+
+		// Beyond the end, so it is never served, and it must not hold the subscription open.
+		writeGroup(track, 1); // group 1
+		track.close();
+
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V20);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+
+		// Only the in-range group was ever opened.
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * An absolute fill ending below the live edge with no end object reads until its group
+ * closes, which a group still being written may never do. The subscriber leaving has to end
+ * it: watching only the fetch stream would pin the group and its cache subscription for the
+ * life of the track.
+ */
+test("draft-20: the subscriber leaving ends a fill still reading its group", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+
+	// Group 0 stays open, so a fill over it has no end of its own to wait for. Group 1 puts
+	// the live edge above it, which is what leaves the requested end object unset.
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: {
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				rangeFilters: false,
+			},
+		}),
+	);
+
+	try {
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+
+		// The fill is parked on a group that is never going to close on its own, so this only
+		// settles once the subscriber leaving cancels it.
+		const reading = readFill(fill);
+		client.close();
+
+		// A reset discards what the peer has not acknowledged, so the objects already written
+		// may or may not survive it. That it ends at all, with the cancellation as its reason,
+		// is the whole point.
+		const served = await reading;
+		expect(served.reset?.message).toContain("unsubscribed");
+	} finally {
+		open.close();
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A broadcast served through `requested()` resolves its track on demand, and a dynamic serve
+ * is deliberately one request per peer subscription. Resolving the track again to read the
+ * fill's cache would mint a second producer nobody has accepted, so the fill has to read the
+ * one already serving the subscription.
+ */
+test("draft-20: a fill works on a dynamically requested track", async () => {
+	const fx = fixture();
+
+	// Answer the request the subscription raises, the way an application serving on demand
+	// does, rather than inserting the track up front.
+	const serving = (async () => {
+		const request = await fx.broadcast.requested();
+		if (!request) throw new Error("no track was requested");
+		const track = request.accept();
+		const group = track.appendGroup();
+		for (let i = 0; i < 2; i++) {
+			group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+		}
+		return group;
+	})();
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	const group = await serving;
+
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
+
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("no fetch stream for the requested fill");
+		expect(await readFill(fill)).toEqual({
+			requestId: 7n,
+			objects: [
+				{ group: 0, id: 0, payload: "0.0" },
+				{ group: 0, id: 1, payload: "0.1" },
+			],
+			reset: undefined,
+		});
+	} finally {
+		group.close();
+		fx.close();
+		client.close();
 	}
 });

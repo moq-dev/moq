@@ -54,10 +54,11 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
-            catalog = await announcement.broadcast.catalog()
+            broadcast = await client.request_broadcast(announcement.path)
+            catalog = await broadcast.catalog()
 
             for name in catalog.audio:
-                async for frame in announcement.broadcast.subscribe_media(name):
+                async for frame in broadcast.subscribe_media(name):
                     print(f"frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
 asyncio.run(main())

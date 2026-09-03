@@ -1,132 +1,95 @@
 ---
-title: Development Guide
-description: Set up the rest of the stuff.
+title: Development
+description: Run, test, and debug the MoQ workspace
 ---
 
 # Development
 
-Still here? You must be a Big Buck Bunny fan.
+The repository uses [Just](https://github.com/casey/just) as its command runner.
+Run commands inside the Nix development shell when possible so your tools match
+CI.
 
-This guide covers the rest of the stuff you can run locally.
+## Common commands
 
-## Just
+| Command | Purpose |
+| --- | --- |
+| `just` | Start the local relay, test publisher, and web demo. |
+| `just --list` | List available recipes. |
+| `just fix` | Format and lint changed packages and their dependents. |
+| `just check` | Compile and lint the same changed-package scope. |
+| `just test` | Run tests for the same changed-package scope. |
+| `just fix-all` | Format and lint every Rust, TypeScript, and Python package. |
+| `just check-all` | Compile and lint every package. |
+| `just test all` | Test every Rust, TypeScript, and Python package. |
 
-We use [Just](https://github.com/casey/just) to run helper commands.
-It's *just* a fancier `Makefile` so you don't have to remember all the commands.
-
-### Common Commands
+For example, publish the Tears of Steel HLS fixture over MoQ with:
 
 ```bash
-# Run the demo (default)
-just
-
-# List all available commands
-just --list
-
-# This is equivalent to 3 terminal tabs:
-# just relay
-# just web
-# just pub bbb
-
-# Make sure the code you changed compiles and passes linting
-just check
-
-# Run the tests for the code you changed
-just test
-
-# Auto-fix linting errors, same scope
-just fix
-
-# Same as the above, over every package
-just check-all
-just test all
-just fix-all
-
-# Publish a HLS broadcast (CMAF) over MoQ
 just pub hls tos
 ```
 
-Want more? See the [justfile](https://github.com/moq-dev/moq/blob/main/justfile) for all commands.
+The root [justfile](https://github.com/moq-dev/moq/blob/main/justfile) and
+`just --list` show the remaining recipes.
 
-### The Internet
+## Test over the internet
 
-Most of the commands default to `http://localhost:4443`.
-That's pretty lame.
+Most demo commands use the local relay at `http://localhost:4443`. The public
+test relay is available at `https://cdn.moq.dev/anon`:
 
-If you want to do a real test of how MoQ works over the internet, you're going to need a remote server.
-Fortunately I'm hosting a small cluster on Linode for just the occasion: `https://cdn.moq.dev`
-
-::: warning
-All of these commands are unauthenticated, hence the `/anon`.
-Anything you publish is public and discoverable... so be careful and don't abuse it.
-[Setup your own relay](/setup/prod) or contact `@kixelated` for an auth token.
+::: warning Public namespace
+The `/anon` path is unauthenticated. Broadcasts published there are public and
+discoverable. Do not publish private media or rely on a name remaining reserved.
 :::
 
 ```bash
-# Run the web server, pointing to the public relay
-# NOTE: The `bbb` demo on moq.dev uses a different path so it won't show up.
+# Run the local web client against the public relay.
 just web serve https://cdn.moq.dev/anon
 
-# Publish Tears of Steel, watch it via https://moq.dev/watch?name=tos
+# Publish Tears of Steel, then open https://moq.dev/watch?name=tos.
 just pub tos https://cdn.moq.dev/anon
 
-# Publish a clock broadcast
+# Publish and subscribe to a data-only clock broadcast in separate terminals.
 just pub clock publish https://cdn.moq.dev/anon
-
-# Subscribe to said clock broadcast (different tab)
 just pub clock subscribe https://cdn.moq.dev/anon
-
-# Publish an authentication broadcast
-just pub bbb https://cdn.moq.dev/?jwt=not_a_real_token_ask_for_one
 ```
 
-## Debugging
+For private paths, deploy a relay and configure
+[authentication](/bin/relay/auth).
 
-### Rust
+## Debug Rust
 
-You can set the logging level with the `RUST_LOG` environment variable.
+Use `RUST_LOG` for structured logs and `RUST_BACKTRACE` for panic backtraces:
 
 ```bash
-# Print the most verbose logs
 RUST_LOG=trace just
-```
-
-If you're getting a panic, use `RUST_BACKTRACE=1` to get a backtrace.
-
-```bash
-# Print a backtrace on panic.
 RUST_BACKTRACE=1 just
 ```
 
-## IDE Setup
+## Editor setup
 
-I use [Cursor](https://www.cursor.com/), but anything works.
-
-Recommended extensions:
+Any editor with standard Rust and TypeScript support works. Useful extensions
+include:
 
 - [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 - [Biome](https://marketplace.visualstudio.com/items?itemName=biomejs.biome)
 - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
 - [direnv](https://marketplace.visualstudio.com/items?itemName=mkhl.direnv)
 
-## Contributing
+## Before opening a pull request
 
-Run `just fix` before pushing your changes, otherwise CI will yell at you.
-CI runs `just check` and then `just test`, so running those two locally is the easiest way to debug any issues.
-All three only touch the packages your branch changed (plus anything depending on them), measured against the branch's upstream; `just check-all`, `just test all`, and `just fix-all` cover everything.
+Run the same checks used by CI:
 
-Please don't submit a vibe coded PR unless you understand it.
-`You're absolutely right!` is not always good enough.
+```bash
+just fix
+just check
+just test
+```
 
-## Onwards
+These commands scope work to packages changed from the branch's configured
+upstream and include their dependents. Use `just fix-all`, `just check-all`, and
+`just test all` when changing shared tooling or configuration that the package
+diff cannot attribute. `just check-all` also covers language wrappers whose
+tests are part of their check recipe.
 
-`just` runs three processes that normally, should run on separate hosts.
-Learn how to run them [in production](/setup/prod).
-
-Or take a detour and:
-
-- Brush up on the [concepts](/concept/).
-- Discover the other [apps](/bin/).
-- `use` the [Rust crates](/lib/rs/).
-- `import` the [Typescript packages](/lib/js/).
-- or IDK, go take a shower or something while Claude parses the docs.
+See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
+for branch targeting, commits, and pull requests.

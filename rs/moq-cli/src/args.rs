@@ -84,6 +84,14 @@ pub struct Invocation {
 	/// The MoQ attachment, shared by every stage.
 	pub moq: MoqSide,
 
+	/// The same attachment, built without consulting the environment.
+	///
+	/// Only [`MoqSide::reject`] reads it. A local verb refuses a MoQ side the user
+	/// asked for, and an exported `MOQ_CONNECT` is not an ask: it is a standing
+	/// setting for the publishing this shell usually does, and it would otherwise
+	/// make `moq token` and `moq completion` fail for everyone who has one.
+	pub typed: MoqSide,
+
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
 }
@@ -146,18 +154,16 @@ impl std::error::Error for ParseError {}
 
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
-	pub fn parse() -> Self {
+	///
+	/// Async because a completion request is answered first, and some completers
+	/// dial the relay the line already names (see [`crate::complete`]).
+	pub async fn parse() -> Self {
 		let args: Vec<OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
 		// generated `Cli::parse()`, which the stage grammar cannot use: without this
 		// the request reaches the ordinary grammar and is refused. Recognized before
 		// the split on `--`, because a completion is not a command this binary runs.
-		//
-		// Answered against the root, so a cursor inside a later stage is completed
-		// against a grammar that also carries the process-wide flags a stage refuses.
-		// Narrowing that needs the request's own line and cursor rewritten to the last
-		// stage, which is not done here.
-		if let Some(reply) = completion_request(args.get(1..).unwrap_or_default()) {
+		if let Some(reply) = crate::complete::answer(args.get(1..).unwrap_or_default()).await {
 			print!("{reply}");
 			std::process::exit(0);
 		}
@@ -165,6 +171,14 @@ impl Invocation {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
+	}
+
+	/// Refuse a MoQ side on a verb that runs locally and takes none.
+	///
+	/// Answered from what the command line said, never from the environment; see
+	/// [`Self::typed`] and `MoqSide::reject`.
+	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+		self.typed.reject(command)
 	}
 
 	/// Split `argv` on `--` and run each chunk through a real parser.
@@ -181,6 +195,7 @@ impl Invocation {
 		let first = chunks.next().unwrap_or_default();
 		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
 		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
+		let typed = MoqSide::from_argv(&first, Environment::Ignore).unwrap_or_else(|| cli.moq.clone());
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
@@ -219,6 +234,7 @@ impl Invocation {
 		Ok(Self {
 			log: cli.log,
 			moq: cli.moq,
+			typed,
 			stages,
 		})
 	}
@@ -269,98 +285,6 @@ impl Invocation {
 	}
 }
 
-/// Answer a shell's completion request, against the grammar the cursor is actually in.
-///
-/// `#[usage(completion)]` installs the `__complete_word__` interception in the
-/// generated `Cli::parse()`, which the stage grammar cannot use: this binary splits
-/// argv on `--` and parses each chunk itself, so without this the request reaches
-/// the ordinary grammar and is refused.
-///
-/// The root spec is the globals plus the *first* stage. A cursor in a later chunk
-/// answered against it offers `--connect` and the other process-wide flags, which a
-/// stage refuses, so the request is rewritten to the active chunk and handed to
-/// [`Stage`]. Both request shapes normalize to a word list first: elvish sends one
-/// already, and everything else sends a line and a cursor that Usage's own splitter
-/// turns into the same thing.
-fn completion_request(argv: &[OsString]) -> Option<String> {
-	if argv.first()?.to_str()? != "__complete_word__" {
-		return None;
-	}
-
-	let mut shell_name = "bash".to_string();
-	let mut candidates: Option<String> = None;
-	let mut line = String::new();
-	let mut cursor = None;
-	let mut words: Option<Vec<String>> = None;
-
-	let mut rest = argv[1..].iter();
-	while let Some(arg) = rest.next() {
-		match arg.to_str().unwrap_or_default() {
-			"--shell" => {
-				if let Some(name) = rest.next() {
-					shell_name = name.to_string_lossy().into_owned();
-				}
-			}
-			"--line" => {
-				if let Some(value) = rest.next() {
-					line = value.to_string_lossy().into_owned();
-				}
-			}
-			"--cursor" => cursor = rest.next().and_then(|v| v.to_str()).and_then(|v| v.parse().ok()),
-			"--candidates" => candidates = rest.next().map(|v| v.to_string_lossy().into_owned()),
-			// Terminal, as it is for Usage: the rest of argv is the word list.
-			"--words" => {
-				words = Some(rest.map(|w| w.to_string_lossy().into_owned()).collect());
-				break;
-			}
-			// An unknown flag is a shell passing something this version does not know
-			// about. Ignored rather than refused, the way Usage ignores it.
-			_ => {}
-		}
-	}
-
-	let shell = usage::complete::Shell::from_name(&shell_name).unwrap_or(usage::complete::Shell::Bash);
-	let (mut words, cword) = match words {
-		Some(mut words) => {
-			if words.is_empty() {
-				words.push(String::new());
-			}
-			let cword = words.len() - 1;
-			(words, cword)
-		}
-		None => {
-			let split = usage::complete::split(&line, cursor.unwrap_or(line.len()), shell);
-			(split.words, split.cword)
-		}
-	};
-
-	// Everything past the cursor says nothing about the word being completed, and
-	// dropping it leaves that word last, which is the shape `--words` describes.
-	words.truncate(cword + 1);
-
-	// Strictly before the cursor: a cursor sitting *on* a `--` is typing the
-	// separator itself, which is the root's business rather than a stage's.
-	let stage_start = words[..cword].iter().rposition(|word| word == "--").map(|at| at + 1);
-	let Some(start) = stage_start else {
-		return Cli::completion_request(argv);
-	};
-
-	// `words[0]` is read as the program name, so the chunk gets one of its own.
-	let mut rewritten: Vec<OsString> = vec![
-		OsString::from("__complete_word__"),
-		OsString::from("--shell"),
-		OsString::from(&shell_name),
-	];
-	if let Some(name) = candidates {
-		rewritten.push(OsString::from("--candidates"));
-		rewritten.push(OsString::from(name));
-	}
-	rewritten.push(OsString::from("--words"));
-	rewritten.push(OsString::from("moq"));
-	rewritten.extend(words[start..].iter().map(OsString::from));
-	Stage::completion_request(&rewritten)
-}
-
 /// Turn a Usage parse result into a [`ParseError`].
 ///
 /// The rendering lives in [`moq_tokio::cli::answer`], shared with moq-relay and
@@ -381,6 +305,15 @@ fn parse_error(
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
+}
+
+/// Whether [`MoqSide::from_argv`] lets the environment fill what the words left out.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Environment {
+	/// Apply the `MOQ_*` variables, as an ordinary parse does.
+	Read,
+	/// Read only what the words say, which is what "the user asked for this" means.
+	Ignore,
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -405,15 +338,20 @@ pub struct MoqSide {
 	#[usage(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
-	/// Fix this process's origin id instead of minting a fresh random one.
+	/// Fix this process's Hop ID instead of minting a fresh random one.
 	///
-	/// The origin id is the first hop of every announcement this process
+	/// The Hop ID is the first hop of every announcement this process
 	/// publishes, and relays treat it as the broadcast's content identity:
 	/// redundant publishers of the same broadcast share an id so relays fail
 	/// over between them at a group boundary. Leave unset outside a redundant
 	/// (1+1) chain; the default fresh id per run is what makes a restarted
 	/// publisher look like new content instead of silently splicing.
-	#[usage(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
+	#[usage(long, env = "MOQ_HOP", help_heading = "MoQ")]
+	pub hop: Option<u64>,
+
+	/// The released spelling of [`Self::hop`], kept in the parser only so a
+	/// process that still passes it is told what to pass instead.
+	#[usage(name = "origin", long = "origin", env = "MOQ_ORIGIN", hide = true)]
 	pub origin: Option<u64>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
@@ -446,16 +384,19 @@ impl MoqSide {
 		let mut found = self.client.deprecated();
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
+		if self.origin.is_some() {
+			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
+		}
 		found
 	}
 
-	/// Mint the origin all broadcasts route through: the pinned `--origin` id
-	/// when set, otherwise fresh and random.
+	/// Mint the origin all broadcasts route through, identified by the pinned
+	/// `--hop` id when set and a fresh random one otherwise.
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
 		use anyhow::Context;
-		Ok(moq_tokio::origin::spawn(match self.origin {
-			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
-			None => moq_net::Origin::random(),
+		Ok(moq_tokio::origin::spawn(match self.hop {
+			Some(id) => moq_net::Hop::new(id).with_context(|| format!("invalid --hop {id}"))?,
+			None => moq_net::Hop::random(),
 		}))
 	}
 
@@ -507,14 +448,45 @@ impl MoqSide {
 		Ok(())
 	}
 
+	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
+	///
+	/// Stops at the first thing the grammar cannot take, because the two callers are
+	/// both looking at an incomplete line: a half-typed one being completed, and (via
+	/// [`Environment::Ignore`]) a real one whose typed values are being separated from
+	/// its ambient ones. Whatever was understood before that point is the answer.
+	pub(crate) fn from_argv(argv: &[&OsStr], environment: Environment) -> Option<Self> {
+		use usage::spec::CommandArgs;
+
+		let mut partial = <Self as CommandArgs>::start();
+		let mut parser = usage::Parser::new(Cli::command(), argv);
+		while let Some(event) = parser.next_event() {
+			match event {
+				Ok(event) => {
+					<Self as CommandArgs>::apply(&mut partial, &event);
+				}
+				Err(_) => break,
+			}
+		}
+
+		if environment == Environment::Read {
+			<Self as CommandArgs>::apply_env(&mut partial);
+		}
+		<Self as CommandArgs>::apply_defaults(&mut partial);
+		<Self as CommandArgs>::build(partial).ok()
+	}
+
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
 	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
 	/// next to `token generate` it reads like it scopes the key, which `--root` does.
 	///
-	/// `--origin` is left out on purpose. It reads `MOQ_ORIGIN`, so rejecting it would
-	/// fail `moq token` in any shell that exports the variable for a publisher, and an
-	/// ambient env value is not the deliberate request this is meant to catch.
-	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+	/// Private, and reached only through [`Invocation::reject`], so it cannot be asked
+	/// of the resolved side: every one of these flags has a `MOQ_*` variable, and a
+	/// shell that exports one for the publishing it usually does has not asked this
+	/// verb for anything. A call site that picked the wrong view would read correctly
+	/// and be wrong, so there is only one view to pick. `--hop` is in the list for
+	/// the same reason it used to be out of it -- an ambient `MOQ_HOP` no longer
+	/// reaches here, so a typed one can be refused like the rest.
+	fn reject(&self, command: &str) -> anyhow::Result<()> {
 		#[cfg(feature = "cluster-lan")]
 		let cluster_secret = self.cluster.secret.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
@@ -529,6 +501,7 @@ impl MoqSide {
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
+			("--hop", self.hop.is_some()),
 		];
 		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
@@ -576,6 +549,8 @@ pub enum Command {
 	Transcode(crate::transcode::Args),
 	/// Generate, sign, and verify the JWT tokens a relay authenticates with.
 	Token(moq_token_cli::Args),
+	/// Write the shell script that completes this command line.
+	Completion(crate::complete::Args),
 	/// List the capture devices `import capture` can name.
 	#[cfg(feature = "capture")]
 	Devices,
@@ -609,6 +584,7 @@ impl Command {
 			#[cfg(feature = "transcode")]
 			Self::Transcode(_) => "transcode",
 			Self::Token(_) => "token",
+			Self::Completion(_) => "completion",
 			#[cfg(feature = "capture")]
 			Self::Devices => "devices",
 		}
@@ -879,6 +855,33 @@ mod tests {
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
+	}
+
+	/// `moq-cli`'s own rename rides the same refusal as the flags it flattens from
+	/// `moq-tokio`, and lands in the same message.
+	///
+	/// Both halves matter: `--origin` must not silently pin a Hop ID onto the field
+	/// `--hop` now owns, and the migration has to name the environment variable too,
+	/// since a deployment that sets `MOQ_ORIGIN` never typed the flag.
+	#[test]
+	fn the_released_origin_spelling_is_refused_with_a_migration() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--origin",
+			"42",
+			"--connect",
+			"http://relay/anon",
+			"export",
+			"ts",
+		]) else {
+			panic!("--origin must not start a run");
+		};
+
+		let reported = err.to_string();
+		assert!(
+			reported.contains("--origin / MOQ_ORIGIN -> --hop / MOQ_HOP"),
+			"missing the migration from {reported}"
+		);
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -1594,42 +1597,5 @@ mod tests {
 			choices.sort_unstable();
 			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
 		}
-	}
-
-	/// A cursor in a later stage is completed against the stage grammar.
-	///
-	/// The root spec is the globals plus the first stage, so answering a later chunk
-	/// against it offers process-wide flags that the chunk refuses.
-	#[test]
-	fn completion_retargets_to_the_active_stage() {
-		fn complete(line: &str) -> Vec<String> {
-			let argv: Vec<OsString> = ["__complete_word__", "--shell", "bash", "--line", line, "--cursor"]
-				.iter()
-				.map(OsString::from)
-				.chain(std::iter::once(OsString::from(line.len().to_string())))
-				.collect();
-			completion_request(&argv)
-				.unwrap_or_default()
-				.lines()
-				.map(str::to_string)
-				.collect()
-		}
-
-		// A stage offers its own flags, and none of the globals it would refuse.
-		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --");
-		assert!(!staged.is_empty(), "a later stage completed nothing");
-		for global in ["--connect", "--origin", "--broadcast"] {
-			assert!(
-				!staged.iter().any(|c| c == global),
-				"{global} leaked into a stage that refuses it: {staged:?}"
-			);
-		}
-
-		// The root still answers for itself.
-		let root = complete("moq --conn");
-		assert!(root.iter().any(|c| c == "--connect"), "root lost its globals: {root:?}");
-
-		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import fmp4 --").is_empty());
 	}
 }

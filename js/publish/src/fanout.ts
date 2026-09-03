@@ -5,7 +5,7 @@ const QUEUE = 4;
 
 /** Constructor options for {@link Fanout}. */
 export interface FanoutProps<T> {
-	/** How many values each reader may buffer before its oldest is dropped. Defaults to 4. */
+	/** Positive safe integer of values each reader may buffer before its oldest is dropped. Defaults to 4. */
 	queue?: number;
 
 	/**
@@ -46,7 +46,7 @@ export class Fanout<T> {
 	#failure: { error: unknown } | undefined;
 
 	constructor(source: ReadableStream<T>, props?: FanoutProps<T>) {
-		this.#queue = props?.queue ?? QUEUE;
+		this.#queue = validateQueue(props?.queue ?? QUEUE);
 		this.#clone = props?.clone;
 		this.#release = props?.release;
 		this.#reader = source.getReader();
@@ -57,11 +57,17 @@ export class Fanout<T> {
 	/**
 	 * A stream of everything published from now on, cancelled when `effect` is torn down.
 	 *
-	 * `queue` overrides how far this reader may fall behind before it loses its oldest. Pass 1 for a
-	 * consumer that only wants the newest, like a preview that draws one frame per paint.
+	 * `queue` is a positive safe integer overriding how far this reader may fall behind before it
+	 * loses its oldest. Pass 1 for a consumer that only wants the newest, like a preview that draws
+	 * one frame per paint.
 	 */
 	subscribe(effect: Effect, queue = this.#queue): ReadableStream<T> {
-		const reader: Reader<T> = { queue: [], limit: queue, waiting: undefined, done: this.#closed };
+		const reader: Reader<T> = {
+			queue: [],
+			limit: validateQueue(queue),
+			waiting: undefined,
+			done: this.#closed,
+		};
 		this.#readers.add(reader);
 
 		effect.cleanup(() => {
@@ -181,6 +187,14 @@ export class Fanout<T> {
 		for (const value of reader.queue) this.#release?.(value);
 		reader.queue.length = 0;
 	}
+}
+
+function validateQueue(queue: number): number {
+	if (!Number.isSafeInteger(queue) || queue <= 0) {
+		throw new RangeError(`fanout queue must be a positive safe integer, got ${queue}`);
+	}
+
+	return queue;
 }
 
 // One attached reader: what it hasn't consumed yet, plus a resolver parked on an empty queue.

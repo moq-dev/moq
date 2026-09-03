@@ -266,13 +266,15 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
 	const modernVersion =
-		protocol === Ietf.ALPN.DRAFT_19
-			? Ietf.Version.DRAFT_19
-			: protocol === Ietf.ALPN.DRAFT_18
-				? Ietf.Version.DRAFT_18
-				: protocol === Ietf.ALPN.DRAFT_17
-					? Ietf.Version.DRAFT_17
-					: undefined;
+		protocol === Ietf.ALPN.DRAFT_20
+			? Ietf.Version.DRAFT_20
+			: protocol === Ietf.ALPN.DRAFT_19
+				? Ietf.Version.DRAFT_19
+				: protocol === Ietf.ALPN.DRAFT_18
+					? Ietf.Version.DRAFT_18
+					: protocol === Ietf.ALPN.DRAFT_17
+						? Ietf.Version.DRAFT_17
+						: undefined;
 	if (modernVersion !== undefined) {
 		return await handshakeAlpn(url, session, modernVersion, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
@@ -437,6 +439,7 @@ async function connectWebTransport(
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,
+			Ietf.ALPN.DRAFT_20,
 			Ietf.ALPN.DRAFT_19,
 			Ietf.ALPN.DRAFT_18,
 			Ietf.ALPN.DRAFT_17,
@@ -516,6 +519,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 		[Lite.ALPN_04]: null,
 		[Lite.ALPN_03]: null,
 		[Lite.ALPN]: null,
+		[Ietf.ALPN.DRAFT_20]: "qmux-01",
 		[Ietf.ALPN.DRAFT_18]: "qmux-01",
 		[Ietf.ALPN.DRAFT_17]: null,
 		[Ietf.ALPN.DRAFT_16]: null,

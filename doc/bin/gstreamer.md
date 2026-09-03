@@ -7,11 +7,11 @@ description: GStreamer plugin for MoQ
 
 A GStreamer plugin for publishing and consuming MoQ streams.
 
-::: warning Work in Progress
-This plugin is currently under development, but it works okay.
+::: warning Active development
+The plugin is usable, but its API may still change.
 :::
 
-## Overview
+## Elements and properties
 
 The GStreamer plugin provides two elements:
 
@@ -160,7 +160,7 @@ nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
 cargo build -p moq-gst
 ```
 
-This produces a shared library (cdylib) in `target/debug/`. GStreamer needs to find this plugin via the `GST_PLUGIN_PATH_1_0` environment variable — the `just` commands below handle this automatically.
+This produces a shared library (cdylib) in `target/debug/`. GStreamer needs to find this plugin via the `GST_PLUGIN_PATH_1_0` environment variable; the `just` commands below handle this automatically.
 
 ## Running Locally
 
@@ -317,6 +317,21 @@ reserved name, the generated one included, and further writes are ignored with a
 element (back to `READY`) releases the reservation and makes it writable again. An empty string keeps
 the generated name. A name another pad already holds invalidates only that pad, so the rest of the
 broadcast keeps publishing.
+
+Each pad also reports what its track is doing, so a publication can be diagnosed without reading the
+logs or asking a consumer:
+
+| Property      | Type   | Description                                       |
+| ------------- | ------ | ------------------------------------------------- |
+| `track-status` | enum   | `pending` until CAPS builds a producer, `active` once the broadcast reserved the track, `ended` when it was finalized, `error` when the pad was invalidated |
+| `track-error` | string | Why the pad was invalidated, null when it was not  |
+
+Both emit `notify`, so an application can connect to `notify::track-status` rather than poll. `active`
+means the producer exists and the track is registered, not merely that the pad was requested, and a
+pad that sent EOS stays `active` until every pad has ended and the producers are finalized. `error`
+is terminal: it survives EOS, and clears when the pad is released or the element goes back to
+`READY`. A pad still waiting for CAPS is `pending` with no error, because nothing has failed yet.
+Connection loss is the element's own `status`.
 
 A pad negotiated as `application/octet-stream` publishes application data instead of media. The bytes
 go out exactly as they arrive: no codec, no media container, no interpretation. A data pad's

@@ -100,7 +100,7 @@ echo "building @moq/wasm..."
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
-(cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
+(cd "$WORKSPACE" && "${RUST_CARGO:-cargo}" build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
 TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 

@@ -38,17 +38,45 @@ func (o *OriginProducer) Dynamic() *OriginDynamic {
 // CreateBroadcast creates a broadcast at the given path, returning the producer
 // that feeds it.
 //
-// The broadcast starts live: the origin announces the path so subscribers can
-// discover it, becoming visible shortly after this returns. Toggle
-// discoverability with [BroadcastProducer.SetAnnounce]; Finish unpublishes
-// immediately, while dropping the producer without finishing also unpublishes
-// but reads to subscribers as a failure rather than a deliberate end.
+// The broadcast starts announced: the origin advertises the exact path as a
+// route so subscribers can discover it, becoming visible shortly after this
+// returns. Toggle discoverability with [BroadcastProducer.SetAnnounce]; Finish
+// unpublishes immediately, while dropping the producer without finishing also
+// unpublishes but reads to subscribers as a failure rather than a deliberate end.
 func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
 	inner, err := o.inner.CreateBroadcast(path)
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastProducer{inner: inner}, nil
+}
+
+// Announce advertises a route: a claim that paths under route.Prefix can be
+// served. Hold the returned Announce for as long as the route should stay
+// advertised. Announcing is independent of CreateBroadcast: announce one short
+// prefix and serve requests beneath it with Dynamic.
+func (o *OriginProducer) Announce(prefix string, route Route) (*Announce, error) {
+	inner, err := o.inner.Announce(prefix, route)
+	if err != nil {
+		return nil, err
+	}
+	return &Announce{inner: inner}, nil
+}
+
+// Announce is a live route advertisement. The route stays advertised until
+// Cancel (or garbage collection releases the handle).
+type Announce struct {
+	inner *ffi.MoqAnnounce
+}
+
+// Update re-prices the route in place: replaces its hops and cost.
+func (a *Announce) Update(route Route) error {
+	return a.inner.Update(route)
+}
+
+// Cancel retracts the route.
+func (a *Announce) Cancel() {
+	a.inner.Cancel()
 }
 
 // OriginDynamic streams requests for paths with no existing exact-path broadcast.
@@ -105,7 +133,7 @@ type OriginConsumer struct {
 	inner *ffi.MoqOriginConsumer
 }
 
-// Announced streams broadcasts whose path starts with prefix.
+// Announced streams route announcements whose prefix starts with prefix.
 func (o *OriginConsumer) Announced(prefix string) (*Announced, error) {
 	inner, err := o.inner.Announced(prefix)
 	if err != nil {
@@ -114,7 +142,8 @@ func (o *OriginConsumer) Announced(prefix string) (*Announced, error) {
 	return &Announced{inner: inner}, nil
 }
 
-// AnnouncedBroadcast resolves a single broadcast at an exact path.
+// AnnouncedBroadcast waits for a route covering an exact path, then resolves
+// the broadcast there.
 func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	inner, err := o.inner.AnnouncedBroadcast(path)
 	if err != nil {
@@ -123,11 +152,11 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served: an
-// existing exact-path broadcast whether announced or not, otherwise a dynamic
-// fallback on the origin, or an error if neither can serve it. Unlike
-// AnnouncedBroadcast, it does not wait for a future announcement. Blocks until
-// resolved.
+// RequestBroadcast resolves a broadcast at path as soon as it can be served: a
+// local broadcast at the exact path, the best announced route covering it
+// (served on demand by the session that announced it), or a dynamic fallback on
+// the origin; errors if nothing can serve it. Unlike AnnouncedBroadcast, it
+// does not wait for a future announcement. Blocks until resolved.
 func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
 	inner, err := o.inner.RequestBroadcast(path)
 	if err != nil {
@@ -136,22 +165,31 @@ func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, erro
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// Announcement is a discovered broadcast.
+// Announcement is a route announcement or retraction. A route claims that
+// paths under Path can be served; it carries no broadcast. Resolve a specific
+// path with [OriginConsumer.RequestBroadcast]. By convention a publisher
+// announces each broadcast's exact path.
 type Announcement struct {
 	inner *ffi.MoqAnnouncement
 }
 
-// Path is the broadcast's announced path.
+// Path is the announced route's prefix, relative to the Announced prefix.
 func (a *Announcement) Path() string {
 	return a.inner.Path()
 }
 
-// Broadcast returns a consumer for the announced broadcast's tracks.
-func (a *Announcement) Broadcast() *BroadcastConsumer {
-	return &BroadcastConsumer{inner: a.inner.Broadcast()}
+// Active reports whether the route is active (true) or was retracted (false).
+// A repeated active announcement for the same path is a metadata update.
+func (a *Announcement) Active() bool {
+	return a.inner.Active()
 }
 
-// Announced is a stream of broadcast announcements.
+// Route is the route serving the prefix: its relay hops and cost.
+func (a *Announcement) Route() Route {
+	return a.inner.Route()
+}
+
+// Announced is a stream of route announcements and retractions.
 type Announced struct {
 	inner *ffi.MoqAnnounced
 }

@@ -39,7 +39,7 @@ impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
 		// lands on the dedicated libmoq runtime.
-		self.active.insert(moq_tokio::origin::spawn(moq_net::Origin::random()))
+		self.active.insert(moq_tokio::origin::spawn(moq_net::Hop::random()))
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {
@@ -78,7 +78,7 @@ impl Origin {
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let moq_net::announce::Update { path, broadcast } = tokio::select! {
+			let update = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = consumer.next() => match next {
@@ -88,11 +88,10 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			// Only Active carries a broadcast; Ended does not.
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((path.to_string(), broadcast.is_some()))?;
+				.insert((update.prefix.to_string(), update.active))?;
 			callback.call(announced_id);
 		}
 	}
@@ -167,11 +166,21 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `biased` so a pending close always wins over a ready announcement.
+		// `routed_broadcast` rides out the churn between a route covering the path
+		// and the path actually resolving (failover, an advertise-only announce
+		// racing its handler). `biased` so a pending close always wins.
 		let broadcast = tokio::select! {
 			biased;
 			_ = &mut close => return Ok(()),
-			found = consumer.announced_broadcast(path.as_str()) => found.ok_or(Error::BroadcastNotFound)?,
+			resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
+				Ok(broadcast) => broadcast,
+				// An unreachable path and a closed origin both mean no broadcast
+				// can ever arrive here.
+				Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
+					return Err(Error::BroadcastNotFound);
+				}
+				Err(err) => return Err(err.into()),
+			},
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
@@ -246,12 +255,28 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Create a live broadcast at `path` on an origin, returning its producer.
+	/// Create a live broadcast at `path` on an origin, announcing the exact path.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn publish<P: moq_net::AsPath>(&self, origin: Id, path: P) -> Result<moq_net::broadcast::Producer, Error> {
+	#[allow(clippy::type_complexity)]
+	pub fn publish<P: moq_net::AsPath>(
+		&self,
+		origin: Id,
+		path: P,
+	) -> Result<
+		(
+			moq_net::broadcast::Producer,
+			moq_net::origin::Producer,
+			moq_net::PathOwned,
+			moq_net::announce::Producer,
+		),
+		Error,
+	> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		Ok(origin.create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?)
+		let path = path.as_path().to_owned();
+		let broadcast = origin.create_broadcast(&path)?;
+		let announcement = origin.announce(&path, Default::default())?;
+		Ok((broadcast, origin.clone(), path, announcement))
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

@@ -14,14 +14,12 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 
 #[path = "support/quiche.rs"]
 mod support;
 
 use std::net::UdpSocket;
-use std::pin::Pin;
-use std::task::Poll;
 
 use moq_net::origin;
 use moq_uring::{Config, Error, Worker, quic, udp};
@@ -37,49 +35,6 @@ fn worker() -> Option<Worker> {
 	}
 }
 
-/// A `Send` [`moq_net::runtime::Timers`] over tokio, for the origin drivers.
-#[derive(Clone, Default)]
-struct TokioTimers;
-
-impl moq_net::runtime::Timers for TokioTimers {
-	type Timer = TokioTimer;
-
-	fn timer(&self) -> Self::Timer {
-		TokioTimer { at: None, sleep: None }
-	}
-
-	fn now(&self) -> moq_net::runtime::Instant {
-		tokio::time::Instant::now().into_std()
-	}
-}
-
-struct TokioTimer {
-	at: Option<moq_net::runtime::Instant>,
-	// Allocated on the first poll after arming, then re-armed in place;
-	// construction panics without a live tokio time driver.
-	sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-}
-
-impl moq_net::runtime::Timer for TokioTimer {
-	fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
-		self.at = at;
-		if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
-			sleep.as_mut().reset(tokio::time::Instant::from_std(at));
-		}
-	}
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some(at) = self.at else { return Poll::Pending };
-		let sleep = self
-			.sleep
-			.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
-		if sleep.is_elapsed() {
-			return Poll::Ready(());
-		}
-		waiter.poll_future(sleep.as_mut())
-	}
-}
-
 const ALPN: &str = "moq-lite-05";
 const PAYLOAD: &[u8] = b"hello over io_uring";
 
@@ -89,22 +44,26 @@ fn lite_session_over_the_worker() {
 	let handle = worker.handle();
 
 	// The model and its origins, driven on a tokio thread (see module docs).
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			tokio::join!(pub_driver.run(TokioTimers), sub_driver.run(TokioTimers));
+			tokio::join!(
+				pub_driver.run(support::TokioTimers),
+				sub_driver.run(support::TokioTimers)
+			);
 		});
 	});
 
 	// Content ready before anyone connects: one broadcast, one track, one
 	// finished group.
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("data", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -114,7 +73,7 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -137,7 +96,7 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let session = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(server_handle.clone(), conn)
+			.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
 			.await
 			.expect("accept_lite");
 		// Serve until the client walks away.
@@ -158,15 +117,15 @@ fn lite_session_over_the_worker() {
 
 			let session = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(handle.clone(), conn)
+				.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 				.await
 				.expect("connect_lite");
 
-			let bc = sub
-				.consume()
-				.announced_broadcast("test")
-				.await
-				.expect("broadcast announced");
+			let bc = {
+				let consumer = sub.consume();
+				consumer.routed("test").await.expect("broadcast announced");
+				consumer.request_broadcast("test").await.expect("broadcast resolves")
+			};
 			let mut track = bc
 				.track("data")
 				.expect("track")
@@ -204,9 +163,9 @@ fn two_lite_sessions_share_the_server_socket() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -214,15 +173,16 @@ fn two_lite_sessions_share_the_server_socket() {
 			.expect("tokio runtime");
 		rt.block_on(async move {
 			tokio::join!(
-				pub_driver.run(TokioTimers),
-				sub_a_driver.run(TokioTimers),
-				sub_b_driver.run(TokioTimers),
+				pub_driver.run(support::TokioTimers),
+				sub_a_driver.run(support::TokioTimers),
+				sub_b_driver.run(support::TokioTimers),
 			);
 		});
 	});
 
-	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = pub_origin
+		.announce("test", Default::default())
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("data", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -232,7 +192,7 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -255,7 +215,7 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let session = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(session_handle, conn)
+					.accept_lite(session_handle, quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
 				session.closed().await;
@@ -279,15 +239,15 @@ fn two_lite_sessions_share_the_server_socket() {
 					.expect("quic connect");
 				let session = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(handle.clone(), conn)
+					.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 					.await
 					.expect("connect_lite");
 
-				let bc = sub
-					.consume()
-					.announced_broadcast("test")
-					.await
-					.expect("broadcast announced");
+				let bc = {
+					let consumer = sub.consume();
+					consumer.routed("test").await.expect("broadcast announced");
+					consumer.request_broadcast("test").await.expect("broadcast resolves")
+				};
 				let mut track = bc
 					.track("data")
 					.expect("track")
@@ -323,7 +283,7 @@ fn configured_roots_verify_the_server() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -379,7 +339,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 	// Any root will do: the client presents nothing, so it fails before the
 	// chain is ever checked.
@@ -430,4 +390,53 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		!accepted.get(),
 		"a server requiring a certificate must refuse an anonymous client"
 	);
+}
+
+/// A root file is routinely a bundle of several CAs, and it has to be loaded
+/// whole.
+///
+/// Only the second CA in the bundle below signed the server, so a loader that
+/// stops at the first certificate rejects a peer that is perfectly valid while
+/// still looking configured. The relay reaches this through `listen.tls.root`.
+#[test]
+fn a_root_bundle_is_loaded_whole() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let bundle = support::bundle().expect("bundle");
+
+	let mut server_config =
+		quic::server::Config::new(quic::Identity::open(&bundle.cert, &bundle.key).expect("identity"));
+	server_config.alpn = vec![ALPN.to_string()];
+
+	let server_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("server socket");
+	let server_addr = server_sock.local_addr().expect("server addr");
+	let client_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	dial.alpn = vec![ALPN.to_string()];
+	dial.system_roots = false;
+	dial.roots = vec![bundle.roots.clone()];
+
+	let server_handle = handle.clone();
+	handle.spawn(async move {
+		quic::server::accept(&server_handle, server_sock, &server_config)
+			.await
+			.expect("quic accept");
+	});
+
+	worker
+		.block_on(async move {
+			let conn = quic::client::connect(&handle, client_sock, &dial)
+				.await
+				.expect("quic connect");
+			assert_eq!(
+				web_transport_trait::poll::Session::protocol(&conn),
+				Some(ALPN),
+				"negotiated ALPN"
+			);
+		})
+		.expect("worker");
 }

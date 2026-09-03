@@ -411,7 +411,7 @@ mod tests {
 					Err(err) => panic!("rung track {name}: {err}"),
 				}
 			};
-			subscribers.push((name, track.subscribe(None).await.unwrap()));
+			subscribers.push((name, track.subscribe(None).await.unwrap().ordered()));
 		}
 
 		// Every rung receives a complete group with all 5 source frames.
@@ -479,7 +479,7 @@ mod tests {
 					Err(err) => panic!("rung track {name}: {err}"),
 				}
 			};
-			subscribers.push((name, track.subscribe(None).await.unwrap()));
+			subscribers.push((name, track.subscribe(None).await.unwrap().ordered()));
 		}
 
 		for (name, subscriber) in &mut subscribers {
@@ -585,10 +585,8 @@ mod tests {
 		// The passthrough reference (`..`) resolves against the output broadcast's path, so
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
-		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-		let output = origin
-			.create_broadcast("room/transcode", moq_net::broadcast::Route::new())
-			.unwrap();
+		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let output = origin.create_broadcast("room/transcode").unwrap();
 		let consumer = output.consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 
@@ -625,7 +623,13 @@ mod tests {
 
 		// Subscribing to the rung starts the live loop, which mirrors source
 		// group sequences 1:1.
-		let mut subscriber = consumer.track("video/120p").unwrap().subscribe(None).await.unwrap();
+		let mut subscriber = consumer
+			.track("video/120p")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap()
+			.ordered();
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		assert!(group.sequence <= 1, "unexpected sequence {}", group.sequence);
 		let payload = group.read_frame().await.unwrap().unwrap();
@@ -703,7 +707,13 @@ mod tests {
 		assert!(!update.encoding, "encoding before anyone asked");
 		assert_eq!(rendition.frames(), 0);
 
-		let mut subscriber = consumer.track("video/120p").unwrap().subscribe(None).await.unwrap();
+		let mut subscriber = consumer
+			.track("video/120p")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap()
+			.ordered();
 		let update = active.next().await.unwrap();
 		assert_eq!(update.rendition.name(), "video/120p");
 		assert!(update.encoding);

@@ -30,14 +30,12 @@ async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 test("TrackInfo round-trips on draft-05", async () => {
 	const info = new TrackInfo({
 		priority: 7,
-		ordered: false,
 		maxAge: 2000,
 		timescale: 90000,
 	});
 	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05)));
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(7);
-	expect(got.ordered).toBe(false);
 	expect(got.maxAge).toBe(2000);
 	expect(got.timescale).toBe(90000);
 });

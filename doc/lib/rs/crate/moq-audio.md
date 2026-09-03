@@ -35,10 +35,18 @@ The one system dependency is the platform's audio API, and only when you enable
 needs the ALSA development headers (`libasound2-dev` or your distro's equivalent)
 for cpal to link. A default build has neither feature and needs nothing.
 
-`Frame` is a timestamp and a payload. Layout lives on the producer or consumer
-(`encode::Input` / `decode::Config`) rather than on each frame, so you cannot
-drift between calls, and `Format` mirrors the WebCodecs `AudioData.format` values
-with conversions to the interleaved `f32` that the codecs want.
+`Frame` is a timestamp, a payload, and an `Activity`. Layout lives on the
+producer or consumer (`encode::Input` / `decode::Config`) rather than on each
+frame, so you cannot drift between calls, and `Format` mirrors the WebCodecs
+`AudioData.format` values with conversions to the interleaved `f32` that the
+codecs want. `Activity` says whether a packet coded audio or none at all, which is what an
+Opus sender withholding silence looks like (`encode::Config::dtx`), so a call UI
+can show who is talking without running a second voice detector; the publish side
+reads the same thing off `encode::Producer::activity`. It is read off the packet,
+so it works for senders that are not us. Opus marks withheld audio but not
+silence itself, so a silent run is interrupted every few hundred milliseconds by
+an ordinarily coded frame that reads active: hold an indicator across that gap
+rather than following it frame by frame.
 
 ## Installation
 
@@ -54,22 +62,59 @@ mix as its reference.
 
 ## Publishing
 
-`encode::publish_capture` advertises the track and catalog up front and opens the
-microphone only while somebody is listening:
+`encode::Publication` advertises the track up front and opens the microphone
+only while somebody is listening. Its separate driver owns capture and encoding,
+while clones of the retained handle control that same track:
 
 ```rust
 use moq_audio::{capture, encode};
+use tokio::task::LocalSet;
 
-let config = capture::Config::default();
+let local = LocalSet::new();
+local.run_until(async move {
+    let mut options = encode::PublicationOptions::default();
+    options.capture = capture::Config::default();
+    options.clock = clock;
 
-encode::publish_capture(
-    broadcast,
-    catalog,
-    config,
-    encode::Options::default(),
-    clock,
-).await?;
+    let (mut microphone, driver) = encode::Publication::new(broadcast, catalog, options)?;
+    let publish = tokio::task::spawn_local(driver.run());
+
+    microphone.stop(); // releases the device, but keeps the track
+    microphone.replace(capture::Source::Microphone(Some(device_id)));
+    microphone.start(); // resumes on the same MoQ broadcast and track
+
+    if let Some(state) = microphone.changed().await {
+        tracing::info!(
+            status = ?state.status(),
+            device = ?state.device(),
+            failure = ?state.failure(),
+        );
+    }
+    let level = microphone.level(); // rms/peak, for a local meter
+
+    // The driver runs until the track ends or the last handle drops, so
+    // releasing the controls is how this flow finishes.
+    drop(microphone);
+    publish.await??;
+    Ok(())
+}).await?;
 ```
+
+The native capture driver is not `Send`, so await it directly or use a
+`LocalSet` when it needs a separate task. `encode::publish_capture` remains the
+shorthand when no controls are needed.
+
+Constructing a publication never touches the device, so the controls exist even
+on a machine with no microphone. The driver probes the input for the PCM layout
+the catalog rendition describes and registers that rendition on the first
+success, so the catalog advertises no audio until then and `Status::Starting` is
+how an observer sees it. Transient input failures retry with capped backoff.
+Terminal failures leave the track registered in `Status::Failed`; `start`
+retries, while `replace` selects another device without changing the identity
+subscribers already know. `Publication::level` is measured
+after AEC and other capture processing, so it is suitable for a local meter or
+active-speaker input. It rides its own channel rather than `State`, because it
+changes every buffer and `changed` reports lifecycle transitions only.
 
 `encode::Producer` takes PCM you supply instead. Either way the codec is
 `encode::Codec`: Opus (the default) or uncompressed PCM, which trades bandwidth

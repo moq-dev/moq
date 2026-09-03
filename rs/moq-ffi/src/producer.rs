@@ -6,21 +6,16 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, M
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame, MoqVideoInit, MoqVideoProperties};
-use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, unordered, the publisher's default max age, microsecond timescale).
+/// (priority 0, the publisher's default max age, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Whether groups are prioritized in sequence order. Groups may always arrive
-	/// out-of-order (or not at all) over the network. Defaults to false.
-	#[uniffi(default = false)]
-	pub ordered: bool,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// milliseconds. Null uses the default. This is the publisher-side half of
 	/// [`MoqSubscription::max_age_ms`](crate::consumer::MoqSubscription::max_age_ms).
@@ -37,8 +32,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority)
-			.with_ordered(info.ordered);
+			.with_priority(info.priority);
 		if let Some(ms) = info.max_age_ms {
 			out = out.with_max_age(std::time::Duration::from_millis(ms));
 		}
@@ -65,7 +59,6 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
-			ordered: info.ordered,
 			max_age_ms: Some(max_age_ms),
 			timescale: Some(info.timescale.as_u64()),
 		})
@@ -79,6 +72,18 @@ pub(crate) struct BroadcastProducer {
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
+	// How to (re-)announce the exact path, for origin-created broadcasts.
+	// `None` for a standalone broadcast, which has no origin to announce on.
+	pub(crate) announce: Option<AnnounceState>,
+}
+
+/// The origin handle and path an origin-created broadcast was published under,
+/// so `set_announce` can toggle its route.
+pub(crate) struct AnnounceState {
+	pub(crate) origin: moq_net::origin::Producer,
+	pub(crate) path: moq_net::PathOwned,
+	/// The live advertisement, absent while unannounced.
+	pub(crate) announcement: Option<moq_net::announce::Producer>,
 }
 
 /// A whole-frame importer for one codec track.
@@ -160,11 +165,24 @@ impl TrackDynamicProducer {
 impl MoqBroadcastProducer {
 	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
 	/// the catalog track every FFI broadcast carries.
-	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
+	pub(crate) fn from_inner(broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
+		Self::from_inner_announced(broadcast, None)
+	}
+
+	/// [`Self::from_inner`], carrying the origin/path/announcement state that lets
+	/// `set_announce` toggle an origin-created broadcast's route.
+	pub(crate) fn from_inner_announced(
+		mut broadcast: moq_net::broadcast::Producer,
+		announce: Option<AnnounceState>,
+	) -> Result<Self, MoqError> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Self {
-			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
+			state: std::sync::Mutex::new(Some(BroadcastProducer {
+				broadcast,
+				catalog,
+				announce,
+			})),
 		})
 	}
 
@@ -241,27 +259,25 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(Self::from_inner(moq_net::broadcast::Info::new().produce())?))
 	}
 
-	/// Update the broadcast's route: the hop chain, cost, and announce flag it advertises.
-	///
-	/// Use this as conditions shift (e.g. a standby transcoder lowering its cost
-	/// once it is warm); consumers observe the change via
-	/// `MoqBroadcastConsumer::route_updates` and sessions forward it downstream.
-	pub fn set_route(&self, route: MoqRoute) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let route = route.try_into()?;
-		self.with_state(|state| Ok(state.broadcast.set_route(route)?))
-	}
-
-	/// Set whether the broadcast is announced, keeping the rest of its route (hops, cost).
+	/// Set whether the broadcast's exact path is announced as a route.
 	///
 	/// The origin advertises the path only while announced; an unannounced
 	/// broadcast stays reachable by exact path for subscribes and fetches. This is
 	/// how a publisher goes on and off the air without tearing down the broadcast.
+	/// Errors with `Closed` on a standalone broadcast (no origin to announce on).
 	pub fn set_announce(&self, announce: bool) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let route = state.broadcast.consume().route();
-			Ok(state.broadcast.set_route(route.with_announce(announce))?)
+			let announce_state = state.announce.as_mut().ok_or(MoqError::Closed)?;
+			match (announce, announce_state.announcement.is_some()) {
+				(true, false) => {
+					let route = moq_net::origin::Route::default();
+					announce_state.announcement = Some(announce_state.origin.announce(&announce_state.path, route)?);
+				}
+				(false, true) => announce_state.announcement = None,
+				_ => {}
+			}
+			Ok(())
 		})
 	}
 
@@ -694,7 +710,7 @@ impl MoqTrackProducer {
 	/// Create a consumer that reads from this producer's track.
 	///
 	/// Useful for local pub/sub without going through an origin/broadcast. `subscription`
-	/// tunes delivery priority, group ordering priority, and group range; omit for defaults.
+	/// tunes delivery priority, group range, and staleness; omit for defaults.
 	pub fn consume(&self, subscription: Option<MoqSubscription>) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();

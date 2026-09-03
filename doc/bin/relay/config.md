@@ -71,7 +71,7 @@ runtime serves every connection off one UDP socket.
 # that owns its connection.
 #
 # Linux only. Needs a backend whose connection IDs can name the owning worker,
-# so listen.backend must be quinn (the default) or noq; quiche refuses to start.
+# so listen.backend must be noq (the default) or quinn; quiche refuses to start.
 # Cannot be combined with listen.quic_lb_id, which wants the same bytes of the
 # connection ID.
 #
@@ -87,7 +87,42 @@ workers = 8
 
 # Pin each worker to a CPU core. Default: true.
 pin = true
+
+# Drive the workers with io_uring instead of tokio. Each worker owns a ring
+# with batched UDP (multishot receive with UDP_GRO, UDP_SEGMENT send),
+# userspace timers, and a local task set; authentication and session
+# supervision stay on the shared runtime. Serves browsers (WebTransport) and
+# native peers (raw QUIC) alike, moq-lite sessions only: moq-transport
+# versions are not offered on this listener, and neither is the pre-lite-05
+# SETUP exchange a browser reaches by offering no subprotocol. Requires
+# `workers`, Linux 6.12+, a build with the `io-uring` cargo feature, and
+# exactly one listen.tls certificate, read once at startup (no hot reload
+# yet). Refuses to start anywhere it cannot deliver. Default: false.
+io_uring = false
 ```
+
+The `io-uring` feature is off by default. Prebuilt binaries that ship it say so;
+building it yourself is `cargo build -p moq-relay --features io-uring`.
+
+The `[quic]` section applies to this listener too: `max_streams`,
+`idle_timeout`, `keep_alive`, `congestion_control` and `gso` are honored.
+`qlog` and `mtu_discovery` are not (the datagram path sends a fixed payload,
+so there is nothing to discover), and asking for either is a startup error
+rather than a setting that quietly does nothing.
+
+The same goes for the listener settings this mode cannot deliver: `lb_id`
+(QUIC-LB server ids, which cannot share the connection id with the shard
+prefix), an explicit `backend`, `tls.generate`, more than one certificate, and
+moq-lite 01/02, whose version is negotiated in the SETUP rather than by ALPN.
+Each is refused at startup. `listen.bind` must be named too, rather than
+defaulted: leaving it unset means stream-only when a tcp or unix listener is
+configured, and this mode will not guess.
+
+`tls.root` works here as it does on the tokio listener: a client that presents
+a certificate chaining to one of those roots is authenticated by it, with full
+access within its path's canonical root, and one that presents none falls back
+to the usual token flow. `/certificate.sha256` serves what the workers are
+presenting, so a client can still pin a self-signed relay through it.
 
 The shared runtime is still there for everything that is not QUIC, and it still
 sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the
@@ -563,15 +598,18 @@ environment variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`,
 
 ### \[cache]
 
-Memory budget for cached groups. Old (non-latest) groups stay cached until their
-track's retention window expires, the `duration` ceiling is reached, or the pool
-runs out of room, whichever comes first. Under memory pressure each track evicts
-its own stalest groups as it writes, ordered by when each was last written or
-served from cache, and proportional to how much it writes, so usage converges on
-the budget without any global scan; groups that FETCH requests keep hitting are
-retained over ones nobody reads. The latest group of every track is
-always retained. With none of the knobs set the cache is unbounded and only each
-track's own window limits memory.
+Memory budget for cached groups. Old (non-latest) groups stay cached until they
+sit unaccessed past the wall-clock LRU window (`duration`, 30 seconds by
+default) or the pool runs out of room, whichever comes first. Under memory
+pressure each track evicts its own stalest groups as it writes, ordered by when
+each was last read or written, and proportional to how much it
+writes, so usage converges on the budget without any global scan; groups that
+FETCH requests keep hitting are retained over ones nobody reads. The latest
+group of every track is always retained. With none of the knobs set the cache
+is unbounded in bytes and only the default LRU window limits memory. Each
+track's own retention window (its publisher's max age) is separate: that is
+measured in media timestamps and bounds what subscribers may wait for, not
+when idle memory is reclaimed.
 
 ```toml
 [cache]
@@ -588,21 +626,20 @@ capacity = "8GiB"
 # with `capacity` to also bound the target from above.
 headroom = "2GiB"
 
-# Maximum time a non-latest cached group is retained since it was last written
-# or served from cache by a FETCH ("30s", "500ms"). Caps each track's own
-# retention window: a publisher advertising a longer window is clamped down to
-# this, bounding how much history a track accumulates no matter what upstream
-# asks for. A FETCH cache hit restarts the clock, so actively-read history
-# stays cached. The latest group of every track is always retained, as it is
-# the live edge. Unbounded (each track keeps its own window) when unset.
-duration = "30s"
+# Maximum time a non-latest cached group is retained since it was last read or
+# written ("30s", "500ms"). Sets the pool's wall-clock
+# LRU window (30s when unset), and also clamps each track's media-timestamp
+# retention window, so a publisher advertising a longer window can't promise
+# more history than the relay keeps. A FETCH cache hit restarts the clock, so
+# actively-read history stays cached. The latest group of every track is
+# always retained, as it is the live edge.
+duration = "60s"
 ```
 
 The `capacity` budget counts group payload bytes, not process RSS, so leave
 slack below physical memory (or just use `headroom`, which measures actual
-available memory). `duration` is the age counterpart: it stops a long-running
-relay from accumulating hours of history per track when the byte budget alone
-leaves room for it.
+available memory). `duration` is the age counterpart: it stops idle history
+from pinning memory when the byte budget alone leaves room for it.
 
 All eviction happens as tracks write (there is no background reaper), so both
 `duration` and the byte budget cap how much history *active* publishers build

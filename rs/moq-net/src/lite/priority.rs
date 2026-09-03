@@ -1,18 +1,19 @@
 use std::{
-	cmp::{Ordering, Reverse},
-	collections::{BinaryHeap, HashMap},
-	sync::{Arc, Mutex},
-	task::Poll,
+	cmp::Ordering,
+	collections::BTreeSet,
+	task::{Poll, Waker},
 };
+
+use slab::Slab;
 
 // Hybrid priority queue that provides strict priority ordering for the top 255 items.
 //
 // Design:
 // - Top 255 items are stored in a sorted Vec where index maps directly to priority (0 = highest)
-// - Items beyond 255 go into a BinaryHeap overflow and all report u8::MAX
+// - Items beyond 255 go into a BTreeSet overflow and all report u8::MAX
 // - On insert: binary search into Vec if room, else check if higher priority than lowest in Vec
-// - On remove from Vec: pop highest priority item from overflow heap to backfill
-// - On remove from overflow: rebuild heap (rare case, acceptable O(n) cost)
+// - On remove from Vec: pop highest priority item from overflow to backfill
+// - On remove from overflow: remove its priority-and-id key in O(log n)
 //
 // Priority ordering: higher track value = higher priority, then subscription, then
 // group sequence in that subscription's own direction.
@@ -21,45 +22,25 @@ use std::{
 /// belongs to, and its group sequence.
 ///
 /// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`,
-/// in the direction that subscription asked for: a live subscription transmits the
-/// newest group first, an `Ordered` one the oldest.
+/// newest first, so a congested track sheds its backlog rather than its live edge.
 ///
-/// Scoping the tie-break to a subscription is what keeps `Ordered` from deciding
-/// between tracks. The draft gives that job to `Priority` alone, so a session
-/// carrying an ordered track and a live one at equal priority must interleave them
-/// by priority, not by direction. Comparing the two directions in one space cannot
-/// do that: whichever encoding puts the oldest group on top also puts it above
-/// every group of the other subscription.
+/// Scoping the tie-break to a subscription is what keeps group sequence from deciding
+/// between tracks. The draft gives that job to `Priority` alone, so a session carrying
+/// two tracks at equal priority interleaves them rather than draining one first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priority {
 	track: u8,
 	subscribe: u64,
 	group: u64,
-	/// The owning subscription's `Ordered` preference, which decides which way
-	/// `group` is read. [`PriorityState::set_ordered`] moves a whole
-	/// subscription's groups at once so they agree on it.
-	ordered: bool,
 }
 
 impl Priority {
-	/// Rank for a live (unordered) subscription: the newest group transmits first.
+	/// Rank a group for transmission: the newest group of a track transmits first.
 	pub fn new(track: u8, subscribe: u64, group: u64) -> Self {
 		Self {
 			track,
 			subscribe,
 			group,
-			ordered: false,
-		}
-	}
-
-	/// Rank for an `Ordered` subscription: the oldest group transmits first, so
-	/// back-to-back groups leave the session in sequence order.
-	pub fn ordered(track: u8, subscribe: u64, group: u64) -> Self {
-		Self {
-			track,
-			subscribe,
-			group,
-			ordered: true,
 		}
 	}
 }
@@ -74,19 +55,9 @@ impl Ord for Priority {
 			// stable and independent of either one's direction. The older (lower id)
 			// subscription goes first.
 			.then(self.subscribe.cmp(&other.subscribe))
-			// Normally redundant, since one subscription's groups all carry its
-			// direction. It is here so the comparison below is reached only by two
-			// groups that agree on it, which makes this a total order for every
-			// value rather than only for well-formed ones: reversing the sense for
-			// one side alone is intransitive, and `sort` is documented to be free
-			// to panic on a comparator that does that. Nothing in the protocol
-			// stops a peer opening two SUBSCRIBEs with one id and disagreeing.
-			.then(self.ordered.cmp(&other.ordered))
-			// Both sides agree on the direction, so it can be read off either.
-			.then_with(|| match self.ordered {
-				true => self.group.cmp(&other.group),
-				false => other.group.cmp(&self.group),
-			})
+			// Newest group first, which is what makes a congested track shed its
+			// backlog rather than its live edge.
+			.then(other.group.cmp(&self.group))
 	}
 }
 
@@ -104,7 +75,7 @@ struct PriorityItem {
 
 impl PartialEq for PriorityItem {
 	fn eq(&self, other: &Self) -> bool {
-		self.priority == other.priority
+		self.priority == other.priority && self.id == other.id
 	}
 }
 
@@ -118,25 +89,84 @@ impl PartialOrd for PriorityItem {
 
 impl Ord for PriorityItem {
 	fn cmp(&self, other: &Self) -> Ordering {
-		self.priority.cmp(&other.priority)
+		self.priority.cmp(&other.priority).then(self.id.cmp(&other.id))
 	}
 }
 
-#[derive(Clone, Default)]
+// One lock for the whole queue, and the wakes are the entries' own business, so this
+// is `kio::Lock` rather than a watch channel: there is no single "the state changed"
+// event to publish. A reorder shifts a run of entries but changes the rank of only
+// some of them, and each entry wakes its own group when its rank actually moves.
+#[derive(Clone)]
 pub struct PriorityQueue {
-	state: Arc<Mutex<PriorityState>>,
+	state: kio::Lock<PriorityState>,
+}
+
+impl Default for PriorityQueue {
+	fn default() -> Self {
+		Self {
+			state: kio::Lock::new(PriorityState::default()),
+		}
+	}
 }
 
 impl PriorityQueue {
 	// TODO Implement some sort of round robin between tracks with the same priority.
 	pub fn insert(&self, priority: Priority) -> PriorityHandle {
-		self.state.lock().unwrap().insert(priority, self.clone())
+		self.lock().insert(priority, self.clone())
 	}
 
-	/// Apply a subscription's new `Ordered` preference to the groups it has already
-	/// queued, so a SUBSCRIBE_UPDATE reaches the backlog and not just what follows it.
-	pub fn set_ordered(&self, subscribe: u64, ordered: bool) {
-		self.state.lock().unwrap().set_ordered(subscribe, ordered);
+	/// Lock the queue for a mutation, waking whatever it reranked once the lock is back
+	/// open. Every caller goes through this, so a rerank can't leave a group parked.
+	fn lock(&self) -> Guard<'_> {
+		Guard {
+			lock: &self.state,
+			state: Some(self.state.lock()),
+		}
+	}
+}
+
+/// A locked queue whose drop wakes the groups the mutation reranked.
+///
+/// The wake has to happen with the lock open. A [`Waker`] is allowed to poll its task
+/// inline, and that task's first move is [`PriorityHandle::poll_next`], which takes this
+/// same non-reentrant lock. kio's own channels drain before waking for the same reason.
+struct Guard<'a> {
+	lock: &'a kio::Lock<PriorityState>,
+	// An Option so the lock can be released before the wakers run.
+	state: Option<kio::LockGuard<'a, PriorityState>>,
+}
+
+impl Drop for Guard<'_> {
+	fn drop(&mut self) {
+		let mut state = self.state.take().expect("guard already dropped");
+		if state.pending.is_empty() {
+			return;
+		}
+
+		let mut pending = std::mem::take(&mut state.pending);
+		drop(state);
+
+		for waker in pending.drain(..) {
+			waker.wake();
+		}
+
+		// Hand the buffer back so the next reorder reuses its capacity.
+		self.lock.lock().pending = pending;
+	}
+}
+
+impl std::ops::Deref for Guard<'_> {
+	type Target = PriorityState;
+
+	fn deref(&self) -> &Self::Target {
+		self.state.as_ref().expect("guard already dropped")
+	}
+}
+
+impl std::ops::DerefMut for Guard<'_> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.state.as_mut().expect("guard already dropped")
 	}
 }
 
@@ -144,40 +174,48 @@ const MAX_VEC_SIZE: usize = 255;
 
 enum Location {
 	Vec(usize), // Index in the sorted vec
-	Overflow,   // In the overflow heap
+	Overflow,   // In the overflow set
+}
+
+struct PriorityEntry {
+	location: Location,
+	priority: Priority,
+	/// The rank this entry last published, so a reorder that shifts an entry without
+	/// changing its rank wakes nobody.
+	rank: u8,
+	/// The group serving this entry, parked until its rank moves. One waker rather than
+	/// a `kio::WaiterList`, because exactly one `GroupServe` ever polls an entry, and a
+	/// `kio::Producer` per queued group would be an allocation and a second mutex each.
+	waker: Option<Waker>,
 }
 
 #[derive(Default)]
 struct PriorityState {
 	// Sorted vec for top 255 items (index 0 = highest priority)
 	vec: Vec<PriorityItem>,
-	// Binary heap for overflow items (all report u8::MAX). Wrapped in `Reverse`
-	// because PriorityItem's Ord is itself reversed (higher priority sorts as
-	// less); BinaryHeap is a max-heap, so without the wrapper `pop()` would
-	// return the *lowest*-priority overflow item, not the highest. With the
-	// wrapper, `pop()` returns the next item that should be promoted into vec.
-	overflow: BinaryHeap<Reverse<PriorityItem>>,
-	// Track location and notification channel for each ID
-	indexes: HashMap<usize, (Location, kio::Producer<u8>)>,
-	next_id: usize,
+	// Sorted overflow items, so arbitrary removal and promoting the highest-ranked
+	// item are both O(log n).
+	overflow: BTreeSet<PriorityItem>,
+	// Track location and priority for each reusable ID.
+	entries: Slab<PriorityEntry>,
+	// Wakers the mutation in progress pulled out, woken by `Guard::drop` once the lock
+	// is open. Kept here so its capacity survives across reorders.
+	pending: Vec<Waker>,
 }
 
 impl PriorityState {
 	pub fn insert(&mut self, priority: Priority, myself: PriorityQueue) -> PriorityHandle {
-		let id = self.next_id;
-		self.next_id += 1;
-
-		// Pre-register the channel so `place` can update it via `update_location`.
-		// The initial value is overwritten as soon as `place` decides where the item lands.
-		let tx = kio::Producer::new(u8::MAX);
-		let rx = tx.consume();
-		self.indexes.insert(id, (Location::Overflow, tx));
+		let id = self.entries.insert(PriorityEntry {
+			location: Location::Overflow,
+			priority,
+			rank: u8::MAX,
+			waker: None,
+		});
 		self.place(PriorityItem { id, priority });
 
 		PriorityHandle {
 			id,
 			track: priority.track,
-			rx,
 			seen: u8::MAX,
 			queue: myself,
 		}
@@ -185,34 +223,44 @@ impl PriorityState {
 
 	fn update_indices_from(&mut self, start: usize) {
 		for (idx, item) in self.vec.iter().enumerate().skip(start) {
-			Self::update_location(&mut self.indexes, item.id, Location::Vec(idx));
+			Self::update_location(&mut self.entries, &mut self.pending, item.id, Location::Vec(idx));
 		}
 	}
 
-	fn update_location(indexes: &mut HashMap<usize, (Location, kio::Producer<u8>)>, id: usize, location: Location) {
-		let (loc, tx) = indexes.get_mut(&id).expect("item not in indexes");
-		*loc = location;
+	/// Move an entry, queueing its group for a wake if that changed the rank it reports.
+	///
+	/// Takes the fields rather than `&mut self` so a shift can walk `vec` while writing
+	/// through `entries`. A reorder moves a run of entries and only queues the ones whose
+	/// rank lands somewhere new, which is what keeps a shift from re-polling the session's
+	/// every stream machine.
+	fn update_location(entries: &mut Slab<PriorityEntry>, pending: &mut Vec<Waker>, id: usize, location: Location) {
+		let entry = entries.get_mut(id).expect("item not in entries");
+		entry.location = location;
 
-		let new_priority = match loc {
+		let rank = Self::rank_of(&entry.location);
+		if entry.rank != rank {
+			entry.rank = rank;
+			pending.extend(entry.waker.take());
+		}
+	}
+
+	fn rank_of(location: &Location) -> u8 {
+		match location {
 			Location::Vec(idx) => (*idx).try_into().unwrap_or(u8::MAX),
 			Location::Overflow => u8::MAX,
-		};
-
-		// Only touch the write guard on a real change, so unchanged items don't wake.
-		// Read first and drop the guard: the write below takes the same lock.
-		let current = *tx.read();
-		if current != new_priority
-			&& let Ok(mut value) = tx.write()
-		{
-			*value = new_priority;
 		}
 	}
 
-	// Place an item into vec or overflow based on its priority, updating the HashMap
-	// location and notifying watch channels. The item's id must already be present in
-	// `self.indexes`; the entry's location is overwritten here.
+	fn rank(&self, id: usize) -> u8 {
+		Self::rank_of(&self.entries.get(id).expect("item not in entries").location)
+	}
+
+	// Place an item into vec or overflow based on its priority, updating the entry
+	// location and waking whatever that reranked. The item's id must already be present
+	// in `self.entries`; the entry's location is overwritten here.
 	fn place(&mut self, item: PriorityItem) {
 		let id = item.id;
+		self.entries[id].priority = item.priority;
 
 		if self.vec.len() < MAX_VEC_SIZE {
 			// Note: Ord is reversed (higher priority = "less than"), so `top < item`
@@ -221,24 +269,29 @@ impl PriorityState {
 			// This case only arises via a re-rank: a fresh insert can't reach
 			// here with non-empty overflow because the invariant "every overflow
 			// item has lower priority than every vec item" is maintained on insert.
-			if let Some(Reverse(top)) = self.overflow.peek()
+			if let Some(top) = self.overflow.first()
 				&& *top < item
 			{
-				let Reverse(promoted) = self.overflow.pop().unwrap();
-				self.overflow.push(Reverse(item));
-				Self::update_location(&mut self.indexes, id, Location::Overflow);
+				let promoted = self.overflow.pop_first().unwrap();
+				assert!(self.overflow.insert(item));
+				Self::update_location(&mut self.entries, &mut self.pending, id, Location::Overflow);
 
 				let insert_pos = self.vec.binary_search(&promoted).unwrap_or_else(|pos| pos);
 				let promoted_id = promoted.id;
 				self.vec.insert(insert_pos, promoted);
-				Self::update_location(&mut self.indexes, promoted_id, Location::Vec(insert_pos));
+				Self::update_location(
+					&mut self.entries,
+					&mut self.pending,
+					promoted_id,
+					Location::Vec(insert_pos),
+				);
 				self.update_indices_from(insert_pos + 1);
 				return;
 			}
 
 			let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 			self.vec.insert(insert_pos, item);
-			Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+			Self::update_location(&mut self.entries, &mut self.pending, id, Location::Vec(insert_pos));
 			self.update_indices_from(insert_pos + 1);
 			return;
 		}
@@ -247,26 +300,27 @@ impl PriorityState {
 		// so item > lowest_in_vec means item has lower priority than the tail.
 		let lowest_in_vec = self.vec.last().unwrap();
 		if item > *lowest_in_vec {
-			self.overflow.push(Reverse(item));
-			Self::update_location(&mut self.indexes, id, Location::Overflow);
+			assert!(self.overflow.insert(item));
+			Self::update_location(&mut self.entries, &mut self.pending, id, Location::Overflow);
 			return;
 		}
 
 		// Higher priority than the tail of vec: demote the tail into overflow.
 		let removed = self.vec.pop().unwrap();
-		Self::update_location(&mut self.indexes, removed.id, Location::Overflow);
-		self.overflow.push(Reverse(removed));
+		let removed_id = removed.id;
+		assert!(self.overflow.insert(removed));
+		Self::update_location(&mut self.entries, &mut self.pending, removed_id, Location::Overflow);
 
 		let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 		self.vec.insert(insert_pos, item);
-		Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+		Self::update_location(&mut self.entries, &mut self.pending, id, Location::Vec(insert_pos));
 		self.update_indices_from(insert_pos + 1);
 	}
 
-	// Pull an item out of vec/overflow, returning it. The HashMap entry is left in place;
+	// Pull an item out of vec/overflow, returning it. The slab entry is left in place;
 	// callers must either drop it (true removal) or call `place` again (reinsertion).
 	fn extract(&mut self, id: usize) -> PriorityItem {
-		let (location, _) = self.indexes.get(&id).expect("item not in indexes");
+		let location = &self.entries.get(id).expect("item not in entries").location;
 
 		match location {
 			Location::Vec(idx) => {
@@ -276,90 +330,46 @@ impl PriorityState {
 				item
 			}
 			Location::Overflow => {
-				// BinaryHeap has no O(log N) random removal, so drain and rebuild.
-				// Acceptable because overflow removal is rare (only when handle drops
-				// or a re-rank targets an item that has been demoted past index 254).
-				let mut found = None;
-				let drained: Vec<_> = self.overflow.drain().collect();
-				for Reverse(entry) in drained {
-					if entry.id == id && found.is_none() {
-						found = Some(entry);
-					} else {
-						self.overflow.push(Reverse(entry));
-					}
-				}
-				found.expect("item not found in overflow heap")
+				let priority = self.entries[id].priority;
+				self.overflow
+					.take(&PriorityItem { id, priority })
+					.expect("item not found in overflow set")
 			}
 		}
 	}
 
 	/// Change one item's track priority, leaving the rest of its rank alone.
-	///
-	/// Deliberately narrower than "write back a whole [`Priority`]": a handle's copy
-	/// of the direction goes stale the moment [`Self::set_ordered`] runs, and pushing
-	/// that copy back would resurrect the old direction for a single group.
 	fn set_track(&mut self, id: usize, track: u8) {
 		let mut item = self.extract(id);
 		item.priority.track = track;
 		self.place(item);
 	}
 
-	/// Flip the group direction for every queued group of one subscription.
-	///
-	/// Done wholesale rather than per item because [`Priority`] is only a total order
-	/// while every group of a subscription agrees on its direction. Re-placing them
-	/// one at a time would leave the queue comparing an ordered rank against a live
-	/// one from the same subscription, which is intransitive and would corrupt the
-	/// sorted vec. The flip can also move entries across the vec/overflow boundary,
-	/// so both containers are rebuilt from one sorted snapshot.
-	fn set_ordered(&mut self, subscribe: u64, ordered: bool) {
-		let stale = |item: &PriorityItem| item.priority.subscribe == subscribe && item.priority.ordered != ordered;
-		if !self.vec.iter().any(stale) && !self.overflow.iter().any(|Reverse(item)| stale(item)) {
-			return;
-		}
-
-		let mut items = std::mem::take(&mut self.vec);
-		items.extend(self.overflow.drain().map(|Reverse(item)| item));
-		for item in &mut items {
-			if item.priority.subscribe == subscribe {
-				item.priority.ordered = ordered;
-			}
-		}
-		items.sort();
-
-		let overflow = items.split_off(items.len().min(MAX_VEC_SIZE));
-		self.vec = items;
-		self.update_indices_from(0);
-		for item in overflow {
-			let id = item.id;
-			self.overflow.push(Reverse(item));
-			Self::update_location(&mut self.indexes, id, Location::Overflow);
-		}
-	}
-
 	fn remove(&mut self, id: usize) {
-		let was_in_vec = matches!(self.indexes.get(&id), Some((Location::Vec(_), _)));
+		let was_in_vec = matches!(
+			self.entries.get(id).map(|entry| &entry.location),
+			Some(Location::Vec(_))
+		);
 		self.extract(id);
-		self.indexes.remove(&id);
+		self.entries.remove(id);
 
 		// If we removed from vec, promote the highest-priority overflow item to backfill.
 		// The overflow item still has lower priority than every existing vec entry, so it
 		// belongs at the tail and the vec stays sorted.
-		if was_in_vec && let Some(Reverse(overflow_item)) = self.overflow.pop() {
+		if was_in_vec && let Some(overflow_item) = self.overflow.pop_first() {
 			let overflow_id = overflow_item.id;
 			self.vec.push(overflow_item);
-			Self::update_location(&mut self.indexes, overflow_id, Location::Vec(self.vec.len() - 1));
+			let tail = self.vec.len() - 1;
+			Self::update_location(&mut self.entries, &mut self.pending, overflow_id, Location::Vec(tail));
 		}
 	}
 }
 
 pub struct PriorityHandle {
 	id: usize,
-	/// This item's track priority, the only part of its rank a handle owns. The
-	/// rest lives in the queue, which [`PriorityQueue::set_ordered`] can change
-	/// underneath us.
+	/// This item's track priority, the only part of its rank a handle owns; the
+	/// rest is fixed when the item is queued.
 	track: u8,
-	rx: kio::Consumer<u8>,
 	/// Last value observed via [`current`](Self::current)/[`next`](Self::next), so
 	/// `next` fires only on a real change.
 	seen: u8,
@@ -368,43 +378,51 @@ pub struct PriorityHandle {
 
 impl Drop for PriorityHandle {
 	fn drop(&mut self) {
-		self.queue.state.lock().unwrap().remove(self.id);
+		self.queue.lock().remove(self.id);
 	}
 }
 
 impl PriorityHandle {
 	pub fn current(&mut self) -> u8 {
-		self.seen = *self.rx.read();
-		self.seen
+		let rank = self.queue.state.lock().rank(self.id);
+		self.seen = rank;
+		rank
 	}
 
-	/// The current rank as a transport send order, where HIGHER values are
-	/// transmitted first (the W3C `sendOrder` / quinn convention, and the model's
+	/// A queue rank as a transport send order, where HIGHER values are transmitted
+	/// first (the W3C `sendOrder` / quinn convention, and the model's
 	/// `Subscription::priority` semantics). The queue rank is the opposite
-	/// (0 = most urgent), so this is where the two conventions meet.
-	pub fn send_order(&mut self) -> u8 {
-		u8::MAX - self.current()
+	/// (0 = most urgent), so this is the one place the two conventions meet; every
+	/// other rank this handle hands out stays in the queue's own direction.
+	pub fn send_order_of(rank: u8) -> u8 {
+		u8::MAX - rank
 	}
 
-	/// Poll for a priority change since the last observed value.
-	///
-	/// The queue holds the producer while this handle is registered, so closure is
-	/// unreachable; it parks rather than spinning a caller's poll loop.
+	/// This item's current rank as a send order.
+	pub fn send_order(&mut self) -> u8 {
+		Self::send_order_of(self.current())
+	}
+
+	/// Poll for a rank change since the last observed value.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<u8> {
-		let seen = self.seen;
-		match self.rx.poll(waiter, |value| {
-			if **value != seen {
-				Poll::Ready(**value)
-			} else {
-				Poll::Pending
+		// A plain read lock: parking stores a waker, which is not a rerank, so nothing
+		// here can queue a wake and the `Guard` would have nothing to do.
+		let mut state = self.queue.state.lock();
+		let entry = state.entries.get_mut(self.id).expect("item not in entries");
+
+		if entry.rank == self.seen {
+			let waker = waiter.waker();
+			if !entry.waker.as_ref().is_some_and(|parked| parked.will_wake(waker)) {
+				entry.waker = Some(waker.clone());
 			}
-		}) {
-			Poll::Ready(Ok(value)) => {
-				self.seen = value;
-				Poll::Ready(value)
-			}
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+			return Poll::Pending;
 		}
+
+		let rank = entry.rank;
+		drop(state);
+
+		self.seen = rank;
+		Poll::Ready(rank)
 	}
 
 	#[cfg(test)]
@@ -412,19 +430,33 @@ impl PriorityHandle {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Change this item's track priority and re-sort the queue.
+	/// Change this item's track priority and re-sort the queue, returning its new rank.
 	/// No-op if the track value hasn't changed.
-	pub fn set_track(&mut self, new_track: u8) {
+	pub fn set_track(&mut self, new_track: u8) -> u8 {
 		if self.track == new_track {
-			return;
+			return self.current();
 		}
 		self.track = new_track;
-		self.queue.state.lock().unwrap().set_track(self.id, new_track);
+
+		let rank = {
+			let mut state = self.queue.lock();
+			state.set_track(self.id, new_track);
+			state.rank(self.id)
+		};
+
+		self.seen = rank;
+		rank
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering as AtomicOrdering},
+	};
+	use std::task::Wake;
+
 	use super::*;
 
 	/// A live subscription's group rank, on the one subscription these tests share.
@@ -434,9 +466,91 @@ mod tests {
 		Priority::new(track, 0, group)
 	}
 
-	/// The same, for a subscription that asked for `Ordered`.
-	fn older_first(track: u8, group: u64) -> Priority {
-		Priority::ordered(track, 0, group)
+	struct WakeCount(AtomicUsize);
+
+	impl Wake for WakeCount {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, AtomicOrdering::Relaxed);
+		}
+	}
+
+	/// Park every handle on a waiter of its own, the way `kio::Tasks` gives each
+	/// group serve its own slot waker. A shared waiter would dedup the wakes and hide
+	/// exactly what these assert.
+	struct Parked {
+		handles: Vec<PriorityHandle>,
+		wakes: Vec<Arc<WakeCount>>,
+		waiters: Vec<kio::Waiter>,
+	}
+
+	impl Parked {
+		fn new(handles: Vec<PriorityHandle>) -> Self {
+			let wakes: Vec<_> = handles
+				.iter()
+				.map(|_| Arc::new(WakeCount(AtomicUsize::new(0))))
+				.collect();
+			let waiters = wakes
+				.iter()
+				.map(|wake| kio::Waiter::new(std::task::Waker::from(wake.clone())))
+				.collect();
+
+			let mut parked = Self {
+				handles,
+				wakes,
+				waiters,
+			};
+			parked.park();
+			parked
+		}
+
+		fn park(&mut self) {
+			for (handle, waiter) in self.handles.iter_mut().zip(&self.waiters) {
+				handle.current();
+				assert!(handle.poll_next(waiter).is_pending());
+			}
+		}
+
+		fn counts(&self) -> Vec<usize> {
+			self.wakes.iter().map(|w| w.0.load(AtomicOrdering::Relaxed)).collect()
+		}
+	}
+
+	/// A group whose rank didn't move must not be re-polled. Every queued group parks on
+	/// its own waker, so a queue-wide notification would drag every stream machine in the
+	/// session through a pass that finds nothing changed.
+	#[test]
+	fn a_reorder_wakes_only_the_ranks_that_moved() {
+		let queue = PriorityQueue::default();
+		let parked = Parked::new((0..64).map(|group| queue.insert(live(100, group))).collect());
+
+		// Lowest priority yet, so it lands at the tail and shifts nobody.
+		let tail = queue.insert(live(50, 0));
+		assert_eq!(parked.counts(), vec![0; 64], "a tail insert moved no other rank");
+
+		// Highest priority yet, so every existing entry shifts down one.
+		let front = queue.insert(live(u8::MAX, u64::MAX));
+		assert_eq!(parked.counts(), vec![1; 64], "a front insert moved every other rank");
+
+		drop((tail, front));
+	}
+
+	/// Overflow entries all report `u8::MAX`, so removing one changes nobody's rank.
+	#[test]
+	fn an_overflow_removal_wakes_nobody() {
+		let queue = PriorityQueue::default();
+		let fillers = (0..MAX_VEC_SIZE as u64).map(|group| queue.insert(live(200, group)));
+		let overflow = (0..2).map(|group| queue.insert(live(100, group)));
+		let mut parked = Parked::new(fillers.chain(overflow).collect());
+
+		let doomed = parked.handles.pop().expect("overflow handle");
+		assert_eq!(doomed.seen, u8::MAX, "the dropped entry was in overflow");
+		drop(doomed);
+
+		let survivors = &parked.counts()[..parked.handles.len()];
+		assert!(
+			survivors.iter().all(|&count| count == 0),
+			"an overflow removal woke {survivors:?}"
+		);
 	}
 
 	#[test]
@@ -491,96 +605,12 @@ mod tests {
 		assert_eq!(group1.current(), 2);
 	}
 
+	/// `Ord` has to hold for every value: the queue sorts a shared vec, and a
+	/// comparator that says `a < b` and `b < a` is free to panic `sort`.
 	#[test]
-	fn test_ordered_prefers_older_groups() {
-		let queue = PriorityQueue::default();
-
-		// Same track priority, ordered subscription: sequence order wins.
-		let mut group1 = queue.insert(older_first(100, 1));
-		let mut group5 = queue.insert(older_first(100, 5));
-		let mut group10 = queue.insert(older_first(100, 10));
-
-		assert_eq!(group1.current(), 0);
-		assert_eq!(group5.current(), 1);
-		assert_eq!(group10.current(), 2);
-	}
-
-	/// `Ordered` chooses between a subscription's own groups, never between
-	/// subscriptions. One queue serves the whole session, so an ordered rank and a
-	/// live rank meet here constantly; if the direction were compared across them,
-	/// every ordered group would outrank every live one at the same priority and
-	/// starve a live track that shares the session.
-	#[test]
-	fn test_ordered_does_not_outrank_a_live_subscription() {
-		let queue = PriorityQueue::default();
-
-		// Same track priority: one live subscription, one that asked for Ordered.
-		let mut live_new = queue.insert(Priority::new(100, 0, 2));
-		let mut live_old = queue.insert(Priority::new(100, 0, 1));
-		let mut ordered_old = queue.insert(Priority::ordered(100, 1, 1));
-		let mut ordered_new = queue.insert(Priority::ordered(100, 1, 2));
-
-		// The subscriptions stay whole and in id order; neither one's direction
-		// promotes it past the other.
-		assert_eq!(live_new.current(), 0);
-		assert_eq!(live_old.current(), 1);
-		assert_eq!(ordered_old.current(), 2);
-		assert_eq!(ordered_new.current(), 3);
-	}
-
-	/// A subscription that flips to `Ordered` mid-stream means it about the groups
-	/// already queued for it, not just the ones that follow. Leaving the backlog on
-	/// the old direction would let every new group outrank exactly the groups the
-	/// subscriber just asked to receive first.
-	#[test]
-	fn test_set_ordered_reranks_the_backlog() {
-		let queue = PriorityQueue::default();
-
-		let mut group1 = queue.insert(live(100, 1));
-		let mut group2 = queue.insert(live(100, 2));
-		let mut group3 = queue.insert(live(100, 3));
-		assert_eq!((group3.current(), group2.current(), group1.current()), (0, 1, 2));
-
-		queue.set_ordered(0, true);
-		assert_eq!((group1.current(), group2.current(), group3.current()), (0, 1, 2));
-
-		// And back: the direction is not a one-way door.
-		queue.set_ordered(0, false);
-		assert_eq!((group3.current(), group2.current(), group1.current()), (0, 1, 2));
-	}
-
-	/// The flip can move an entry across the vec/overflow boundary, so both sides
-	/// are rebuilt: the oldest groups start out demoted past index 254 and have to
-	/// come back as the top of the queue.
-	#[test]
-	fn test_set_ordered_promotes_across_the_overflow_boundary() {
-		let queue = PriorityQueue::default();
-
-		let total = MAX_VEC_SIZE + 50;
-		let mut handles: Vec<_> = (0..total as u64).map(|group| queue.insert(live(100, group))).collect();
-
-		// Live ranks newest first, so the oldest groups sit in overflow.
-		assert_eq!(handles[total - 1].current(), 0);
-		assert_eq!(handles[0].current(), u8::MAX);
-
-		queue.set_ordered(0, true);
-
-		// Ordered inverts it: the oldest group leads and the newest is demoted.
-		assert_eq!(handles[0].current(), 0);
-		assert_eq!(handles[1].current(), 1);
-		assert_eq!(handles[total - 1].current(), u8::MAX);
-	}
-
-	/// `Ord` has to hold for every value, not just the ones a well-behaved peer
-	/// produces. Nothing stops a peer opening two SUBSCRIBEs with the same id and
-	/// opposite `Ordered`, which lands both directions under one subscribe id, and
-	/// a comparator that says `a < b` and `b < a` is free to panic `sort`.
-	#[test]
-	fn test_ord_is_total_across_mixed_directions() {
+	fn test_ord_is_total() {
 		let mixed = [
-			Priority::ordered(100, 7, 1),
 			Priority::new(100, 7, 1),
-			Priority::ordered(100, 7, 2),
 			Priority::new(100, 7, 2),
 			Priority::new(100, 8, 1),
 			Priority::new(200, 7, 1),
@@ -598,22 +628,6 @@ mod tests {
 				}
 			}
 		}
-	}
-
-	/// A flip must not disturb a subscription that did not ask for one.
-	#[test]
-	fn test_set_ordered_leaves_other_subscriptions_alone() {
-		let queue = PriorityQueue::default();
-
-		let mut other_new = queue.insert(Priority::new(100, 7, 2));
-		let mut other_old = queue.insert(Priority::new(100, 7, 1));
-		let mut mine = queue.insert(Priority::new(100, 9, 1));
-
-		queue.set_ordered(9, true);
-
-		assert_eq!(other_new.current(), 0, "an untouched subscription keeps newest-first");
-		assert_eq!(other_old.current(), 1);
-		assert_eq!(mine.current(), 2);
 	}
 
 	#[test]

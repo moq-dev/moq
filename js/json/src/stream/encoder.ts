@@ -1,4 +1,4 @@
-import { Encoder as Flate } from "@moq/flate";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface ProducerConfig {
@@ -99,6 +99,13 @@ export class Encoder<T> {
 		}
 
 		const bytes = new TextEncoder().encode(text);
+
+		// Every consumer decodes with `@moq/flate`'s default output cap, so a record past it would be
+		// unreadable however small it compresses to. Reject it here, where the caller still learns
+		// why, rather than publishing something only the producer can read.
+		if (this.#compress && bytes.byteLength > DEFAULT_MAX_FRAME_SIZE) {
+			throw new Error(`record larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
+		}
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
 		this.#pending = true;

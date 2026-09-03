@@ -9,7 +9,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use moq_relay::{Config, PublicConfig, Relay};
-use moq_tokio::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 4;
@@ -99,21 +99,18 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let mut workers = relay.workers.expect("workers configured");
 	let mut tasks = Vec::new();
 	for (server, spawner) in workers.split() {
-		tasks.push(spawner.run(moq_relay::serve(
-			server,
-			cluster.clone(),
-			auth.clone(),
-			shutdown.clone(),
-		)));
+		let cluster = cluster.clone();
+		let auth = auth.clone();
+		let shutdown = shutdown.clone();
+		tasks.push(spawner.run(move || moq_relay::serve(server, cluster, auth, shutdown)));
 	}
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
 
 	// ── publisher ───────────────────────────────────────────────────
-	let origin = moq_tokio::origin::spawn(Origin::random());
-	let mut broadcast = origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
-		.expect("create broadcast");
+	let origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -126,19 +123,24 @@ async fn workers_serve_quic_and_share_one_origin() {
 	// ── subscribers ─────────────────────────────────────────────────
 	let mut subscribers = Vec::new();
 	for _ in 0..WORKERS {
-		let origin = moq_tokio::origin::spawn(Origin::random());
-		let announced = origin.consume().announced();
+		let origin = moq_tokio::origin::spawn(Hop::random());
+		let consumer = origin.consume();
+		let announced = consumer.announced();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
-		subscribers.push((connection, announced));
+		subscribers.push((connection, consumer, announced));
 	}
 
-	for (index, (_connection, announced)) in subscribers.iter_mut().enumerate() {
-		let moq_net::announce::Update { path, broadcast } = tokio::time::timeout(TIMEOUT, announced.next())
+	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
-		assert_eq!(path.as_str(), "test");
-		let broadcast = broadcast.expect("expected announce, got unannounce");
+		assert_eq!(update.prefix.as_path().as_str(), "test");
+		assert!(update.active, "expected announce, got retraction");
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+			.await
+			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
+			.expect("announced broadcast resolves");
 
 		let mut subscription = broadcast
 			.track("video")

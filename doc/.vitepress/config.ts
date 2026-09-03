@@ -72,9 +72,9 @@ export default defineConfig({
 					items: [
 						{ text: "Development", link: "/setup/dev" },
 						{ text: "Production", link: "/setup/prod" },
-						{ text: "AI Agents", link: "/setup/agent" },
-						{ text: "Linux Packages", link: "/setup/linux" },
+						{ text: "Linux", link: "/setup/linux" },
 						{ text: "Windows", link: "/setup/windows" },
+						{ text: "Coding agents", link: "/setup/agent" },
 					],
 				},
 				{
@@ -121,7 +121,6 @@ export default defineConfig({
 								{ text: "Distribution", link: "/concept/use-case/distribution" },
 								{ text: "Conferencing", link: "/concept/use-case/conferencing" },
 								{ text: "AI", link: "/concept/use-case/ai" },
-								{ text: "Other", link: "/concept/use-case/other" },
 							],
 						},
 					],
@@ -149,16 +148,26 @@ export default defineConfig({
 								{ text: "Authentication", link: "/bin/relay/auth" },
 								{ text: "Clustering", link: "/bin/relay/cluster" },
 								{ text: "HTTP", link: "/bin/relay/http" },
-								{ text: "Production", link: "/bin/relay/prod" },
+								{ text: "Deployment", link: "/setup/prod" },
 							],
 						},
 						{ text: "CLI", link: "/bin/cli" },
-						{ text: "WebRTC", link: "/bin/rtc" },
-						{ text: "RTMP", link: "/bin/rtmp" },
-						{ text: "OBS", link: "/bin/obs" },
-						{ text: "GStreamer", link: "/bin/gstreamer" },
-						{ text: "HLS", link: "/bin/hls" },
-						{ text: "Web", link: "/bin/web" },
+						{
+							text: "Gateways",
+							items: [
+								{ text: "HLS", link: "/bin/hls" },
+								{ text: "RTMP", link: "/bin/rtmp" },
+								{ text: "WebRTC", link: "/bin/rtc" },
+							],
+						},
+						{
+							text: "Integrations",
+							items: [
+								{ text: "OBS", link: "/bin/obs" },
+								{ text: "GStreamer", link: "/bin/gstreamer" },
+								{ text: "Web demo", link: "/bin/web" },
+							],
+						},
 					],
 				},
 			],
@@ -202,7 +211,6 @@ export default defineConfig({
 							items: [
 								{
 									text: "Environments",
-									link: "/lib/js/env/",
 									items: [
 										{ text: "Web", link: "/lib/js/env/web" },
 										{ text: "Native", link: "/lib/js/env/native" },
@@ -210,7 +218,6 @@ export default defineConfig({
 								},
 								{
 									text: "Packages",
-									link: "/lib/js/@moq",
 									items: [
 										{ text: "@moq/net", link: "/lib/js/@moq/net" },
 										{ text: "@moq/hang", link: "/lib/js/@moq/hang" },

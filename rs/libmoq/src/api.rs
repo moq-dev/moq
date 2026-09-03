@@ -426,10 +426,6 @@ pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	pub priority: u8,
 
-	/// Whether groups are prioritized in sequence order.
-	/// Groups may always arrive out-of-order (or not at all) over the network.
-	pub ordered: bool,
-
 	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
 	/// The publisher-side half of `moq_subscription.max_age_ms`.
 	pub max_age_ms: u64,
@@ -451,8 +447,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		// timestamp_us units. An explicit timescale below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority)
-			.with_ordered(info.ordered);
+			.with_priority(info.priority);
 		if info.max_age_present {
 			out = out.with_max_age(std::time::Duration::from_millis(info.max_age_ms));
 		}
@@ -473,17 +468,15 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Whether groups are prioritized in sequence order.
-	/// Groups may always arrive out-of-order (or not at all) over the network.
-	pub ordered: bool,
-
 	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
 	pub max_age_ms: u64,
 
-	/// First group to deliver.
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_ms` is
+	/// what asks for data, and delivery starts at the oldest group at or above the floor
+	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
-	/// Whether `group_start` is present. When false, delivery starts at the latest group.
+	/// Whether `group_start` is present. When false, there is no floor.
 	pub group_start_present: bool,
 
 	/// Last group to deliver, inclusive.
@@ -496,7 +489,6 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
-			.with_ordered(subscription.ordered)
 			.with_max_age(std::time::Duration::from_millis(subscription.max_age_ms));
 		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
@@ -785,7 +777,7 @@ fn millis(duration: std::time::Duration) -> u64 {
 pub struct moq_client_config {
 	/// Protocol versions to offer during the handshake, most preferred first.
 	/// NULL/0 offers everything this build supports. Names are spelled the way
-	/// the CLI spells them (`moq-lite-05`, `moq-transport-19`); [moq_versions]
+	/// the CLI spells them (`moq-lite-05`, `moq-transport-20`); [moq_versions]
 	/// lists what is on offer.
 	pub versions: *const moq_string,
 	pub versions_len: usize,
@@ -1125,8 +1117,8 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 		let path = unsafe { ffi::parse_str(path, path_len)? };
 
 		let mut state = State::lock();
-		let broadcast = state.origin.publish(origin, path)?;
-		state.publish.create(broadcast)
+		let (broadcast, origin, path, announcement) = state.origin.publish(origin, path)?;
+		state.publish.create(broadcast, origin, path, announcement)
 	})
 }
 

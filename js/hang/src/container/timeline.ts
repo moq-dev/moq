@@ -57,9 +57,12 @@ export const DEFAULT_TIMESCALE = 1000;
  */
 export const DEFAULT_DURATION_MIN_MS = 1000;
 
+/** Recent segment records repeated when the Window track rolls to a new group. */
+const CHECKPOINT_RECORDS = 256;
+
 /**
  * The conventional name for a broadcast's timeline track (the `.z` marks the
- * DEFLATE-compressed stream, like the catalog's `.json.z` sibling). The actual name is read
+ * DEFLATE-compressed window, like the catalog's `.json.z` sibling). The actual name is read
  * from the catalog's root `timeline` section, so this is only a default.
  */
 export const DEFAULT_NAME = "timeline.z";
@@ -119,7 +122,7 @@ interface TrackState {
 
 /**
  * Publishes the broadcast's timeline track: one JSON record per complete segment,
- * DEFLATE-compressed (a `@moq/json` stream), plus the shared boundary list every media track's
+ * DEFLATE-compressed (a `@moq/json` Window), plus the shared boundary list every media track's
  * groups map onto.
  *
  * One per broadcast. Tracks enroll with {@link track}; continuous media explicitly opts into
@@ -128,7 +131,7 @@ interface TrackState {
  * Advertise it in the catalog's root `timeline` section via {@link section}.
  */
 export class Producer {
-	#stream: Json.Stream.Producer<Record>;
+	#window: Json.Window.Producer<Record>;
 	#trackName: string;
 	#durationMinUs: number;
 	#durationMaxUs?: number;
@@ -159,7 +162,10 @@ export class Producer {
 			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
 			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
 		}
-		this.#stream = new Json.Stream.Producer<Record>(track, { compression: true });
+		this.#window = new Json.Window.Producer<Record>(track, {
+			compression: true,
+			checkpointRecords: CHECKPOINT_RECORDS,
+		});
 	}
 
 	/**
@@ -283,7 +289,7 @@ export class Producer {
 			}
 		}
 
-		this.#stream.finish();
+		this.#window.finish();
 	}
 
 	/** @internal A group open reported by a {@link Recorder}. */
@@ -428,7 +434,7 @@ export class Producer {
 				);
 				// End the track rather than drop it: the records published before the promise
 				// broke are still true, and a consumer that has them should keep them.
-				this.#stream.finish();
+				this.#window.finish();
 				return;
 			}
 		}
@@ -465,7 +471,7 @@ export class Producer {
 		}
 		if (any) record.tracks = tracks;
 
-		this.#stream.append(record);
+		this.#window.push(record);
 	}
 }
 

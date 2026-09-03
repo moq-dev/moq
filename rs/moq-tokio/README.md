@@ -12,7 +12,7 @@ Tokio-based connection helpers for native [Media over QUIC](https://moq.dev) app
 
 Establishes MoQ connections over a few different transports, selectable via cargo features:
 
-- **WebTransport** (HTTP/3) via [quinn](https://crates.io/crates/quinn) (default) or [quiche](https://crates.io/crates/quiche)
+- **WebTransport** (HTTP/3) via [noq](https://crates.io/crates/noq) (default), [quinn](https://crates.io/crates/quinn), or [quiche](https://crates.io/crates/quiche)
 - **Raw QUIC** with ALPN negotiation
 - **WebSocket** as a fallback when QUIC isn't available
 - **Iroh** P2P (`iroh` feature)

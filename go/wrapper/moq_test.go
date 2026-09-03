@@ -267,11 +267,19 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann.Path() != "live" {
 		t.Fatalf("path = %q, want %q", ann.Path(), "live")
 	}
-	if route := ann.Broadcast().Route(); len(route.Hops) != 0 {
+	if !ann.Active() {
+		t.Fatal("expected an active announcement")
+	}
+	if route := ann.Route(); len(route.Hops) != 0 {
 		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
-	catalog, err := ann.Broadcast().Catalog(ctx)
+	bc, err := consumer.RequestBroadcast(ann.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, err := bc.Catalog(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +296,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, nil)
+	mediaConsumer, err := bc.SubscribeMedia(trackName, audio.Container, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

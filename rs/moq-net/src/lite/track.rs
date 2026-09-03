@@ -49,9 +49,6 @@ impl Message for Track<'_> {
 pub struct TrackInfo {
 	/// The publisher's tie-break priority for this track.
 	pub priority: u8,
-	/// Whether groups are prioritized in sequence order. Groups may always arrive
-	/// out-of-order (or not at all) over the network.
-	pub ordered: bool,
 	/// Publisher Max Age: an upper bound on how long the publisher caches a
 	/// non-latest group past the arrival of a newer one. Encoded as milliseconds.
 	pub max_age: Duration,
@@ -67,13 +64,12 @@ impl Message for TrackInfo {
 		}
 
 		let priority = u8::decode(r, version)?;
-		let ordered = u8::decode(r, version)? != 0;
+		super::subscribe::skip_group_order(r, version)?;
 		let max_age = Duration::decode(r, version)?;
 		let timescale = Timescale::new(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			priority,
-			ordered,
 			max_age,
 			timescale,
 		})
@@ -85,7 +81,7 @@ impl Message for TrackInfo {
 		}
 
 		self.priority.encode(w, version)?;
-		(self.ordered as u8).encode(w, version)?;
+		super::subscribe::pad_group_order(w, version)?;
 		self.max_age.encode(w, version)?;
 		u64::from(self.timescale).encode(w, version)?;
 		Ok(())
@@ -99,7 +95,6 @@ mod test {
 	fn info_sample() -> TrackInfo {
 		TrackInfo {
 			priority: 7,
-			ordered: false,
 			max_age: Duration::from_millis(2000),
 			timescale: Timescale::MICRO,
 		}
@@ -116,7 +111,6 @@ mod test {
 	fn track_info_roundtrips_on_lite05() {
 		let got = info_roundtrip(Version::Lite05, &info_sample());
 		assert_eq!(got.priority, 7);
-		assert!(!got.ordered);
 		assert_eq!(got.max_age, Duration::from_millis(2000));
 		assert_eq!(got.timescale, Timescale::MICRO);
 	}
@@ -133,7 +127,6 @@ mod test {
 		let info = crate::track::Info::default();
 		let info = TrackInfo {
 			priority: info.priority,
-			ordered: info.ordered,
 			max_age: info.max_age,
 			timescale: info.timescale,
 		};

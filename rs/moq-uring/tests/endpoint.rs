@@ -1,10 +1,11 @@
 //! Endpoint mechanics the session tests don't reach: one socket dialing and
-//! accepting at once, version negotiation, and the dial-only refusal.
+//! accepting at once, version negotiation, the dial-only refusal, and how a
+//! close is reported.
 //!
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 
 #[path = "support/quiche.rs"]
 mod support;
@@ -12,7 +13,7 @@ mod support;
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
@@ -29,9 +30,11 @@ fn worker() -> Option<Worker> {
 }
 
 const ALPN: &str = "moq-uring-test";
+const CLOSE_CODE: u32 = 42;
+const CLOSE_REASON: &str = "bye";
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	let mut config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	config.alpn = vec![ALPN.to_string()];
 	config
 }
@@ -84,6 +87,49 @@ fn dial_and_accept_share_one_socket() {
 		.expect("worker");
 }
 
+/// A close reaches both ends carrying the code and reason it was given. The
+/// closer reads its own close back out of `poll_closed`, which is what moq's
+/// session machine waits on, and the peer reads the same one off the wire.
+#[test]
+fn a_close_reaches_both_ends_with_its_code() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		&handle,
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client =
+		quic::Endpoint::new(&handle, socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			dialed.close(CLOSE_CODE, CLOSE_REASON);
+
+			for (end, conn) in [("closer", &mut dialed), ("peer", &mut accepted)] {
+				match std::future::poll_fn(|cx| conn.poll_closed(cx)).await {
+					quic::Error::App { code, reason } => {
+						assert_eq!(code, u64::from(CLOSE_CODE), "{end} close code");
+						assert_eq!(reason, CLOSE_REASON, "{end} close reason");
+					}
+					other => panic!("{end} expected an application close, got {other:?}"),
+				}
+			}
+		})
+		.expect("worker");
+}
+
 /// A server negotiates an unsupported version, while a dial-only endpoint and
 /// junk stay silent.
 #[test]
@@ -123,8 +169,21 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 			let sock = UdpSocket::bind("127.0.0.1:0")?;
 			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-			// Junk first: it must be ignored, not answered or fatal.
-			sock.send_to(&[0u8; 64], server)?;
+			// Junk first: it must not be fatal, and whatever answer it draws
+			// must be smaller than it was, so the socket is never an
+			// amplifier. quiche stays silent; quinn answers a packet naming
+			// no connection with a stateless reset, which is what tells a
+			// peer holding stale state to give up.
+			let junk = [0u8; 64];
+			sock.send_to(&junk, server)?;
+			sock.set_read_timeout(Some(Duration::from_millis(200)))?;
+			let mut answer = [0u8; 1500];
+			match sock.recv_from(&mut answer) {
+				Ok((len, _)) => anyhow::ensure!(len < junk.len(), "a junk datagram drew {len} bytes back"),
+				Err(err) if timed_out(&err) => {}
+				Err(err) => return Err(err.into()),
+			}
+			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
 
 			// The long-header type bits are version-specific. Use bits that mean
 			// 0-RTT in v1 to prove we negotiate before interpreting them.
@@ -149,11 +208,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 			sock.send_to(&packet, dial_only_addr)?;
 			let mut unexpected = [0u8; 1500];
 			match sock.recv_from(&mut unexpected) {
-				Err(err)
-					if matches!(
-						err.kind(),
-						std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-					) => {}
+				Err(err) if timed_out(&err) => {}
 				Err(err) => return Err(err.into()),
 				Ok((len, from)) => anyhow::bail!("dial-only endpoint answered {len} bytes from {from}"),
 			}
@@ -189,6 +244,96 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	drop((endpoint, dial_only));
 }
 
+/// Await `future`, failing loudly rather than hanging if it never resolves.
+async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<Output = T>) -> T {
+	let mut deadline = moq_net::runtime::Deadline::after(handle, Duration::from_secs(5));
+	let mut future = std::pin::pin!(future);
+	kio::wait(|waiter| {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+			return Poll::Ready(Some(value));
+		}
+		deadline.poll(waiter).map(|()| None)
+	})
+	.await
+	.unwrap_or_else(|| panic!("timed out waiting for {what}"))
+}
+
+/// A peer's stop reaches the send half of the stream it accepted.
+///
+/// The stop can be processed before or after the application takes the
+/// stream, depending on how the driver's sweep interleaves with the accept,
+/// and `poll_closed` has to report it either way rather than waiting for an
+/// event that has already been and gone.
+#[test]
+fn a_peer_stop_reaches_the_accepted_stream() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		&handle,
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client =
+		quic::Endpoint::new(&handle, socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			// Held, not dropped: dropping the send half would reset it, and
+			// the peer would then see a reset rather than the stop.
+			let (mut send, mut recv) = std::future::poll_fn(|cx| dialed.poll_open_bi(cx))
+				.await
+				.expect("open_bi");
+			// One byte, so both backends surface the stream: quiche queues an
+			// incoming stream for accept when it becomes readable, not when it
+			// is created. Nothing is awaited between the write and the stop, so
+			// both frames leave in the same flush and land in the same sweep.
+			std::future::poll_fn(|cx| send.poll_write(cx, b"x"))
+				.await
+				.expect("write");
+			recv.stop(CLOSE_CODE);
+
+			let (mut send, _recv) = within(
+				&handle,
+				"the stopped stream to arrive",
+				std::future::poll_fn(|cx| accepted.poll_accept_bi(cx)),
+			)
+			.await
+			.expect("accept_bi");
+
+			match within(
+				&handle,
+				"the stop to be reported",
+				std::future::poll_fn(|cx| send.poll_closed(cx)),
+			)
+			.await
+			{
+				Err(quic::Error::Stop(code)) => assert_eq!(code, u64::from(CLOSE_CODE), "stop code"),
+				other => panic!("expected the peer's stop, got {other:?}"),
+			}
+		})
+		.expect("worker");
+}
+
+/// A read timeout, which the platform spells one of two ways.
+fn timed_out(err: &std::io::Error) -> bool {
+	matches!(
+		err.kind(),
+		std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+	)
+}
+
 /// A dial nobody answers must time out rather than hang: with no ingress ever
 /// arriving, the driver's own deadline is the only thing that can wake it, so
 /// this fails if the deadline is armed without a registered waiter (the driver
@@ -206,7 +351,7 @@ fn an_unanswered_dial_times_out() {
 	let mut dial = dial_config(hole.local_addr().expect("addr"));
 	// quiche stretches this to 3x the initial probe timeout (RFC 9000 §10.1),
 	// so the dial resolves in about three seconds.
-	dial.idle_timeout = Duration::from_millis(500);
+	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
@@ -245,7 +390,7 @@ fn the_backlog_bounds_pending_handshakes() {
 	let mut dial = dial_config(server);
 	// The server never answers, so the dial ends at the idle timeout; keep the
 	// test short.
-	dial.idle_timeout = Duration::from_millis(500);
+	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
@@ -282,7 +427,7 @@ fn the_backlog_bounds_queued_connections() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("second client socket");
 	let mut second_config = dial_config(server);
-	second_config.idle_timeout = Duration::from_millis(500);
+	second_config.transport.idle_timeout = Duration::from_millis(500);
 	let second = worker
 		.block_on(async { quic::client::connect(&handle, second_sock, &second_config).await })
 		.expect("worker");
@@ -304,7 +449,7 @@ fn connections_share_one_tx_buffer_fairly() {
 	let certs = support::certs().expect("certificates");
 
 	let mut udp_config = udp::Config::default();
-	udp_config.tx_buffers = 1;
+	udp_config.tx_buffers_max = 1;
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 		.expect("socket");
@@ -343,9 +488,14 @@ fn connections_share_one_tx_buffer_fairly() {
 				while send_running.get() {
 					let mut offset = 0;
 					while offset < chunk.len() {
-						offset += std::future::poll_fn(|cx| send.poll_write(cx, &chunk[offset..]))
-							.await
-							.expect("write busy stream");
+						match std::future::poll_fn(|cx| send.poll_write(cx, &chunk[offset..])).await {
+							Ok(n) => offset += n,
+							// The reader drops its half as the test winds down, which
+							// stops this stream mid-write. Only a stop *before* that is
+							// a real failure.
+							Err(_) if !send_running.get() => return,
+							Err(err) => panic!("write busy stream: {err}"),
+						}
 					}
 					let mut progress = send_progress.borrow_mut();
 					progress.bytes += chunk.len();
@@ -385,10 +535,16 @@ fn connections_share_one_tx_buffer_fairly() {
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("second client socket");
 			let mut second_config = dial_config(server);
-			second_config.idle_timeout = Duration::from_millis(500);
+			second_config.transport.idle_timeout = Duration::from_millis(500);
+			let started = Instant::now();
 			let second = quic::client::connect(&handle, second_sock, &second_config).await;
+			let elapsed = started.elapsed();
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
+			assert!(
+				elapsed < Duration::from_millis(500),
+				"second handshake took {elapsed:?}"
+			);
 			let accepted = endpoint.accept().await.expect("second accepted connection");
 			drop((second, accepted));
 		})
@@ -408,4 +564,58 @@ fn accept_needs_a_server_config() {
 
 	let result = worker.block_on(async move { endpoint.accept().await }).expect("worker");
 	assert!(matches!(result, Err(quic::Error::NotServer)), "got {result:?}");
+}
+
+/// One [`quic::Identity`] serves every endpoint built from it, without ever
+/// touching the files again.
+///
+/// A worker group builds its endpoints on the worker threads, so re-reading
+/// the certificate per endpoint means a certificate replaced on disk while
+/// those threads are starting leaves earlier and later workers presenting
+/// different identities, and a client pinning either one fails depending on
+/// which worker accepts it.
+#[test]
+fn an_identity_is_read_once() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let config = server_config(&certs);
+
+	// Whatever the endpoints below present, it did not come from here.
+	std::fs::remove_file(&certs.cert).expect("remove cert");
+	std::fs::remove_file(&certs.key).expect("remove key");
+
+	let listener = |handle: &moq_uring::Handle| {
+		let sock = handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket");
+		quic::Endpoint::new(
+			handle,
+			sock,
+			quic::endpoint::Config::default().with_server(config.clone()),
+		)
+		.expect("endpoint")
+	};
+
+	// Two endpoints, as two workers would build them, then a real handshake
+	// against the second: the identity has to survive being cloned as well as
+	// being read.
+	let _first = listener(&handle);
+	let second = listener(&handle);
+	let server = second.local_addr();
+
+	worker
+		.block_on(async move {
+			let sock = handle
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+				.expect("client socket");
+			let dial = handle.clone();
+			handle.spawn(async move {
+				quic::client::connect(&dial, sock, &dial_config(server))
+					.await
+					.expect("dial");
+			});
+			second.accept().await.expect("accepted connection");
+		})
+		.expect("worker");
 }

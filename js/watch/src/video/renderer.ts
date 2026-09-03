@@ -167,7 +167,7 @@ export class Renderer {
 
 		// Clean up any pending animation request.
 		effect.cleanup(() => {
-			if (animate) cancelAnimationFrame(animate);
+			if (animate !== undefined) cancelAnimationFrame(animate);
 		});
 	}
 

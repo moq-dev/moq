@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.14"
+version = "0.2.17"
 edition = "2024"
 rust-version.workspace = true
 
@@ -20,16 +20,21 @@ ignored = ["getrandom"]
 # A feature rather than cfg(test) because integration tests and other crates'
 # tests compile against the normal library build.
 test-runtime = []
+# Exposes the wire codecs to the `fuzz/` harness through the hidden `fuzz` module.
+# Off by default and hidden from the docs; nothing depends on it but that harness.
+fuzz = []
 
 [dependencies]
-bytes = "1"
-futures = "0.3"
+arrayvec = "0.7"
+bytes = { workspace = true }
+futures = { workspace = true }
 kio = { workspace = true }
-num_enum = "0.7"
-rand = "0.10.1"
+num_enum = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
-thiserror = "2"
-tracing = "0.1"
+slab = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 
@@ -38,7 +43,7 @@ criterion = { workspace = true }
 # Enable the test runtime for our own unit and integration tests. A crate may
 # dev-depend on itself to turn features on for its test builds only.
 moq-net = { path = ".", features = ["test-runtime"] }
-serde_json = "1"
+serde_json = { workspace = true }
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
 # wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
@@ -52,13 +57,28 @@ loom = { workspace = true }
 # only here (dev), so it isn't forced on downstream consumers. They select
 # their own backend in the leaf binary.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { workspace = true }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
 wasm-bindgen-test = "=0.3.71"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
+
 [[bench]]
 name = "group"
+harness = false
+
+[[bench]]
+name = "track"
+harness = false
+
+[[bench]]
+name = "priority"
 harness = false

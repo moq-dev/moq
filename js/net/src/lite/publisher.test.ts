@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Producer as GroupProducer } from "../group.ts";
-import { randomOrigin } from "../hop.ts";
+import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -31,7 +31,7 @@ function replayUpdate(props: ConstructorParameters<typeof SubscribeUpdate>[0]) {
 async function subscribeEnd(sequences: number[]): Promise<number> {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -89,12 +89,12 @@ async function servingNextGroup(opened: ReadableStreamDefaultReader<ReadableStre
 //
 // Every group is left open, so all of their streams are in flight and ranked against each
 // other. A group that finished would leave the ranking, which is the point of it.
-async function groupSendOrders(options: { priority: number; sequences: number[]; update?: number; ordered?: boolean }) {
-	const { priority, sequences, update, ordered } = options;
+async function groupSendOrders(options: { priority: number; sequences: number[]; update?: number }) {
+	const { priority, sequences, update } = options;
 	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -108,7 +108,6 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 		broadcast: Path.from("test"),
 		track: "video",
 		priority,
-		ordered,
 	});
 	void publisher.runSubscribe(msg, server);
 
@@ -118,7 +117,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	try {
 		for (const [index, group] of groups.entries()) {
 			if (index === 1 && update !== undefined) {
-				await replayUpdate({ priority: update, ordered }).encode(client.writer, Version.DRAFT_05);
+				await replayUpdate({ priority: update }).encode(client.writer, Version.DRAFT_05);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
@@ -156,19 +155,6 @@ test("lite draft-05: group streams are ranked newest-first", async () => {
 	expect(orders[2]).toBeGreaterThan(orders[1]);
 });
 
-// An ordered subscriber is playing through in sequence, so the oldest group in flight is the
-// one it needs next.
-test("lite draft-05: an ordered subscription is ranked oldest-first", async () => {
-	const orders = await groupSendOrders({ priority: 7, sequences: [0, 1, 2], ordered: true });
-	expect(orders).toEqual([
-		sendOrder({ priority: 7, position: 0 }),
-		sendOrder({ priority: 7, position: 1 }),
-		sendOrder({ priority: 7, position: 2 }),
-	]);
-
-	expect(orders[2]).toBeLessThan(orders[1]);
-});
-
 // Two tracks the subscriber values equally each get their next group out, whatever their group
 // numbering: ranking by sequence would let the one with larger numbers starve the other.
 test("lite draft-05: equal priorities tie regardless of group numbering", async () => {
@@ -192,7 +178,7 @@ test("lite draft-05: a subscribe update re-ranks the whole subscription", async 
 test("lite draft-05: a subscribe update re-ranks a group already on the wire", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -245,7 +231,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 test("lite draft-05: a subscribe update during the stream open still ranks the group", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -305,7 +291,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const count = 120;
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -359,7 +345,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 test("lite draft-05: the fetch response ranks the publisher's own writes", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -454,7 +440,7 @@ async function servedSubscription(
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06_WIP : ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video", { maxAge: options.maxAge });
@@ -813,12 +799,11 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		sub.serve(0);
 		await sub.parked;
 
-		await replayUpdate({ priority: 9, ordered: true, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 9, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			ordered: true,
 			maxAge: DEFAULT_MAX_AGE_MS,
 			startGroup: undefined,
 			endGroup: 5,
@@ -934,7 +919,7 @@ async function serve(
 ): Promise<{ start?: number; end?: number; served: Served[] }> {
 	const pair = createMockTransportPair(ALPN_06_WIP);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -1116,7 +1101,7 @@ async function saturatedGroup() {
 	};
 
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
 
@@ -1196,7 +1181,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 	pair.server.createUnidirectionalStream = async () => writable;
 
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
 	const client = await Stream.open(pair.client);
@@ -1278,7 +1263,7 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	const pair = createMockTransportPair(ALPN_05, {
 		stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12.34 },
 	});
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop());
 
 	// The subscriber opens the probe stream; the publisher only replies on it.
 	const client = await Stream.open(pair.client);

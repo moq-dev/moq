@@ -26,22 +26,12 @@ export type Recv =
 	/** The track aborted. */
 	| { kind: "error"; error: Error };
 
-/** Where a group cursor sits while measuring drift against the live edge. */
-export interface GroupPosition {
-	/** Presentation timestamp of the next or in-flight frame. */
-	presentation?: Timestamp;
-	/** Monotonic arrival time of the next or in-flight frame. */
-	activity?: number;
-}
-
-/** A package-internal frame read paired with its guarded cursor position. */
+/** A package-internal frame read the wire publisher completes once written. */
 export interface ReadGroupFrame {
 	/** Frame sequence within the group. */
 	sequence: number;
 	/** Frame returned to the publisher. */
 	frame: Frame;
-	/** Cursor position held while the frame is in flight. */
-	position: GroupPosition;
 	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
 	complete(): void;
 }
@@ -77,19 +67,24 @@ export const hooks: {
 	tryRecvGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Disable subscription drift filtering for a one-shot FETCH scan. */
-	ignoreLatency: (subscriber: Subscriber) => void;
+	/**
+	 * Exempt a subscriber from live-delivery policy for a one-shot FETCH scan: it names one
+	 * old group explicitly, so it is neither late against the live edge nor bound by the start
+	 * a live subscription resolves to.
+	 */
+	exemptFetch: (subscriber: Subscriber) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
+	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
-		expiry: { expired: (at: GroupPosition) => boolean; changed: readonly Getter<unknown>[] },
+		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
 	/** Stop an in-flight group operation if the handed-out group expires. */
-	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>, at?: GroupPosition) => Promise<T>;
-	/** Read a frame with the cursor position needed to guard its wire write. */
-	readGroupFrame: (group: GroupConsumer) => Promise<ReadGroupFrame | undefined>;
+	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>) => Promise<T>;
+	/** Read a frame the wire publisher completes (or skips) once written. */
+	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 } = {
@@ -102,10 +97,13 @@ export const hooks: {
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
-	ignoreLatency: () => {
+	exemptFetch: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupTimestamp: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupLatest: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {

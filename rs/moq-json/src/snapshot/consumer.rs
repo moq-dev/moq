@@ -13,7 +13,7 @@ use crate::Result;
 /// yields the reconstructed value. When something else already owns the track, use the [`Decoder`]
 /// directly.
 pub struct Consumer<T> {
-	track: moq_net::track::Subscriber,
+	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 	decoder: Decoder<T>,
 	frames_read: usize,
@@ -26,7 +26,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// [`ProducerConfig::compression`](super::ProducerConfig::compression) on.
 	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
 		Self {
-			track,
+			track: track.ordered(),
 			group: None,
 			decoder: Decoder::new(config),
 			frames_read: 0,

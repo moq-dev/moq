@@ -4,6 +4,20 @@ permissions:
   contents: read
 
 on:
+  # `main` is the single writer of this workflow's Rust cache, mirroring
+  # cache.yml. Actions scopes cache reads to the current branch plus the default
+  # branch, so an entry saved by a pull request is readable only by that same
+  # pull request while still counting against the repository's 10 GB budget,
+  # evicting the shared entries everyone else restores. This run exists to save
+  # one; it checks a commit that was already checked as a pull request.
+  push:
+    branches: [main]
+    paths:
+      - "swift/**"
+      - "rs/moq-ffi/**"
+      - "rs/moq-video/**"
+      - "Cargo.lock"
+      - ".github/workflows/swift.yml"
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the job itself is skipped on close.
@@ -16,7 +30,10 @@ on:
       - ".github/workflows/swift.yml"
 
 concurrency:
-  group: swift-${{ github.ref }}
+  # Keyed by event as well as ref: a merged pull request's `closed` run and the
+  # `main` push run it triggers are simultaneous, and if they shared a group the
+  # skipped one could cancel the cache writer.
+  group: swift-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -40,6 +57,11 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
+          # Restore everywhere, save only on `main`; see the `on:` comment. The
+          # key is derived from the job id, the rustc identity and the manifests,
+          # none of which depend on the event, so a pull request restores what a
+          # push saved.
+          save-if: ${{ github.event_name == 'push' }}
           cache-on-failure: true
 
       - name: Rust simulator check

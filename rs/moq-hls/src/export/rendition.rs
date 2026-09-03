@@ -140,8 +140,9 @@ impl Rendition {
 
 	/// Feed one timeline record into this rendition's window: its own ranges (empty when the
 	/// record carries none for it, a gap), timed by the record.
-	pub(crate) fn push(&self, entry: &Entry, window: Duration) {
+	pub(crate) fn push(&self, index: u64, entry: &Entry, window: Duration) {
 		let row = segments::Row {
+			index,
 			segment: entry.segment,
 			ranges: entry.tracks.get(&self.name).cloned().unwrap_or_default(),
 			duration: entry.duration.as_secs_f64(),
@@ -149,6 +150,16 @@ impl Rendition {
 			end: Duration::from(entry.pts) + entry.duration,
 		};
 		self.live.push(row, window);
+	}
+
+	/// Remove source timeline records in `range` from this rendition's window.
+	pub(crate) fn pop(&self, range: std::ops::Range<u64>) {
+		self.live.pop(range);
+	}
+
+	/// Clear rows that can no longer be followed by a consecutive source timeline record.
+	pub(crate) fn clear(&self) {
+		self.live.clear();
 	}
 
 	/// Mark this rendition's window ended (the timeline finished cleanly).
@@ -368,11 +379,11 @@ impl Rendition {
 				let Some(track) = self.track().await else {
 					return Ok(None);
 				};
-				let Some(mut group) = fetch(&track, sequence).await? else {
+				let Ok(mut group) = fetch(&track, sequence).await? else {
 					return Ok(None);
 				};
 				// A cache eviction mid-read leaves the init unbuildable for now, not an error.
-				if read_group(&mut muxer, &mut group).await?.is_none() {
+				if read_group(&mut muxer, &mut group).await?.is_err() {
 					return Ok(None);
 				}
 				let Some(bytes) = muxer.init()? else {
@@ -427,16 +438,23 @@ impl Rendition {
 		let mut frames = Vec::new();
 		for range in &ranges {
 			for sequence in range.start..=range.end {
-				let Some(mut group) = fetch(&track, sequence).await? else {
-					// A missing group: the segment left the relay cache; serve nothing rather
-					// than a truncated segment.
-					return Ok(None);
+				let miss = match fetch(&track, sequence).await? {
+					Ok(mut group) => match read_group(&mut muxer, &mut group).await? {
+						Ok(mut group_frames) => {
+							frames.append(&mut group_frames);
+							continue;
+						}
+						Err(err) => err,
+					},
+					Err(err) => err,
 				};
-				let Some(mut group_frames) = read_group(&mut muxer, &mut group).await? else {
-					// The group aged out of the cache mid-read.
-					return Ok(None);
-				};
-				frames.append(&mut group_frames);
+				tracing::warn!(
+					segment,
+					group = sequence,
+					err = %miss,
+					"abandoning an advertised segment: a group is unavailable"
+				);
+				return Ok(None);
 			}
 		}
 
@@ -447,11 +465,15 @@ impl Rendition {
 	}
 }
 
-/// Fetch one group, mapping "no longer (or not yet) servable" to `None`.
-async fn fetch(track: &moq_net::track::Consumer, sequence: u64) -> Result<Option<moq_net::group::Consumer>> {
+/// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so
+/// rather than a bare `None`: a caller abandoning a segment can only explain itself with it.
+async fn fetch(
+	track: &moq_net::track::Consumer,
+	sequence: u64,
+) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
 	match track.fetch_group(sequence, None).await {
-		Ok(group) => Ok(Some(group)),
-		Err(err) if is_cache_miss(&err) => Ok(None),
+		Ok(group) => Ok(Ok(group)),
+		Err(err) if is_cache_miss(&err) => Ok(Err(err)),
 		Err(err) => Err(err.into()),
 	}
 }
@@ -462,11 +484,16 @@ async fn fetch(track: &moq_net::track::Consumer, sequence: u64) -> Result<Option
 async fn read_group(
 	muxer: &mut Muxer,
 	group: &mut moq_net::group::Consumer,
-) -> Result<Option<Vec<moq_mux::container::Frame>>> {
+) -> Result<std::result::Result<Vec<moq_mux::container::Frame>, moq_net::Error>> {
 	match muxer.read(group).await {
-		Ok(frames) => Ok(Some(frames)),
-		Err(err) if is_cache_miss_mux(&err) => Ok(None),
-		Err(err) => Err(err.into()),
+		Ok(frames) => Ok(Ok(frames)),
+		Err(err) => {
+			let miss = net_errors(&err).find(|err| is_cache_miss(err)).cloned();
+			match miss {
+				Some(miss) => Ok(Err(miss)),
+				None => Err(err.into()),
+			}
+		}
 	}
 }
 
@@ -492,10 +519,9 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 /// Walks the source chain rather than matching those wrappings, since missing one turns that
 /// container's evictions back into server errors while the rest 404, and `moq_mux::Error` is
 /// `#[non_exhaustive]`: a container added later would silently reintroduce the bug.
-fn is_cache_miss_mux(err: &moq_mux::Error) -> bool {
+fn net_errors(err: &moq_mux::Error) -> impl Iterator<Item = &moq_net::Error> {
 	std::iter::successors(Some(err as &(dyn std::error::Error + 'static)), |err| err.source())
 		.filter_map(|err| err.downcast_ref::<moq_net::Error>())
-		.any(is_cache_miss)
 }
 #[cfg(test)]
 mod tests {
@@ -534,19 +560,15 @@ mod tests {
 		// resolve to 404. `Hang` is the shape a real relay produces most, since it is what the
 		// legacy container (the JS and native encoders) surfaces.
 		let remote = moq_net::Error::Remote(moq_net::Error::NotFound.to_code());
-		assert!(is_cache_miss_mux(&moq_mux::Error::Moq(remote.clone())));
-		assert!(is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(
-			remote.clone()
-		))));
-		assert!(is_cache_miss_mux(&moq_mux::Error::Cmaf(
-			moq_mux::container::fmp4::Error::Moq(remote)
-		)));
+		assert!(net_errors(&moq_mux::Error::Moq(remote.clone())).any(is_cache_miss));
+		assert!(net_errors(&moq_mux::Error::Hang(hang::Error::Moq(remote.clone()))).any(is_cache_miss));
+		assert!(net_errors(&moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(remote))).any(is_cache_miss));
 
 		// A genuine failure stays a failure through the same wrappings, and an error carrying no
 		// transport error at all is never a miss.
 		let denied = moq_net::Error::Unauthorized;
-		assert!(!is_cache_miss_mux(&moq_mux::Error::Moq(denied.clone())));
-		assert!(!is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(denied))));
-		assert!(!is_cache_miss_mux(&moq_mux::Error::UnknownFormat("nope".to_string())));
+		assert!(!net_errors(&moq_mux::Error::Moq(denied.clone())).any(is_cache_miss));
+		assert!(!net_errors(&moq_mux::Error::Hang(hang::Error::Moq(denied))).any(is_cache_miss));
+		assert!(!net_errors(&moq_mux::Error::UnknownFormat("nope".to_string())).any(is_cache_miss));
 	}
 }

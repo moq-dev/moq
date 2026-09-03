@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use super::{Connection, Error, Identity, Trust};
+use super::{Connection, Error, Identity};
 use crate::{Handle, udp};
 
 /// Where to dial, as whom, and who to trust.
@@ -27,8 +27,9 @@ pub struct Config {
 	pub system_roots: bool,
 	/// A certificate to present when the server asks for one (mTLS).
 	pub identity: Option<Identity>,
-	/// Close the connection after this long without activity.
-	pub idle_timeout: std::time::Duration,
+	/// The per-connection transport settings (timeouts, stream limits,
+	/// congestion control).
+	pub transport: super::Transport,
 }
 
 impl Config {
@@ -42,27 +43,8 @@ impl Config {
 			roots: Vec::new(),
 			system_roots: true,
 			identity: None,
-			idle_timeout: std::time::Duration::from_secs(10),
+			transport: super::Transport::default(),
 		}
-	}
-
-	pub(crate) fn quiche(&self) -> Result<quiche::Config, Error> {
-		// Nothing is checked with verification off, so nothing is loaded: a
-		// root path that does not exist must not fail a connection that was
-		// never going to look at it.
-		let trust = match self.verify {
-			true => Trust {
-				roots: self.roots.clone(),
-				system: self.system_roots,
-				verify: boring::ssl::SslVerifyMode::PEER,
-			},
-			false => Trust {
-				roots: Vec::new(),
-				system: false,
-				verify: boring::ssl::SslVerifyMode::NONE,
-			},
-		};
-		super::tls(&self.alpn, self.identity.as_ref(), trust, self.idle_timeout)
 	}
 }
 

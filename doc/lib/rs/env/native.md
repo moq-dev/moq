@@ -12,7 +12,7 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 
 The key crates:
 
-- [moq-tokio](https://crates.io/crates/moq-tokio): Configures QUIC (via [quinn](https://crates.io/crates/quinn) by default, with [noq](https://crates.io/crates/noq) available through the `noq` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
+- [moq-tokio](https://crates.io/crates/moq-tokio): Configures QUIC (via [noq](https://crates.io/crates/noq) by default, with [quinn](https://crates.io/crates/quinn) available through the `quinn` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
 - [moq-net](https://crates.io/crates/moq-net): The core networking layer. Can be used directly with any `web_transport_trait::poll::Session` implementation if you need full control over the QUIC endpoint.
 - [hang](https://crates.io/crates/hang): Media-specific catalog and container format on top of `moq-net`.
 
@@ -87,12 +87,15 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 ```rust
 // Publish into an origin wired before connecting: it outlives any one session,
 // so the broadcast survives a reconnect. Hold the connection to keep redialing.
-let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
-let route = moq_net::broadcast::Route::new().with_announce(true);
-let mut broadcast = origin.create_broadcast("", route)?;
+let mut broadcast = origin.create_broadcast("")?;
 // ... add catalog and tracks to the broadcast ...
+// Then announce the exact path as a route, so the advertisement lands with the
+// tracks in place. Dropping the announcement retracts the route while the
+// broadcast itself stays reachable by path.
+let _announcement = origin.announce("", Default::default())?;
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.
@@ -106,16 +109,19 @@ Subscribing works the same way round: wire an origin in before connecting and re
 ```rust
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
-let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
-let mut announced = origin.consume().announced();
+let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+let consumer = origin.consume();
+let mut announced = consumer.announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
-// Wait for broadcasts to be announced.
+// Wait for routes to be announced. By convention a publisher announces each
+// broadcast's exact path, so resolve the announced path into a broadcast.
 while let Some(update) = announced.next().await {
-    let Some(broadcast) = update.broadcast else {
-        tracing::info!(path = %update.path, "broadcast ended");
+    if !update.active {
+        tracing::info!(prefix = %update.route.prefix, "route ended");
         continue;
-    };
+    }
+    let broadcast = consumer.request_broadcast(&update.route.prefix).await?;
     // Subscribe to tracks on this broadcast...
 }
 ```

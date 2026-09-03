@@ -94,13 +94,17 @@ pub async fn accept(
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
+	let broadcast = broadcast.as_path();
 
 	// Create the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
 	let producer = publisher
-		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_announce(true))
+		.create_broadcast(&broadcast)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
+	let announcement = publisher
+		.announce(&broadcast, moq_net::origin::Route::default())
+		.map_err(|err| Error::Other(anyhow::anyhow!("failed to announce broadcast: {err}")))?;
 
 	let handle = producer.clone();
 	let sink = Box::new(IngestSink::new(producer, server.config().max_age)?);
@@ -137,6 +141,7 @@ pub async fn accept(
 			cancel: Some(cancel),
 			role: "whip server",
 			broadcast: Some(handle),
+			_announcement: Some(announcement),
 		},
 	})
 }

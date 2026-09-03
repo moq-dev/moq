@@ -27,20 +27,20 @@ typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or abort it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
-/** A stream of broadcast announcements under a prefix. */
+/** A stream of route announcements and retractions under a prefix. */
 typealias Announced = uniffi.moq.MoqAnnounced
-/** A pending wait for a specific broadcast path to be announced. */
+/** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
-/** A single broadcast announcement: its path plus a consumer. */
+/** A single route announcement or retraction: its path, route metadata, and active flag. */
 typealias Announcement = uniffi.moq.MoqAnnouncement
+/** A live route advertisement: hold it while the route should stay announced. */
+typealias Announce = uniffi.moq.MoqAnnounce
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 /** The read side of a broadcast: subscribe to its catalog and tracks. */
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
-/** Watches a broadcast's route: yields the current route first, then every change. */
-typealias RouteWatch = uniffi.moq.MoqRouteWatch
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
 /** The write side of a raw track: append groups of frames. */
@@ -121,7 +121,7 @@ typealias ContainerInit = uniffi.moq.MoqContainerInit
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
-/** The route a broadcast takes to reach this origin: relay hop ids (oldest first), advertised cost (lower wins), and whether it's announced. */
+/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription

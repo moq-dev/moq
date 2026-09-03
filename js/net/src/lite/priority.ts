@@ -60,9 +60,9 @@ function clamp(value: number, max: number): number {
  * set changes or the subscription is updated.
  *
  * A group's rank is its position among the groups in flight, so which group goes first is
- * decided here rather than by arithmetic on sequence numbers. Newest-first by default, since
- * that is what live playback wants; an `ordered` subscription is playing through in sequence,
- * so it gets the oldest group first instead.
+ * decided here rather than by arithmetic on sequence numbers. Newest first, always: under
+ * congestion that sheds the backlog rather than the live edge, and a subscriber wanting
+ * sequence order reorders locally rather than asking the wire for it.
  *
  * One listener covers the whole subscription. A listener per group would instead pile up on
  * it, and a track that stalls with many groups open would trip the signals leak guard.
@@ -125,11 +125,9 @@ export class Priority {
 	// Sequences are unique within a subscription, so a group already registered never counts
 	// itself.
 	#position(sequence: number): number {
-		const ordered = this.#track.subscription.peek()?.ordered ?? false;
-
 		let ahead = 0;
 		for (const other of this.#streams.values()) {
-			if (ordered ? other < sequence : other > sequence) ahead++;
+			if (other > sequence) ahead++;
 		}
 		return ahead;
 	}

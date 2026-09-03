@@ -6,6 +6,7 @@
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 
@@ -102,7 +103,7 @@ impl Consumer {
 	pub fn traffic(&self, tier: &Tier, role: Role) -> TrafficConsumer {
 		let name = traffic_track(tier, role, self.config.compression);
 		TrafficConsumer {
-			inner: Merged::new(self.origin.announced(), &self.config, name),
+			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
 
@@ -110,7 +111,7 @@ impl Consumer {
 	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
 		let name = sessions_track(tier, self.config.compression);
 		SessionsConsumer {
-			inner: Merged::new(self.origin.announced(), &self.config, name),
+			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
 }
@@ -163,6 +164,15 @@ impl Mergeable for Presence {
 
 /// One node's subscription to the merged track.
 enum Reader<V: Mergeable> {
+	/// Resolving the announced path into a broadcast. `queued` records whether
+	/// the request was handed to a serving route (fixed at request time): a
+	/// queued request that fails `Unroutable` was killed by its serving route
+	/// retracting (the table has already changed), while an unqueued
+	/// `Unroutable` means nothing serves the path at all.
+	Resolving {
+		pending: Pending<origin::Requesting>,
+		queued: bool,
+	},
 	/// Awaiting the subscription handshake.
 	Subscribing(Pending<Subscribing>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
@@ -177,11 +187,16 @@ enum Reader<V: Mergeable> {
 /// merged view).
 struct Node<V: Mergeable> {
 	reader: Reader<V>,
+	/// The announced path, relative to the announce cursor: what a re-resolve
+	/// after the reader ends requests again.
+	path: PathOwned,
 	last: Option<BTreeMap<String, V>>,
 }
 
 /// Watches a group's node announces and folds one track across all of them.
 struct Merged<V: Mergeable> {
+	/// Resolves announced node paths into broadcasts.
+	origin: origin::Consumer,
 	announce: moq_net::announce::Consumer,
 	prefix: PathOwned,
 	depth: usize,
@@ -193,9 +208,10 @@ struct Merged<V: Mergeable> {
 }
 
 impl<V: Mergeable> Merged<V> {
-	fn new(announce: moq_net::announce::Consumer, config: &Config, name: String) -> Self {
+	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
-			announce,
+			announce: origin.announced(),
+			origin,
 			prefix: config.prefix.clone(),
 			depth: config.depth,
 			name,
@@ -223,8 +239,9 @@ impl<V: Mergeable> Merged<V> {
 		// Advance each node's reader, collapsing any backlog to its latest frame.
 		let config = &self.config;
 		let name = self.name.as_str();
+		let origin = &self.origin;
 		for node in self.nodes.values_mut() {
-			changed |= advance(node, config, name, waiter);
+			changed |= advance(node, origin, config, name, waiter);
 		}
 
 		if changed {
@@ -237,32 +254,42 @@ impl<V: Mergeable> Merged<V> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a drop or a replacement of a node that had a value does).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let moq_net::announce::Update { path, broadcast } = update;
+		let path = update.prefix.as_path().to_owned();
 		let absolute = self.announce.absolute(&path).to_owned();
 
-		// Only fold node-category broadcasts; skip sibling categories a producer
-		// may publish under the same prefix.
+		// Only fold node-category routes; skip sibling categories a producer
+		// may publish under the same prefix. A route names a prefix, and node
+		// broadcasts are announced at their exact path by convention.
 		if parse_node_path(&self.prefix, self.depth, &absolute).is_none() {
 			return false;
 		}
 
-		match broadcast {
-			Some(broadcast) => match broadcast.track(&self.name) {
-				Ok(track) => {
-					let node = Node {
-						reader: Reader::Subscribing(track.subscribe(None)),
+		if update.active {
+			// A route update on a node already tracked (a reprice, or a takeover
+			// with different metadata) keeps the live reader: existing
+			// subscriptions survive a takeover, and the reader re-resolves through
+			// the current best route the moment it actually ends. Only an ended
+			// node re-arms here, since a fresh route is new evidence that a
+			// re-resolve could succeed.
+			match self.nodes.entry(absolute) {
+				Entry::Occupied(mut entry) => {
+					let node = entry.get_mut();
+					if matches!(node.reader, Reader::Ended) {
+						node.reader = resolve(&self.origin, &node.path);
+					}
+					false
+				}
+				Entry::Vacant(entry) => {
+					entry.insert(Node {
+						reader: resolve(&self.origin, &path),
+						path,
 						last: None,
-					};
-					// A replacement (failover) drops the old value until the new
-					// subscription catches up.
-					self.nodes.insert(absolute, node).is_some_and(|old| old.last.is_some())
+					});
+					false
 				}
-				Err(err) => {
-					tracing::debug!(?err, node = %absolute, name = %self.name, "stats: node missing track");
-					self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
-				}
-			},
-			None => self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some()),
+			}
+		} else {
+			self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
 		}
 	}
 
@@ -284,13 +311,42 @@ impl<V: Mergeable> Merged<V> {
 /// whether that node's contribution to the merged view changed.
 fn advance<V: Mergeable>(
 	node: &mut Node<V>,
+	origin: &origin::Consumer,
 	config: &moq_json::snapshot::ConsumerConfig,
 	name: &str,
 	waiter: &Waiter,
 ) -> bool {
 	let mut changed = false;
+	// At most one re-resolve per call: a subscription that terminates
+	// synchronously twice in a row is done, not failing over.
+	let mut rearmed = false;
 	loop {
 		match &mut node.reader {
+			Reader::Resolving { pending, queued } => match pending.poll_ok(waiter) {
+				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
+					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Err(err) => {
+						tracing::debug!(?err, name, "stats: node missing track");
+						node.reader = Reader::Ended;
+						return changed;
+					}
+				},
+				// A queued request killed by its route retracting: an identical
+				// standby swaps in without any announce update, so re-resolve
+				// through the already-updated table. Each retry consumed a real
+				// retraction, so this cannot spin; an instant Unroutable instead
+				// means nothing serves the path (the retraction that empties the
+				// table also unannounces this node).
+				Poll::Ready(Err(moq_net::Error::Unroutable)) if *queued => {
+					node.reader = resolve(origin, &node.path);
+				}
+				Poll::Ready(Err(err)) => {
+					tracing::debug!(?err, name, "stats: node broadcast unresolvable");
+					node.reader = Reader::Ended;
+					return changed;
+				}
+				Poll::Pending => return changed,
+			},
 			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(subscriber)) => {
 					node.reader =
@@ -308,12 +364,28 @@ fn advance<V: Mergeable>(
 					node.last = Some(frame);
 					changed = true;
 				}
-				Poll::Ready(Ok(None)) => return terminate(node, changed),
-				Poll::Ready(Err(err)) => {
-					// One bad node must not tear down the whole merged view; drop
-					// just this node and keep folding the rest.
-					tracing::debug!(?err, name, "stats: node read error");
-					return terminate(node, changed);
+				// The subscription ended: the serving session died (a failover to
+				// an identical route delivers no announce update) or the track
+				// finished. Drop the last frame so a stale gauge stops pinning
+				// the sum, then re-resolve through the current best route; an
+				// authoritative refusal on the way ends the node instead.
+				Poll::Ready(result @ (Ok(None) | Err(_))) => {
+					if let Err(err) = result {
+						// One bad node must not tear down the whole merged view;
+						// re-resolve just this node and keep folding the rest.
+						tracing::debug!(?err, name, "stats: node read error");
+					}
+					changed |= node.last.take().is_some();
+					if rearmed {
+						node.reader = Reader::Ended;
+						return changed;
+					}
+					rearmed = true;
+					// Drop the dead reader before re-requesting: our own handle is
+					// what keeps a dying served broadcast cached, and releasing it
+					// first lets the request materialize a fresh one.
+					node.reader = Reader::Ended;
+					node.reader = resolve(origin, &node.path);
 				}
 				Poll::Pending => return changed,
 			},
@@ -322,21 +394,18 @@ fn advance<V: Mergeable>(
 	}
 }
 
-/// Retire a node whose reader terminated: drop its last frame so it stops
-/// contributing (a still-announced but unreadable node must not pin a stale
-/// gauge into the sum) and mark it ended so it lingers only until it
-/// unannounces. Returns whether the merged view changed.
-fn terminate<V: Mergeable>(node: &mut Node<V>, changed: bool) -> bool {
-	let had_value = node.last.take().is_some();
-	node.reader = Reader::Ended;
-	changed || had_value
+/// Start resolving `path` (relative to the announce cursor) into a broadcast.
+fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned) -> Reader<V> {
+	let pending = origin.request_broadcast(path);
+	let queued = pending.is_queued();
+	Reader::Resolving { pending, queued }
 }
 
 #[cfg(test)]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -372,6 +441,7 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
+		route: announce::Producer,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
@@ -387,17 +457,13 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let mut source = feed_origin
-			.create_broadcast(path, broadcast::Route::announced())
-			.expect("create_broadcast");
+		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
+		let route = feed_origin.announce(path, origin::Route::default()).expect("announce");
 		let mut track = source.create_track("video", None).expect("create_track");
 
-		// Let the origin's source watcher attach and announce.
-		tokio::time::sleep(Duration::from_millis(1)).await;
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
-		let consumer = broadcast.expect("active");
+		let update = announced.next().await.expect("announce");
+		assert!(update.active);
+		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -408,6 +474,7 @@ mod tests {
 
 		Feed {
 			announced,
+			route,
 			source,
 			consumer,
 			sub,

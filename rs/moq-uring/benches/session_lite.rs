@@ -9,11 +9,11 @@
 
 use criterion::{criterion_group, criterion_main};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 #[path = "../tests/support/quiche.rs"]
 mod support;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 mod linux {
 	use std::net::UdpSocket;
 	use std::pin::Pin;
@@ -135,8 +135,8 @@ mod linux {
 			let mut worker = Worker::new(Config::default()).expect("worker");
 			let handle = worker.handle();
 
-			let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
-			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Origin::random()));
+			let (pub_origin, pub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
+			let (sub_origin, sub_driver) = origin::Producer::new(origin::Info::new(moq_net::Hop::random()));
 			let origins = std::thread::spawn(move || {
 				let rt = tokio::runtime::Builder::new_current_thread()
 					.enable_time()
@@ -147,14 +147,15 @@ mod linux {
 				});
 			});
 
-			let mut broadcast = pub_origin
-				.create_broadcast("bench", moq_net::broadcast::Route::new().with_announce(true))
+			let mut broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
+			let _announce_broadcast = pub_origin
+				.announce("bench", Default::default())
 				.expect("create broadcast");
 			let mut track = broadcast.create_track("data", None).expect("create track");
 
 			let certs = support::certs().expect("certificates");
 			let mut server_config =
-				quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+				quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 			server_config.alpn = vec![ALPN.to_string()];
 
 			let server_sock = handle
@@ -175,7 +176,7 @@ mod linux {
 					.expect("quic accept");
 				let session = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(server_handle.clone(), conn)
+					.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
 				session.closed().await;
@@ -189,14 +190,14 @@ mod linux {
 						.expect("quic connect");
 					let session = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(handle.clone(), conn)
+						.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 						.await
 						.expect("connect_lite");
-					let bc = sub_origin
-						.consume()
-						.announced_broadcast("bench")
-						.await
-						.expect("broadcast announced");
+					let bc = {
+						let consumer = sub_origin.consume();
+						consumer.routed("bench").await.expect("broadcast announced");
+						consumer.request_broadcast("bench").await.expect("broadcast resolves")
+					};
 					let sub = bc
 						.track("data")
 						.expect("track")
@@ -254,10 +255,10 @@ mod linux {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 use linux::benchmark;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn"))))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);

@@ -80,16 +80,9 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	return &BroadcastDynamic{inner: inner}, nil
 }
 
-// SetRoute sets the broadcast's route: the hop chain, cost, and liveness it
-// advertises. Use it as conditions shift (e.g. a standby transcoder lowering
-// its cost once warm); consumers observe the change via RouteUpdates.
-func (b *BroadcastProducer) SetRoute(route Route) error {
-	return b.inner.SetRoute(route)
-}
-
-// SetAnnounce sets whether the broadcast is announced, keeping the rest of its route.
+// SetAnnounce sets whether the broadcast's exact path is announced as a route.
 //
-// The origin announces the path only while the broadcast is announced; a unannounced
+// The origin announces the path only while the broadcast is announced; an unannounced
 // broadcast stays reachable by exact path for subscribes and fetches. This is
 // how a publisher goes on and off the air without tearing down the broadcast.
 func (b *BroadcastProducer) SetAnnounce(live bool) error {
@@ -477,7 +470,7 @@ func (t *TrackProducer) Abort(errorCode uint16) error {
 }
 
 // Consume reads directly from this producer's track. subscription tunes delivery
-// (delivery priority, group ordering priority, group range); pass nil for defaults.
+// (delivery priority, group range); pass nil for defaults.
 func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, error) {
 	inner, err := t.inner.Consume(subscription)
 	if err != nil {

@@ -2,10 +2,11 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), screen ->
-//!   xdg-desktop-portal + PipeWire (RGB -> CPU I420, `pipewire` feature).
+//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), X11 display and
+//!   window -> X11, Wayland display -> xdg-desktop-portal + PipeWire
+//!   (`pipewire` feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
-//!   DXGI Desktop Duplication (BGRA -> CPU I420).
+//!   DXGI Desktop Duplication, window -> GDI (BGRA -> CPU I420).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -13,6 +14,8 @@ use std::sync::Arc;
 
 use crate::Error;
 use crate::frame::Surface;
+
+const MAX_FRAMERATE: u32 = 1_000_000;
 
 mod channel;
 use channel::FrameChannel;
@@ -39,6 +42,9 @@ mod surface;
 // Native V4L2 camera capture on Linux.
 #[cfg(target_os = "linux")]
 mod v4l2;
+// Native X11 display and window capture, including the portal fallback.
+#[cfg(target_os = "linux")]
+mod x11;
 
 // Portal + PipeWire screen capture on Linux.
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
@@ -51,6 +57,9 @@ mod mediafoundation;
 // DXGI Desktop Duplication screen capture on Windows.
 #[cfg(target_os = "windows")]
 mod desktopduplication;
+// Native GDI window enumeration and capture on Windows.
+#[cfg(target_os = "windows")]
+mod window;
 
 // Blocking-device -> async-channel bridge used by V4L2 / Media Foundation.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -74,11 +83,12 @@ pub enum Source {
 
 	/// A whole display. `None` opens the main display.
 	///
-	/// The id is a bare display index. macOS and Windows honor it; on Linux the
-	/// xdg-desktop-portal picker owns selection and the id is ignored.
+	/// The id is the opaque value [`displays`] reports. On Wayland the
+	/// xdg-desktop-portal picker owns selection and no stable id is available.
 	Display(Option<String>),
 
-	/// A single window, by the id [`windows`] reports. macOS only.
+	/// A single window, by the id [`windows`] reports. Supported on macOS,
+	/// Windows, and X11.
 	Window(String),
 
 	/// Every window belonging to one application, by the id [`apps`] reports
@@ -137,10 +147,11 @@ pub struct Display {
 	pub id: String,
 	/// Human-readable name, e.g. "Display 1".
 	pub name: String,
-	/// Width in the platform's desktop coordinate space. This is points on
-	/// macOS and desktop pixels on Windows.
+	/// Width in the platform's desktop coordinate space: points on macOS and
+	/// desktop pixels on Windows and X11.
 	pub width: u32,
-	/// Height in the platform's desktop coordinate space.
+	/// Height in the platform's desktop coordinate space: points on macOS and
+	/// desktop pixels on Windows and X11.
 	pub height: u32,
 }
 
@@ -160,10 +171,11 @@ pub struct Window {
 	pub title: String,
 	/// The name of the application owning the window.
 	pub app: String,
-	/// Width in points, i.e. the logical size, which is what capture defaults to.
-	/// A window on a 2x retina display reports half its native pixel width.
+	/// Width in platform window coordinates: points on macOS and pixels on
+	/// Windows and X11.
 	pub width: u32,
-	/// Height in points. See [`width`](Self::width).
+	/// Height in platform window coordinates: points on macOS and pixels on
+	/// Windows and X11.
 	pub height: u32,
 }
 
@@ -200,8 +212,11 @@ impl App {
 pub struct Config {
 	/// What to capture.
 	pub source: Source,
+	/// Preferred output width in pixels.
 	pub width: Option<u32>,
+	/// Preferred output height in pixels.
 	pub height: Option<u32>,
+	/// Preferred frame rate in frames per second, from 1 through 1,000,000.
 	pub framerate: Option<u32>,
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
@@ -222,18 +237,19 @@ impl Default for Config {
 
 /// A live, async frame source opened via [`open`].
 ///
-/// Every backend delivers frames through a shared [`FrameChannel`], so the
-/// encode loop just `read().await`s regardless of platform. Dropping the stream
+/// Every backend delivers frames through the same latest-frame channel, so the
+/// consumer just `read().await`s regardless of platform. Dropping the stream
 /// releases the device (stops the macOS `AVCaptureSession`, joins the V4L2 /
 /// Media Foundation pump thread). That is the whole point: because `read` is a
 /// real await, cancelling the capture future drops this and the camera turns off
 /// promptly, with no blocking task left pinned to the runtime.
-pub(crate) struct FrameStream {
+pub struct Stream {
 	chan: Arc<FrameChannel>,
 	width: u32,
 	height: u32,
 	framerate: Option<u32>,
-	device: String,
+	color: Option<crate::Color>,
+	label: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
 	pending: Option<Surface>,
@@ -242,62 +258,75 @@ pub(crate) struct FrameStream {
 	_backend: Keepalive,
 }
 
-impl FrameStream {
+impl Stream {
 	/// Build a stream from a backend's channel, geometry, and keep-alive guard.
 	fn new(
 		chan: Arc<FrameChannel>,
 		width: u32,
 		height: u32,
 		framerate: Option<u32>,
-		device: String,
+		label: String,
 		pending: Option<Surface>,
 		backend: Keepalive,
 	) -> Self {
+		let color = pending.as_ref().and_then(Surface::color);
 		Self {
 			chan,
 			width,
 			height,
 			framerate,
-			device,
+			color,
+			label,
 			pending,
 			_backend: backend,
 		}
 	}
 
-	/// Await the next frame, or `None` once the source ends. Cancel-safe: drop
-	/// the future to stop reading and release the device.
-	pub(crate) async fn read(&mut self) -> Option<Surface> {
+	/// Await the next frame, or `None` once the source ends.
+	///
+	/// `None` is recoverable: the source stopped for a benign reason (it
+	/// resized, the compositor renegotiated the format, the device went idle)
+	/// and reopening is expected to work. An `Err` is terminal for this
+	/// selection: the source is gone or was refused.
+	///
+	/// Dropping this future cancels only the pending read. Dropping the stream
+	/// releases the capture source.
+	pub async fn read(&mut self) -> Result<Option<Surface>, Error> {
 		if let Some(frame) = self.pending.take() {
-			return Some(frame);
+			return Ok(Some(frame));
 		}
 		self.chan.recv().await
 	}
 
-	pub(crate) fn width(&self) -> u32 {
+	/// Width of the captured frames in pixels.
+	pub fn width(&self) -> u32 {
 		self.width
 	}
 
-	pub(crate) fn height(&self) -> u32 {
+	/// Height of the captured frames in pixels.
+	pub fn height(&self) -> u32 {
 		self.height
 	}
 
 	/// The negotiated frame rate, or `None` if the source doesn't report one.
-	pub(crate) fn framerate(&self) -> Option<u32> {
+	pub fn framerate(&self) -> Option<u32> {
 		self.framerate
 	}
 
 	/// The first frame's declared color space, when its capture backend knows it.
-	pub(crate) fn color(&self) -> Option<crate::Color> {
-		self.pending.as_ref().and_then(Surface::color)
+	pub fn color(&self) -> Option<crate::Color> {
+		self.color
 	}
 
-	pub(crate) fn device(&self) -> &str {
-		&self.device
+	/// Human-readable label for the selected capture source.
+	pub fn label(&self) -> &str {
+		&self.label
 	}
 }
 
 /// Open the capture source described by `config`.
-pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
+pub async fn open(config: &Config) -> Result<Stream, Error> {
+	validate(config)?;
 	match &config.source {
 		Source::Camera(device) => {
 			let _ = device;
@@ -330,13 +359,15 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 			}
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
 			{
-				pipewire::open(config, device.as_deref()).await
+				if x11::selected(device.as_deref()) {
+					x11::open_display(config, device.as_deref()).await
+				} else {
+					pipewire::open(config, device.as_deref()).await
+				}
 			}
 			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
 			{
-				Err(Error::Unsupported(
-					"screen capture on Linux without the `pipewire` feature".to_string(),
-				))
+				x11::open_display(config, device.as_deref()).await
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 			{
@@ -349,7 +380,15 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 			{
 				screencapture::open_window(config, id).await
 			}
-			#[cfg(not(target_os = "macos"))]
+			#[cfg(target_os = "linux")]
+			{
+				x11::open_window(config, id).await
+			}
+			#[cfg(target_os = "windows")]
+			{
+				window::open(config, id).await
+			}
+			#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 			{
 				Err(Error::Unsupported("window capture".to_string()))
 			}
@@ -365,6 +404,13 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 				Err(Error::Unsupported("application capture".to_string()))
 			}
 		}
+	}
+}
+
+fn validate(config: &Config) -> Result<(), Error> {
+	match config.framerate {
+		Some(value) if value == 0 || value > MAX_FRAMERATE => Err(Error::InvalidFramerate(value)),
+		_ => Ok(()),
 	}
 }
 
@@ -390,8 +436,9 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 
 /// List the available displays and the identifiers [`Source::Display`] accepts.
 ///
-/// On Linux the xdg-desktop-portal picker owns display selection, so there is no
-/// list or stable identifier to expose.
+/// On Wayland the xdg-desktop-portal picker owns display selection, so there is
+/// no portal list or stable identifier to expose. When XWayland is available,
+/// its native displays are listed with stable X11 ids.
 pub async fn displays() -> Result<Vec<Display>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -401,19 +448,31 @@ pub async fn displays() -> Result<Vec<Display>, Error> {
 	{
 		blocking(desktopduplication::displays).await
 	}
-	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+	#[cfg(target_os = "linux")]
+	{
+		blocking(x11::displays).await
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{
 		Err(Error::Unsupported("listing displays".to_string()))
 	}
 }
 
-/// List the on-screen windows. macOS only.
+/// List the on-screen windows.
 pub async fn windows() -> Result<Vec<Window>, Error> {
 	#[cfg(target_os = "macos")]
 	{
 		screencapture::windows().await
 	}
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(target_os = "linux")]
+	{
+		blocking(x11::windows).await
+	}
+	#[cfg(target_os = "windows")]
+	{
+		blocking(window::windows).await
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 	{
 		Err(Error::Unsupported("listing windows".to_string()))
 	}
@@ -441,4 +500,25 @@ where
 	tokio::task::spawn_blocking(f)
 		.await
 		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn validates_framerate_range() {
+		let mut config = Config::default();
+		assert!(validate(&config).is_ok());
+
+		config.framerate = Some(1);
+		assert!(validate(&config).is_ok());
+		config.framerate = Some(MAX_FRAMERATE);
+		assert!(validate(&config).is_ok());
+
+		config.framerate = Some(0);
+		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(0))));
+		config.framerate = Some(MAX_FRAMERATE + 1);
+		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(value)) if value == MAX_FRAMERATE + 1));
+	}
 }

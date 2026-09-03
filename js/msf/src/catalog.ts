@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import * as z from "zod/mini";
+import * as z from "@zod/mini";
 
 /** Zod schema for a track's wire packaging. Accepts known values or any future string. */
 export const PackagingSchema = z.union([
@@ -149,7 +149,7 @@ export function decode(raw: Uint8Array): Catalog {
 }
 
 /** Read and decode the next catalog frame from a track, or undefined if the track ended. */
-export async function fetch(track: Moq.Track.Subscriber): Promise<Catalog | undefined> {
+export async function fetch(track: Moq.Track.Ordered): Promise<Catalog | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
 	return decode(frame.payload);

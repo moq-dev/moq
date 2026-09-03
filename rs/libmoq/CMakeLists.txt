@@ -41,11 +41,19 @@ if(BUILD_RUST_LIB)
     set(RUST_LIB "${RUST_DIR}/${LIB_PREFIX}moq${LIB_SUFFIX}")
     set(RUST_HEADER "${RUST_TARGET_DIR}/include/moq.h")
 
+    # Same RUST_CARGO knob the justfiles read, so a local Cargo wrapper reaches
+    # the one Rust compile this plugin actually pays for.
+    if(DEFINED ENV{RUST_CARGO} AND NOT "$ENV{RUST_CARGO}" STREQUAL "")
+        set(CARGO_COMMAND "$ENV{RUST_CARGO}")
+    else()
+        set(CARGO_COMMAND "cargo")
+    endif()
+
     add_custom_target(rust_build ALL
-        COMMAND cargo build --locked ${CARGO_BUILD_FLAG}
+        COMMAND ${CARGO_COMMAND} build --locked ${CARGO_BUILD_FLAG}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         BYPRODUCTS ${RUST_LIB} ${RUST_HEADER}
-        COMMENT "Building Rust library with cargo"
+        COMMENT "Building Rust library with ${CARGO_COMMAND}"
         VERBATIM
     )
 else()

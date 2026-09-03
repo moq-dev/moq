@@ -10,7 +10,7 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -87,6 +87,21 @@ pub enum MediaRole {
 	Egress(Box<EgressSource>),
 }
 
+#[derive(Clone, Copy)]
+enum MediaFlow {
+	Ingest,
+	Egress,
+}
+
+impl MediaFlow {
+	fn accepts(self, direction: str0m::media::Direction) -> bool {
+		match self {
+			Self::Ingest => direction.is_receiving(),
+			Self::Egress => direction.is_sending(),
+		}
+	}
+}
+
 /// Drives a [`Rtc`] instance until it ends.
 ///
 /// The caller pre-populates the `Rtc` with whatever SDP exchange they need.
@@ -112,6 +127,7 @@ pub struct Session {
 	/// the session is done.
 	inbound: mpsc::Receiver<Packet>,
 	role: MediaRole,
+	opened_media: HashSet<str0m::media::Mid>,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
 	/// sessions; pumps send frames here, the main loop forwards them into
 	/// str0m's [`Writer`](str0m::media::Writer).
@@ -140,6 +156,7 @@ impl Session {
 			locals,
 			inbound,
 			role: MediaRole::Ingest(sink),
+			opened_media: HashSet::new(),
 			writes_rx: None,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
@@ -162,10 +179,16 @@ impl Session {
 			locals,
 			inbound,
 			role: MediaRole::Egress(Box::new(source)),
+			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		}
+	}
+
+	/// Open a locally offered media line after its answer has been applied.
+	pub(crate) fn open_media(&mut self, mid: str0m::media::Mid) -> Result<()> {
+		self.handle_media(mid)
 	}
 
 	pub async fn run(mut self) -> Result<()> {
@@ -285,7 +308,7 @@ impl Session {
 					return Err(Error::SessionClosed);
 				}
 			}
-			Event::MediaAdded(added) => self.handle_media_added(added)?,
+			Event::MediaAdded(added) => self.handle_media(added.mid)?,
 			Event::MediaData(data) => {
 				// `ingest_clock` and `role` are disjoint fields, so the borrow checker lets
 				// us rebase the (random, per-track) RTP base and feed the sink in one
@@ -317,20 +340,37 @@ impl Session {
 		Ok(())
 	}
 
-	fn handle_media_added(&mut self, added: str0m::media::MediaAdded) -> Result<()> {
+	fn handle_media(&mut self, mid: str0m::media::Mid) -> Result<()> {
+		if self.opened_media.contains(&mid) {
+			return Ok(());
+		}
+
 		// str0m's CodecConfig is the negotiated set; pick the first
 		// codec advertised for this `mid`.
-		let pt = self.rtc.media(added.mid).and_then(|m| m.remote_pts().first().copied());
+		let Some(media) = self.rtc.media(mid) else {
+			tracing::warn!(?mid, "negotiated media is missing; ignoring");
+			return Ok(());
+		};
+		let kind = media.kind();
+		let flow = match &self.role {
+			MediaRole::Ingest(_) => MediaFlow::Ingest,
+			MediaRole::Egress(_) => MediaFlow::Egress,
+		};
+		if !flow.accepts(media.direction()) {
+			return Ok(());
+		}
+		let pt = media.remote_pts().first().copied();
 		let params = pt.and_then(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == pt).copied());
 		let params = match params {
 			Some(p) => p,
 			None => {
-				tracing::warn!(?added.mid, "no codec params for media; ignoring");
+				tracing::warn!(?mid, "no codec params for media; ignoring");
 				return Ok(());
 			}
 		};
 		let spec = params.spec();
 		let codec = spec.codec;
+		self.opened_media.insert(mid);
 
 		match &mut self.role {
 			MediaRole::Ingest(sink) => {
@@ -339,10 +379,10 @@ impl Session {
 				} else {
 					None
 				};
-				sink.on_track(added.mid, added.kind, codec, audio_params)?;
+				sink.on_track(mid, kind, codec, audio_params)?;
 			}
 			MediaRole::Egress(source) => {
-				source.on_track(added.mid, codec, params.pt(), spec.clock_rate)?;
+				source.on_track(mid, codec, params.pt(), spec.clock_rate)?;
 			}
 		}
 		Ok(())
@@ -671,6 +711,21 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[test]
+	fn media_flow_respects_negotiated_direction() {
+		use str0m::media::Direction::{Inactive, RecvOnly, SendOnly, SendRecv};
+
+		assert!(MediaFlow::Ingest.accepts(RecvOnly));
+		assert!(MediaFlow::Ingest.accepts(SendRecv));
+		assert!(!MediaFlow::Ingest.accepts(SendOnly));
+		assert!(!MediaFlow::Ingest.accepts(Inactive));
+
+		assert!(MediaFlow::Egress.accepts(SendOnly));
+		assert!(MediaFlow::Egress.accepts(SendRecv));
+		assert!(!MediaFlow::Egress.accepts(RecvOnly));
+		assert!(!MediaFlow::Egress.accepts(Inactive));
+	}
 
 	#[test]
 	fn advertised_candidates_use_loopback_for_unspecified_ipv4() {

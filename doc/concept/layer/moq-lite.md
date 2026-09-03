@@ -58,23 +58,27 @@ Transports that don't carry a request URI (native QUIC, or qmux over TCP/TLS) al
 
 ### Announcements
 
-`moq-lite` optionally supports live discovery of broadcasts.
+`moq-lite` optionally supports live discovery via announcements.
 
-Depending on the language, there's an `announced(prefix: Path)` method on the session.
-This asks the peer to notify us of any existing broadcasts that match the prefix and any future updates.
+An announcement is a **route**: a claim that broadcasts under a path prefix can be served.
+Depending on the language, there's an `announce(prefix)` method on the publishing side and an `announced(prefix)` method on the session.
+The latter asks the peer for every route that intersects the prefix, plus any future updates.
+
+By convention a publisher announces each broadcast's exact path, so subscribers can enumerate broadcasts by iterating routes.
+But a route can also cover a whole subtree: a dashboard server announces one short prefix and serves whatever broadcast is requested beneath it, with no per-broadcast announcement.
+It's up to the application to decide that an announced path is a broadcast and request it.
 
 This is extremely useful for conference rooms, as you can live discover when participants join and leave.
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
 The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
-The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
+The peer first replies with the set of routes that are currently advertised, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
 
-Each announcement also describes the route it took: the chain of relay identities it passed through (which is how forwarding loops are caught) and what pulling the broadcast via that route would cost.
-The cost comes in two magnitudes, compared in order.
-The *warm* cost is what one more subscription would cost the mesh right now, so it collapses to zero at any relay already carrying the broadcast; that is what lets a cluster deduplicate onto a warm copy instead of opening a second ingest.
-The *cold* cost prices the same path as if nothing were cached, so when two warm relays tie at zero it still says which of them sits closer to the publisher.
-Subscribers route to the lowest warm cost and break ties on cold; [moq-relay clustering](/bin/relay/cluster) covers how relays use this to pick an aggregation point.
+Each route also describes the path it took: the chain of relay identities it passed through (which is how forwarding loops are caught) and what pulling content via that route would cost.
+The cost comes in two magnitudes, compared in order: routing minimizes the *warm* cost and breaks a tie on the *cold* cost.
+Today both carry the same accumulated price; the split reserves room for a warm-copy discount, so an extension can let a relay already carrying the content advertise it cheaper while the cold price still says who sits closer to the publisher.
+Subscribers route to the lowest warm cost and break ties on cold; [moq-relay clustering](/bin/relay/cluster) covers how link prices are configured.
 
 ### Subscriptions
 
@@ -88,11 +92,13 @@ If the peer doesn't have the broadcast/track, they will get an error.
 Otherwise, the subscription is active and will stay open until closed by the publisher (possibly with an error).
 
 A track is broken into **groups**, each with an increasing ID.
-Conceptually, these are join points, and new subscriptions will always start at the latest group.
+Conceptually, these are join points, and new subscriptions start at the newest group they can still use.
 Groups are delivered independently and potentially out of order, so you should have some logic to reorder or skip during congestion.
 A group is closed when finished or aborted with an error (ex. during congestion).
 
-A subscription starts at the latest group by default, but can name any (group, frame) position instead.
+A subscription can name a (group, frame) floor, but the floor is not a request: **Subscriber Max Age** is the only thing that asks for data.
+Delivery starts at the oldest group at or above the floor within that budget, which is the latest group at the default budget of zero.
+A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and never history it would skip on arrival: one bound decides both.
 That is how a subscriber follows a track to a different publisher partway through a group, which matters when the current group may stay open indefinitely (a JSON append log, or a catalog that keeps appending deltas).
 A group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
 
@@ -122,14 +128,17 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Subscriber Max Age**: How old a non-latest group may get before it is skipped. Defaults to zero, so stale groups are skipped immediately.
 
-That age is measured both on the media timeline (a group's first timestamp against the newest stamped one) and by wall-clock arrival time, and either limit can expire the group.
-The media timeline keeps a backlog delivered as a burst old, while wall-clock time backstops stalled or empty groups that have no timestamp.
+That age is measured on the media timeline: a group is stale once everything it could still hold falls a full budget behind the newest frame, bounded by where its successor begins.
+Timestamps rather than the wall clock, so a backlog delivered as a burst is still old, while a congestion stall (nothing arrives, timestamps stand still) never expires content on its own.
+Reclaiming idle cached content by wall clock is a separate cache policy, not part of this budget.
 Both ends apply it: the publisher skips a group rather than sending it, and the subscriber skips it again as it reads.
 The publisher only ever sees the most tolerant budget across its subscribers, which is why the subscriber applies it too.
-Asking for old groups with `Group Start` does not exempt them: a start bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
+Asking for old groups with `Group Start` does not exempt them: a floor only bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
+That is also why the budget is what decides where delivery starts: the groups worth sending are exactly the ones it would not immediately skip.
 
 The publisher also keeps old groups around for a best-effort **Publisher Max Age** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's max age is bounded by this window: a group can't be waited for longer than it's actually kept around.
+Best-effort cuts the other way too: a cache reclaims groups nobody has read or written for a while (30 seconds by default) regardless of the advertised window, so idle history doesn't pin memory.
 
 It is declared per track, so a publisher raises it on the tracks that are read as history rather than followed at the live edge.
 hang media tracks ask for 30 seconds on that basis: a segmented egress (HLS/DASH) may only advertise segments a fetch can still reach, and a standard player starts several segments behind the live edge.
@@ -211,10 +220,11 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
 - **Single-group FETCH only (lite-05+)**: Fetch one group by sequence, optionally bounded to a range of frames within it. Fetching across groups is not supported.
-- **No Joining Fetch**: A subscription resumes by asking for the missing range directly, rather than by pairing a fetch with a subscribe.
+- **No Joining Fetch, and single-group fills only**: A subscription resumes by asking for the missing range directly rather than pairing a fetch with a subscribe. `moqt-20` replaced the joining fetch with a fill. As a publisher we serve a fill whose range resolves to a single group, straight from the group cache and capped at the largest published object, which covers `moqt-20`'s own current-group join (a Next Object subscription plus a `StartGroup=1` fill); a fill spanning several groups is refused by resetting its fetch stream. As a subscriber we request no fill: we ask for the current group directly with a relative Location Filter instead, and refuse an incoming fetch stream because it answers no request of ours. Against a strict publisher, which only delivers objects published after the subscription, that degrades the join to the next group boundary.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.
+- **Group granularity, object-trimmed**: A subscription starts and ends on a group. A `moq-transport` Location Filter can narrow a range to an object, and delivery honors that: the start group is served from the requested object and the end group up to it. The subscription itself still spans whole groups.
 - **No pausing**: Unsubscribe if you don't want a track.
 - **No binary names**: Uses UTF-8 strings instead of arrays of byte arrays.
 

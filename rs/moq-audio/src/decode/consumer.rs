@@ -1,17 +1,20 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
 use crate::resample::{Resampler, remix, validate_channels};
-use crate::{Error, Frame};
+use crate::{Activity, Error, Frame};
 
 /// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
 /// declared by [`Config`].
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / channel count are fixed at construction, and
-/// [`read`](Self::read) returns plain [`Frame`]s.
+/// [`read`](Self::read) returns [`Frame`]s carrying the codec activity they
+/// were decoded from.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
@@ -22,6 +25,11 @@ pub struct Consumer {
 	/// One past the last sample handed to the resampler, so the tail it is still
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
+	/// Codec activity spans the resampler's buffered output still covers.
+	spans: VecDeque<ActivitySpan>,
+	/// Activity of the last span the output ran past, for the rounding samples the
+	/// filter leaves beyond the final input boundary.
+	trailing: Activity,
 	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
@@ -32,6 +40,11 @@ pub struct Consumer {
 	terminal_start: Option<moq_net::Timestamp>,
 	/// Last container discontinuity applied to codec and resampler state.
 	discontinuity: u64,
+}
+
+struct ActivitySpan {
+	end: moq_net::Timestamp,
+	activity: Activity,
 }
 
 impl Consumer {
@@ -83,6 +96,8 @@ impl Consumer {
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
+			spans: VecDeque::new(),
+			trailing: Activity::Active,
 			epoch: None,
 			frames_decoded: 0,
 			end: None,
@@ -109,6 +124,11 @@ impl Consumer {
 	}
 
 	/// Read the next decoded PCM frame, or `None` when the track ends.
+	///
+	/// [`Frame::activity`] reports whether the packet these samples came from
+	/// coded audio. It describes where the frame begins, so a resampled
+	/// frame that straddles a change carries the activity its first sample came
+	/// from and the next frame carries the new one.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			let mux_frame = self.track.read().await?;
@@ -127,7 +147,9 @@ impl Consumer {
 
 			let rate = self.decoder.sample_rate();
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
-			let mut decoded = self.decoder.decode(&mux_frame.payload)?;
+			let decoded = self.decoder.decode(&mux_frame.payload)?;
+			let activity = decoded.activity;
+			let mut decoded = decoded.samples;
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
@@ -164,9 +186,34 @@ impl Consumer {
 				None => (decoded, decoded_at),
 			};
 
-			self.tail = Some(advance(decoded_at, frames, rate)?);
+			let decoded_end = advance(decoded_at, frames, rate)?;
+			self.tail = Some(decoded_end);
 
-			return Ok(Some(self.frame(pcm, timestamp)?));
+			// The resampler hands back samples it was holding from earlier packets,
+			// so what comes out starts before the packet that filled its chunk. Track
+			// where each packet's activity ends so the output can be labelled by
+			// where it actually begins, not by the packet just submitted.
+			let resampled = self.resampler.is_some();
+			if resampled {
+				self.spans.push_back(ActivitySpan {
+					end: decoded_end,
+					activity,
+				});
+			}
+
+			// A packet shorter than the resampler's chunk leaves nothing to hand
+			// over yet. Read on rather than returning a frame with no samples, which
+			// a caller would otherwise see as audio arriving.
+			if pcm.is_empty() {
+				continue;
+			}
+
+			let activity = if resampled {
+				self.activity_at(timestamp)
+			} else {
+				activity
+			};
+			return Ok(Some(self.frame(pcm, timestamp, activity)?));
 		}
 	}
 
@@ -183,6 +230,8 @@ impl Consumer {
 			resampler.reset();
 		}
 		self.tail = None;
+		self.spans.clear();
+		self.trailing = Activity::Active;
 		self.epoch = None;
 		self.frames_decoded = 0;
 		self.end = None;
@@ -209,7 +258,18 @@ impl Consumer {
 		}
 
 		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
-		Ok(Some(self.frame(pcm, timestamp)?))
+		let activity = self.activity_at(timestamp);
+		Ok(Some(self.frame(pcm, timestamp, activity)?))
+	}
+
+	/// The codec activity covering `timestamp`, dropping the spans it has passed.
+	fn activity_at(&mut self, timestamp: moq_net::Timestamp) -> Activity {
+		while let Some(span) = self.spans.front().filter(|span| span.end <= timestamp) {
+			self.trailing = span.activity;
+			self.spans.pop_front();
+		}
+
+		self.spans.front().map_or(self.trailing, |span| span.activity)
 	}
 
 	/// Where the output the resampler is about to hand back actually begins.
@@ -232,7 +292,7 @@ impl Consumer {
 	}
 
 	/// Remix and pack decoded PCM into an output frame.
-	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp) -> Result<Frame, Error> {
+	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp, activity: Activity) -> Result<Frame, Error> {
 		let pcm = if self.decoder.channel_count() == self.resolved_channels {
 			pcm
 		} else {
@@ -243,6 +303,7 @@ impl Consumer {
 		Ok(Frame {
 			timestamp,
 			data: Bytes::from(bytes),
+			activity,
 		})
 	}
 }
@@ -320,12 +381,7 @@ mod tests {
 		for sample in samples {
 			data.extend_from_slice(&sample.to_le_bytes());
 		}
-		producer
-			.write(&Frame {
-				timestamp: Timestamp::ZERO,
-				data: data.into(),
-			})
-			.unwrap();
+		producer.write(&Frame::new(data.into(), Timestamp::ZERO)).unwrap();
 
 		let frame = consumer.read().await.unwrap().expect("decoded frame");
 		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
@@ -458,6 +514,89 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn resampling_keeps_the_activity_boundary_on_its_source() {
+		let mut encoder = Encoder::new(&crate::encode::Config {
+			dtx: true,
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
+			frame_duration: std::time::Duration::from_millis(10),
+			..crate::encode::Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
+		.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				sample_rate: Some(44_100),
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let active = vec![0.5; encoder.frame_size()];
+		let silence = vec![0.0; encoder.frame_size()];
+		let mut first_dtx = None;
+		for index in 0..40u64 {
+			let packet = encoder.encode(if index == 0 { &active } else { &silence }).unwrap();
+			let timestamp = Timestamp::from_scale(index * encoder.frame_size() as u64, 48_000).unwrap();
+			if first_dtx.is_none() && packet.activity.is_dtx() {
+				first_dtx = Some(timestamp);
+			}
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp,
+					payload: packet.payload,
+					keyframe: true,
+					duration: None,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let expected = first_dtx.expect("silence should enter Opus DTX");
+		let mut actual = None;
+		while let Some(frame) = consumer.read().await.unwrap() {
+			// 10 ms packets do not fill the 20 ms chunk, so the resampler hands back
+			// nothing every other packet. Those must not surface as frames: a frame
+			// with no samples reads as audio arriving, and carries an activity
+			// describing samples that are not there.
+			assert!(!frame.data.is_empty(), "read returned a frame with no samples");
+			if frame.activity.is_dtx() {
+				actual = Some(frame.timestamp);
+				break;
+			}
+		}
+		let actual = actual.expect("consumer should report Opus DTX");
+
+		// Each frame carries the activity its first sample came from, so the label
+		// can lag its source by up to the frame it lands in, but it must never lead
+		// it: leading means samples that are still active got labelled DTX. That is
+		// what labelling by the packet most recently submitted does, since the
+		// resampler is handing back audio from before that packet. It puts the
+		// boundary a chunk early instead of a fraction of a chunk late.
+		let delay = actual.as_micros() as i128 - expected.as_micros() as i128;
+		let chunk_us = 20_000i128;
+		assert!(
+			(0..chunk_us).contains(&delay),
+			"DTX label landed {delay} us from its source, outside [0, {chunk_us})"
+		);
+	}
+
+	#[tokio::test]
 	async fn reads_the_container_the_catalog_declares() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -541,7 +680,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::ZERO,
-				payload: packet,
+				payload: packet.payload,
 				keyframe: true,
 				duration: None,
 			})

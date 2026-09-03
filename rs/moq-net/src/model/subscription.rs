@@ -11,10 +11,6 @@ use std::{task::Poll, time::Duration};
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// Whether groups are prioritized in sequence order. Groups may always arrive
-	/// out-of-order (or not at all) over the network. Defaults to `false`; the
-	/// aggregate is ordered only when every live subscriber asks for it.
-	pub ordered: bool,
 	/// How old a group may get before this subscriber gives up on it.
 	///
 	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
@@ -42,10 +38,12 @@ pub struct Subscription {
 	///
 	/// # How age is measured
 	///
-	/// By both presentation time and wall-clock arrival, with either able to expire the
-	/// group. Presentation time compares a group's first timestamp against the newest
-	/// one above it, so a backlog delivered as a burst still reads as its true age.
-	/// Wall-clock backstops an empty or stalled group that has supplied no timestamp.
+	/// In presentation time only. A group is measured by its *reach*, where its immediate
+	/// successor begins, against the newest frame of the latest group: it cannot present
+	/// past its successor, so once everything it could still hold falls outside the budget
+	/// it is provably useless. The candidate needs no timestamp of its own, so an empty or
+	/// stalled group is bounded by its stamped successor the same way. Wall-clock
+	/// reclamation of idle content is the cache's own policy, not this budget's.
 	///
 	/// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport
 	/// without the Timestamp property) have their frames stamped on receipt, which makes
@@ -53,13 +51,18 @@ pub struct Subscription {
 	/// in three reads as three. The publisher's copy is stamped as it produces, so the
 	/// gate there still holds; it is just the coarser of the two.
 	pub max_age: Duration,
-	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
-	/// group.
+	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
-	/// A request, aggregated across every live subscriber (the earliest explicit start
-	/// wins), so it says what the publisher sends, not what any one subscriber sees.
-	/// [`crate::track::Subscriber::start_at`] is the local read cursor; setting one does
-	/// not imply the other. See [Local cursor vs wire
+	/// A floor, not a request: only [`Self::max_age`] asks for data, and the floor bounds
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing, since
+	/// nothing sits below group 0. Delivery starts at the oldest group at or above the
+	/// floor that the budget still considers fresh, so a floor above the live edge simply
+	/// waits there (a resumed subscription naming where it left off).
+	///
+	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
+	/// without one clears it), so it says what the publisher sends, not what any one
+	/// subscriber sees. [`crate::track::Subscriber::start_at`] is the local read cursor;
+	/// setting one does not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub start: Option<Position>,
 	/// First [`Position`] the publisher should *not* deliver, or `None` for no end.
@@ -83,7 +86,6 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			ordered: false,
 			max_age: Duration::ZERO,
 			start: None,
 			end: None,
@@ -98,23 +100,17 @@ impl Subscription {
 		self
 	}
 
-	/// Set whether groups are prioritized in sequence order, returning `self` for
-	/// chaining. Groups may always arrive out-of-order (or not at all) over the network.
-	pub fn with_ordered(mut self, ordered: bool) -> Self {
-		self.ordered = ordered;
-		self
-	}
-
 	/// Set how old a group may get before it is skipped, returning `self` for chaining.
 	pub fn with_max_age(mut self, max_age: Duration) -> Self {
 		self.max_age = max_age;
 		self
 	}
 
-	/// Start delivery at `start`, or at the latest group when `None`. Returns `self` for
+	/// Floor delivery at `start`, or leave it unfloored when `None`. Returns `self` for
 	/// chaining.
 	///
-	/// [`Position::group`] is the whole-group form.
+	/// A floor bounds how far back [`Self::max_age`] may reach; it does not request data
+	/// on its own. [`Position::group`] is the whole-group form.
 	pub fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.start = start.into();
 		self
@@ -142,12 +138,11 @@ impl Subscription {
 		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
-			ordered: self.ordered && combined.ordered,
 			max_age: self.max_age.max(combined.max_age),
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
 			// would invent a bound neither asked for.
-			start: min_some(self.start, combined.start),
+			start: min_floored(self.start, combined.start),
 			end: max_unbounded(self.end, combined.end),
 		};
 
@@ -228,7 +223,15 @@ impl Position {
 	}
 }
 
-/// The lower of two optional bounds, treating `None` as unbounded.
+// Combining two optional bounds comes in two families, and they disagree on what `None`
+// means. `_some` treats it as the neutral element (the other side wins), for intersecting
+// two ranges that each restrict independently. `_floored` / `_unbounded` treat it as
+// absorbing (the result is `None` too), for aggregating across subscribers, where one
+// subscriber asking for everything makes the aggregate everything. Picking the wrong
+// family silently narrows or widens what the publisher sends, so the suffix, not the
+// `min`/`max`, is the part to read.
+
+/// The lower of two optional bounds, `None` neutral. Pairs with [`max_some`].
 pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -237,8 +240,26 @@ pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
-/// The higher of two optional bounds, treating `None` as unbounded (and therefore
-/// absorbing).
+/// The higher of two optional bounds, `None` neutral. Pairs with [`min_some`].
+pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.max(b)),
+		(Some(a), None) | (None, Some(a)) => Some(a),
+		(None, None) => None,
+	}
+}
+
+/// The lower of two optional floors, `None` absorbing (no floor). The mirror of
+/// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
+/// the aggregate unrestricted.
+pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(None, _) | (_, None) => None,
+	}
+}
+
+/// The higher of two optional bounds, `None` absorbing (unbounded).
 pub(super) fn max_unbounded<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),
@@ -258,25 +279,6 @@ mod tests {
 			}
 		}
 		combined
-	}
-
-	#[test]
-	fn combined_ordered_stays_ordered_for_multiple_ordered_viewers() {
-		let subscription = Subscription::default().with_ordered(true);
-
-		let combined = combine(&[subscription.clone(), subscription.clone(), subscription]).unwrap();
-
-		assert!(combined.ordered);
-	}
-
-	#[test]
-	fn combined_any_unordered_viewer_disables_ordered() {
-		let unordered = Subscription::default().with_ordered(false);
-		let ordered = Subscription::default().with_ordered(true);
-
-		let combined = combine(&[unordered, ordered]).unwrap();
-
-		assert!(!combined.ordered);
 	}
 
 	/// The exclusive representation runs out at both extremes, and `Option` says so
@@ -313,15 +315,18 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_group_start_uses_earliest_explicit_start() {
-		// No start at all is the live edge, which loses to any explicit one.
-		let live = Subscription::default();
+	fn combined_group_start_keeps_the_loosest_floor() {
+		// A floor only restricts, so the lowest one wins across floored subscribers.
 		let catchup = Subscription::default().with_start(Position::group(10));
 		let older_catchup = Subscription::default().with_start(Position::group(5));
-
-		let combined = combine(&[live, catchup, older_catchup]).unwrap();
-
+		let combined = combine(&[catchup.clone(), older_catchup]).unwrap();
 		assert_eq!(combined.start, Some(Position::group(5)));
+
+		// A subscriber with no floor at all clears the aggregate: its budget may reach
+		// below any floor the others set.
+		let unfloored = Subscription::default();
+		let combined = combine(&[catchup, unfloored]).unwrap();
+		assert_eq!(combined.start, None);
 	}
 
 	#[test]

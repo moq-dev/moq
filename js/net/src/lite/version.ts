@@ -110,7 +110,7 @@ export function hasAnnounceId(version: Version): boolean {
 }
 
 /** Whether ANNOUNCE_REQUEST carries the Exclude Hop field: the subscriber's own
- * origin id, which the publisher uses to skip announces whose hop chain already
+ * Hop ID, which the publisher uses to skip announces whose hop chain already
  * passed through the subscriber. Present in lite-04 and lite-05 only.
  *
  * The receiver's own reflected-announce check drops those announces anyway (and
@@ -155,6 +155,49 @@ export function hasRouteCost(version: Version): boolean {
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */
 export function hasFrameBounds(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO carry the retired
+ * `Ordered` byte.
+ *
+ * The field is gone from the model: a publisher transmits newest-first within a track,
+ * always. Deployed drafts still have the byte in their layout, so it is written as 0 and
+ * ignored on read rather than shifting every field behind it. */
+export function hasGroupOrder(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a start
+ * from: the raw minimum group sequence (default 0), with `Subscriber Max Age` as the only
+ * gate on how far back delivery begins. Changed in lite-06.
+ *
+ * Older versions encode `Group Start` as the sequence + 1, with 0 meaning the latest
+ * group, so an absent start there pins the cursor to the live edge instead of letting the
+ * budget reach back.
+ */
+export function resolvesStart(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

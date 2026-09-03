@@ -3,8 +3,10 @@
  *
  * Publish broadcasts into an origin and hand the origin to one or more connections to
  * serve them; the broadcasts outlive any single session. Hand the same (or another)
- * origin to a connection's `subscribe` option and the peer's announced broadcasts appear
- * in the table too, consumable by path. Mirrors the `origin` module in `rs/moq-net`.
+ * origin to a connection's `subscribe` option and the peer's announced routes appear
+ * in the table too: each route covers a path prefix, and a request for a path under
+ * it resolves through the session that announced it. Mirrors the `origin` module in
+ * `rs/moq-net`.
  *
  * @module
  */
@@ -33,23 +35,40 @@ export interface RequestSlot {
 	readonly route: Signal<broadcast.Consumer | undefined>;
 }
 
+/**
+ * What serves the paths a remote route covers: the connection that announced it.
+ *
+ * `consume` opens (or reuses) that session's subscription to the exact path; the
+ * origin materializes lazily, only when a request actually lands under the route.
+ *
+ * @internal
+ */
+export interface RouteProvider {
+	consume(path: Path.Valid): broadcast.Consumer;
+}
+
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
-	// Both tables hold consumer fronts, so the application producing into the origin and
-	// the connections serving or feeding it stay decoupled. Undefined once the origin
-	// closes, so late writes fail loudly.
+	// Both tables decouple the application producing into the origin from the
+	// connections serving or feeding it. Undefined once the origin closes, so late
+	// writes fail loudly.
 	//
-	// Local is what this endpoint publishes; sessions announce and serve it. Remote is
-	// what sessions feeding the origin discovered; an entry dies with the session that
-	// inserted it. They are separate maps so a session can never announce a remote entry
-	// back to a peer, which is what makes an origin shared by both directions echo-free.
+	// Local is what this endpoint publishes, keyed by exact path; sessions announce and
+	// serve it. Remote is the route table: the path prefixes sessions announced, each
+	// covering every path beneath it; an entry dies with the session that inserted it.
+	// They are separate so a session can never announce a remote entry back to a peer,
+	// which is what makes an origin shared by both directions echo-free.
 	//
-	// Remote keeps every session's front per path, newest first: [0] is the route consumers
-	// resolve, and removing it promotes the next, so a session dying does not black-hole a
-	// path another live session still carries (which would stay dark forever, since that
-	// session already announced it and will not again).
+	// Remote keeps every session's provider per prefix, newest first: [0] is the one
+	// requests resolve through, and removing it promotes the next, so a session dying
+	// does not black-hole a prefix another live session still covers.
 	local = new Signal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
-	remote = new Signal<Map<Path.Valid, broadcast.Consumer[]> | undefined>(new Map());
+	remote = new Signal<Map<Path.Valid, RouteProvider[]> | undefined>(new Map());
+
+	// Broadcasts materialized from remote routes, keyed by exact path. Shared by every
+	// request for the path so repeats reuse one session subscription; dropped (and
+	// closed) when the providing route goes away or the last request releases it.
+	materialized = new Map<Path.Valid, { provider: RouteProvider; front: broadcast.Consumer }>();
 
 	// Paths consumers asked for without waiting for an announcement; attached sessions
 	// answer them with blind subscriptions. Never announced: an answered request is assumed
@@ -81,9 +100,76 @@ class OriginState {
 		slot.route.set(this.route(path, slot.answer));
 	}
 
-	/** What `path` resolves to: the table's route when it has one, else the blind answer. */
+	/**
+	 * Recompute every open request covered by `prefix`, after a route was inserted or
+	 * removed there: a route covers many paths, so a single-path refresh is not enough.
+	 * Materialized broadcasts whose provider changed are released here too, so a
+	 * retracted route's session subscription closes even when nothing reads it again.
+	 */
+	refreshPrefix(prefix: Path.Valid): void {
+		for (const [path, cached] of [...this.materialized]) {
+			if (!Path.hasPrefix(prefix, path)) continue;
+			if (cached.provider !== this.provider(path)) {
+				this.materialized.delete(path);
+				cached.front.close();
+			}
+		}
+		for (const [path, slot] of this.requests.peek() ?? []) {
+			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot.answer));
+		}
+	}
+
+	/**
+	 * Release the materialized broadcast for `path`, once its last request is gone: the
+	 * cache exists to share one session subscription between requests, not to outlive
+	 * them.
+	 */
+	releaseMaterialized(path: Path.Valid): void {
+		const cached = this.materialized.get(path);
+		if (!cached) return;
+		this.materialized.delete(path);
+		cached.front.close();
+	}
+
+	/** The newest provider on the most specific route covering `path`, if any. */
+	provider(path: Path.Valid): RouteProvider | undefined {
+		let bestPrefix: Path.Valid | undefined;
+		let best: RouteProvider | undefined;
+		for (const [prefix, providers] of this.remote.peek() ?? []) {
+			if (!providers[0]) continue;
+			if (!Path.hasPrefix(prefix, path)) continue;
+			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
+				bestPrefix = prefix;
+				best = providers[0];
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * What `path` resolves to: a local publish, a broadcast materialized from the best
+	 * covering route, or the blind answer.
+	 *
+	 * Materialization is lazy and cached per path: the first request under a route opens
+	 * the providing session's subscription, repeats share it, and a provider change (the
+	 * route retracting, a better session taking over) swaps it out.
+	 */
 	route(path: Path.Valid, answer?: broadcast.Consumer): broadcast.Consumer | undefined {
-		return this.local.peek()?.get(path) ?? this.remote.peek()?.get(path)?.[0] ?? answer;
+		const local = this.local.peek()?.get(path);
+		if (local) return local;
+
+		const provider = this.provider(path);
+		const cached = this.materialized.get(path);
+		if (cached && cached.provider === provider) return cached.front;
+		if (cached) {
+			this.materialized.delete(path);
+			cached.front.close();
+		}
+		if (!provider) return answer;
+
+		const front = provider.consume(path);
+		this.materialized.set(path, { provider, front });
+		return front;
 	}
 }
 
@@ -172,45 +258,48 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Insert a broadcast discovered by a session, taking ownership of `front`.
+	 * Advertise a route: a claim that paths under `prefix` can be served through
+	 * `provider`.
 	 *
-	 * The newest insertion becomes the route consumers resolve; earlier ones are kept as
-	 * fallbacks and promoted when it goes away, so overlapping sessions carrying the same
-	 * path fail over instead of black-holing it. The returned dispose retracts this front
-	 * (whichever position it holds) and releases it; call it when the announcement ends or
-	 * the session dies. Inserting into a closed origin releases the front immediately and
-	 * retracts nothing.
+	 * This is how sessions land the routes a peer announces, and how an application
+	 * serves a whole subtree without publishing each path: announce one short prefix
+	 * and hand back a broadcast from `provider.consume(path)` for whatever is
+	 * requested beneath it. Announcing each broadcast's exact path is the convention
+	 * that lets subscribers enumerate broadcasts ({@link publish} does that half).
 	 *
-	 * @internal
+	 * The newest announcement becomes the provider requests resolve through; earlier
+	 * ones are kept as fallbacks and promoted when it goes away, so overlapping
+	 * sessions covering the same prefix fail over instead of black-holing it. The
+	 * returned dispose retracts this route (whichever position it holds); call it
+	 * when the advertisement ends or the session dies. Announcing into a closed
+	 * origin retracts nothing.
+	 *
+	 * @public
 	 */
-	insertRemote(path: Path.Valid, front: broadcast.Consumer): Dispose {
+	announce(prefix: Path.Valid, provider: RouteProvider): Dispose {
 		let closed = false;
-		this.#state.remote.mutate((broadcasts) => {
-			if (!broadcasts) {
+		this.#state.remote.mutate((routes) => {
+			if (!routes) {
 				closed = true;
 				return;
 			}
-			const fronts = broadcasts.get(path);
-			if (fronts) fronts.unshift(front);
-			else broadcasts.set(path, [front]);
+			const providers = routes.get(prefix);
+			if (providers) providers.unshift(provider);
+			else routes.set(prefix, [provider]);
 		});
-		if (closed) {
-			front.close();
-			return () => {};
-		}
-		this.#state.refresh(path);
+		if (closed) return () => {};
+		this.#state.refreshPrefix(prefix);
 
 		return () => {
-			this.#state.remote.mutate((broadcasts) => {
-				const fronts = broadcasts?.get(path);
-				if (!fronts) return;
-				const index = fronts.indexOf(front);
+			this.#state.remote.mutate((routes) => {
+				const providers = routes?.get(prefix);
+				if (!providers) return;
+				const index = providers.indexOf(provider);
 				if (index < 0) return;
-				fronts.splice(index, 1);
-				if (fronts.length === 0) broadcasts?.delete(path);
+				providers.splice(index, 1);
+				if (providers.length === 0) routes?.delete(prefix);
 			});
-			this.#state.refresh(path);
-			front.close();
+			this.#state.refreshPrefix(prefix);
 		};
 	}
 
@@ -350,13 +439,12 @@ export class Producer implements Table {
 			}
 			return undefined;
 		});
-		this.#state.remote.update((broadcasts) => {
-			// Remote broadcasts are somebody else's; only release our handles on them.
-			for (const fronts of broadcasts?.values() ?? []) {
-				for (const front of fronts) front.close();
-			}
-			return undefined;
-		});
+		this.#state.remote.update(() => undefined);
+		// Materialized broadcasts are handles we opened; release them.
+		for (const cached of this.#state.materialized.values()) {
+			cached.front.close();
+		}
+		this.#state.materialized.clear();
 		// Nothing will answer a request on a closed origin, whatever is still attached, so
 		// existing requests report unroutable rather than waiting on a corpse.
 		this.#state.answerers.set(0);
@@ -497,7 +585,8 @@ export class Consumer {
 	readonly #discovery: Getter<boolean | undefined>;
 
 	/**
-	 * Whether the table routes `path` itself, by a local publish or a session's announcement.
+	 * Whether the table routes `path`, by a local publish or an announced route
+	 * covering it.
 	 *
 	 * Availability, not a handle: {@link request} is the only way to consume by path. A
 	 * request on a routed path resolves to that route and never to a blind answer, which is
@@ -507,7 +596,7 @@ export class Consumer {
 	 */
 	routes(path: Path.Valid): boolean {
 		if (this.#state.local.peek()?.has(path)) return true;
-		return (this.#state.remote.peek()?.get(path)?.length ?? 0) > 0;
+		return this.#state.provider(path) !== undefined;
 	}
 
 	/**
@@ -609,15 +698,17 @@ export class Consumer {
 				taken.answer?.close();
 				taken.answer = undefined;
 				taken.route.set(undefined);
+				this.#state.releaseMaterialized(path);
 			});
 		});
 	}
 
 	/**
-	 * The available broadcasts under `prefix`, as a live stream: everything currently
-	 * routed arrives first as `active`, then additions and removals as they happen. Paths
-	 * are relative to `prefix`. The stream ends when the origin closes or the consumer is
-	 * closed.
+	 * The announced routes under `prefix`, as a live stream: every currently announced
+	 * prefix arrives first as `active`, then additions and retractions as they happen. A
+	 * local publish announces its exact path; a session's route announces the prefix it
+	 * covers. Paths are relative to `prefix`. The stream ends when the origin closes or
+	 * the consumer is closed.
 	 */
 	announced(prefix: Path.Valid = Path.empty()): announce.Consumer {
 		const producer = new announce.Producer(prefix);
@@ -626,11 +717,12 @@ export class Consumer {
 	}
 
 	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
-		// Keyed by suffix, valued by the routing front. Diffing identity rather than mere
-		// presence means a republish (a new broadcast taking the path) emits a retraction
-		// then a fresh announcement, so a consumer re-consumes instead of clinging to the
-		// superseded broadcast.
-		let active = new Map<Path.Valid, broadcast.Consumer>();
+		// Keyed by suffix, valued by the routing identity (a local front or a route's
+		// newest provider). Diffing identity rather than mere presence means a republish
+		// (a new broadcast taking the path) emits a retraction then a fresh
+		// announcement, so a consumer re-consumes instead of clinging to the superseded
+		// broadcast; an identical route from a replacement session is invisible.
+		let active = new Map<Path.Valid, object>();
 
 		try {
 			for (;;) {
@@ -638,12 +730,24 @@ export class Consumer {
 				const remote = this.#state.remote.peek();
 				if (local === undefined && remote === undefined) break;
 
-				const next = new Map<Path.Valid, broadcast.Consumer>();
+				const next = new Map<Path.Valid, object>();
 				// Remote first, so a local publish at the same path overwrites it: the
-				// announcement points at whatever consume() would resolve.
-				for (const [path, fronts] of remote ?? []) {
+				// announcement points at whatever request() would resolve.
+				// The most specific route covering `prefix` itself wins the root slot,
+				// matching request() resolution.
+				let rootLen = -1;
+				for (const [path, providers] of remote ?? []) {
+					if (!providers[0]) continue;
+					if (Path.hasPrefix(path, prefix)) {
+						// A route at or above `prefix` covers everything under it and
+						// presents at the root, mirroring Rust's prefix intersection.
+						if (path.length < rootLen) continue;
+						rootLen = path.length;
+						next.set(Path.empty(), providers[0]);
+						continue;
+					}
 					const suffix = Path.stripPrefix(prefix, path);
-					if (suffix !== null && fronts[0]) next.set(suffix, fronts[0]);
+					if (suffix !== null) next.set(suffix, providers[0]);
 				}
 				for (const [path, front] of local ?? []) {
 					const suffix = Path.stripPrefix(prefix, path);
@@ -651,10 +755,10 @@ export class Consumer {
 				}
 
 				for (const [path, front] of active) {
-					if (next.get(path) !== front) producer.append({ path, active: false });
+					if (next.get(path) !== front) producer.append({ prefix: path, active: false });
 				}
 				for (const [path, front] of next) {
-					if (active.get(path) !== front) producer.append({ path, active: true });
+					if (active.get(path) !== front) producer.append({ prefix: path, active: true });
 				}
 				active = next;
 

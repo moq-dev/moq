@@ -361,6 +361,20 @@ impl<E: CatalogExt> Producer<E> {
 		super::Reserved::new(self.clone())
 	}
 
+	/// Take a rendition name without withholding the catalog's initial snapshot.
+	///
+	/// Use this for a long-lived incremental producer whose config may arrive
+	/// later or never arrive. The returned handle owns the name immediately,
+	/// publishes the config on [`set`](super::Rendition::set), and retires it on
+	/// drop. Use [`reserve`](Self::reserve) when the initial catalog must wait for
+	/// the complete track set instead.
+	pub fn rendition<C: super::RenditionConfig<E>>(
+		&self,
+		name: impl Into<String>,
+	) -> crate::Result<super::Rendition<E, C>> {
+		super::Rendition::live(self.clone(), name.into())
+	}
+
 	/// Take `name` in `C`'s section for a new [`Rendition`](super::Rendition), which owns it until
 	/// the handle drops.
 	///
@@ -459,6 +473,75 @@ impl<E: CatalogExt> Producer<E> {
 	/// this producer's own [`reserve`](Self::reserve)).
 	pub fn timeline(&self) -> crate::timeline::Producer {
 		self.timeline.clone()
+	}
+
+	/// Publish `track` as a latest-value JSON track, advertising it in the catalog.
+	///
+	/// The caller creates the track on the broadcast, as it does for a media track
+	/// ([`media_producer`](Self::media_producer)); this writes its catalog entry and removes the
+	/// entry when the returned handle drops. The catalog key is [`track.name()`](moq_net::track::Producer::name)
+	/// verbatim, with no `.z` suffix even when compressed, since the entry's compression flag is
+	/// what a consumer reads.
+	///
+	/// Errors if the catalog already carries an entry under that name, for example one seeded
+	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast.
+	pub fn json_snapshot<T: serde::Serialize>(
+		&self,
+		track: moq_net::track::Producer,
+		config: crate::json::Config,
+	) -> crate::Result<crate::json::Snapshot<T, E>> {
+		let rendition = self.data_entry(track.name())?;
+		Ok(crate::json::Snapshot::new(track, rendition, &config))
+	}
+
+	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that every
+	/// record is preserved rather than superseded.
+	pub fn json_stream<T: serde::Serialize>(
+		&self,
+		track: moq_net::track::Producer,
+		config: crate::json::Config,
+	) -> crate::Result<crate::json::Stream<T, E>> {
+		let rendition = self.data_entry(track.name())?;
+		Ok(crate::json::Stream::new(track, rendition, &config))
+	}
+
+	/// Publish `track` as a latest-value binary track, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
+	/// payloads are opaque bytes.
+	pub fn binary_snapshot(
+		&self,
+		track: moq_net::track::Producer,
+		config: crate::binary::Config,
+	) -> crate::Result<crate::binary::Snapshot<E>> {
+		let rendition = self.data_entry(track.name())?;
+		Ok(crate::binary::Snapshot::new(track, rendition, &config))
+	}
+
+	/// Publish `track` as an append-log binary track, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
+	/// payloads are opaque bytes and every one is preserved rather than superseded.
+	pub fn binary_stream(
+		&self,
+		track: moq_net::track::Producer,
+		config: crate::binary::Config,
+	) -> crate::Result<crate::binary::Stream<E>> {
+		let rendition = self.data_entry(track.name())?;
+		Ok(crate::binary::Stream::new(track, rendition, &config))
+	}
+
+	/// Reserve the catalog entry a data producer owns, keyed by its track name.
+	///
+	/// The rendition is reserved but not yet set, so the caller fills it in with the config for the
+	/// mode it is about to publish. Reserving is what rejects a name the catalog already carries,
+	/// including an entry with no local track behind it (seeded through
+	/// [`Config::with_catalog`], or pointing at a sibling broadcast), which publishing over would
+	/// silently replace and then retire when this handle drops.
+	fn data_entry<C: super::RenditionConfig<E>>(&self, name: &str) -> crate::Result<super::Rendition<E, C>> {
+		self.reserve().init(name)
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
@@ -904,6 +987,29 @@ mod test {
 			matches!(consumer.poll_next(&waiter), Poll::Pending),
 			"only the one complete snapshot should be published"
 		);
+	}
+
+	#[test]
+	fn live_rendition_owns_its_name_without_gating_the_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let _unresolved = catalog.rendition::<VideoConfig>("video0").unwrap();
+		assert!(
+			catalog.rendition::<VideoConfig>("video0").is_err(),
+			"the unresolved live rendition owns its name"
+		);
+		let mut audio = catalog.rendition::<AudioConfig>("audio0").unwrap();
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected the incremental audio catalog, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(!snapshot.video.renditions.contains_key("video0"));
 	}
 
 	// Dropping a reservation without fulfilling it (a stream that never produced a config) still opens

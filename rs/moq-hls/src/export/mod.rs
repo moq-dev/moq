@@ -342,8 +342,13 @@ async fn watch(
 	renditions: &renditions::Fanout,
 ) -> crate::Result<()> {
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
-	while let Some(entry) = timeline.next().await? {
-		renditions.push(entry);
+	while let Some(event) = timeline.next().await? {
+		match event {
+			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry),
+			moq_mux::timeline::Event::Pop(range) => renditions.pop(range),
+			moq_mux::timeline::Event::Skip(_) => renditions.skip(),
+			_ => unreachable!("unknown timeline event"),
+		}
 	}
 	Ok(())
 }
@@ -352,7 +357,7 @@ async fn watch(
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
@@ -411,9 +416,8 @@ mod tests {
 	#[tokio::test]
 	async fn escaping_broadcast_reference_is_not_advertised() {
 		let origin = produce_origin();
-		let _broadcast = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let _broadcast = origin.create_broadcast("a/pub").expect("publish allowed");
+		let _announce_broadcast = origin.announce("a/pub", Default::default()).expect("publish allowed");
 		settle().await;
 		let source = moq_mux::Source::new(origin.consume(), "a/pub");
 		let upstream = Upstream {
@@ -437,9 +441,8 @@ mod tests {
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -514,9 +517,8 @@ mod tests {
 	#[tokio::test]
 	async fn serves_dash_manifest_and_time_addressed_segments() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -595,9 +597,8 @@ mod tests {
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -656,9 +657,8 @@ mod tests {
 	#[tokio::test]
 	async fn target_duration_covers_the_window_without_a_declared_bound() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -693,9 +693,8 @@ mod tests {
 	#[tokio::test]
 	async fn audio_and_video_segments_are_aligned() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -778,9 +777,8 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -832,7 +830,7 @@ mod tests {
 	}
 
 	// A same-path republish takes the origin leaf over with a brand new broadcast (an ordinary
-	// publisher is `Origin::UNKNOWN`, which never counts as the same publisher, so even a plain
+	// publisher is `Hop::UNKNOWN`, which never counts as the same publisher, so even a plain
 	// reconnect qualifies). Renditions derived from the old broadcast's catalog must not serve the
 	// replacement's media: its group numbering restarts, so those bytes would be served under the
 	// replaced broadcast's segment number, duration, and PROGRAM-DATE-TIME.
@@ -848,9 +846,8 @@ mod tests {
 			origin: &moq_net::origin::Producer,
 			payload: &'static [u8],
 		) -> (Box<dyn std::any::Any>, hang::catalog::VideoConfig) {
-			let mut broadcast = origin
-				.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-				.expect("publish allowed");
+			let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+			let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 			let reserved = catalog.reserve();
@@ -957,9 +954,8 @@ mod tests {
 	#[tokio::test]
 	async fn removing_a_rendition_ends_its_segment_cursor() {
 		let origin = produce_origin();
-		let broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		settle().await;
 		let upstream = Upstream {
@@ -979,10 +975,8 @@ mod tests {
 		let mut segments = rendition.segments();
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
-		let empty = moq_mux::catalog::hang::Catalog {
-			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME)),
-			..Default::default()
-		};
+		let mut empty = moq_mux::catalog::hang::Catalog::default();
+		empty.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &empty);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
@@ -1000,9 +994,8 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_broadcaster_releases_its_renditions() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -1057,9 +1050,8 @@ mod tests {
 	#[tokio::test]
 	async fn record_cursors_yield_renditions_and_segments() {
 		let origin = produce_origin();
-		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
-			.expect("publish allowed");
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce_broadcast = origin.announce("live", Default::default()).expect("publish allowed");
 		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 

@@ -320,7 +320,7 @@ mod tests {
 			.produce()
 			.create_track("v", None)
 			.unwrap();
-		let mut subscriber = track.subscribe(None);
+		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
 		producer.write(frame(10_000_000, true)).unwrap();
 		producer.write(frame(10_033_000, false)).unwrap();
@@ -355,7 +355,7 @@ mod tests {
 			.produce()
 			.create_track("v", None)
 			.unwrap();
-		let mut subscriber = track.subscribe(None);
+		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
 		producer
 			.write(Frame {

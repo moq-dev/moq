@@ -226,6 +226,202 @@ describe("Effect", () => {
 		}
 	});
 
+	test("spawn does not start work after close", async () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const effect = new Effect();
+		let started = false;
+
+		try {
+			effect.close();
+			effect.spawn(async () => {
+				started = true;
+			});
+			await settle();
+
+			expect(started).toBe(false);
+		} finally {
+			effect.close();
+			warn.mockRestore();
+		}
+	});
+
+	test("a cleanup that spawns during close cannot start work", async () => {
+		// close() used to run the cleanups while #dispose was still defined, so a cleanup calling
+		// back into the effect passed every guard. The task then outlived the close that cleared
+		// #async, with no rerun left to drain it.
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const effect = new Effect();
+		let started = false;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		try {
+			effect.cleanup(() => {
+				effect.spawn(async () => {
+					started = true;
+					await gate;
+				});
+			});
+
+			effect.close();
+			await settle();
+
+			expect(started).toBe(false);
+		} finally {
+			release();
+			warn.mockRestore();
+		}
+	});
+
+	test("a cleanup registered during close still runs", async () => {
+		// Teardown that cascades still completes: `cleanup` appends onto the list close() is
+		// draining rather than dropping it on the floor.
+		const effect = new Effect();
+		const order: string[] = [];
+
+		effect.cleanup(() => {
+			order.push("outer");
+			effect.cleanup(() => order.push("inner"));
+		});
+
+		effect.close();
+
+		expect(order).toEqual(["outer", "inner"]);
+	});
+
+	test("a deep cleanup cascade during close drains without recursing", async () => {
+		// close() drains its list by index, so a chain of any depth stays flat. Running each
+		// cascading cleanup nested inside its parent overflows the stack around 19k and abandons
+		// every cleanup after it.
+		const effect = new Effect();
+		let count = 0;
+
+		const chain = (depth: number) => {
+			count++;
+			if (depth > 0) effect.cleanup(() => chain(depth - 1));
+		};
+
+		effect.cleanup(() => chain(100_000));
+		effect.close();
+
+		expect(count).toBe(100_001);
+	});
+
+	test("a throwing cleanup does not abandon the rest of teardown", async () => {
+		// Teardown that stops half way leaks whatever the remaining callbacks owned, so the drain
+		// reports a failure and keeps going.
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		const effect = new Effect();
+		const ran: string[] = [];
+		let late = false;
+
+		try {
+			effect.cleanup(() => {
+				throw new Error("boom");
+			});
+			effect.cleanup(() => ran.push("after"));
+			effect.close();
+
+			expect(ran).toEqual(["after"]);
+			expect(error).toHaveBeenCalled();
+
+			// And the effect is left properly closed, not mid-drain.
+			effect.cleanup(() => {
+				late = true;
+			});
+			expect(late).toBe(true);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	test("closing from a rerun cleanup runs each teardown once", async () => {
+		// `#run` and `close` share one drain, so a cleanup that closes the effect hands off at the
+		// cursor rather than starting a second pass over callbacks that already ran.
+		const sig = new Signal(0);
+		const ran: string[] = [];
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			inner.cleanup(() => {
+				ran.push("a");
+				inner.close();
+			});
+			inner.cleanup(() => ran.push("b"));
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(ran).toEqual(["a", "b"]);
+
+			// Closed, not left mid-drain: teardown registered now runs immediately.
+			let late = false;
+			effect.cleanup(() => {
+				late = true;
+			});
+			expect(late).toBe(true);
+		} finally {
+			effect.close();
+		}
+	});
+
+	test("a deep cleanup cascade during a rerun drains without recursing", async () => {
+		// The rerun path shares the drain, so a chain registered during its teardown stays flat.
+		const sig = new Signal(0);
+		let count = 0;
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			inner.cleanup(() => {
+				const chain = (depth: number) => {
+					count++;
+					if (depth > 0) inner.cleanup(() => chain(depth - 1));
+				};
+				chain(100_000);
+			});
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(count).toBe(100_001);
+		} finally {
+			effect.close();
+		}
+	});
+
+	test("cancelling a nested run during teardown does not skip the next cleanup", async () => {
+		// The disposer `run` hands back removes itself from the parent. Doing that by splicing
+		// shifts every later entry down, stepping the drain's cursor over a cleanup that has not
+		// run yet, so it never fires and leaks whatever it owned.
+		const sig = new Signal(0);
+		const ran: string[] = [];
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			const dispose = inner.run(() => {});
+			inner.cleanup(() => {
+				ran.push("middle");
+				dispose();
+			});
+			inner.cleanup(() => ran.push("last"));
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(ran).toEqual(["middle", "last"]);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("cleanup from a spawn that outlived its run fires immediately", async () => {
 		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
 		// after that point used to register teardown against the NEXT run: the resource it owned

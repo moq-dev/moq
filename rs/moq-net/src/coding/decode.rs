@@ -49,6 +49,15 @@ pub enum DecodeError {
 	#[error("expected end")]
 	ExpectedEnd,
 
+	/// A length-prefixed message exceeded the receiver's byte limit.
+	#[error("message too large: {size} bytes exceeds {max} byte limit")]
+	MessageTooLarge {
+		/// The byte length declared by the peer.
+		size: usize,
+		/// The largest message this receiver accepts.
+		max: usize,
+	},
+
 	/// The stream ended where a payload was required.
 	#[error("expected data")]
 	ExpectedData,

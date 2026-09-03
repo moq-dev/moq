@@ -59,7 +59,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 		match self {
 			Self::Hang(c) => c.poll_next(waiter),
 			Self::Msf(c) => {
-				// MSF carries only the media sections, so the extension defaults.
+				// MSF carries only the media sections, so the data sections and the extension default.
 				let media = match ready!(c.poll_next(waiter)) {
 					Ok(media) => media,
 					Err(err) => return Poll::Ready(Err(err)),
@@ -69,6 +69,8 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 					audio: m.audio,
 					timeline: m.timeline,
 					text: m.text,
+					json: hang::catalog::Json::default(),
+					binary: hang::catalog::Binary::default(),
 					ext: E::default(),
 				})))
 			}

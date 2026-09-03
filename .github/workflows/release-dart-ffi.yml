@@ -1,0 +1,231 @@
+name: Release Dart FFI
+
+# Publishes the raw `moq_ffi` package and its Native Assets libraries in
+# lockstep with the moq-ffi crate. The ergonomic `moq` package is released by
+# release-dart.yml from its own tag.
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-dart-ffi.yml"
+      - "dart/moq_ffi/**"
+      - "dart/scripts/**"
+      - "rs/moq-ffi/**"
+      - "!rs/moq-ffi/Cargo.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dart-ffi
+  cancel-in-progress: false
+
+env:
+  CARGO_NDK_VERSION: 4.1.2
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            .github/scripts/release.sh parse-version moq-ffi
+          fi
+
+  build:
+    name: Build Native Asset (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-ios
+            os: macos-latest
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+          - target: x86_64-apple-ios
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
+
+      - name: Build and stage asset
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --target "$BUILD_TARGET" \
+            --version "$BUILD_VERSION" \
+            --output dist \
+            --no-default-features
+
+          case "$BUILD_TARGET" in
+            *-apple-ios* | *-apple-darwin*) LIBRARY=libmoq_ffi.dylib ;;
+            *-windows-*) LIBRARY=moq_ffi.dll ;;
+            *) LIBRARY=libmoq_ffi.so ;;
+          esac
+
+          NAME="moq-ffi-$BUILD_VERSION-$BUILD_TARGET-$LIBRARY"
+          mkdir -p assets
+          cp "dist/moq-ffi-$BUILD_VERSION-$BUILD_TARGET/lib/$LIBRARY" "assets/$NAME"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "assets/$NAME" > "assets/$NAME.sha256"
+          else
+            shasum -a 256 "assets/$NAME" > "assets/$NAME.sha256"
+          fi
+
+      - name: Upload Native Asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dart-asset-${{ matrix.target }}
+          path: assets/*
+
+  package:
+    name: Check pub package
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+
+      - name: Stage and check package
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./dart/scripts/package.sh \
+            --package moq_ffi \
+            --version "$BUILD_VERSION" \
+            --output release-out
+          cd "release-out/moq_ffi-$BUILD_VERSION"
+          dart pub get --enforce-lockfile
+          dart analyze
+          dart pub publish --dry-run
+
+      - name: Upload pub package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dart-ffi-package
+          path: release-out/*
+
+  release:
+    name: Attach Native Assets
+    needs: [parse-version, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find previous tag
+        id: prev_tag
+        run: .github/scripts/release.sh prev-tag moq-ffi
+
+      - name: Download Native Assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          pattern: dart-asset-*
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+          RELEASE_CHECKSUMS: SHA256SUMS-dart
+        run: .github/scripts/release.sh create artifacts
+
+  publish:
+    name: Publish moq_ffi to pub.dev
+    needs: [parse-version, package, release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: pub.dev
+      url: https://pub.dev/packages/moq_ffi
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dart-ffi-package
+          path: package
+
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+
+      - name: Publish
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: cd "package/moq_ffi-$BUILD_VERSION" && dart pub publish --force

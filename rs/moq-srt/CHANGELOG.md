@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.6...moq-srt-v0.2.7) - 2026-09-01
+
+### Other
+
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
+## [0.2.6](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.5...moq-srt-v0.2.6) - 2026-08-26
+
+### Fixed
+
+- *(moq-srt)* preserve SCTE-35 through the SRT gateway ([#3075](https://github.com/moq-dev/moq/pull/3075))
+
 ## [0.2.5](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.4...moq-srt-v0.2.5) - 2026-08-24
 
 ### Fixed

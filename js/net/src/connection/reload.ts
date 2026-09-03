@@ -1,4 +1,4 @@
-import { type Dispose, Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -141,10 +141,6 @@ export class Reload {
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
 
-	// Releases the subscribe origin's expectation. Idempotent, so the terminal paths and the
-	// close cleanup can both call it.
-	#expected?: Dispose;
-
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
 	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
 	#delay: DOMHighResTimeStamp | undefined;
@@ -175,8 +171,7 @@ export class Reload {
 		// terminal failure: a reconnect loop that has given up must stop claiming it will
 		// answer, or every request on the origin waits forever on a connection that is done.
 		if (this.subscribe) {
-			this.#expected = this.subscribe.expect();
-			this.#signals.cleanup(this.#expected);
+			this.#signals.cleanup(this.subscribe.expect());
 		}
 
 		this.closed = new Promise((resolve, reject) => {
@@ -308,8 +303,7 @@ export class Reload {
 		// for good.
 		if (cause instanceof SessionError && cause.code === SessionCode.Unauthorized) {
 			console.warn("session rejected as unauthorized, not retrying");
-			this.#expected?.();
-			this.#closedReject(cause);
+			this.#terminate(cause);
 			return;
 		}
 
@@ -320,8 +314,7 @@ export class Reload {
 		if (now >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
-			this.#expected?.();
-			this.#closedReject(cause === undefined ? new Error("reconnect timed out") : error(cause));
+			this.#terminate(cause === undefined ? new Error("reconnect timed out") : error(cause));
 			return;
 		}
 
@@ -332,6 +325,11 @@ export class Reload {
 
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
+	}
+
+	#terminate(cause: Error): void {
+		this.#signals.close();
+		this.#closedReject(cause);
 	}
 
 	/**
@@ -377,8 +375,8 @@ export class Reload {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.path);
-						else active.delete(entry.path);
+						if (entry.active) active.add(entry.prefix);
+						else active.delete(entry.prefix);
 						producer.append(entry);
 					}
 				} catch {
@@ -387,8 +385,8 @@ export class Reload {
 					// Retract everything from the connection that just went away, so a per-broadcast
 					// watcher tears down instead of clinging to the dead route.
 					if (!closed) {
-						for (const path of active) {
-							producer.append({ path, active: false });
+						for (const prefix of active) {
+							producer.append({ prefix, active: false });
 						}
 					}
 				}

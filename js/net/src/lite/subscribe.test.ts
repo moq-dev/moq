@@ -64,14 +64,13 @@ async function encodeMessage(
 	return concat(written);
 }
 
-test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => {
+test("SubscribeOk round-trips priority/groups on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_04, {
-		ok: new SubscribeOk({ priority: 7, ordered: true, maxAge: 250, startGroup: 3 }),
+		ok: new SubscribeOk({ priority: 7, maxAge: 250, startGroup: 3 }),
 	});
 	expect("ok" in got).toBe(true);
 	if (!("ok" in got)) throw new Error("expected ok");
 	expect(got.ok.priority).toBe(7);
-	expect(got.ok.ordered).toBe(true);
 	expect(got.ok.startGroup).toBe(3);
 });
 
@@ -81,39 +80,65 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 7,
-		ordered: true,
 		maxAge: 250,
 		startGroup: 0,
 		endGroup: 9,
 	});
+	// Lite-06 carries the raw floor, and a floor of 0 with no frame offset is the same
+	// absence of a constraint as no floor at all, so it canonicalizes to undefined.
 	const got = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
+	);
+	expect(got.priority).toBe(7);
+	expect(got.maxAge).toBe(250);
+	expect(got.startGroup).toBeUndefined();
+	expect(got.endGroup).toBe(9);
+
+	// Group 0 stays named when a Frame Start qualifies it: a subscription can resume
+	// partway through group 0 (a catalog never leaves it).
+	message.startFrame = 4;
+	const resumed = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
+	);
+	expect(resumed.startGroup).toBe(0);
+	expect(resumed.startFrame).toBe(4);
+	message.startFrame = 0;
+
+	// A pre-06 wire folds the vacuous floor back to absent: an explicit group 0 there
+	// would mean "replay from the beginning", which is not what a floor of 0 asks for.
+	const folded = await Subscribe.decode(
 		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
 		Version.DRAFT_05,
 	);
-	expect(got.priority).toBe(7);
-	expect(got.ordered).toBe(true);
-	expect(got.maxAge).toBe(250);
-	expect(got.startGroup).toBe(0);
-	expect(got.endGroup).toBe(9);
+	expect(folded.startGroup).toBeUndefined();
+	expect(folded.endGroup).toBe(9);
 });
 
 test("SubscribeUpdate round-trips every option including startGroup 0", async () => {
 	const message = new SubscribeUpdate({
 		priority: 8,
-		ordered: true,
 		maxAge: 500,
 		startGroup: 0,
 		endGroup: 12,
 	});
 	const got = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		Version.DRAFT_06,
+	);
+	expect(got.priority).toBe(8);
+	expect(got.maxAge).toBe(500);
+	expect(got.startGroup).toBeUndefined();
+	expect(got.endGroup).toBe(12);
+
+	// The same fold as SUBSCRIBE on a pre-06 wire.
+	const folded = await SubscribeUpdate.decode(
 		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
 		Version.DRAFT_05,
 	);
-	expect(got.priority).toBe(8);
-	expect(got.ordered).toBe(true);
-	expect(got.maxAge).toBe(500);
-	expect(got.startGroup).toBe(0);
-	expect(got.endGroup).toBe(12);
+	expect(folded.startGroup).toBeUndefined();
+	expect(folded.endGroup).toBe(12);
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {

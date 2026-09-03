@@ -10,14 +10,19 @@ import type { Request as OriginRequest, Table as OriginTable } from "./origin.js
 import * as Path from "./path.js";
 
 /**
- * The availability of a broadcast.
+ * A route announcement or retraction.
+ *
+ * A route claims that paths under {@link prefix} can be served; it carries no
+ * broadcast. By convention a publisher announces each broadcast's exact path,
+ * so enumerating routes enumerates broadcasts; resolve one with the origin's
+ * `request(path)`.
  *
  * @public
  */
 export interface Event {
-	/** Broadcast path relative to the prefix passed to `announced()`. */
-	path: Path.Valid;
-	/** True when the broadcast is available, false when it was removed. */
+	/** What the route covers, relative to the prefix passed to `announced()`. */
+	prefix: Path.Valid;
+	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
 }
 
@@ -287,7 +292,7 @@ export class Broadcast {
 						if (!event) break;
 
 						// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
-						if (event.path !== Path.empty()) continue;
+						if (event.prefix !== Path.empty()) continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -356,7 +361,7 @@ export class Broadcast {
 				if (!event) break;
 
 				// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
-				if (event.path !== Path.empty()) continue;
+				if (event.prefix !== Path.empty()) continue;
 
 				if (event.active) {
 					current?.close();
