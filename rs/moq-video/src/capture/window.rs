@@ -25,7 +25,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
 	CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, EnumWindows, GetCursorInfo, GetIconInfo, GetPropW,
-	GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsWindow,
+	GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsIconic, IsWindow,
 	IsWindowVisible, PW_RENDERFULLCONTENT, RemovePropW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, SetPropW,
 	WM_NULL,
 };
@@ -33,6 +33,7 @@ use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
+use super::settle::{Settle, Settled};
 use super::{Config, Stream, Window};
 use crate::Error;
 use crate::frame::{I420, Surface};
@@ -130,6 +131,10 @@ struct Capture {
 	next: Instant,
 	name: String,
 	cursor: bool,
+	settle: Settle<(u32, u32)>,
+	/// Whether the window was minimized on the previous read, so the hold is
+	/// logged when it starts and ends rather than once per frame.
+	iconic: bool,
 	_dpi: DpiContext,
 }
 
@@ -162,11 +167,13 @@ impl Capture {
 			next: Instant::now(),
 			name: format!("window:{}", handle.0 as usize),
 			cursor: config.cursor,
+			settle: Settle::new((width, height)),
+			iconic: false,
 			_dpi: dpi,
 		})
 	}
 
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let now = Instant::now();
 		if self.next > now {
 			std::thread::sleep(self.next - now);
@@ -179,21 +186,42 @@ impl Capture {
 				self.name
 			)));
 		}
+		// A minimized window reports an off-screen rect and has no capturable
+		// area, so hold the capture instead of ending it: reopening would fail
+		// outright, killing the broadcast for what is only a taskbar click.
+		if unsafe { IsIconic(self.handle) }.as_bool() {
+			if !self.iconic {
+				self.iconic = true;
+				tracing::info!(source = %self.name, "window minimized; holding capture");
+			}
+			return Ok(pump::Read::Idle);
+		}
+		if self.iconic {
+			self.iconic = false;
+			tracing::info!(source = %self.name, "window restored; resuming capture");
+		}
+
 		let mut rect = RECT::default();
 		unsafe { GetWindowRect(self.handle, &mut rect) }
 			.map_err(|error| Error::SourceUnavailable(format!("read window geometry: {error}")))?;
 		let width = ((rect.right - rect.left).max(0) as u32) & !1;
 		let height = ((rect.bottom - rect.top).max(0) as u32) & !1;
-		if (width, height) != (self.width, self.height) {
+		match self.settle.observe(&(width, height), Instant::now()) {
+			Settled::Open => {}
+			// Mid-drag: the window is a size the encoder can't take, but one that
+			// is still moving, so skip the frame and look again next interval.
+			Settled::Waiting => return Ok(pump::Read::Idle),
 			// The encoder's geometry is fixed at open, so end the stream and let
-			// the caller reopen against the new size.
-			tracing::info!(
-				source = %self.name,
-				from = %format_args!("{}x{}", self.width, self.height),
-				to = %format_args!("{width}x{height}"),
-				"window resized; ending capture"
-			);
-			return Ok(None);
+			// the caller reopen against the size the drag came to rest at.
+			Settled::Changed => {
+				tracing::info!(
+					source = %self.name,
+					from = %format_args!("{}x{}", self.width, self.height),
+					to = %format_args!("{width}x{height}"),
+					"window resized; ending capture"
+				);
+				return Ok(pump::Read::Done);
+			}
 		}
 		let bgra = snapshot(self.handle, self.width, self.height, self.cursor)?;
 		if !self.identity.matches(self.handle) {
@@ -202,7 +230,7 @@ impl Capture {
 				self.name
 			)));
 		}
-		Ok(Some(Surface::I420(I420::from_bgra(
+		Ok(pump::Read::Frame(Surface::I420(I420::from_bgra(
 			&bgra,
 			self.width * 4,
 			self.width,

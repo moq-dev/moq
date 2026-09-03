@@ -175,7 +175,7 @@ impl Camera {
 
 	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
 	/// in a loop and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let (buf, meta) = CaptureStream::next(&mut self.stream)
 			.map_err(|error| Error::SourceUnavailable(format!("V4L2 camera {}: {error}", self.name)))?;
 
@@ -195,7 +195,7 @@ impl Camera {
 				I420::from_rgb(&rgb, w as u32, h as u32)?
 			}
 		};
-		Ok(Some(Surface::I420(i420)))
+		Ok(pump::Read::Frame(Surface::I420(i420)))
 	}
 }
 
