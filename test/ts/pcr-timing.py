@@ -11,12 +11,6 @@ instrument pointed at another:
     release     when the bytes carrying them were handed over  (--live only)
     position    where the PCR packets sit among the media bytes
 
-`compliance.py` grades the first from a file, which is the right basis for what
-it checks and is why it states that wall-clock delivery timing is out of its
-scope. This grades all three from one pass, and reads a pipe so that `release`
-exists at all: a change to *when* bytes are handed over cannot be seen by any
-harness that needs no wall-clock capture.
-
 Every check is an invariant on the stream, not an assertion about how the stream
 was produced. `release` grades arrival against the PCR's *own* values rather than
 against a wall clock, so it needs no reference clock, no source file and no
@@ -30,6 +24,7 @@ the report-only (shape) checks to hard.
 import argparse
 import collections
 import json
+import select
 import statistics
 import sys
 import time
@@ -37,6 +32,11 @@ import time
 PKT = 188
 SYNC = 0x47
 HARD, SHAPE = "hard", "shape"
+TICKS_PER_MS = 27_000.0
+# The 33-bit PCR base counts 90 kHz ticks and the 9-bit extension counts 27 MHz ticks
+# within one of them, so the whole field restarts after this many 27 MHz ticks, roughly
+# every 26.5 hours.
+PCR_MODULUS = (1 << 33) * 300
 
 
 def percentile(xs, p):
@@ -51,7 +51,11 @@ def parse_pcr(p):
     """The 33+9-bit PCR of an adaptation field, in 27 MHz ticks, or None."""
     if (p[3] >> 4) & 0x3 not in (2, 3):  # adaptation_field_control
         return None
-    if p[4] == 0 or not (p[5] & 0x10):  # adaptation_field_length, PCR_flag
+    # A PCR occupies six bytes after the flags byte, so an adaptation field shorter than
+    # seven cannot hold one however the flag is set. Without this a stream that sets
+    # PCR_flag on a short field yields a value read out of stuffing or payload, and that
+    # sample then feeds all three timing checks.
+    if p[4] < 7 or not (p[5] & 0x10):  # adaptation_field_length, PCR_flag
         return None
     base = (p[6] << 25) | (p[7] << 17) | (p[8] << 9) | (p[9] << 1) | (p[10] >> 7)
     ext = ((p[10] & 0x01) << 8) | p[11]
@@ -68,7 +72,11 @@ class Scan:
         self.transport_error = 0
         self.cc_errors = []
         self.cc_on_empty = []
+        self.wraps = 0
         self._cc = {}
+        self._dup = {}
+        self._pcr_raw = {}
+        self._pcr_offset = {}
 
     def feed(self, p, arrival=None):
         index = self.packets
@@ -82,20 +90,48 @@ class Scan:
 
         ticks = parse_pcr(p)
         if ticks is not None:
-            self.pcr.append((index, ticks, arrival, pid))
+            # Unwrap, so the checks see a monotone timeline. A capture crossing the
+            # rollover would otherwise show one huge negative interval, which the value
+            # check accepts (it only rejects intervals that are too long) while the
+            # release check reads it as a day of lateness. A rollover drops the value by
+            # nearly the whole modulus, so only a drop past halfway is treated as one and
+            # a merely backwards PCR stays visible as the defect it is.
+            prev_raw = self._pcr_raw.get(pid)
+            if prev_raw is not None and ticks < prev_raw - PCR_MODULUS // 2:
+                self._pcr_offset[pid] = self._pcr_offset.get(pid, 0) + PCR_MODULUS
+                self.wraps += 1
+            self._pcr_raw[pid] = ticks
+            self.pcr.append((index, ticks + self._pcr_offset.get(pid, 0), arrival, pid))
 
         # ISO 13818-1 2.4.3.3: the continuity counter advances only on a packet
         # carrying a payload, so an adaptation-only PCR packet must repeat the
         # previous value rather than increment it.
         cc = p[3] & 0x0F
         payload = bool((p[3] >> 4) & 0x1)
+        # The same clause allows the counter to jump when the adaptation field sets
+        # discontinuity_indicator, and allows one packet to be sent twice, repeating its
+        # counter. Both are legal, and treating either as an error fails a conforming
+        # stream on a hard check.
+        adaptation = bool((p[3] >> 4) & 0x2)
+        discontinuity = adaptation and p[4] > 0 and bool(p[5] & 0x80)
         prev = self._cc.get(pid)
         self._cc[pid] = cc
         if prev is None or pid == 0x1FFF:
             return
+        if discontinuity:
+            self._dup[pid] = False
+            return
         if payload:
-            if cc != (prev + 1) & 0x0F:
+            if cc == prev:
+                # Legal only once: a second repeat is a stuck counter, not a duplicate.
+                if self._dup.get(pid):
+                    self.cc_errors.append((index, pid, (prev + 1) & 0x0F, cc))
+                self._dup[pid] = not self._dup.get(pid)
+            elif cc == (prev + 1) & 0x0F:
+                self._dup[pid] = False
+            else:
                 self.cc_errors.append((index, pid, (prev + 1) & 0x0F, cc))
+                self._dup[pid] = False
         elif cc != prev:
             self.cc_on_empty.append((index, pid, prev, cc))
 
@@ -120,23 +156,43 @@ def scan_live(seconds):
     """
     scan = Scan()
     fd = sys.stdin.buffer
+    deadline = time.monotonic() + seconds
+
+    def read_exactly(n):
+        """Read n bytes, or return None once the capture window has expired.
+
+        A plain read blocks until the producer sends something, so a producer that
+        holds the pipe open and stops writing suspends the loop indefinitely and
+        --seconds never takes effect. That is the likeliest state to be in while
+        diagnosing an exporter or a network stall, which is when the tool has to
+        return a report rather than hang.
+        """
+        buf = b""
+        while len(buf) < n:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                return None
+            chunk = fd.read1(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
 
     # Find the first sync byte, then stay aligned on it.
     while True:
-        b = fd.read(1)
+        b = read_exactly(1)
         if not b:
             return scan
         if b[0] == SYNC:
-            rest = fd.read(PKT - 1)
-            if len(rest) < PKT - 1:
+            rest = read_exactly(PKT - 1)
+            if not rest:
                 return scan
-            start = time.monotonic()
-            scan.feed(b + rest, start)
+            scan.feed(b + rest, time.monotonic())
             break
 
-    while time.monotonic() - start < seconds:
-        p = fd.read(PKT)
-        if len(p) < PKT:
+    while time.monotonic() < deadline:
+        p = read_exactly(PKT)
+        if not p:
             return scan
         scan.feed(p, time.monotonic())
     return scan
@@ -191,10 +247,17 @@ def check_pcr_single_pid(scan, args):
 
 def check_value_interval(scan, args):
     """PCR values must be spaced within the repetition limit."""
-    iv = [(b[1] - a[1]) / 27_000.0 for a, b in zip(scan.pcr, scan.pcr[1:])]
+    iv = [(b[1] - a[1]) / TICKS_PER_MS for a, b in zip(scan.pcr, scan.pcr[1:])]
     if not iv:
         return ("pcr-value-interval", HARD, False, "no PCR intervals in the stream", {})
     over = [m for m in iv if m > args.repetition_ms]
+    # A PCR that goes backwards is as much a clock defect as one that arrives too late,
+    # and testing only the upper bound makes it invisible: the negative interval passes,
+    # and it drags the median and the over-limit share down with it. Rollover is already
+    # unwrapped in the scan, so a negative interval here is the stream's own doing. Zero
+    # is not: ISO 13818-1 2.4.3.3 allows a packet to be sent twice, and the duplicate
+    # repeats its PCR exactly, so testing `<= 0` would fail a conforming stream.
+    backwards = [m for m in iv if m < 0]
     detail = {
         "count": len(iv),
         "median_ms": round(statistics.median(iv), 3),
@@ -203,13 +266,16 @@ def check_value_interval(scan, args):
         "over_limit": len(over),
         "over_limit_pct": round(100.0 * len(over) / len(iv), 2),
         "sub_ms": sum(1 for m in iv if m < 1.0),
+        "non_positive": len(backwards),
+        "wraps_unwrapped": scan.wraps,
     }
+    backwards_note = f", {len(backwards)} non-positive" if backwards else ""
     return (
         "pcr-value-interval",
         HARD,
-        not over,
+        not over and not backwards,
         f"{len(over)}/{len(iv)} intervals over {args.repetition_ms:g} ms "
-        f"(median {detail['median_ms']:g} ms, worst {detail['max_ms']:g} ms)",
+        f"(median {detail['median_ms']:g} ms, worst {detail['max_ms']:g} ms{backwards_note})",
         detail,
     )
 
@@ -219,7 +285,7 @@ def check_release(scan, args):
 
     Graded against the stream's own values, so it holds at any clock rate: if two
     consecutive PCRs are 25 ms apart in value they must be ~25 ms apart in
-    arrival. Two statistics, because they fail independently — per-interval error,
+    arrival. Two statistics, because they fail independently: per-interval error,
     which is what a receiver PLL and any downstream re-timing stage sees, and
     accumulated drift, which must stay bounded or the pipe is not running at the
     media rate at all.
@@ -228,9 +294,9 @@ def check_release(scan, args):
     if len(pts) < 3:
         return ("pcr-release-timing", HARD, True, "not measured (no arrival stamps)", {})
 
-    err = [((b[1] - a[1]) * 1000.0) - ((b[0] - a[0]) / 27_000.0) for a, b in zip(pts, pts[1:])]
+    err = [((b[1] - a[1]) * 1000.0) - ((b[0] - a[0]) / TICKS_PER_MS) for a, b in zip(pts, pts[1:])]
     magnitude = [abs(e) for e in err]
-    drift = ((pts[-1][1] - pts[0][1]) * 1000.0) - ((pts[-1][0] - pts[0][0]) / 27_000.0)
+    drift = ((pts[-1][1] - pts[0][1]) * 1000.0) - ((pts[-1][0] - pts[0][0]) / TICKS_PER_MS)
     late = [e for e in err if e > args.release_ms]
     early = [e for e in err if e < -args.release_ms]
     detail = {
@@ -244,15 +310,22 @@ def check_release(scan, args):
         "released_early": len(early),
         "released_late": len(late),
         "total_drift_ms": round(drift, 1),
+        "drift_limit_ms": args.drift_ms,
     }
+    # Per-interval error and accumulated drift fail independently, and bounding only the
+    # first leaves the second unbounded: a consistent 1 ms error on a 25 ms grid sits well
+    # inside a 10 ms tolerance while reaching nearly two seconds over a 45 s sample. The
+    # docstring claimed drift was bounded; until now only the per-interval error was.
+    drifted = abs(drift) > args.drift_ms
+    drift_note = f" > ±{args.drift_ms:g} ms" if drifted else ""
     return (
         "pcr-release-timing",
         HARD,
-        not (late or early),
+        not (late or early or drifted),
         f"{detail['outside_tolerance']}/{len(err)} releases outside ±{args.release_ms:g} ms of the "
         f"interval the PCR asserts ({detail['released_early']} early, {detail['released_late']} late; "
         f"p95 {detail['p95_abs_ms']:g} ms, worst {detail['max_abs_ms']:g} ms; "
-        f"drift {detail['total_drift_ms']:g} ms)",
+        f"drift {detail['total_drift_ms']:g} ms{drift_note})",
         detail,
     )
 
@@ -263,7 +336,7 @@ def check_position(scan, args):
     The grid is uniform in media time, so if position tracks time then the packet
     gap between consecutive PCRs is roughly uniform too. That needs no assumption
     that the stream is CBR, only that comparable spans of media time carry
-    comparable numbers of bytes. What it catches is a bimodal layout — PCR packets
+    comparable numbers of bytes. What it catches is a bimodal layout, PCR packets
     laid back-to-back with the media bytes they label heaped between the clusters.
     A consumer holding only the byte stream cannot recover the clock from such a
     layout, and one that re-stamps PCR from byte position regenerates exactly the
@@ -319,7 +392,7 @@ def coincidence(scan, args):
         return None
     rows = collections.Counter()
     for a, b in zip(pts, pts[1:]):
-        err = ((b[2] - a[2]) * 1000.0) - ((b[1] - a[1]) / 27_000.0)
+        err = ((b[2] - a[2]) * 1000.0) - ((b[1] - a[1]) / TICKS_PER_MS)
         when = "early" if err < -args.release_ms else "late" if err > args.release_ms else "on time"
         where = "adjacent" if (b[0] - a[0]) <= args.adjacent_packets else "spaced"
         rows[(where, when)] += 1
@@ -341,6 +414,12 @@ def main():
         type=float,
         default=10.0,
         help="tolerance on release timing against the asserted interval (default 10)",
+    )
+    ap.add_argument(
+        "--drift-ms",
+        type=float,
+        default=250.0,
+        help="bound on accumulated release drift over the whole sample (default 250)",
     )
     ap.add_argument(
         "--adjacent-packets", type=int, default=1, help="packet gap at or below which two PCRs count as clustered"

@@ -103,7 +103,7 @@ moq --client-connect http://localhost:4443 --broadcast live.hang export ts \
 ./pcr-timing.py capture.ts
 ```
 
-It needs only `python3` — no TSDuck, no source file and no declared mux rate,
+It needs only `python3`, with no TSDuck, no source file and no declared mux rate,
 because every check is graded against the stream's **own** PCR values. If two
 consecutive PCRs are 25 ms apart in value then they must be ~25 ms apart in
 arrival, whatever clock rate the stream is running at. The price of that basis is
@@ -116,12 +116,12 @@ internally consistent, so absolute rate is not what this grades.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
 | `pcr-single-pid` | hard | every PCR rides one PID |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290) |
-| `pcr-release-timing` | hard | each interval's arrival is within `--release-ms` of the interval its own values assert, with bounded accumulated drift (`--live` only) |
+| `pcr-release-timing` | hard | each interval's arrival is within `--release-ms` of the interval its own values assert, and accumulated drift over the whole sample stays within `--drift-ms` (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 
 `pcr-position` is a shape check because `export ts` is VBR by design. It is worth
-reporting even so: a consumer holding only the byte stream — which is every
-MPEG-TS tool — recovers the clock from where the PCR packets sit, so a layout
+reporting even so: a consumer holding only the byte stream, which is every
+MPEG-TS tool, recovers the clock from where the PCR packets sit, so a layout
 that clusters them and heaps the media bytes between the clusters is one such a
 consumer cannot follow, however exact the values are.
 
