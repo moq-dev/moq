@@ -41,7 +41,12 @@ use crate::{
 ///
 /// 4 keeps the steady state allocation-free for the small lists that dominate
 /// while giving back most of the memory. A genuinely hot fan-out list spills
-/// under any of these; it did at 32 too.
+/// under any of these; it did at 32 too. `tests/waiter_allocs.rs` pins both halves
+/// of that trade, and `the_list_stays_small` pins the size.
+///
+/// One inline slot plus a `Vec` for the rest reaches the same 56 B as 2 inline
+/// slots, but allocates from the *second* waiter rather than the third, so it is
+/// strictly worse than the row it ties.
 const INLINE_WAITERS: usize = 4;
 
 /// Registrations remembered per waiter identity for O(1) dedup. A poll typically
@@ -231,7 +236,9 @@ pub struct WaiterList {
 }
 
 impl WaiterList {
-	/// Create an empty list, allocating nothing until the first [`register`](Self::register).
+	/// Create an empty list. It allocates nothing until it holds more waiters than it
+	/// has inline slots, so the first [`register`](Self::register) never touches the
+	/// heap and nor do the next few.
 	pub fn new() -> Self {
 		Self {
 			entries: SmallVec::new(),
@@ -895,6 +902,17 @@ mod tests {
 		assert_sync::<crate::Pending<crate::Consumer<u32>>>();
 		assert_sync::<crate::Shared<u32>>();
 	};
+
+	/// Three lists sit inside every kio channel's state cell, and that cell is paid
+	/// per announced broadcast and per cached group in moq-net whether or not
+	/// anything ever parks. Growing either is invisible at the call site, so pin
+	/// them: a diff that moves these numbers should say why.
+	#[test]
+	#[cfg(target_pointer_width = "64")]
+	fn the_list_stays_small() {
+		assert_eq!(std::mem::size_of::<WaiterList>(), 72);
+		assert_eq!(std::mem::size_of::<crate::State<()>>(), 224);
+	}
 
 	#[test]
 	fn park_survives_a_poll_that_returns_early() {
