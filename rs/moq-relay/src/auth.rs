@@ -21,7 +21,11 @@ use url::Url;
 /// request-derived path + JWT, plus metadata about the connection itself that the
 /// auth API can bucket on (e.g. the transport). Connection metadata is set by the
 /// relay after parsing the request (the URL/SETUP parsers don't know it).
+///
+/// `#[non_exhaustive]` so a new field is additive: build one with
+/// [`AuthParams::new`] and set fields, rather than by struct literal.
 #[derive(Default, Debug, Clone)]
+#[non_exhaustive]
 pub struct AuthParams {
 	/// The URL path identifying the broadcast root.
 	pub path: String,
@@ -29,7 +33,9 @@ pub struct AuthParams {
 	/// endpoint can do its own subdomain routing. `None` outside a URL-dialed
 	/// connection (the gateways pass a path directly).
 	pub host: Option<String>,
-	/// A JWT token, if provided via the `jwt` query parameter.
+	/// The credential from the `jwt` query parameter. A JWT the relay verifies
+	/// itself, or in [`AuthApiMode::Proxy`] an opaque string only the endpoint
+	/// interprets.
 	pub jwt: Option<String>,
 	/// The connection's transport, forwarded to the auth API as `transport=` so it
 	/// can bucket by connection type (e.g. bill traffic on the internal Unix-socket
@@ -476,11 +482,12 @@ pub struct AuthConfig {
 	/// the JWT's `kid`, or `public` prefixes for a tokenless connection.
 	///
 	/// `proxy` makes the endpoint the decider: the relay forwards the connection
-	/// verbatim - host, path, mTLS flag, transport, and the credential as
+	/// verbatim - host, path, transport, and the credential as
 	/// `Authorization: Bearer` - and enforces the `grant` it gets back, verifying
 	/// nothing and holding no keys. The credential is part of the request, so
 	/// responses cache per credential and auth cost tracks concurrent viewers
-	/// rather than broadcasts.
+	/// rather than broadcasts. mTLS peers resolve through [`Auth::verify_mtls`]
+	/// in either mode.
 	///
 	/// `Option` so a TOML value survives the CLI re-parse.
 	#[usage(long = "auth-api-mode", env = "MOQ_AUTH_API_MODE")]
@@ -807,7 +814,7 @@ impl AuthApiRequest {
 	fn identity(&self, base: &url::Url) -> FlightKey {
 		FlightKey {
 			url: self.url(base).into(),
-			credential: self.credential.clone(),
+			credential: self.credential.as_deref().map(crate::http_client::digest),
 		}
 	}
 }
@@ -848,13 +855,11 @@ impl AuthApiResponse {
 }
 
 /// A grant the auth API resolved itself, instead of handing back a key for the
-/// relay to verify a JWT against.
+/// relay to verify a JWT against. Read only in [`AuthApiMode::Proxy`].
 ///
 /// This is what lets a credential the relay cannot parse authorize a connection:
 /// the relay forwards it as `Authorization: Bearer` and the endpoint answers with
-/// the permissions directly. One endpoint and one response type covers both, so
-/// it can answer with a `key` for one connection and a `grant` for another; there
-/// is no second flag and an operator migrates per connection.
+/// the permissions directly.
 #[derive(Debug, Default, Deserialize)]
 struct GrantResponse {
 	/// Root the permissions below are relative to; absent -> the connection path.
@@ -931,6 +936,52 @@ impl AuthConfig {
 	pub async fn init(mut self, client_tls: &moq_tokio::tls::Connect) -> anyhow::Result<Auth> {
 		self.client_tls = Some(client_tls.clone());
 		Auth::new(self).await
+	}
+
+	/// Reject option combinations that cannot mean what the operator asked for.
+	///
+	/// Run by [`Auth::new`], and separately by the relay BEFORE it decides whether
+	/// an auth config is empty: an mTLS-only relay never builds an `Auth`, and a
+	/// `--auth-api-mode` it silently discarded there would start the relay in a
+	/// mode other than the one it was told to run.
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.key.is_none() || self.key_dir.is_none(),
+			"cannot specify both --auth-key and --auth-key-dir"
+		);
+
+		// The unified --auth-api supplies key + public + alias itself, so it
+		// can't be combined with the standalone key/public sources.
+		anyhow::ensure!(
+			self.auth_api.is_none()
+				|| (self.key.is_none()
+					&& self.key_dir.is_none()
+					&& self.public.is_none()
+					&& self.public_subscribe.is_none()
+					&& self.public_publish.is_none()
+					&& self.public_api.is_none()),
+			"--auth-api cannot be combined with --auth-key/--auth-key-dir/--auth-public/--auth-public-api"
+		);
+
+		// A mode with no endpoint to consult decides nothing: `verify` never reaches
+		// `api_mode` without an `auth_api`, so the relay would silently start with
+		// token or mTLS behavior after being told to proxy every decision.
+		anyhow::ensure!(
+			self.api_mode.is_none() || self.auth_api.is_some(),
+			"--auth-api-mode requires --auth-api"
+		);
+
+		// Both answer "who turns a hostname into a broadcast root", and proxy mode's
+		// premise is that the endpoint does. Applying both routes the subdomain
+		// twice: the relay rewrites `customer.example.com/foo` to `/customer/foo`
+		// and still forwards the host, so an endpoint doing its own routing
+		// prepends `customer` again.
+		anyhow::ensure!(
+			self.api_mode != Some(AuthApiMode::Proxy) || self.domains.is_empty(),
+			"--auth-api-mode proxy cannot be combined with --auth-domain: the endpoint owns subdomain routing"
+		);
+
+		Ok(())
 	}
 
 	/// True when no JWT key, public access rules, or public API are configured.
@@ -1041,11 +1092,10 @@ pub(crate) struct Revalidate {
 	/// The schedule admission resolved. Its existence IS the opt-in: no `max-age`
 	/// on the admission reply means no `Revalidate` at all.
 	schedule: Schedule,
-	/// The outer bound admission granted, and in [`AuthApiMode::Token`] a CEILING
-	/// a later reply may lower but never raise: there the bound comes from a
-	/// signed JWT, and no endpoint reply gets to extend a signed credential's
-	/// life. Proxy mode has no signature to respect - the endpoint IS the
-	/// authority - so its latest word replaces this outright.
+	/// The outer bound admission granted. Fixed in [`AuthApiMode::Token`], where
+	/// it comes from a signed JWT that no endpoint reply gets to extend. Proxy
+	/// mode has no signature to respect - the endpoint IS the authority - so each
+	/// re-check's word replaces this outright.
 	expires: Option<std::time::SystemTime>,
 }
 
@@ -1194,6 +1244,8 @@ struct FlightSlot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FlightKey {
 	url: String,
+	/// A digest of the credential, never the credential: this derives `Debug`
+	/// and a bearer secret must not be one stray `{:?}` away from a log line.
 	credential: Option<String>,
 }
 
@@ -1317,41 +1369,7 @@ pub struct Auth {
 
 impl Auth {
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		anyhow::ensure!(
-			config.key.is_none() || config.key_dir.is_none(),
-			"cannot specify both --auth-key and --auth-key-dir"
-		);
-
-		// The unified --auth-api supplies key + public + alias itself, so it
-		// can't be combined with the standalone key/public sources.
-		anyhow::ensure!(
-			config.auth_api.is_none()
-				|| (config.key.is_none()
-					&& config.key_dir.is_none()
-					&& config.public.is_none()
-					&& config.public_subscribe.is_none()
-					&& config.public_publish.is_none()
-					&& config.public_api.is_none()),
-			"--auth-api cannot be combined with --auth-key/--auth-key-dir/--auth-public/--auth-public-api"
-		);
-
-		// A mode with no endpoint to consult decides nothing: `verify` never reaches
-		// `api_mode` without an `auth_api`, so the relay would silently start with
-		// token or mTLS behavior after being told to proxy every decision.
-		anyhow::ensure!(
-			config.api_mode.is_none() || config.auth_api.is_some(),
-			"--auth-api-mode requires --auth-api"
-		);
-
-		// Both answer "who turns a hostname into a broadcast root", and proxy mode's
-		// premise is that the endpoint does. Applying both routes the subdomain
-		// twice: the relay rewrites `customer.example.com/foo` to `/customer/foo`
-		// and still forwards the host, so an endpoint doing its own routing
-		// prepends `customer` again.
-		anyhow::ensure!(
-			config.api_mode != Some(AuthApiMode::Proxy) || config.domains.is_empty(),
-			"--auth-api-mode proxy cannot be combined with --auth-domain: the endpoint owns subdomain routing"
-		);
+		config.validate()?;
 
 		// Outbound auth HTTP (JWK + auth/public-API fetches) reuses the cluster
 		// client's --client-tls-* identity. The deprecated --auth-tls-* flags
@@ -1901,17 +1919,13 @@ impl Auth {
 			};
 			match outcome {
 				Recheck::Valid { hints, expires } => {
-					// The endpoint's latest word on the bound. Token mode clamps to
-					// admission's, which came off a signed JWT; proxy mode takes the reply
+					// The endpoint's latest word on the bound. Proxy mode takes the reply
 					// outright, so an endpoint can extend a renewed session as well as cut
-					// one short. A reply that names no bound lifts it only where there was
-					// never a signature to respect.
+					// one short, and a reply naming no bound lifts it. Token mode keeps
+					// admission's: the bound came off a signed JWT that a re-check only
+					// re-verifies, so no reply gets to move it.
 					bound = match grant.api.mode {
-						AuthApiMode::Token => match (grant.expires, expires) {
-							(Some(ceiling), Some(expires)) => Some(ceiling.min(expires)),
-							(ceiling, None) => ceiling,
-							(None, expires) => expires,
-						},
+						AuthApiMode::Token => grant.expires,
 						AuthApiMode::Proxy => expires,
 					};
 					// A reply that stops naming `max-age` keeps the schedule the session
@@ -5484,6 +5498,22 @@ api = "https://api.example.com/access"
 		.await
 		.map(|_| ())
 		.expect_err("--auth-api-mode without --auth-api must fail");
+		assert!(err.to_string().contains("--auth-api-mode requires --auth-api"), "{err}");
+	}
+
+	/// An mTLS-only relay has an EMPTY auth config and never builds an `Auth`, so
+	/// the guard has to fire from the config alone or the relay starts with the
+	/// mode silently discarded.
+	#[test]
+	fn proxy_mode_requires_an_auth_api_even_when_otherwise_empty() {
+		let config = AuthConfig {
+			api_mode: Some(AuthApiMode::Proxy),
+			..Default::default()
+		};
+		assert!(config.is_empty(), "the mTLS-only shortcut is what this guards");
+		let err = config
+			.validate()
+			.expect_err("--auth-api-mode without --auth-api must fail");
 		assert!(err.to_string().contains("--auth-api-mode requires --auth-api"), "{err}");
 	}
 

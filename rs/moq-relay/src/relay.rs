@@ -129,6 +129,10 @@ impl Relay {
 			None => (server, client),
 		};
 
+		// Before the empty check: an mTLS-only relay never builds an `Auth`, and an
+		// option that only `Auth::new` would have refused must not slip past.
+		config.auth.validate()?;
+
 		// Reject configs where neither JWT nor mTLS can authenticate anyone.
 		if config.auth.is_empty() {
 			anyhow::ensure!(

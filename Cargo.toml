@@ -81,6 +81,7 @@ criterion = "0.8"
 flate2 = "1.1"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20.6", path = "rs/hang" }
+hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
 io-uring = "0.7.14"

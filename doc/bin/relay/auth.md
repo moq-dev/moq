@@ -277,10 +277,11 @@ By default (`--auth-api-mode token`) the relay is the verifier: the endpoint han
 
 With `--auth-api-mode proxy` the endpoint is the decider. The relay forwards the connection verbatim - host (the URL authority, or `Host` on HTTP/1.1), path, transport, and the credential as `Authorization: Bearer` - and enforces whatever comes back:
 
-```
+```http
 GET <base>?root=demo&host=live.example.com&transport=quic
 Authorization: Bearer <credential>
 ```
+
 ```json
 {
   "alias": "x7k2qp",

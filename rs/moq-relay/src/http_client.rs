@@ -30,13 +30,14 @@ pub(crate) fn build(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMidd
 			manager: MokaManager::new(MokaCache::new(10_000)),
 			options: HttpCacheOptions {
 				cache_key: Some(std::sync::Arc::new(cache_key)),
-				// RFC 9111 §3.5 stops a SHARED cache storing any response to a request
-				// carrying `Authorization`, because it cannot tell one user's response
-				// from another's. `cache_key` above draws exactly that line, so this
-				// cache is private by construction and the blanket refusal only means a
+				// A private cache, for every client built here. RFC 9111 §3.5 stops a
+				// SHARED cache storing any response to a request carrying
+				// `Authorization`, because it cannot tell one user's response from
+				// another's; `cache_key` draws exactly that line, and without this a
 				// proxy-mode endpoint sending a plain `max-age` would never be cached
-				// at all. Nothing here reads `s-maxage` (see `CacheHints`), so the
-				// revalidation schedule is unaffected.
+				// at all. The cost is that a private cache ignores `s-maxage`, which
+				// nothing here documents or reads (see `CacheHints`), and stores
+				// `private` responses, which only this process ever sees anyway.
 				cache_options: Some(http_cache_reqwest::CacheOptions {
 					shared: false,
 					..Default::default()
@@ -64,11 +65,14 @@ fn cache_key(parts: &http::request::Parts) -> String {
 		// rather than a `Hash` impl because the split is a security boundary and
 		// the credentials are attacker-chosen: two of them landing on one key
 		// would serve one viewer another's grant.
-		Some(auth) => {
-			use sha2::Digest;
-			let digest = sha2::Sha256::digest(auth.as_bytes());
-			format!("{key}:{}", hex::encode(digest))
-		}
+		Some(auth) => format!("{key}:{}", digest(auth.as_bytes())),
 		None => key,
 	}
+}
+
+/// Hex SHA-256 of a credential, so it can key a map or a log line without the
+/// secret itself. Shared with `Auth`'s flight keys so both split on the same line.
+pub(crate) fn digest(credential: impl AsRef<[u8]>) -> String {
+	use sha2::Digest;
+	hex::encode(sha2::Sha256::digest(credential.as_ref()))
 }

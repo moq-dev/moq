@@ -48,7 +48,7 @@ core_affinity = "0.8"
 # (RFC 8305 section 3) while still going through the system resolver.
 dns-lookup = { version = "3", optional = true }
 futures = "0.3"
-hex = "0.4"
+hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 humantime = "2.3"
 mdns-sd = { workspace = true, optional = true }
