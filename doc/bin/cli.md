@@ -570,6 +570,11 @@ TS export is paced: bytes leave stdout at the instant the stream's clock (PCR)
 asserts, smoothed within the `--latency-max` budget, so the pipe carries a
 real-time transport stream rather than draining as fast as frames arrive.
 
+If the publisher rewinds its timeline, the export starts a new one: the program
+tables, the SI tables, and the PCR grid all resume from the first frame of the
+rewound span, the break is marked with `discontinuity_indicator` on the PCR PID,
+and pacing re-anchors so the new timeline is spaced from the moment it arrives.
+
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
