@@ -70,7 +70,7 @@
           targets = [
             "wasm32-unknown-unknown"
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             "aarch64-apple-darwin"
           ];
         };
@@ -86,7 +86,7 @@
 
         tsduck = pkgs.tsduck.overrideAttrs (
           old:
-          pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
             makeFlags = old.makeFlags ++ [ "CXXFLAGS_WARNINGS=" ];
           }
         );
@@ -122,7 +122,7 @@
             wasm-bindgen-cli
           ]
           ++ gstreamerDeps
-          ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+          ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
             # cpal's `alsa-sys` (moq-audio `capture` / `playback` features) links
@@ -210,7 +210,7 @@
         # in nixpkgs. The publish workflows only ever run on Linux runners.
         publishDeps =
           with pkgs;
-          lib.optionals (!stdenv.isDarwin) [
+          lib.optionals (!stdenv.hostPlatform.isDarwin) [
             apt
             createrepo_c
             rpm
@@ -382,7 +382,7 @@
             clang-tools
             gersemi
           ]
-          ++ lib.optionals (!stdenv.isDarwin) [
+          ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
             obs-studio
             ninja
           ];
@@ -481,7 +481,7 @@
             # release everywhere, rather than whatever the host happens to have.
             OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
           }
-          // pkgs.lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
+          // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
           };
         };

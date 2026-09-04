@@ -41,7 +41,3 @@ the fix, and the two opens stay.
 ## Closes
 
 - [#2799](https://github.com/moq-dev/moq/issues/2799) - close this issue when the quest finishes
-
-## Related
-
-- [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - the other half of the resize story, on the live capture path

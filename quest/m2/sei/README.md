@@ -54,9 +54,6 @@ contract.
 
 ## Related
 
-- [H.265 suffix SEI](/quest/m0/h265-suffix.md) - suffix SEI stays with the
-  access unit it follows instead of moving to the next frame or disappearing
-  at EOF; sei-rust requires it
 - [Colour model](/quest/m2/color-model.md) - the catalog has nowhere to put
   display metadata such as HDR10 mastering display; a pre-existing gap this
   line does not widen, because no renderer here reads that SEI today

@@ -374,9 +374,9 @@ fix-changed $FILES:
 # builds vendored C++ that needs an MSVC toolchain and openh264 is a
 # non-optional dependency.
 #
-# Nothing in CI runs this. Windows runners cost too much for a per-PR gate, so
-# the code compiles for the first time in a tag-triggered release build unless
-# someone runs this by hand on a Windows host.
+# Windows runners cost too much for a per-PR gate, so nightly.yml runs this
+# once a day instead. A break there lands on main rather than being caught in
+# review, which is the same trade the other nightly gates make.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
 # backend don't build on MSVC, while moq-video's Linux-only `nvidia` default

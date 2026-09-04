@@ -17,12 +17,26 @@ across every copy, so the wire object is not the problem.
 
 ### Root cause
 
-`kio::State<T>` carries three `WaiterList`s, and each is a
-`SmallVec<[Weak<Waker>; 32]>`: 280 B of inline waker slots paid unconditionally
-inside the `Arc<Mutex<...>>`, so `size_of::<State<()>>()` is 848 B before `T`.
-A broadcast holds four to five of those cells (the source's `Shared` and
-`Alive`, the front's `Shared` and `Alive`, and `FrontState`), so ~4.2 KB of the
-8.8 KB is empty slots. [Waiter slots](/quest/m2/relay-memory/waiters.md) is that struct.
+`kio::State<T>` carries three `WaiterList`s, each an inline array of weak wakers
+paid unconditionally inside the `Arc<Mutex<...>>`. A broadcast holds four to
+five of those cells (the source's `Shared` and `Alive`, the front's `Shared` and
+`Alive`, and `FrontState`), so empty waker slots used to dominate its footprint:
+at 32 inline slots a `WaiterList` was 296 B and `size_of::<State<()>>()` was 896 B
+before `T`.
+
+That lever is spent.
+[moq#2989](https://github.com/moq-dev/moq/pull/2989) cut the inline count to 4,
+which is 64 to 72 B and 200 to 224 B respectively, the range depending on
+whether anything in the build graph enables `smallvec/union`. Going lower trades
+memory for an allocation on every wake, because `WaiterList::take()` hands its
+spilled buffer to the snapshot that wakes it, so a spilled list re-allocates per
+cycle rather than keeping capacity. `kio`'s `tests/waiter_allocs.rs` and
+`the_list_stays_small` now pin both sides of that trade.
+
+The remaining 48 B per cell is therefore gated on [cheaper parking and
+waking](/quest/m1/perf/kio-wake.md), which owns the buffer reuse that would make
+a smaller inline count free. Shrinking the slots before that lands only moves
+cost from memory to the fan-out path.
 
 The per-route half is closed. It used to be that every received announcement ran
 the whole `create_broadcast` path, minting its own `broadcast::Producer` and
@@ -51,11 +65,10 @@ RAM given to the group cache and health shedding at 75%), announce state has
 roughly 200 MB of headroom against a warm cache, so the node sheds itself out
 of serving near 7,000 concurrent cluster-wide broadcasts.
 
-Every figure above predates prefix routes and is no longer trustworthy: they
-were measured on `adad52b`, where an announcement built a broadcast. A
-`ServeState` still carries kio state cells, so the waiter-slot lever below still
-applies to it, but the per-route multiplier those numbers describe is gone.
-Remeasure before treating any of them as current.
+Every figure above predates both prefix routes and the inline-slot cut, so none
+of it is trustworthy: it was measured on `adad52b`, where an announcement built
+a broadcast out of 896 B state cells. Remeasure before treating any of it as
+current.
 
 ### Why now rather than later
 
@@ -74,11 +87,10 @@ Nothing is near the ceiling today. Two committed directions move it:
 ### Expected result
 
 The published table compared today, waiter slots, and standby routes at ~29 KB,
-~19 KB, and ~9 KB per cluster-wide broadcast on a degree-5, 1 GB relay. Standby
-routes has since landed by another route, and the baseline it was measured
-against no longer exists, so the remaining claim is only that waiter slots
-removes 840 B from every kio channel. Rebuild the harness and restate the table
-before quoting a shed threshold.
+~19 KB, and ~9 KB per cluster-wide broadcast on a degree-5, 1 GB relay. Both of
+those levers have since landed by other routes, and the baseline they were
+measured against no longer exists, so no claim survives. Rebuild the harness and
+restate the table before quoting a shed threshold.
 
 ### Reproducing the measurements
 
@@ -91,12 +103,10 @@ from this quest rather than expecting them in the tree.
 
 ## Quests
 
-- [Waiter slots](/quest/m2/relay-memory/waiters.md) - kio channels stop paying
-  840 B of empty inline waker slots: the largest single lever in the questline
 - [Routes per broadcast gauge](/quest/m2/relay-memory/route-gauge.md) - expose
   how many routes a relay holds for a path
 
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - the group cache charges what a
-  cached group really costs; it undercounts chat-shaped traffic 4x today
+  cached group really costs; it undercounts chat-shaped traffic today

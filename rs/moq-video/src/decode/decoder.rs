@@ -7,6 +7,13 @@
 //! already Annex-B inline) and AV1 OBU temporal units untouched. Gates output
 //! until the first keyframe so the backend never sees a delta frame it can't
 //! decode.
+//!
+//! A track that says avc1 and carries no description is read as Annex-B rather
+//! than refused. A browser encoding with WebCodecs' `annexb` output keeps the
+//! avc1 label while putting its parameter sets in band, which is what
+//! `@moq/publish` does today. Length-prefixed payloads without their parameter
+//! sets could not be decoded anyway, so the lenient reading only ever turns an
+//! error into a picture.
 
 use std::time::Duration;
 
@@ -93,17 +100,19 @@ impl Decoder {
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 		let (codec, conversion) = match &catalog.codec {
 			VideoCodec::H264(h264) => {
-				let conversion = if h264.inline {
-					Conversion::Passthrough
-				} else {
-					let avcc = catalog.description.as_ref().ok_or_else(|| {
-						Error::Codec(anyhow::anyhow!("avc1 H.264 track is missing its avcC description"))
-					})?;
-					let params = h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
-					let keyframe_prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
-					Conversion::LengthPrefixed {
-						length_size: params.length_size,
-						keyframe_prefix,
+				let conversion = match (h264.inline, catalog.description.as_ref()) {
+					(true, _) => Conversion::Passthrough,
+					(false, Some(avcc)) => {
+						let params = h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
+						let keyframe_prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
+						Conversion::LengthPrefixed {
+							length_size: params.length_size,
+							keyframe_prefix,
+						}
+					}
+					(false, None) => {
+						tracing::warn!("avc1 track has no avcC description; reading it as Annex-B");
+						Conversion::Passthrough
 					}
 				};
 				(Codec::H264, conversion)
@@ -283,6 +292,53 @@ mod tests {
 	fn openh264_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		round_trip(h264_software_encoder(gray_size()), decoder, "openh264");
+	}
+
+	/// A description-less avc1 track from WebCodecs carries Annex-B payloads with
+	/// its parameter sets in band, the only framing that can decode without avcC.
+	#[test]
+	fn avc1_without_avcc_decodes_as_annexb() {
+		// The catalog shape observed from @moq/publish: `"codec": "avc1.640028"`
+		// and no `description`.
+		let h264 = hang::catalog::H264 {
+			inline: false,
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x28,
+		};
+		let catalog = hang::catalog::VideoConfig::new(h264);
+		assert_eq!(catalog.codec.to_string(), "avc1.640028");
+		assert!(catalog.description.is_none());
+
+		let mut decoder = super::Decoder::new(&catalog, &decode_config(super::Kind::Software))
+			.expect("a description-less avc1 track opens rather than erroring");
+		assert!(
+			matches!(decoder.conversion, super::Conversion::Passthrough),
+			"a description-less avc1 track is read as Annex-B"
+		);
+
+		// openh264 emits Annex-B access units with SPS/PPS inline ahead of each
+		// IDR, which is the bitstream WebCodecs produces in `annexb` format.
+		let mut encoder = h264_software_encoder(gray_size());
+		let mut decoded = Vec::new();
+		for i in 0..5u64 {
+			let keyframe = i == 0;
+			if keyframe {
+				encoder.keyframe();
+			}
+			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
+				assert!(
+					encoded.payload.starts_with(&[0, 0, 0, 1]) || encoded.payload.starts_with(&[0, 0, 1]),
+					"the test feeds Annex-B, not length-prefixed NALs"
+				);
+				decoded.extend(decoder.decode(&encoded.payload, encoded.timestamp, keyframe).unwrap());
+			}
+		}
+
+		assert!(!decoded.is_empty(), "decoder produced no frames");
+		for out in &decoded {
+			assert_gray(&out.surface.to_i420().unwrap(), 320, 240);
+		}
 	}
 
 	#[test]

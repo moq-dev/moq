@@ -125,6 +125,11 @@ export class Decoder {
 	#tooLarge = false;
 	#maxFrameSize: number;
 
+	/** The per-frame decompressed-size cap in bytes, in effect for this decoder. */
+	get maxFrameSize(): number {
+		return this.#maxFrameSize;
+	}
+
 	/** Start a fresh decoder with a cold window. */
 	constructor(options: DecoderOptions = {}) {
 		this.#maxFrameSize = options.maxFrameSize ?? DEFAULT_MAX_FRAME_SIZE;

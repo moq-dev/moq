@@ -7,7 +7,9 @@
 //! handle such as `IMFSourceReader` is fine) and dropped when the thread exits.
 //! [`PumpGuard`] stops and joins the thread when the [`Stream`](super::Stream)
 //! drops, releasing the device. The stop flag is checked between reads, so on a
-//! live device (which delivers a frame per interval) shutdown is prompt; the join
+//! live device (which delivers a frame per interval) shutdown is prompt; a read
+//! with no frame to hand back returns [`Read::Idle`] rather than blocking, which
+//! is what keeps a held capture (a minimized window) just as prompt. The join
 //! is what guarantees the device fd is closed before a subsequent reopen, so we
 //! don't race EBUSY. A wedged device that blocks a read forever would stall that
 //! join, the same as the original `spawn_blocking` path did, but that needs a
@@ -20,6 +22,18 @@ use std::thread::JoinHandle;
 use super::channel::FrameChannel;
 use crate::Error;
 use crate::frame::Surface;
+
+/// The outcome of one device read.
+pub(super) enum Read {
+	/// A captured frame.
+	Frame(Surface),
+	/// No frame this turn, but the source is still live: the pump re-checks its
+	/// stop flag and calls again. A backend uses this to hold a capture (a
+	/// minimized or mid-resize window) without ending the stream.
+	Idle,
+	/// The source stopped producing; the stream ends and the caller reopens.
+	Done,
+}
 
 /// The negotiated geometry a backend reports once its device is open.
 pub(super) struct Geometry {
@@ -47,9 +61,9 @@ impl Drop for PumpGuard {
 /// Run `init` then `read` on a dedicated thread, feeding `chan`.
 ///
 /// `init` builds the blocking device and reports its [`Geometry`]; it runs on
-/// the thread, so the device handle never has to be `Send`. `read` pulls one
-/// frame per call (blocking, bounded). Returns once the device is open (or its
-/// init fails), so geometry is known before the first `read().await`.
+/// the thread, so the device handle never has to be `Send`. `read` pulls at most
+/// one frame per call (blocking, bounded). Returns once the device is open (or
+/// its init fails), so geometry is known before the first `read().await`.
 pub(super) async fn spawn<S, I, R>(
 	chan: Arc<FrameChannel>,
 	init: I,
@@ -57,7 +71,7 @@ pub(super) async fn spawn<S, I, R>(
 ) -> Result<(Geometry, PumpGuard), Error>
 where
 	I: FnOnce() -> Result<(S, Geometry), Error> + Send + 'static,
-	R: FnMut(&mut S) -> Result<Option<Surface>, Error> + Send + 'static,
+	R: FnMut(&mut S) -> Result<Read, Error> + Send + 'static,
 {
 	let stop = Arc::new(AtomicBool::new(false));
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
@@ -80,8 +94,9 @@ where
 
 			while !stop.load(Ordering::SeqCst) {
 				match read(&mut source) {
-					Ok(Some(frame)) => chan.push(frame),
-					Ok(None) => break, // device stopped producing frames
+					Ok(Read::Frame(frame)) => chan.push(frame),
+					Ok(Read::Idle) => {}     // held: re-check the stop flag, then read again
+					Ok(Read::Done) => break, // device stopped producing frames
 					Err(err) => {
 						chan.fail(err);
 						break;

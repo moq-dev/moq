@@ -482,6 +482,89 @@ async fn export_avc1_out_of_band_reassembles() {
 	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
 }
 
+/// H.265 suffix SEI must survive the container seam in both directions: the exporter
+/// puts each access unit on the wire whole, and the importer's splitter gives it back
+/// unchanged. A splitter that closed the access unit on a suffix SEI would hand it to
+/// the next picture, and drop the last one entirely when the stream ends, which a unit
+/// test on the splitter alone cannot see once the bytes cross a PES boundary.
+#[tokio::test(start_paused = true)]
+async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
+	use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+
+	// HEVC NAL headers: byte 0 = nal_unit_type << 1. Slices set
+	// first_slice_segment_in_pic_flag (byte 2 high bit).
+	const IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+	const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33]; // TrailR (1)
+	const AUD: &[u8] = &[0x46, 0x01, 0x50]; // AudNut (35)
+	const PREFIX_SEI: &[u8] = &[0x4e, 0x01, 0x01, 0x04, 0x80]; // PrefixSeiNut (39)
+	const SUFFIX_SEI: &[u8] = &[0x50, 0x01, 0x84, 0x02, 0x80]; // SuffixSeiNut (40)
+	const SUFFIX_SEI2: &[u8] = &[0x50, 0x01, 0x05, 0x03, 0x80]; // a second SuffixSeiNut
+
+	// Three access units covering every shape: multiple suffix units, a prefix SEI
+	// immediately after a suffix, consecutive pictures, and a suffix at end of stream.
+	let units: [Vec<&[u8]>; 3] = [
+		vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, SUFFIX_SEI2],
+		vec![PREFIX_SEI, TRAIL, SUFFIX_SEI],
+		vec![AUD, TRAIL, SUFFIX_SEI],
+	];
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(broadcast.unique_name(".hev1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		// hev1: the config comes from the SPS the keyframe carries inline.
+		let mut cfg = crate::codec::h265::config(&annexb(&units[0])).unwrap();
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	for (i, nals) in units.iter().enumerate() {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_millis(i as u64 * 40).unwrap(),
+				duration: None,
+				payload: annexb(nals),
+				keyframe: i == 0,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	// Keep the producers alive (see `export_aac_roundtrip`).
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// Export: the elementary stream is the three access units back to back, every SEI
+	// still trailing the picture it was written with.
+	let all: Vec<&[u8]> = units.iter().flatten().copied().collect();
+	let reassembled = reassemble_video(&ts, StreamType::H265);
+	assert_eq!(reassembled.as_slice(), annexb(&all).as_ref());
+
+	// Import: the same TS back through the demuxer must rebuild the same access units.
+	let mut imported = moq_net::broadcast::Info::new().produce();
+	let imported_consumer = imported.consume();
+	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
+	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
+	import.decode(&ts).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = import_catalog.snapshot();
+	let (imported_name, video) = snapshot.video.renditions.iter().next().expect("an H.265 rendition");
+	assert!(video.codec.to_string().starts_with("hev1"), "codec was {}", video.codec);
+
+	let recovered = read_frames(&imported_consumer, imported_name).await;
+	assert_eq!(recovered.len(), units.len(), "access unit count");
+	for (i, (got, nals)) in recovered.iter().zip(&units).enumerate() {
+		assert_eq!(got.as_slice(), annexb(nals).as_ref(), "access unit {i}");
+	}
+}
+
 /// A real broadcast contribution feed (Ateme Kyrion, H.264 1080i with ~86 B-frames)
 /// must come out of the exporter with an authored decode timeline. The importer publishes
 /// the reorder depth as the catalog `jitter`, and the exporter sizes its decode-clock reserve

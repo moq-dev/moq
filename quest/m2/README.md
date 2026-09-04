@@ -23,11 +23,10 @@ can act on. Each still carries its own plan and regression test.
 - [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
-- [QoS](/quest/m2/qos/README.md) - broadcast health counters: network backlog, publisher stats, viewer feedback
+- [QoS](/quest/m2/qos/README.md) - broadcast health from the relay: viewer starvation and publisher timeliness histograms, publisher stats, viewer feedback
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
-- [Custom QUIC](/quest/m2/quic/README.md) - a maintained Quinn-family fork
-  supplies reliable reset, hierarchical scheduling, qmux, and the next
-  moq-uring backend
+- [Custom QUIC](/quest/m2/quic/README.md) - noq as the upstream for per-stream
+  ACK progress, reliable reset, hierarchical scheduling, and qmux
 - [Bandwidth estimate release](/quest/m2/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
 - [#2847](/quest/m2/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
 - [Relay memory](/quest/m2/relay-memory/README.md) - relay memory scales with what it serves, not what the fleet knows
