@@ -34,8 +34,8 @@ preflight, consumes them downstream.
   the acknowledged frontier of its subscriptions is, in media time, plus the
   media dropped before it was acknowledged
 - [Starvation at frame granularity](/quest/m2/qos/starvation-frames.md) - the
-  same histograms sampled at every frame boundary through `poll_acked`, with
-  a delivery-delay histogram for jitter
+  acknowledged frontier moves at every frame boundary through `poll_acked`,
+  with a delivery-delay histogram for jitter
 - [Publisher timeliness](/quest/m2/qos/publisher-timeliness.md) - per
   broadcast, how late media arrives at the relay against the track's own
   clock, and whether timestamps stay monotonic

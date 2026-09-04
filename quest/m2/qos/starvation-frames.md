@@ -2,10 +2,12 @@
 
 ## Goal
 
-The starvation histogram and dropped-media counters are sampled at every
-frame boundary instead of once per group, and a second histogram reports
-per-frame delivery delay so viewer jitter is visible per broadcast. The wire
-shape from the group slice is unchanged apart from the new histogram.
+Each subscription's acknowledged frontier moves at every frame boundary
+instead of once per group, so the starvation histogram and dropped-media
+counters from the group slice read a frontier at most one frame stale, and a
+second histogram reports per-frame delivery delay so viewer jitter is visible
+per broadcast. The wire shape from the group slice is unchanged apart from
+the new histogram.
 
 ## Plan
 

@@ -15,9 +15,11 @@ design in #2733: media-time lag is the primary signal, bytes are the weights.
 
 Define the frontier and the sample separately. Each subscription has an
 acknowledged frontier: the newest frame timestamp the peer is known to have
-received. Before the first ACK it is the timestamp of the first frame the
-subscription serves, so a fresh subscription's lag is exactly the media
-produced since it started. In this slice the frontier advances when a group
+received. At activation, before any frame is chosen or acknowledged, it is
+the track's newest produced timestamp at that moment, so a subscription
+blocked before its first write is still sampled, its lag is exactly the
+media produced since it started, and the backlog it deliberately starts
+behind (a latency floor, an ordered start) never reads as starvation. In this slice the frontier advances when a group
 stream's FIN is acknowledged, which `Writer::close()` already awaits in
 `Subscription::serve_group` in `rs/moq-net/src/lite/publisher.rs` and in the
 IETF publisher, and the group's last frame timestamp becomes the frontier.
@@ -31,9 +33,10 @@ does not matter. The write path cannot be the sampler: a flow-controlled
 subscription's serve tasks block inside `write`, which is precisely the
 stalled viewer the metric exists to show, and sampling only on ACK would let
 that viewer emit nothing and vanish from the snapshot deltas. A periodic
-sample keeps it climbing the buckets while its frontier stands still. Lag is
-zero while the source is paused, and the sample carries no weight then,
-since nothing was produced. This slice moves the frontier once per group;
+sample keeps it climbing the buckets while its frontier stands still. While
+the source is paused nothing is produced, so a tick carries no weight and
+the histogram does not move; a viewer's lag stays whatever it was until its
+frontier catches up, and reappears in the buckets once production resumes. This slice moves the frontier once per group;
 the [frame-granularity quest](/quest/m2/qos/starvation-frames.md) moves it
 per frame without changing the wire shape or the sampler, so fix both here.
 
@@ -71,8 +74,8 @@ section of `doc/bin/relay/config.md` with the new fields and their meaning.
 Tests: a subscriber that reads at media rate lands in the lowest bucket; a
 flow-controlled subscriber walks up the buckets as backlog grows, including
 one that stops acknowledging entirely; a skipped group adds its span to
-`dropped_duration`, and its bytes were already counted in the histogram at
-whatever lag the subscription had when the group was produced; a
+`dropped_duration` and nothing to the histogram beyond the interval samples
+already taken while it was outstanding; a
 session close mid-group counts as dropped; two subscriptions of one broadcast
 sum into one row; the aggregate consumer sums two nodes bucket by bucket.
 
@@ -84,7 +87,7 @@ sum into one row; the aggregate consumer sums two nodes bucket by bucket.
 ## Related
 
 - [Starvation at frame granularity](/quest/m2/qos/starvation-frames.md) -
-  samples at every frame end once `poll_acked` is released
+  moves the frontier at every frame end once `poll_acked` is released
 - [Publisher timeliness](/quest/m2/qos/publisher-timeliness.md) - the ingress
   mirror on the `Role::Subscriber` rows
 - [Viewer feedback](/quest/m2/qos/viewer-feedback.md) - receiver-side
