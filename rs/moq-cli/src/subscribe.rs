@@ -322,7 +322,9 @@ impl Subscribe {
 			.await?;
 
 			let Some(frame) = frame else { break };
-			delivery.deliver(&frame, waited, &mut stdout).await?;
+			delivery
+				.deliver(&frame, waited, ts.discontinuity(), &mut stdout)
+				.await?;
 		}
 
 		Ok(())
@@ -373,6 +375,14 @@ impl Subscribe {
 /// the budget on every sleep. The cost is bounded: a hurry can collapse at
 /// most the lead-sized interval ahead of the epoch, and smoothing resumes at
 /// the next actual wait.
+///
+/// A publisher rewind is the one lag the epoch can't see: the media clock jumps
+/// backwards, so the whole rewound span paces to instants already past and is
+/// written on arrival, unsmoothed, until it climbs back over the old base. The
+/// export reports it
+/// ([`ts::Export::discontinuity`](moq_mux::container::ts::Export::discontinuity))
+/// and the frame that changes the counter hurries: it becomes the live edge, and
+/// the new timeline paces off it.
 struct Delivery {
 	pacer: moq_mux::Pacer,
 	/// The delivery-lag bound, and the pacer's lead: both are the export's
@@ -381,6 +391,9 @@ struct Delivery {
 	/// The last instant the export made us wait for a frame: the conservative
 	/// arrival epoch for frames obtained without waiting (see the type docs).
 	arrived: tokio::time::Instant,
+	/// The export's discontinuity counter as of the last delivered frame, so a
+	/// rewind is spotted on the frame that carries it.
+	discontinuity: u64,
 }
 
 impl Delivery {
@@ -391,20 +404,34 @@ impl Delivery {
 			// tokio's clock rather than the bare std one so tests can pause it; in
 			// production they are identical.
 			arrived: tokio::time::Instant::now(),
+			discontinuity: 0,
 		}
 	}
 
 	/// Write one export frame to `out` at its paced instant. `waited` is whether
-	/// the export made us wait for this frame rather than having it ready.
+	/// the export made us wait for this frame rather than having it ready, and
+	/// `discontinuity` is [`ts::Export::discontinuity`](moq_mux::container::ts::Export::discontinuity)
+	/// as of this frame.
 	async fn deliver(
 		&mut self,
 		frame: &moq_mux::container::Frame,
 		waited: bool,
+		discontinuity: u64,
 		out: &mut (impl tokio::io::AsyncWrite + Unpin),
 	) -> anyhow::Result<()> {
 		let now = tokio::time::Instant::now();
 		if waited {
 			self.arrived = now;
+		}
+
+		// A publisher rewind moves the media clock backwards, so the pacer's base
+		// belongs to a timeline that no longer exists: every frame of the rewound span
+		// would pace to an instant already past and be written on arrival. Re-anchor to
+		// the first frame of the new timeline instead, and smooth from there.
+		if discontinuity != self.discontinuity {
+			self.discontinuity = discontinuity;
+			self.arrived = now;
+			self.pacer.hurry(frame.timestamp, now.into_std());
 		}
 
 		let mut send_at = self.pacer.pace(frame.timestamp, now.into_std());
@@ -446,7 +473,7 @@ mod tests {
 
 		// The first frame anchors the pacer and is written immediately.
 		delivery
-			.deliver(&frame(0, Timescale::MICRO), true, &mut out)
+			.deliver(&frame(0, Timescale::MICRO), true, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(start.elapsed(), Duration::ZERO);
@@ -454,14 +481,14 @@ mod tests {
 		// A PCR slot 25ms later (ready without waiting, like a backfilled grid
 		// slot) waits for its grid boundary.
 		delivery
-			.deliver(&frame(25_000, Timescale::MICRO), false, &mut out)
+			.deliver(&frame(25_000, Timescale::MICRO), false, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_millis(25));
 
 		// A media frame at the source's 90 kHz timescale paces on the same clock.
 		delivery
-			.deliver(&frame(3_600, Timescale::new(90_000).unwrap()), true, &mut out)
+			.deliver(&frame(3_600, Timescale::new(90_000).unwrap()), true, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_millis(40));
@@ -486,21 +513,21 @@ mod tests {
 		// after the first): pacing may hold each for at most the 500ms budget
 		// past the last wait, not restart the budget after every sleep.
 		delivery
-			.deliver(&frame(0, Timescale::MICRO), true, &mut out)
+			.deliver(&frame(0, Timescale::MICRO), true, 0, &mut out)
 			.await
 			.unwrap();
 		delivery
-			.deliver(&frame(400_000, Timescale::MICRO), false, &mut out)
+			.deliver(&frame(400_000, Timescale::MICRO), false, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_millis(400), "within the budget: paced");
 
 		delivery
-			.deliver(&frame(800_000, Timescale::MICRO), false, &mut out)
+			.deliver(&frame(800_000, Timescale::MICRO), false, 0, &mut out)
 			.await
 			.unwrap();
 		delivery
-			.deliver(&frame(1_200_000, Timescale::MICRO), false, &mut out)
+			.deliver(&frame(1_200_000, Timescale::MICRO), false, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(
@@ -512,9 +539,48 @@ mod tests {
 		// The hurry made the newest frame the live edge, so pacing resumes
 		// relative to it once the export makes us wait again.
 		delivery
-			.deliver(&frame(1_240_000, Timescale::MICRO), true, &mut out)
+			.deliver(&frame(1_240_000, Timescale::MICRO), true, 0, &mut out)
 			.await
 			.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_millis(440));
+	}
+
+	/// Regression for #2833: a publisher rewind moves the media clock backwards, so
+	/// every frame of the rewound span paces to an instant already past and is written
+	/// the moment it arrives. The export's discontinuity counter re-anchors the pacer
+	/// to the first frame of the new timeline, so spacing resumes immediately.
+	#[tokio::test(start_paused = true)]
+	async fn a_rewind_re_anchors_the_pacer() {
+		let mut delivery = Delivery::new(Duration::from_millis(500));
+		let mut out = Vec::new();
+
+		let start = tokio::time::Instant::now();
+		delivery
+			.deliver(&frame(0, Timescale::MICRO), true, 0, &mut out)
+			.await
+			.unwrap();
+		delivery
+			.deliver(&frame(400_000, Timescale::MICRO), true, 0, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(400));
+
+		// The publisher rewinds to zero. Without the re-anchor this frame (and the
+		// whole 400ms it replays) would pace to an instant 400ms in the past.
+		let rewound = start + Duration::from_millis(400);
+		delivery
+			.deliver(&frame(0, Timescale::MICRO), true, 1, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(tokio::time::Instant::now(), rewound, "the first new frame goes out now");
+
+		// And the new timeline paces off it rather than racing to catch up.
+		delivery
+			.deliver(&frame(40_000, Timescale::MICRO), true, 1, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(tokio::time::Instant::now(), rewound + Duration::from_millis(40));
+
+		assert_eq!(out.len(), 4 * 188, "every payload was written");
 	}
 }

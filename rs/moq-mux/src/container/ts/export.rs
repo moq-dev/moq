@@ -64,6 +64,10 @@ const PCR_BACKFILL: u128 = 40;
 /// The leading PAT/PMT rides on the first frame (so it inherits a real
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
+///
+/// Every repetition cadence here is anchored on the media clock, so a publisher
+/// rewind starts a fresh timeline: see [`discontinuity`](Self::discontinuity),
+/// which a caller pacing on that clock has to follow.
 pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
@@ -89,6 +93,11 @@ pub struct Export<E: catalog::Catalog = ()> {
 	last_psi: Option<Timestamp>,
 	/// Grid slot of the last PCR emission ([`Self::write_pcr`]).
 	last_pcr: Option<u128>,
+	/// Discontinuity counter of the timeline being emitted ([`Self::discontinuity`]).
+	discontinuity: u64,
+	/// A rewind has been observed and the next PCR packet must flag it. Set by
+	/// [`Self::rewind`], consumed by [`Self::pcr_packet`].
+	pcr_discontinuity: bool,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -99,13 +108,24 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// cached video keyframe; emitting that lead audio first would bury the parameter
 	/// sets behind an audio-only preamble, and a live decoder probing the stream gives
 	/// up before it ever configures video. `None` until the tables are built, and for
-	/// programs with no video track (nothing to align to).
+	/// programs with no video track (nothing to align to). Cleared on a rewind: the
+	/// anchor belongs to the old timeline, and holding it would drop every audio
+	/// frame of the rewound span.
 	video_start: Option<Timestamp>,
+}
+
+/// A frame pulled from a track's source, waiting its turn in the output order.
+struct Pending {
+	frame: Frame,
+	/// The source's discontinuity counter when this frame was read, so the rewind is
+	/// acted on when the frame is *emitted* rather than when it is buffered: another
+	/// track's old-epoch frame may still be ahead of it in timestamp order.
+	discontinuity: u64,
 }
 
 struct Track {
 	source: ExportSource,
-	pending: Option<Frame>,
+	pending: Option<Pending>,
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -221,6 +241,8 @@ impl<E: catalog::Catalog> Export<E> {
 			psi: None,
 			last_psi: None,
 			last_pcr: None,
+			discontinuity: 0,
+			pcr_discontinuity: false,
 			video_start: None,
 		})
 	}
@@ -282,7 +304,8 @@ impl<E: catalog::Catalog> Export<E> {
 						{
 							continue;
 						}
-						track.pending = Some(frame);
+						let discontinuity = track.source.discontinuity();
+						track.pending = Some(Pending { frame, discontinuity });
 						break;
 					}
 					Poll::Ready(None) => {
@@ -324,7 +347,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(start) = self.video_start {
 				for track in self.tracks.values_mut() {
 					if !matches!(track.kind, Kind::Video(_))
-						&& track.pending.as_ref().is_some_and(|f| f.timestamp < start)
+						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
 					}
@@ -338,11 +361,20 @@ impl<E: catalog::Catalog> Export<E> {
 		// stamped at the slot boundary, so the caller's pacer places the PCR at the
 		// time it asserts instead of bunching it with the frame that revealed it.
 		if let Some(name) = self.pick_next_track() {
-			let timestamp = self.tracks[&name].pending.as_ref().unwrap().timestamp;
+			let pending = self.tracks[&name].pending.as_ref().unwrap();
+			let (timestamp, discontinuity) = (pending.frame.timestamp, pending.discontinuity);
+			// A rewind re-anchors everything paced on the media clock, before the clock
+			// itself is written for this frame. Strictly greater, not merely different:
+			// the rewound frame sorts ahead of another track's old-epoch straggler, so
+			// that straggler is emitted *after* the timeline has already moved on and
+			// would otherwise rewind it right back.
+			if discontinuity > self.discontinuity {
+				self.rewind(discontinuity);
+			}
 			if let Some(out) = self.write_pcr(timestamp)? {
 				return Poll::Ready(Ok(Some(out)));
 			}
-			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
+			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap().frame;
 			let out = self.write_frame(&name, frame)?;
 			return Poll::Ready(Ok(Some(out)));
 		}
@@ -523,6 +555,33 @@ impl<E: catalog::Catalog> Export<E> {
 		);
 	}
 
+	/// The timeline-discontinuity counter of the most recently returned [`Frame`].
+	///
+	/// It increments once per publisher rewind (see
+	/// [`container::Consumer::discontinuity`](crate::container::Consumer::discontinuity)),
+	/// and the frame returned by the [`next`](Self::next) that changes it is the first
+	/// of the new timeline, carrying the `discontinuity_indicator` on the PCR PID. A
+	/// caller pacing on the media clock must re-anchor its own base to that frame,
+	/// because the media clock just jumped backwards.
+	pub fn discontinuity(&self) -> u64 {
+		self.discontinuity
+	}
+
+	/// Adopt a rewound timeline: everything anchored on the media clock is holding a
+	/// base from the old epoch and would stay frozen for the whole rewound span.
+	///
+	/// Clearing the anchors makes the first frame of the new timeline due for the
+	/// program tables, every SI PID, and the PCR grid, and arms the
+	/// `discontinuity_indicator` that the next PCR packet carries exactly once.
+	fn rewind(&mut self, discontinuity: u64) {
+		self.discontinuity = discontinuity;
+		self.last_psi = None;
+		self.last_si.clear();
+		self.last_pcr = None;
+		self.pcr_discontinuity = true;
+		self.video_start = None;
+	}
+
 	/// Header is ready when every track's [`ExportSource`] has resolved its
 	/// codec config (from the catalog `description`, or built by the transform).
 	fn header_ready(&self) -> bool {
@@ -547,7 +606,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.tracks
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
-			.filter_map(|t| t.pending.as_ref().map(|f| f.timestamp))
+			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
 			.min()
 	}
 
@@ -707,7 +766,7 @@ impl<E: catalog::Catalog> Export<E> {
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (f.timestamp, t.pid, n)))
+			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n)))
 			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
 			.map(|(_, _, name)| name.clone())
 	}
@@ -863,7 +922,9 @@ impl<E: catalog::Catalog> Export<E> {
 			None => current,
 			Some(last) => {
 				// A reordered (B-frame) timestamp steps backwards into a slot already
-				// served; the clock only ever moves forward.
+				// served; the clock only ever moves forward. A publisher rewind is the
+				// other way a timestamp goes backwards, and that one clears `last_pcr`
+				// ([`Self::rewind`]) so it never reaches this test.
 				if current <= last {
 					return Ok(None);
 				}
@@ -917,8 +978,14 @@ impl<E: catalog::Catalog> Export<E> {
 		p.push(0x20 | cc);
 		// adaptation_field_length covers the rest of the packet.
 		p.push(183);
-		// PCR_flag alone.
-		p.push(0x10);
+		// PCR_flag, plus discontinuity_indicator on the first packet after a rewind:
+		// the PCR that follows is not continuous with the one before it, and this is
+		// the only adaptation field an audio-only program ever writes.
+		p.push(if std::mem::take(&mut self.pcr_discontinuity) {
+			0x90
+		} else {
+			0x10
+		});
 		// program_clock_reference_base (33 bits), 6 reserved '1' bits, and a zero
 		// 9-bit extension (the grid is 90 kHz-exact, so there is nothing sub-tick).
 		p.push((base >> 25) as u8);
