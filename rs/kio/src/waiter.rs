@@ -239,9 +239,10 @@ pub struct WaiterList {
 }
 
 impl WaiterList {
-	/// Create an empty list. It allocates nothing until it holds more waiters than it
-	/// has inline slots, so the first [`register`](Self::register) never touches the
-	/// heap and nor do the next few.
+	/// Create an empty list with inline entry storage.
+	///
+	/// Registration requires no list-storage growth allocation until the inline
+	/// capacity is exceeded.
 	pub fn new() -> Self {
 		Self {
 			entries: SmallVec::new(),
