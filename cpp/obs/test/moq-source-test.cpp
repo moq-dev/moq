@@ -269,6 +269,7 @@ int g_send_result = 0;
 int g_receive_result = 0;
 int g_decoded_width = 320;
 int g_decoded_height = 240;
+std::atomic<int> g_last_decoder_extradata{-1};
 
 std::atomic<int> g_sws_scales{0};
 
@@ -309,8 +310,9 @@ int avcodec_open2(AVCodecContext *, const AVCodec *, AVDictionary **)
 
 void avcodec_flush_buffers(AVCodecContext *) {}
 
-int avcodec_send_packet(AVCodecContext *, const AVPacket *)
+int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *)
 {
+	g_last_decoder_extradata = ctx->extradata_size > 0 ? ctx->extradata[0] : -1;
 	return g_send_result;
 }
 
@@ -415,6 +417,7 @@ struct Sub {
 	void *user_data = nullptr;
 	bool closed = false;
 	bool terminated = false;
+	bool callback_complete = false;
 };
 
 // Guards every table below. Always taken *under* the source's own mutex (the
@@ -436,8 +439,17 @@ int32_t g_next_frame = 9000;
 std::atomic<bool> g_defer_terminals{false};
 std::vector<int32_t> g_deferred;
 
-// Closing a handle libmoq has already retired. The real API answers -1; what
-// this counts is the plugin losing track of which handles it still owns.
+// Opens the exact retirement window where libmoq has removed a task but has not
+// yet invoked its terminal callback.
+std::mutex g_terminal_gate_mutex;
+std::condition_variable g_terminal_gate_cv;
+bool g_pause_terminal = false;
+bool g_terminal_marked = false;
+bool g_release_terminal = false;
+bool g_inflight_close_seen = false;
+
+// Closing a handle after its terminal callback completed. A failed close while
+// that callback is still in flight is an expected teardown race instead.
 std::atomic<int> g_double_close{0};
 
 std::atomic<int> g_origin_creates{0};
@@ -472,14 +484,14 @@ int g_video_config_result = 0;
 uint32_t g_coded_width = 320;
 uint32_t g_coded_height = 240;
 const char g_codec[] = "h264";
-const uint8_t g_description[] = {0x01, 0x64, 0x00, 0x1f};
+uint8_t g_description[] = {0x01, 0x64, 0x00, 0x1f};
 bool g_describe = false;
 
 int32_t addSub(SubKind kind, void (*cb)(void *, int32_t), void *user_data)
 {
 	std::lock_guard<std::mutex> lock(g_subs_mutex);
 	int32_t handle = g_next_sub++;
-	g_subs[handle] = Sub{kind, cb, user_data, false, false};
+	g_subs[handle] = Sub{kind, cb, user_data, false, false, false};
 	return handle;
 }
 
@@ -511,7 +523,19 @@ bool deliverStatus(int32_t handle, int32_t code)
 		if (code <= 0)
 			it->second.terminated = true;
 	}
+	if (code <= 0) {
+		std::unique_lock<std::mutex> lock(g_terminal_gate_mutex);
+		if (g_pause_terminal) {
+			g_terminal_marked = true;
+			g_terminal_gate_cv.notify_all();
+			g_terminal_gate_cv.wait(lock, [] { return g_release_terminal; });
+		}
+	}
 	cb(user_data, code);
+	if (code <= 0) {
+		std::lock_guard<std::mutex> lock(g_subs_mutex);
+		g_subs.at(handle).callback_complete = true;
+	}
 
 	// The announced wait is one-shot: after delivering its broadcast handle,
 	// libmoq immediately follows with the terminal callback on the same thread.
@@ -524,24 +548,38 @@ bool deliverStatus(int32_t handle, int32_t code)
 			it->second.terminated = true;
 		}
 		cb(user_data, 0);
+		std::lock_guard<std::mutex> lock(g_subs_mutex);
+		g_subs.at(handle).callback_complete = true;
 	}
 	return true;
 }
 
 int32_t closeSub(int32_t handle)
 {
+	bool terminal_in_flight = false;
 	{
 		std::lock_guard<std::mutex> lock(g_subs_mutex);
 		auto it = g_subs.find(handle);
-		if (it == g_subs.end() || it->second.closed || it->second.terminated) {
+		if (it == g_subs.end() || it->second.closed ||
+		    (it->second.terminated && it->second.callback_complete)) {
 			g_double_close++;
 			return -1;
 		}
-		it->second.closed = true;
-		if (g_defer_terminals) {
-			g_deferred.push_back(handle);
-			return 0;
+		if (it->second.terminated) {
+			terminal_in_flight = true;
+		} else {
+			it->second.closed = true;
+			if (g_defer_terminals) {
+				g_deferred.push_back(handle);
+				return 0;
+			}
 		}
+	}
+	if (terminal_in_flight) {
+		std::lock_guard<std::mutex> lock(g_terminal_gate_mutex);
+		g_inflight_close_seen = true;
+		g_terminal_gate_cv.notify_all();
+		return -1;
 	}
 	// Posted, never called inline: the plugin closes each handle while holding
 	// ctx->mutex, which the terminal's reference release also needs.
@@ -796,6 +834,13 @@ void reset()
 	g_settings.url = "https://relay.example/anon";
 	g_settings.broadcast = "obs/test";
 	g_defer_terminals = false;
+	{
+		std::lock_guard<std::mutex> lock(g_terminal_gate_mutex);
+		g_pause_terminal = false;
+		g_terminal_marked = false;
+		g_release_terminal = false;
+		g_inflight_close_seen = false;
+	}
 	g_double_close = 0;
 	g_stub_errors = 0;
 	g_origin_creates = 0;
@@ -826,8 +871,10 @@ void reset()
 	g_send_result = 0;
 	g_receive_result = 0;
 	g_describe = false;
+	g_description[0] = 0x01;
 	g_decoded_width = 320;
 	g_decoded_height = 240;
+	g_last_decoder_extradata = -1;
 	g_live_allocs = 0;
 	g_av_allocs = 0;
 }
@@ -1077,10 +1124,12 @@ int main()
 	// existing video subscription remains current and must keep delivering frames.
 	{
 		reset();
+		g_describe = true;
 		void *source = createSource();
 		subscribeVideo(newBroadcast());
 		int32_t first_track = g_last_video;
 
+		g_description[0] = 0x02;
 		g_video_result = -77;
 		int32_t snapshot = newSnapshot();
 		g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
@@ -1092,6 +1141,7 @@ int main()
 		g_runtime->Run([first_track, frame] { deliverStatus(first_track, frame); });
 		CHECK(g_output_frames == 1);
 		CHECK(g_frame_frees == 1);
+		CHECK(g_last_decoder_extradata == 0x01);
 
 		destroySource(source);
 	}
@@ -1228,6 +1278,39 @@ int main()
 		destroySource(source);
 	}
 	report("undecodable catalog leaves no dangling reference");
+
+	// libmoq retires a task before entering its terminal callback. Teardown can
+	// see the still-stored handle in that interval; a failed close is expected and
+	// must not be mistaken for a close after the callback already retired it.
+	{
+		reset();
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		int32_t track = g_last_video;
+		{
+			std::lock_guard<std::mutex> lock(g_terminal_gate_mutex);
+			g_pause_terminal = true;
+		}
+
+		std::thread terminal([track] { deliverStatus(track, 0); });
+		{
+			std::unique_lock<std::mutex> lock(g_terminal_gate_mutex);
+			CHECK(g_terminal_gate_cv.wait_for(lock, std::chrono::seconds(1),
+							  [] { return g_terminal_marked; }));
+		}
+
+		std::thread teardown([source] { destroySource(source); });
+		{
+			std::unique_lock<std::mutex> lock(g_terminal_gate_mutex);
+			CHECK(g_terminal_gate_cv.wait_for(lock, std::chrono::seconds(1),
+							  [] { return g_inflight_close_seen; }));
+			g_release_terminal = true;
+			g_terminal_gate_cv.notify_all();
+		}
+		terminal.join();
+		teardown.join();
+	}
+	report("teardown accepts an in-flight terminal");
 
 	// Terminal callbacks racing destruction, repeatedly. Whichever order they land
 	// in, teardown returns on the callbacks and frees everything.

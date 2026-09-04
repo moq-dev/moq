@@ -170,6 +170,20 @@ struct callback_state {
 struct callback_data {
 	std::shared_ptr<callback_state> state;
 };
+
+struct prepared_decoder {
+	AVCodecContext *codec_ctx = nullptr;
+	AVCodecID codec_id = AV_CODEC_ID_NONE;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	std::string codec;
+
+	~prepared_decoder()
+	{
+		if (codec_ctx)
+			avcodec_free_context(&codec_ctx);
+	}
+};
 } // namespace
 
 // Forward declarations
@@ -188,7 +202,8 @@ static void on_video_frame(void *user_data, int32_t frame_id);
 static void moq_source_reconnect(struct moq_source *ctx);
 static void moq_source_disconnect_locked(struct moq_source *ctx);
 static void moq_source_blank_video(struct moq_source *ctx);
-static bool moq_source_init_decoder(struct moq_source *ctx, const struct moq_video_config *config);
+static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct moq_video_config *config);
+static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder);
 static void moq_source_destroy_decoder_locked(struct moq_source *ctx);
 static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id);
 
@@ -505,7 +520,6 @@ static void on_catalog(void *user_data, int32_t catalog)
 		moq_consume_catalog_free(catalog);
 		return;
 	}
-
 	// Get video configuration from the snapshot.
 	struct moq_video_config video_config;
 	if (moq_consume_video_config(catalog, 0, &video_config) < 0) {
@@ -514,14 +528,14 @@ static void on_catalog(void *user_data, int32_t catalog)
 		return;
 	}
 
-	// Initialize decoder with the video config (takes mutex internally, and
-	// copies the codec/description out of the snapshot).
-	if (!moq_source_init_decoder(ctx, &video_config)) {
+	// Build the decoder without replacing the current one. The snapshot owns the
+	// config pointers, so preparation also copies everything the decoder needs.
+	auto decoder = moq_source_prepare_decoder(&video_config);
+	if (!decoder) {
 		LOG_ERROR("Failed to initialize decoder");
 		moq_consume_catalog_free(catalog);
 		return;
 	}
-
 	// Pre-account for the video track subscription before handing ctx to libmoq,
 	// so its reference is in place the instant the subscription exists. Reserve
 	// the next attempt without making it current until creation succeeds, so a
@@ -559,6 +573,7 @@ static void on_catalog(void *user_data, int32_t catalog)
 		// the previous one so its terminal callback releases its reference (else
 		// it would linger until teardown's bounded wait).
 		int32_t old_track = ctx->video_track;
+		moq_source_install_decoder_locked(ctx, std::move(decoder));
 		ctx->video_attempt = video_attempt;
 		ctx->video_track = track;
 		pthread_mutex_unlock(&ctx->mutex);
@@ -974,7 +989,7 @@ static void moq_source_blank_video(struct moq_source *ctx)
 	LOG_DEBUG("Video preview blanked");
 }
 
-static bool moq_source_init_decoder(struct moq_source *ctx, const struct moq_video_config *config)
+static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct moq_video_config *config)
 {
 	// Map codec string to FFmpeg codec ID dynamically
 	AVCodecID codec_id = codec_string_to_id(config->codec, config->codec_len);
@@ -986,87 +1001,80 @@ static bool moq_source_init_decoder(struct moq_source *ctx, const struct moq_vid
 			memcpy(codec_str, config->codec, copy_len);
 		}
 		LOG_ERROR("Unknown or unsupported codec: '%s'", codec_str);
-		return false;
+		return nullptr;
 	}
 
 	// Find decoder for the codec
 	const AVCodec *codec = avcodec_find_decoder(codec_id);
 	if (!codec) {
 		LOG_ERROR("Decoder not found for codec ID: %d", codec_id);
-		return false;
+		return nullptr;
 	}
 
-	// Create codec context (can be done outside mutex)
-	AVCodecContext *new_codec_ctx = avcodec_alloc_context3(codec);
-	if (!new_codec_ctx) {
+	auto decoder = std::make_unique<prepared_decoder>();
+	decoder->codec_id = codec_id;
+	decoder->codec.assign(config->codec, config->codec_len);
+	decoder->codec_ctx = avcodec_alloc_context3(codec);
+	if (!decoder->codec_ctx) {
 		LOG_ERROR("Failed to allocate codec context");
-		return false;
+		return nullptr;
 	}
 
 	// Get dimensions from config - required for buffer allocation
-	uint32_t width = 0;
-	uint32_t height = 0;
-
 	if (config->coded_width && *config->coded_width > 0) {
-		new_codec_ctx->width = *config->coded_width;
-		width = *config->coded_width;
+		decoder->codec_ctx->width = *config->coded_width;
+		decoder->width = *config->coded_width;
 	}
 	if (config->coded_height && *config->coded_height > 0) {
-		new_codec_ctx->height = *config->coded_height;
-		height = *config->coded_height;
+		decoder->codec_ctx->height = *config->coded_height;
+		decoder->height = *config->coded_height;
 	}
 
 	// Use codec description as extradata (contains SPS/PPS for H.264, VPS/SPS/PPS for HEVC, etc.)
 	if (config->description && config->description_len > 0) {
-		new_codec_ctx->extradata =
+		decoder->codec_ctx->extradata =
 			(uint8_t *)av_mallocz(config->description_len + AV_INPUT_BUFFER_PADDING_SIZE);
-		if (new_codec_ctx->extradata) {
-			memcpy(new_codec_ctx->extradata, config->description, config->description_len);
-			new_codec_ctx->extradata_size = static_cast<int>(config->description_len);
+		if (decoder->codec_ctx->extradata) {
+			memcpy(decoder->codec_ctx->extradata, config->description, config->description_len);
+			decoder->codec_ctx->extradata_size = static_cast<int>(config->description_len);
 		}
 	}
 
 	// Open codec
-	if (avcodec_open2(new_codec_ctx, codec, NULL) < 0) {
+	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
 		LOG_ERROR("Failed to open codec");
-		avcodec_free_context(&new_codec_ctx);
-		return false;
+		return nullptr;
 	}
 
 	// If dimensions weren't in config, try to get them from the opened codec context
 	// (may have been parsed from extradata)
-	if (width == 0 && new_codec_ctx->width > 0) {
-		width = new_codec_ctx->width;
+	if (decoder->width == 0 && decoder->codec_ctx->width > 0) {
+		decoder->width = decoder->codec_ctx->width;
 	}
-	if (height == 0 && new_codec_ctx->height > 0) {
-		height = new_codec_ctx->height;
+	if (decoder->height == 0 && decoder->codec_ctx->height > 0) {
+		decoder->height = decoder->codec_ctx->height;
 	}
 
-	// Now take the mutex and swap in the new decoder state
-	pthread_mutex_lock(&ctx->mutex);
+	return decoder;
+}
 
-	// Destroy old decoder state
-	if (ctx->sws_ctx) {
-		sws_freeContext(ctx->sws_ctx);
-	}
-	if (ctx->codec_ctx) {
-		avcodec_free_context(&ctx->codec_ctx);
-	}
-	if (ctx->frame_buffer) {
-		bfree(ctx->frame_buffer);
-	}
+// NOTE: Caller must hold ctx->mutex when calling this function.
+static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder)
+{
+	moq_source_destroy_decoder_locked(ctx);
 
 	// Install new decoder state
 	// Note: sws_ctx, frame_buffer, and frame dimensions will be initialized
 	// dynamically on first decoded frame when we know the actual pixel format
-	ctx->codec_ctx = new_codec_ctx;
-	ctx->current_codec_id = codec_id;
+	ctx->codec_ctx = decoder->codec_ctx;
+	decoder->codec_ctx = nullptr;
+	ctx->current_codec_id = decoder->codec_id;
 	ctx->current_pix_fmt = AV_PIX_FMT_NONE; // Will be set on first frame
 	ctx->sws_ctx = NULL;                    // Will be created on first frame with actual pixel format
 	ctx->frame_buffer = NULL;               // Will be allocated on first frame with actual dimensions
-	ctx->frame.width = width;
-	ctx->frame.height = height;
-	ctx->frame.linesize[0] = width * 4;
+	ctx->frame.width = decoder->width;
+	ctx->frame.height = decoder->height;
+	ctx->frame.linesize[0] = decoder->width * 4;
 	ctx->frame.data[0] = NULL;
 	ctx->frame.format = VIDEO_FORMAT_RGBA;
 	ctx->frame.timestamp = 0;
@@ -1074,17 +1082,8 @@ static bool moq_source_init_decoder(struct moq_source *ctx, const struct moq_vid
 	ctx->frames_waiting_for_keyframe = 0;
 	ctx->consecutive_decode_errors = 0;
 
-	pthread_mutex_unlock(&ctx->mutex);
-
-	// Log codec name for debugging
-	char codec_str[64] = {0};
-	size_t copy_len = config->codec_len < sizeof(codec_str) - 1 ? config->codec_len : sizeof(codec_str) - 1;
-	if (config->codec && copy_len > 0) {
-		memcpy(codec_str, config->codec, copy_len);
-	}
-	LOG_INFO("Decoder initialized: codec=%s, dimensions=%ux%u (may be refined on first frame)", codec_str, width,
-		 height);
-	return true;
+	LOG_INFO("Decoder initialized: codec=%s, dimensions=%ux%u (may be refined on first frame)",
+		 decoder->codec.c_str(), decoder->width, decoder->height);
 }
 
 // NOTE: Caller must hold ctx->mutex when calling this function
