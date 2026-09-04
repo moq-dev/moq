@@ -123,17 +123,19 @@ export class Decoder {
 	#chunks: Uint8Array[] = [];
 	#total = 0;
 	#tooLarge = false;
-	#maxFrameSize: number;
+
+	/** The per-frame decompressed-size cap in bytes, in effect for this decoder. */
+	readonly maxFrameSize: number;
 
 	/** Start a fresh decoder with a cold window. */
 	constructor(options: DecoderOptions = {}) {
-		this.#maxFrameSize = options.maxFrameSize ?? DEFAULT_MAX_FRAME_SIZE;
+		this.maxFrameSize = options.maxFrameSize ?? DEFAULT_MAX_FRAME_SIZE;
 		this.#inflate.onData = (chunk) => {
 			const bytes = chunk as Uint8Array;
 			this.#total += bytes.length;
 			// Bound the inflated output as it is produced; a tiny slice can expand enormously. Stop
 			// retaining past the cap, then reject once the push returns.
-			if (this.#total > this.#maxFrameSize) {
+			if (this.#total > this.maxFrameSize) {
 				this.#tooLarge = true;
 				return;
 			}
@@ -157,7 +159,7 @@ export class Decoder {
 		this.#inflate.push(slice, false);
 		this.#inflate.push(SYNC_FLUSH_TAIL, pako.Z_SYNC_FLUSH);
 		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
-		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${this.#maxFrameSize} bytes`);
+		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${this.maxFrameSize} bytes`);
 
 		return concat(this.#chunks, this.#total);
 	}
