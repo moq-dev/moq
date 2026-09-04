@@ -412,11 +412,12 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 		let sequence = group.sequence;
 		match read_group(&mut group, &mut learned_shape, stats).await {
 			// Only a group read end to end counts as delivered.
-			Ok(()) => gaps.observe(sequence),
+			Ok(()) => gaps.complete(sequence),
 			// The relay failed this one group: `Error::Lagged` once we fall behind.
-			// Leaving the sequence unobserved lets the gap tracker charge it as a
-			// group that never landed, which is the loss we came to measure.
-			Err(err) => tracing::debug!(sequence, %err, "group ended early"),
+			Err(err) => {
+				gaps.fail(sequence);
+				tracing::debug!(sequence, %err, "group ended early");
+			}
 		}
 	}
 	Ok(())
@@ -458,10 +459,10 @@ async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats
 /// settled once a higher group has confirmed it. A truly skipped group is counted
 /// once the frontier moves past it.
 ///
-/// Each observation feeds the shared [`Stats`] incrementally so the reporter sees
-/// losses live and many subscriptions sum correctly: `groups_expected` is the size
-/// of every settled span, `groups_present` is how many of those groups arrived, and
-/// `groups_expected - groups_present` is the total skipped.
+/// A group that explicitly fails is known lost immediately, even when it is the
+/// first or live-frontier group. Each observation feeds the shared [`Stats`]
+/// incrementally so the reporter sees losses live and many subscriptions sum
+/// correctly: `groups_expected - groups_present` is the total skipped or failed.
 struct GapTracker<'a> {
 	stats: &'a Stats,
 	min: u64,
@@ -469,9 +470,14 @@ struct GapTracker<'a> {
 	/// Second-highest sequence seen: the settled frontier we count up to. `None`
 	/// until a second group arrives.
 	cap: Option<u64>,
-	/// This subscription's current contribution to `groups_expected` (`cap - min + 1`),
-	/// remembered so each update pushes only the delta.
+	/// Number of groups that completed, including the live frontier when it completed.
+	complete: u64,
+	/// Whether the live frontier completed rather than failed.
+	frontier_complete: bool,
+	/// This subscription's current contributions, remembered so each update pushes
+	/// only the delta into the shared counters.
 	expected: u64,
+	present: u64,
 	started: bool,
 }
 
@@ -482,41 +488,54 @@ impl<'a> GapTracker<'a> {
 			min: 0,
 			max: 0,
 			cap: None,
+			complete: 0,
+			frontier_complete: false,
 			expected: 0,
+			present: 0,
 			started: false,
 		}
 	}
 
-	fn observe(&mut self, sequence: u64) {
+	fn complete(&mut self, sequence: u64) {
 		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
+		self.record(sequence, true);
+	}
 
-		// The first group is the lone frontier: nothing settled yet, so it doesn't count.
+	fn fail(&mut self, sequence: u64) {
+		self.record(sequence, false);
+	}
+
+	fn record(&mut self, sequence: u64, complete: bool) {
+		self.complete += u64::from(complete);
 		if !self.started {
 			self.started = true;
 			self.min = sequence;
 			self.max = sequence;
-			return;
+			self.frontier_complete = complete;
+		} else {
+			self.min = self.min.min(sequence);
+			if sequence > self.max {
+				// New frontier: the old `max` is now settled and becomes the cap.
+				self.cap = Some(self.max);
+				self.max = sequence;
+				self.frontier_complete = complete;
+			} else if self.cap.is_none_or(|cap| sequence > cap) {
+				self.cap = Some(sequence);
+			}
 		}
 
-		// Every later group sits at or below the settled frontier, so it's a present group.
-		self.stats.groups_present.fetch_add(1, Ordering::Relaxed);
-
-		self.min = self.min.min(sequence);
-		if sequence > self.max {
-			// New frontier: the old `max` is now settled and becomes the cap.
-			self.cap = Some(self.max);
-			self.max = sequence;
-		} else if self.cap.is_none_or(|cap| sequence > cap) {
-			self.cap = Some(sequence);
-		}
-
-		// `cap` is always set here: either the branch above set it, or a prior group did.
-		let cap = self.cap.expect("cap set once a second group arrives");
-		let expected = cap - self.min + 1;
+		// The frontier stays out of inferred spans, but a failed frontier is already
+		// known lost. Completed groups below the frontier are present.
+		let expected = self.cap.map_or(0, |cap| cap - self.min + 1) + u64::from(!self.frontier_complete);
+		let present = self.complete - u64::from(self.frontier_complete);
 		self.stats
 			.groups_expected
 			.fetch_add(expected - self.expected, Ordering::Relaxed);
+		self.stats
+			.groups_present
+			.fetch_add(present - self.present, Ordering::Relaxed);
 		self.expected = expected;
+		self.present = present;
 	}
 }
 
@@ -848,7 +867,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [0, 1, 3, 4] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 1);
@@ -860,7 +879,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [2, 0, 1, 3] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 0);
@@ -875,12 +894,49 @@ mod tests {
 
 		// 3 is missing, 4 is the live frontier: nothing is settled past 2 yet.
 		for seq in [0, 1, 2, 4] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(lost(&stats), 0);
 
 		// 5 advances the frontier, settling 4 and confirming 3 was skipped.
-		gaps.observe(5);
+		gaps.complete(5);
 		assert_eq!(lost(&stats), 1);
+	}
+
+	/// An explicitly failed first group is lost even before a frontier can settle it.
+	#[test]
+	fn gap_tracker_counts_failed_first_group() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		gaps.fail(0);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 0);
+		assert_eq!(lost(&stats), 1);
+
+		gaps.complete(1);
+		assert_eq!(
+			lost(&stats),
+			1,
+			"advancing the frontier must not count the failure twice"
+		);
+	}
+
+	/// An explicitly failed live frontier is lost without waiting for another group.
+	#[test]
+	fn gap_tracker_counts_failed_final_group() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		gaps.complete(0);
+		gaps.fail(1);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+		assert_eq!(lost(&stats), 1);
+
+		gaps.complete(2);
+		assert_eq!(
+			lost(&stats),
+			1,
+			"advancing the frontier must not count the failure twice"
+		);
 	}
 }
