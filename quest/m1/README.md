@@ -33,9 +33,8 @@ with the current dev tree before starting.
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
 - [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
-- [Announce handle](/quest/m1/announce-handle.md) - announce(prefix, route) advertises and serves requests; create_broadcast plus set_announce publishes
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, set_announce, and announce with one meaning
-- [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, an announce flag, and the announce handle
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, announce/unannounce on the broadcast, and dynamic(prefix, route) with one meaning
+- [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, a broadcast-owned announcement, and the dynamic handle
 - [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper mirrors the same three operations once dev merges
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
 - [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS

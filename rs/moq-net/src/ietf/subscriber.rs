@@ -306,8 +306,9 @@ struct BroadcastState {
 	// The route announced into our origin for this namespace, post-charge.
 	route: crate::origin::Route,
 
-	// The live advertisement; dropping it retracts the route.
-	announcement: crate::announce::Producer,
+	// The served route: dropping it (and the serve task's clone) retracts the
+	// route and rejects its queued requests.
+	dynamic: crate::origin::Dynamic,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -1178,16 +1179,16 @@ where
 				// tracks keep flowing.
 				let entry = entry.into_mut();
 				entry.route = route.clone();
-				entry.announcement.update(route)?;
+				entry.dynamic.update(route)?;
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let (announcement, server) = self.origin.announce_served(&path, route.clone())?;
+				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
-					announcement,
+					dynamic,
 					count: 1,
 					sources: HashMap::new(),
 				});
@@ -1199,7 +1200,7 @@ where
 					// stop_announce is the authoritative remover: it drops the entry
 					// (retracting the route) once the announce refcount hits zero,
 					// which is what makes run_route exit.
-					this.run_route(path, server).await;
+					this.run_route(path).await;
 				});
 
 				Ok(())
@@ -1236,7 +1237,7 @@ where
 	/// Serve materialization requests for one announced namespace: mint a source
 	/// per requested path and serve its track requests until the route is
 	/// retracted or the session dies.
-	async fn run_route(&self, path: PathOwned, mut server: crate::model::RouteServer) {
+	async fn run_route(&self, path: PathOwned) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
 		loop {
@@ -1253,7 +1254,13 @@ where
 					if self.going_away.poll(waiter).is_ready() {
 						self.drain_route(&path);
 					}
-					server.poll_requested_broadcast(waiter).map(Some)
+					// The route lives in the entry: stop_announce removing it retracts
+					// the route, and this loop ends with it.
+					let mut state = self.state.lock();
+					match state.broadcasts.get_mut(&path) {
+						Some(entry) => entry.dynamic.poll_requested_broadcast(waiter).map(Some),
+						None => Poll::Ready(None),
+					}
 				})
 				.await;
 
@@ -1306,7 +1313,7 @@ where
 			return;
 		}
 		entry.route.cost = crate::origin::Cost::DRAIN;
-		let _ = entry.announcement.update(entry.route.clone());
+		let _ = entry.dynamic.update(entry.route.clone());
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {

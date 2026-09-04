@@ -917,7 +917,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 				TrackInfoState::Hop { .. } => {
 					// The peer requested this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
-					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
+					// is served on demand by the route covering it (an `origin::Dynamic`).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
 					let TrackInfoState::Hop { msg } = std::mem::replace(&mut self.state, TrackInfoState::Decode) else {
 						unreachable!()
@@ -1055,7 +1055,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					// We just received a subscribe for this exact path, so by definition the
 					// peer has already seen an announcement for it. `request_broadcast`
 					// resolves an announced broadcast immediately; if it isn't announced it
-					// falls back to an `origin::Dynamic` handler (or resolves to an error
+					// is served by the route covering it (or resolves to an error
 					// when there is none).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
 					let SubscribeState::Hop { msg } = std::mem::replace(&mut self.state, SubscribeState::Decode) else {
@@ -1065,7 +1065,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					self.state = SubscribeState::Request { msg, requesting };
 				}
 				SubscribeState::Request { requesting, .. } => {
-					// Waits for the dynamic fallback if the broadcast wasn't announced;
+					// Waits for the covering route to serve the path if it is not local;
 					// resolves immediately otherwise (including an unroutable/dropped error).
 					let broadcast = ready!(requesting.poll_ok(waiter))?;
 					let SubscribeState::Request { msg, .. } =
@@ -1285,7 +1285,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 				FetchState::Hop { .. } => {
 					// The peer fetched this exact path, so it has already seen an
 					// announcement for it. `request_broadcast` resolves it immediately, or
-					// falls back to an `origin::Dynamic` handler (as in SubscribeServe).
+					// is served on demand by the route covering it (an `origin::Dynamic`).
 					let origin = ready!(self.shared.poll_serving_origin(waiter));
 					let FetchState::Hop { msg } = std::mem::replace(&mut self.state, FetchState::Decode) else {
 						unreachable!()
@@ -1702,7 +1702,7 @@ mod announce_test {
 		/// route under it, which would end the announce loop.
 		origin: origin::Producer,
 		/// The initial announcement; drop to retract, update to restart.
-		announcement: crate::announce::Producer,
+		announcement: crate::model::AnnounceProducer,
 		wire: Wire,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
@@ -2997,14 +2997,14 @@ mod tests {
 
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(assigned).unwrap();
-		let (_echoed, _echoed_server) = origin
-			.announce_served("echoed", crate::origin::Route::default().with_hops(echoed_hops))
+		let _echoed = origin
+			.dynamic("echoed", crate::origin::Route::default().with_hops(echoed_hops))
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
-		let (_local, _local_server) = origin
-			.announce_served("local", crate::origin::Route::default().with_hops(local_hops))
+		let _local = origin
+			.dynamic("local", crate::origin::Route::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.

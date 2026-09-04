@@ -323,11 +323,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// disjoint from our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(hops, cost, link_cost);
-		let Ok((announcement, server)) = self.origin.announce_served(&path, route.clone()) else {
+		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
 			return Ok(false);
 		};
 
-		announced.attach(path, AnnouncedRoute::new(route, announcement, server));
+		announced.attach(path, AnnouncedRoute::new(route, dynamic));
 
 		Ok(true)
 	}
@@ -403,11 +403,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(true);
 		}
 
-		let Ok((announcement, server)) = self.origin.announce_served(&path, metadata.clone()) else {
+		let Ok(dynamic) = self.origin.dynamic(&path, metadata.clone()) else {
 			announced.declined(path);
 			return Ok(false);
 		};
-		announced.attach(path, AnnouncedRoute::new(metadata, announcement, server));
+		announced.attach(path, AnnouncedRoute::new(metadata, dynamic));
 
 		Ok(true)
 	}
@@ -2388,7 +2388,7 @@ impl Announced {
 	fn poll_serve<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, waiter: &kio::Waiter) {
 		let root = subscriber.origin.root().to_owned();
 		for entry in self.0.values_mut().flatten() {
-			while let Poll::Ready(Ok(request)) = entry.server.poll_requested_broadcast(waiter) {
+			while let Poll::Ready(Ok(request)) = entry.dynamic.poll_requested_broadcast(waiter) {
 				// The request path is absolute; the wire (and our origin handle)
 				// speak paths relative to the session's root.
 				let Some(path) = request.path().strip_prefix(&root) else {
@@ -2414,14 +2414,15 @@ impl Announced {
 	}
 }
 
-/// One received announce: the route announced into the origin, its request
-/// queue, and the sources minted to serve requested paths beneath it.
+/// One received announce: the served route announced into the origin (the
+/// advertisement plus its request queue), and the sources minted to serve
+/// requested paths beneath it.
 struct AnnouncedRoute {
 	/// The route as last announced (post-charge), so a drain can re-price it
 	/// without recomputing the chain.
 	route: crate::origin::Route,
-	announcement: crate::announce::Producer,
-	server: crate::model::RouteServer,
+	/// Dropping it retracts the route and rejects its queued requests.
+	dynamic: crate::origin::Dynamic,
 	/// One minted source per requested path, finished on a clean retraction and
 	/// aborted (via drop) when the session dies.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
@@ -2430,15 +2431,10 @@ struct AnnouncedRoute {
 }
 
 impl AnnouncedRoute {
-	fn new(
-		route: crate::origin::Route,
-		announcement: crate::announce::Producer,
-		server: crate::model::RouteServer,
-	) -> Self {
+	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic) -> Self {
 		Self {
 			route,
-			announcement,
-			server,
+			dynamic,
 			sources: HashMap::new(),
 			drained: false,
 		}
@@ -2456,7 +2452,7 @@ impl AnnouncedRoute {
 	fn update(&mut self, route: crate::origin::Route) {
 		self.route = route.clone();
 		self.drained = false;
-		let _ = self.announcement.update(route);
+		let _ = self.dynamic.update(route);
 	}
 
 	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
@@ -2469,7 +2465,7 @@ impl AnnouncedRoute {
 		self.drained = true;
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.announcement.update(route);
+		let _ = self.dynamic.update(route);
 	}
 }
 

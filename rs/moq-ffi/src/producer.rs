@@ -72,18 +72,6 @@ pub(crate) struct BroadcastProducer {
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
-	// How to (re-)announce the exact path, for origin-created broadcasts.
-	// `None` for a standalone broadcast, which has no origin to announce on.
-	pub(crate) announce: Option<AnnounceState>,
-}
-
-/// The origin handle and path an origin-created broadcast was published under,
-/// so `set_announce` can toggle its route.
-pub(crate) struct AnnounceState {
-	pub(crate) origin: moq_net::origin::Producer,
-	pub(crate) path: moq_net::PathOwned,
-	/// The live advertisement, absent while unannounced.
-	pub(crate) announcement: Option<moq_net::announce::Producer>,
 }
 
 /// A whole-frame importer for one codec track.
@@ -165,24 +153,11 @@ impl TrackDynamicProducer {
 impl MoqBroadcastProducer {
 	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
 	/// the catalog track every FFI broadcast carries.
-	pub(crate) fn from_inner(broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
-		Self::from_inner_announced(broadcast, None)
-	}
-
-	/// [`Self::from_inner`], carrying the origin/path/announcement state that lets
-	/// `set_announce` toggle an origin-created broadcast's route.
-	pub(crate) fn from_inner_announced(
-		mut broadcast: moq_net::broadcast::Producer,
-		announce: Option<AnnounceState>,
-	) -> Result<Self, MoqError> {
+	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Self {
-			state: std::sync::Mutex::new(Some(BroadcastProducer {
-				broadcast,
-				catalog,
-				announce,
-			})),
+			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		})
 	}
 
@@ -268,14 +243,10 @@ impl MoqBroadcastProducer {
 	pub fn set_announce(&self, announce: bool) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let announce_state = state.announce.as_mut().ok_or(MoqError::Closed)?;
-			match (announce, announce_state.announcement.is_some()) {
-				(true, false) => {
-					let route = moq_net::origin::Route::default();
-					announce_state.announcement = Some(announce_state.origin.announce(&announce_state.path, route)?);
-				}
-				(false, true) => announce_state.announcement = None,
-				_ => {}
+			if announce {
+				state.broadcast.announce(moq_net::origin::Route::default())?;
+			} else {
+				state.broadcast.unannounce();
 			}
 			Ok(())
 		})

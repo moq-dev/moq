@@ -968,7 +968,7 @@ mod tests {
 		assert!(parked.is_err(), "expected to still be waiting on the announcement");
 
 		let _broadcast = origin.create_broadcast("room.hang").unwrap();
-		let _announce_broadcast = origin.announce("room.hang", Default::default()).unwrap();
+		_broadcast.announce(Default::default()).unwrap();
 		waiting.await.unwrap();
 	}
 

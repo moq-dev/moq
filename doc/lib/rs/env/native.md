@@ -92,13 +92,25 @@ let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let mut broadcast = origin.create_broadcast("")?;
 // ... add catalog and tracks to the broadcast ...
-// Then announce the exact path as a route, so the advertisement lands with the
-// tracks in place. Dropping the announcement retracts the route while the
-// broadcast itself stays reachable by path.
-let _announcement = origin.announce("", Default::default())?;
+// Then announce the broadcast, so the advertisement lands with the tracks in
+// place. The route retracts on `unannounce()` or when the broadcast ends; the
+// broadcast itself stays reachable by path either way.
+broadcast.announce(Default::default())?;
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.
+
+To serve a whole subtree on demand instead of publishing each path, advertise a prefix with [`origin::Producer::dynamic`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html#method.dynamic) and answer the requests it yields:
+
+```rust
+// Claims every path under "room/" and hands each request to this loop.
+let mut dynamic = origin.dynamic("room/", Default::default())?;
+while let Ok(request) = dynamic.requested_broadcast().await {
+    let broadcast = moq_net::broadcast::Info::new().produce();
+    // ... populate the broadcast for `request.path()` ...
+    request.accept(&broadcast);
+}
+```
 
 ## Subscribing
 

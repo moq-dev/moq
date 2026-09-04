@@ -588,7 +588,7 @@ mod tests {
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
 		let mut pub_source = pub_origin.create_broadcast("demo/x").unwrap();
-		let _announce_pub_source = pub_origin.announce("demo/x", Default::default()).unwrap();
+		pub_source.announce(Default::default()).unwrap();
 		let mut pub_track = pub_source.create_track("video", None).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
@@ -596,7 +596,7 @@ mod tests {
 		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
 		let sub_origin = moq_tokio::origin::spawn(Hop::random()).with_stats(regional_ctx.clone());
 		let mut sub_source = sub_origin.create_broadcast("demo/x").unwrap();
-		let _announce_sub_source = sub_origin.announce("demo/x", Default::default()).unwrap();
+		sub_source.announce(Default::default()).unwrap();
 		let mut sub_track = sub_source.create_track("audio", None).unwrap();
 
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;

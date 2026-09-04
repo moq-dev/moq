@@ -427,7 +427,7 @@ where
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
-		// an `origin::Dynamic` handler if one is registered.
+		// the route covering it (an `origin::Dynamic`), if any.
 		let broadcast = match self
 			.serving_origin()
 			.await
@@ -2599,7 +2599,7 @@ mod tests {
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
-		Vec<crate::announce::Producer>,
+		Vec<crate::model::AnnounceProducer>,
 	) {
 		let other = crate::Hop::new(778).unwrap();
 		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();

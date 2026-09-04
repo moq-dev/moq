@@ -146,7 +146,9 @@ pub struct MoqAnnouncement {
 /// The route stays advertised until `cancel` is called or the handle drops.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounce {
-	inner: std::sync::Mutex<Option<moq_net::announce::Producer>>,
+	// A served route nobody polls: requests beneath the prefix wait until the
+	// advertisement is cancelled, which rejects them.
+	inner: std::sync::Mutex<Option<moq_net::origin::Dynamic>>,
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -235,16 +237,23 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Create a dynamic handler for serving unannounced broadcasts on request.
+	/// Create a dynamic handler for serving broadcasts on request.
 	///
-	/// Hold the returned object while missing broadcast requests should be accepted.
-	/// Dropping it makes future requests to unknown broadcasts fail.
+	/// Advertises the whole origin as a route and hands over every request no
+	/// local broadcast resolves. Hold the returned object while missing broadcast
+	/// requests should be accepted. Dropping it makes future requests to unknown
+	/// broadcasts fail.
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
+		// The origin's driver is gone if this fails: `requested_broadcast` then
+		// reports `Closed`, the same end a handler observes once it is torn down.
+		let task = self
+			.inner
+			.dynamic("", Default::default())
+			.ok()
+			.map(|inner| Arc::new(Task::new(OriginDynamic { inner })));
 		Arc::new(MoqOriginDynamic {
-			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
-				inner: self.inner.dynamic(),
-			})))),
+			task: std::sync::Mutex::new(task),
 		})
 	}
 
@@ -262,15 +271,8 @@ impl MoqOriginProducer {
 		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let broadcast = self.inner.create_broadcast(path.as_str())?;
-		let announcement = self.inner.announce(path.as_str(), Default::default())?;
-		Ok(Arc::new(MoqBroadcastProducer::from_inner_announced(
-			broadcast,
-			Some(crate::producer::AnnounceState {
-				origin: self.inner.clone(),
-				path: moq_net::Path::new(&path).to_owned(),
-				announcement: Some(announcement),
-			}),
-		)?))
+		broadcast.announce(Default::default())?;
+		Ok(Arc::new(MoqBroadcastProducer::from_inner(broadcast)?))
 	}
 
 	/// Advertise a route: a claim that paths under `prefix` can be served.
@@ -282,7 +284,7 @@ impl MoqOriginProducer {
 	pub fn announce(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqAnnounce>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
-		let announcement = self.inner.announce(prefix.as_str(), route)?;
+		let announcement = self.inner.dynamic(prefix.as_str(), route)?;
 		Ok(Arc::new(MoqAnnounce {
 			inner: std::sync::Mutex::new(Some(announcement)),
 		}))

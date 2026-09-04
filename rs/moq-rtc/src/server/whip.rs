@@ -102,8 +102,8 @@ pub async fn accept(
 	let producer = publisher
 		.create_broadcast(&broadcast)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
-	let announcement = publisher
-		.announce(&broadcast, moq_net::origin::Route::default())
+	producer
+		.announce(moq_net::origin::Route::default())
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to announce broadcast: {err}")))?;
 
 	let handle = producer.clone();
@@ -141,7 +141,6 @@ pub async fn accept(
 			cancel: Some(cancel),
 			role: "whip server",
 			broadcast: Some(handle),
-			_announcement: Some(announcement),
 		},
 	})
 }
