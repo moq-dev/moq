@@ -18,11 +18,12 @@ lagging ACK never stalls sending. One waiter per stream suffices: offsets are
 acknowledged in order for the purpose of this metric, so poll the oldest
 pending frame and retire everything at or below the acknowledged offset.
 
-At each acknowledged frame, add the frame's bytes to the lag histogram at
-`newest produced timestamp - this frame's timestamp`. When a stream is reset
-before a frame is acknowledged, `dropped_duration` now grows by the span from
-the newest acknowledged frame to the newest written one, which is the exact
-media the viewer lost.
+Each acknowledged frame moves the subscription's frontier to that frame's
+timestamp, so the production-time lag samples from the parent quest read a
+frontier that is at most one frame stale instead of one group. When a stream
+is reset before a frame is acknowledged, `dropped_duration` now grows by the
+span from the newest acknowledged frame to the newest written one, which is
+the exact media the viewer lost.
 
 Add a second byte-weighted cumulative histogram of delivery delay:
 `acked.received - written_at` per frame, where `received` is the

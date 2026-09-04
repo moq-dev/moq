@@ -38,8 +38,5 @@ backend docs and feature matrix in the same PR.
 
 - [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - WebTransport
   parity cannot be claimed without it
-
-## Related
-
 - [Release the fork stack](/quest/m2/quic/release.md) - the relay must pin
-  released noq sources when quiche goes
+  released noq sources before quiche goes

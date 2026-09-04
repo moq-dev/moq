@@ -15,13 +15,16 @@ needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
-track against itself. Per track keep an anchor `(arrival_instant,
-timestamp)` and compute `drift = (arrival - anchor.arrival) - (timestamp -
-anchor.timestamp)`. Whenever drift goes negative, the frame arrived earlier
-than the anchor predicted, so re-anchor on it and record zero. Drift is then
-always "how late this frame is against the track's own best pace", and clock
-skew between the publisher's media clock and the relay's wall clock cannot
-accumulate the way a first-frame anchor lets it.
+track against itself. Per track compute each frame's raw offset
+`arrival_instant - timestamp` (both converted to one unit) and keep the
+minimum of that offset over a sliding window, a minute or so; drift is the
+frame's offset minus the windowed minimum. Drift is then "how late this frame
+is against the track's own best recent pace". A first-frame anchor lets clock
+skew accumulate without bound, and a running minimum bounds only a fast
+publisher clock: a clock 100 ppm slow would still read 360 ms late after an
+hour. The window bounds both directions to window length times skew, a few
+milliseconds, and the re-anchor happens on its own as old minima expire.
+Document the window length beside the bucket edges.
 
 Aggregate as a byte-weighted cumulative histogram of drift on the
 `Role::Subscriber` (ingress) rows, with the same bucket edges and the same
@@ -39,8 +42,9 @@ peers without a timescale stamp frames with `Timestamp::now()`, which would
 read as perfectly on time; leave those tracks out of the histogram rather than
 report a fiction. Update the stats section of `doc/bin/relay/config.md`.
 
-Tests: a paced publisher lands in the lowest bucket; a publisher whose wall
-clock runs slow re-anchors and stays near zero; a paused publisher records a
+Tests: a paced publisher lands in the lowest bucket; publishers whose clocks
+run 100 ppm slow and 100 ppm fast both stay in the lowest bucket over a
+simulated hour; a paused publisher records a
 stall and no drift for frames it never sent; a regression across groups is
 counted while intra-group reordering is not; a track without a timescale is
 excluded.

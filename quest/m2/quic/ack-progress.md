@@ -39,9 +39,12 @@ creates the moq-dev fork per the [parent quest](/quest/m2/quic/parent.md)
 and the release rules. The quest completes when a noq-proto release carries
 the accessor and `Cargo.lock` here can name it.
 
+## Required
+
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - creates the
+  tracking thread this proposal goes to and names its reviewer
+
 ## Related
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - the thread this
-  proposal goes to
 - [poll_acked in web-transport](/quest/m2/quic/ack-hook.md) - the first
   consumer of the accessor

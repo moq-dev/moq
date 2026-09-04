@@ -13,21 +13,29 @@ without any per-viewer row on the wire.
 This is the DELIVERY half of a health verdict and closes the byte-backlog
 design in #2733: media-time lag is the primary signal, bytes are the weights.
 
-Define the sample. When a group stream's FIN is acknowledged (which
-`Writer::close()` already awaits in `Subscription::serve_group`, in
-`rs/moq-net/src/lite/publisher.rs`, and in the IETF publisher), take
-`lag = newest frame timestamp the track has produced - newest frame timestamp
-in the acknowledged group`. Both are timestamps on the same track, so the
-missing epoch does not matter. Lag is zero while the source is paused, and
-grows with backlog and with skipped groups until a newer group is acknowledged.
-Weight the sample by the group's bytes. This slice samples once per group;
-the [frame-granularity quest](/quest/m2/qos/starvation-frames.md) sharpens it
-without changing the wire shape, so fix the shape here.
+Define the frontier and the sample separately. Each subscription has an
+acknowledged frontier: the newest frame timestamp the peer is known to have
+received. In this slice the frontier advances when a group stream's FIN is
+acknowledged, which `Writer::close()` already awaits in
+`Subscription::serve_group` in `rs/moq-net/src/lite/publisher.rs` and in the
+IETF publisher. The sample is taken when production advances, not when an
+ACK arrives: each time the track commits a new group, every subscription
+records `lag = newest produced frame timestamp - its frontier`, weighted by
+the new group's bytes. Both are timestamps on the same track, so the missing
+epoch does not matter. Sampling on production is what keeps a stalled viewer
+visible: a subscription whose ACKs stopped keeps landing new bytes in ever
+higher buckets, where sampling only on ACK would emit nothing and let the
+most starved viewer vanish from the snapshot deltas. Lag is zero while the
+source is paused, since nothing is produced. This slice moves the frontier
+once per group; the
+[frame-granularity quest](/quest/m2/qos/starvation-frames.md) moves it per
+frame without changing the wire shape, so fix the shape here.
 
 Aggregate as a byte-weighted cumulative histogram on `Traffic`, on the
 `Role::Publisher` (egress) rows of the existing `(tier, broadcast, role)`
 key: fixed log-spaced buckets of media time, each a monotonic byte counter
-(acknowledged bytes whose lag fell in that bucket). Propose buckets at 50 ms,
+(bytes produced for a subscription while its frontier lag fell in that
+bucket). Propose buckets at 50 ms,
 100 ms, 250 ms, 500 ms, 1 s, 2 s, 5 s, and above, and document the edges in
 the stats section of `doc/bin/relay/config.md`. A consumer diffs two snapshots
 for a byte-weighted distribution, percentiles, or mean over any interval.
@@ -54,8 +62,10 @@ aggregate consumer the same way it sums counters today. Update the stats
 section of `doc/bin/relay/config.md` with the new fields and their meaning.
 
 Tests: a subscriber that reads at media rate lands in the lowest bucket; a
-flow-controlled subscriber walks up the buckets as backlog grows; a skipped
-group adds its span to `dropped_duration` and nothing to the histogram; a
+flow-controlled subscriber walks up the buckets as backlog grows, including
+one that stops acknowledging entirely; a skipped group adds its span to
+`dropped_duration`, and its bytes were already counted in the histogram at
+whatever lag the subscription had when the group was produced; a
 session close mid-group counts as dropped; two subscriptions of one broadcast
 sum into one row; the aggregate consumer sums two nodes bucket by bucket.
 

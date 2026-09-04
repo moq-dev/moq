@@ -17,15 +17,18 @@ latency sample needs.
 Add one method to `SendStream`, in the trait's poll style:
 
 ```rust
-fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Acked, Self::Error>>;
+fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Option<Acked>, Self::Error>>;
 ```
 
-It is ready once every byte below `offset` has been acknowledged. `Acked`
-carries the ACK-delay-corrected receive instant from noq. It resolves with an
-error once the stream is reset by either side or the session closes, so a
-waiter never hangs on bytes the peer will never acknowledge. The default
-implementation returns an unsupported error immediately: a backend that
-cannot see acknowledgments must say so, never report zero or ready.
+It is ready with `Some` once every byte below `offset` has been acknowledged.
+`Acked` carries the ACK-delay-corrected receive instant from noq. It resolves
+with an error once the stream is reset by either side or the session closes,
+so a waiter never hangs on bytes the peer will never acknowledge. The default
+implementation is ready with `Ok(None)` immediately: `None` means the backend
+cannot see acknowledgments, the same convention the trait's `Stats` methods
+use. A default body cannot construct a backend's own `Self::Error`, so
+unsupported has to live in the return type rather than the error, and a
+consumer must treat `None` as unknown, never as delivered.
 
 Implement it in `web-transport-noq` over the noq-proto accessor. Leave
 `web-transport-quinn`, `web-transport-quiche`, and `web-transport-wasm` on
