@@ -63,6 +63,10 @@ default-members = [
 ]
 resolver = "2"
 
+[workspace.metadata.cargo-shear]
+# Feature-only dependency selecting the wasm_js backend for browser consumers.
+ignored = ["getrandom"]
+
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-native) needs 1.91. This is
 # what consumers of moq-net / hang / moq-native / etc. see. moq-relay overrides

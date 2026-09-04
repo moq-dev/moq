@@ -48,11 +48,11 @@ pub struct Error(web_transport_wasm::Error);
 
 impl wtt::Error for Error {
 	fn session_error(&self) -> Option<(u32, String)> {
-		self.0.code().map(|code| (code as u32, self.0.to_string()))
+		self.0.code().map(|code| (code, self.0.to_string()))
 	}
 
 	fn stream_error(&self) -> Option<u32> {
-		self.0.code().map(|c| c as u32)
+		self.0.code()
 	}
 }
 
@@ -131,7 +131,7 @@ impl wtt::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.0.reset(&code.to_string());
+		self.0.reset(code);
 	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
@@ -154,7 +154,7 @@ impl wtt::RecvStream for RecvStream {
 	}
 
 	fn stop(&mut self, code: u32) {
-		self.0.stop(&code.to_string());
+		self.0.stop(code);
 	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
