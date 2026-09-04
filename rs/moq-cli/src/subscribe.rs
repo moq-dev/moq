@@ -364,8 +364,16 @@ impl Subscribe {
 /// schedule overshoots that epoch by more than the lead, it is delivered
 /// immediately and becomes the live edge
 /// ([`Pacer::hurry`](moq_mux::Pacer::hurry)). The anchor then rides the newest
-/// frame through a backlog, so pacing resumes from the live edge once the
-/// export makes us wait again.
+/// frame through a backlog, so pacing resumes from the live edge.
+///
+/// A hurry moves the epoch with it, because the frame it delivers *is* the live
+/// edge and the distance it is measured from has to be too. `hurry` returns `now`,
+/// so the credit below can never fire on the frame that hurried; leaving the epoch
+/// behind would put every later frame the same overshoot past it and shed the whole
+/// stream at the arrival cadence, which the buffered export would never correct
+/// since it never makes us wait. A sink that is genuinely slow still sheds on every
+/// stall: each one leaves the next frame far enough past the epoch to overshoot
+/// again.
 ///
 /// Reaching a scheduled instant also advances the epoch, and has to. The TS export
 /// holds a mux buffer: it always has the next grid slot ready, so it stops making
@@ -423,6 +431,11 @@ impl Delivery {
 		let mut send_at = self.pacer.pace(frame.timestamp, now.into_std());
 		if send_at.saturating_duration_since(self.arrived.into_std()) > budget {
 			send_at = self.pacer.hurry(frame.timestamp, now.into_std());
+			// A hurry makes this frame the live edge, so the epoch it is measured
+			// against becomes now as well. `hurry` returns `now`, so the credit below
+			// can't do it, and a stale epoch would overshoot the budget on every
+			// later frame, latching the shed on for good.
+			self.arrived = now;
 		}
 
 		let send_at = tokio::time::Instant::from_std(send_at);
@@ -494,10 +507,10 @@ mod tests {
 	/// A sink that cannot reach its schedule still sheds the lag, which is the case
 	/// the budget is left guarding.
 	///
-	/// The epoch advances on a wait or on reaching a scheduled instant, and a sink
-	/// falling behind does neither: every frame is already overdue, so nothing
-	/// sleeps and nothing credits. The schedule then runs away from the frozen
-	/// epoch and the overshoot hurries.
+	/// The epoch advances on a wait, on reaching a scheduled instant, or on a hurry.
+	/// A sink falling behind reaches none of its instants and is never made to wait,
+	/// so only the hurry moves it, and each fresh stall puts the next frame far
+	/// enough past that epoch to overshoot the budget and hurry again.
 	///
 	/// What this no longer covers, deliberately, is a one-off pre-queued backlog
 	/// (a tune-in group replaying from its keyframe). That now paces out at the
@@ -527,23 +540,74 @@ mod tests {
 		assert_eq!(
 			start.elapsed(),
 			Duration::from_secs(2),
-			"an overdue frame writes at once, and the pacer takes its 500ms of lead as slack"
+			"an overdue frame writes at once: the overshoot hurries and makes it the live edge"
 		);
 
-		// 1100ms of schedule against a budget of lead + slack: the overshoot hurries
-		// and makes this the live edge.
+		// Shedding happens at the re-anchor, once, not on every frame after it. This
+		// one is 200ms of media past the new edge and 200ms past the epoch the hurry
+		// set with it, so it is inside the budget and paces.
 		delivery
 			.deliver(&frame(600_000, Timescale::MICRO), false, &mut out)
 			.await
 			.unwrap();
-		assert_eq!(start.elapsed(), Duration::from_secs(2));
+		assert_eq!(start.elapsed(), Duration::from_secs(2) + Duration::from_millis(200));
 
-		// Pacing resumes relative to that edge.
+		// A sink that goes on stalling goes on shedding, which is the property this
+		// test is here for: each stall leaves the next frame far enough past the
+		// epoch to overshoot the budget again, however recently the last hurry moved
+		// it. Media steps 25ms per iteration while the wall clock steps 2s.
+		for slot in 1..=3u64 {
+			tokio::time::advance(Duration::from_secs(2)).await;
+			let before = start.elapsed();
+			delivery
+				.deliver(&frame(600_000 + slot * 25_000, Timescale::MICRO), false, &mut out)
+				.await
+				.unwrap();
+			assert_eq!(start.elapsed(), before, "stall {slot} must shed, not pace");
+		}
+	}
+
+	/// A hurry has to move the arrival epoch with it, or it latches.
+	///
+	/// `hurry` returns `now`, so the credit for reaching a scheduled instant can
+	/// never fire on the frame that hurried. Left there, the epoch stays wherever it
+	/// was before the shed while the schedule walks forward from the new edge, so the
+	/// next frame overshoots the budget too, and so does every one after it. The
+	/// buffered export never waits, so nothing else would move the epoch back.
+	#[tokio::test(start_paused = true)]
+	async fn pacing_resumes_after_a_hurry_without_a_wait() {
+		let mut delivery = Delivery::new(Duration::from_millis(500));
+		let mut out = Vec::new();
+
+		let start = tokio::time::Instant::now();
 		delivery
-			.deliver(&frame(640_000, Timescale::MICRO), true, &mut out)
+			.deliver(&frame(0, Timescale::MICRO), true, &mut out)
 			.await
 			.unwrap();
-		assert_eq!(start.elapsed(), Duration::from_secs(2) + Duration::from_millis(40));
+
+		// Stall long enough that the schedule outruns the budget and sheds.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		delivery
+			.deliver(&frame(400_000, Timescale::MICRO), false, &mut out)
+			.await
+			.unwrap();
+		let hurried = start.elapsed();
+		assert_eq!(hurried, Duration::from_secs(2), "the overshoot sheds");
+
+		// Grid slots from the new edge, every one already queued and none waited on.
+		// Against a stale epoch each is a whole stall past it, so each would hurry and
+		// write at once, pinning `start.elapsed()` at `hurried` for the whole loop.
+		for slot in 1..=8u64 {
+			delivery
+				.deliver(&frame(400_000 + slot * 25_000, Timescale::MICRO), false, &mut out)
+				.await
+				.unwrap();
+			assert_eq!(
+				start.elapsed(),
+				hurried + Duration::from_millis(slot * 25),
+				"slot {slot} must be paced, not shed"
+			);
+		}
 	}
 
 	/// The TS export holds a mux buffer, so it always has the next grid slot ready

@@ -83,9 +83,15 @@ jobs:
       # cannot: the grader has to sit on the exporter's stdout for the length of
       # the run, stamping each packet. That is a real-time window no per-PR gate
       # should pay for, so it lives here (see test/ts/README.md).
+      #
+      # 120 s rather than the 20 s default, because the drift term needs it. The
+      # exporter builds its mux buffer once and holds it, and a window that ends
+      # while it is still filling cannot tell that from a pipe running slow: the
+      # lag reaches ~480 ms over the first ~48 s and is flat after. Nightly is the
+      # one arm with the wall-clock time to see the flat part.
       - name: TS timing
         if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --live
+        run: nix develop --command just test ts --live --duration 120
 
   # `just rs windows` is the only thing that compiles moq-video's Media
   # Foundation capture/encode/decode, its D3D11 frames, and every
