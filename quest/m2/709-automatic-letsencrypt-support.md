@@ -30,7 +30,9 @@ dependency.
   authorization, and config validation requires `web.http` to be bound while
   `[acme]` is set, since the challenge must reach port 80 and `listen.tls`
   is UDP. TLS-ALPN-01 is deliberately not offered: it needs a new TCP :443
-  acceptor that collides with `web.https`.
+  acceptor that collides with `web.https`. DNS-01 is not offered either, so a
+  wildcard in `acme.domains` is a config error rather than a first start that
+  blocks forever on an issuance HTTP-01 cannot complete.
 - **Delivery.** The issuer writes the PEM chain and key under `acme.dir` and
   the existing `notify` file watcher swaps them in on the next handshake, so
   no new `moq-tokio` surface is needed and per-worker rotation rides
@@ -66,7 +68,8 @@ performs no challenge, a cached certificate missing a configured domain is
 reissued at startup, a certificate near expiry renews and the QUIC
 listener serves the new chain without restart, a renewal failure leaves the
 old certificate serving, and the config rejects `[acme]` alongside explicit
-paths, without `web.http`, or on a backend that cannot reload.
+paths, without `web.http`, with a wildcard domain, or on a backend that
+cannot reload.
 
 ## Closes
 

@@ -49,8 +49,10 @@ pools by URL href.
 - `Reload` mirrors `Draining`: on GOAWAY it dials the target immediately,
   swaps the origin wiring (`forwardAnnounced`, `publish`, `subscribe`) once
   the replacement is established, and leaves the old session to close on its
-  own or at a handover cap, `min(peer timeout, configured cap)`. Groups in
-  flight finish. A GOAWAY does not go through the backoff delay; a failed
+  own or at a handover cap: the configured cap, lowered to the peer's timeout
+  when the wire carried a positive one. Lite and IETF drafts 14 to 16 carry no
+  timeout, and the IETF decoder reads an absent one as zero, so absence means
+  the cap and never a zero-length handover. Groups in flight finish. A GOAWAY does not go through the backoff delay; a failed
   replacement dial does.
 - Port the guard: follow by default, refuse a scheme-tier drop or a widening
   to a local host, and offer the same-host mode. An empty URI redials the
@@ -60,9 +62,16 @@ pools by URL href.
 - `Connection.Shared` re-keys its entry to the redirect target, so a later
   caller configured with that URL shares the migrated connection. The app's
   handle and shared origin are unchanged; only the pool key moves, and a
-  caller still asking for the original URL gets a fresh entry.
+  caller still asking for the original URL gets a fresh entry. When the
+  target key already holds a live entry, that entry wins: the migrating entry
+  keeps its original key and its migrated connection, so its callers are
+  never re-wired, and it retires when its last caller releases it. Two
+  connections to one relay for that overlap is the honest cost; entry removal
+  is identity-guarded so neither cleanup can delete the other's entry.
 - Tests against the in-tree relay: an empty-URI drain migrates without a
-  dropped group, a redirect moves the pool key and origins, each guard refusal
+  dropped group, a GOAWAY without a timeout hands over at the configured cap,
+  a redirect moves the pool key and origins, a redirect onto an already
+  pooled key leaves both entries intact until release, each guard refusal
   closes rather than reconnects, and the draft-14 to -16 route decodes the
   URI.
 
