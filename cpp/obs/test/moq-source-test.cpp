@@ -498,6 +498,7 @@ bool deliverStatus(int32_t handle, int32_t code)
 
 	void (*cb)(void *, int32_t) = nullptr;
 	void *user_data = nullptr;
+	SubKind kind = SubKind::Session;
 	{
 		std::lock_guard<std::mutex> lock(g_subs_mutex);
 		auto it = g_subs.find(handle);
@@ -505,10 +506,24 @@ bool deliverStatus(int32_t handle, int32_t code)
 			return false;
 		cb = it->second.cb;
 		user_data = it->second.user_data;
+		kind = it->second.kind;
 		if (code <= 0)
 			it->second.terminated = true;
 	}
 	cb(user_data, code);
+
+	// The announced wait is one-shot: after delivering its broadcast handle,
+	// libmoq immediately follows with the terminal callback on the same thread.
+	if (kind == SubKind::Announced && code > 0) {
+		{
+			std::lock_guard<std::mutex> lock(g_subs_mutex);
+			auto it = g_subs.find(handle);
+			if (it == g_subs.end() || it->second.terminated)
+				return true;
+			it->second.terminated = true;
+		}
+		cb(user_data, 0);
+	}
 	return true;
 }
 
@@ -517,7 +532,7 @@ int32_t closeSub(int32_t handle)
 	{
 		std::lock_guard<std::mutex> lock(g_subs_mutex);
 		auto it = g_subs.find(handle);
-		if (it == g_subs.end() || it->second.closed) {
+		if (it == g_subs.end() || it->second.closed || it->second.terminated) {
 			g_double_close++;
 			return -1;
 		}
@@ -854,6 +869,10 @@ void subscribeVideo(int32_t broadcast)
 {
 	g_runtime->Run([] { deliverStatus(g_last_session, 1); });
 	g_runtime->Run([broadcast] { deliverStatus(g_last_announced, broadcast); });
+	{
+		std::lock_guard<std::mutex> lock(g_subs_mutex);
+		CHECK(g_subs.at(g_last_announced).terminated);
+	}
 	int32_t snapshot = newSnapshot();
 	g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
 }
@@ -888,6 +907,10 @@ int main()
 
 		int32_t broadcast = newBroadcast();
 		g_runtime->Run([broadcast] { deliverStatus(g_last_announced, broadcast); });
+		{
+			std::lock_guard<std::mutex> lock(g_subs_mutex);
+			CHECK(g_subs.at(g_last_announced).terminated);
+		}
 		CHECK(g_catalog_calls == 1);
 
 		int32_t snapshot = newSnapshot();

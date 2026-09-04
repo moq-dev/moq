@@ -6,6 +6,7 @@
 #include <util/dstr.h>
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <errno.h>
 #include <time.h>
@@ -90,6 +91,8 @@ struct moq_source {
 	int32_t consume;
 	int32_t catalog_handle;
 	int32_t video_track;
+	uint64_t catalog_attempt;
+	uint64_t video_attempt;
 
 	// Decoder state
 	AVCodecContext *codec_ctx;
@@ -151,6 +154,22 @@ struct broadcast_request {
 	struct moq_source *ctx;
 	uint32_t gen;
 };
+
+// Identifies one subscription even after a reconnect or catalog update replaces
+// the handle stored on moq_source. The caller keeps the state alive until the
+// registration call returns; the terminal callback owns callback_data.
+struct callback_state {
+	struct moq_source *ctx;
+	uint32_t gen;
+	uint64_t attempt;
+	std::atomic<bool> terminal{false};
+
+	callback_state(struct moq_source *ctx, uint32_t gen, uint64_t attempt) : ctx(ctx), gen(gen), attempt(attempt) {}
+};
+
+struct callback_data {
+	std::shared_ptr<callback_state> state;
+};
 } // namespace
 
 // Forward declarations
@@ -195,6 +214,8 @@ static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 	ctx->consume = -1;
 	ctx->catalog_handle = -1;
 	ctx->video_track = -1;
+	ctx->catalog_attempt = 0;
+	ctx->video_attempt = 0;
 
 	// Initialize decoder state
 	ctx->codec_ctx = NULL;
@@ -368,12 +389,19 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 // MoQ callback implementations
 static void on_session_status(void *user_data, int32_t code)
 {
-	struct moq_source *ctx = (struct moq_source *)user_data;
+	auto *data = static_cast<callback_data *>(user_data);
+	auto state = data->state;
+	struct moq_source *ctx = state->ctx;
 
 	// Hold this session subscription's reference for the callback's lifetime. A
 	// terminal status (<= 0) means the session task has ended and will not touch
 	// ctx again, so the reference is released when `ref` goes out of scope.
 	subscription_ref ref(ctx, code <= 0);
+	std::unique_ptr<callback_data> owned;
+	if (code <= 0) {
+		state->terminal = true;
+		owned.reset(data);
+	}
 
 	pthread_mutex_lock(&ctx->mutex);
 	if (ctx->shutting_down.load()) {
@@ -382,12 +410,19 @@ static void on_session_status(void *user_data, int32_t code)
 		pthread_mutex_unlock(&ctx->mutex);
 		return;
 	}
-	if (ctx->session < 0) {
+	if (ctx->generation != state->gen) {
+		LOG_DEBUG("Ignoring stale session status callback");
+		pthread_mutex_unlock(&ctx->mutex);
+		return;
+	}
+	uint32_t current_gen = state->gen;
+	if (code <= 0)
+		ctx->session = -1;
+	else if (ctx->origin < 0) {
 		LOG_DEBUG("Ignoring session status callback - already disconnected");
 		pthread_mutex_unlock(&ctx->mutex);
 		return;
 	}
-	uint32_t current_gen = ctx->generation;
 
 	// libmoq status codes (>= 0.3.0):
 	//   > 0 : (re)connected, carrying the connection epoch (1 = first connect,
@@ -424,18 +459,30 @@ static void on_session_status(void *user_data, int32_t code)
 
 static void on_catalog(void *user_data, int32_t catalog)
 {
-	struct moq_source *ctx = (struct moq_source *)user_data;
+	auto *data = static_cast<callback_data *>(user_data);
+	auto state = data->state;
+	struct moq_source *ctx = state->ctx;
 
 	// Hold the catalog subscription's reference for the callback's lifetime;
 	// release it when this is the terminal callback (catalog <= 0).
 	subscription_ref ref(ctx, catalog <= 0);
+	std::unique_ptr<callback_data> owned;
+	if (catalog <= 0) {
+		state->terminal = true;
+		owned.reset(data);
+	}
 
 	if (catalog <= 0) {
+		pthread_mutex_lock(&ctx->mutex);
+		bool current = ctx->generation == state->gen && ctx->catalog_attempt == state->attempt;
+		if (current)
+			ctx->catalog_handle = -1;
+		pthread_mutex_unlock(&ctx->mutex);
 		if (catalog < 0) {
 			LOG_ERROR("Catalog subscription error: %d", catalog);
-			// Surface the failure (e.g. invalid broadcast) by blanking, as the
-			// old catalog-fetch-failed path did - but not during our own teardown.
-			if (!ctx->shutting_down.load())
+			// Surface a current subscription failure, but not a stale callback or
+			// our own teardown.
+			if (current && !ctx->shutting_down.load())
 				moq_source_blank_video(ctx);
 		} else {
 			LOG_DEBUG("Catalog subscription closed cleanly");
@@ -449,8 +496,9 @@ static void on_catalog(void *user_data, int32_t catalog)
 	// subscription handle stored in ctx->catalog_handle). It must be freed with
 	// moq_consume_catalog_free on every path below - never closed.
 	pthread_mutex_lock(&ctx->mutex);
-	bool stale = ctx->shutting_down.load() || ctx->consume < 0;
-	uint32_t current_gen = ctx->generation;
+	bool stale = ctx->shutting_down.load() || ctx->generation != state->gen ||
+		     ctx->catalog_attempt != state->attempt || ctx->consume < 0;
+	uint32_t current_gen = state->gen;
 	pthread_mutex_unlock(&ctx->mutex);
 	if (stale) {
 		// Disconnected or shutting down; ignore this snapshot.
@@ -478,16 +526,20 @@ static void on_catalog(void *user_data, int32_t catalog)
 	// so its reference is in place the instant the subscription exists. Undone
 	// below only if creation fails.
 	pthread_mutex_lock(&ctx->mutex);
+	uint64_t video_attempt = ++ctx->video_attempt;
 	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
+	auto video_state = std::make_shared<callback_state>(ctx, current_gen, video_attempt);
+	auto *video_data = new callback_data{video_state};
 
 	// Subscribe to the video track (index 0). This takes the catalog snapshot,
 	// not the consume handle, and does not retain it - so free the snapshot
 	// immediately after.
-	int32_t track = moq_consume_video(catalog, 0, 0, on_video_frame, ctx);
+	int32_t track = moq_consume_video(catalog, 0, 0, on_video_frame, video_data);
 	moq_consume_catalog_free(catalog);
 	if (track < 0) {
 		LOG_ERROR("Failed to subscribe to video track: %d", track);
+		delete video_data;
 		pthread_mutex_lock(&ctx->mutex);
 		// No subscription was created, so no terminal will fire; undo the ref.
 		if (--ctx->refs == 0)
@@ -500,7 +552,8 @@ static void on_catalog(void *user_data, int32_t catalog)
 	// on_video_frame (<= 0) that releases the reference added above - even on the
 	// cleanup path below.
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == current_gen && !ctx->shutting_down.load()) {
+	if (ctx->generation == current_gen && ctx->video_attempt == video_attempt && !ctx->shutting_down.load() &&
+	    !video_state->terminal.load()) {
 		// A catalog update can arrive while a track is already subscribed; close
 		// the previous one so its terminal callback releases its reference (else
 		// it would linger until teardown's bounded wait).
@@ -514,18 +567,30 @@ static void on_catalog(void *user_data, int32_t catalog)
 		// Stale or shutting down: close the track we just created; its terminal
 		// callback releases the reference added above.
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_video_close(track);
+		if (!video_state->terminal.load())
+			moq_consume_video_close(track);
 	}
 }
 
 static void on_video_frame(void *user_data, int32_t frame_id)
 {
-	struct moq_source *ctx = (struct moq_source *)user_data;
+	auto *data = static_cast<callback_data *>(user_data);
+	auto state = data->state;
+	struct moq_source *ctx = state->ctx;
 
 	// Hold the video track subscription's reference for the callback's lifetime
 	// (which includes the FFmpeg decode in moq_source_decode_frame); release it
 	// on the terminal callback (frame_id <= 0).
 	subscription_ref ref(ctx, frame_id <= 0);
+	std::unique_ptr<callback_data> owned;
+	if (frame_id <= 0) {
+		state->terminal = true;
+		owned.reset(data);
+		pthread_mutex_lock(&ctx->mutex);
+		if (ctx->generation == state->gen && ctx->video_attempt == state->attempt)
+			ctx->video_track = -1;
+		pthread_mutex_unlock(&ctx->mutex);
+	}
 
 	if (frame_id <= 0) {
 		if (frame_id < 0)
@@ -536,7 +601,8 @@ static void on_video_frame(void *user_data, int32_t frame_id)
 	}
 
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load() || ctx->consume < 0) {
+	if (ctx->shutting_down.load() || ctx->generation != state->gen || ctx->video_attempt != state->attempt ||
+	    ctx->consume < 0) {
 		// Shutting down or disconnected: drop the frame.
 		pthread_mutex_unlock(&ctx->mutex);
 		moq_consume_frame_free(frame_id);
@@ -600,12 +666,15 @@ static void moq_source_reconnect(struct moq_source *ctx)
 		pthread_mutex_unlock(&ctx->mutex);
 		return;
 	}
+	auto state = std::make_shared<callback_state>(ctx, new_gen, 0);
+	auto *data = new callback_data{state};
 
 	// Pre-account for the session subscription before handing ctx to libmoq: the
 	// connection can fail and fire its terminal on_session_status from the
 	// runtime thread immediately, and that must not decrement the reference
 	// before we have added it.
 	pthread_mutex_lock(&ctx->mutex);
+	ctx->origin = new_origin;
 	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
 
@@ -613,13 +682,17 @@ static void moq_source_reconnect(struct moq_source *ctx)
 	int32_t new_session = moq_session_connect(url_copy, strlen(url_copy),
 						  0,          // origin_publish
 						  new_origin, // origin_consume
-						  on_session_status, ctx);
+						  on_session_status, data);
 	bfree(url_copy);
 
 	if (new_session < 0) {
 		LOG_ERROR("Failed to connect to MoQ server: %d", new_session);
-		moq_origin_close(new_origin);
+		delete data;
 		pthread_mutex_lock(&ctx->mutex);
+		if (ctx->origin == new_origin) {
+			moq_origin_close(new_origin);
+			ctx->origin = -1;
+		}
 		// No session subscription was created, so no terminal will fire; undo
 		// the reference we pre-added above.
 		if (--ctx->refs == 0)
@@ -631,17 +704,21 @@ static void moq_source_reconnect(struct moq_source *ctx)
 
 	// Now update ctx with the new handles, checking if generation changed
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation != new_gen) {
-		// Another reconnect happened while we were creating origin/session
-		// Clean up our newly created resources
+	if (ctx->generation != new_gen || ctx->shutting_down.load() || state->terminal.load()) {
+		// The attempt ended or was superseded while the handles were being
+		// created. Clean up anything its callback did not already retire.
 		ctx->reconnect_in_progress = false;
+		bool close_origin = ctx->origin == new_origin;
+		if (close_origin)
+			ctx->origin = -1;
 		pthread_mutex_unlock(&ctx->mutex);
-		LOG_INFO("Generation changed during reconnect setup, cleaning up stale resources");
-		moq_session_close(new_session);
-		moq_origin_close(new_origin);
+		LOG_INFO("Session became stale during reconnect setup, cleaning up resources");
+		if (!state->terminal.load())
+			moq_session_close(new_session);
+		if (close_origin)
+			moq_origin_close(new_origin);
 		return;
 	}
-	ctx->origin = new_origin;
 	ctx->session = new_session;
 	ctx->reconnect_in_progress = false;
 	LOG_INFO("Connecting to MoQ server (generation %u)", new_gen);
@@ -793,13 +870,17 @@ static void on_broadcast(void *user_data, int32_t broadcast)
 	// Pre-account for the catalog subscription before handing ctx to libmoq, so
 	// its reference is in place the instant the subscription exists (see the
 	// note on subscription_ref). Undone below only if creation fails.
+	uint64_t catalog_attempt = ++ctx->catalog_attempt;
 	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
+	auto state = std::make_shared<callback_state>(ctx, expected_gen, catalog_attempt);
+	auto *data = new callback_data{state};
 
 	// Subscribe to catalog updates
-	int32_t catalog_handle = moq_consume_catalog(broadcast, on_catalog, ctx);
+	int32_t catalog_handle = moq_consume_catalog(broadcast, on_catalog, data);
 	if (catalog_handle < 0) {
 		LOG_ERROR("Failed to subscribe to catalog: %d", catalog_handle);
+		delete data;
 		pthread_mutex_lock(&ctx->mutex);
 		// No subscription was created, so no terminal will fire; undo the ref.
 		if (--ctx->refs == 0)
@@ -816,14 +897,16 @@ static void on_broadcast(void *user_data, int32_t broadcast)
 	// (This is the real subscription handle, distinct from the catalog snapshot
 	// ids delivered to on_catalog.)
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == expected_gen && !ctx->shutting_down.load()) {
+	if (ctx->generation == expected_gen && ctx->catalog_attempt == catalog_attempt && !ctx->shutting_down.load() &&
+	    !state->terminal.load()) {
 		ctx->catalog_handle = catalog_handle;
 		LOG_INFO("Consuming broadcast: %s", ctx->broadcast);
 		pthread_mutex_unlock(&ctx->mutex);
 	} else {
 		// Stale or shutting down: close it; its terminal releases the reference.
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_catalog_close(catalog_handle);
+		if (!state->terminal.load())
+			moq_consume_catalog_close(catalog_handle);
 	}
 }
 
@@ -836,6 +919,11 @@ static void on_broadcast(void *user_data, int32_t broadcast)
 // mutex on this same thread (which would self-deadlock).
 static void moq_source_disconnect_locked(struct moq_source *ctx)
 {
+	// Invalidate callbacks before closing their handles. A late terminal from an
+	// older subscription must not retire the replacement's handle.
+	ctx->catalog_attempt++;
+	ctx->video_attempt++;
+
 	if (ctx->video_track >= 0) {
 		moq_consume_video_close(ctx->video_track);
 		ctx->video_track = -1;
