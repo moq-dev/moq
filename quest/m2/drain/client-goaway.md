@@ -63,15 +63,17 @@ pools by URL href.
   caller configured with that URL shares the migrated connection. The app's
   handle and shared origin are unchanged; only the pool key moves, and a
   caller still asking for the original URL gets a fresh entry. When the
-  target key already holds a live entry, that entry wins: the migrating entry
-  keeps its original key and its migrated connection, so its callers are
-  never re-wired, and it retires when its last caller releases it. Two
-  connections to one relay for that overlap is the honest cost; entry removal
-  is identity-guarded so neither cleanup can delete the other's entry.
+  target key already holds a live entry, that entry wins for every new
+  lookup: the original key is tombstoned so a later caller for either URL
+  lands on the target's entry, while the migrating entry keeps serving the
+  handles it already handed out and retires when the last of them releases.
+  Two connections to one relay for that overlap is the honest cost; entry
+  removal is identity-guarded so neither cleanup can delete the other's
+  entry.
 - Tests against the in-tree relay: an empty-URI drain migrates without a
   dropped group, a GOAWAY without a timeout hands over at the configured cap,
   a redirect moves the pool key and origins, a redirect onto an already
-  pooled key leaves both entries intact until release, each guard refusal
+  pooled key tombstones the original key while existing handles drain, each guard refusal
   closes rather than reconnects, and the draft-14 to -16 route decodes the
   URI.
 
