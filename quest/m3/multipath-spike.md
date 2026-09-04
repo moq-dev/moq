@@ -64,8 +64,8 @@ Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 
 ## Related
 
-- [Choose the QUIC parent](/quest/m2/quic/parent.md) - noq's multipath support
-  informs the parent choice, but this spike does not block it
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - noq's
+  multipath support is one reason to invest in the upstream relationship
 
 ## Closes
 

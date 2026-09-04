@@ -1,39 +1,34 @@
-# [M] Choose the parent and establish the QUIC fork
+# [S] Establish the noq relationship
 
 ## Goal
 
-Choose Quinn or noq as the parent, create the maintained moq-dev fork, and
-record who owns rebases, releases, security updates, and upstream
-coordination. Every later quest can name one concrete protocol core and one
-package source.
+MoQ's transport work has a named path into noq: the maintainers know what MoQ
+intends to propose, each proposal has a reviewer, noq releases and security
+advisories reach this repo on a known cadence, and the conditions under which
+a moq-dev fork would be created are written down before one is needed.
 
 ## Plan
 
-Start with Quinn. Select noq only when both of these gates pass:
+noq is the parent. It is already the default backend for `moq-tokio` and
+`moq-uring` on `dev`, and MoQ has merged and open pull requests there. There
+is no bakeoff left to run; the remaining work is coordination.
 
-- the n0/Iroh maintainers explicitly welcome the hierarchical scheduler and
-  qmux state-machine work as upstream contributions;
-- porting the green [Quinn qmux prototype](https://github.com/kixelated/quinn/pull/2)
-  plus a minimal scheduler-key spike does not require coupling either feature
-  to noq's multipath path state.
+Open a tracking issue or discussion in n0-computer/noq listing the features
+this questline needs, in the order MoQ will propose them: per-stream
+acknowledgment progress, `RESET_STREAM_AT`, hierarchical send groups, and the
+stream state machine accessors qmux needs. Record the maintainers' response
+here: what they want upstream, what they would rather see as an extension
+crate, and what they decline. Anything declined is the fork's charter.
 
-Audit the two candidates against the needs already exercised here: sans-IO
-driving from `moq-uring`, rustls, connection-ID routing, pacing and transmit
-batching, stream priority updates, reliable-reset stream-state changes,
-per-stream delivery accounting, qlog, and the ordinary `moq-native` async
-adapters. This is a code and ownership audit, not a new performance bakeoff.
-Both candidates get the same relay benchmark gate when adopted.
+Agree on a sync procedure: which noq releases MoQ tracks, how an advisory
+against noq or Quinn is triaged here, and who rebases MoQ's open noq branches.
+Write it into this repository's contributing docs so it survives the quest.
 
-The evidence at planning time is mixed but useful. noq is a Quinn-derived
-stack maintained for Iroh, and n0 merged
-[noq#667](https://github.com/n0-computer/noq/pull/667), a port of
-[Quinn#2601](https://github.com/quinn-rs/quinn/pull/2601), while the Quinn PR
-remains open. Quinn has the smaller delta from MoQ's current default and is
-already the home of the qmux prototype. Record any maintainer response and the
-port diff in this quest before making the choice.
+Do not create a fork in this quest. If a later quest's change is rejected,
+that quest creates the moq-dev fork with the rejection linked, following the
+[release quest](/quest/m2/quic/release.md) rules for package identity.
 
-Create the fork only after choosing. Protect its main branch, mirror the
-parent's security advisories, define a regular upstream-sync check, and keep
-each carried feature as a separable commit series. Decide package identity at
-the same time: changes not released by the parent need uniquely named
-moq-dev packages before a published MoQ crate can consume them.
+## Related
+
+- [Multipath spike](/quest/m3/multipath-spike.md) - noq's multipath support is
+  one reason the relationship is worth investing in
