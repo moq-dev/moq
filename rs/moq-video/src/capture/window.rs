@@ -8,6 +8,7 @@
 
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, FILETIME, HANDLE, HWND, LPARAM, RECT, WPARAM};
@@ -23,11 +24,12 @@ use windows::Win32::UI::HiDpi::{
 	DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-	CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, EnumWindows, GetCursorInfo, GetIconInfo, GetWindowRect,
-	GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsWindow, IsWindowVisible,
-	PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_NULL,
+	CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, EnumWindows, GetCursorInfo, GetIconInfo, GetPropW,
+	GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsWindow,
+	IsWindowVisible, PW_RENDERFULLCONTENT, RemovePropW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, SetPropW,
+	WM_NULL,
 };
-use windows::core::{BOOL, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
@@ -37,6 +39,7 @@ use crate::frame::{I420, Surface};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 const PROBE_TIMEOUT_MS: u32 = 50;
+static NEXT_WINDOW_IDENTITY: AtomicUsize = AtomicUsize::new(1);
 
 /// List visible, titled top-level windows by native HWND.
 pub(super) fn windows() -> Result<Vec<Window>, Error> {
@@ -147,7 +150,7 @@ impl Capture {
 		if width == 0 || height == 0 {
 			return Err(Error::SourceUnavailable("window has no capturable area".to_string()));
 		}
-		let identity = WindowIdentity::read(handle);
+		let identity = WindowIdentity::new(handle);
 		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
 		Ok(Self {
 			handle,
@@ -226,16 +229,14 @@ impl Drop for DpiContext {
 	}
 }
 
-/// Read-only identity for a window we do not own, so a recycled `HWND` is not
-/// mistaken for the one that was selected.
+/// Identity for a window we do not own, so a recycled `HWND` is not mistaken
+/// for the one that was selected.
 ///
-/// A marker written with `SetPropW` would be exact, but UIPI refuses a write to
-/// a window owned by a higher-integrity process, which loses us every elevated
-/// window that GDI could otherwise read. The owning process id plus that
-/// process's creation time needs no write and survives pid reuse. It cannot
-/// see a window destroyed and recreated inside the same process; `IsWindow`
-/// plus the per-frame geometry check is what covers the rest.
+/// A unique property gives exact identity when the target accepts it. UIPI
+/// refuses that write to a higher-integrity window, so elevated targets fall
+/// back to the owning process id and creation time.
 struct WindowIdentity {
+	marker: Option<WindowMarker>,
 	/// Owning process, 0 when it could not be read.
 	process: u32,
 	/// Owning process's creation time, `None` when it could not be read.
@@ -243,9 +244,18 @@ struct WindowIdentity {
 }
 
 impl WindowIdentity {
-	fn read(handle: HWND) -> Self {
+	fn new(handle: HWND) -> Self {
+		let value = NEXT_WINDOW_IDENTITY.fetch_add(1, Ordering::Relaxed).max(1);
+		let token = HANDLE(value as *mut c_void);
+		let name = format!("moq.capture.identity.{}.{value}\0", std::process::id())
+			.encode_utf16()
+			.collect::<Vec<_>>();
+		let marker = unsafe { SetPropW(handle, PCWSTR(name.as_ptr()), Some(token)) }
+			.is_ok()
+			.then_some(WindowMarker { handle, name, token });
 		let process = process_id(handle);
 		Self {
+			marker,
 			process,
 			created: process_created(process),
 		}
@@ -255,15 +265,38 @@ impl WindowIdentity {
 		if !unsafe { IsWindow(Some(handle)) }.as_bool() {
 			return false;
 		}
-		let now = Self::read(handle);
-		if now.process == 0 || now.process != self.process {
+		if let Some(marker) = &self.marker {
+			return marker.matches(handle);
+		}
+		let process = process_id(handle);
+		if process == 0 || process != self.process {
 			return false;
 		}
 		// A creation time we failed to read is not evidence the process changed,
 		// so only compare when both reads succeeded.
-		match (self.created, now.created) {
+		match (self.created, process_created(process)) {
 			(Some(before), Some(after)) => before == after,
 			_ => true,
+		}
+	}
+}
+
+struct WindowMarker {
+	handle: HWND,
+	name: Vec<u16>,
+	token: HANDLE,
+}
+
+impl WindowMarker {
+	fn matches(&self, handle: HWND) -> bool {
+		unsafe { GetPropW(handle, PCWSTR(self.name.as_ptr())).0 == self.token.0 }
+	}
+}
+
+impl Drop for WindowMarker {
+	fn drop(&mut self) {
+		if self.matches(self.handle) {
+			let _ = unsafe { RemovePropW(self.handle, PCWSTR(self.name.as_ptr())) };
 		}
 	}
 }
