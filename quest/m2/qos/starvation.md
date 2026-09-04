@@ -15,27 +15,33 @@ design in #2733: media-time lag is the primary signal, bytes are the weights.
 
 Define the frontier and the sample separately. Each subscription has an
 acknowledged frontier: the newest frame timestamp the peer is known to have
-received. In this slice the frontier advances when a group stream's FIN is
-acknowledged, which `Writer::close()` already awaits in
+received. Before the first ACK it is the timestamp of the first frame the
+subscription serves, so a fresh subscription's lag is exactly the media
+produced since it started. In this slice the frontier advances when a group
+stream's FIN is acknowledged, which `Writer::close()` already awaits in
 `Subscription::serve_group` in `rs/moq-net/src/lite/publisher.rs` and in the
-IETF publisher. The sample is taken when production advances, not when an
-ACK arrives: each time the track commits a new group, every subscription
-records `lag = newest produced frame timestamp - its frontier`, weighted by
-the new group's bytes. Both are timestamps on the same track, so the missing
-epoch does not matter. Sampling on production is what keeps a stalled viewer
-visible: a subscription whose ACKs stopped keeps landing new bytes in ever
-higher buckets, where sampling only on ACK would emit nothing and let the
-most starved viewer vanish from the snapshot deltas. Lag is zero while the
-source is paused, since nothing is produced. This slice moves the frontier
-once per group; the
-[frame-granularity quest](/quest/m2/qos/starvation-frames.md) moves it per
-frame without changing the wire shape, so fix the shape here.
+IETF publisher, and the group's last frame timestamp becomes the frontier.
+
+The sample is taken on the stats producer's interval tick, not on any ACK
+and not in the write path. Each tick walks the active subscriptions and
+records `lag = newest frame timestamp the track has produced - the
+subscription's frontier`, weighted by the bytes the track produced during
+the interval. Both are timestamps on the same track, so the missing epoch
+does not matter. The write path cannot be the sampler: a flow-controlled
+subscription's serve tasks block inside `write`, which is precisely the
+stalled viewer the metric exists to show, and sampling only on ACK would let
+that viewer emit nothing and vanish from the snapshot deltas. A periodic
+sample keeps it climbing the buckets while its frontier stands still. Lag is
+zero while the source is paused, and the sample carries no weight then,
+since nothing was produced. This slice moves the frontier once per group;
+the [frame-granularity quest](/quest/m2/qos/starvation-frames.md) moves it
+per frame without changing the wire shape or the sampler, so fix both here.
 
 Aggregate as a byte-weighted cumulative histogram on `Traffic`, on the
 `Role::Publisher` (egress) rows of the existing `(tier, broadcast, role)`
 key: fixed log-spaced buckets of media time, each a monotonic byte counter
-(bytes produced for a subscription while its frontier lag fell in that
-bucket). Propose buckets at 50 ms,
+(bytes produced for a subscription during intervals when its frontier lag
+fell in that bucket). Propose buckets at 50 ms,
 100 ms, 250 ms, 500 ms, 1 s, 2 s, 5 s, and above, and document the edges in
 the stats section of `doc/bin/relay/config.md`. A consumer diffs two snapshots
 for a byte-weighted distribution, percentiles, or mean over any interval.
@@ -53,12 +59,13 @@ frame slice lands. Say so in the docs. Sum tracks per broadcast: the histogram
 is in media time, so mixing audio and video is coherent, and byte weighting
 already lets video dominate.
 
-Mechanics. `Writer` in `rs/moq-net/src/coding/writer.rs` gains a monotonic
-written-offset counter, since every write funnels through it; the per-group
-serve task records the newest written timestamp as it goes. The bump points
-live on the crate-private `stats::Meter` and `stats::Subscription` carriers
-in `rs/moq-net/src/stats.rs`. `moq-stats` sums histograms across nodes in its
-aggregate consumer the same way it sums counters today. Update the stats
+Mechanics. The track's newest produced timestamp and interval byte count
+live beside the existing per-frame bump points on the crate-private
+`stats::Meter` in `rs/moq-net/src/stats.rs`; the frontier is a shared cell on
+the `stats::Subscription` guard that the serve task advances on ACK and the
+sampler reads. The serve task records the newest timestamp it has written to
+each group so a drop can be sized. `moq-stats` sums histograms across nodes
+in its aggregate consumer the same way it sums counters today. Update the stats
 section of `doc/bin/relay/config.md` with the new fields and their meaning.
 
 Tests: a subscriber that reads at media rate lands in the lowest bucket; a

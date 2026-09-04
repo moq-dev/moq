@@ -9,18 +9,21 @@ shape from the group slice is unchanged apart from the new histogram.
 
 ## Plan
 
-A frame is atomic to the viewer: it is useful only once fully delivered. At
-each frame end the per-group serve task already knows the stream offset (from
-the `Writer` counter) and the frame timestamp. Record `(offset, timestamp,
-bytes, written_at)` and await `poll_acked(offset)` from the released
-`web-transport-trait` hook, interleaved with the writes of later frames so a
-lagging ACK never stalls sending. One waiter per stream suffices: offsets are
+A frame is atomic to the viewer: it is useful only once fully delivered. The
+sampler from the parent quest is unchanged; what changes is how often the
+frontier it reads moves. `Writer` in `rs/moq-net/src/coding/writer.rs` gains
+a monotonic written-offset counter, since every write funnels through it, so
+at each frame end the per-group serve task knows the stream offset and the
+frame timestamp. Record `(offset, timestamp, bytes, written_at)` and await
+`poll_acked(offset)` from the released `web-transport-trait` hook,
+interleaved with the writes of later frames so a lagging ACK never stalls
+sending. One waiter per stream suffices: offsets are
 acknowledged in order for the purpose of this metric, so poll the oldest
 pending frame and retire everything at or below the acknowledged offset.
 
 Each acknowledged frame moves the subscription's frontier to that frame's
-timestamp, so the production-time lag samples from the parent quest read a
-frontier that is at most one frame stale instead of one group. When a stream
+timestamp, so the interval samples from the parent quest read a frontier that
+is at most one frame stale instead of one group. When a stream
 is reset before a frame is acknowledged, `dropped_duration` now grows by the
 span from the newest acknowledged frame to the newest written one, which is
 the exact media the viewer lost.
@@ -36,10 +39,12 @@ Backends that return unsupported from `poll_acked` keep the group-granularity
 sampling from the parent quest, so the histogram never disappears when the
 relay is built on quinn or quiche; document which resolution a node offers.
 
-Tests: frame-end samples under a peer that acknowledges in bursts, a reset
-mid-group attributing only the unacknowledged span to `dropped_duration`,
-delivery delay under an injected ACK delay staying inside one bucket of the
-true RTT, and fallback to group sampling when the hook is unsupported.
+Tests: the frontier tracking frame ends under a peer that acknowledges in
+bursts, with interval samples landing one bucket lower than group-granularity
+tracking of the same run; a reset mid-group attributing only the
+unacknowledged span to `dropped_duration`; delivery delay under an injected ACK delay staying inside one bucket of the
+true RTT; and fallback to group-granularity frontier tracking when the hook is
+unsupported.
 
 ## Required
 
