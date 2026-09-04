@@ -253,9 +253,10 @@ _tools $FILES="":
     # platform: the plugin type-checks against headers, and the dev shell ships
     # those even on Darwin, where obs-studio can't build.
     scoped '^(cpp/obs/|rs/libmoq/|flake\.nix$)' && tools+=(pkg-config cargo)
-    # `just obs check` lints with clang-format and gersemi, and compares the
-    # three OBS pins, one of which moves on a flake.lock bump alone.
-    scoped '^(cpp/obs/|flake\.(nix|lock)$)' && tools+=(clang-format gersemi)
+    # `just obs check` lints with clang-format and gersemi, validates the CMake
+    # release configuration, and compares the three OBS pins, one of which moves
+    # on a flake.lock bump alone.
+    scoped '^(cpp/obs/|flake\.(nix|lock)$)' && tools+=(clang-format gersemi cmake)
 
     # Scopes overlap (rs/moq-ffi/ is in five of them), so the same tool can land
     # in the list twice and be reported missing twice. Splitting on whitespace is
@@ -328,10 +329,10 @@ check $BASE="":
     	fi
     	# flake.nix is in scope because `just obs check` is what compares the OBS
     	# version pinned there against buildspec.json, and either side can move.
-    	# flake.lock too, because the third OBS the guard compares is nixpkgs'
-    	# obs-studio, the one `just obs ci` links: it moves on a lock bump alone,
-    	# and that bump is the change that opens the gap.
-    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.(nix|lock)$)'; then
+        # flake.lock too, because the third OBS the guard compares is nixpkgs'
+        # obs-studio, the one `just obs ci` links: it moves on a lock bump alone,
+        # and that bump is the change that opens the gap.
+        if echo "$files" | grep -qE '^(cpp/obs/|flake\.(nix|lock)$)'; then
     		just obs check
     	fi
     	# Validates flake eval + dev shell build; it no longer compiles the
