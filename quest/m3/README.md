@@ -19,6 +19,7 @@ its verdict lands and the follow-on work becomes concrete.
 - [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
 - [QUIC GCC](/quest/m3/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress
 - [QUIC FEC](/quest/m3/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
+- [Web P2P](/quest/m3/p2p/README.md) - a measured verdict on browsers serving each other over LAN-only data channels to offload the relay
 - [GOP overhead](/quest/m3/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [#697](/quest/m3/697-conferencing-demo.md) - Conferencing Demo
 - [#703](/quest/m3/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
