@@ -468,11 +468,47 @@ _markdown $ACTION:
 
     exit "$status"
 
+# Check Markdown formatting detection without touching the caller's worktree.
+[private]
+_markdown-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    fail() { echo "markdown: _markdown-test: $1" >&2; exit 1; }
+
+    repo=$PWD
+    fixture=$(mktemp -d)
+    trap 'rm -rf "$fixture"' EXIT
+
+    git -C "$fixture" init --quiet
+    cp .remarkrc.mjs .remarkignore "$fixture/"
+    ln -s "$repo/node_modules" "$fixture/node_modules"
+    printf '# dirty_heading\n' > "$fixture/dirty.md"
+    git -C "$fixture" add dirty.md
+
+    original=$(<"$fixture/dirty.md")
+    if just --justfile "$repo/justfile" --working-directory "$fixture" \
+        _markdown check > "$fixture/check.log" 2>&1; then
+        fail "formatter-only drift must fail the check"
+    fi
+    [[ "$(<"$fixture/dirty.md")" == "$original" ]] \
+        || fail "the check modified its input"
+    grep -q 'dirty.md' "$fixture/check.log" \
+        || fail "the check did not name the drifted file"
+
+    just --justfile "$repo/justfile" --working-directory "$fixture" _markdown fix
+    [[ "$(<"$fixture/dirty.md")" == '# dirty\_heading' ]] \
+        || fail "the fix did not format the file"
+    just --justfile "$repo/justfile" --working-directory "$fixture" _markdown check
+
+    echo "markdown: check/fix regression ok"
+
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
     just _changed-test
     bun install --frozen-lockfile
+    just _markdown-test
     just _markdown check
     just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
