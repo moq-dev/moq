@@ -307,8 +307,21 @@ if [[ -n "$LIVE" ]]; then
         echo >&2
         echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
         dump_logs
+        exit "$GRADE_RC"
     fi
-    exit "$GRADE_RC"
+    # The grader's verdict is not the whole run. It grades whatever reached it, and
+    # the sample floor only rejects a window that came up short: a publisher that
+    # dies late still leaves enough behind to pass every check. That is a broken
+    # round-trip reported as a good one, so the publisher's own status is a gate
+    # too. 124 is `timeout` killing a stalled `moq import ts`, which is a failure
+    # of the same kind rather than a clean end, so it is not excused here.
+    if [[ "$PUB_RC" -ne 0 ]]; then
+        echo >&2
+        echo "error: the publisher exited $PUB_RC; the graded stream is not a whole round-trip" >&2
+        dump_logs
+        exit 1
+    fi
+    exit 0
 fi
 
 sleep 3

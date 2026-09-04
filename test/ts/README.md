@@ -31,6 +31,11 @@ subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file
 That is the only arm that can see release timing at all, and it is what nightly
 runs (see [CI](#ci)).
 
+The arm passes only when the grader's verdict *and* the publisher's exit status
+are clean. The grader can only speak for what reached it, and the sample floor
+rejects a window that came up short, so a publisher dying late in the run leaves
+enough behind to pass every check: a broken round-trip reported as a good one.
+
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
 subscriber output:
 
