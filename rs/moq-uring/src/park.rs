@@ -12,6 +12,8 @@ use std::sync::{
 };
 use std::task::{Wake, Waker};
 
+use crate::metrics::Counters;
+
 /// The worker is polling; a wake only needs to prevent the next park.
 pub(crate) const RUNNING: u32 = 0;
 /// A wake arrived; the next park attempt consumes it and re-polls instead.
@@ -29,12 +31,14 @@ pub(crate) const FUTEX_BITSET_MATCH_ANY: u64 = u32::MAX as u64;
 /// mints, so a wake from any thread lands here.
 pub(crate) struct Unpark {
 	pub(crate) word: AtomicU32,
+	metrics: Arc<Counters>,
 }
 
 impl Unpark {
-	pub(crate) fn new() -> Arc<Self> {
+	pub(crate) fn new(metrics: Arc<Counters>) -> Arc<Self> {
 		Arc::new(Self {
 			word: AtomicU32::new(RUNNING),
+			metrics,
 		})
 	}
 
@@ -42,6 +46,7 @@ impl Unpark {
 	/// kick the futex so the armed `FUTEX_WAIT` completes.
 	pub(crate) fn unpark(&self) {
 		if self.word.swap(NOTIFIED, Ordering::AcqRel) == PARKED {
+			self.metrics.wakes.add(1);
 			// SAFETY: waking a futex reads no user memory beyond the address.
 			unsafe {
 				libc::syscall(

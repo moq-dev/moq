@@ -90,6 +90,12 @@ pub struct Workers {
 	server: moq_uring::quic::server::Config,
 	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
 	certificates: moq_tokio::tls::Certificates,
+	/// One counter set per worker, in shard order. Created here rather than on
+	/// the worker thread so `/metrics` can publish every worker's series from
+	/// the first scrape, before the threads exist: a series that only appears
+	/// once a worker has done something reads as a healthy node until it is too
+	/// late to notice.
+	metrics: Vec<moq_uring::Metrics>,
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
@@ -253,6 +259,7 @@ impl Workers {
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
 		Ok(Self {
+			metrics: (0..count).map(|_| moq_uring::Metrics::default()).collect(),
 			members,
 			addr,
 			server,
@@ -272,6 +279,14 @@ impl Workers {
 	/// The address every worker is bound to.
 	pub fn local_addr(&self) -> SocketAddr {
 		self.addr
+	}
+
+	/// Every worker's counters, in shard order, for an ops surface to scrape.
+	///
+	/// Available from [`bind`](Self::bind), so a scrape covers a worker that has
+	/// not started (or has died) instead of dropping its series.
+	pub fn metrics(&self) -> Vec<moq_uring::Metrics> {
+		self.metrics.clone()
 	}
 
 	/// The certificate every worker presents, for publishing its SHA-256
@@ -313,6 +328,7 @@ impl Workers {
 			let spawn = Spawn {
 				member,
 				core,
+				metrics: self.metrics[index as usize].clone(),
 				server: self.server.clone(),
 				udp: self.udp.clone(),
 				serve: serve.clone(),
@@ -436,6 +452,8 @@ struct Spawn {
 	member: Member,
 	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
+	/// This worker's counter set, shared with whoever scrapes `/metrics`.
+	metrics: moq_uring::Metrics,
 	server: moq_uring::quic::server::Config,
 	udp: moq_uring::udp::Config,
 	serve: Serve,
@@ -482,6 +500,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let Spawn {
 		member,
 		core,
+		metrics,
 		server,
 		udp,
 		serve,
@@ -499,7 +518,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 	}
 
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
-		let worker = moq_uring::Worker::new(Default::default()).context("io_uring setup failed")?;
+		let mut config = moq_uring::Config::default();
+		config.metrics = metrics;
+		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
 		let handle = worker.handle();
 		let socket = handle
 			.udp(member.socket, udp)

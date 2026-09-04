@@ -37,8 +37,3 @@ ablation's number is what justifies the rest of the line.
   the `hyper::rt` adapters that let axum run on it
 - [Relay](/quest/m1/uring-tcp/relay.md) - serve the relay's WebSocket and
   stream listeners from the io_uring workers
-
-## Related
-
-- [Worker metrics](/quest/m1/uring-metrics.md) - the counters that make the
-  ported path observable, and that the ablation reads

@@ -31,8 +31,3 @@ a bespoke writer thread. Either way, document which one shipped and why.
 Traces are per connection and named from the connection id, matching what the
 tokio path already produces, so an existing qlog workflow reads both without
 knowing which runtime wrote them.
-
-## Related
-
-- [Worker metrics](/quest/m1/uring-metrics.md) - the other half of io_uring-mode
-  observability, on the counter side rather than the trace side

@@ -41,6 +41,7 @@ use std::task::Poll;
 use io_uring::{cqueue, opcode, types};
 
 use crate::Error;
+use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
 
 /// Space reserved for received control messages (`UDP_GRO` needs one int).
@@ -332,6 +333,9 @@ impl TxSlot {
 pub(crate) struct SockShared {
 	io: UdpSocket,
 	worker: Weak<Shared>,
+	/// The worker's counters, held directly rather than reached through
+	/// `worker`, so counting a datagram is not a `Weak::upgrade`.
+	metrics: std::sync::Arc<Counters>,
 	config: Config,
 	bgid: u16,
 	closed: Cell<bool>,
@@ -526,6 +530,7 @@ impl Socket {
 		let sock = Rc::new(SockShared {
 			io,
 			worker: Rc::downgrade(shared),
+			metrics: shared.metrics.clone(),
 			config,
 			bgid,
 			closed: Cell::new(false),
@@ -617,6 +622,7 @@ impl Socket {
 				armed: false,
 			}));
 		}
+		self.shared.metrics.tx_stalls.add(1);
 		waiter.register(&mut tx.waiters);
 		Poll::Pending
 	}
@@ -794,6 +800,7 @@ impl TxBuf {
 				send_one(&shared, &staging, index, unsafe { base.add(offset) }, chunk, to, None)?;
 			}
 		}
+		sock.metrics.tx_datagrams.add(segments as u64);
 		Ok(())
 	}
 }
@@ -923,6 +930,7 @@ fn send_one(
 		shared.ops.borrow_mut().remove(key as usize);
 		return Err(err);
 	}
+	staging.sock.metrics.tx_sends.add(1);
 	Ok(())
 }
 
@@ -949,6 +957,7 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 		// receive would die on ENOBUFS immediately and re-arming here would
 		// spin.
 		if !rx.bufs.iter().any(|buf| !buf.kernel_done) {
+			sock.metrics.rx_exhausted.add(1);
 			return;
 		}
 		let key = shared.insert(Op::Recv {
@@ -969,6 +978,7 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 		else {
 			// Every buffer is borrowed and the pool is at its ceiling; a
 			// release re-arms us.
+			sock.metrics.rx_exhausted.add(1);
 			return;
 		};
 		rx.bufs[bid as usize].claimed = true;
@@ -1037,7 +1047,10 @@ pub(crate) fn on_recv(
 		match code {
 			// The receive pool is exhausted. Record it: by the time the re-arm
 			// looks, a recycled buffer may hide that the kernel ran dry.
-			libc::ENOBUFS => sock.rx.borrow_mut().starved = true,
+			libc::ENOBUFS => {
+				sock.metrics.rx_enobufs.add(1);
+				sock.rx.borrow_mut().starved = true;
+			}
 			// Socket teardown; nothing to surface.
 			libc::ECANCELED => return,
 			_ => {
@@ -1055,6 +1068,12 @@ pub(crate) fn on_recv(
 	};
 	match received {
 		Ok((_, Some(queued))) => {
+			sock.metrics.rx_receives.add(1);
+			// A zero stride would be a kernel that reported a `UDP_GRO` size of
+			// zero; count the receive as one datagram rather than dividing by it.
+			sock.metrics
+				.rx_datagrams
+				.add(queued.len.div_ceil(queued.stride.max(1)) as u64);
 			let mut rx = sock.rx.borrow_mut();
 			rx.bufs[queued.bid as usize].outstanding += 1;
 			rx.queue.push_back(queued);
