@@ -38,7 +38,10 @@ dependency.
   no new `moq-tokio` surface is needed and per-worker rotation rides
   [TLS rotation atomicity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md).
   Writes are atomic renames into the watched directory, which the watcher
-  already treats as a reload. Only the quinn and noq backends on the tokio
+  already treats as a reload. The account key and the serving key are created
+  owner-only (`0600`, the mode `doc/bin/relay/auth.md` already requires of
+  private keys) before any bytes land, never with the umask default, so a
+  group-searchable `acme.dir` cannot leak a key to another local user. Only the quinn and noq backends on the tokio
   runtime reload certificates today: quiche snapshots its TLS material when
   the listener is built, and the io_uring workers read the certificate once at
   bind. Config validation refuses `[acme]` with those until they can rotate,
@@ -67,7 +70,8 @@ feature flag) issues on first run, a restart with a valid cached certificate
 performs no challenge, a cached certificate missing a configured domain is
 reissued at startup, a certificate near expiry renews and the QUIC
 listener serves the new chain without restart, a renewal failure leaves the
-old certificate serving, and the config rejects `[acme]` alongside explicit
+old certificate serving, both generated keys are mode `0600`, and the config
+rejects `[acme]` alongside explicit
 paths, without `web.http`, with a wildcard domain, or on a backend that
 cannot reload.
 
