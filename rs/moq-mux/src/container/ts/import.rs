@@ -68,6 +68,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	pmt_pids: HashSet<Pid>,
 	/// Per elementary-stream-PID codec routing.
 	streams: HashMap<Pid, Stream<E>>,
+	/// Counters from audio routes a later PMT replaced, keyed by PID.
+	retired_stats: BTreeMap<u16, StreamStats>,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
 	/// Per elementary-stream-PID TS continuity state.
@@ -145,6 +147,7 @@ impl<E: catalog::Catalog> Import<E> {
 			feed,
 			pmt_pids: HashSet::new(),
 			streams: HashMap::new(),
+			retired_stats: BTreeMap::new(),
 			pending: HashMap::new(),
 			continuity: HashMap::new(),
 			initialized: false,
@@ -519,7 +522,9 @@ impl<E: catalog::Catalog> Import<E> {
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section never reaches the PES reader. Warn once.
-			if !matches!(self.streams.insert(pid, Stream::Ignored), Some(Stream::Ignored)) {
+			let previous = self.retire_stream(pid);
+			self.streams.insert(pid, Stream::Ignored);
+			if !matches!(previous, Some(Stream::Ignored)) {
 				tracing::warn!(
 					pid = pid.as_u16(),
 					"private section stream detected without `mpegts` catalog support; dropping"
@@ -528,7 +533,7 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 		// A prior PMT may have routed this PID to Ignored; drop it so the PID has one route.
-		self.streams.remove(&pid);
+		self.retire_stream(pid);
 		let descriptors = to_descriptors(descriptors);
 		let stream = SectionStream::new(
 			self.broadcast.clone(),
@@ -545,6 +550,18 @@ impl<E: catalog::Catalog> Import<E> {
 			"private section stream detected; intercepting before the reader"
 		);
 		Ok(())
+	}
+
+	/// Remove a PES route while keeping the counters it accumulated for this importer.
+	fn retire_stream(&mut self, pid: Pid) -> Option<Stream<E>> {
+		let stream = self.streams.remove(&pid)?;
+		if let Some(current) = stream.stats() {
+			self.retired_stats
+				.entry(pid.as_u16())
+				.and_modify(|retired| retired.merge(&current))
+				.or_insert(current);
+		}
+		Some(stream)
 	}
 
 	fn handle_pes_start(&mut self, pid: Pid, pes: Pes) -> anyhow::Result<()> {
@@ -755,11 +772,16 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Cheap: it reads counters the demuxer already keeps, so a caller can poll it per
 	/// chunk and report the delta.
 	pub fn stats(&self) -> Stats {
-		let streams = self
-			.streams
-			.iter()
-			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
-			.collect();
+		let mut streams = self.retired_stats.clone();
+		for (pid, stream) in &self.streams {
+			let Some(current) = stream.stats() else {
+				continue;
+			};
+			streams
+				.entry(pid.as_u16())
+				.and_modify(|retired| retired.merge(&current))
+				.or_insert(current);
+		}
 		Stats { streams }
 	}
 
@@ -801,7 +823,7 @@ impl Stats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StreamStats {
-	/// The MoQ track suffix this stream publishes under (`.mp2`, `.ac3`, `.aac`, ...).
+	/// The current or most recent MoQ track suffix for this PID (`.mp2`, `.ac3`, `.aac`, ...).
 	pub track: &'static str,
 	/// Completed resyncs: the stream lost frame sync and locked onto a confirmed frame
 	/// again. Each one is a gap in the audio.
@@ -814,6 +836,16 @@ pub struct StreamStats {
 	/// confirm it. That substitutes audio rather than leaving a gap, which is why it is
 	/// counted separately from a resync.
 	pub unconfirmed: u64,
+}
+
+impl StreamStats {
+	/// Add a newer route's counters while naming the route that is active now.
+	fn merge(&mut self, current: &Self) {
+		self.track = current.track;
+		self.resyncs += current.resyncs;
+		self.discarded += current.discarded;
+		self.unconfirmed += current.unconfirmed;
+	}
 }
 
 /// A reassembled PES packet awaiting routing to its codec importer.
@@ -2544,6 +2576,30 @@ mod test {
 			"an unconfirmed frame does not prove sync was regained"
 		);
 		assert_eq!(stats.unconfirmed, 1, "the unvouched publication is counted separately");
+	}
+
+	#[test]
+	fn remapping_a_pid_keeps_its_retired_resync_stats() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = mpeg2ts::ts::Pid::new(0x61).unwrap();
+		let mut stream = import.legacy_stream(pid, &super::mp2::DESCRIPTOR);
+		let super::Stream::Legacy(legacy) = &mut stream else {
+			unreachable!();
+		};
+		let codec = super::SyncWord::from(&super::mp2::DESCRIPTOR);
+		legacy.resync.recover(&[0; 10], 0, &codec);
+		legacy.resync.published(false);
+		import.streams.insert(pid, stream);
+		let before = import.stats();
+
+		import
+			.ensure_section(pid, StreamType::Dts8ChannelLosslessAudio as u8, &[])
+			.unwrap();
+
+		assert!(matches!(import.streams.get(&pid), Some(super::Stream::Ignored)));
+		assert_eq!(import.stats(), before, "a PMT remap must not reset lifetime counters");
 	}
 
 	/// Build a payload-only TS packet (PID 0x0021, afc 0b01). `body` is the bytes
