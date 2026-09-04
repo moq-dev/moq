@@ -73,8 +73,12 @@ test("codec rejects a frame that inflates past the cap", () => {
 });
 
 test("a decoder without options caps frames at 64 MiB", () => {
+	const decoder = new Decoder();
 	expect(DEFAULT_MAX_FRAME_SIZE).toBe(64 * 1024 * 1024);
-	expect(new Decoder().maxFrameSize).toBe(DEFAULT_MAX_FRAME_SIZE);
+	expect(decoder.maxFrameSize).toBe(DEFAULT_MAX_FRAME_SIZE);
+	expect(() => {
+		(decoder as { maxFrameSize: number }).maxFrameSize = Infinity;
+	}).toThrow(TypeError);
 });
 
 test("a frame larger than pako's chunk size round-trips", () => {
