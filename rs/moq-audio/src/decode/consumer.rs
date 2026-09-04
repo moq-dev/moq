@@ -20,6 +20,7 @@ pub struct Consumer {
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	resampler: Option<Resampler>,
 	config: Config,
+	latency_max: std::time::Duration,
 	resolved_sample_rate: u32,
 	resolved_channels: u32,
 	/// One past the last sample handed to the resampler, so the tail it is still
@@ -88,6 +89,7 @@ impl Consumer {
 			.track(&name)?
 			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 			.await?;
+		let latency_max = config.latency_max.unwrap_or_default().min(track.info().latency_max);
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
@@ -102,6 +104,7 @@ impl Consumer {
 			track,
 			resampler,
 			config,
+			latency_max,
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
@@ -125,7 +128,7 @@ impl Consumer {
 
 	/// The effective latency budget after clamping to the publisher's retention window.
 	pub fn latency_max(&self) -> std::time::Duration {
-		self.track.latency()
+		self.latency_max
 	}
 
 	/// Sample rate samples are actually delivered at, which is
