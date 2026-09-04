@@ -1747,6 +1747,32 @@ mod test {
 		drop(dynamic);
 	}
 
+	/// A reverse fetch can install the track metadata before the live request is
+	/// accepted, but it does not create a live publisher. Finishing the broadcast
+	/// must still reject that name so an arrival-order subscriber does not park on
+	/// backfill that is deliberately absent from its queue.
+	#[tokio::test]
+	async fn finish_resolves_an_unaccepted_track_with_fetched_info() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let dynamic = request.dynamic();
+		let track = consumer.track("track1").unwrap();
+		let pending_fetch = track.fetch_group(0, None);
+		let fetch = dynamic.requested_group().await.unwrap();
+		let mut group = fetch.accept(None).unwrap();
+		group.finish().unwrap();
+		pending_fetch.await.unwrap();
+
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		producer.finish();
+		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
+
+		let mut stale = request.accept(None);
+		assert!(stale.append_group().is_err());
+	}
+
 	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps
 	/// its cache and its publisher decides when it ends.
 	#[tokio::test]

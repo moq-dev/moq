@@ -133,6 +133,9 @@ pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
 	// Copied by value into each group it creates.
 	info: Option<Info>,
+	// Whether a live Producer was minted. A reverse fetch may install `info`
+	// before acceptance, so the two states are deliberately separate.
+	published: bool,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the `cache_duration` ceiling clamping `Info::latency_max`.
@@ -263,6 +266,11 @@ struct FetchOutcome {
 }
 
 impl TrackState {
+	fn accept(&mut self, info: Info) {
+		self.published = true;
+		self.install(info);
+	}
+
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
 			Poll::Ready(Ok(info.clone()))
@@ -877,7 +885,7 @@ impl Producer {
 			.write()
 			.ok()
 			.expect("a new track is open")
-			.install(info.into().unwrap_or_default());
+			.accept(info.into().unwrap_or_default());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
 		Self {
@@ -1572,8 +1580,9 @@ impl TrackWeak {
 
 	/// Reject a track nothing ever served, resolving its pending subscribes with `err`.
 	///
-	/// A track whose [`Info`] arrived has a publisher, so it is left alone and this
-	/// returns false; so is one that already carries an abort reason.
+	/// A track whose [`Producer`] was minted is left alone and this returns false;
+	/// so is one that already carries an abort reason. Fetched backfill can install
+	/// [`Info`] before acceptance, so metadata alone does not prove a publisher exists.
 	///
 	/// Closes the state like [`Producer::abort`], so a [`Request`] still held by the
 	/// publisher can't `accept` its way back to life afterwards.
@@ -1584,7 +1593,7 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.info.is_some() || state.abort.is_some() {
+		if state.published || state.abort.is_some() {
 			return false;
 		}
 		state.abort = Some(err);
@@ -2714,7 +2723,7 @@ impl Request {
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
-			state.install(info.into().unwrap_or_default());
+			state.accept(info.into().unwrap_or_default());
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
