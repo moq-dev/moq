@@ -14,9 +14,12 @@ moq.pro's (downstream) fleet drain orchestration relies on this behavior: a
 drained node is already out of DNS when GOAWAY fires, so a re-resolve is what
 lands clients on a healthy relay.
 
+Everything below describes `dev`, which is where this quest lands: `main`
+still has `moq-native`'s close-only `Reconnect` and no `Connection.Shared`.
+
 ### Rust is done except the proof
 
-`moq_tokio::Connection` already handles GOAWAY: the session loop returns the
+On `dev`, `moq_tokio::Connection` already handles GOAWAY: the session loop returns the
 message, `Redirect::resolve` guards the URI (scheme tier never drops, no
 widening to a local host, optional same-host mode), the loop redials while a
 `Draining` handle keeps the old session serving until it closes or overstays
@@ -33,10 +36,11 @@ guard stays [its own quest](/quest/m1/2624-moq-native-goaway-redirect-guard-clas
 
 ### JavaScript is greenfield
 
-Today `js/net` logs the lite GOAWAY URI, logs the IETF draft-17+ URI, and does
-not decode the body at all on the draft-14 to -16 shared control stream.
+On `dev`, `js/net` logs the lite GOAWAY URI, logs the IETF draft-17+ URI, and
+does not decode the body at all on the draft-14 to -16 shared control stream.
 `Reload` reconnects only on `closed`, tears the old connection down in its
-effect cleanup, and `Connection.Shared` pools by URL href.
+effect cleanup, and `Connection.Shared` (`js/net/src/connection/pool.ts`)
+pools by URL href.
 
 - Surface the peer's GOAWAY on `Established` as a drain signal carrying the
   resolved URI and the timeout, decoded on every wire the client speaks,

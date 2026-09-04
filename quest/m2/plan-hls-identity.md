@@ -33,7 +33,11 @@ What the pass settled, so it is not re-derived:
 - An epoch on ANNOUNCE_START / ANNOUNCE_UPDATE is rejected. Announcements are
   capability routes, and a `transcode/*` route followed by a more specific
   `transcode/foo` route must keep stitching by hop ID; a per-route epoch would
-  break that.
+  break that. `main`'s copy of `draft-lcurley-moq-lite.md` still carries the
+  old Epoch text on those messages and on TRACK, TRACK_INFO, SUBSCRIBE, and
+  FETCH; `dev` deleted all of it in [moq#3225](https://github.com/moq-dev/moq/pull/3225),
+  and `dev` is the draft this decision is made against. It was never
+  implemented on either branch.
 - The candidates left, none chosen: an `Epoch` field on TRACK_INFO stamped
   from `broadcast::Info` (per-broadcast value, per-track carriage, fits the
   existing rule that TRACK_INFO is fixed for a track's lifetime, and a
