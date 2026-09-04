@@ -444,10 +444,8 @@ std::atomic<int> g_origin_creates{0};
 std::atomic<int> g_origin_closes{0};
 std::atomic<int> g_session_connects{0};
 std::atomic<int> g_announced_calls{0};
-// moq_origin_request resolves against what is announced *right now*. Starting
-// consumption from the connected callback is exactly when nothing is announced
-// yet, which is how #2856 blanked live sources, so the plugin must use
-// moq_origin_consume_announced and this must stay zero.
+// moq_origin_request resolves only broadcasts that are already announced. The
+// source must wait with moq_origin_consume_announced, so this stays zero.
 std::atomic<int> g_request_calls{0};
 std::atomic<int> g_catalog_calls{0};
 std::atomic<int> g_video_calls{0};
@@ -585,9 +583,8 @@ int32_t moq_origin_consume_announced_close(uint32_t task)
 	return closeSub(static_cast<int32_t>(task));
 }
 
-// Present only so that a source which went back to resolving against what is
-// announced *now* still links, and is caught by the assertion on g_request_calls
-// rather than by a puzzling link error.
+// Keep the immediate lookup stub link-complete so g_request_calls can assert that
+// the source uses the waiting API instead.
 int32_t moq_origin_request(uint32_t, const char *, uintptr_t, void (*)(void *, int32_t), void *)
 {
 	g_request_calls++;
@@ -876,9 +873,8 @@ int main()
 	CHECK(g_info.get_defaults && g_info.get_properties && g_info.get_name);
 
 	// The announcement arrives after the session reports connected, which is the
-	// normal order on the wire and the one #2856 got wrong: consumption started
-	// from the connected callback but resolved against what was announced *now*,
-	// so a live broadcast came back "not found" and the source blanked.
+	// normal order on the wire. The source waits for it, then starts the catalog
+	// subscription from the delivered broadcast.
 	{
 		reset();
 		void *source = createSource();
