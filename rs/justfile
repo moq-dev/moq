@@ -459,10 +459,14 @@ audit:
 # `--all-features` is the only thing that compiles moq-cli's play/capture,
 # moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
+#
+# Both carry `--all-targets`. A `#[cfg(test)]` module leans on whatever the
+# default features happened to import, so a test that only compiles by accident
+# is invisible to a lib-only check.
 
 # Compile the workspace at the feature extremes.
 features:
-    {{ cargo_compile }} check --locked --workspace --no-default-features
+    {{ cargo_compile }} check --locked --workspace --all-targets --no-default-features
     {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
     {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features

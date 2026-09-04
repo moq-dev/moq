@@ -2,7 +2,6 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
-use crate::audio::{MoqAudioCodec, MoqAudioEncoderInput, MoqAudioEncoderOutput, MoqAudioFormat, MoqAudioFrame};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
@@ -130,8 +129,11 @@ async fn raw_track_activity() {
 		.unwrap();
 }
 
+#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_activity() {
+	use crate::audio::*;
+
 	const SAMPLE_RATE: u32 = 48_000;
 	const FRAME_DURATION_MS: u32 = 20;
 	const FRAME_SAMPLES: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1_000) as usize;
