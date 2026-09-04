@@ -50,10 +50,17 @@ Three things the offset has to get right, none of which fall out of adding it to
   `now`, undelayed, so every later re-anchor drops the delay again. Compare and
   re-anchor on the undelayed instant and apply the delay last.
 - **A moved anchor has to wake pending waits.** With audio and video sharing one
-  `Pacer`, a task can already be parked in `wait(ts)` when an earlier frame on
-  the other stream moves the anchor. `Sync.#setReference` resolves `#update` to
-  wake every parked wait so it recomputes; `Pacer` has no notification at all.
-  The `poll_wait(&kio::Waiter, ts)` pair is where that lives.
+  `Pacer`, a task can already be parked waiting on a frame when an earlier frame
+  on the other stream moves the anchor. `Sync.#setReference` resolves `#update`
+  to wake every parked wait so it recomputes; `Pacer` has no notification at all.
+
+  This is a re-anchor notification, not a timed wait: `kio` has no time module
+  (`rs/CLAUDE.md`), so a `poll_*` that had to fire at a deadline would park
+  forever with nothing to arm it, and taking a `moq_net::Timers` the way
+  `origin::Driver::run` does would drag a runtime into a type that has never
+  needed one. Keep `pace` returning the instant and let the caller sleep, which
+  is the contract the export path already relies on, and add only the
+  `poll_*`/`kio::Waiter` pair that reports the anchor moving.
 - **Audio must not take the delay twice.** If audio waits for the delayed
   instant and then hands samples to a sink that also holds a delay's worth, it
   trails video by roughly another delay. Either feed the ring ahead of the
@@ -77,6 +84,27 @@ Three things the offset has to get right, none of which fall out of adding it to
   stays unchanged on `import`, the stdout containers, and `rtmp export`.
 - Reconcile `doc/bin/cli.md`, which documents `play --max-age` and carries an
   example invocation using it, plus any other `moq play` example in the tree.
+
+### Open questions
+
+Left open deliberately: they are A/V policy that wants the code in front of it,
+and the answer changes what the tests should assert.
+
+- **Which stream owns the anchor when both exist.** Video taking a tune-in burst
+  can `hurry` the shared anchor past what the speaker is still draining, and
+  because the anchor only moves forward, later audio cannot pull it back. Making
+  the speaker the sole re-anchor source while audio exists is one answer;
+  discarding audio to the same edge is another.
+- **What the speaker contributes.** `last_timestamp - buffered()` is the sample
+  sounding now, so feeding it in as the anchor while every result is shifted by
+  `delay` would schedule video a full delay behind it. If the speaker position
+  stays in the calculation it has to enter at the live edge, not the playing
+  edge.
+- **Whether a per-write bound is needed.** `play_audio` splits PCM into chunks of
+  up to a second and checks `sink.buffered()` only between whole writes, so a
+  first chunk can overshoot a 100ms delay outright. Sizing each part to the
+  remaining headroom is the obvious fix; whether the sink should grow an
+  operation for it is not.
 
 ### Verification
 
