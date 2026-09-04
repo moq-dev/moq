@@ -855,6 +855,86 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// Retiring a rung stops accepting new fetches, but a group already accepted
+	/// from the dynamic handler remains part of the track below its final sequence
+	/// and must finish cleanly.
+	#[tokio::test]
+	async fn retirement_finishes_an_in_flight_fetch() {
+		let mut source = source_catalog(320, 240);
+		let mut group = source._track.create_group(0u64.into()).unwrap();
+
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, 30);
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		encoder.keyframe();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
+			hang::container::Frame {
+				timestamp: encoded.timestamp,
+				payload: encoded.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+		}
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let mut fetched = consumer
+			.track("video/120p")
+			.unwrap()
+			.fetch_group(0, None)
+			.await
+			.unwrap();
+
+		// The output group has been accepted, but its source group is still open.
+		// Retiring now used to drop the fetch JoinSet and abort this group.
+		source.resize(160, 90);
+		tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			await_catalog(&mut catalogs, |snapshot| {
+				!snapshot.video.renditions.contains_key("video/120p")
+			}),
+		)
+		.await
+		.expect("the ladder never retired the rung");
+		group.finish().unwrap();
+
+		let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while fetched.read_frame().await?.is_some() {}
+			fetched.finished().await
+		})
+		.await
+		.expect("the accepted fetch never finished");
+		assert!(finished.is_ok(), "retirement aborted the accepted group: {finished:?}");
+
+		transcoder.abort();
+	}
+
 	/// `run` must terminate (not hang in its shutdown drain) when the source
 	/// broadcast goes away, even with a rung task that was never subscribed.
 	#[tokio::test]

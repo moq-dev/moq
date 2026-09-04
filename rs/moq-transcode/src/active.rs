@@ -21,8 +21,9 @@
 //! Frames are the unit rather than wall-clock time, because the two only agree
 //! on the live path. A group fetch encodes seconds of media in milliseconds, and
 //! a subscriber attached to a stalled source holds a pipeline open for minutes
-//! while producing nothing; counting frames is right in both. Media seconds, if
-//! that is the bill, are [`Rendition::frames`] over [`Rendition::framerate`].
+//! while producing nothing; counting frames is right in both. Use
+//! [`Rendition::media_duration`] when the bill is media time: it stays correct
+//! when the source changes framerate under a same-named rung.
 //!
 //! A rendition counts as encoding from its first encoded frame, not from the
 //! moment a consumer asked, for the same reason.
@@ -90,9 +91,8 @@ impl Rendition {
 	/// This is the meter to bill: monotonic, never reset, and counting what was
 	/// produced rather than how long a pipeline stayed alive, so a group fetch
 	/// and a live session are charged the same way. Subtracting two reads bills
-	/// the span between them, and `frames / framerate` is the media seconds that
-	/// reached consumers. Frames that failed to reach the output group are not
-	/// counted.
+	/// the span between them. Use [`media_duration`](Self::media_duration) when the
+	/// rate can change. Frames that failed to reach the output group are not counted.
 	pub fn frames(&self) -> u64 {
 		self.0.counts.lock().frames
 	}
@@ -104,11 +104,22 @@ impl Rendition {
 		self.0.counts.lock().bytes
 	}
 
+	/// How much media time this rendition has encoded, over every pipeline.
+	///
+	/// Unlike dividing [`frames`](Self::frames) by [`framerate`](Self::framerate),
+	/// this remains correct when the source changes framerate mid-stream. A
+	/// pipeline banks its frames at the rate it was opened with, including one
+	/// finishing a group after the ladder has already moved to a new rate.
+	pub fn media_duration(&self) -> std::time::Duration {
+		self.0.counts.lock().media_duration
+	}
+
 	/// Bank encoded output. Called on the writing path, off the cursor's lock.
-	fn produced(&self, frames: u64, bytes: u64) {
+	fn produced(&self, frames: u64, bytes: u64, framerate: u32) {
 		let mut counts = self.0.counts.lock();
 		counts.frames += frames;
 		counts.bytes += bytes;
+		counts.media_duration = counts.media_duration.saturating_add(frame_duration(frames, framerate));
 	}
 
 	/// Adopt a re-resolved geometry, keeping the totals.
@@ -151,6 +162,8 @@ struct Counts {
 	frames: u64,
 	/// Bytes of encoded bitstream written to the output track.
 	bytes: u64,
+	/// Media time encoded at each pipeline's own framerate.
+	media_duration: std::time::Duration,
 }
 
 impl Counts {
@@ -161,8 +174,20 @@ impl Counts {
 			framerate: rung.framerate,
 			frames: 0,
 			bytes: 0,
+			media_duration: std::time::Duration::ZERO,
 		}
 	}
+}
+
+/// Convert a frame count at one fixed rate without floating-point drift.
+fn frame_duration(frames: u64, framerate: u32) -> std::time::Duration {
+	if framerate == 0 {
+		return std::time::Duration::ZERO;
+	}
+	let rate = u64::from(framerate);
+	let seconds = frames / rate;
+	let nanos = ((frames % rate) * 1_000_000_000 / rate) as u32;
+	std::time::Duration::new(seconds, nanos)
 }
 
 /// One rendition's entry in the shared ladder.
@@ -231,6 +256,7 @@ impl Producer {
 		Guard {
 			state: self.state.clone(),
 			rendition,
+			framerate: rung.framerate,
 			producing: AtomicBool::new(false),
 		}
 	}
@@ -261,6 +287,9 @@ impl State {
 pub(crate) struct Guard {
 	state: kio::Producer<State>,
 	rendition: Rendition,
+	/// The rate this pipeline opened with, which may differ from the ladder by
+	/// the time its last group finishes.
+	framerate: u32,
 	/// Whether this pipeline has produced a frame, so it is counted in the
 	/// rendition's refs and has to take itself back out on drop. Atomic rather
 	/// than a `Cell` only so a `&Guard` can cross an `.await` in a spawned task.
@@ -277,7 +306,7 @@ impl Guard {
 		if frames == 0 {
 			return;
 		}
-		self.rendition.produced(frames, bytes);
+		self.rendition.produced(frames, bytes, self.framerate);
 
 		if self.producing.swap(true, Ordering::Relaxed) {
 			return;
@@ -434,7 +463,8 @@ mod tests {
 	/// A source that resizes re-resolves the ladder, and a rung of the same name
 	/// comes back at a new size. The handle a caller is already holding has to
 	/// follow it, or it bills the geometry the rung stopped encoding, while the
-	/// totals it accrued have to survive the move.
+	/// totals it accrued have to survive the move. Media time is banked at each
+	/// pipeline's own rate, including one finishing after the move.
 	#[tokio::test]
 	async fn a_redeclared_rung_follows_the_ladder() {
 		let active = Producer::default();
@@ -443,21 +473,27 @@ mod tests {
 
 		let mut cursor = active.consume();
 		let rendition = cursor.next().await.unwrap().rendition;
-		let guard = active.attach(&before);
-		guard.produced(2, 1_000);
-		drop(guard);
+		let stale = active.attach(&before);
+		stale.produced(30, 1_000);
 
 		let mut after = resolved("video/360p", 360);
 		after.size = moq_video::Size::new(480, 360);
+		after.framerate = 60;
 		active.declare(std::slice::from_ref(&after));
+		let current = active.attach(&after);
+		current.produced(60, 1_000);
+		// The retired pipeline rides its group out at the rate it opened with.
+		stale.produced(30, 1_000);
 
 		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
-		assert_eq!(rendition.frames(), 2, "the resize reset the bill");
+		assert_eq!(rendition.framerate(), 60);
+		assert_eq!(rendition.frames(), 120, "the resize reset the bill");
+		assert_eq!(rendition.media_duration(), std::time::Duration::from_secs(3));
 
-		// A rung task outliving its own retirement still attaches with the
-		// geometry it was serving, which must not drag the ladder backwards.
-		let stale = active.attach(&before);
+		// A rung task outliving its own retirement must not drag the ladder's
+		// current geometry backwards.
 		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
+		drop(current);
 		drop(stale);
 	}
 

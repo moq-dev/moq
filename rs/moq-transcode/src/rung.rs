@@ -122,11 +122,15 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	let dynamic = request.dynamic();
 	let info = hang::container::track_info();
 	let mut producer = request.accept(info);
+	let (finished, mut finishing) = tokio::sync::watch::channel(false);
 
-	let result = tokio::select! {
-		res = live(&rung, &mut producer) => res,
-		res = fetches(&rung, &dynamic) => res,
+	let live = async {
+		let result = live(&rung, &mut producer).await;
+		let _ = finished.send(true);
+		result
 	};
+	let (live, fetches) = tokio::join!(live, fetches(&rung, &dynamic, &mut finishing));
+	let result = live.and(fetches);
 	if result.is_err() {
 		// End the track so subscribers see an error rather than a stall.
 		let _ = producer.abort(moq_net::Error::Cancel);
@@ -331,29 +335,48 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 /// The fetch path: serve requests for specific (past) groups.
 ///
 /// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached: when `serve` cancels this future (the live path ended, or the
-/// output track closed), dropping the set aborts every in-flight fetch, so none
-/// keep a source subscription or an encoder session alive past teardown. A
-/// semaphore bounds how many run at once.
-async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), Error> {
+/// detached. Retirement stops accepting new work and drains groups already
+/// accepted below the track's final sequence. Other teardown aborts them, so no
+/// source subscription or encoder session survives a failed track. A semaphore
+/// bounds how many run at once.
+async fn fetches(
+	rung: &Rung,
+	dynamic: &moq_net::track::Dynamic,
+	finishing: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<(), Error> {
 	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
 	let mut tasks = tokio::task::JoinSet::new();
+	let mut retire = rung.retire.clone();
+	let mut retired = false;
 
 	loop {
 		// Reap finished fetches so the set doesn't grow without bound.
 		while tasks.try_join_next().is_some() {}
 
-		let Ok(request) = dynamic.requested_group().await else {
-			// The output track closed; nothing more to serve.
-			return Ok(());
+		// Take a slot before popping a request, so retirement never strands one in
+		// the handler while all slots are busy.
+		let permit = tokio::select! {
+			biased;
+			() = retire.fired() => {
+				retired = true;
+				break;
+			},
+			_ = finishing.wait_for(|finished| *finished) => break,
+			permit = limit.clone().acquire_owned() => permit.expect("the semaphore stays open"),
 		};
 
-		// Take a slot before spawning the transcode. Under a burst this blocks
-		// here, so further requests queue in the dynamic handler (backpressure)
-		// instead of spawning unbounded pipelines. The semaphore is never closed,
-		// so acquire only fails if we drop it first.
-		let Ok(permit) = limit.clone().acquire_owned().await else {
-			return Ok(());
+		let request = tokio::select! {
+			biased;
+			() = retire.fired() => {
+				retired = true;
+				break;
+			},
+			_ = finishing.wait_for(|finished| *finished) => break,
+			request = dynamic.requested_group() => match request {
+				Ok(request) => request,
+				// The output track closed; nothing more to serve.
+				Err(_) => break,
+			},
 		};
 
 		let rung = rung.clone();
@@ -365,6 +388,22 @@ async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), E
 			}
 		});
 	}
+
+	if retired {
+		// The track may already have declared its final sequence, but groups below
+		// that boundary remain writable. Finish every one the handler accepted, or
+		// its producer stays open and the fetch stalls forever.
+		while let Some(result) = tasks.join_next().await {
+			if let Err(err) = result {
+				tracing::warn!(%err, "transcode fetch task panicked");
+			}
+		}
+	} else {
+		// A closed or failed track has no result left to preserve.
+		tasks.shutdown().await;
+	}
+
+	Ok(())
 }
 
 /// Transcode one specifically requested group, fetching it from the source.

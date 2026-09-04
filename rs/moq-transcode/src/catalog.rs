@@ -66,12 +66,12 @@ pub(crate) fn follow_source(video: &Video, current: &str) -> Result<(String, Vid
 
 /// Whether a rung decoding `old` can keep decoding `new` untouched.
 ///
-/// Decoders are opened from the codec and container and read their geometry out
-/// of the bitstream, so a source that only resized is still the same stream: the
-/// shared decode and every rung that still fits carry on, and only the ladder
-/// moves.
+/// Decoders are opened from the codec, container, and any out-of-band codec
+/// description. They read geometry changes from the bitstream, so a source that
+/// only resized is still the same stream: the shared decode and every rung that
+/// still fits carry on, and only the ladder moves.
 pub(crate) fn same_stream(old: &VideoConfig, new: &VideoConfig) -> bool {
-	old.codec == new.codec && old.container == new.container
+	old.codec == new.codec && old.container == new.container && old.description == new.description
 }
 
 /// The source geometry a ladder can be sized against, if it's known at all.
@@ -345,6 +345,23 @@ mod tests {
 			resolve_rungs(&[Rung::new(360, 600_000)], "video", &config),
 			Err(Error::SourceDimensions(_))
 		));
+	}
+
+	/// An out-of-band parameter-set change changes what the decoder injects ahead
+	/// of every keyframe, even when the codec string and container stay the same.
+	#[test]
+	fn a_new_description_is_a_new_decode_stream() {
+		let mut before = source(1920, 1080, Some(6_000_000));
+		let VideoCodec::H264(h264) = &mut before.codec else {
+			unreachable!()
+		};
+		h264.inline = false;
+		before.description = Some(bytes::Bytes::from_static(b"old avcC"));
+
+		let mut after = before.clone();
+		after.description = Some(bytes::Bytes::from_static(b"new avcC"));
+
+		assert!(!same_stream(&before, &after));
 	}
 
 	/// A rung's entry describes the rung, not the source: the codec string's level and every
