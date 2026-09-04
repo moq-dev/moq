@@ -51,8 +51,11 @@ pub struct Args {
 	#[usage(long, value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Maximum media buffering before skipping a stalled group.
-	#[usage(long = "latency-max", default = "500ms")]
+	/// How stale a media group may get before it is skipped.
+	///
+	/// A staleness budget, not a playout delay: it never holds the picture back, it caps how
+	/// long a late group is waited for. The presentation clock anchors to the speaker.
+	#[usage(long, alias = "latency-max", default = "500ms")]
 	pub max_age: moq_tokio::Duration,
 
 	/// Rendition selection by track name or codec.

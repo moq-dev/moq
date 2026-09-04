@@ -20,7 +20,7 @@ pub struct ImportTarget {
 	pub name: String,
 
 	/// How long relays keep a non-latest group of the published media tracks fetchable
-	/// (`--latency-max`), or `None` for the publisher's own default.
+	/// (`--max-age`), or `None` for the publisher's own default.
 	pub max_age: Option<std::time::Duration>,
 }
 
