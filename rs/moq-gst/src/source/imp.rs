@@ -423,9 +423,10 @@ async fn follow_catalog(
 					// indistinguishable here from one that has simply not been polled yet:
 					// a final snapshot naming a track the publisher does serve arrives this
 					// way, and cancelling on "not live yet" would drop it. Whether a
-					// rendition will ever be served is the publisher's to answer, and a
-					// closing catalog is where it does: a name it never filled is rejected,
-					// which fails that pump's subscribe and ends it here.
+					// rendition will ever be served is the publisher's to answer, and
+					// ending the broadcast is where it does: every name it never served
+					// resolves with an error, which fails that pump's subscribe and ends
+					// it here.
 					None => catalog_closed = true,
 				}
 			}
@@ -643,10 +644,10 @@ impl Pump {
 			state,
 			mut cancel,
 		} = self;
-		// Resolves once the publisher answers, with the track info or with a rejection (which
-		// is what a catalog closing over a name nobody served produces). A publisher that
-		// answers neither leaves this waiting, so racing `cancel` keeps such a pump reapable,
-		// and holding the wait here rather than in `reconcile` keeps it off every other
+		// Resolves once the publisher answers, with the track info or with an error (which is
+		// what ending a broadcast produces for a name nobody served). A publisher that answers
+		// neither leaves this waiting, so racing `cancel` keeps such a pump reapable, and
+		// holding the wait here rather than in `reconcile` keeps it off every other
 		// rendition.
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return,
@@ -1167,13 +1168,12 @@ mod session_tests {
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
-	/// The flip side of the test above: once the catalog is closed, a rendition the publisher
-	/// reserved and never served is finally answerable, because closing the catalog promises the
-	/// announced set is final. Its pump must end on its own so the session terminates when the
-	/// renditions that *did* arrive drain, rather than holding the connection open until the
-	/// element is stopped.
+	/// The flip side of the test above: a rendition the publisher reserved and never served is
+	/// answerable once the publisher ends the broadcast, which resolves every name it never
+	/// filled. That pump must end on its own so the session terminates on the media it was
+	/// serving, rather than holding the connection open until the element is stopped.
 	#[test]
-	fn a_rendition_nobody_served_ends_with_the_catalog() {
+	fn a_rendition_nobody_served_ends_with_the_broadcast() {
 		let _pad_ids = pad_ids();
 		let element = element();
 
@@ -1207,9 +1207,10 @@ mod session_tests {
 			gst::PadProbeReturn::Ok
 		});
 
-		// Close the catalog, which rejects the reserved rendition, then end the served one.
+		// End the served rendition and the broadcast, which answers for the reserved one.
 		catalog.finish().unwrap();
 		video.finish().unwrap();
+		broadcast.finish();
 
 		// No shutdown is sent: the session has to end on the media draining alone.
 		super::RUNTIME

@@ -1574,6 +1574,9 @@ impl TrackWeak {
 	///
 	/// A track whose [`Info`] arrived has a publisher, so it is left alone and this
 	/// returns false; so is one that already carries an abort reason.
+	///
+	/// Closes the state like [`Producer::abort`], so a [`Request`] still held by the
+	/// publisher can't `accept` its way back to life afterwards.
 	pub(crate) fn reject(&self, err: Error) -> bool {
 		let Some(producer) = self.state.produce() else {
 			return false;
@@ -1585,6 +1588,7 @@ impl TrackWeak {
 			return false;
 		}
 		state.abort = Some(err);
+		state.close();
 		true
 	}
 
