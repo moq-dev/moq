@@ -247,11 +247,11 @@ A grant that is only checked at connect time can only stop NEW connections. Revo
 
 So `--auth-api` keeps asking. The relay re-issues each live session's admission request on the endpoint's own `Cache-Control: max-age` cadence, and closes the session once the reply no longer grants what the session holds. There is no flag: an endpoint that can refuse a connection can stop one, or the two would disagree.
 
-- **Still granted**: the reply still authorizes at least the scope the session already has - a `key` that verifies its credential, or the `public` prefixes it was admitted under. The next re-check waits out the new `max-age`.
+- **Still granted**: the reply still authorizes at least the scope the session already has - a `key` that verifies its credential, the `public` prefixes it was admitted under, or (in `proxy` mode) a `grant`. The next re-check waits out the new `max-age`.
 - **Refused** (404, or a reply that no longer grants the session's scope): the session closes immediately.
 - **Unavailable** (network error, 5xx, unparseable body, or a 401/403 rejecting the *relay's own* credential): evidence of nothing about this session. The session keeps serving and the re-check retries with jittered backoff until the outage window passes without a success, then closes. A brief auth outage does not mass-disconnect; a sustained one still fails closed.
 
-The re-check REPLAYS the admission request rather than asking a narrower question, which is what makes one mechanism correct for every credential: a key replaced under an existing `kid` no longer verifies the retained JWT, and a withdrawn `public` block revokes anonymous sessions. `exp` still applies as the outer bound wherever the credential has one. mTLS peers are never revalidated, so a customer-facing decision cannot tear down the relay mesh.
+The re-check REPLAYS the admission request rather than asking a narrower question, which is what makes one mechanism correct in both modes and for every credential: a key replaced under an existing `kid` no longer verifies the retained JWT, a withdrawn `public` block revokes anonymous sessions, and a `proxy` session simply stops being granted. `exp` still applies as the outer bound wherever the credential has one. mTLS peers are never revalidated, so a customer-facing decision cannot tear down the relay mesh.
 
 **`max-age` is the opt-in.** Revalidation is switched on by the endpoint, not by relay config: a reply that names a `max-age` is telling the relay how long its answer is good for, and that is the cadence. A reply with no usable `max-age` - none at all, `no-store`, `no-cache`, or `max-age=0` - has not asked to be re-consulted, so the session is never re-checked and its credential's own `exp` remains the only bound, exactly as before revalidation existed. Nothing is invented on the endpoint's behalf, and an existing deployment that sends no `Cache-Control` is unaffected until it opts in.
 
@@ -270,6 +270,39 @@ Either stale directive grants the outage window, and `stale-if-error` wins when 
 **Budget for twice the `max-age`.** Two things hold the request rate to one per grant rather than one per viewer, and the second costs window. Sessions that would issue an identical request share one in-flight re-check, which merges an audience whose timers fire together. Re-checks also ride the same cached HTTP client as admission, which merges the ones that do not - sessions connect at staggered times, so without it a staggered audience would each dial on its own schedule. The cost is that a re-check may be answered from a cache entry up to one `max-age` old, so worst case is one `max-age` of staleness plus one until the session asks again: `2 x max-age`. Cap what you emit at half the window you are willing to promise.
 
 Note the asymmetry when choosing a long `max-age`: the cadence is set by the reply the relay is already holding, so shortening `max-age` later cannot pull in a re-check that is already scheduled. Whatever TTL you hand a healthy connection is how long an unannounced revocation takes to reach it.
+
+### Letting the endpoint decide (`--auth-api-mode proxy`)
+
+By default (`--auth-api-mode token`) the relay is the verifier: the endpoint hands back a `key` and the relay checks the credential against it.
+
+With `--auth-api-mode proxy` the endpoint is the decider. The relay forwards the connection verbatim - host (the URL authority, or `Host` on HTTP/1.1), path, transport, and the credential as `Authorization: Bearer` - and enforces whatever comes back:
+
+```http
+GET <base>?root=demo&host=live.example.com&transport=quic
+Authorization: Bearer <credential>
+```
+
+```json
+{
+  "alias": "x7k2qp",
+  "tier": "region/sjc",
+  "grant": { "subscribe": ["room"], "publish": ["room/alice"], "exp": 1893456000 }
+}
+```
+
+The relay verifies nothing and holds no keys. Every policy decision - signature checking, scoping, expiry, per-viewer rules, even subdomain routing - belongs to the endpoint, so changing one is a deploy of the endpoint rather than a roll of the fleet. The credential need not be a JWT: it is an opaque string the endpoint alone interprets.
+
+`root` on the grant defaults to the connection path. `exp` (unix seconds) is the outer bound, and one already in the past is refused rather than admitted; an endpoint that omits it is asking for a session that ends only when revalidation says so. Each re-check's `exp` replaces the one before it, so an endpoint can cut a session short or extend a renewed one; in `token` mode the JWT's own `exp` is a ceiling a reply may lower but never raise. A reply with no grant, or one that authorizes nothing, is a refusal - there is no second shape to fall back to, so a `key` or `public` in a proxy-mode reply means nothing.
+
+**Refusing a viewer**: return `404`, an empty grant, or - in `proxy` mode only - `401`/`403`. The relay reads a `401`/`403` as a definitive rejection exactly where it forwarded a credential to be rejected; a `token`-mode request carries none, and neither does an anonymous `proxy` connection, so there the same status can only mean the relay's own identity or a gateway in front of the endpoint and is treated as an outage. Reading it otherwise would disconnect an entire audience over a gateway blip.
+
+`--auth-api-mode proxy` cannot be combined with `--auth-domain`: both decide how a hostname becomes a broadcast root, and proxy mode gives that job to the endpoint. To do that job the `alias` may RESHAPE the path, not just rename its leading segment - a connection to `/` can be aliased to `x7k2qp`, and `/room` to `x7k2qp/room` - so the endpoint can anchor a forwarded host at a root the client never dialed. Grant prefixes stay relative to the connection path, so they follow wherever the alias anchors them. In `token` mode the alias remains a rename of the leading segment and must keep the path's depth: there it resolves a vanity name to a pid, and a reply that reshaped the path would silently relocate the broadcast. `--auth-api-mode` without `--auth-api` is likewise a startup error - a mode with no endpoint to consult decides nothing.
+
+These are separate modes rather than two shapes of one reply, deliberately. Letting one endpoint answer either way per connection puts both paths inside a single request - which cache key applies, whether the credential may be sent, what "still vouched for" means. Choosing once, per relay, keeps each path independently simple.
+
+**The mode is a cost decision.** In `token` mode the request depends only on (`kid`, `root`, `transport`), so an audience sharing a signing key resolves to ONE cached request per relay however many distinct tokens they hold: auth cost tracks broadcasts and keys, not viewers. In `proxy` mode the credential is part of the request, so responses cache per credential and cost tracks concurrent viewers. A tokenless connection still caches per path in either mode. Pick `proxy` for control and simplicity, `token` when audience size would otherwise multiply your auth traffic.
+
+The relay keys its cache on the credential (a SHA-256 of it, so the secret stays out of logs and metrics), so a missing `Vary: Authorization` on the endpoint cannot leak one viewer's grant to another. Send `Vary: Authorization` anyway if anything else caches in front of it. Because that key already separates credentials, the relay's cache is a *private* one in HTTP's sense and stores a credentialed reply on a plain `max-age`; a shared cache would refuse it (RFC 9111 §3.5) unless the endpoint also sent `public`.
 
 ### Authenticating the relay to the auth API
 
