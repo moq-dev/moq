@@ -62,22 +62,26 @@ dependency.
   bind. Config validation refuses `[acme]` with those until they can rotate,
   rather than letting a relay serve an expired certificate; lifting the
   refusal is part of whatever gives them a reload path.
-- **Startup.** With no cached certificate the relay blocks accepting QUIC
-  until the first issuance succeeds; a self-signed placeholder cannot serve
-  browsers, so there is nothing honest to serve meanwhile. The attempt is
-  bounded per the repository's retry rule: capped exponential backoff with
-  jitter inside a startup budget (a few minutes, configurable), after which
-  the relay exits with the last real ACME error, the domain, and the port it
-  expected the challenge on. With a usable cached certificate it starts
-  immediately and renews in the background. Usable means not yet expired:
-  an expired cache serves exactly as badly as none, so it blocks the same
-  way and goes through the same bounded first issuance. A cached
-  certificate whose SANs do not cover every configured domain counts as
-  missing: an operator who adds or replaces a hostname while reusing
-  `acme.dir` gets a fresh issuance, not a wait for the renewal threshold.
-  The directory URL that issued the cached certificate is persisted beside
-  it, and a changed `acme.directory` (staging to production, say) also counts
-  as missing, so a staging certificate is never served as if trusted.
+- **Startup.** With no usable cached certificate, bind `web.http` first and
+  serve only the challenge route while issuance is pending. Reuse that bound
+  listener for the normal router after issuance, so there is no
+  close-and-rebind race. QUIC, HTTPS, the other HTTP routes, health, and the
+  readiness notification stay unavailable until the certificate and key are
+  persisted; a self-signed placeholder cannot serve browsers, so there is
+  nothing honest to serve meanwhile. The attempt is bounded per the
+  repository's retry rule: capped exponential backoff with jitter inside a
+  startup budget (a few minutes, configurable), after which the relay exits
+  with the last real ACME error, the domain, and the port it expected the
+  challenge on. With a usable cached certificate it starts immediately and
+  renews in the background. Usable means not yet expired: an expired cache
+  serves exactly as badly as none, so it blocks the same way and goes through
+  the same bounded first issuance. A cached certificate whose SANs do not
+  cover every configured domain counts as missing: an operator who adds or
+  replaces a hostname while reusing `acme.dir` gets a fresh issuance, not a
+  wait for the renewal threshold. The directory URL that issued the cached
+  certificate is persisted beside it, and a changed `acme.directory` (staging
+  to production, say) also counts as missing, so a staging certificate is
+  never served as if trusted.
 - **Renewal.** A daily jittered check reads the cached certificate's expiry
   with the `x509-parser` already used for peer expiry and renews once a
   third of its lifetime remains, Let's Encrypt's own rule for 90-day
@@ -95,20 +99,25 @@ dependency.
   the nix module expose `acme.dir` under the state directory.
 
 Tests: an in-process ACME test server (or the Pebble container behind a
-feature flag) issues on first run, a restart with a valid cached certificate
-performs no challenge, a cached certificate missing a configured domain or
-issued by a different directory is reissued at startup, an unreachable
-directory fails the first start inside the budget with an actionable error,
-a restart with an expired cached certificate blocks and reissues rather than
-serving it, a transient renewal error retries within the attempt and a
-non-retryable response stops it early,
-a certificate near expiry renews and both the quinn and noq listeners serve
-the new chain through a fresh handshake without restart (the `web.https`
-reload is a separate test), a renewal failure leaves the old certificate
-serving, a reload of a half-written pair keeps the old one, both generated
-keys are mode `0600` after issuance and after renewal, and the config
-rejects `[acme]` alongside explicit paths, without `web.http`, with a
-wildcard domain, or on a backend that cannot reload.
+feature flag) issues on first run while only the HTTP-01 route answers, then
+the same listener serves the normal router without a rebind; a restart with a
+valid cached certificate performs no challenge, a cached certificate missing
+a configured domain or issued by a different directory is reissued at
+startup, an unreachable directory fails the first start inside the budget
+with an actionable error, a restart with an expired cached certificate blocks
+and reissues rather than serving it, a transient renewal error retries within
+the attempt and a non-retryable response stops it early, a certificate near
+expiry renews and both the quinn and noq listeners serve the new chain through
+a fresh handshake without restart (the `web.https` reload is a separate test),
+a renewal failure leaves the old certificate serving, a reload of a
+half-written pair keeps the old one, both generated keys are mode `0600` after
+issuance and after renewal, and the config rejects `[acme]` alongside explicit
+paths, without `web.http`, with a wildcard domain, or on a backend that cannot
+reload.
+
+## Required
+
+- [TLS rotation atomicity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every supported worker must share one reloadable identity before ACME can promise renewal
 
 ## Closes
 
