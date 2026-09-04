@@ -91,6 +91,21 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 }
 
+// Owns the active subscriptions for exactly as long as `Subscriber::run`.
+// The driver future can be dropped at any await, so cleanup cannot depend on
+// reaching a normal return path.
+struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
+
+impl Drop for SubscriptionCleanup {
+	fn drop(&mut self) {
+		// Abort the model producer before receive tasks release their open group
+		// handles. This records session cancellation as the track's terminal state.
+		for (_, entry) in self.0.lock().drain() {
+			let _ = entry.producer.abort(Error::Cancel);
+		}
+	}
+}
+
 impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn new(config: SubscriberConfig<S>) -> Self {
 		// Identity for incoming-hop loop detection. Derived from the local
@@ -140,6 +155,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub async fn run(self, mut tasks: TaskSet) -> Result<(), Error> {
+		let _cleanup = SubscriptionCleanup(self.subscribes.clone());
 		let bw = self.clone();
 		let dg = self.clone();
 		// The watchdog halves (announce/bandwidth/datagrams) only end the session on

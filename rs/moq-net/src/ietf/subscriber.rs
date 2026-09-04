@@ -147,6 +147,17 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await.
+		// Abort remaining model producers before receive tasks release their open
+		// group handles. An ordinary unsubscribe removes its entry before this.
+		for (_, track) in self.subscribes.drain() {
+			let _ = track.producer.abort(Error::Cancel);
+		}
+	}
+}
+
 /// The head of a joined group, delivered on the subscription's fill fetch stream.
 ///
 /// Draft-20's current-group join (section 5.1.6) splits one group across two streams: the
