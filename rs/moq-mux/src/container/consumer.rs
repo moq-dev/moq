@@ -171,6 +171,11 @@ impl<F: Container> Consumer<F> {
 		self
 	}
 
+	/// The effective latency tolerance after clamping to publisher retention.
+	pub fn latency(&self) -> std::time::Duration {
+		self.latency
+	}
+
 	/// A counter that increments each time the consumer reaches a declared discontinuity or
 	/// detects a timeline rewind and drops the reneged buffer.
 	///

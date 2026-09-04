@@ -234,6 +234,15 @@ impl Decoder {
 
 	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
 	pub fn reset(&mut self) -> Result<(), Error> {
+		self.reset_prediction()?;
+		if let Backend::Opus(opus) = &mut self.backend {
+			opus.pre_skip_remaining = self.delay;
+		}
+		Ok(())
+	}
+
+	/// Reset codec prediction after packet loss without reapplying stream startup delay.
+	pub(super) fn reset_prediction(&mut self) -> Result<(), Error> {
 		match &mut self.backend {
 			Backend::Opus(opus) => {
 				// SAFETY: `inner` owns a live decoder and OPUS_RESET_STATE takes no arguments.
@@ -241,7 +250,6 @@ impl Decoder {
 				if rc != OPUS_OK {
 					return Err(crate::opus::error(rc, "OPUS_RESET_STATE"));
 				}
-				opus.pre_skip_remaining = self.delay;
 				opus.in_dtx = false;
 			}
 			Backend::Pcm { .. } => {}
@@ -251,12 +259,7 @@ impl Decoder {
 		Ok(())
 	}
 
-	/// Codec delay trimmed from the beginning of a fresh decoder, in native-rate frames.
-	pub(super) fn delay(&self) -> usize {
-		self.delay
-	}
-
-	/// How much of [`delay`](Self::delay) is still to be trimmed, in native-rate frames.
+	/// How much startup delay is still to be trimmed, in native-rate frames.
 	///
 	/// Trimmed samples are media the packet covered even though nothing came out of
 	/// it, so a caller tracking where a packet ends has to add back whatever this

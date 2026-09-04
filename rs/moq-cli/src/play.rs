@@ -395,7 +395,7 @@ async fn play_audio(
 	// decoder's latency budget says: anything longer is what that budget chose to
 	// skip, so playing it as silence would hand back the delay the skip avoided.
 	// Past it the sink skips the hole and the clock re-anchors, as it does today.
-	let fill_max = (consumer.config().latency_max.unwrap_or_default().as_secs_f64() * sample_rate as f64) as u64;
+	let fill_max = (consumer.latency_max().as_secs_f64() * sample_rate as f64) as u64;
 	let silence = vec![0u8; chunk];
 
 	let mut timeline = AudioTimeline::default();

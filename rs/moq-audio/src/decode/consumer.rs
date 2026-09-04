@@ -40,6 +40,8 @@ pub struct Consumer {
 	/// Timestamp of the first encoded packet in this decoder epoch, used to
 	/// interpret codec delay and a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
+	/// Codec delay trimmed since the current decoder epoch began.
+	delay_trimmed: usize,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
 	frames_decoded: usize,
 	/// Logical endpoint carried by an empty legacy frame before terminal packets.
@@ -108,6 +110,7 @@ impl Consumer {
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
 			epoch: None,
+			delay_trimmed: 0,
 			frames_decoded: 0,
 			end: None,
 			terminal_start: None,
@@ -118,6 +121,11 @@ impl Consumer {
 	/// The config this consumer was built with.
 	pub fn config(&self) -> &Config {
 		&self.config
+	}
+
+	/// The effective latency budget after clamping to the publisher's retention window.
+	pub fn latency_max(&self) -> std::time::Duration {
+		self.track.latency()
 	}
 
 	/// Sample rate samples are actually delivered at, which is
@@ -187,12 +195,13 @@ impl Consumer {
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
 			let trimmed = delay - self.decoder.delay_remaining();
+			self.delay_trimmed += trimmed;
 			let activity = decoded.activity;
 			let mut decoded = decoded.samples;
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
-					.get_or_insert(rewind(mux_frame.timestamp, self.decoder.delay(), rate)?.max(epoch));
+					.get_or_insert(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch));
 				let total = frames_between(terminal_start, end, rate)?;
 				let remaining = total.saturating_sub(self.frames_decoded);
 				decoded.truncate(remaining.saturating_mul(self.decoder.channel_count() as usize));
@@ -205,8 +214,7 @@ impl Consumer {
 				// The codec delay is padding before the epoch, not a hole after the
 				// first short frame. Keep later output contiguous by moving it back over
 				// everything trimmed since this decoder epoch began.
-				let trimmed = self.decoder.delay() - self.decoder.delay_remaining();
-				rewind(mux_frame.timestamp, trimmed, rate)?.max(epoch)
+				rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch)
 			};
 			if self.end.is_some() {
 				self.frames_decoded += frames;
@@ -283,13 +291,14 @@ impl Consumer {
 		self.spans.clear();
 		self.trailing = Activity::Active;
 		self.epoch = None;
+		self.delay_trimmed = 0;
 		self.frames_decoded = 0;
 		self.end = None;
 		self.terminal_start = None;
 		Ok(())
 	}
 
-	/// Reset every stateful decode stage at a hole, returning whatever the
+	/// Reset codec prediction and resampling state at a hole, returning whatever the
 	/// resampler was still holding from before it.
 	///
 	/// Those samples arrived before the hole and belong before it, so they come
@@ -298,7 +307,7 @@ impl Consumer {
 	/// the next packet's output stamp from the packet itself: nothing is buffered
 	/// to reach back over.
 	fn gap(&mut self) -> Result<Option<Frame>, Error> {
-		self.decoder.reset()?;
+		self.decoder.reset_prediction()?;
 
 		let drained = match (self.resampler.as_mut(), self.tail) {
 			(Some(resampler), Some(tail)) => {
@@ -324,6 +333,7 @@ impl Consumer {
 		self.spans.clear();
 		self.trailing = Activity::Active;
 		self.epoch = None;
+		self.delay_trimmed = 0;
 		Ok(frame)
 	}
 
@@ -844,6 +854,7 @@ mod tests {
 		for timestamp in [
 			Timestamp::from_micros(0).unwrap(),
 			Timestamp::from_micros(22_500).unwrap(),
+			Timestamp::from_micros(42_500).unwrap(),
 		] {
 			producer
 				.write(moq_mux::container::Frame {
@@ -863,11 +874,41 @@ mod tests {
 		let frames = first.data.len() / size_of::<f32>();
 		assert!(frames < 960, "the pre-skip should be trimmed, got {frames} frames");
 
-		// The hole is real, so the decoder starts over: it trims its pre-skip again,
-		// and the audio is stamped where the packet says rather than 2.5 ms early.
+		// The hole is real, so codec prediction starts over but stream-level pre-skip
+		// does not. The audio is stamped where the packet says rather than 2.5 ms early.
 		let second = consumer.read().await.unwrap().expect("decoded frame");
 		assert_eq!(second.timestamp.as_micros(), 22_500);
-		assert_eq!(second.data.len(), first.data.len(), "the decoder was not reset");
+		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");
+
+		let third = consumer.read().await.unwrap().expect("decoded frame after gap");
+		let second_frames = second.data.len() / size_of::<f32>();
+		assert_eq!(
+			third.timestamp,
+			advance(second.timestamp, second_frames, 48_000).unwrap()
+		);
+	}
+
+	#[tokio::test]
+	async fn latency_max_is_clamped_to_publisher_retention() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let info = hang::container::track_info().with_latency_max(std::time::Duration::from_millis(100));
+		let _track = broadcast.create_track("audio", info).unwrap();
+		let subscriber = broadcast.consume();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+
+		let consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				latency_max: Some(std::time::Duration::from_millis(500)),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(consumer.latency_max(), std::time::Duration::from_millis(100));
 	}
 
 	/// Opus pre-skip is padding before the decoded epoch, not missing media after
