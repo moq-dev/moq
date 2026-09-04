@@ -64,5 +64,6 @@ with the current dev tree before starting.
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - Make 2.5 ms Opus frame durations work across bindings
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
 - [#2933](/quest/m1/2933-moq-ffi-moqroute-round-trip-erases-a-routes-cold-cost.md) - moq-ffi: MoqRoute round-trip erases a route's cold cost
+- [#3049](/quest/m1/3049-moq-net-outbound-hop-path-construction-is-never.md) - moq-net: validate a hop chain where it is emitted, not only where it is parsed
 - [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - moq-net: ban Hop ID 0 from hop chains
 - [#2248](/quest/m1/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
