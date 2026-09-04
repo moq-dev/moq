@@ -2,6 +2,7 @@
 //! demand.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -17,6 +18,14 @@ use crate::Result;
 /// Fallback advertised bitrates when the catalog doesn't carry one.
 const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
+
+/// The fallback advertised bitrate for a rendition of this kind.
+fn default_bandwidth(kind: Kind) -> u64 {
+	match kind {
+		Kind::Video => DEFAULT_VIDEO_BITRATE,
+		Kind::Audio => DEFAULT_AUDIO_BITRATE,
+	}
+}
 
 /// Upper bound on the groups fetched for one segment, so a corrupt timeline can't turn one
 /// HTTP request into an endless fetch loop.
@@ -57,10 +66,40 @@ impl std::str::FromStr for Kind {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+///
+/// Normalized on the way in, so equality answers "decodes and muxes the same" rather than "is
+/// byte-identical": see [`normalize_video`] / [`normalize_audio`].
 #[derive(PartialEq)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
+}
+
+/// Clear the video fields that don't change how the rendition decodes or is muxed, so a config
+/// the publisher only re-measured or re-labelled compares equal to the one already being served.
+///
+/// A denylist rather than an allowlist on purpose: a field the catalog gains later counts as
+/// decode-relevant until someone decides otherwise, so the failure mode is a needless rebuild
+/// rather than serving an init segment that no longer describes the media.
+fn normalize_video(config: &VideoConfig) -> VideoConfig {
+	let mut config = config.clone();
+	config.bitrate = None;
+	config.jitter = None;
+	config.label = None;
+	config.stalled = None;
+	// The muxer ignores a non-finite framerate, and NaN never equals itself, so a catalog
+	// carrying one would otherwise look different from itself on every republish.
+	config.framerate = config.framerate.filter(|fps| fps.is_finite());
+	config
+}
+
+/// The audio counterpart of [`normalize_video`].
+fn normalize_audio(config: &AudioConfig) -> AudioConfig {
+	let mut config = config.clone();
+	config.bitrate = None;
+	config.jitter = None;
+	config.label = None;
+	config
 }
 
 /// A single HLS rendition: master-playlist metadata, its view of the broadcast timeline (which
@@ -70,8 +109,9 @@ pub struct Rendition {
 	pub name: String,
 	/// Whether this rendition is video or audio.
 	pub kind: Kind,
-	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute.
-	pub bandwidth: u64,
+	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute; read through
+	/// [`bandwidth`](Self::bandwidth), refreshed in place by [`refresh`](Self::refresh).
+	bandwidth: AtomicU64,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -94,12 +134,34 @@ pub struct Rendition {
 }
 
 impl Rendition {
+	/// Whether `config` describes the same media this rendition is already serving, i.e. whether
+	/// it decodes and muxes identically. Fields the publisher revises without touching the media
+	/// (its bitrate and jitter estimates, a label) are ignored here and picked up by
+	/// [`refresh`](Self::refresh) instead.
 	pub(crate) fn matches_video(&self, config: &VideoConfig) -> bool {
-		self.config == Config::Video(config.clone())
+		self.config == Config::Video(normalize_video(config))
 	}
 
+	/// The audio counterpart of [`matches_video`](Self::matches_video).
 	pub(crate) fn matches_audio(&self, config: &AudioConfig) -> bool {
-		self.config == Config::Audio(config.clone())
+		self.config == Config::Audio(normalize_audio(config))
+	}
+
+	/// The advertised bitrate in bits per second, for the master playlist `BANDWIDTH` attribute
+	/// and the DASH `bandwidth`. Falls back to a per-kind default when the catalog carries none.
+	pub fn bandwidth(&self) -> u64 {
+		self.bandwidth.load(Ordering::Relaxed)
+	}
+
+	/// Take the advertised bitrate from a catalog update that
+	/// [`matches`](Self::matches_video) this rendition.
+	///
+	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
+	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
+	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute.
+	pub(crate) fn refresh(&self, bitrate: Option<u64>) {
+		self.bandwidth
+			.store(bitrate.unwrap_or(default_bandwidth(self.kind)), Ordering::Relaxed);
 	}
 
 	/// Build a video rendition over the broadcast's timeline `section`.
@@ -107,11 +169,11 @@ impl Rendition {
 		Self {
 			name,
 			kind: Kind::Video,
-			bandwidth: config.bitrate.unwrap_or(DEFAULT_VIDEO_BITRATE),
+			bandwidth: AtomicU64::new(config.bitrate.unwrap_or(DEFAULT_VIDEO_BITRATE)),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
-			config: Config::Video(config.clone()),
+			config: Config::Video(normalize_video(config)),
 			section,
 			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
 			source: upstream.source.clone(),
@@ -125,11 +187,11 @@ impl Rendition {
 		Self {
 			name,
 			kind: Kind::Audio,
-			bandwidth: config.bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE),
+			bandwidth: AtomicU64::new(config.bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE)),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
-			config: Config::Audio(config.clone()),
+			config: Config::Audio(normalize_audio(config)),
 			section,
 			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
 			source: upstream.source.clone(),
@@ -296,7 +358,7 @@ impl Rendition {
 		mpd::Representation {
 			name: self.name.clone(),
 			kind: self.kind,
-			bandwidth: self.bandwidth,
+			bandwidth: self.bandwidth(),
 			codec: self.codec.clone(),
 			width: self.width,
 			height: self.height,
