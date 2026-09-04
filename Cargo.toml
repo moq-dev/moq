@@ -130,9 +130,9 @@ moq-net = { version = "0.2.18", path = "rs/moq-net" }
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.0.4", path = "rs/moq-nvenc" }
-moq-sock = { version = "0.0.1", path = "rs/moq-sock" }
 moq-rtc = { version = "0.2.8", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.8", path = "rs/moq-rtmp" }
+moq-sock = { version = "0.0.1", path = "rs/moq-sock" }
 moq-srt = { version = "0.2.8", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.8", path = "rs/moq-stats" }
 moq-token = { version = "0.7.3", path = "rs/moq-token" }
