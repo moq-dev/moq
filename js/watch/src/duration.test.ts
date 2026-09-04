@@ -46,4 +46,11 @@ describe("formatDuration", () => {
 		expect(parseDuration(formatDuration(ms(30_000)))).toBe(ms(30_000));
 		expect(parseDuration(formatDuration(ms(0)))).toBe(ms(0));
 	});
+
+	it("round-trips a fraction, since the reflected value is parsed straight back", () => {
+		// Rounding here would rewrite the caller's value: 1.5 becoming 2, and 0.4 becoming 0,
+		// which also switches buffered playback off.
+		expect(parseDuration(formatDuration(ms(1.5)))).toBe(ms(1.5));
+		expect(parseDuration(formatDuration(ms(0.4)))).toBe(ms(0.4));
+	});
 });

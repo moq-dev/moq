@@ -25,8 +25,12 @@ export function parseDuration(value: string): Time.Milli | undefined {
 /**
  * Render a duration back out as an attribute value, in the canonical unit.
  *
+ * Not rounded: the reflected attribute is parsed straight back into the signal, so rounding here
+ * would rewrite the value behind the caller (`1.5ms` becoming `2ms`, and `0.4ms` becoming zero,
+ * which also switches buffered playback off).
+ *
  * @internal
  */
 export function formatDuration(value: Time.Milli): string {
-	return `${Math.round(value)}ms`;
+	return `${value}ms`;
 }

@@ -26,6 +26,11 @@ const OBSERVED = [
 	"reload",
 	"delay",
 	"buffer",
+	// Released spellings, kept parsing but off the documented surface. `latency-max` is absent
+	// deliberately: its old ceiling included the floor, so translating it faithfully would mean
+	// tracking the resolved delay reactively, which is the coupling `buffer` exists to remove.
+	"latency",
+	"latency-min",
 	"jitter",
 	"catalog-format",
 	"captions",
@@ -66,11 +71,13 @@ function parseBuffer(value: string | null): Time.Milli {
 	return Moq.Time.Milli.zero;
 }
 
-// The pre-`delay` spelling, in bare milliseconds. Kept unitless so pages still on it behave exactly
-// as they did; `delay` is the current surface and does require a unit.
-function parseJitter(value: string | null): Delay {
-	if (!value || value.trim() === "real-time") return "auto";
-	const parsed = Number.parseFloat(value);
+// The released spellings of `delay`, in bare milliseconds. Kept unitless so pages still on them
+// behave exactly as they did; `delay` is the current surface and does require a unit.
+function parseLegacyDelay(value: string | null): Delay {
+	const trimmed = value?.trim();
+	if (!trimmed || trimmed === "real-time") return "auto";
+	if (trimmed === "instant") return "instant";
+	const parsed = Number.parseFloat(trimmed);
 	return Moq.Time.Milli(Number.isFinite(parsed) ? parsed : 100);
 }
 
@@ -464,8 +471,8 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.delay.set(parseDelay(newValue));
 		} else if (name === "buffer") {
 			this.controls.buffer.set(parseBuffer(newValue));
-		} else if (name === "jitter") {
-			this.controls.delay.set(parseJitter(newValue));
+		} else if (name === "latency" || name === "latency-min" || name === "jitter") {
+			this.controls.delay.set(parseLegacyDelay(newValue));
 		} else if (name === "catalog-format") {
 			this.#catalogFormat.set(parseCatalogFormat(newValue));
 		} else if (name === "captions") {
