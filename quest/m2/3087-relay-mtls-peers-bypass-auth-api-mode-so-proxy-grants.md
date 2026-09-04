@@ -46,7 +46,8 @@ same path are indistinguishable at the endpoint.
 - Tests: a proxy-mode mTLS peer refused by an empty reply, scoped by a narrow
   grant, and admitted unrestricted in token mode; `host` present on the proxy
   request; `mtls=true` unchanged with `mtls_name` carrying the SAN name over
-  both QUIC and WebSocket, and absent for a nameless cert.
+  both QUIC and WebSocket, the CN for a certificate with no DNS SAN, and
+  absent for a nameless cert.
   Update the mTLS and auth API sections of `doc/bin/relay/auth.md`.
 
 ## Required

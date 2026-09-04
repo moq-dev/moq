@@ -6,7 +6,8 @@ The JavaScript client migrates on GOAWAY the way the Rust client already
 does: it dials the replacement while the old session keeps serving, follows a
 redirect URI under the same guard, and keeps the app-visible handle and its
 origins across the swap. The Rust client's fleet-drain path (an empty-URI
-GOAWAY redialed through a fresh DNS resolve) is pinned by a regression test.
+GOAWAY redialed through a fresh DNS resolve) gains the regression test it
+lacks today.
 
 ## Plan
 
@@ -36,16 +37,18 @@ guard stays [its own quest](/quest/m1/2624-moq-native-goaway-redirect-guard-clas
 
 ### JavaScript is greenfield
 
-On `dev`, `js/net` logs the lite GOAWAY URI, logs the IETF draft-17+ URI, and
-does not decode the body at all on the draft-14 to -16 shared control stream.
-`Reload` reconnects only on `closed`, tears the old connection down in its
-effect cleanup, and `Connection.Shared` (`js/net/src/connection/pool.ts`)
-pools by URL href.
+On `dev`, `js/net` logs the lite GOAWAY URI and keeps that session open,
+logs the IETF draft-17+ URI and then closes the session when its control
+loop ends, and on the draft-14 to -16 shared control stream reads the message
+body but returns without decoding it. Nothing migrates: `Reload` reconnects
+only after `closed` fires, through its backoff, tears the old connection
+down in its effect cleanup, and `Connection.Shared`
+(`js/net/src/connection/pool.ts`) pools by URL href.
 
 - Surface the peer's GOAWAY on `Established` as a drain signal carrying the
   resolved URI and the timeout, decoded on every wire the client speaks,
-  including the draft-14 to -16 adapter route that currently returns before
-  reading the body.
+  including the draft-14 to -16 adapter route that currently returns without
+  decoding the body it has already read.
 - `Reload` mirrors `Draining`: on GOAWAY it dials the target immediately,
   swaps the origin wiring (`forwardAnnounced`, `publish`, `subscribe`) once
   the replacement is established, and leaves the old session to close on its

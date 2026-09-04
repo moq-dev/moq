@@ -13,8 +13,9 @@ the new software boot.
 
 GOAWAY only reaches MoQ sessions, and only the Rust client acts on it today:
 `moq_tokio::Connection` migrates, while `js/net` decodes and logs the message
-without closing or migrating the session, and the wire message is
-lite04+/IETF only besides. So the stop deadline is the
+and at most closes the session afterwards (the IETF path does, the lite path
+does not), leaving any reconnect to the ordinary close-triggered backoff
+rather than migrating. The wire message is lite04+/IETF only besides. So the stop deadline is the
 real backstop - for pre-lite04 versions, for client SDKs deployed before
 client-goaway ships, and for in-process ingest gateways (RTMP/SRT/WHIP/WHEP),
 which have no GOAWAY equivalent at all: their grace is the DNS-drain window
@@ -35,7 +36,7 @@ enough phase/session state to prove which bound ended a drain.
 
 **client-goaway.** The JS reconnector migrates like the Rust one, preserving
 the app-visible session while resolving DNS again before dialing, and the Rust
-path is pinned by a test. This is a
+path gains the regression test it lacks. This is a
 scale-down prerequisite, not merely a deploy improvement. RTMP/SRT/WHIP/WHEP
 cannot receive MoQ GOAWAY, so their contract remains DNS withdrawal followed
 by the stop deadline and encoder reconnect.
