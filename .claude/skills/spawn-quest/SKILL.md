@@ -8,9 +8,20 @@ Before you begin, read `quest/AGENTS.md` completely.
 Resolve the first argument to a questline directory under `quest/`, defaulting
 to `quest/` itself: `m0` means `quest/m0`.
 
+`git fetch origin` **before** looking at claims. The remote branch is the
+coordination mechanism, so stale remote-tracking refs mean offering a quest
+another agent already claimed, and the spawned agent finds out only when its
+push is rejected.
+
 Read every quest in the scope, not just the summaries in each `README.md`. Drop
-the ones a recent branch or open PR already claims, and say when a branch is
-stale (old, no open PR) so it can be reused or deleted.
+the ones a recent branch or open PR already claims.
+
+Resolve a stale branch (old, no open PR) before keeping its quest in the start
+pool, rather than only mentioning it. Left in place it makes the agent's claim
+push fail as non-fast-forward, which the agent then reports as a lost race that
+never happened. Inspect its tip: reuse the work, or delete the ref only when it
+is confirmed stale, is not checked out, and has no unmerged commits. Otherwise
+treat the quest as claimed and take it out of the pool.
 
 Put every quest to the user in priority order - the depth-first walk of the
 scope's `Quests` lists - with a recommendation and the one fact behind it.
@@ -27,8 +38,7 @@ unblock it.
 
 ## Spawning
 
-`git fetch origin` once, then settle a base branch **per quest** and pass it
-to that quest's agent. Apply the Branch Targeting rules in `CLAUDE.md`: `dev`
+Settle a base branch **per quest** and pass it to that quest's agent. Apply the Branch Targeting rules in `CLAUDE.md`: `dev`
 only for a semver break in a published API, `main` for everything else. One
 scope mixes both, so a single base for the whole wave puts some PR on the
 wrong branch. Never let an agent derive its own base: an agent branching from
