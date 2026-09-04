@@ -241,100 +241,109 @@ impl Media {
 				}
 				// Followed for as long as it lasts, not just until something is
 				// playing: a publisher retires renditions (a transcode ladder
-				// resizing under a source that changed resolution), and the
-				// snapshot naming the replacement arrives after the track it
-				// replaces has already ended.
+				// resizing under a source that changed resolution) by naming the
+				// replacement in a snapshot and only then finishing the track it
+				// replaces, so the snapshot that matters lands while both halves
+				// are still running.
 				snapshot = catalogs.next(), if playback.following() => {
-					let Some(snapshot) = snapshot.context("failed to read the catalog")? else {
-						anyhow::ensure!(playback.played, "the catalog contains no playable audio or video renditions");
-						playback.catalog_ended = true;
-						continue;
-					};
-
-					// Why nothing started, so a catalog this build can't play reports the
-					// reason instead of leaving a blank window up forever. The decoders are
-					// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
-					// this covers gaps the codec flags can't be validated against up front.
-					let mut rejected = Vec::new();
-
-					if !playback.playing(Kind::Video) {
-						for (name, config) in snapshot.video.renditions {
-							// A rendition pointing at a broadcast we can't reach is that
-							// rendition's problem, not the catalog's: fall through to the
-							// next one like an unsupported codec does.
-							let rendition = match source.resolve(config.broadcast.as_ref()).await {
-								Ok(rendition) => rendition,
-								Err(err) => {
-									tracing::warn!(track = name, %err, "cannot resolve video rendition");
-									rejected.push(format!("video `{name}`: {err}"));
-									continue;
-								}
-							};
-							let mut decode = moq_video::decode::Config::new();
-							decode.latency_max = Some(self.args.latency_max);
-							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
-								Ok(consumer) => {
-									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
-									let video = self.video.clone();
-									let drained = self.drained.clone();
-									let proxy = self.proxy.clone();
-									tasks.spawn(async move {
-										(Kind::Video, play_video(consumer, video, drained, proxy).await)
-									});
-									playback.started(Kind::Video);
-									break;
-								}
-								Err(err) => {
-									tracing::warn!(track = name, %err, "cannot play video rendition");
-									rejected.push(format!("video `{name}`: {err}"));
-								}
-							}
+					match snapshot.context("failed to read the catalog")? {
+						Some(snapshot) => playback.received(snapshot),
+						None => {
+							anyhow::ensure!(playback.played, "the catalog contains no playable audio or video renditions");
+							playback.catalog_ended = true;
 						}
 					}
-
-					if !playback.playing(Kind::Audio) {
-						for (name, config) in snapshot.audio.renditions {
-							let rendition = match source.resolve(config.broadcast.as_ref()).await {
-								Ok(rendition) => rendition,
-								Err(err) => {
-									tracing::warn!(track = name, %err, "cannot resolve audio rendition");
-									rejected.push(format!("audio `{name}`: {err}"));
-									continue;
-								}
-							};
-							let mut decode = moq_audio::decode::Config::new();
-							decode.latency_max = Some(self.args.latency_max);
-							// The sink and the frame-duration math below both assume f32,
-							// so ask for it rather than inheriting the decoder default.
-							decode.format = moq_audio::Format::F32;
-							match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
-								Ok(consumer) => {
-									tracing::info!(track = name, "playing audio rendition");
-									let clock = self.audio_clock.clone();
-									let proxy = self.proxy.clone();
-									tasks.spawn(async move {
-										(Kind::Audio, play_audio(consumer, clock, proxy).await)
-									});
-									playback.started(Kind::Audio);
-									break;
-								}
-								Err(err) => {
-									tracing::warn!(track = name, %err, "cannot play audio rendition");
-									rejected.push(format!("audio `{name}`: {err}"));
-								}
-							}
-						}
-					}
-
-					// Renditions on offer and not one of them playable, with nothing
-					// already running to fall back on.
-					anyhow::ensure!(
-						!tasks.is_empty() || rejected.is_empty(),
-						"no playable rendition in the catalog: {}",
-						rejected.join("; ")
-					);
 				}
 			}
+
+			// Start whatever isn't playing from the newest snapshot, which is not
+			// necessarily the one that just arrived: the half that a retirement
+			// stopped reads the snapshot naming its replacement afterwards.
+			let Some(snapshot) = playback.pending().cloned() else {
+				continue;
+			};
+
+			// Why nothing started, so a catalog this build can't play reports the
+			// reason instead of leaving a blank window up forever. The decoders are
+			// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
+			// this covers gaps the codec flags can't be validated against up front.
+			let mut rejected = Vec::new();
+
+			if playback.wants(Kind::Video) {
+				playback.read(Kind::Video);
+				for (name, config) in snapshot.video.renditions {
+					// A rendition pointing at a broadcast we can't reach is that
+					// rendition's problem, not the catalog's: fall through to the
+					// next one like an unsupported codec does.
+					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+						Ok(rendition) => rendition,
+						Err(err) => {
+							tracing::warn!(track = name, %err, "cannot resolve video rendition");
+							rejected.push(format!("video `{name}`: {err}"));
+							continue;
+						}
+					};
+					let mut decode = moq_video::decode::Config::new();
+					decode.latency_max = Some(self.args.latency_max);
+					match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
+						Ok(consumer) => {
+							tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
+							let video = self.video.clone();
+							let drained = self.drained.clone();
+							let proxy = self.proxy.clone();
+							tasks
+								.spawn(async move { (Kind::Video, play_video(consumer, video, drained, proxy).await) });
+							playback.started(Kind::Video);
+							break;
+						}
+						Err(err) => {
+							tracing::warn!(track = name, %err, "cannot play video rendition");
+							rejected.push(format!("video `{name}`: {err}"));
+						}
+					}
+				}
+			}
+
+			if playback.wants(Kind::Audio) {
+				playback.read(Kind::Audio);
+				for (name, config) in snapshot.audio.renditions {
+					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+						Ok(rendition) => rendition,
+						Err(err) => {
+							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
+							rejected.push(format!("audio `{name}`: {err}"));
+							continue;
+						}
+					};
+					let mut decode = moq_audio::decode::Config::new();
+					decode.latency_max = Some(self.args.latency_max);
+					// The sink and the frame-duration math below both assume f32,
+					// so ask for it rather than inheriting the decoder default.
+					decode.format = moq_audio::Format::F32;
+					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
+						Ok(consumer) => {
+							tracing::info!(track = name, "playing audio rendition");
+							let clock = self.audio_clock.clone();
+							let proxy = self.proxy.clone();
+							tasks.spawn(async move { (Kind::Audio, play_audio(consumer, clock, proxy).await) });
+							playback.started(Kind::Audio);
+							break;
+						}
+						Err(err) => {
+							tracing::warn!(track = name, %err, "cannot play audio rendition");
+							rejected.push(format!("audio `{name}`: {err}"));
+						}
+					}
+				}
+			}
+
+			// Renditions on offer and not one of them playable, with nothing
+			// already running to fall back on.
+			anyhow::ensure!(
+				!tasks.is_empty() || rejected.is_empty(),
+				"no playable rendition in the catalog: {}",
+				rejected.join("; ")
+			);
 		}
 	}
 }
@@ -346,18 +355,37 @@ enum Kind {
 	Audio,
 }
 
+/// One half of the pipeline: whether it is playing, and which catalog snapshot
+/// it last picked a rendition from.
+#[derive(Default)]
+struct Half {
+	playing: bool,
+	/// The snapshot this half last read. A half reads a snapshot once, so a
+	/// track that ends with nothing newer on offer stays stopped rather than
+	/// resubscribing to the rendition it just finished, and doing it again every
+	/// time that resubscription ends.
+	read: Option<u64>,
+}
+
 /// What is playing, and whether anything else still can.
 ///
 /// A track ending is not the end of playback. Audio and video end
 /// independently, and either can end while the broadcast plays on: a publisher
 /// retires a rendition (a transcode ladder resizing under a source that changed
-/// resolution) by finishing its track, and names the replacement in a later
-/// catalog snapshot. So a track that ends re-arms selection for its own half,
-/// and playback stops only once the catalog itself is over.
+/// resolution) by naming the replacement in a catalog snapshot and only then
+/// finishing the retired track. That snapshot therefore lands while the doomed
+/// track is still playing, so it is held onto and read again once the track
+/// ends. Playback stops only once the catalog itself is over.
 #[derive(Default)]
 struct Playback {
-	video: bool,
-	audio: bool,
+	video: Half,
+	audio: Half,
+	/// The newest snapshot, held until every half has read it.
+	latest: Option<catalog::hang::Catalog>,
+	/// How many snapshots have arrived. A half records this rather than the
+	/// catalog itself, so "newer than the one I read" costs a comparison and
+	/// survives intermediate snapshots being dropped.
+	snapshots: u64,
 	/// Whether anything ever played, so a catalog with nothing playable in it
 	/// reports why rather than exiting as a success.
 	played: bool,
@@ -368,28 +396,56 @@ struct Playback {
 }
 
 impl Playback {
-	fn playing(&self, kind: Kind) -> bool {
+	fn half(&self, kind: Kind) -> &Half {
 		match kind {
-			Kind::Video => self.video,
-			Kind::Audio => self.audio,
+			Kind::Video => &self.video,
+			Kind::Audio => &self.audio,
 		}
+	}
+
+	fn half_mut(&mut self, kind: Kind) -> &mut Half {
+		match kind {
+			Kind::Video => &mut self.video,
+			Kind::Audio => &mut self.audio,
+		}
+	}
+
+	/// Hold onto a snapshot, which may not be read until a track ends.
+	fn received(&mut self, snapshot: catalog::hang::Catalog) {
+		self.snapshots += 1;
+		self.latest = Some(snapshot);
 	}
 
 	fn started(&mut self, kind: Kind) {
 		self.played = true;
-		match kind {
-			Kind::Video => self.video = true,
-			Kind::Audio => self.audio = true,
-		}
+		self.half_mut(kind).playing = true;
 	}
 
 	/// Record a task ending, re-arming selection for that half.
 	fn ended(&mut self, kind: Option<Kind>) {
-		match kind {
-			Some(Kind::Video) => self.video = false,
-			Some(Kind::Audio) => self.audio = false,
-			None => {}
+		if let Some(kind) = kind {
+			self.half_mut(kind).playing = false;
 		}
+	}
+
+	/// Whether this half needs a rendition and hasn't already looked for one in
+	/// the snapshot on hand.
+	fn wants(&self, kind: Kind) -> bool {
+		let half = self.half(kind);
+		!half.playing && half.read != Some(self.snapshots)
+	}
+
+	/// Record that this half read the snapshot on hand, whether or not it found
+	/// anything playable in it.
+	fn read(&mut self, kind: Kind) {
+		let snapshots = self.snapshots;
+		self.half_mut(kind).read = Some(snapshots);
+	}
+
+	/// The snapshot to pick renditions from, if either half still needs one.
+	fn pending(&self) -> Option<&catalog::hang::Catalog> {
+		let snapshot = self.latest.as_ref()?;
+		(self.wants(Kind::Video) || self.wants(Kind::Audio)).then_some(snapshot)
 	}
 
 	/// Whether the catalog is still worth reading.
@@ -403,7 +459,7 @@ impl Playback {
 
 	/// True once nothing is playing and nothing more can start.
 	fn done(&self) -> bool {
-		self.catalog_ended && !self.video && !self.audio
+		self.catalog_ended && !self.video.playing && !self.audio.playing
 	}
 }
 
@@ -1135,33 +1191,56 @@ mod tests {
 	}
 
 	/// A publisher retiring a rendition (a transcode ladder resizing under a
-	/// source that changed resolution) finishes that track and names the
-	/// replacement in a later catalog snapshot. So the half whose track ended has
-	/// to go back to the catalog for it, while the other half plays on and the
-	/// broadcast is not treated as over.
+	/// source that changed resolution) names the replacement in a catalog
+	/// snapshot and only then finishes the retired track, at the end of the group
+	/// it was mid-way through. So the snapshot lands while both halves are still
+	/// playing and has to be kept: it is the only warning the player gets, and
+	/// the half whose track ends afterwards reads it then.
 	#[test]
 	fn a_finished_track_re_arms_its_half() {
 		let mut playback = Playback::default();
+		playback.received(Default::default());
 		playback.started(Kind::Video);
+		playback.read(Kind::Video);
 		playback.started(Kind::Audio);
-		assert!(!playback.done());
-		assert!(
-			playback.following(),
-			"the retirement snapshot arrives while both halves are still playing"
-		);
+		playback.read(Kind::Audio);
+
+		// The snapshot naming the replacement, while the retired track plays on.
+		playback.received(Default::default());
+		assert!(playback.pending().is_none(), "nothing to start while both halves play");
 
 		playback.ended(Some(Kind::Video));
-		assert!(
-			!playback.playing(Kind::Video),
-			"a snapshot after the retirement must be able to start the replacement"
-		);
-		assert!(playback.playing(Kind::Audio), "audio ended with the video rendition");
 		assert!(!playback.done(), "playback ended on a retired rendition");
+		assert!(playback.audio.playing, "audio ended with the video rendition");
+		assert!(playback.pending().is_some(), "the retirement snapshot was dropped");
+		assert!(playback.wants(Kind::Video), "the replacement was never looked for");
+		assert!(!playback.wants(Kind::Audio), "audio is still playing its own rendition");
 
 		// The replacement lands and playback carries on.
+		playback.read(Kind::Video);
 		playback.started(Kind::Video);
-		assert!(playback.playing(Kind::Video));
+		assert!(playback.pending().is_none());
 		assert!(!playback.done());
+	}
+
+	/// A track that ends with nothing newer on offer stays stopped. Reading the
+	/// snapshot it was selected from again would resubscribe to the rendition
+	/// that just finished, and do it again the moment that ended too.
+	#[test]
+	fn a_read_snapshot_is_not_read_twice() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		// A video-only catalog: both halves read the snapshot, only one found
+		// something in it.
+		playback.read(Kind::Video);
+		playback.started(Kind::Video);
+		playback.read(Kind::Audio);
+
+		playback.ended(Some(Kind::Video));
+		assert!(playback.pending().is_none(), "the player would resubscribe in a loop");
+
+		playback.received(Default::default());
+		assert!(playback.pending().is_some(), "a fresh snapshot must be read");
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing

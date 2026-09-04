@@ -164,8 +164,8 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang p
 decode, independently of the other, and follows catalog updates for as long as
 the catalog lasts. Audio-only and video-only broadcasts play fine. A publisher
 that retires the rendition being played ends its track, and that role picks a
-replacement out of a later catalog snapshot; playback ends once the catalog has
-ended and every track it started has too.
+replacement out of the newest snapshot it hasn't read; playback ends once the
+catalog has ended and every track it started has too.
 
 Within a role it takes the first rendition it can decode, in track-name order,
 which is arbitrary as a quality choice. Pass `--video-name` / `--audio-name` to
