@@ -149,8 +149,9 @@ impl DmaBufPlane {
 pub struct DmaBufExport {
 	fd: OwnedFd,
 	// The producer's lease, held so its buffer outlives the descriptor. Only the
-	// renderer ever reads it back out, through `into_parts`.
-	#[cfg_attr(not(feature = "render"), expect(dead_code))]
+	// renderer ever reads it back out, through `into_parts`. No dead-code
+	// attribute of its own: the one on `into_parts` seeds that method as a live
+	// root, so this field counts as read even in a build that never calls it.
 	inner: Arc<dyn DmaBufFrame>,
 }
 
