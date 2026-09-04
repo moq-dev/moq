@@ -18,7 +18,9 @@ pub struct Stats {
 	pub bytes_sent: AtomicU64,
 	pub frames_recv: AtomicU64,
 	pub bytes_recv: AtomicU64,
-	/// Distinct groups received across all subscriptions (the displayed total).
+	/// Distinct groups read end to end across all subscriptions (the displayed
+	/// total). A group the relay failed part-way is left out, so it shows up as a
+	/// gap rather than as delivery.
 	pub groups_recv: AtomicU64,
 	/// Size of every subscription's settled sequence span, excluding the live frontier.
 	pub groups_expected: AtomicU64,

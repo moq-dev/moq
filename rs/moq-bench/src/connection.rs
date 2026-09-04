@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_native::Status;
 use moq_native::moq_net::{self, Origin, bytes::Bytes};
-use moq_native::moq_net::{broadcast, track};
+use moq_native::moq_net::{broadcast, group, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -395,6 +395,10 @@ fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Cons
 
 /// Subscribe to the broadcast's track, counting every frame received and tracking
 /// group-sequence gaps to report skipped groups.
+///
+/// Only a track- or session-level failure ends the subscription. A group that
+/// fails mid-read is the relay giving up on that one group, which a real player
+/// skips over while it keeps watching.
 async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
@@ -405,27 +409,39 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 	// `recv_group` yields groups in arrival order, including out of sequence, so we
 	// can spot holes. `next_group` would silently drop late arrivals and hide them.
 	while let Some(mut group) = track.recv_group().await? {
-		gaps.observe(group.sequence);
-
-		let mut first = true;
-		while let Some(frame) = group.read_frame().await? {
-			// The first frame of every group is the JSON keyframe. Parse it once to
-			// learn the publisher's shape (we may be watching a peer, not ourselves).
-			if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
-				stats.latency(header.timestamp_ms);
-				if !learned_shape {
-					tracing::debug!(
-						fps = header.fps,
-						frame_size = header.frame_size,
-						group_size = header.group_size,
-						"subscribed broadcast shape"
-					);
-					learned_shape = true;
-				}
-			}
-			first = false;
-			stats.frame_recv(frame.payload.len());
+		let sequence = group.sequence;
+		match read_group(&mut group, &mut learned_shape, stats).await {
+			// Only a group read end to end counts as delivered.
+			Ok(()) => gaps.observe(sequence),
+			// The relay failed this one group: `Error::Lagged` once we fall behind.
+			// Leaving the sequence unobserved lets the gap tracker charge it as a
+			// group that never landed, which is the loss we came to measure.
+			Err(err) => tracing::debug!(sequence, %err, "group ended early"),
 		}
+	}
+	Ok(())
+}
+
+/// Read one group to its end, counting every frame and sampling the keyframe header.
+async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats: &Stats) -> moq_net::Result<()> {
+	let mut first = true;
+	while let Some(frame) = group.read_frame().await? {
+		// The first frame of every group is the JSON keyframe. Parse it once to
+		// learn the publisher's shape (we may be watching a peer, not ourselves).
+		if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
+			stats.latency(header.timestamp_ms);
+			if !*learned_shape {
+				tracing::debug!(
+					fps = header.fps,
+					frame_size = header.frame_size,
+					group_size = header.group_size,
+					"subscribed broadcast shape"
+				);
+				*learned_shape = true;
+			}
+		}
+		first = false;
+		stats.frame_recv(frame.payload.len());
 	}
 	Ok(())
 }
@@ -734,6 +750,64 @@ mod tests {
 
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+	}
+
+	/// The relay fails a group it gave up on (`Error::Lagged` once a subscriber
+	/// falls behind). That ends the group, not the subscription: the drain must
+	/// keep consuming later groups, and charge the failed one as a gap. Treating
+	/// it as terminal shrank the offered load as a run went on, so the relay was
+	/// measured under fewer subscribers than it was asked to serve.
+	#[tokio::test]
+	async fn drain_survives_a_failed_group() {
+		fn write_group(track: &mut track::Producer) {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// Group 0 lands intact.
+		write_group(&mut track);
+
+		let task = {
+			let stats = stats.clone();
+			tokio::spawn(async move { drain(consumer, &stats).await })
+		};
+
+		// Group 1 opens and is picked up by the drain, then the relay gives up on it.
+		// Aborting a group nobody is reading drops its cached frames, so wait for the
+		// drain to be parked inside it before failing it.
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		for _ in 0..100 {
+			if stats.frames_recv.load(Ordering::Relaxed) >= 2 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 2, "drain is inside group 1");
+		group.abort(moq_net::Error::Lagged).unwrap();
+
+		// Groups 2 and 3 land intact, then the publisher is done.
+		write_group(&mut track);
+		write_group(&mut track);
+		track.finish().unwrap();
+		broadcast.finish();
+
+		task.await
+			.unwrap()
+			.expect("a failed group must not end the subscription");
+
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 3, "the three intact groups");
+		assert_eq!(lost(&stats), 1, "the failed group counts as a gap");
 	}
 
 	/// Subscription targets must be picked at random from the announced stream.

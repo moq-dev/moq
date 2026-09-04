@@ -42,6 +42,5 @@ Open questions to settle before implementing:
 
 ## Related
 
-- [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - how a subscriber should react to a lagged group
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - open-group lifecycle work in the same area
