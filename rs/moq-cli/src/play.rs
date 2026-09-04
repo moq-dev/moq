@@ -374,11 +374,12 @@ async fn play_audio(
 	let sample_rate = consumer.sample_rate();
 	let channels = consumer.channels();
 	let engine = moq_audio::playback::Engine::open(Default::default()).await?;
-	let mut sink = engine.sink(moq_audio::playback::Input {
+	let input = moq_audio::playback::Input {
 		format: moq_audio::Format::F32,
 		sample_rate,
 		channels,
-	})?;
+	};
+	let mut sink = engine.sink(input.clone())?;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
@@ -397,13 +398,7 @@ async fn play_audio(
 	let fill_max = (consumer.config().latency_max.unwrap_or_default().as_secs_f64() * sample_rate as f64) as u64;
 	let silence = vec![0u8; chunk];
 
-	// Media time of the first sample, and how many have gone to the speaker since.
-	// A hole is the difference between the two, so it is measured against the whole
-	// track rather than the last frame: timestamps carry a fraction of a sample of
-	// rounding either way, and closing each one on its own would ratchet that into
-	// real drift.
-	let mut origin: Option<Duration> = None;
-	let mut written = 0u64;
+	let mut timeline = AudioTimeline::default();
 
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
@@ -431,16 +426,25 @@ async fn play_audio(
 
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
 		let start = timestamp(frame.timestamp);
-		let end = start.saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
+		let timing = timeline.push(start, samples, sample_rate, fill_max);
+
+		// A rewound timestamp starts a new playback epoch. The old sink has no clock
+		// and would otherwise play its buffered audio before the new epoch, while the
+		// cumulative counters stay ahead until the rewound timeline catches up.
+		if timing.restarted {
+			drop(sink);
+			*clock.lock().unwrap() = None;
+			sink = engine.sink(input.clone())?;
+		}
 
 		// A hole in the media is a hole in the audio, not a splice. Handing the next
 		// frame straight to the speaker shortens the track by the missing duration,
 		// which leaves it running ahead of media time until the clock below
 		// re-anchors, taking the video with it. Play the hole instead.
-		let origin = *origin.get_or_insert(start);
-		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
-		if let Some(hole) = expected.checked_sub(written).filter(|hole| *hole > 0) {
-			let mut remaining = usize::try_from(hole.min(fill_max)).unwrap_or(usize::MAX) * stride;
+		if timing.silence > 0 {
+			let mut remaining = usize::try_from(timing.silence)
+				.unwrap_or(usize::MAX / stride)
+				.saturating_mul(stride);
 			while remaining > 0 {
 				if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
 					tokio::time::sleep(excess).await;
@@ -449,10 +453,6 @@ async fn play_audio(
 				sink.write(&silence[..part])?;
 				remaining -= part;
 			}
-			// Either way the speaker now stands where this frame does: a hole past the
-			// budget is skipped rather than played, and re-measuring it against the
-			// next frame would only fill the same budget again.
-			written = expected;
 		}
 
 		for part in frame.data.chunks(chunk) {
@@ -462,10 +462,9 @@ async fn play_audio(
 			}
 			sink.write(part)?;
 		}
-		written += samples as u64;
 
 		let previous = clock.lock().unwrap().replace(Clock {
-			media: end.saturating_sub(sink.buffered()),
+			media: timing.end.saturating_sub(sink.buffered()),
 			wall: Instant::now(),
 		});
 		// Only the very first sample needs a wake, to hand the render loop a clock
@@ -492,6 +491,54 @@ async fn play_audio(
 
 fn timestamp(timestamp: hang::moq_net::Timestamp) -> Duration {
 	Duration::from_micros(timestamp.as_micros().min(u64::MAX as u128) as u64)
+}
+
+#[derive(Default)]
+struct AudioTimeline {
+	origin: Option<Duration>,
+	end: Option<Duration>,
+	written: u64,
+}
+
+struct AudioTiming {
+	end: Duration,
+	silence: u64,
+	restarted: bool,
+}
+
+impl AudioTimeline {
+	fn push(&mut self, start: Duration, samples: usize, sample_rate: u32, fill_max: u64) -> AudioTiming {
+		let duration = Duration::from_secs_f64(samples as f64 / sample_rate as f64);
+		let end = start.saturating_add(duration);
+		// Millisecond-stamped input can put adjacent frames on either side of their
+		// exact boundary. Two output samples cover the conversions on top of that.
+		let tolerance = Duration::from_millis(1).saturating_add(Duration::from_secs_f64(2.0 / sample_rate as f64));
+		let restarted = self
+			.end
+			.is_some_and(|previous| start.saturating_add(tolerance) < previous);
+		if restarted {
+			self.origin = None;
+			self.written = 0;
+		}
+
+		// Measure every hole from the track origin so timestamp rounding cannot
+		// accumulate into drift. Advancing to `expected` even when the fill is capped
+		// makes a longer hole a timeline skip rather than refilling the cap forever.
+		let origin = *self.origin.get_or_insert(start);
+		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
+		let silence = expected.saturating_sub(self.written).min(fill_max);
+		self.written = self
+			.written
+			.max(expected)
+			.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
+		self.end = Some(end);
+
+		AudioTiming {
+			end,
+			silence,
+			restarted,
+		}
+	}
 }
 
 struct App {
@@ -1033,5 +1080,31 @@ mod tests {
 			wall: Instant::now() - Duration::from_millis(20),
 		};
 		assert!(clock.now() >= Duration::from_millis(10_020));
+	}
+
+	#[test]
+	fn audio_timeline_restarts_when_media_time_rewinds() {
+		let mut timeline = AudioTimeline::default();
+		let first = timeline.push(Duration::from_secs(10), 960, 48_000, 24_000);
+		assert!(!first.restarted);
+
+		let rewound = timeline.push(Duration::from_secs(5), 960, 48_000, 24_000);
+		assert!(rewound.restarted);
+		assert_eq!(rewound.silence, 0);
+
+		let next = timeline.push(Duration::from_millis(5_020), 960, 48_000, 24_000);
+		assert!(!next.restarted);
+		assert_eq!(next.silence, 0);
+	}
+
+	#[test]
+	fn audio_timeline_tolerates_millisecond_stamp_rounding() {
+		let mut timeline = AudioTimeline::default();
+		let first = timeline.push(Duration::ZERO, 1024, 44_100, 22_050);
+		assert!(!first.restarted);
+
+		// 1024 frames end at 23.22 ms, but an FLV timestamp carries 23 ms.
+		let rounded = timeline.push(Duration::from_millis(23), 1024, 44_100, 22_050);
+		assert!(!rounded.restarted);
 	}
 }
