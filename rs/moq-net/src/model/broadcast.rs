@@ -1709,11 +1709,15 @@ mod test {
 		let mut producer = Info::new().produce();
 		let consumer = producer.consume();
 
-		let _request = producer.reserve_track("track1").unwrap();
+		let request = producer.reserve_track("track1").unwrap();
 		let pending = subscribe_pending!(consumer, "track1");
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(matches!(pending.await, Err(Error::Cancel)));
+
+		let track = request.accept(None);
+		let mut subscriber = track.subscribe(None);
+		assert!(matches!(subscriber.recv_group().await, Err(Error::Cancel)));
 	}
 
 	/// A request still queued for a handler is the same parking case reached from the
@@ -1806,6 +1810,8 @@ mod test {
 
 		let mut track = request.accept(None);
 		assert!(track.append_group().is_err());
+		let mut subscriber = track.subscribe(None);
+		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
 		assert!(consumer.track("track1").is_err());
 	}
 

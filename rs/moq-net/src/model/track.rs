@@ -853,6 +853,7 @@ impl TrackState {
 #[derive(Clone)]
 pub struct Producer {
 	name: Arc<str>,
+	info: Info,
 	// The parent broadcast's info, inherited from [`broadcast::Producer::create_track`].
 	// Top link of the ownership chain; carried for identity and future inheritance.
 	broadcast: Arc<broadcast::Info>,
@@ -880,16 +881,14 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let name = name.into();
+		let info = info.into().unwrap_or_default();
 		let state = TrackState::spawn(broadcast.clone());
-		state
-			.write()
-			.ok()
-			.expect("a new track is open")
-			.accept(info.into().unwrap_or_default());
+		state.write().ok().expect("a new track is open").accept(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
 		Self {
 			name,
+			info,
 			state,
 			broadcast,
 			prev_subscription: None,
@@ -1183,7 +1182,7 @@ impl Producer {
 		// requiring a live producer state. If the track already ended, the returned
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
-		let info = self.state.read().info.clone().expect("producer always has info");
+		let info = self.info.clone();
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -2720,16 +2719,18 @@ impl Request {
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
+		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
-			state.accept(info.into().unwrap_or_default());
+			state.accept(info.clone());
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
 		self.alive.publish(Some(&self.stats));
 		Producer {
 			name: self.name,
+			info,
 			broadcast: self.broadcast,
 			state: self.state,
 			prev_subscription: None,
