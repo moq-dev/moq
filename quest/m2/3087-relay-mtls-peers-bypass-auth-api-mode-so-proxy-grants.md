@@ -17,8 +17,15 @@ that, and the request carries no `host`, so host-routed tenants dialing the
 same path are indistinguishable at the endpoint.
 
 - Delete `resolve_mtls`. Build the request through `api_request` with
-  `mtls: true`, plus `host` in proxy mode as the mode already sends it, and
+  `mtls` set, plus `host` in proxy mode as the mode already sends it, and
   resolve through `authorize`, so a grant is read one way for every credential.
+- Send the peer's identity, not a flag: `mtls=<name>` carries the client
+  certificate's first SAN DNS name (the CN when it has none) in place of
+  `mtls=true`, so the endpoint can tell peers apart and issue a per-peer
+  grant. `moq_tokio::tls::PeerIdentity` grows a name accessor beside `expiry`,
+  parsed with the `x509-parser` it already uses. A certificate with neither
+  still sends `mtls=true`, and the docs say the value is a name the endpoint
+  matches, never proof by itself; the CA that signed the cert is.
 - Token mode: `mtls: true` satisfies "has a credential" without a JWT or a
   `key`; the certificate is the token. No grant means unrestricted, as today.
 - Proxy mode: the endpoint returns a grant like anyone else, and no grant is a
@@ -33,7 +40,8 @@ same path are indistinguishable at the endpoint.
   answers "no" still partitions the mesh.
 - Tests: a proxy-mode mTLS peer refused by an empty reply, scoped by a narrow
   grant, and admitted unrestricted in token mode; `host` present on the proxy
-  request. Update the mTLS section of `doc/bin/relay/auth.md`.
+  request; `mtls` carrying the SAN name, and `true` for a nameless cert.
+  Update the mTLS and auth API sections of `doc/bin/relay/auth.md`.
 
 ## Required
 
