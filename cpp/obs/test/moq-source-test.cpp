@@ -1069,6 +1069,30 @@ int main()
 	}
 	report("catalog update retires the old track");
 
+	// A catalog update can advertise a replacement that libmoq rejects. The
+	// existing video subscription remains current and must keep delivering frames.
+	{
+		reset();
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		int32_t first_track = g_last_video;
+
+		g_video_result = -77;
+		int32_t snapshot = newSnapshot();
+		g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
+		CHECK(g_video_calls == 1);
+		CHECK(g_last_video == first_track);
+		CHECK(g_snapshot_frees == 2);
+
+		int32_t frame = newFrame(true);
+		g_runtime->Run([first_track, frame] { deliverStatus(first_track, frame); });
+		CHECK(g_output_frames == 1);
+		CHECK(g_frame_frees == 1);
+
+		destroySource(source);
+	}
+	report("failed replacement keeps the old track current");
+
 	// A session that fails for good tears down every subscription, not just the
 	// session, so the catalog and video references come back immediately instead
 	// of lingering until the source is destroyed.

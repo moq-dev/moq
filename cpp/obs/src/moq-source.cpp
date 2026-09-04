@@ -523,10 +523,11 @@ static void on_catalog(void *user_data, int32_t catalog)
 	}
 
 	// Pre-account for the video track subscription before handing ctx to libmoq,
-	// so its reference is in place the instant the subscription exists. Undone
-	// below only if creation fails.
+	// so its reference is in place the instant the subscription exists. Reserve
+	// the next attempt without making it current until creation succeeds, so a
+	// rejected replacement does not invalidate the existing track.
 	pthread_mutex_lock(&ctx->mutex);
-	uint64_t video_attempt = ++ctx->video_attempt;
+	uint64_t video_attempt = ctx->video_attempt + 1;
 	ctx->refs++;
 	pthread_mutex_unlock(&ctx->mutex);
 	auto video_state = std::make_shared<callback_state>(ctx, current_gen, video_attempt);
@@ -552,12 +553,13 @@ static void on_catalog(void *user_data, int32_t catalog)
 	// on_video_frame (<= 0) that releases the reference added above - even on the
 	// cleanup path below.
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation == current_gen && ctx->video_attempt == video_attempt && !ctx->shutting_down.load() &&
+	if (ctx->generation == current_gen && ctx->video_attempt + 1 == video_attempt && !ctx->shutting_down.load() &&
 	    !video_state->terminal.load()) {
 		// A catalog update can arrive while a track is already subscribed; close
 		// the previous one so its terminal callback releases its reference (else
 		// it would linger until teardown's bounded wait).
 		int32_t old_track = ctx->video_track;
+		ctx->video_attempt = video_attempt;
 		ctx->video_track = track;
 		pthread_mutex_unlock(&ctx->mutex);
 		if (old_track >= 0)
