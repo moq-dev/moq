@@ -23,9 +23,22 @@ function pack(epoch: number, read: number): bigint {
 	return (BigInt(epoch >>> 0) << 32n) | BigInt(read >>> 0);
 }
 
-/** The timeline half. Bumped by the writer on every re-anchor. */
+/**
+ * The timeline half. Even while the timeline is settled, odd while `truncate` retreats WRITE.
+ *
+ * WRITE lives in a different word, so a retreat cannot move it and the epoch together. Marking
+ * the epoch on either side of the retreat is what covers the gap: a reader that snapshotted
+ * before the mark finds the word moved and its exchange fails, one that snapshots between the
+ * marks sees the odd epoch and renders silence, and one that snapshots after already reads the
+ * retreated WRITE. So the writer steps by two on a re-anchor, keeping odd for the retreat alone.
+ */
 function epochOf(state: bigint): number {
 	return Number(state >> 32n) | 0;
+}
+
+/** Whether a `truncate` is mid-retreat, so WRITE may still describe samples it is dropping. */
+function retreating(state: bigint): boolean {
+	return (epochOf(state) & 1) !== 0;
 }
 
 /** The playhead half, back as an i32 so the modular comparisons elsewhere still hold. */
@@ -190,6 +203,19 @@ export class SharedRingBuffer {
 	}
 
 	/**
+	 * Step the epoch by one, leaving the playhead wherever the reader has taken it.
+	 *
+	 * Retries while the word changes under it: only the timeline half is the writer's to move.
+	 */
+	#step(): void {
+		for (;;) {
+			const state = Atomics.load(this.#state, 0);
+			const next = pack((epochOf(state) + 1) | 0, readOf(state));
+			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
+		}
+	}
+
+	/**
 	 * Insert audio samples at the given timestamp.
 	 * Main thread only. Handles out-of-order writes, gap filling, and overflow.
 	 */
@@ -205,9 +231,9 @@ export class SharedRingBuffer {
 		if (!this.#anchored) {
 			this.#anchor = start;
 			// One store rebases both halves, so a reader's compare-exchange against the old word
-			// cannot land afterwards.
+			// cannot land afterwards. Two, because odd epochs belong to `truncate`.
 			const epoch = epochOf(Atomics.load(this.#state, 0));
-			Atomics.store(this.#state, 0, pack((epoch + 1) | 0, 0));
+			Atomics.store(this.#state, 0, pack((epoch + 2) | 0, 0));
 			Atomics.store(this.#control, WRITE, 0);
 			this.#anchored = true;
 			this.#position = 0;
@@ -290,6 +316,9 @@ export class SharedRingBuffer {
 		// arriving after sees the STALLED that `reset` raised and never starts.
 		const state = Atomics.load(this.#state, 0);
 		if (Atomics.load(this.#control, STALLED) === 1) return 0;
+		// A retreat is in flight, so WRITE still describes samples `truncate` is dropping and a
+		// later exchange could not tell them apart. Render the quantum as silence instead.
+		if (retreating(state)) return 0;
 
 		let read = readOf(state);
 		const write = Atomics.load(this.#control, WRITE);
@@ -351,18 +380,23 @@ export class SharedRingBuffer {
 	 */
 	truncate(timestamp: Time.Micro): void {
 		const target = (Math.round(Time.Second.fromMicro(timestamp) * this.rate) - this.#anchor) | 0;
+		if (((Atomics.load(this.#control, WRITE) - target) | 0) <= 0) return; // nothing past the new timeline
+
+		// Bracket the retreat with epoch steps, so a reader is never left holding a WRITE this
+		// dropped the tail of. See `epochOf`.
+		this.#step();
 		for (;;) {
 			const write = Atomics.load(this.#control, WRITE);
-			if (((write - target) | 0) <= 0) return; // nothing buffered past the new timeline
 			// Never retreat past the playhead: those samples are already due. The worklet can still
 			// advance READ past the value read here, leaving READ ahead of WRITE. That reads as an
 			// empty ring (read() returns nothing, insert() trims what the worklet already played) and
 			// heals on the first successor sample past the playhead, so it costs a quantum of silence
 			// rather than replaying anything.
 			const clamped = i32Max(target, readOf(Atomics.load(this.#state, 0)));
-			if (((write - clamped) | 0) <= 0) return;
-			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) return;
+			if (((write - clamped) | 0) <= 0) break;
+			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) break;
 		}
+		this.#step();
 	}
 
 	/**
