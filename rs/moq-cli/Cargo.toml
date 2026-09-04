@@ -83,7 +83,6 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
-humantime = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
