@@ -31,7 +31,10 @@ Decisions:
   to the same representation, and its equality covers every field, so an
   `egress`-only or `token`-only update is a change and the token is never
   dropped. Unknown fields reject the whole list, so a typo keeps the
-  last-good topology exactly as a malformed URL does.
+  last-good topology exactly as a malformed URL does, and so does an object
+  whose `url` still carries `?cost=` or `?jwt=`: policy has one home per
+  form, and a mixed entry is rejected rather than given a precedence a
+  migration could silently get wrong.
 - Gossip and mDNS keep advertising URLs only. Their allowlist admits `?cost=`
   alone, and the draft already makes a declared price an assertion the
   receiver may override, so a peer never needs to push structured policy at us.
@@ -56,5 +59,6 @@ declared value visible on the far side; a `connect_api` update that changes
 only `egress` or only `token` redials that peer and no other; an identical
 object render is a no-op; equivalent URL and object forms of one peer
 deduplicate while differing policies for one identity conflict; an unknown
-field keeps the previous list. Update `doc/bin/relay/cluster.md` and
+field, or an object whose `url` carries `?cost=` or `?jwt=`, keeps the
+previous list. Update `doc/bin/relay/cluster.md` and
 `doc/bin/relay/config.md` with the object form.

@@ -68,8 +68,10 @@ dependency.
   bounded per the repository's retry rule: capped exponential backoff with
   jitter inside a startup budget (a few minutes, configurable), after which
   the relay exits with the last real ACME error, the domain, and the port it
-  expected the challenge on. With a cached certificate it starts immediately
-  and renews in the background. A cached
+  expected the challenge on. With a usable cached certificate it starts
+  immediately and renews in the background. Usable means not yet expired:
+  an expired cache serves exactly as badly as none, so it blocks the same
+  way and goes through the same bounded first issuance. A cached
   certificate whose SANs do not cover every configured domain counts as
   missing: an operator who adds or replaces a hostname while reusing
   `acme.dir` gets a fresh issuance, not a wait for the renewal threshold.
@@ -79,9 +81,14 @@ dependency.
 - **Renewal.** A daily jittered check reads the cached certificate's expiry
   with the `x509-parser` already used for peer expiry and renews once a
   third of its lifetime remains, Let's Encrypt's own rule for 90-day
-  certificates. A failed renewal logs and waits for the next check; it never
-  restarts the relay or discards the serving certificate. The account key is
-  reused across runs so renewals do not create accounts.
+  certificates. Each renewal attempt owns its own retry sequence per the
+  repository's retry rule: capped exponential backoff with jitter inside a
+  bounded budget, stopping early on an explicit non-retryable ACME response
+  (a rejected order, a rate limit with a stated wait), so a transient
+  directory blip does not burn a day of the renewal window. A renewal that
+  exhausts its budget logs and waits for the next check; it never restarts
+  the relay or discards the serving certificate. The account key is reused
+  across runs so renewals do not create accounts.
 - **Docs.** `doc/bin/relay/config.md` gains the section; `doc/setup/prod.md`
   makes ACME the recommended path and keeps the external-certificate path;
   `doc/bin/relay/http.md` notes the challenge route; the packaging TOML and
@@ -92,6 +99,9 @@ feature flag) issues on first run, a restart with a valid cached certificate
 performs no challenge, a cached certificate missing a configured domain or
 issued by a different directory is reissued at startup, an unreachable
 directory fails the first start inside the budget with an actionable error,
+a restart with an expired cached certificate blocks and reissues rather than
+serving it, a transient renewal error retries within the attempt and a
+non-retryable response stops it early,
 a certificate near expiry renews and both the quinn and noq listeners serve
 the new chain through a fresh handshake without restart (the `web.https`
 reload is a separate test), a renewal failure leaves the old certificate
