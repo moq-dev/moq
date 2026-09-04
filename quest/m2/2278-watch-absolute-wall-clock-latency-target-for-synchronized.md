@@ -93,4 +93,4 @@ Mostly resolved: `js/watch`'s `Latency` / `Bound` types are gone, replaced by `D
 
 ## Related
 
-- [Playout clock](/quest/m1/playout-clock.md) - ports the same anchoring model to Rust as `moq_mux::Clock`
+- [Playout clock](/quest/m0/playout-clock.md) - ports the same anchoring model to Rust as `moq_mux::Clock`
