@@ -529,8 +529,9 @@ impl std::fmt::Display for Prefix {
 
 /// The path a route took through the mesh and what using it costs.
 ///
-/// The metadata half of an advertisement: [`Producer::announce`] pairs it with
-/// the [`Prefix`] it covers, and [`Consumer::announced`] yields both. A route
+/// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
+/// the [`Prefix`] it covers, [`broadcast::Producer::announce`] with the
+/// broadcast's exact path, and [`Consumer::announced`] yields both. A route
 /// claims capability, not inventory: it says paths under its prefix are
 /// servable, never that any specific broadcast exists. The common convention is
 /// that a publisher announces each broadcast's exact path, so subscribers can
@@ -1170,9 +1171,10 @@ impl Producer {
 	/// tracks resume from the replacement at the first missing group; consumers
 	/// never observe the swap.
 	///
-	/// The broadcast is *not* advertised: it is reachable by exact path for
-	/// subscribes and fetches. Advertise it (or a whole prefix of paths) separately
-	/// with [`Self::announce`]; the two are independent, so cached or on-demand
+	/// The broadcast starts *unadvertised*: it is reachable by exact path for
+	/// subscribes and fetches. Advertise it once its tracks exist with
+	/// [`broadcast::Producer::announce`] (or a whole prefix of paths with
+	/// [`Self::dynamic`]); the two are independent, so cached or on-demand
 	/// content can stay reachable without ever being announced.
 	///
 	/// The broadcast is visible to exact lookups before this returns; only
