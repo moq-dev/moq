@@ -71,6 +71,18 @@ function parseBuffer(value: string | null): Time.Milli {
 	return Moq.Time.Milli.zero;
 }
 
+// The released `latency` / `latencyMin` property spellings, translated onto `delay`. The range
+// object is refused rather than half-applied: its ceiling included the floor, so it has no faithful
+// `buffer` without tracking the resolved delay, which is the coupling `buffer` exists to remove.
+function coerceLegacyDelay(value: unknown): Delay {
+	if (value === "instant") return "instant";
+	if (value === undefined || value === "auto" || value === "real-time") return "auto";
+	if (typeof value === "number" && Number.isFinite(value)) return Moq.Time.Milli(value);
+	throw new Error(
+		"moq-watch: the latency range is gone. Set `delay` (how far playback trails the live edge) and `buffer` (media held beyond it).",
+	);
+}
+
 // The released spellings of `delay`, in bare milliseconds. Kept unitless so pages still on them
 // behave exactly as they did; `delay` is the current surface and does require a unit.
 function parseLegacyDelay(value: string | null): Delay {
@@ -568,6 +580,31 @@ export default class MoqWatch extends HTMLElement {
 
 	set buffer(value: Time.Milli) {
 		this.controls.buffer.set(value);
+	}
+
+	/** @internal */
+	get latency(): Delay {
+		return this.controls.delay.peek();
+	}
+
+	set latency(value: unknown) {
+		this.controls.delay.set(coerceLegacyDelay(value));
+	}
+
+	/** @internal */
+	get latencyMin(): Delay {
+		return this.controls.delay.peek();
+	}
+
+	set latencyMin(value: unknown) {
+		this.controls.delay.set(coerceLegacyDelay(value));
+	}
+
+	/** @internal */
+	set latencyMax(_value: unknown) {
+		throw new Error(
+			"moq-watch: `latencyMax` is gone. Use `buffer`, the media held beyond the live edge; the old ceiling included the floor, so it is `latencyMax - delay`.",
+		);
 	}
 
 	/** The jitter buffer in milliseconds. */
