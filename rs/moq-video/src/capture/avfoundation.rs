@@ -110,10 +110,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	// means a session that fails during `startRunning` is observed: that failure
 	// arrives as a runtime-error notification, which an observer added afterwards
 	// would miss.
-	let guard = SessionGuard::new(session.clone(), chan.clone(), delegate, dispatch);
+	let guard = SessionGuard::new(session.clone(), delegate, dispatch);
 
+	let configuration = SessionConfiguration::new(&session);
 	unsafe {
-		session.beginConfiguration();
 		if !session.canAddInput(&input) {
 			return Err(Error::Codec(anyhow::anyhow!("cannot add camera input")));
 		}
@@ -122,9 +122,9 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 			return Err(Error::Codec(anyhow::anyhow!("cannot add video output")));
 		}
 		session.addOutput(&output);
-		session.commitConfiguration();
-		session.startRunning();
 	}
+	drop(configuration);
+	unsafe { session.startRunning() };
 
 	// Await the first frame to learn the negotiated resolution (and to surface a
 	// permission failure as an error rather than a silent hang).
@@ -292,6 +292,27 @@ fn runtime_error(error: Option<&NSError>) -> Error {
 	Error::SourceUnavailable(reason)
 }
 
+/// Commits the session configuration before any later guard stops the session.
+///
+/// `stopRunning` raises an Objective-C exception while a configuration is open,
+/// so this must also cover the early error returns from `open`.
+struct SessionConfiguration<'a> {
+	session: &'a AVCaptureSession,
+}
+
+impl<'a> SessionConfiguration<'a> {
+	fn new(session: &'a AVCaptureSession) -> Self {
+		unsafe { session.beginConfiguration() };
+		Self { session }
+	}
+}
+
+impl Drop for SessionConfiguration<'_> {
+	fn drop(&mut self) {
+		unsafe { self.session.commitConfiguration() };
+	}
+}
+
 /// Keeps the capture session (and its delegate) alive; stops it on drop, which
 /// turns the camera LED off and closes the channel so a parked read returns.
 struct SessionGuard {
@@ -306,11 +327,11 @@ impl SessionGuard {
 	/// notifications, which the guard unsubscribes on drop.
 	fn new(
 		session: Retained<AVCaptureSession>,
-		chan: Arc<FrameChannel>,
 		delegate: Retained<Delegate>,
 		dispatch: DispatchRetained<DispatchQueue>,
 	) -> Self {
 		observe(&delegate, &session);
+		let chan = delegate.ivars().chan.clone();
 		Self {
 			session,
 			chan,
@@ -428,8 +449,20 @@ mod tests {
 		let session = unsafe { AVCaptureSession::new() };
 		let delegate = Delegate::new(chan.clone(), device_id.to_string());
 		let dispatch = DispatchQueue::new("dev.moq.video.capture.test", None);
-		let guard = SessionGuard::new(session.clone(), chan.clone(), delegate, dispatch);
+		let guard = SessionGuard::new(session.clone(), delegate, dispatch);
 		(chan, session, guard)
+	}
+
+	/// Teardown must never call `stopRunning` while configuration is open. This
+	/// is the setup-failure path when `canAddInput` or `canAddOutput` returns false.
+	#[test]
+	fn an_early_configuration_error_commits_before_teardown() {
+		let session = unsafe { AVCaptureSession::new() };
+		let configuration = SessionConfiguration::new(&session);
+		drop(configuration);
+
+		// Raises `NSGenericException` if the configuration was not committed.
+		unsafe { session.stopRunning() };
 	}
 
 	/// Post an `AVCaptureSessionRuntimeErrorNotification` for `session` carrying
