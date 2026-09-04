@@ -435,6 +435,17 @@ _markdown $ACTION:
     mirror=$(mktemp -d)
     trap 'rm -rf "$mirror"' EXIT
 
+    extension_list=$(bun -e \
+        'import extensions from "markdown-extensions"; console.log(extensions.join("\n"))')
+    patterns=()
+    while IFS= read -r extension; do
+        [[ -n "$extension" ]] && patterns+=("*.$extension")
+    done <<< "$extension_list"
+    ((${#patterns[@]})) || {
+        echo "error: remark reported no Markdown extensions" >&2
+        exit 1
+    }
+
     # Untracked files are in scope so a new doc is linted before it is staged;
     # --exclude-standard keeps build output out.
     files=()
@@ -443,7 +454,7 @@ _markdown $ACTION:
         files+=("$file")
         mkdir -p "$mirror/$(dirname "$file")"
         cp "$file" "$mirror/$file"
-    done < <(git ls-files -z --cached --others --exclude-standard -- '*.md')
+    done < <(git ls-files -z --cached --others --exclude-standard -- "${patterns[@]}")
     ((${#files[@]})) || exit 0
 
     # The config rides along so every .remarkignore pattern resolves against the
@@ -483,22 +494,28 @@ _markdown-test:
     git -C "$fixture" init --quiet
     cp .remarkrc.mjs .remarkignore "$fixture/"
     ln -s "$repo/node_modules" "$fixture/node_modules"
-    printf '# dirty_heading\n' > "$fixture/dirty.md"
-    git -C "$fixture" add dirty.md
+    for file in dirty.md dirty.markdown; do
+        printf '# dirty_heading\n' > "$fixture/$file"
+        git -C "$fixture" add "$file"
+    done
 
-    original=$(<"$fixture/dirty.md")
+    original='# dirty_heading'
     if just --justfile "$repo/justfile" --working-directory "$fixture" \
         _markdown check > "$fixture/check.log" 2>&1; then
         fail "formatter-only drift must fail the check"
     fi
-    [[ "$(<"$fixture/dirty.md")" == "$original" ]] \
-        || fail "the check modified its input"
-    grep -q 'dirty.md' "$fixture/check.log" \
-        || fail "the check did not name the drifted file"
+    for file in dirty.md dirty.markdown; do
+        [[ "$(<"$fixture/$file")" == "$original" ]] \
+            || fail "the check modified $file"
+        grep -q "$file" "$fixture/check.log" \
+            || fail "the check did not name $file"
+    done
 
     just --justfile "$repo/justfile" --working-directory "$fixture" _markdown fix
-    [[ "$(<"$fixture/dirty.md")" == '# dirty\_heading' ]] \
-        || fail "the fix did not format the file"
+    for file in dirty.md dirty.markdown; do
+        [[ "$(<"$fixture/$file")" == '# dirty\_heading' ]] \
+            || fail "the fix did not format $file"
+    done
     just --justfile "$repo/justfile" --working-directory "$fixture" _markdown check
 
     echo "markdown: check/fix regression ok"
