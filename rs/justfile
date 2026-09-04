@@ -523,10 +523,24 @@ audit:
 # `--all-features` is the only thing that compiles moq-cli's play/capture,
 # moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
+#
+# A `--workspace` pass says nothing about a single crate's minimal build, because
+# cargo unifies features across the selection: moq-rtmp's dev-dependency on
+# moq-tokio hands every crate in it a QUIC backend, so `--no-default-features`
+# above has never compiled moq-tokio without one. The per-package passes below are
+# what actually check that, one crate at a time, where nothing else can turn a
+# feature on for it. `--each-feature` carries `aws-lc-rs` because a rustls backend
+# without a crypto provider is a refused build by design; `tokio-features` owns the
+# rest of moq-tokio's matrix, including the zero-feature build and that refusal.
 
 # Compile the workspace at the feature extremes.
 features:
     {{ cargo_compile }} check --locked --workspace --no-default-features
+    cargo hack check --locked -p moq-tokio --each-feature --no-dev-deps --features aws-lc-rs
+    {{ cargo_compile }} check --locked -p moq-relay --no-default-features
+    {{ cargo_compile }} check --locked -p moq-cli --no-default-features
+    {{ cargo_compile }} check --locked -p moq-bench --no-default-features
+    {{ cargo_compile }} check --locked -p moq-boy --no-default-features
     {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
     {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features

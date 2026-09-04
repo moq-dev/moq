@@ -29,7 +29,9 @@ moq-tokio = "0.19"
 
 The default features select noq with the AWS-LC crypto provider. With
 `default-features = false`, the `quinn` and `noq` backends must be paired with
-the `aws-lc-rs` or `ring` feature.
+the `aws-lc-rs` or `ring` feature. Every other subset compiles, including no
+transport at all: that build cannot connect to anything, but a crypto provider
+alone is still enough to configure TLS and terminate it on a plain-TLS listener.
 
 ## API Reference
 

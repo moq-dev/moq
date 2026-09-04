@@ -12,7 +12,11 @@
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
 //! With `default-features = false`, the `quinn` and `noq` backends must be paired
-//! with the `aws-lc-rs` or `ring` crypto-provider feature.
+//! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
+//! compiles, including no transport at all: such a build cannot connect to
+//! anything, though a crypto provider on its own is still enough to configure TLS
+//! and to build a plain-TLS listener's `rustls::ServerConfig` from
+//! [`tls::Listen::server_config`].
 
 #![warn(missing_docs)]
 
