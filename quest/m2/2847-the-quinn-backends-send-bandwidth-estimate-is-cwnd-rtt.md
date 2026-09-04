@@ -31,7 +31,7 @@ defaults quinn to BBR, so the default path is populated once plumbed.
 
 ## Required
 
-- [Bandwidth estimate release](/quest/m0/web-transport-bandwidth-estimate.md) - the upstream change and the release this bumps to
+- [Bandwidth estimate release](/quest/m2/web-transport-bandwidth-estimate.md) - the upstream change and the release this bumps to
 
 ## Closes
 

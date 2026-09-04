@@ -30,7 +30,7 @@ the references and should be clean.
   hardware decoder if available. Record the numbers in the PR and in the
   leading-picture quest.
 - The consumer-side fix is
-  [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md), which
+  [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md), which
   waits on these numbers.
 
 ## Closes
@@ -39,4 +39,4 @@ the references and should be clean.
 
 ## Related
 
-- [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md) - the tune-in drop this characterizes
+- [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - the tune-in drop this characterizes

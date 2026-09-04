@@ -1597,18 +1597,21 @@ impl Resync {
 	/// draining at end of stream. It is the one case where recovery substitutes audio
 	/// instead of leaving a gap, so it is counted apart from a resync.
 	fn published(&mut self, unvouched: bool) {
-		// A scan that ended in a published frame is a completed resync. This is the only
-		// place the count is known: `discarded` is reset here and the caller sees neither.
 		if self.discarded > 0 {
-			self.stats.resyncs += 1;
 			self.stats.discarded += self.discarded as u64;
-			tracing::warn!(
-				pid = self.pid,
-				track = self.stats.track,
-				discarded = self.discarded,
-				resyncs = self.stats.resyncs,
-				"audio stream lost frame sync and resynced"
-			);
+			// Only a confirmed frame proves that the stream regained sync. The EOF drain
+			// can publish an unvouched candidate, but that is a substitution rather than a
+			// completed resync.
+			if !unvouched {
+				self.stats.resyncs += 1;
+				tracing::warn!(
+					pid = self.pid,
+					track = self.stats.track,
+					discarded = self.discarded,
+					resyncs = self.stats.resyncs,
+					"audio stream lost frame sync and resynced"
+				);
+			}
 		}
 		self.stats.unconfirmed += u64::from(unvouched);
 		self.discarded = 0;
@@ -1617,7 +1620,9 @@ impl Resync {
 
 	/// The counters an operator alarms on. See [`Stats`].
 	fn stats(&self) -> StreamStats {
-		self.stats.clone()
+		let mut stats = self.stats.clone();
+		stats.discarded += self.discarded as u64;
+		stats
 	}
 
 	/// Undo the scanning charged since `discarded`. Those bytes turned out to be retained
@@ -2506,6 +2511,40 @@ mod test {
 		0xfc, 0x30, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xf0, 0x0a, 0x05, 0x00, 0x00, 0x2b, 0xb4,
 		0x7f, 0xdf, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xad, 0x25, 0xe8, 0x39,
 	];
+
+	#[test]
+	fn resync_stats_include_an_in_progress_scan() {
+		let mut resync = super::Resync::new(0x61, ".mp2");
+		let codec = super::SyncWord {
+			min_header_len: 4,
+			sync_byte: 0xff,
+		};
+
+		assert!(matches!(resync.recover(&[0; 10], 0, &codec), super::Recover::Carry(7)));
+		let stats = resync.stats();
+		assert_eq!(stats.discarded, 7, "the active scan must be visible before recovery");
+		assert_eq!(stats.resyncs, 0, "the stream has not regained sync yet");
+	}
+
+	#[test]
+	fn resync_does_not_count_an_unvouched_eof_publication() {
+		let mut resync = super::Resync::new(0x61, ".mp2");
+		let codec = super::SyncWord {
+			min_header_len: 4,
+			sync_byte: 0xff,
+		};
+
+		resync.recover(&[0; 10], 0, &codec);
+		resync.drain();
+		resync.published(true);
+		let stats = resync.stats();
+		assert_eq!(stats.discarded, 7, "the bytes skipped before EOF were discarded");
+		assert_eq!(
+			stats.resyncs, 0,
+			"an unconfirmed frame does not prove sync was regained"
+		);
+		assert_eq!(stats.unconfirmed, 1, "the unvouched publication is counted separately");
+	}
 
 	/// Build a payload-only TS packet (PID 0x0021, afc 0b01). `body` is the bytes
 	/// after the pointer_field (when `pusi`) or after the 4-byte header, padded to

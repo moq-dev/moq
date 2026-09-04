@@ -35,4 +35,4 @@ here so review does not relitigate them:
   like a `kid`, a per-viewer credential costs a request per viewer.
 
 What the PR leaves out on purpose is the mTLS path, which still bypasses the
-mode; that is [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md).
+mode; that is [#3087](/quest/m2/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md).

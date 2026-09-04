@@ -10,7 +10,7 @@ contribution case, and what the reference capture carries) and H.265 CRA
 pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: the
 splitter does not retain the count, and unsafe pictures there can sit at or
 after the keyframe timestamp, so it has its own quest,
-[gradual recovery](/quest/m0/open-gop-gradual-recovery.md).
+[gradual recovery](/quest/m2/open-gop-gradual-recovery.md).
 
 ## Plan
 
@@ -42,8 +42,8 @@ everyone.
 
 ## Required
 
-- [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - decides whether the glitch is dropped frames, corrupt frames, or a decoder error, which sets what this has to prove
+- [#2067](/quest/m2/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - decides whether the glitch is dropped frames, corrupt frames, or a decoder error, which sets what this has to prove
 
 ## Related
 
-- [Gradual recovery](/quest/m0/open-gop-gradual-recovery.md) - the `recovery_frame_cnt > 0` case this rule does not cover
+- [Gradual recovery](/quest/m2/open-gop-gradual-recovery.md) - the `recovery_frame_cnt > 0` case this rule does not cover

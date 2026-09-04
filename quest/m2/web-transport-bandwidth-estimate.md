@@ -20,7 +20,7 @@ inside the bump.
   not invent a fourth interpretation.
 - Cut a web-transport-quinn release carrying it. The quest completes when
   that release is on crates.io; the bump here is
-  [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md).
+  [#2847](/quest/m2/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md).
 
 ## Required
 
