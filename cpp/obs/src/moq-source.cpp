@@ -706,7 +706,8 @@ static void moq_source_reconnect(struct moq_source *ctx)
 
 	// Now update ctx with the new handles, checking if generation changed
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->generation != new_gen || ctx->shutting_down.load() || state->terminal.load()) {
+	if (ctx->generation != new_gen || ctx->origin != new_origin || ctx->shutting_down.load() ||
+	    state->terminal.load()) {
 		// The attempt ended or was superseded while the handles were being
 		// created. Clean up anything its callback did not already retire.
 		ctx->reconnect_in_progress = false;

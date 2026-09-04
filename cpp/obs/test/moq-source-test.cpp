@@ -460,6 +460,7 @@ std::atomic<int32_t> g_last_catalog{0};
 std::atomic<int32_t> g_last_video{0};
 
 // Immediate-failure injection, matching libmoq's negative return codes.
+bool g_session_connect_early = false;
 int g_origin_result = 0;
 int g_session_result = 0;
 int g_announced_result = 0;
@@ -574,6 +575,8 @@ int32_t moq_session_connect(const char *, uintptr_t, uint32_t, uint32_t, void (*
 	g_session_connects++;
 	int32_t handle = addSub(SubKind::Session, on_status, user_data);
 	g_last_session = handle;
+	if (g_session_connect_early)
+		g_runtime->Run([handle] { deliverStatus(handle, 1); });
 	return handle;
 }
 
@@ -812,6 +815,7 @@ void reset()
 	g_output_frames = 0;
 	g_blank_calls = 0;
 	g_sws_scales = 0;
+	g_session_connect_early = false;
 	g_origin_result = 0;
 	g_session_result = 0;
 	g_announced_result = 0;
@@ -1183,6 +1187,24 @@ int main()
 		destroySource(source);
 	}
 	report("refused subscriptions undo their reference");
+
+	// A connected callback can finish before moq_session_connect returns. If
+	// consume setup then fails, the returned session belongs to the aborted origin
+	// and must be closed instead of becoming the source's current session.
+	{
+		reset();
+		g_session_connect_early = true;
+		g_announced_result = -1;
+		void *source = createSource();
+		CHECK(g_origin_closes == 1);
+		{
+			std::lock_guard<std::mutex> lock(g_subs_mutex);
+			CHECK(g_subs.at(g_last_session).closed);
+		}
+		g_runtime->Run([] {});
+		destroySource(source);
+	}
+	report("early consume failure rejects the returned session");
 
 	// A decoder that cannot be built leaves the catalog subscription alone: no
 	// video track, the snapshot still freed, and nothing waiting on a terminal
