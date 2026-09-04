@@ -37,7 +37,8 @@ pub struct Consumer {
 	/// Activity of the last span the output ran past, for the rounding samples the
 	/// filter leaves beyond the final input boundary.
 	trailing: Activity,
-	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
+	/// Timestamp of the first encoded packet in this decoder epoch, used to
+	/// interpret codec delay and a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec-rate terminal frames emitted since `terminal_start`.
 	frames_decoded: usize,
@@ -139,10 +140,10 @@ impl Consumer {
 	/// from and the next frame carries the new one.
 	///
 	/// A timestamp that doesn't continue the previous packet is a hole in the
-	/// output, not a splice: nothing is carried across it, and the frames either
-	/// side keep the timestamps their own packets gave them, so the hole is
-	/// there to see. "Doesn't continue" allows for the quantization the stamps
-	/// carry, which on a millisecond-stamped ingest is most of a millisecond.
+	/// output, not a splice: nothing is carried across it, and the frames on either
+	/// side stay anchored to their own packet timeline, so the hole is there to
+	/// see. "Doesn't continue" allows for the quantization the stamps carry, which
+	/// on a millisecond-stamped ingest is most of a millisecond.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			if let Some(frame) = self.ready.pop_front() {
@@ -201,12 +202,18 @@ impl Consumer {
 			let decoded_at = if let Some(terminal_start) = self.terminal_start {
 				advance(terminal_start, self.frames_decoded, rate)?
 			} else {
-				mux_frame.timestamp
+				// The codec delay is padding before the epoch, not a hole after the
+				// first short frame. Keep later output contiguous by moving it back over
+				// everything trimmed since this decoder epoch began.
+				let trimmed = self.decoder.delay() - self.decoder.delay_remaining();
+				rewind(mux_frame.timestamp, trimmed, rate)?.max(epoch)
 			};
 			if self.end.is_some() {
 				self.frames_decoded += frames;
 			}
-			self.next_start = Some(advance(decoded_at, frames + trimmed, rate)?);
+			// Packet continuity stays on the encoded timeline. `decoded_at` may be
+			// earlier because codec pre-skip is padding before the decoded epoch.
+			self.next_start = Some(advance(mux_frame.timestamp, frames + trimmed, rate)?);
 			if decoded.is_empty() {
 				continue;
 			}
@@ -316,6 +323,7 @@ impl Consumer {
 		self.next_start = None;
 		self.spans.clear();
 		self.trailing = Activity::Active;
+		self.epoch = None;
 		Ok(frame)
 	}
 
@@ -860,6 +868,47 @@ mod tests {
 		let second = consumer.read().await.unwrap().expect("decoded frame");
 		assert_eq!(second.timestamp.as_micros(), 22_500);
 		assert_eq!(second.data.len(), first.data.len(), "the decoder was not reset");
+	}
+
+	/// Opus pre-skip is padding before the decoded epoch, not missing media after
+	/// the first short frame. The second frame must meet the first or playback
+	/// fills the codec delay with silence and creates a startup glitch.
+	#[tokio::test]
+	async fn opus_pre_skip_does_not_leave_a_timestamp_hole() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
+		let catalog = encoder.catalog();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
+			.await
+			.unwrap();
+
+		let pcm = vec![0.25f32; encoder.frame_size()];
+		for packet in 0..2 {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
+					duration: None,
+					payload: encoder.encode(&pcm).unwrap().payload,
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+
+		let first = consumer.read().await.unwrap().expect("first decoded frame");
+		let second = consumer.read().await.unwrap().expect("second decoded frame");
+		let first_frames = first.data.len() / size_of::<f32>();
+		let expected = advance(first.timestamp, first_frames, 48_000).unwrap();
+		assert_eq!(second.timestamp, expected);
 	}
 
 	#[tokio::test]
