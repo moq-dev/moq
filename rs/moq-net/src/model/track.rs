@@ -266,6 +266,11 @@ struct FetchOutcome {
 }
 
 impl TrackState {
+	fn normalize_info(broadcast: &broadcast::Info, mut info: Info) -> Info {
+		info.latency_max = info.latency_max.min(broadcast.origin.cache_duration);
+		info
+	}
+
 	fn accept(&mut self, info: Info) {
 		self.published = true;
 		self.install(info);
@@ -570,8 +575,8 @@ impl TrackState {
 	/// group is never retained longer than the origin allows. Every path that binds an
 	/// info to a track funnels through here, covering local publishers and relayed
 	/// (lite / IETF) tracks alike.
-	fn install(&mut self, mut info: Info) {
-		info.latency_max = info.latency_max.min(self.broadcast.origin.cache_duration);
+	fn install(&mut self, info: Info) {
+		let info = Self::normalize_info(&self.broadcast, info);
 		self.info = Some(info);
 	}
 
@@ -881,7 +886,7 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let name = name.into();
-		let info = info.into().unwrap_or_default();
+		let info = TrackState::normalize_info(&broadcast, info.into().unwrap_or_default());
 		let state = TrackState::spawn(broadcast.clone());
 		state.write().ok().expect("a new track is open").accept(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
@@ -2719,7 +2724,7 @@ impl Request {
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
-		let info = info.into().unwrap_or_default();
+		let info = TrackState::normalize_info(&self.broadcast, info.into().unwrap_or_default());
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
@@ -3460,6 +3465,7 @@ mod test {
 			Duration::from_secs(1),
 		);
 		assert_eq!(capped.state.read().latency_bound(), Some(Duration::from_secs(1)));
+		assert_eq!(capped.subscribe(None).info().latency_max, Duration::from_secs(1));
 
 		let under = track_producer_capped(
 			"test",
