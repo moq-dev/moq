@@ -18,7 +18,7 @@ deployment (moq.pro) that already keys recordings itself. Until that is
 decided this quest stays a plan quest; do not start
 [HLS generation](/quest/m2/hls-generation.md) against a guess.
 
-What the pass settled, so it is not re-derived:
+The pass settled the following points, so they do not need to be re-derived:
 
 - The requirement is unchanged: a CDN edge needs one URL to mean the same
   bytes on every edge, so the ID has to be minted by the publisher and travel
@@ -50,5 +50,7 @@ What the pass settled, so it is not re-derived:
   publisher session downstream.
 - If a wire epoch is chosen it folds into lite-06-wip, is minted at random
   on `broadcast::Info` with an application override so an archive replays a
-  recording under its recorded value, and reaches moq-transport as a
-  SUBSCRIBE_OK parameter.
+  recording under its recorded value. On moq-lite it rides TRACK_INFO (lite's
+  SUBSCRIBE_OK carries only the resolved group); on moq-transport, which has
+  no TRACK_INFO, it rides a SUBSCRIBE_OK parameter, and the adapter maps
+  both onto the same `track::Info` field.
