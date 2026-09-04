@@ -430,6 +430,23 @@ where
 		}
 	}
 
+	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
+	/// subscription, then retired.
+	///
+	/// The alias table is private to this module and the loop that answers a group for a
+	/// retired alias lives in `session.rs`, so this is what lets that loop be driven end to
+	/// end from there.
+	#[cfg(test)]
+	pub(super) fn retire_alias(&self, alias: u64) {
+		// Which request owned the alias does not matter, only that retirement follows the
+		// same binding it does in production.
+		const REQUEST_ID: RequestId = RequestId(0);
+
+		let aliases = self.state.lock().aliases.clone();
+		insert_track_alias(&aliases, alias, REQUEST_ID).expect("bind the alias");
+		retire_track_alias(&aliases, alias, REQUEST_ID);
+	}
+
 	/// What the peer declared in its SETUP, or the default (extension off) on a version
 	/// that cannot negotiate it. See [`super::Publisher::peer`].
 	pub(super) async fn peer(&self) -> cluster::Peer {
@@ -2558,8 +2575,8 @@ mod tests {
 	/// what distorts its error handling.
 	///
 	/// Covers the error this path produces and the code it maps to, not the dispatch loop
-	/// that sends it: `run_unis` is private to `session`, and retiring an alias reaches into
-	/// state private to this module, so nothing here can drive one end to end. See #3002.
+	/// that sends it. `session::a_group_for_a_retired_alias_is_stopped_with_cancelled`
+	/// drives that loop over a real receive stream.
 	#[tokio::test(start_paused = true)]
 	async fn a_retired_alias_maps_to_the_cancelled_code() {
 		let aliases = TrackAliases::default();
