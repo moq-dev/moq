@@ -743,8 +743,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
+			// These tests publish a whole track up front and read it back afterwards,
+			// so every packet but the last is already old by the time the consumer
+			// looks. The default budget is zero, which sheds all of them.
 			Config {
 				sample_rate: Some(out_rate),
+				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
 		)
@@ -860,9 +864,17 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		// A 20 ms packet at 0, then the next one at 22.5 ms: the 2.5 ms packet
 		// between them was lost.
@@ -947,9 +959,17 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		let pcm = vec![0.25f32; encoder.frame_size()];
 		for packet in 0..2 {
