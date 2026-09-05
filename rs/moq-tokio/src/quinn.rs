@@ -516,6 +516,7 @@ fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 pub(crate) struct QuinnServer {
 	pub quic: quinn::Endpoint,
 	pub certs: Arc<ServeCerts>,
+	_reload: crate::tls::Reload,
 }
 
 impl QuinnServer {
@@ -613,9 +614,9 @@ impl QuinnServer {
 
 		// Spawn the cert reload watcher only after endpoint creation succeeds,
 		// so we don't leave a dangling watcher on failure.
-		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
+		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
 
-		Ok(Self { quic, certs })
+		Ok(Self { quic, certs, _reload })
 	}
 
 	pub fn accept(&self) -> impl std::future::Future<Output = Option<quinn::Incoming>> + '_ {
