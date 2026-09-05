@@ -28,6 +28,11 @@ use moq_net::Timestamp;
 /// fragment duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
 ///
+/// The exported timeline starts at zero, not at the publisher's presentation clock, so a
+/// subscriber that joins two hours into a broadcast writes a file that begins at 00:00:00
+/// rather than 02:00:00. One origin covers every track, so A/V offsets and any gap inside the
+/// recording survive intact.
+///
 /// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
 /// sync sample and how long it lasts. A segmenting consumer (e.g. an HLS/LL-HLS
@@ -49,6 +54,12 @@ pub struct Export<S: Stream> {
 	/// Set after the init segment has been emitted; subsequent catalog updates only
 	/// (un)subscribe tracks without re-emitting init.
 	init_emitted: bool,
+
+	/// Where this export puts timeline zero. `None` until the first fragment fixes it.
+	///
+	/// See [`resolve_origin`](Self::resolve_origin) for what it is resolved from and why the
+	/// whole export shares one value.
+	origin: Option<Timestamp>,
 }
 
 /// One emitted CMAF chunk: the init segment, then media fragments.
@@ -162,6 +173,7 @@ impl<S: Stream> Export<S> {
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			init_emitted: false,
+			origin: None,
 		}
 	}
 
@@ -307,29 +319,38 @@ impl<S: Stream> Export<S> {
 				// the next one flushes it.
 				let has_video = self.tracks.values().any(|t| t.is_video);
 				let per_frame = frag == Some(Duration::ZERO) || (frag.is_none() && !has_video);
-				let track = self.tracks.get_mut(&name).unwrap();
-				let frame = track.pending.take().unwrap();
-				if per_frame {
-					// A catalog change can leave buffered frames behind. Drain them
-					// first and retry this frame on the next poll.
-					if !track.buffer.is_empty() {
-						let frames = std::mem::take(&mut track.buffer);
-						let fragment = emit_fragment(track, frames, Some(&frame))?;
-						track.pending = Some(frame);
+				let track = &self.tracks[&name];
+
+				if per_frame || should_flush(track, track.pending.as_ref().unwrap(), frag) {
+					// Fixing the origin here rather than at the first pulled frame gives every
+					// track its chance to arrive first: nothing is written at the export's zero
+					// until now.
+					let origin = self.resolve_origin();
+					let track = self.tracks.get_mut(&name).unwrap();
+					let frame = track.pending.take().unwrap();
+					if per_frame {
+						// A catalog change can leave buffered frames behind. Drain them
+						// first and retry this frame on the next poll.
+						if !track.buffer.is_empty() {
+							let frames = std::mem::take(&mut track.buffer);
+							let fragment = emit_fragment(track, frames, Some(&frame), origin)?;
+							track.pending = Some(frame);
+							return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
+						}
+						track.buffer_independent = frame.keyframe;
+						let fragment = emit_fragment(track, vec![frame], None, origin)?;
 						return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 					}
-					track.buffer_independent = frame.keyframe;
-					let fragment = emit_fragment(track, vec![frame], None)?;
-					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
-				}
-				if should_flush(track, &frame, frag) {
 					let frames = std::mem::take(&mut track.buffer);
-					let fragment = emit_fragment(track, frames, Some(&frame))?;
+					let fragment = emit_fragment(track, frames, Some(&frame), origin)?;
 					// The flushed run is done; the incoming frame opens the next buffer.
 					track.buffer_independent = frame.keyframe;
 					track.buffer.push(frame);
 					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 				}
+
+				let track = self.tracks.get_mut(&name).unwrap();
+				let frame = track.pending.take().unwrap();
 				if track.buffer.is_empty() {
 					track.buffer_independent = frame.keyframe;
 				}
@@ -354,9 +375,10 @@ impl<S: Stream> Export<S> {
 				.map(|(name, _)| name);
 
 			if let Some(name) = flushable {
+				let origin = self.resolve_origin();
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(track, frames, None)?;
+				let fragment = emit_fragment(track, frames, None, origin)?;
 				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 			}
 
@@ -371,6 +393,35 @@ impl<S: Stream> Export<S> {
 
 			return Poll::Pending;
 		}
+	}
+
+	/// Where this export puts timeline zero, fixed on the first fragment.
+	///
+	/// A subscriber joining a broadcast that has been live for two hours gets frames stamped
+	/// near 7200 seconds, because a publisher's presentation clock counts from when *it*
+	/// started. That age belongs to the publisher, not to the file being written: an export is
+	/// its own recording and its first fragment is its zero, so the earliest presentation time
+	/// any track has produced is subtracted from every fragment.
+	///
+	/// One value for the whole export, resolved once. Per-track origins would shift audio and
+	/// video apart by whatever their first frames happened to differ by, and re-deriving it at
+	/// each publisher pause would rewind `tfdt` mid-track. So a gap inside the recording stays
+	/// a gap, which is what it is; only the age the export inherited is removed.
+	fn resolve_origin(&mut self) -> Timestamp {
+		if let Some(origin) = self.origin {
+			return origin;
+		}
+		// Everything pulled so far, which for a buffering track is a whole run rather than
+		// just the frame about to be written.
+		let origin = self
+			.tracks
+			.values()
+			.flat_map(|track| track.buffer.iter().chain(&track.pending))
+			.map(|frame| frame.timestamp)
+			.min()
+			.unwrap_or(Timestamp::ZERO);
+		self.origin = Some(origin);
+		origin
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
@@ -624,8 +675,9 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	max.saturating_sub(min) >= cap
 }
 
-/// Encode a buffered run of samples as a single CMAF moof+mdat fragment.
-fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
+/// Encode a buffered run of samples as a single CMAF moof+mdat fragment, on the export's own
+/// timeline rather than the publisher's.
+fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>, origin: Timestamp) -> Result<Bytes> {
 	if frames.is_empty() {
 		return Err(Error::NoFrames.into());
 	}
@@ -636,12 +688,18 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 		track_id: track.track_id,
 		timescale,
 		sequence_number: seq,
+		origin: crate::container::fmp4::timestamp_ticks(origin, timescale)?,
 	};
 	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
-fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
+fn emit_fragment(
+	track: &mut Fmp4Track,
+	mut frames: Vec<Frame>,
+	successor: Option<&Frame>,
+	origin: Timestamp,
+) -> Result<Fragment> {
 	apply_codec_durations(&mut frames, track.opus);
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
@@ -649,7 +707,7 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	let timescale = moq_net::Timescale::new(track.timescale)?;
 	infer_missing_durations(&mut frames, successor, track.default_frame, timescale)?;
 	let duration = fragment_duration(&frames, track.default_frame);
-	let data = encode_fragment(track, frames)?;
+	let data = encode_fragment(track, frames, origin)?;
 	Ok(Fragment {
 		data,
 		independent,
