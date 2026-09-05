@@ -596,15 +596,21 @@ export class Producer {
 		this.#pruneTimer = undefined;
 		if (this.#state.closed.peek() !== undefined) return;
 
+		// One pass, no intermediate arrays: this runs on every publish, and a spread
+		// over the cache would also cap how many groups a track can hold.
 		const live = this.#liveEdge();
-		const ages = this.#cache.filter((entry) => entry.group !== live).map((entry) => entry.group.activity);
-		if (ages.length === 0) return;
+		let oldest: number | undefined;
+		for (const entry of this.#cache) {
+			if (entry.group === live) continue;
+			if (oldest === undefined || entry.group.activity < oldest) oldest = entry.group.activity;
+		}
+		if (oldest === undefined) return;
 
 		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
 		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
 		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
 		// retains anything still fresh, so the extra wakeups are the only cost.
-		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, Math.min(...ages) + maxAgeMs - performance.now()));
+		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, oldest + maxAgeMs - performance.now()));
 		const timer = setTimeout(() => {
 			this.#pruneTimer = undefined;
 			this.#prune();

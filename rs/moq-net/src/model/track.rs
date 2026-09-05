@@ -52,8 +52,10 @@ const EVICT_SCAN: usize = 4;
 #[derive(Clone, Copy)]
 pub(super) struct ExpiryScan {
 	start: usize,
-	// How many entries this pass examines. `EVICT_SCAN` from the write path, the
-	// whole queue from the pool's sweep.
+	// Ceiling on how many entries this pass examines. `EVICT_SCAN` from the write
+	// path, the whole queue from the pool's sweep. Either way the pass stops once it
+	// has retained `EVICT_SCAN` entries, so its cost tracks what it reclaims rather
+	// than how much the track has cached.
 	width: usize,
 	now: u64,
 	max_ticks: u64,
@@ -597,16 +599,17 @@ impl TrackState {
 		}
 	}
 
-	/// Describe a scan covering the whole eviction order, for the pool's sweep.
+	/// Describe a scan that drains the stale front of the eviction order, for the
+	/// pool's sweep.
 	///
-	/// A write's window is deliberately tiny so it stays off the hot path, which is
-	/// fine while writes keep coming. The sweep is the only thing running on a track
-	/// nobody writes, so a rotating window there would take a backlog's length in
-	/// sweeps to reach the oldest entry, missing the window's deadline by orders of
-	/// magnitude. It runs at most once per gate interval, off any write, so it covers
-	/// the queue in one pass instead. The cost is one pass over the track's cached
-	/// groups, which the pool's byte budget already bounds.
-	pub(super) fn expiry_scan_full(&self) -> ExpiryScan {
+	/// A write's rotating window is fine while writes keep coming, because the next
+	/// one revisits the rest. The sweep is the only thing running on a track nobody
+	/// writes, so that window would take a backlog's length in sweeps to reach the
+	/// oldest entry. This starts at the front, where the oldest entries are, and the
+	/// shared stop rule ends it once the front stops yielding victims. A track that
+	/// went quiet has its whole backlog stale and contiguous there, so one sweep takes
+	/// all of it; a track with nothing due costs `EVICT_SCAN` entries, not its depth.
+	pub(super) fn expiry_scan_drain(&self) -> ExpiryScan {
 		ExpiryScan {
 			start: 0,
 			width: self.evict.len(),
@@ -616,10 +619,14 @@ impl TrackState {
 	}
 
 	/// Whether an expiry scan would change observable track state.
+	///
+	/// Mirrors [`Self::evict_expired_scan`]'s walk exactly, stop rule included: a memo
+	/// that scanned further would report work the scan itself will not do.
 	pub(super) fn expiry_mutation_due(&self, scan: ExpiryScan) -> bool {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
+			let mut retained = 0;
 			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
@@ -634,6 +641,10 @@ impl TrackState {
 				{
 					return true;
 				}
+				retained += 1;
+				if retained >= EVICT_SCAN {
+					break;
+				}
 			}
 		}
 
@@ -647,11 +658,13 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Apply a scan previously selected by [`Self::expiry_scan`].
+	/// Apply a scan previously selected by [`Self::expiry_scan`] or
+	/// [`Self::expiry_scan_drain`].
 	pub(super) fn evict_expired_scan(&mut self, scan: ExpiryScan) {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
+			let mut retained = 0;
 			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
@@ -670,6 +683,13 @@ impl TrackState {
 				if Some(sequence) == self.latest_group
 					|| scan.now.saturating_sub(slot.group.cache_accessed_tick()) <= scan.max_ticks
 				{
+					// Nothing to reclaim here. The front of the queue is the oldest
+					// content, so a run of these means the rest is fresher still: stop
+					// rather than walk a whole cache to find nothing.
+					retained += 1;
+					if retained >= EVICT_SCAN {
+						break;
+					}
 					continue;
 				}
 				// Take the group out of the cache and abort it, so any consumer

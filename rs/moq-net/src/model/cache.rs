@@ -234,8 +234,8 @@ impl Pool {
 	/// How often [`Self::sweep`] should run, or `None` when idle reclamation is off.
 	///
 	/// Half the window, so a group is reclaimed within 1.5 windows of its last access
-	/// rather than 2, and each track's pass covers its whole eviction order so that
-	/// bound holds however deep the backlog is. A shorter cadence buys nothing: the
+	/// rather than 2, and each track's pass drains from its oldest entry so that bound
+	/// holds however deep the backlog is. A shorter cadence buys nothing: the
 	/// same per-track gate the write path uses ([`EXPIRY_SCAN_TICKS`]) floors an
 	/// actual scan at one per second, which is also why a window under two seconds
 	/// reclaims within two windows instead of 1.5.
@@ -248,9 +248,10 @@ impl Pool {
 	/// This is the write-independent half of the LRU window: a track whose publisher
 	/// has stalled runs no write path, so nothing else would ever reclaim the group it
 	/// left open, and a reader parked inside that group would never be told. Each track
-	/// covers its whole eviction order, since nothing else will, but behind the same
-	/// time gate a write uses: a sweep over a pool with nothing due costs a relaxed
-	/// atomic per track.
+	/// drains from its oldest entry rather than a rotating window, since nothing else
+	/// will, but stops as soon as the front stops yielding victims: a sweep over a pool
+	/// with nothing due costs a clock read and a few entries per track, not a walk of
+	/// everything cached.
 	///
 	/// A no-op when idle reclamation is disabled: nothing registers.
 	pub(crate) fn sweep(&self) {
@@ -466,14 +467,14 @@ impl Track {
 		self.settle_inner(now, false);
 	}
 
-	/// Settle from [`Pool::sweep`], covering the whole eviction order.
+	/// Settle from [`Pool::sweep`], draining the stale front of the eviction order.
 	///
-	/// The write path's rotating window is bounded so it stays off the hot path, which
-	/// holds the deadline only because writes keep coming. Nothing else runs on a track
-	/// that stopped writing, so the sweep scans the queue in one pass instead: a
-	/// backlog otherwise needs its own length in windows before the sweep reaches its
-	/// oldest entry. Bounded by the track's cached groups, which the byte budget caps,
-	/// and gated to the same interval a write is.
+	/// The write path's rotating window is fine while writes keep coming, because the
+	/// next one revisits the rest. Nothing follows on a track that stopped writing, so
+	/// the sweep starts at the oldest entry and keeps going while it finds victims: a
+	/// backlog otherwise needs its own length in windows before the oldest entry is
+	/// even examined. A track with nothing due costs a handful of entries, not its
+	/// depth, and this is gated to the same interval a write is.
 	pub(crate) fn sweep(&self) {
 		self.settle_inner(None, true);
 	}
@@ -490,7 +491,7 @@ impl Track {
 		let expiry = if scan_expiry {
 			let state = state.read();
 			let scan = if full {
-				state.expiry_scan_full()
+				state.expiry_scan_drain()
 			} else {
 				state.expiry_scan()
 			};
