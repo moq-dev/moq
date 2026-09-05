@@ -145,7 +145,7 @@ impl V4l2 {
 		)?;
 		device.set_control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, h264_level(config)?)?;
 		device.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, config.gop as i32)?;
-		set_bitrate(&device, config.resolved_bitrate())?;
+		set_bitrate(&device, config.resolved_bitrate().as_bps())?;
 		// Constant rate is what a live uplink wants: the congestion controller
 		// already owns the rate, and a variable-rate encoder would spend it on the
 		// wrong frames.
@@ -829,7 +829,7 @@ fn h264_level(config: &Config) -> Result<i32, Error> {
 	let size = config.size();
 	let per_frame = size.width.div_ceil(16) * size.height.div_ceil(16);
 	let per_second = per_frame as u64 * config.framerate as u64;
-	let kbps = config.resolved_bitrate().div_ceil(1_000);
+	let kbps = config.resolved_bitrate().as_bps().div_ceil(1_000);
 	LEVELS
 		.iter()
 		.find(|level| {
@@ -916,9 +916,9 @@ mod tests {
 	#[test]
 	fn the_level_clears_the_bitrate() {
 		let mut config = config(1280, 720, 30);
-		config.bitrate = Some(14_000_000);
+		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(14_000_000));
 		assert_eq!(h264_level(&config).unwrap(), 9); // 3.1
-		config.bitrate = Some(14_000_001);
+		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(14_000_001));
 		assert_eq!(h264_level(&config).unwrap(), 10); // 3.2
 	}
 
