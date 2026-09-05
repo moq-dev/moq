@@ -1513,15 +1513,16 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	if (!cookie || !cookie->bridge || !cookie->bridge->begin())
 		return;
 
+	// Covers only the OBS-thread read of the dock pointer and failure text.
+	// The queued Qt work uses QPointer, so it must not hold the activity count
+	// or destruction would wait on the event loop.
 	struct EndBridge {
 		std::shared_ptr<MoQDockStopBridge> bridge;
-		bool armed = true;
 		~EndBridge()
 		{
-			if (armed && bridge)
+			if (bridge)
 				bridge->end();
 		}
-		void disarm() { armed = false; }
 	} endBridge{cookie->bridge};
 
 	MoQDock *self = nullptr;
@@ -1552,22 +1553,11 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	const QString failText = ExplainFailure(failCode, failReason);
 
 	// Queue onto the application object, not the dock: the dock may be destroyed
-	// before the event runs. The bridge keep-alive + QPointer cover that window.
+	// before the event runs. QPointer makes a late delivery a no-op.
 	const QPointer<MoQDock> dock(self);
-	auto bridge = cookie->bridge;
-	endBridge.disarm();
-	const bool posted = QMetaObject::invokeMethod(
+	QMetaObject::invokeMethod(
 		qApp,
-		[bridge, dock, code, failText, stopped]() {
-			struct Done {
-				std::shared_ptr<MoQDockStopBridge> bridge;
-				~Done()
-				{
-					if (bridge)
-						bridge->end();
-				}
-			} done{bridge};
-
+		[dock, code, failText, stopped]() {
 			if (!dock)
 				return;
 			// A late stop for a superseded output must not tear down a newer Go Live.
@@ -1587,8 +1577,6 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 			}
 		},
 		Qt::QueuedConnection);
-	if (!posted)
-		bridge->end();
 }
 
 void register_moq_dock()
