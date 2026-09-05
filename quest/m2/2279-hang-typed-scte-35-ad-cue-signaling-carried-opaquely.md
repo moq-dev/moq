@@ -18,7 +18,12 @@ bytes. Not a `moq-json` stream of typed records.
 - **A `scte35` catalog section**, as its own `CatalogExt` like the `mpegts`
   one, naming one sidecar track per rendition that carries cues. Cues from a
   TS program attach to its video rendition, or to its audio rendition when
-  there is no video; the import already stamps them with video PTS.
+  there is no video. One timestamp contract for both: a cue's wire timestamp
+  is its `splice_time` (or the section's arrival time when it has none)
+  converted to the owning rendition's clock, so the importer, which stamps
+  from the video `last_pts` today, learns to stamp from audio PTS for an
+  audio-only program, and the draft, both implementations, and the export
+  tests use the same rule.
 - **Framing.** Each frame is one complete `splice_info_section`, byte for
   byte, in the group of the media it applies to, stamped with the splice
   time's wire timestamp. A section with no splice time (`splice_null`,

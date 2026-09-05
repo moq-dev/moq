@@ -34,9 +34,11 @@ either hides paths the subscriber may use or leaks the ones it must not, and
 `request_broadcast` resolves against the route table regardless. The
 enforcing shape is a pattern-scoped grant on the consumer handle, narrowed at
 resolution and announce fan-out alike, and changed at runtime through
-[relay revalidation](/quest/m2/path-patterns/relay-auth.md); prove the deafen
-case (a grant excluding one audio path under a room prefix) in the model-layer
-tests here.
+[relay revalidation](/quest/m2/path-patterns/relay-auth.md). Narrowing a live
+grant must also end the subscriptions it no longer covers, not only refuse new
+ones. Prove the deafen case in the model-layer tests here: subscribe under a
+room prefix, revalidate with a grant that excludes that audio path, and assert
+the existing subscription closes and no further objects arrive.
 
 ## Required
 

@@ -17,6 +17,12 @@ wire timestamp of the media it accompanies, and carries raw bytes. A 1080p and
 a 360p rendition carry different SEI, so there is one sidecar per video
 rendition, and group 7 of the sidecar holds the SEI for group 7 of its video.
 
+Metadata that precedes the first media unit (an `emsg` before the first
+`moof`, an FLV script tag before the first media tag) rides the rendition's
+first group, ordered before that group's media, stamped with its own
+presentation time when it has one and otherwise with the first media frame's,
+and an exporter emits it before the first media unit.
+
 Within a group the frame's wire timestamp is the key, so an application
 syncing to presentation time reads it directly instead of joining against the
 video track it deliberately did not subscribe to. Several access units can

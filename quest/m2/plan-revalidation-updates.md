@@ -24,7 +24,18 @@ fields the auth API can legitimately change therefore behave inconsistently:
   announcing under a root the API no longer assigns, but it is a silent hard
   disconnect for what may be a benign rename.
 
-Decide deliberately, per field: update in place, close, or refuse the change.
+Two things are fixed before this decision is made. The
+[relay auth](/quest/m2/path-patterns/relay-auth.md) quest already requires a
+re-check to compare the full versioned grant, reject unsupported, mixed,
+invalid, and out-of-scope grants, and resize a live session with no prefix-only
+widening window; this plan inherits that invariant rather than restating a
+weaker one. And "the alias becomes the token's `root`" describes today's v0
+behavior only: under v1 grants a literal root aliases or rebases the patterns
+and never becomes one, so the canonical alias transformation has to be stated
+before deciding whether an alias change closes or updates a session.
+
+Then decide deliberately, per field: update in place, close, or refuse the
+change.
 Then the implementing quest applies it in `rs/moq-relay/src/auth.rs` with a
 test per field and documents the contract in `doc/bin/relay/auth.md`.
 
