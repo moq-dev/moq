@@ -159,14 +159,14 @@ impl Broadcaster {
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
 					name: rendition.name.clone(),
-					bandwidth: rendition.bandwidth,
+					bandwidth: rendition.bandwidth(),
 					width: rendition.width,
 					height: rendition.height,
 					codec: rendition.codec.clone(),
 				}),
 				Kind::Audio => audio.push(master::AudioVariant {
 					name: rendition.name.clone(),
-					bandwidth: rendition.bandwidth,
+					bandwidth: rendition.bandwidth(),
 					codec: rendition.codec.clone(),
 				}),
 			}
@@ -433,6 +433,201 @@ mod tests {
 		let renditions = renditions::Producer::new(Config::default().window);
 		renditions.sync(&upstream, &catalog);
 		assert!(renditions.get(Kind::Video, "video").is_none());
+	}
+
+	/// An upstream over an empty published broadcast, for the `sync` reconciliation tests.
+	async fn empty_upstream(origin: &moq_net::origin::Producer, path: &str) -> Upstream {
+		let source = moq_mux::Source::new(origin.consume(), path);
+		Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		}
+	}
+
+	/// A catalog with one video and one audio rendition, both servable.
+	fn catalog_with_both() -> moq_mux::catalog::hang::Catalog {
+		let mut audio = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 2 }),
+			44_100,
+			2,
+		);
+		audio.description = Some(bytes::Bytes::from_static(&[0x12, 0x10]));
+		audio.bitrate = Some(96_000);
+
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.video.renditions.insert("video0".to_string(), video_config());
+		catalog.audio.renditions.insert("audio0".to_string(), audio);
+		catalog
+	}
+
+	/// The next rendition event, or `None` if the set is quiet.
+	async fn next_event(cursor: &mut renditions::Consumer) -> Option<renditions::Event> {
+		tokio::time::timeout(Duration::from_millis(50), cursor.next())
+			.await
+			.ok()
+			.flatten()
+	}
+
+	/// The average bitrate encoded in a synthesized AAC init segment.
+	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
+		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
+		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
+		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+			panic!("expected mp4a, got {codec:?}");
+		};
+		mp4a.esds.es_desc.dec_config.avg_bitrate
+	}
+
+	// A publisher's estimator republishes the catalog every time its measured bitrate or jitter
+	// moves, writing those two fields and nothing else. That must not churn the rendition:
+	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,
+	// and makes every recording cursor see a Removed followed by an Added.
+	#[tokio::test]
+	async fn estimate_only_catalog_update_keeps_the_rendition() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce = origin.announce("live", Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		let renditions = renditions::Producer::new(Config::default().window);
+		let mut cursor = renditions.subscribe();
+		renditions.sync(&upstream, &catalog);
+
+		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
+		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
+		let audio_init = audio.init().await.unwrap().expect("AAC init segment");
+		assert_eq!(
+			aac_avg_bitrate(&audio_init),
+			96_000,
+			"the muxer keeps the declared catalog bitrate"
+		);
+		assert_eq!(video.bandwidth(), 2_000_000, "the catalog carries no video bitrate yet");
+		assert_eq!(audio.bandwidth(), 96_000);
+		assert!(matches!(
+			next_event(&mut cursor).await,
+			Some(renditions::Event::Added(_))
+		));
+		assert!(matches!(
+			next_event(&mut cursor).await,
+			Some(renditions::Event::Added(_))
+		));
+
+		// Exactly what `catalog::Rendition::estimate` writes back.
+		let video_config = catalog.video.renditions.get_mut("video0").unwrap();
+		video_config.bitrate = Some(1_800_000);
+		video_config.jitter = Some(Duration::from_millis(33));
+		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
+		renditions.sync(&upstream, &catalog);
+
+		assert!(
+			Arc::ptr_eq(&video, &renditions.get(Kind::Video, "video0").unwrap()),
+			"the video rendition survives an estimate-only update"
+		);
+		assert!(
+			Arc::ptr_eq(&audio, &renditions.get(Kind::Audio, "audio0").unwrap()),
+			"the audio rendition survives an estimate-only update"
+		);
+		assert_eq!(
+			video.bandwidth(),
+			1_800_000,
+			"the master playlist advertises the estimate"
+		);
+		assert_eq!(audio.bandwidth(), 110_000);
+		assert_eq!(
+			audio.init().await.unwrap().expect("cached AAC init segment"),
+			audio_init,
+			"an estimate update preserves the cached init segment"
+		);
+		assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
+
+		// A bitrate the publisher retracts falls back to the advertised default.
+		catalog.video.renditions.get_mut("video0").unwrap().bitrate = None;
+		renditions.sync(&upstream, &catalog);
+		assert_eq!(video.bandwidth(), 2_000_000);
+	}
+
+	#[tokio::test]
+	async fn estimate_before_first_init_reaches_aac_descriptor() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce = origin.announce("live", Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = None;
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &catalog);
+		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
+
+		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
+		renditions.sync(&upstream, &catalog);
+		assert!(
+			Arc::ptr_eq(&audio, &renditions.get(Kind::Audio, "audio0").unwrap()),
+			"the estimate updates the existing rendition"
+		);
+		let init = audio.init().await.unwrap().expect("AAC init segment");
+
+		assert_eq!(audio.bandwidth(), 110_000);
+		assert_eq!(
+			aac_avg_bitrate(&init),
+			110_000,
+			"the latest estimate reaches an init that was not cached yet"
+		);
+	}
+
+	// The other half: a change that alters how the rendition decodes still rebuilds it, so the
+	// cached init segment can never describe media it no longer matches.
+	#[tokio::test]
+	async fn decoder_config_change_rebuilds_the_rendition() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce = origin.announce("live", Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		let renditions = renditions::Producer::new(Config::default().window);
+		let mut cursor = renditions.subscribe();
+		renditions.sync(&upstream, &catalog);
+
+		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
+		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
+		assert!(matches!(
+			next_event(&mut cursor).await,
+			Some(renditions::Event::Added(_))
+		));
+		assert!(matches!(
+			next_event(&mut cursor).await,
+			Some(renditions::Event::Added(_))
+		));
+
+		// A resolution change and a sample-rate change both invalidate the init segment.
+		catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(640);
+		catalog.audio.renditions.get_mut("audio0").unwrap().sample_rate = 48_000;
+		renditions.sync(&upstream, &catalog);
+
+		let rebuilt = renditions.get(Kind::Video, "video0").expect("video rendition");
+		assert!(!Arc::ptr_eq(&video, &rebuilt), "the video rendition is rebuilt");
+		assert_eq!(rebuilt.width, Some(640));
+		assert!(
+			!Arc::ptr_eq(&audio, &renditions.get(Kind::Audio, "audio0").unwrap()),
+			"the audio rendition is rebuilt"
+		);
+
+		// Both cursors see the replacement as a removal followed by an addition.
+		let mut removed = 0;
+		let mut added = 0;
+		while let Some(event) = next_event(&mut cursor).await {
+			match event {
+				renditions::Event::Removed { .. } => removed += 1,
+				renditions::Event::Added(_) => added += 1,
+			}
+		}
+		assert_eq!((removed, added), (2, 2));
 	}
 
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
