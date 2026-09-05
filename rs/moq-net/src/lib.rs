@@ -107,6 +107,8 @@ pub use error::*;
 pub use lite::Role;
 pub use model::*;
 pub use path::*;
+/// The path patterns grants and advertisements are written in; see [`moq_path`].
+pub use moq_path::{Pattern, Patterns};
 pub use runtime::{Runtime, Timers};
 pub use server::*;
 pub use session::*;
@@ -120,3 +122,6 @@ pub use web_transport_trait;
 
 // Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
 pub use kio;
+
+// Re-export the moq-path crate for the rest of the pattern API (segments, specificity, errors).
+pub use moq_path;

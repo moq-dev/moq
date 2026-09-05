@@ -17,6 +17,7 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
 | [@moq/token](/lib/js/token) | Mint and verify relay JWTs. |
+| [@moq/path](https://www.npmjs.com/package/@moq/path) | Path patterns: the wildcard grammar tokens, origins, and announcements share. |
 | [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
 | [@moq/json](https://www.npmjs.com/package/@moq/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [@moq/flate](https://www.npmjs.com/package/@moq/flate) | Group-scoped DEFLATE for any track. |

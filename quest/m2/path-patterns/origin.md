@@ -40,10 +40,6 @@ ones. Prove the deafen case in the model-layer tests here: subscribe under a
 room prefix, revalidate with a grant that excludes that audio path, and assert
 the existing subscription closes and no further objects arrive.
 
-## Required
-
-- [Matcher](/quest/m2/path-patterns/matcher.md)
-
 ## Closes
 
 - [#2714](https://github.com/moq-dev/moq/issues/2714) - close this issue when the quest finishes

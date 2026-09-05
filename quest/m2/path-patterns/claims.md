@@ -6,7 +6,7 @@ Rust and TypeScript token libraries verify v0 prefix claims forever and add an
 exact v1 wire shape:
 
 ```json
-{"v":1,"root":"pid","publish":["*/chat"],"subscribe":["**/*.hang"]}
+{"v":1,"root":"pid","publish":["*/chat"],"subscribe":["**/cam.hang"]}
 ```
 
 ## Plan
@@ -26,6 +26,3 @@ exact v1 wire shape:
   cross-version interoperability vectors, including old-reader fail-closed
   behavior.
 
-## Required
-
-- [Matcher](/quest/m2/path-patterns/matcher.md)
