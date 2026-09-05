@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14](https://github.com/moq-dev/moq/compare/libmoq-v0.5.13...libmoq-v0.5.14) - 2026-09-05
+
+### Added
+
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
 ## [0.5.13](https://github.com/moq-dev/moq/compare/libmoq-v0.5.12...libmoq-v0.5.13) - 2026-09-02
 
 ### Added

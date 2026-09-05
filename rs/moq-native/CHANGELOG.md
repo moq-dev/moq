@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.17](https://github.com/moq-dev/moq/compare/moq-native-v0.19.16...moq-native-v0.19.17) - 2026-09-05
+
+### Added
+
+- *(moq-net)* stitch a draft-20 fill into the group it joined ([#3325](https://github.com/moq-dev/moq/pull/3325))
+
+### Fixed
+
+- *(moq-native)* stop logging credentials in relay URLs and RTMP stream keys ([#3379](https://github.com/moq-dev/moq/pull/3379))
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 5 updates ([#3395](https://github.com/moq-dev/moq/pull/3395))
+
 ## [0.19.16](https://github.com/moq-dev/moq/compare/moq-native-v0.19.15...moq-native-v0.19.16) - 2026-09-02
 
 ### Other

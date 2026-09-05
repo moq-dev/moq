@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.13...moq-boy-v0.4.14) - 2026-09-05
+
+### Added
+
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(moq-native)* stop logging credentials in relay URLs and RTMP stream keys ([#3379](https://github.com/moq-dev/moq/pull/3379))
+
 ## [0.4.13](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.12...moq-boy-v0.4.13) - 2026-09-02
 
 ### Added
