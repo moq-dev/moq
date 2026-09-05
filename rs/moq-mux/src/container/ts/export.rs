@@ -230,7 +230,7 @@ struct SiTrack {
 	/// so holding a revision to the interval delivers the time seconds late and can
 	/// re-assert an already-sent value (#2934).
 	dirty: bool,
-	/// Media timestamp of the last emission ([`Export::write_frame`]).
+	/// Media timestamp of the last emission ([`Export::mux`]).
 	last_emit: Option<Timestamp>,
 	/// The same budget the media sources use. SI carries table snapshots at a low
 	/// rate, so the real-time default would take only the newest group and drop
@@ -470,7 +470,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		// 1b. Drive the SI subscriptions, folding arrived snapshots into each
-		// entry's active set (emission happens on cadence in `write_frame`).
+		// entry's active set (emission happens on cadence in `mux`).
 		//
 		// Deliberately not part of the first-frame gate below: nothing in SI is
 		// something a TS stream cannot begin without (the PAT/PMT are built locally,

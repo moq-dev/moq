@@ -2789,13 +2789,15 @@ async fn late_join_matches_a_running_exporter() {
 async fn late_join_matches_a_running_exporter_without_video() {
 	let (a, b) = export_twice(false).await;
 
-	// The joiner leads with its own PCR and a PAT/PMT-carrying tune-in frame so a receiver
-	// can start; the running exporter has no reason to repeat those there. From the first
-	// timestamp after the tune-in frame the two are rendering the same stream. (The joiner's
-	// leading PCR is stamped at a slot boundary at or before the tune-in frame, so comparing
-	// strictly after the tune-in excludes both.)
-	let tune_in = b.iter().find(|f| !is_pcr_frame(f)).expect("a tune-in frame").timestamp;
-	let from = b.iter().map(|f| f.timestamp).filter(|&t| t > tune_in).min().unwrap();
+	// The joiner's first span leads with PAT/PMT, while the running exporter has no
+	// reason to repeat them there. The span can cover several PCR slices, so compare
+	// from the next PAT/PMT refresh, which both exporters anchor to the media grid.
+	let from = b
+		.iter()
+		.filter(|frame| count_pid(std::slice::from_ref(*frame), 0) > 0)
+		.nth(1)
+		.expect("a periodic PAT/PMT refresh")
+		.timestamp;
 	assert_only_continuity_differs(&a, &b, from);
 }
 
@@ -2907,12 +2909,7 @@ async fn repointed_si_entry_resubscribes() {
 	let mut before = BytesMut::new();
 	write_key(&mut producer, 0);
 	write_key(&mut producer, 1);
-	for _ in 0..2 {
-		let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
-			.await
-			.expect("a frame before the switch")
-			.unwrap()
-			.unwrap();
+	for frame in drain_frames(&mut exporter).await {
 		before.extend_from_slice(&frame.payload);
 	}
 
@@ -3160,15 +3157,19 @@ async fn si_revision_does_not_wait_for_the_interval() {
 	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
-	assert_eq!(rig.media(0, 0x0014).await, 1, "a fresh exporter leads with the table");
-	assert_eq!(rig.media(1_000, 0x0014).await, 0, "unchanged: held by the 30s floor");
+	assert_eq!(rig.media(0, 0x0014).await, 0, "the first span stays buffered");
+	assert_eq!(
+		rig.media(1_000, 0x0014).await,
+		1,
+		"the next span closes the lead emission"
+	);
 	assert_eq!(rig.media(2_000, 0x0014).await, 0, "unchanged: still held");
 
 	// The clock ticks. Nothing about the 30 s interval has elapsed, but the value
 	// changed: it must go out with the very next frame.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(2))).unwrap();
-	assert_eq!(rig.media(3_000, 0x0014).await, 1, "the revision rides the next frame");
-	assert_eq!(rig.media(4_000, 0x0014).await, 0, "emitted once, then floored again");
+	assert_eq!(rig.media(3_000, 0x0014).await, 0, "the revision enters the open span");
+	assert_eq!(rig.media(4_000, 0x0014).await, 1, "the next span closes the revision");
 }
 
 /// #2934, the repeat half: an *unchanged* snapshot repeats only once its interval
@@ -3182,29 +3183,34 @@ async fn si_repeats_are_floored_from_the_last_emission() {
 	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1)).unwrap();
-	assert_eq!(rig.media(0, 0x0011).await, 1, "lead emission");
-	assert_eq!(rig.media(1_000, 0x0011).await, 0, "within the floor");
-	assert_eq!(rig.media(2_000, 0x0011).await, 1, "repeat once 2s elapsed");
+	assert_eq!(rig.media(0, 0x0011).await, 0, "the first span stays buffered");
+	assert_eq!(
+		rig.media(1_000, 0x0011).await,
+		1,
+		"the next span closes the lead emission"
+	);
+	assert_eq!(rig.media(2_000, 0x0011).await, 0, "the repeat enters the open span");
 
 	// A revision lands mid-interval: it waits only for the 1s revision floor
 	// (measured from the 2s repeat), not for the 2s interval or a grid slot.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2)).unwrap();
 	assert_eq!(
 		rig.media(2_500, 0x0011).await,
-		0,
-		"a revision honors the revision floor"
+		1,
+		"the prior repeat closes before the revision"
 	);
 	assert_eq!(
 		rig.media(3_500, 0x0011).await,
-		1,
-		"the revision rides the floor, not the interval"
+		0,
+		"the revision enters the span once its floor lapses"
 	);
 
 	// The next repeat is due 2s after that. The absolute grid would have re-sent
 	// at the 4s boundary, 0.5s after the wire last carried the identical sections.
-	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the old grid slot must not fire");
+	assert_eq!(rig.media(4_000, 0x0011).await, 1, "the next span closes the revision");
 	assert_eq!(rig.media(5_000, 0x0011).await, 0, "within the floor of the revision");
-	assert_eq!(rig.media(5_500, 0x0011).await, 1, "repeat 2s after the revision");
+	assert_eq!(rig.media(5_500, 0x0011).await, 0, "the repeat enters the open span");
+	assert_eq!(rig.media(6_000, 0x0011).await, 1, "the next span closes the repeat");
 }
 
 /// A reordered (B-frame) timestamp below the emission anchor earns no credit:
@@ -3219,12 +3225,12 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 		.unwrap();
-	assert_eq!(rig.media(1_000, 0x0011).await, 1, "lead emission");
+	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first span stays buffered");
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(1)))
 		.unwrap();
-	assert_eq!(rig.media(2_500, 0x0011).await, 1, "revision after the floor");
+	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the lead emission closes");
 
 	// The next revision arrives on a frame stepping back behind the 2.5s anchor,
 	// like a B-frame emitted in decode order: no elapsed time, no emission.
@@ -3234,12 +3240,13 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 	assert_eq!(rig.media(2_400, 0x0011).await, 0, "a reordered frame earns no credit");
 
 	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s.
-	assert_eq!(rig.media(3_400, 0x0011).await, 0, "still inside the floor");
+	assert_eq!(rig.media(3_400, 0x0011).await, 1, "only the prior revision closes");
 	assert_eq!(
 		rig.media(3_500, 0x0011).await,
-		1,
-		"the deferred revision rides the floor"
+		0,
+		"the deferred revision enters the span at the floor"
 	);
+	assert_eq!(rig.media(3_600, 0x0011).await, 1, "the next span closes the revision");
 }
 
 /// The emission anchor never moves backwards, even where a zero-interval entry
@@ -3257,10 +3264,10 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 		.unwrap();
-	assert_eq!(rig.media(1_000, 0x0011).await, 1, "zero interval rides every frame");
+	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first span stays buffered");
 	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the anchor advances to 2.5s");
 	// A reordered frame steps back behind the anchor; zero interval still emits.
-	assert_eq!(rig.media(2_400, 0x0011).await, 1, "and still rides a reordered frame");
+	assert_eq!(rig.media(2_400, 0x0011).await, 0, "the reordered span stays open");
 
 	// The catalog raises the interval to 1s. The floor must measure from the 2.5s
 	// anchor, not the reordered 2.4s emission.
@@ -3273,8 +3280,13 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		.get_mut(&0x42)
 		.unwrap()
 		.interval = Some(Duration::from_secs(1));
-	assert_eq!(rig.media(3_400, 0x0011).await, 0, "the reorder span is not credited");
-	assert_eq!(rig.media(3_500, 0x0011).await, 1, "due 1s after the true anchor");
+	assert_eq!(
+		rig.media(3_400, 0x0011).await,
+		2,
+		"both zero-interval frames close together"
+	);
+	assert_eq!(rig.media(3_500, 0x0011).await, 0, "the due table enters the open span");
+	assert_eq!(rig.media(3_600, 0x0011).await, 1, "the next span closes the due table");
 }
 
 /// A publisher revising its snapshot before every frame must not drive the mux at
@@ -3294,10 +3306,10 @@ async fn si_rapid_revisions_are_rate_bounded() {
 		let frames = rig.media_frames(u64::from(i) * 250).await;
 		let count = count_pid(&frames, 0x0011);
 		emitted += count;
-		if i == 4 {
+		if i == 5 {
 			// The 1s floor lapses here; the emission carries the newest revision,
-			// not the three that were coalesced over.
-			assert_eq!(count, 1, "the floored emission fires at 1s");
+			// not the revisions that arrived after it while its span was buffered.
+			assert_eq!(count, 1, "the next span closes the 1s emission");
 			let needle = section(4);
 			assert!(
 				frames
@@ -3307,6 +3319,7 @@ async fn si_rapid_revisions_are_rate_bounded() {
 			);
 		}
 	}
+	emitted += rig.media(3_250, 0x0011).await;
 	assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 }
 
@@ -3471,7 +3484,10 @@ async fn export_cbr_video() -> Vec<Frame> {
 	}
 	video.finish().unwrap();
 
-	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let mut exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
 	drain_frames(&mut exporter).await
 }
 
@@ -3550,7 +3566,10 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
-	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let mut exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
 	let frames = drain_frames(&mut exporter).await;
 	let pcrs = collect_pcrs(&frames);
 	assert!(pcrs.len() > 50, "expected the full feed, got {} PCRs", pcrs.len());
