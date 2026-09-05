@@ -110,16 +110,6 @@ honored. `mtu_discovery` is not (the datagram path sends a fixed payload, so
 there is nothing to discover), and asking for it is a startup error rather than
 a setting that quietly does nothing.
 
-`qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
-workers, and writes the same JSON-SEQ traces into the same directory, so one
-workflow reads both runtimes. Files are named
-`moq-<started>-<connection id>-<side>.qlog`, where `started` is when the relay
-came up, so a second run does not overwrite the first. A pinned worker never
-writes to the file itself: traces are staged in memory and handed to one
-background thread for the whole worker group, which is also why a trace that
-outruns the disk is truncated rather than allowed to grow the queue without
-bound (it says so in the log when it happens).
-
 The same goes for the listener settings this mode cannot deliver: `lb_id`
 (QUIC-LB server ids, which cannot share the connection id with the shard
 prefix), an explicit `backend`, `tls.generate`, more than one certificate, and
@@ -127,6 +117,18 @@ moq-lite 01/02, whose version is negotiated in the SETUP rather than by ALPN.
 Each is refused at startup. `listen.bind` must be named too, rather than
 defaulted: leaving it unset means stream-only when a tcp or unix listener is
 configured, and this mode will not guess.
+
+`qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
+workers, and writes the same JSON-SEQ traces into the same directory, so one
+workflow reads both runtimes. Files are named
+`moq-<started>-<connection id>-<side>.qlog`, where `started` is when the relay
+came up, so a second run does not overwrite the first (an `io-uring-quinn`
+build writes one file per worker instead of per connection, because
+quinn-proto takes one trace sink per endpoint). A pinned worker never
+writes to the file itself: traces are staged in memory and handed to one
+background thread for the whole worker group, which is also why a trace that
+outruns the disk is truncated rather than allowed to grow the queue without
+bound (it says so in the log when it happens).
 
 `tls.root` works here as it does on the tokio listener: a client that presents
 a certificate chaining to one of those roots is authenticated by it, with full
