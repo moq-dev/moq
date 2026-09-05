@@ -31,6 +31,9 @@ What the tree does today, identically on main and dev:
   the draft-14 `SubscribeError` and the draft-15+ `RequestError` branch;
   `js/net/src/ietf/subscriber.ts` uses `400` and `409`; `errorCode` is a plain
   number everywhere.
+- `js/net/src/ietf/subscriber.ts` `runPublish` writes a draft-14 `PublishError`
+  with the function-local `NOT_SUPPORTED` and a `RequestError` on later
+  drafts; the Rust subscriber's publish handling is the same shape.
 - Stream resets on an IETF session send `Error::to_code()`, the moq-lite space
   where `Cancel` is `0`; draft-19 section 3.3.4 assigns `0x0` to INTERNAL_ERROR
   and `0x1` to CANCELLED. `Error::from_transport` maps only `0` back to
@@ -51,7 +54,8 @@ The work:
   `Reader::abort` / `Writer::abort` on IETF sessions. Delete the literals and
   the function-local constant. `Error::NotFound`'s IETF wire value comes from
   the same mapping.
-- Tests: encode/decode round-trips per version; a subscribe for a missing
+- Tests: encode/decode round-trips per version; a draft-14 PublishError and a
+  draft-15+ RequestError round-trip for the publish path; a subscribe for a missing
   broadcast rejects with the not-found value of each draft; a cancelled
   subscription resets with CANCELLED and a moq-net peer reads it back as
   `Cancel`; the two interop runner cases pass without their COMPAT branch.
