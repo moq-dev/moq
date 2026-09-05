@@ -25,6 +25,23 @@ beneath them.
 - Prove holes and suffix grants at the model layer, including concurrent
   announcements outside the grant never reaching a scoped consumer.
 
+This is also the answer to the per-subscriber exclusion filter
+[#2714](https://github.com/moq-dev/moq/issues/2714) asked for, to enforce
+server-authoritative moderation (a deafened user's audio path) that a forked
+client cannot bypass. A predicate over the announce stream cannot be that
+boundary: announcements are prefix routes, so a filter decides about a set and
+either hides paths the subscriber may use or leaks the ones it must not, and
+`request_broadcast` resolves against the route table regardless. The
+enforcing shape is a pattern-scoped grant on the consumer handle, narrowed at
+resolution and announce fan-out alike, and changed at runtime through
+[relay revalidation](/quest/m2/path-patterns/relay-auth.md); prove the deafen
+case (a grant excluding one audio path under a room prefix) in the model-layer
+tests here.
+
 ## Required
 
 - [Matcher](/quest/m2/path-patterns/matcher.md)
+
+## Closes
+
+- [#2714](https://github.com/moq-dev/moq/issues/2714) - close this issue when the quest finishes

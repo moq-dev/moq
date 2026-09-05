@@ -1,15 +1,27 @@
-# [M] watch: video decoder captures the rewind generation at output time, not submit time
+# [S] watch: the video decoder resets on a declared discontinuity
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3056](https://github.com/moq-dev/moq/issues/3056)
-within the issue's stated scope and boundaries.
+A frame submitted before a declared discontinuity never surfaces after it.
+The decoder is reset (and reconfigured) when the container consumer reports a
+discontinuity, the way the audio decoder already does, so queued pictures from
+the old epoch are discarded rather than parked against the new clock.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Rescoped in the 2026-09 planning pass: undeclared rewinds are going away
+([Monotonic timeline](/quest/m1/monotonic-timeline.md)), so the generation
+mismatch below no longer produces the sixty-second park, but the bug it
+describes still applies to a declared discontinuity, where a stale frame must
+not be presented at all. Fix it the first way the issue suggests: call
+`decoder.reset()` and re-`configure()` in `#onDiscontinuity`, and drop the
+output-time generation guard, which then has nothing left to catch. The
+regression needs a real WebCodecs decoder, so it lives in a browser harness
+rather than a bun unit test.
+
+## Required
+
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - settles what a discontinuity is before the decoder's reaction to one is pinned
 
 ### Issue context
 

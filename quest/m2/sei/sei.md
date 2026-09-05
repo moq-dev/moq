@@ -9,16 +9,21 @@ subscribes to the sidecar alone.
 
 ## Plan
 
-Specify one sidecar track per video rendition, or an equally unambiguous
-mapping, and key each sample by the video group sequence and frame ordinal.
-That identity is exact by construction and independent of how a splitter
-assigns clocks, which a timestamp is not: on the raw Annex B path
-`h264::Split::decode` resolves one wall-clock value per call and gives it to
-every access unit in that chunk, so several frames can share a timestamp.
+This section defines the sidecar rule every timed-metadata section follows
+(ID3, SCTE-35, emsg, FLV script tags, AV1 metadata OBUs each keep their own
+section but share the shape): a metadata track belongs to exactly one
+rendition, uses that rendition's group sequence, stamps each frame with the
+wire timestamp of the media it accompanies, and carries raw bytes. A 1080p and
+a 360p rendition carry different SEI, so there is one sidecar per video
+rendition, and group 7 of the sidecar holds the SEI for group 7 of its video.
 
-Carry the video frame's timestamp on the sample as well, as data rather than
-identity. An application syncing to presentation time reads it directly instead
-of joining against the video track it deliberately did not subscribe to.
+Within a group the frame's wire timestamp is the key, so an application
+syncing to presentation time reads it directly instead of joining against the
+video track it deliberately did not subscribe to. Several access units can
+share a timestamp on the raw Annex B path (`h264::Split::decode` resolves one
+clock value per call and gives it to every access unit in that chunk), so the
+frame's ordinal within the group disambiguates those; it is a tie-break, not
+the identity.
 
 Preserve prefix or suffix placement, original NAL bytes, and order when
 several SEI units accompany one access unit. The codec is the mapped video

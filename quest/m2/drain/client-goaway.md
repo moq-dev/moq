@@ -17,6 +17,11 @@ lands clients on a healthy relay.
 
 Everything below describes `dev`, which is where this quest lands: `main`
 still has `moq-native`'s close-only `Reconnect` and no `Connection.Shared`.
+It lands after [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md)
+collapses `Reload` and `Shared` into one `Connection`, so the drain loop is
+written once into that class and consumers migrate their call sites once;
+where the text below says `Reload` or `Connection.Shared`, read the single
+class and its pool.
 
 ### Rust is done except the proof
 
@@ -82,4 +87,5 @@ down in its effect cleanup, and `Connection.Shared`
 
 ## Required
 
+- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one Connection class first, so GOAWAY is built into it rather than into two
 - [Redirect guard by name](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - pin validated DNS results before enabling cross-host redirects by default

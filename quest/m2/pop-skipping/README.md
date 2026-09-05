@@ -155,4 +155,4 @@ costs of one bidirectional session, which one `?cost=` cannot split.
 
 - [drain](/quest/m2/drain/README.md) - a second relay per PoP makes the same-PoP link price and its connection cardinality operationally important
 - [wildcard](/quest/m2/wildcard/README.md) - it reuses this questline's route cost, and needs a cluster on Lite06
-- [relay-memory](/quest/m2/relay-memory/README.md) - a denser mesh multiplies whatever a non-selected route costs
+- [relay-memory](/quest/m2/relay-memory.md) - a denser mesh multiplies whatever a non-selected route costs

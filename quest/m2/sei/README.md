@@ -33,9 +33,10 @@ still joins two independently scheduled tracks, so it owns a stated buffer
 budget and reports what missed it. An old exporter drops SEI from its output;
 upgrading is the answer.
 
-Correlate by group sequence and frame ordinal, which is exact by construction,
-and carry the video frame's timestamp alongside as data so an application
-syncing to presentation time gets it without subscribing to video. Preserve the
+Correlate by the video group sequence and the frame's wire timestamp, with
+the frame ordinal disambiguating access units that share a timestamp, so an
+application syncing to presentation time gets it without subscribing to video.
+This is the sidecar rule every timed-metadata section shares. Preserve the
 original NAL bytes, prefix or suffix placement, and in-access-unit order so
 reinsertion is byte-faithful without interpreting payload types. Placement must
 be exact: misplaced `recovery_point` misdirects tune-in, and reordered caption
