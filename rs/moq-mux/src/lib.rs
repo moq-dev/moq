@@ -40,7 +40,7 @@ pub mod timeline;
 pub use clock::Clock;
 pub use error::*;
 pub use pace::Pacer;
-pub use source::Source;
+pub use source::{Binding, Source};
 
 /// Translate a catalog entry's declared compression into the flag the codecs take.
 ///

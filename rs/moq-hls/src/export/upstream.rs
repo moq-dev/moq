@@ -17,14 +17,18 @@ pub(crate) struct Upstream {
 }
 
 impl Upstream {
-	/// The broadcast serving a rendition whose catalog `broadcast` field is `rel`, when that can
-	/// be answered without a round trip.
+	/// Bind a rendition whose catalog `broadcast` field is `rel` to the broadcast serving it.
 	///
-	/// An absent or empty reference means the catalog broadcast itself, which is already in hand.
-	/// A named sibling returns `None` and has to go through [`moq_mux::Source::resolve`].
-	pub fn local(&self, rel: Option<&moq_net::PathRelativeOwned>) -> Option<moq_net::broadcast::Consumer> {
-		rel.filter(|rel| !rel.is_empty())
-			.is_none()
-			.then(|| self.broadcast.clone())
+	/// An absent or empty reference means the catalog broadcast, which is already in hand; a
+	/// named sibling is requested here, when the rendition is created. Both are therefore fixed
+	/// before the rendition can list a segment, so a republish afterwards never answers for
+	/// media the timeline has already described.
+	///
+	/// Fails when the reference escapes above the origin root and so names no broadcast at all.
+	pub fn bind(&self, rel: Option<&moq_net::PathRelativeOwned>) -> moq_mux::Result<moq_mux::Binding> {
+		match rel.filter(|rel| !rel.is_empty()) {
+			None => Ok(moq_mux::Binding::new(self.broadcast.clone())),
+			Some(rel) => self.source.bind(Some(rel)),
+		}
 	}
 }
