@@ -16,7 +16,6 @@ with the current dev tree before starting.
 
 ## Quests
 
-- [Worker metrics](/quest/m1/uring-metrics.md) - per-worker io_uring counters at `/metrics`, so the runtime's own health is visible
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [qlog](/quest/m1/uring-qlog.md) - io_uring workers write qlog traces instead of refusing the setting
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model: copies, locks, clock reads, allocations, syscalls
