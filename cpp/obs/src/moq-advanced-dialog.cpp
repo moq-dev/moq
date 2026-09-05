@@ -8,6 +8,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -16,8 +17,6 @@
 
 namespace {
 
-// A path row: an editable field plus a Browse button that opens the matching picker.
-// The QLineEdit is what gets registered as the field's widget, so Load/Save stay uniform.
 QWidget *PathRow(QLineEdit **out, const MoQSettings::Field &field, QWidget *parent)
 {
 	auto *row = new QWidget(parent);
@@ -46,20 +45,41 @@ QWidget *PathRow(QLineEdit **out, const MoQSettings::Field &field, QWidget *pare
 
 } // namespace
 
-MoQAdvancedDialog::MoQAdvancedDialog(obs_data_t *settings, QWidget *parent)
-	: QDialog(parent),
-	  settings(settings),
-	  form(nullptr),
-	  enabled(nullptr)
+QWidget *MoQHintLabel(const QString &title, const QString &help, QWidget *parent)
 {
-	setWindowTitle("MoQ Advanced Settings");
-	setModal(true);
+	auto *wrap = new QWidget(parent);
+	auto *name = new QLabel(title, wrap);
+	name->setWordWrap(true);
+	auto *hint = new QLabel(QStringLiteral("?"), wrap);
+	hint->setFixedSize(16, 16);
+	hint->setAlignment(Qt::AlignCenter);
+	hint->setCursor(Qt::WhatsThisCursor);
+	hint->setStyleSheet("QLabel { color: #9ecbff; background: #2a2a2a; border: 1px solid #555; "
+			    "border-radius: 8px; font-size: 10px; font-weight: bold; }");
+	if (!help.isEmpty()) {
+		name->setToolTip(help);
+		hint->setToolTip(help);
+		wrap->setToolTip(help);
+	} else {
+		hint->hide();
+	}
 
+	auto *row = new QHBoxLayout(wrap);
+	row->setContentsMargins(0, 0, 0, 0);
+	row->setSpacing(6);
+	row->addWidget(name, 1);
+	row->addWidget(hint, 0, Qt::AlignTop);
+	return wrap;
+}
+
+MoQAdvancedPanel::MoQAdvancedPanel(QWidget *parent) : QWidget(parent)
+{
 	enabled = new QCheckBox("Use advanced settings", this);
 	enabled->setToolTip("With this off, MoQ connects with its defaults and everything below is ignored.");
 
 	form = new QWidget(this);
 	auto *layout = new QFormLayout(form);
+	layout->setRowWrapPolicy(QFormLayout::WrapAllRows);
 	layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
 	for (const MoQSettings::Field &field : MoQSettings::Fields()) {
@@ -70,20 +90,22 @@ MoQAdvancedDialog::MoQAdvancedDialog(obs_data_t *settings, QWidget *parent)
 		case MoQSettings::Kind::Bool: {
 			auto *check = new QCheckBox(form);
 			widget = row = check;
+			connect(check, &QCheckBox::toggled, this, &MoQAdvancedPanel::Notify);
 			break;
 		}
 		case MoQSettings::Kind::Int: {
 			auto *spin = new QSpinBox(form);
 			spin->setRange((int)field.min, (int)field.max);
 			spin->setSingleStep((int)field.step);
-			// Typing is faster than stepping through a 600000ms range.
 			spin->setKeyboardTracking(true);
 			widget = row = spin;
+			connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MoQAdvancedPanel::Notify);
 			break;
 		}
 		case MoQSettings::Kind::Text: {
 			auto *edit = new QLineEdit(form);
 			widget = row = edit;
+			connect(edit, &QLineEdit::editingFinished, this, &MoQAdvancedPanel::Notify);
 			break;
 		}
 		case MoQSettings::Kind::File:
@@ -91,6 +113,8 @@ MoQAdvancedDialog::MoQAdvancedDialog(obs_data_t *settings, QWidget *parent)
 			QLineEdit *edit = nullptr;
 			row = PathRow(&edit, field, form);
 			widget = edit;
+			connect(edit, &QLineEdit::editingFinished, this, &MoQAdvancedPanel::Notify);
+			connect(edit, &QLineEdit::textChanged, this, &MoQAdvancedPanel::Notify);
 			break;
 		}
 		case MoQSettings::Kind::Choice: {
@@ -99,47 +123,60 @@ MoQAdvancedDialog::MoQAdvancedDialog(obs_data_t *settings, QWidget *parent)
 			for (const MoQSettings::Option &option : field.options)
 				combo->addItem(QString::fromUtf8(option.label), QString::fromUtf8(option.value));
 			widget = row = combo;
+			connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+				&MoQAdvancedPanel::Notify);
+			if (field.editable)
+				connect(combo, &QComboBox::editTextChanged, this, &MoQAdvancedPanel::Notify);
 			break;
 		}
 		}
 
-		if (field.tooltip) {
-			const QString tooltip = QString::fromUtf8(field.tooltip);
-			widget->setToolTip(tooltip);
-			row->setToolTip(tooltip);
+		const QString help = field.tooltip ? QString::fromUtf8(field.tooltip) : QString();
+		if (!help.isEmpty()) {
+			widget->setToolTip(help);
+			row->setToolTip(help);
 		}
 
 		widgets[field.key] = widget;
-		layout->addRow(QString::fromUtf8(field.label), row);
+		layout->addRow(MoQHintLabel(QString::fromUtf8(field.label), help, form), row);
 	}
 
-	// The form is long; scroll it rather than growing a window taller than the screen.
 	auto *scroll = new QScrollArea(this);
 	scroll->setWidget(form);
 	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
 
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-	connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
-		Save();
-		accept();
-	});
-	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-
-	// Grey the form out when the settings are off, so it's obvious nothing below applies.
 	connect(enabled, &QCheckBox::toggled, form, &QWidget::setEnabled);
+	connect(enabled, &QCheckBox::toggled, this, &MoQAdvancedPanel::Notify);
+
+	auto *enableRow = new QWidget(this);
+	auto *enableLayout = new QHBoxLayout(enableRow);
+	enableLayout->setContentsMargins(0, 0, 0, 0);
+	enableLayout->addWidget(enabled, 1);
+	auto *enableHint = new QLabel(QStringLiteral("?"), enableRow);
+	enableHint->setFixedSize(16, 16);
+	enableHint->setAlignment(Qt::AlignCenter);
+	enableHint->setCursor(Qt::WhatsThisCursor);
+	enableHint->setToolTip(enabled->toolTip());
+	enableHint->setStyleSheet("QLabel { color: #9ecbff; background: #2a2a2a; border: 1px solid #555; "
+				  "border-radius: 8px; font-size: 10px; font-weight: bold; }");
+	enableLayout->addWidget(enableHint, 0, Qt::AlignTop);
 
 	auto *outer = new QVBoxLayout(this);
-	outer->addWidget(enabled);
+	outer->setContentsMargins(0, 0, 0, 0);
+	outer->addWidget(enableRow);
 	outer->addWidget(scroll, 1);
-	outer->addWidget(buttons);
-
-	resize(520, 600);
-
-	Load();
 }
 
-void MoQAdvancedDialog::Load()
+void MoQAdvancedPanel::Notify()
 {
+	if (!loading)
+		emit changed();
+}
+
+void MoQAdvancedPanel::Load(obs_data_t *settings)
+{
+	loading = true;
 	enabled->setChecked(obs_data_get_bool(settings, MoQSettings::ENABLED));
 	form->setEnabled(enabled->isChecked());
 
@@ -166,16 +203,15 @@ void MoQAdvancedDialog::Load()
 			if (index >= 0)
 				combo->setCurrentIndex(index);
 			else if (combo->isEditable())
-				// A value the library accepts but doesn't advertise, e.g. a
-				// work-in-progress draft. Keep it rather than snapping to the default.
 				combo->setEditText(value);
 			break;
 		}
 		}
 	}
+	loading = false;
 }
 
-void MoQAdvancedDialog::Save()
+void MoQAdvancedPanel::Save(obs_data_t *settings)
 {
 	obs_data_set_bool(settings, MoQSettings::ENABLED, enabled->isChecked());
 
@@ -197,8 +233,6 @@ void MoQAdvancedDialog::Save()
 			break;
 		case MoQSettings::Kind::Choice: {
 			auto *combo = static_cast<QComboBox *>(widget);
-			// An editable combo's text is only a listed value when the user picked
-			// one; a typed value has no item data, so read the text in that case.
 			const int index = combo->findText(combo->currentText());
 			const QString value = index >= 0 ? combo->itemData(index).toString() : combo->currentText();
 			obs_data_set_string(settings, field.key, value.toUtf8().constData());
@@ -206,4 +240,28 @@ void MoQAdvancedDialog::Save()
 		}
 		}
 	}
+}
+
+MoQAdvancedDialog::MoQAdvancedDialog(obs_data_t *settings, QWidget *parent)
+	: QDialog(parent),
+	  settings(settings),
+	  panel(new MoQAdvancedPanel(this))
+{
+	setWindowTitle("MoQ Advanced Settings");
+	setModal(true);
+
+	panel->Load(settings);
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+	connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
+		panel->Save(this->settings);
+		accept();
+	});
+	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+	auto *outer = new QVBoxLayout(this);
+	outer->addWidget(panel, 1);
+	outer->addWidget(buttons);
+
+	resize(520, 600);
 }

@@ -127,6 +127,20 @@ impl Session {
 			.ok_or(Error::Offline)
 	}
 
+	/// Negotiated protocol version of the live session.
+	///
+	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
+	/// if the session is currently between connections (reconnecting).
+	pub fn version(&self, id: Id) -> Result<moq_net::Version, Error> {
+		self.task
+			.get(id)
+			.and_then(|entry| entry.as_ref())
+			.ok_or(Error::SessionNotFound)?
+			.stats
+			.version()
+			.ok_or(Error::Offline)
+	}
+
 	/// Forward connection epochs to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a

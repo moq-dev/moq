@@ -81,6 +81,14 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Container<E> {
+	/// True when `format` is a container name this importer recognizes.
+	pub fn known_format(format: &str) -> bool {
+		matches!(
+			format,
+			"fmp4" | "cmaf" | "mkv" | "webm" | "matroska" | "ts" | "mpegts" | "mpeg2ts" | "m2ts" | "flv"
+		)
+	}
+
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,

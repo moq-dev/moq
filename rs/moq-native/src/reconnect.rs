@@ -162,6 +162,11 @@ impl ConnectionStatsReader {
 	pub fn stats(&self) -> Option<moq_net::ConnectionStats> {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
+
+	/// Negotiated MoQ version of the live session, or `None` while disconnected.
+	pub fn version(&self) -> Option<Version> {
+		self.state.read().version
+	}
 }
 
 /// Handle to a background reconnect loop.
