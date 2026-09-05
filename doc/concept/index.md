@@ -25,8 +25,9 @@ against each other, and be dropped under congestion without corrupting the
 rest. For video a group is a GoP starting at a keyframe; for audio it's a
 second or so of samples; for data it's whatever unit can be skipped as a whole.
 
-Subscribers pull. Nothing is encoded or transmitted until someone subscribes,
-and duplicate subscriptions are merged at every relay on the way upstream. Each
+Subscribers pull. Nothing is transmitted until someone subscribes, duplicate
+subscriptions are merged at every relay on the way upstream, and a publisher
+that watches demand (the capture and transcode paths do) can skip encoding too. Each
 subscriber also chooses its own latency budget, so the same broadcast can be
 watched at 100 ms by one viewer and 10 s by another.
 

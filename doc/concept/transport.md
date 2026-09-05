@@ -29,8 +29,10 @@ of that. MoQ spends its effort on media instead.
 
 [WebTransport](https://www.w3.org/TR/webtransport/) exposes QUIC streams to a
 web page over an HTTP/3 `CONNECT`. Chrome and Edge (97+) and Firefox (114+)
-support it. Safari ships it from 26.4, but WebKit bugs stall long sessions, so
-the TypeScript client keeps Safari on the WebSocket fallback for now. Native
+support it. The TypeScript client is pickier than the browsers: it uses
+WebTransport on Firefox only from 153 (earlier releases allow too few incoming
+streams) and keeps Safari on the WebSocket fallback, since WebKit bugs stall
+long sessions even though Safari 26.4 ships the API. Native
 clients can use WebTransport too, but usually skip it.
 
 ## WebSocket fallback
