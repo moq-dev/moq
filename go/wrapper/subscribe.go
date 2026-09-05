@@ -13,8 +13,10 @@ type BroadcastConsumer struct {
 }
 
 // SubscribeCatalog subscribes to the broadcast's catalog track.
-func (b *BroadcastConsumer) SubscribeCatalog() (*CatalogConsumer, error) {
-	inner, err := b.inner.SubscribeCatalog()
+func (b *BroadcastConsumer) SubscribeCatalog(ctx context.Context) (*CatalogConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqCatalogConsumer, error) {
+		return b.inner.SubscribeCatalog(&cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -23,8 +25,14 @@ func (b *BroadcastConsumer) SubscribeCatalog() (*CatalogConsumer, error) {
 
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
-func (b *BroadcastConsumer) SubscribeTrack(name string, subscription *Subscription) (*TrackConsumer, error) {
-	inner, err := b.inner.SubscribeTrack(name, subscription)
+func (b *BroadcastConsumer) SubscribeTrack(
+	ctx context.Context,
+	name string,
+	subscription *Subscription,
+) (*TrackConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqTrackConsumer, error) {
+		return b.inner.SubscribeTrack(name, subscription, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -33,8 +41,15 @@ func (b *BroadcastConsumer) SubscribeTrack(name string, subscription *Subscripti
 
 // FetchGroup fetches one complete group by track name and group sequence
 // without holding a live subscription.
-func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *FetchGroupOptions) (*GroupConsumer, error) {
-	inner, err := b.inner.FetchGroup(name, sequence, options)
+func (b *BroadcastConsumer) FetchGroup(
+	ctx context.Context,
+	name string,
+	sequence uint64,
+	options *FetchGroupOptions,
+) (*GroupConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqGroupConsumer, error) {
+		return b.inner.FetchGroup(name, sequence, options, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +59,16 @@ func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *Fe
 // FetchMediaGroup fetches one group by sequence and decodes it with the given
 // container. Unlike SubscribeMedia this holds no live subscription and applies no
 // latency-based group skipping, so every frame in the group is delivered.
-func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, container Container, options *FetchGroupOptions) (*MediaGroupConsumer, error) {
-	inner, err := b.inner.FetchMediaGroup(name, sequence, container, options)
+func (b *BroadcastConsumer) FetchMediaGroup(
+	ctx context.Context,
+	name string,
+	sequence uint64,
+	container Container,
+	options *FetchGroupOptions,
+) (*MediaGroupConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqMediaGroupConsumer, error) {
+		return b.inner.FetchMediaGroup(name, sequence, container, options, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -56,8 +79,15 @@ func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, contai
 // subscription tunes delivery priority, group range, and
 // the max age; pass nil for defaults. Raise Subscription.MaxAgeMs to
 // buffer instead of skipping a stalled group.
-func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, subscription *Subscription) (*MediaConsumer, error) {
-	inner, err := b.inner.SubscribeMedia(name, container, subscription)
+func (b *BroadcastConsumer) SubscribeMedia(
+	ctx context.Context,
+	name string,
+	container Container,
+	subscription *Subscription,
+) (*MediaConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqMediaConsumer, error) {
+		return b.inner.SubscribeMedia(name, container, subscription, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -73,8 +103,10 @@ func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, sub
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
-func (b *BroadcastConsumer) Resolve(reference *string) (*BroadcastConsumer, error) {
-	inner, err := b.inner.Resolve(reference)
+func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*BroadcastConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqBroadcastConsumer, error) {
+		return b.inner.Resolve(reference, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +115,15 @@ func (b *BroadcastConsumer) Resolve(reference *string) (*BroadcastConsumer, erro
 
 // DecodeAudio subscribes to a raw-audio track; samples come back in the
 // format declared by output. catalogAudio comes from the catalog.
-func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {
-	inner, err := b.inner.DecodeAudio(name, catalogAudio, output)
+func (b *BroadcastConsumer) DecodeAudio(
+	ctx context.Context,
+	name string,
+	catalogAudio Audio,
+	output AudioDecoderOutput,
+) (*AudioConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqAudioConsumer, error) {
+		return b.inner.DecodeAudio(name, catalogAudio, output, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -94,8 +133,15 @@ func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output 
 // DecodeVideo subscribes to a video track and decodes it inside the bindings,
 // yielding packed I420. catalogVideo comes from the catalog. output.Resize is
 // best effort, so read each frame's own dimensions.
-func (b *BroadcastConsumer) DecodeVideo(name string, catalogVideo Video, output VideoDecoderOutput) (*VideoConsumer, error) {
-	inner, err := b.inner.DecodeVideo(name, catalogVideo, output)
+func (b *BroadcastConsumer) DecodeVideo(
+	ctx context.Context,
+	name string,
+	catalogVideo Video,
+	output VideoDecoderOutput,
+) (*VideoConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqVideoConsumer, error) {
+		return b.inner.DecodeVideo(name, catalogVideo, output, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +151,7 @@ func (b *BroadcastConsumer) DecodeVideo(name string, catalogVideo Video, output 
 // Catalog subscribes and returns the first catalog. It reports ErrClosed if the
 // catalog track ends before any catalog arrives.
 func (b *BroadcastConsumer) Catalog(ctx context.Context) (*Catalog, error) {
-	consumer, err := b.SubscribeCatalog()
+	consumer, err := b.SubscribeCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}

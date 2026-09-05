@@ -93,14 +93,13 @@ func IsAuthError(err error) bool {
 
 // runCancellable runs a blocking FFI call on a goroutine and races it against
 // ctx. uniffi-bindgen-go renders Rust async fns as blocking Go calls with no
-// context parameter, so cancellation is wired by calling the object's own
-// cancel() (which aborts the in-flight task) when ctx is done. The blocked
-// goroutine then unwinds on its own and is discarded; the result channel is
-// buffered so that send never blocks and the goroutine can't leak.
+// context parameter, so cancellation is wired by calling cancel (which aborts
+// the in-flight native task) when ctx is done. The blocked goroutine then
+// unwinds on its own and is discarded; the result channel is buffered so that
+// send never blocks and the goroutine can't leak.
 //
-// When cancel is nil there is no way to abort the underlying call, so a
-// cancelled ctx returns ctx.Err() immediately while the goroutine stays parked
-// until the call completes on its own. See the package doc for the consequences.
+// cancel is the object's own cancel() for a call that owns its stream, and a
+// per-call token for everything else. See runOperation.
 func runCancellable[T any](ctx context.Context, cancel func(), call func() (T, error)) (T, error) {
 	type result struct {
 		val T
@@ -128,6 +127,25 @@ func runCancellable[T any](ctx context.Context, cancel func(), call func() (T, e
 func runErr(ctx context.Context, cancel func(), call func() error) error {
 	_, err := runCancellable(ctx, cancel, func() (struct{}, error) {
 		return struct{}{}, call()
+	})
+	return err
+}
+
+// runOperation runs a blocking FFI call that takes a per-call cancellation token.
+//
+// Cancelling ctx aborts that one call and leaves the object it was made on usable,
+// which is what the object-wide cancel() can't express: a deadline on a subscribe
+// must not close the broadcast, and one on Accept must not close the server. The
+// native task unwinds with the token, so nothing outlives the caller that gave up.
+func runOperation[T any](ctx context.Context, call func(*ffi.MoqCancel) (T, error)) (T, error) {
+	token := ffi.NewMoqCancel()
+	return runCancellable(ctx, token.Cancel, func() (T, error) { return call(token) })
+}
+
+// runOperationErr is runOperation for calls that return only an error.
+func runOperationErr(ctx context.Context, call func(*ffi.MoqCancel) error) error {
+	_, err := runOperation(ctx, func(token *ffi.MoqCancel) (struct{}, error) {
+		return struct{}{}, call(token)
 	})
 	return err
 }

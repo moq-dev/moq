@@ -157,8 +157,10 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 // (served on demand by the session that announced it), or a dynamic fallback on
 // the origin; errors if nothing can serve it. Unlike AnnouncedBroadcast, it
 // does not wait for a future announcement. Blocks until resolved.
-func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.RequestBroadcast(path)
+func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqBroadcastConsumer, error) {
+		return o.inner.RequestBroadcast(path, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
