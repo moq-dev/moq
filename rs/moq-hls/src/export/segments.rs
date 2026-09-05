@@ -18,7 +18,7 @@
 //! cursor), and the same number names the same span of content time on every rendition.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
@@ -35,10 +35,6 @@ use crate::Result;
 /// [`kio::Producer`] so a [`Consumer`] can await changes without a separate signal.
 pub(crate) struct Producer {
 	state: kio::Producer<State>,
-	/// The broadcast serving the media track. Seeded at construction for a rendition served by
-	/// the catalog's own broadcast, and otherwise resolved on the first fetch, when the catalog
-	/// rendition's `broadcast` reference names a sibling.
-	pub broadcast: OnceLock<moq_net::broadcast::Consumer>,
 }
 
 struct State {
@@ -125,17 +121,14 @@ impl State {
 }
 
 impl Producer {
-	/// An empty window. `broadcast` is the media broadcast when it is already known, i.e. for a
-	/// rendition served by the catalog's own broadcast; a sibling reference passes `None` and
-	/// [`Rendition::track`](super::Rendition) resolves it on the first fetch.
-	pub fn new(broadcast: Option<moq_net::broadcast::Consumer>) -> Self {
+	/// An empty window.
+	pub fn new() -> Self {
 		Self {
 			state: kio::Producer::new(State {
 				rows: VecDeque::new(),
 				sequence: 0,
 				ended: false,
 			}),
-			broadcast: broadcast.map(OnceLock::from).unwrap_or_default(),
 		}
 	}
 
@@ -412,7 +405,7 @@ mod tests {
 
 	#[test]
 	fn every_row_is_listed() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		live.push(row(0, 0, 0, 2_000), Duration::from_secs(30));
 		live.push(row(1, 1, 2_000, 2_000), Duration::from_secs(30));
 
@@ -429,7 +422,7 @@ mod tests {
 
 	#[test]
 	fn window_evicts_and_advances_sequence() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		let window = Duration::from_secs(4);
 		for i in 0..6u64 {
 			live.push(row(i, i, i * 2_000, 2_000), window);
@@ -446,7 +439,7 @@ mod tests {
 
 	#[test]
 	fn source_window_pop_removes_playlist_rows() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		let window = Duration::from_secs(30);
 		for i in 0..4u64 {
 			let mut row = row(i, i, i * 2_000, 2_000);
@@ -470,7 +463,7 @@ mod tests {
 
 	#[test]
 	fn a_skipped_source_range_clears_rows_before_the_next_segment() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		live.push(row(4, 4, 8_000, 2_000), Duration::from_secs(10));
 		live.clear();
 		live.push(row(10, 10, 20_000, 2_000), Duration::from_secs(10));
@@ -489,7 +482,7 @@ mod tests {
 
 	#[test]
 	fn segment_ranges_and_gaps() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		let window = Duration::from_secs(30);
 		live.push(row(0, 0, 0, 1_000), window);
 		// Segment 1 is a gap for this rendition: no ranges.
@@ -516,7 +509,7 @@ mod tests {
 
 	#[test]
 	fn backwards_jump_resets_the_window() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		let window = Duration::from_secs(30);
 		live.push(row(0, 0, 10_000, 2_000), window);
 		live.push(row(1, 1, 12_000, 2_000), window);
@@ -533,7 +526,7 @@ mod tests {
 
 	#[test]
 	fn next_after_walks_segments() {
-		let live = Producer::new(None);
+		let live = Producer::new();
 		let window = Duration::from_secs(30);
 		live.push(row(0, 0, 0, 2_000), window);
 		live.push(row(1, 1, 2_000, 2_000), window);
