@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // stubHandle stands in for a uniffi object: something the wrapper owns and has
@@ -148,4 +150,30 @@ func TestTokenCancelsWhileLive(t *testing.T) {
 	tok := newToken()
 	tok.cancel()
 	tok.release()
+}
+
+// A context already done mints no token, since nothing would be left to release
+// one: run starts no call, so the deferred release never runs.
+func TestRunOperationMintsNothingForADoneContext(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	cancelCtx()
+
+	called := false
+	val, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqCancel, error) {
+		called = true
+		return cancel, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if val != nil {
+		t.Fatalf("val = %v, want nil", val)
+	}
+	if called {
+		t.Fatal("the call ran for a context that was already done")
+	}
+
+	if err := runOperationErr(ctx, func(*ffi.MoqCancel) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
 }

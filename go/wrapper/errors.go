@@ -186,7 +186,15 @@ func runErr(ctx context.Context, cancel func(), call func() error) error {
 //
 // Releasing on the call's own goroutine is what makes the object outlive every
 // use of it: the call cannot start after its own deferred release, and a cancel
-// that arrives later finds the token already gone and does nothing.
+// that arrives later finds the token already gone and does nothing. Nothing else
+// may release it, since a token freed while its goroutine is between spawn and
+// first use would panic that goroutine.
+//
+// So a token is minted only once its call is going to start, which is why the
+// callers check the context first. A context that becomes done in the window
+// between that check and `run`'s leaves one token to the finalizer, which is
+// what a finalizer is for; what it cannot do is accumulate, since every
+// subsequent call with that context mints nothing at all.
 type token struct {
 	// Set once at construction and never reassigned, so the call can read it
 	// without the lock.
@@ -229,6 +237,13 @@ func (t *token) release() {
 // must not close the broadcast, and one on Accept must not close the server. The
 // native task unwinds with the token, so nothing outlives the caller that gave up.
 func runOperation[T handle](ctx context.Context, call func(*ffi.MoqCancel) (T, error)) (T, error) {
+	// Mint nothing for a context already done: `run` starts no call, so the
+	// closure that would release the token never runs. See `token`.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+
 	tok := newToken()
 	return runHandle(ctx, tok.cancel, func() (T, error) {
 		defer tok.release()
@@ -238,6 +253,10 @@ func runOperation[T handle](ctx context.Context, call func(*ffi.MoqCancel) (T, e
 
 // runOperationErr is runOperation for calls that return only an error.
 func runOperationErr(ctx context.Context, call func(*ffi.MoqCancel) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	tok := newToken()
 	return runErr(ctx, tok.cancel, func() error {
 		defer tok.release()
