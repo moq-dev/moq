@@ -862,7 +862,12 @@ mod tests {
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 
-		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)))
+			.await
+			.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 
 		// A second of audio, so the filter's delay is nowhere near the whole write.
