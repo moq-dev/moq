@@ -153,7 +153,6 @@ pub struct DmaBufExport {
 	fd: OwnedFd,
 	// The producer's lease, held so its buffer outlives the descriptor. Only the
 	// renderer ever reads it back out, through `into_parts`.
-	#[cfg_attr(not(feature = "render"), expect(dead_code))]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
