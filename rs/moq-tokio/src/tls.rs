@@ -2957,9 +2957,28 @@ pub(crate) struct Reload(tokio::task::JoinHandle<()>);
 impl Reload {
 	/// Start watching the file-backed pairs in `config`, if it has any.
 	///
+	/// The watch is registered here rather than inside the task, so it covers the
+	/// listener from the moment this returns. Registering it in the spawned future
+	/// would leave a window between the listener going live and its first poll, and a
+	/// rotation landing in that window would go unseen until the next unrelated change.
+	///
 	/// Call it only once the listener exists, so a failed bind leaves no watcher behind.
 	pub(crate) fn spawn(certs: Arc<ServeCerts>, config: Listen) -> Self {
-		Self(tokio::spawn(reload_certs(certs, config)))
+		let paths: Vec<PathBuf> = config.cert.iter().chain(config.key.iter()).cloned().collect();
+		if paths.is_empty() {
+			// Nothing on disk to watch, so the task has nothing to do.
+			return Self(tokio::spawn(std::future::ready(())));
+		}
+
+		let watcher = match crate::watch::FileWatcher::new(&paths) {
+			Ok(watcher) => watcher,
+			Err(err) => {
+				tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
+				return Self(tokio::spawn(std::future::ready(())));
+			}
+		};
+
+		Self(tokio::spawn(reload_certs(watcher, certs, config)))
 	}
 }
 
@@ -2970,26 +2989,13 @@ impl Drop for Reload {
 	}
 }
 
-/// Watch the on-disk cert/key files and reload them whenever they change.
+/// Reload the certificates every time `watcher` reports a change.
 ///
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
-/// `mv`-into-place rotate certs with no external signal. Returns immediately when
-/// only generated certs are configured: there's nothing on disk to watch.
+/// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
+/// registering the watch and is the only caller.
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
-	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
-	if paths.is_empty() {
-		return;
-	}
-
-	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
-		Ok(watcher) => watcher,
-		Err(err) => {
-			tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
-			return;
-		}
-	};
-
+async fn reload_certs(mut watcher: crate::watch::FileWatcher, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading server certificates");
