@@ -38,5 +38,4 @@ Branch from `dev`, where the origin table lives; the rename is breaking.
 ## Related
 
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the native bindings half
-- [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - publisher state on the same origin table
 - [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - other js/net gaps vs rs/moq-net
