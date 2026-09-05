@@ -42,7 +42,7 @@ disagree about what a code means.
 
 Scope is the moq-lite code space, matching what Rust sends today. The
 moq-transport registry is a separate confusion tracked by
-[#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md),
+[IETF error codes](/quest/m0/ietf-error-codes.md),
 which is fixing both directions there; do not fold the two together.
 
 Land it with a test that a JS publisher's reset arrives at a peer as the right
@@ -55,5 +55,5 @@ code, and drop the `js/json` workaround once the class check is redundant.
 ## Related
 
 - [Group overflow](/quest/m1/group-overflow-abort.md) - adds a new stream code that a JS publisher cannot currently send
-- [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - the moq-transport half
+- [IETF error codes](/quest/m0/ietf-error-codes.md) - the moq-transport half
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - the same structured-code loss across FFI and C

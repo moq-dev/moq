@@ -35,6 +35,8 @@ can act on. Each still carries its own plan and regression test.
 - [SEI](/quest/m2/sei/README.md) - H.26x SEI moves into its own track, readable without subscribing to video
 - [Processor](/quest/m2/processor/README.md) - a customer-run worker publishes an on-demand contribution with scoped access
 - [Timeline wall](/quest/m2/timeline-wall.md) - every built-in publisher anchors its timeline to wall time; the anchor is data, never a sync source
+- [Duration marker](/quest/m2/duration-marker.md) - a video group ends with an empty frame that closes its last frame's duration; audio never writes one
+- [LOC duration marker](/quest/m2/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: a timeline consumer exposes the wall anchor, and the library never syncs playback on it
 - [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues ride a per-rendition sidecar a player can act on
 - [Caption import](/quest/m2/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
@@ -67,8 +69,6 @@ can act on. Each still carries its own plan and regression test.
 - [Cluster flags](/quest/m2/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
 - [Plan: revalidation updates](/quest/m2/plan-revalidation-updates.md) - settle which fields an auth re-check may update on a live session and which force a reconnect
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
-- [cpal release](/quest/m2/cpal-release.md) - a cpal release that emits errors from its real-time paths without allocating
-- [#3247](/quest/m2/3247-moq-audio-cpal-allocates-on-the-audio-thread.md) - moq-audio: cpal allocates and frees on the audio thread when it reports a stream error
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
 - [Room SDK](/quest/m2/room-sdk.md) - a headless room package: a room is a path prefix, no service, no storage

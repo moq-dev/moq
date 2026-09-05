@@ -56,7 +56,7 @@ evicted prefix.
   still holds.
 - **The IETF wire keeps its own mapping.** Sending the new code on the
   moq-transport wire belongs to
-  [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md),
+  [IETF error codes](/quest/m0/ietf-error-codes.md),
   which is fixing the whole registry confusion rather than one variant.
 
 ### What actually gets deleted
@@ -128,4 +128,4 @@ already claims its top end "intentionally reaches the raised
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - also turns "open group hit a limit" into an abort, so the two must not collide on the error variant
 - [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - without it a JS publisher sends this new code to the wire as Internal
-- [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - the moq-transport half of the code mapping
+- [IETF error codes](/quest/m0/ietf-error-codes.md) - the moq-transport half of the code mapping
