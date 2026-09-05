@@ -20,7 +20,8 @@ class MoQSpark;
 // stable OBS yet). The dock owns its own service/output/encoder objects and
 // reuses the encoder settings configured in OBS's Output settings, unless the
 // Quality tab custom source-quality toggle is on (then it uses the dock's
-// source profile / codec picks).
+// source profile / codec picks). The Transcode tab is a relay-side ladder
+// request for moq-transcode, not OBS encoding.
 class MoQDock : public QWidget {
 	Q_OBJECT
 
@@ -34,6 +35,7 @@ private slots:
 	void OpenAdvanced();
 	void OnQualityToggled(bool enabled);
 	void RefreshQualityOptions();
+	void UpdateLadderHint();
 	void OnRelayUrlEdited();
 
 private:
@@ -80,6 +82,10 @@ private:
 	QComboBox *videoCodecCombo;
 	QComboBox *videoEncoderCombo;
 	QComboBox *audioCodecCombo;
+
+	QCheckBox *ladderToggle;
+	QComboBox *ladderProfileCombo;
+	QLabel *ladderHint;
 
 	// Advanced connection settings, edited in their own window so the dock stays
 	// small. Persisted alongside the URL and path, and copied into the throwaway

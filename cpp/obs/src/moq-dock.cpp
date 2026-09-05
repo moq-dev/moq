@@ -115,7 +115,8 @@ std::string RandomBroadcastName()
 	std::string s = "obs-";
 	for (int i = 0; i < 6; i++)
 		s += charset[dist(gen)];
-	// Hang convention: a .hang suffix marks a media broadcast.
+	// Hang convention: a .hang suffix marks a media broadcast so a sibling
+	// ladder at {path}/transcode.hang is unambiguous once moq-transcode runs.
 	s += ".hang";
 	return s;
 }
@@ -438,8 +439,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	status->setFont(statusFont);
 
 	const QString statsHelp =
-		"While live: Quality encode, negotiated MoQ draft and transport. "
-		"RTT / bitrate / loss live in the timeline panels.";
+		"While live: Quality encode, Transcode request if any, negotiated MoQ draft, "
+		"transport (WebTransport / QUIC / WebSocket), RTT, bitrate, loss, and bytes sent.";
 	showStats = new QCheckBox("Show stats", streamPage);
 	showStats->setChecked(true);
 	showStats->setToolTip(statsHelp);
@@ -515,7 +516,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	qualityToggle = new QCheckBox("Custom source quality", qualityPage);
 	qualityToggle->setToolTip(
 		"What OBS encodes and publishes. Off uses Settings → Output. On uses "
-		"the Quality / Performance profile and codec picks below.");
+		"the Quality / Performance profile and codec picks below. This is the "
+		"source stream, not a viewer ladder.");
 
 	qualityBox = new QGroupBox("Source encode", qualityPage);
 	auto *qForm = new QFormLayout(qualityBox);
@@ -561,6 +563,36 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	qualityLayout->addStretch();
 	qualityBox->setEnabled(false);
 
+	auto *ladderPage = new QWidget(tabs);
+	ladderToggle = new QCheckBox("Request moq-transcode", ladderPage);
+	ladderToggle->setToolTip(
+		"Ask the relay (moq.pro when that feature is enabled) to publish a "
+		"viewer ladder beside this broadcast. OBS still sends one source.");
+
+	ladderProfileCombo = new QComboBox(ladderPage);
+	ladderProfileCombo->addItem("Default · 1080 / 720 / 480 / 360 / 240", "default");
+	ladderProfileCombo->addItem("Light · 720 / 480 / 360", "light");
+	ladderProfileCombo->addItem("Mobile · 480 / 360 / 240", "mobile");
+	ladderProfileCombo->setEnabled(false);
+
+	ladderHint = new QLabel(ladderPage);
+	ladderHint->setWordWrap(true);
+	ladderHint->setStyleSheet("color: #888888;");
+
+	auto *ladderForm = new QFormLayout();
+	ladderForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
+	ladderForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	ladderForm->setContentsMargins(0, 0, 0, 0);
+	ladderForm->addRow("Ladder profile", ladderProfileCombo);
+
+	auto *ladderLayout = new QVBoxLayout(ladderPage);
+	ladderLayout->setContentsMargins(0, 8, 0, 0);
+	ladderLayout->setSpacing(10);
+	ladderLayout->addWidget(ladderToggle);
+	ladderLayout->addLayout(ladderForm);
+	ladderLayout->addWidget(ladderHint);
+	ladderLayout->addStretch();
+
 	auto *versionPage = new QWidget(tabs);
 	auto *verForm = new QFormLayout(versionPage);
 	verForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
@@ -598,6 +630,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	tabs->addTab(streamPage, "Stream");
 	tabs->addTab(qualityPage, "Quality");
+	tabs->addTab(ladderPage, "Transcode");
 	tabs->addTab(versionPage, "Version");
 
 	auto *layout = new QVBoxLayout(this);
@@ -610,7 +643,10 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::OnRelayUrlEdited);
 	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
-	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
+	connect(pathEdit, &QLineEdit::editingFinished, this, [this]() {
+		UpdateLadderHint();
+		SaveSettings();
+	});
 	connect(qualityToggle, &QCheckBox::toggled, this, &MoQDock::OnQualityToggled);
 	connect(profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
 		RefreshQualityOptions();
@@ -626,9 +662,19 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	});
 	connect(videoEncoderCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
 	connect(audioCodecCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
+	connect(ladderToggle, &QCheckBox::toggled, this, [this](bool enabled) {
+		ladderProfileCombo->setEnabled(enabled);
+		UpdateLadderHint();
+		SaveSettings();
+	});
+	connect(ladderProfileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+		UpdateLadderHint();
+		SaveSettings();
+	});
 
 	RefreshQualityOptions();
 	LoadSettings();
+	UpdateLadderHint();
 	ApplyView();
 	SetRunning(false);
 }
@@ -823,6 +869,35 @@ void MoQDock::RefreshQualityOptions()
 	if (profileCombo->currentData().toString() == "auto")
 		detected += haveHw ? " · Auto → Quality" : " · Auto → Performance";
 	detectedLabel->setText(detected);
+}
+
+void MoQDock::UpdateLadderHint()
+{
+	if (!ladderHint)
+		return;
+	QString path = pathEdit->text().trimmed();
+	if (path.isEmpty())
+		path = "(broadcast)";
+	const QString profile = ladderProfileCombo->currentData().toString();
+	QString rungs;
+	if (profile == "light")
+		rungs = "720p 2.5 Mbps · 480p 1.2 Mbps · 360p 600 kbps";
+	else if (profile == "mobile")
+		rungs = "480p 1.2 Mbps · 360p 600 kbps · 240p 350 kbps";
+	else
+		rungs = "1080p 5 Mbps · 720p 2.5 Mbps · 480p 1.2 Mbps · 360p 600 kbps · 240p 350 kbps";
+
+	if (!ladderToggle->isChecked()) {
+		ladderHint->setText(
+			QString("Off. When a relay or moq.pro runs moq-transcode, the ladder "
+				"catalog is %1/transcode.hang. OBS still publishes one source.")
+				.arg(path));
+		return;
+	}
+	ladderHint->setText(QString("Requested ladder: %1\nCatalog: %2/transcode.hang\n"
+				    "This plugin does not encode those rungs. The relay does, when "
+				    "moq-transcode is enabled for this account.")
+				    .arg(rungs, path));
 }
 
 bool MoQDock::CreateConfiguredEncoders()
@@ -1038,6 +1113,13 @@ void MoQDock::StartStream()
 		status->setText("Failed to set up encoders");
 		return;
 	}
+	if (ladderToggle->isChecked()) {
+		QString path = pathEdit->text().trimmed();
+		if (path.isEmpty())
+			path = "(broadcast)";
+		publishSummary += QString("\nTranscode %1 → %2/transcode.hang")
+					  .arg(ladderProfileCombo->currentText().split(QStringLiteral(" · ")).first(), path);
+	}
 
 	output = OBSOutputAutoRelease(obs_output_create("moq_output", "moq_dock_output", nullptr, nullptr));
 	if (!output) {
@@ -1102,6 +1184,8 @@ void MoQDock::SetRunning(bool isRunning)
 	advancedButton->setEnabled(!isRunning);
 	qualityToggle->setEnabled(!isRunning);
 	qualityBox->setEnabled(!isRunning && qualityToggle->isChecked());
+	ladderToggle->setEnabled(!isRunning);
+	ladderProfileCombo->setEnabled(!isRunning && ladderToggle->isChecked());
 
 	if (!isRunning) {
 		status->setText("● Disconnected");
@@ -1272,6 +1356,16 @@ void MoQDock::LoadSettings()
 		SelectComboData(videoEncoderCombo, QString::fromUtf8(obs_data_get_string(quality, "video_encoder")));
 		SelectComboData(audioCodecCombo, QString::fromUtf8(obs_data_get_string(quality, "audio_codec")));
 	}
+
+	OBSDataAutoRelease ladder = obs_data_get_obj(data, "ladder");
+	if (ladder) {
+		QSignalBlocker bLadder(ladderToggle);
+		QSignalBlocker bProfile(ladderProfileCombo);
+		const bool enabled = obs_data_get_bool(ladder, "enabled");
+		ladderToggle->setChecked(enabled);
+		ladderProfileCombo->setEnabled(enabled);
+		SelectComboData(ladderProfileCombo, QString::fromUtf8(obs_data_get_string(ladder, "profile")));
+	}
 }
 
 void MoQDock::SaveSettings()
@@ -1298,6 +1392,11 @@ void MoQDock::SaveSettings()
 	obs_data_set_string(quality, "video_encoder", videoEncoderCombo->currentData().toString().toUtf8().constData());
 	obs_data_set_string(quality, "audio_codec", audioCodecCombo->currentData().toString().toUtf8().constData());
 	obs_data_set_obj(data, "quality", quality);
+
+	OBSDataAutoRelease ladder = obs_data_create();
+	obs_data_set_bool(ladder, "enabled", ladderToggle->isChecked());
+	obs_data_set_string(ladder, "profile", ladderProfileCombo->currentData().toString().toUtf8().constData());
+	obs_data_set_obj(data, "ladder", ladder);
 
 	obs_data_save_json(data, path.c_str());
 }
