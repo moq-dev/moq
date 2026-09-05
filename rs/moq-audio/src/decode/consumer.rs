@@ -480,6 +480,8 @@ mod tests {
 	use crate::Format;
 	use crate::encode::{Encoder, Input, Options, Producer};
 
+	const TEST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
 	#[tokio::test]
 	async fn remixes_mono_stream_to_stereo_output() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -745,6 +747,7 @@ mod tests {
 			"audio",
 			Config {
 				sample_rate: Some(out_rate),
+				max_age: TEST_MAX_AGE,
 				..Config::new()
 			},
 		)
@@ -860,9 +863,17 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				max_age: TEST_MAX_AGE,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		// A 20 ms packet at 0, then the next one at 22.5 ms: the 2.5 ms packet
 		// between them was lost.
@@ -947,9 +958,17 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				max_age: TEST_MAX_AGE,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		let pcm = vec![0.25f32; encoder.frame_size()];
 		for packet in 0..2 {
