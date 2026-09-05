@@ -10,10 +10,10 @@ crates passes the interop runner's subscribe-error and subscribe-before-announce
 cases without the peer's compatibility branch, and a routine cancellation is
 read as CANCELLED rather than INTERNAL_ERROR.
 
-Boundaries: moq-lite's own code spaces are untouched, and js/net's inability to
-carry a code on a locally raised stream error stays with
-[JS stream codes](/quest/m1/js-net-stream-error-codes.md), which is about the
-moq-lite space and the abstraction, not the registry.
+Boundaries: moq-lite's own code spaces are untouched. js/net already carries a
+code on a locally raised stream error, via the `toStreamCode` / `fromTransport`
+pair in `js/net/src/error.ts`; that mapping is the moq-lite space, not this
+registry.
 
 ## Plan
 
@@ -70,5 +70,4 @@ enum over a flat one: version-aware, per the above.
 
 ## Related
 
-- [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - the moq-lite half for js/net
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - the same codes crossing the FFI

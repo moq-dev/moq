@@ -4,6 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { FrameTooLarge, Lagged } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 
@@ -48,28 +49,13 @@ export interface Info {
 }
 
 /**
- * Thrown by a frame read when the reader fell behind the group's eviction window: frames
- * it had not yet read were dropped to stay under the cache cap, so the stream has a gap.
- */
-export class Lagged extends Error {
-	constructor() {
-		super("lagged: frames were evicted before being read");
-		this.name = "Lagged";
-	}
-}
-
-/**
- * Thrown by a frame write when the frame is larger than a group can cache, so appending it would
- * evict it immediately and drop the write.
+ * Thrown by a frame read when the reader fell behind the group's eviction window, and by a frame
+ * write when the frame is larger than a group can cache.
  *
- * Mirrors the Rust `Error::FrameTooLarge`, which rejects the same frame before touching any state.
+ * Both carry a stream code, so the condition survives a reset to the peer and comes back as the
+ * same class there.
  */
-export class FrameTooLarge extends Error {
-	constructor() {
-		super("frame too large: larger than a group can cache");
-		this.name = "FrameTooLarge";
-	}
-}
+export { FrameTooLarge, Lagged } from "./error.ts";
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {

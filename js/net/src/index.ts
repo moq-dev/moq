@@ -13,8 +13,15 @@ export * as Announce from "./announced.ts";
 export * as Broadcast from "./broadcast.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
-/** Peer-reported session and stream errors, each carrying a code from its own registry. */
-export { SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
+/** Session and stream errors, each carrying a code from its own registry. */
+export {
+	NotFound,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+	type StreamErrorOptions,
+} from "./error.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
 /** Broadcast routing tables, independent of any connection. */

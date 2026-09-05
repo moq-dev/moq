@@ -4,6 +4,7 @@ import * as Announce from "./announced.ts";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect, Reload } from "./connection/index.ts";
 import { StreamCode, StreamError } from "./error.ts";
+import * as Group from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -507,6 +508,74 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	expect((err as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 
 	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: a locally raised group error reaches the peer as its own code", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = origin.publish(Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe().ordered();
+
+	const group = producer.appendGroup();
+	group.writeString("frame");
+
+	const consumer = await track.nextGroup();
+	if (!consumer) throw new Error("expected a group");
+	expect(await consumer.readString()).toBe("frame");
+
+	// The publisher's own cache dropped the rest of the group. Nothing hand-builds a transport
+	// error here, which is the point: the condition is raised the way the library raises it.
+	group.close(new Group.Lagged());
+
+	const err = await consumer.readFrame().then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	// Without the mapping this arrives as StreamCode.Internal (0), which reads as a crash on the
+	// publisher's side rather than a reader that fell behind.
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.TooFarBehind);
+	// And the reverse direction agrees, so a gap is one class whichever side it happened on.
+	expect(err).toBeInstanceOf(Group.Lagged);
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+test("integration: subscribing to an unserved broadcast is refused as NotFound", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	// Announced, so the subscribe is attempted, but the publisher drops it before the subscribe
+	// arrives and answers with a reset instead of a track.
+	const broadcast = origin.publish(Path.from("test"));
+	const remote = client.consume(Path.from("test"));
+	broadcast.close();
+
+	const track = remote.track("video").subscribe();
+	const err = await withTimeout(Promise.resolve(track.closed), 1000, "track never closed");
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.NotFound);
+
 	remote.close();
 	client.close();
 	server.close();

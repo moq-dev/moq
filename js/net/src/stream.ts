@@ -1,16 +1,20 @@
-import { fromTransport, StreamCode, StreamError, toTransport } from "./error.ts";
+import { error, fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
-// Forwarding a peer's reset must keep its code, or a relay flattens it to 0 (INTERNAL_ERROR).
-// Only a code the peer already put on a stream can be re-sent verbatim: the session registry
-// is a disjoint space, so forwarding one of its codes here would mistranslate it. Anything
-// else is a local failure, which 0 already describes, so leave it alone.
+// Every reset funnels through here, so the code a condition means is what lands on the wire,
+// whether it was raised locally or forwarded from a peer. Without it the transport reads a
+// code off nothing but a WebTransportError and sends 0 (INTERNAL_ERROR) for the rest, so a
+// routine event (a lagging reader, an unknown broadcast) looks like a crash on our side.
+//
+// An error with no code of its own already means 0, so leave it alone: the caller's own class,
+// message and stack are more use locally than a transport-shaped stand-in.
 function withCode(reason: unknown): unknown {
-	return reason instanceof StreamError ? toTransport(reason.code, reason.message) : reason;
+	const code = toStreamCode(reason);
+	return code === StreamCode.Internal ? reason : toTransport(code, error(reason).message);
 }
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -167,7 +171,7 @@ export class Stream {
 		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,
 		// which the stream registry reads as INTERNAL_ERROR: the peer would log a failure
 		// for every subscription we walk away from.
-		this.reader.stop(toTransport(StreamCode.Cancel, "cancel"));
+		this.reader.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 	}
 
 	abort(reason: Error) {
