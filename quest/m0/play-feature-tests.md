@@ -12,8 +12,8 @@ locally without ever being compiled.
 `#[cfg(feature = "play")]` in `main.rs`, so the whole module (its `mod tests`
 included) is compiled out of every default build. `just check`, `just test`,
 and check.yml are default features only, which means the merge gate never sees
-these tests, and neither does a developer running `just test -p moq-cli` after
-editing the file.
+these tests, and neither does a developer running `just rs test -p moq-cli`
+after editing the file.
 
 The one thing that runs them is nightly's `just rs features`, whose last step
 is `nextest run --locked --workspace --all-targets --all-features`. That is
