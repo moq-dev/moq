@@ -372,8 +372,9 @@ impl Publish {
 				// broadcast + catalog. A single shared clock keeps the audio and
 				// video timelines aligned even though the devices open at
 				// different times. Video encodes on demand (camera opens only
-				// while subscribed); audio (cpal) is blocking, so it runs on a
-				// dedicated thread.
+				// while subscribed). Both run on this task rather than a spawn:
+				// on macOS the audio future holds ObjC handles across an await,
+				// so it is `!Send`.
 				let clock = moq_mux::Clock::new();
 				let video_fut = {
 					let broadcast = self.broadcast.clone();
