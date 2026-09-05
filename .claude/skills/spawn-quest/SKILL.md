@@ -96,10 +96,14 @@ itself. Instruct it to:
   it with an empty placeholder commit whose message contains a freshly
   generated UUID, pushed immediately with `git push origin HEAD` after
   pointing the upstream at the base. When triage hands over an existing branch to
-  continue, reset to the SHA triage inspected, rebase onto the base, and claim
+  continue, reset to the SHA triage inspected, point the upstream at the base
+  with `git branch --set-upstream-to=origin/<base>`, rebase onto it, and claim
   it with the same explicit lease (`--force-with-lease=<branch>:<sha>`, pushing
   `HEAD:refs/heads/<branch>`), so a second adopter loses the race rather than
-  joining it. The UUID is what makes the claim a race:
+  joining it. Set that upstream explicitly: `git checkout -B` leaves the branch
+  without one and an explicit refspec push does not add one, so the
+  diff-aware `just check` and `just test` would silently fall back to
+  `origin/main` and drag every dev-only commit into their scope. The UUID is what makes the claim a race:
   two agents claiming the same quest from the same base in the same second
   otherwise produce the same commit object, and the loser's push succeeds as
   already-up-to-date instead of being rejected. A rejected push lost the race:
