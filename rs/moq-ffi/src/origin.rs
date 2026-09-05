@@ -127,8 +127,21 @@ impl Requests {
 		self.notify.notify_one();
 	}
 
+	/// The oldest parked request whose route still stands.
+	///
+	/// A cancel empties its route's slot before it drains the queue, so an entry
+	/// popped in between belongs to a route that is already gone; its requesters
+	/// were rejected by the retraction, and dropping it here is all that is left.
+	/// Checked after the queue lock is released: the push side holds the slot
+	/// while it takes the queue, so nesting them the other way would deadlock.
 	fn pop(&self) -> Option<moq_net::origin::Request> {
-		self.parked.lock().unwrap().pop_front().map(|(_, request)| request)
+		loop {
+			let (route, request) = self.parked.lock().unwrap().pop_front()?;
+			if route.lock().unwrap().is_some() {
+				return Some(request);
+			}
+			drop(request);
+		}
 	}
 
 	/// The origin was torn down: nothing parked can be served any more (their
