@@ -75,8 +75,10 @@ runtime serves every connection off one UDP socket.
 # Cannot be combined with listen.quic_lb_id, which wants the same bytes of the
 # connection ID.
 #
-# The listen address needs an explicit non-zero port: an ephemeral bind gives
-# each worker a port of its own instead of a shared one.
+# The whole group shares one port, including an ephemeral (zero) one: the first
+# worker binds it and the rest join whatever it got. Name the port explicitly
+# unless something else is reading it back, since nothing can dial a port the
+# relay only learns at startup.
 #
 # Incompatible with listen.tls.generate, since each worker would generate a
 # certificate of its own. Point at real certificate files instead. Each worker
