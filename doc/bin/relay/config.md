@@ -20,6 +20,7 @@ cert = "cert.pem"                    # Certificate chain and key. Reloaded on ch
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
 root = ["peer-ca.pem"]               # Optional: CAs whose client certs get full access (mTLS).
+                                     # The quiche backend fixes these at startup; restart to rotate them.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"

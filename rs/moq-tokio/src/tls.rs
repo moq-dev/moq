@@ -5,15 +5,22 @@
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
-//! Certificates, keys, and custom root CAs loaded from disk are normally hot
-//! reloaded for new handshakes. Quiche servers are the exception: all inbound
-//! TLS material is fixed when the listener is built. [`Certificates`] reads the
-//! current served set back out.
+//! Certificates, keys, and custom root CAs loaded from disk are hot reloaded for
+//! new handshakes. A quiche server is the exception for the mTLS client roots
+//! ([`Listen::root`]), which boringssl fixes when the listener is built; the
+//! certificates it serves reload like every other backend's. [`Certificates`]
+//! reads the current served set back out.
 
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "aws-lc-rs",
+	feature = "ring"
+))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -82,12 +89,16 @@ pub enum Error {
 	)]
 	ConflictingClientAuth,
 
-	/// An in-memory identity or a pinned peer set was configured on a backend that
-	/// cannot consume the live rustls material.
+	#[doc(hidden)]
+	#[deprecated(note = "an in-memory Identity is now supported; pinned peers return PeersUnsupported")]
 	#[error(
 		"the quiche backend cannot use an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
 	)]
 	MemoryUnsupported,
+
+	/// A pinned peer set was configured on a backend that cannot run a rustls verifier.
+	#[error("the quiche backend cannot pin client fingerprints; use the quinn or noq backend")]
+	PeersUnsupported,
 
 	/// Client pinning was combined with client CA roots. Pinning bypasses the chain,
 	/// so one of the two would be silently ignored.
@@ -201,6 +212,81 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 	Ok(roots)
 }
 
+// ── Certified ───────────────────────────────────────────────────────
+
+/// A certificate chain with both usable forms of its private key.
+///
+/// rustls signs through an opaque [`rustls::sign::SigningKey`], which is all the
+/// quinn and noq backends need. quiche hands the key to boringssl itself, so the
+/// DER is kept alongside the signer instead of being dropped once loaded, and one
+/// certificate source feeds every backend.
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "aws-lc-rs",
+	feature = "ring"
+))]
+pub(crate) struct Certified {
+	/// The chain and its rustls signer, in leaf-first order.
+	pub rustls: Arc<rustls::sign::CertifiedKey>,
+	/// The same private key, still in DER, for backends that load it themselves.
+	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
+	pub key: PrivateKeyDer<'static>,
+}
+
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "aws-lc-rs",
+	feature = "ring"
+))]
+impl Certified {
+	/// Load `chain` and `key`, building the rustls signer and keeping the DER.
+	pub(crate) fn new(
+		provider: &crypto::Provider,
+		chain: Vec<CertificateDer<'static>>,
+		key: PrivateKeyDer<'static>,
+	) -> Result<Self> {
+		let signer = provider.key_provider.load_private_key(key.clone_key())?;
+		Ok(Self {
+			rustls: Arc::new(rustls::sign::CertifiedKey::new(chain, signer)),
+			key,
+		})
+	}
+
+	/// The certificate chain, leaf first.
+	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
+	pub fn chain(&self) -> &[CertificateDer<'static>] {
+		&self.rustls.cert
+	}
+
+	/// The leaf certificate, which is what a fingerprint identifies.
+	pub fn leaf(&self) -> &CertificateDer<'static> {
+		// `new` and `Identity::generate` are the only constructors and both reject an
+		// empty chain, so there is always a leaf.
+		&self.rustls.cert[0]
+	}
+}
+
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "aws-lc-rs",
+	feature = "ring"
+))]
+impl fmt::Debug for Certified {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// Never derive: the DER private key would print in full.
+		formatter
+			.debug_struct("Certified")
+			.field("chain", &self.rustls.cert.len())
+			.finish_non_exhaustive()
+	}
+}
+
 // ── Identity ────────────────────────────────────────────────────────
 
 /// A self-signed certificate and key, held in memory and used as both a served
@@ -218,7 +304,7 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 #[derive(Clone)]
 pub struct Identity {
-	key: Arc<rustls::sign::CertifiedKey>,
+	key: Arc<Certified>,
 	fingerprint: String,
 }
 
@@ -233,7 +319,7 @@ impl Identity {
 		let hostnames: Vec<String> = hostnames.into_iter().map(Into::into).collect();
 		let provider = crypto::provider();
 		let key = Arc::new(generate(&provider, &hostnames)?);
-		let fingerprint = hex::encode(crypto::sha256(&provider, key.cert[0].as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(&provider, key.leaf().as_ref()));
 		Ok(Self { key, fingerprint })
 	}
 
@@ -246,7 +332,8 @@ impl Identity {
 		&self.fingerprint
 	}
 
-	fn certified(&self) -> Arc<rustls::sign::CertifiedKey> {
+	/// The certificate and key, in both the rustls and the DER form a backend may need.
+	pub(crate) fn certified(&self) -> Arc<Certified> {
 		self.key.clone()
 	}
 }
@@ -1042,7 +1129,7 @@ impl Connect {
 			if self.cert.is_some() || self.key.is_some() {
 				return Err(Error::ConflictingClientAuth);
 			}
-			let resolver = Arc::new(IdentityResolver(identity.certified()));
+			let resolver = Arc::new(IdentityResolver(identity.certified().rustls.clone()));
 			return Ok(builder.with_client_cert_resolver(resolver));
 		}
 
@@ -1071,7 +1158,7 @@ impl Connect {
 /// and the backdating absorbs clock drift between two hosts that have never
 /// agreed on a time source.
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certified> {
 	let key_pair = rcgen::KeyPair::generate()?;
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -1081,14 +1168,16 @@ fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<rustls:
 	let cert = params.self_signed(&key_pair)?;
 
 	// Convert the rcgen types to the rustls ones.
-	let key_der = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
-	let key = provider.key_provider.load_private_key(key_der.into())?;
+	let key = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
 
-	Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
+	Certified::new(provider, vec![cert.into()], key.into())
 }
 
-#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+#[cfg(all(
+	not(any(feature = "aws-lc-rs", feature = "ring")),
+	any(feature = "quinn", feature = "noq", feature = "quiche")
+))]
+fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<Certified> {
 	Err(Error::NoCryptoProvider)
 }
 
@@ -1504,7 +1593,7 @@ impl PeerIdentity {
 #[derive(Debug, Default)]
 pub(crate) struct Info {
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
+	pub(crate) certs: Vec<Arc<Certified>>,
 	pub(crate) fingerprints: Vec<String>,
 }
 
@@ -2078,7 +2167,7 @@ mod tests {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
 		let peers = Peers::new();
 		let verifier = PeerVerifier::new(crypto::provider(), peers.clone());
-		let leaf = identity.certified().cert[0].clone();
+		let leaf = identity.certified().leaf().clone();
 		let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
 
 		assert!(
@@ -2096,7 +2185,7 @@ mod tests {
 		// A different peer's certificate is not interchangeable with an allowed one.
 		let other = Identity::generate(["mesh.invalid"]).unwrap();
 		peers.insert(identity.fingerprint()).unwrap();
-		let other_leaf = other.certified().cert[0].clone();
+		let other_leaf = other.certified().leaf().clone();
 		assert!(verifier.verify_client_cert(&other_leaf, &[], now).is_err());
 	}
 
@@ -2140,7 +2229,7 @@ mod tests {
 	#[test]
 	fn peer_identity_reports_the_published_fingerprint() {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
-		let chain = vec![identity.certified().cert[0].clone()];
+		let chain = vec![identity.certified().leaf().clone()];
 		let peer = PeerIdentity { chain };
 		assert_eq!(peer.fingerprint().as_deref(), Some(identity.fingerprint()));
 	}
@@ -2674,7 +2763,7 @@ impl ServeCerts {
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<rustls::sign::CertifiedKey> {
+	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<Certified> {
 		let chain = read_certs(chain_path)?;
 		if chain.is_empty() {
 			return Err(Error::Empty);
@@ -2682,25 +2771,23 @@ impl ServeCerts {
 
 		// Read the PEM private key
 		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
-		let key = self.provider.key_provider.load_private_key(key)?;
+		let certified = Certified::new(&self.provider, chain, key)?;
 
-		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
-
-		certified_key.keys_match().map_err(|source| Error::KeyMismatch {
+		certified.rustls.keys_match().map_err(|source| Error::KeyMismatch {
 			key: key_path.to_path_buf(),
 			cert: chain_path.to_path_buf(),
 			source,
 		})?;
 
-		Ok(certified_key)
+		Ok(certified)
 	}
 
 	// Replace the certificates
-	pub fn set_certs(&self, certs: Vec<Arc<rustls::sign::CertifiedKey>>) {
+	pub fn set_certs(&self, certs: Vec<Arc<Certified>>) {
 		let fingerprints = certs
 			.iter()
 			.map(|ck| {
-				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());
+				let fingerprint = crate::crypto::sha256(&self.provider, ck.leaf().as_ref());
 				hex::encode(fingerprint)
 			})
 			.collect();
@@ -2710,47 +2797,42 @@ impl ServeCerts {
 		info.fingerprints = fingerprints;
 	}
 
-	// Return the best certificate for the given ClientHello.
-	fn best_certificate(
-		&self,
-		client_hello: &rustls::server::ClientHello<'_>,
-	) -> Option<Arc<rustls::sign::CertifiedKey>> {
-		let server_name = client_hello.server_name()?;
-		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
+	/// The certificate to serve for `server_name`, or the first configured one when
+	/// nothing matches. `None` only when nothing is configured at all.
+	///
+	/// Every backend selects through this, so the rustls-based ones and quiche agree
+	/// on which certificate a given SNI gets.
+	pub(crate) fn select(&self, server_name: Option<&str>) -> Option<Arc<Certified>> {
+		let info = self.info.read().expect("info read lock poisoned");
 
-		for ck in self.info.read().expect("info read lock poisoned").certs.iter() {
-			let leaf: webpki::EndEntityCert = ck
-				.end_entity_cert()
-				.expect("missing certificate")
-				.try_into()
-				.expect("failed to parse certificate");
+		if let Some(name) = server_name
+			&& let Ok(dns_name) = ServerName::try_from(name)
+		{
+			for ck in info.certs.iter() {
+				// A malformed leaf can't match a name, but it also shouldn't take the
+				// whole selection down: skip it and let the next candidate answer.
+				let Ok(leaf) = webpki::EndEntityCert::try_from(ck.leaf()) else {
+					tracing::warn!("failed to parse served certificate");
+					continue;
+				};
 
-			if leaf.verify_is_valid_for_subject_name(&dns_name).is_ok() {
-				return Some(ck.clone());
+				if leaf.verify_is_valid_for_subject_name(&dns_name).is_ok() {
+					return Some(ck.clone());
+				}
 			}
 		}
 
-		None
+		// The client asked for a hostname none of the certificates cover (or sent no
+		// SNI at all). Serve the first one and let it decide whether to trust it.
+		tracing::warn!(?server_name, "no SNI certificate found");
+		info.certs.first().cloned()
 	}
 }
 
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
-		if let Some(cert) = self.best_certificate(&client_hello) {
-			return Some(cert);
-		}
-
-		// If this happens, it means the client was trying to connect to an unknown hostname.
-		// We do our best and return the first certificate.
-		tracing::warn!(server_name = ?client_hello.server_name(), "no SNI certificate found");
-
-		self.info
-			.read()
-			.expect("info read lock poisoned")
-			.certs
-			.first()
-			.cloned()
+		Some(self.select(client_hello.server_name())?.rustls.clone())
 	}
 }
 
@@ -2761,7 +2843,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
 /// `mv`-into-place rotate certs with no external signal. Returns immediately when
 /// only generated certs are configured: there's nothing on disk to watch.
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
 	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
 	if paths.is_empty() {
