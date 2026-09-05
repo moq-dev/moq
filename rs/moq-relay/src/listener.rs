@@ -52,12 +52,21 @@ impl Listener {
 	}
 }
 
-/// An `axum_server` bound to [`Listener`], ready for `.acceptor(..)`/`.serve(..)`.
+/// An `axum_server` bound to [`Listener`] with `acceptor` installed, ready for
+/// `.serve(..)`.
+///
+/// The acceptor is a parameter rather than the builder step `axum_server` offers,
+/// so what a listener does at accept time is something each call site states rather
+/// than something it can leave out.
 ///
 /// The address type is spelled here rather than at each call site: `A::Listener`
 /// doesn't pin `A` down, so inference cannot get there from the listener alone.
-pub(crate) fn server(listener: std::net::TcpListener, health: Health) -> io::Result<axum_server::Server<Peer>> {
-	Ok(axum_server::Server::from_listener(Listener::new(listener, health)?))
+pub(crate) fn server<A>(
+	listener: std::net::TcpListener,
+	health: Health,
+	acceptor: A,
+) -> io::Result<axum_server::Server<Peer, A>> {
+	Ok(axum_server::Server::from_listener(Listener::new(listener, health)?).acceptor(acceptor))
 }
 
 impl AddrListener<TcpStream, Peer> for Listener {
