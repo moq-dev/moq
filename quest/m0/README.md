@@ -17,12 +17,11 @@ regression test per Root Cause First.
 
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
 - [#3361](/quest/m0/3361-js-watch-fails-on-firefox-esr.md) - js/watch: `<moq-watch>` throws from an effect on Firefox ESR, a regression since 0.3.2
-- [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: `MoqWatch.broadcast` is undefined at construction although its type says otherwise
+- [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: a framework binding the element reads `broadcast` before the custom element is upgraded
 - [#3363](/quest/m0/3363-js-watch-audio-only-stream-does-not-resume.md) - js/watch: an audio-only stream resumes only the first time the publisher unmutes
 - [#3359](/quest/m0/3359-moq-net-subscribe-error-sends-hardcoded-404.md) - moq-net: SUBSCRIBE_ERROR sends a literal 404 instead of the draft's registered code
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
-- [#3326](/quest/m0/3326-moq-audio-forward-gap-stamps-resampled-output.md) - moq-audio: a forward timestamp gap stamps resampled output almost a second late
 - [#3291](/quest/m0/3291-moq-net-zero-budget-shedding-drops-discontinuity-markers.md) - moq-net (dev): zero-budget shedding drops the empty group that marks a codec reset
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls SI tables, PCR, and pacing until the media clock catches up
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with

@@ -15,10 +15,9 @@ a dropout, exactly when playback is already degraded.
 allocation-free (atomics and `Thread::unpark`). What remains is upstream and
 the hand-off:
 
-- Raise it with cpal: allocation-free error emission on the RT paths (a
-  `&'static str` message, or deferring the `format!` to a non-RT thread),
-  which is where the dominant allocation lives. Carry the upstream PR as
-  part of this quest and pin the release that includes it.
+- The dominant allocation is upstream; the
+  [cpal release](/quest/m2/cpal-release.md) gate quest carries that proposal
+  and the pin bump, and this quest waits on it.
 - Pre-check in `moq-audio` what can be checked before `stream.play()`, so
   fewer errors are raised from the render path at all.
 - Document the residual constraint beside the driver: the callback owns the
@@ -28,6 +27,10 @@ the hand-off:
 Test: an allocation-counting harness around the error callback, the same
 shape the capture-callback quest used, proving no allocation or free after
 construction on the paths this repo controls.
+
+## Required
+
+- [cpal release](/quest/m2/cpal-release.md) - the upstream fix has to ship before the audio thread can be allocation-free
 
 ## Closes
 
