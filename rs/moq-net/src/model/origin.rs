@@ -1199,7 +1199,7 @@ impl Producer {
 		// Held across the whole attach: the driver's teardown sets `closed` under
 		// this lock, so a create either completes before the teardown (whose walk
 		// then cleans the entry up) or observes `closed` here and fails.
-		let lifecycle = self.shared.lock();
+		let mut lifecycle = self.shared.lock();
 		if lifecycle.closed {
 			return Err(Error::Closed);
 		}
@@ -1265,6 +1265,9 @@ impl Producer {
 			broadcast,
 			id,
 		}));
+		// A local broadcast changes what the exact path resolves to, so a requester
+		// parked on the route table (see `routed_broadcast`) retries.
+		lifecycle.generation += 1;
 		drop(lifecycle);
 
 		Ok(source)
@@ -2775,8 +2778,9 @@ struct OriginState {
 	// holds one entry per live advertisement, not one per broadcast consumer.
 	routes: Vec<RouteEntry>,
 	next_route: u64,
-	// Bumped on every change to `routes` (insert, re-price, retract), so a
-	// requester can tell whether the table moved since it asked.
+	// Bumped on every change to what a path resolves to: a route inserted,
+	// re-priced, or retracted, and a local broadcast attached. A requester waits
+	// on it rather than re-asking a table that has not moved.
 	generation: u64,
 
 	// The registered announce cursors, each with its own coalescing buffer.
@@ -2974,15 +2978,6 @@ impl Dynamic {
 	/// [`Driver`] has been dropped.
 	pub fn update(&self, route: Route) -> Result<(), Error> {
 		self.announcement.update(route)
-	}
-
-	/// Retract the route now, without waiting for the handle to drop.
-	///
-	/// For a handle shared with a serving task: the advertisement is withdrawn and
-	/// the queued requests rejected before this returns, and the task's next
-	/// [`requested_broadcast`](Self::requested_broadcast) reports [`Error::Closed`].
-	pub fn close(&self) {
-		self.announcement.retract();
 	}
 
 	/// Poll for the next requested path under this route, without blocking.
@@ -3515,10 +3510,10 @@ impl Consumer {
 			// was made: nothing covered the path, the serving route retracted
 			// under the request, or its handler declined. Re-asking the same
 			// table would spin, so wait for it to move (an identical standby
-			// swapping in counts, even though no announce update reports it)
-			// and try again. A retraction that already happened bumped the
-			// generation before the error was observed, so that retry is
-			// immediate.
+			// swapping in counts, even though no announce update reports it,
+			// and so does a local broadcast attaching at the path) and try
+			// again. A retraction that already happened bumped the generation
+			// before the error was observed, so that retry is immediate.
 			let seen = request.generation();
 			match request.await {
 				Ok(broadcast) => return Ok(broadcast),
@@ -4448,23 +4443,27 @@ mod tests {
 		resolving.await.expect("resolves");
 	}
 
+	/// A local broadcast appearing at the exact path is a table change too: a
+	/// requester parked on a handler's rejection resolves to it.
 	#[tokio::test]
-	async fn dynamic_close_retracts_synchronously() {
+	async fn routed_broadcast_wakes_for_a_local_broadcast() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let mut announced = consumer.announced();
 		let server = producer.dynamic("room", Route::default()).unwrap();
-		announced.assert_next_active("room");
 
-		let pending = consumer.request_broadcast("room/alice");
-		server.close();
-		announced.assert_next_ended("room");
-		assert!(matches!(
-			server.poll_requested_broadcast(&kio::Waiter::noop()),
-			Poll::Ready(Err(Error::Closed))
-		));
-		let err = pending.await.err().unwrap();
-		assert!(matches!(err, Error::Unroutable));
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+		queued(&server).await.reject(Error::Unroutable);
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!((&mut resolving).now_or_never().is_none());
+
+		// Unannounced, so no route changes: the exact path itself is what moved.
+		let _local = producer.create_broadcast("room/alice").unwrap();
+		let resolved = resolving.await.expect("resolves locally");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 	}
 
 	/// A track first subscribed after the front is already serving another still

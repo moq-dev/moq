@@ -377,11 +377,12 @@ async fn play_audio(
 	let sample_rate = consumer.sample_rate();
 	let channels = consumer.channels();
 	let engine = moq_audio::playback::Engine::open(Default::default()).await?;
-	let mut sink = engine.sink(moq_audio::playback::Input {
+	let input = moq_audio::playback::Input {
 		format: moq_audio::Format::F32,
 		sample_rate,
 		channels,
-	})?;
+	};
+	let mut sink = engine.sink(input.clone())?;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
@@ -391,6 +392,16 @@ async fn play_audio(
 	// Paired with the wait below this keeps the sink under two seconds, inside its
 	// own ceiling.
 	let chunk = (sample_rate as usize * stride).max(stride);
+
+	// The longest hole worth playing through, in samples. A hole this player would
+	// rather sit through is one it is already willing to buffer, which is what the
+	// decoder's latency budget says: anything longer is what that budget chose to
+	// skip, so playing it as silence would hand back the delay the skip avoided.
+	// Past it the sink skips the hole and the clock re-anchors, as it does today.
+	let fill_max = (consumer.latency_max().as_secs_f64() * sample_rate as f64) as u64;
+	let silence = vec![0u8; chunk];
+
+	let mut timeline = AudioTimeline::default();
 
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
@@ -417,8 +428,35 @@ async fn play_audio(
 		dropping = false;
 
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
-		let end =
-			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
+		let start = timestamp(frame.timestamp);
+		let timing = timeline.push(start, samples, sample_rate, fill_max);
+
+		// A rewind or a hole too large to fill starts a new playback sink. The old
+		// sink has no media clock, so its buffered audio cannot be carried across a
+		// timeline region the player skipped.
+		if timing.reset_sink {
+			drop(sink);
+			*clock.lock().unwrap() = None;
+			sink = engine.sink(input.clone())?;
+		}
+
+		// A hole in the media is a hole in the audio, not a splice. Handing the next
+		// frame straight to the speaker shortens the track by the missing duration,
+		// which leaves it running ahead of media time until the clock below
+		// re-anchors, taking the video with it. Play the hole instead.
+		if timing.silence > 0 {
+			let mut remaining = usize::try_from(timing.silence)
+				.unwrap_or(usize::MAX / stride)
+				.saturating_mul(stride);
+			while remaining > 0 {
+				if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
+					tokio::time::sleep(excess).await;
+				}
+				let part = remaining.min(silence.len());
+				sink.write(&silence[..part])?;
+				remaining -= part;
+			}
+		}
 
 		for part in frame.data.chunks(chunk) {
 			// Let the speaker catch up before handing it more than it can hold.
@@ -429,7 +467,7 @@ async fn play_audio(
 		}
 
 		let previous = clock.lock().unwrap().replace(Clock {
-			media: end.saturating_sub(sink.buffered()),
+			media: timing.end.saturating_sub(sink.buffered()),
 			wall: Instant::now(),
 		});
 		// Only the very first sample needs a wake, to hand the render loop a clock
@@ -456,6 +494,56 @@ async fn play_audio(
 
 fn timestamp(timestamp: hang::moq_net::Timestamp) -> Duration {
 	Duration::from_micros(timestamp.as_micros().min(u64::MAX as u128) as u64)
+}
+
+#[derive(Default)]
+struct AudioTimeline {
+	origin: Option<Duration>,
+	end: Option<Duration>,
+	written: u64,
+}
+
+struct AudioTiming {
+	end: Duration,
+	silence: u64,
+	reset_sink: bool,
+}
+
+impl AudioTimeline {
+	fn push(&mut self, start: Duration, samples: usize, sample_rate: u32, fill_max: u64) -> AudioTiming {
+		let duration = Duration::from_secs_f64(samples as f64 / sample_rate as f64);
+		let end = start.saturating_add(duration);
+		// Millisecond-stamped input can put adjacent frames on either side of their
+		// exact boundary. Two output samples cover the conversions on top of that.
+		let tolerance = Duration::from_millis(1).saturating_add(Duration::from_secs_f64(2.0 / sample_rate as f64));
+		let rewound = self
+			.end
+			.is_some_and(|previous| start.saturating_add(tolerance) < previous);
+		if rewound {
+			self.origin = None;
+			self.written = 0;
+		}
+
+		// Measure every hole from the track origin so timestamp rounding cannot
+		// accumulate into drift. Advancing to `expected` even when the fill is capped
+		// makes a longer hole a timeline skip rather than refilling the cap forever.
+		let origin = *self.origin.get_or_insert(start);
+		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
+		let hole = expected.saturating_sub(self.written);
+		let silence = hole.min(fill_max);
+		let reset_sink = rewound || hole > fill_max;
+		self.written = self
+			.written
+			.max(expected)
+			.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
+		self.end = Some(end);
+
+		AudioTiming {
+			end,
+			silence,
+			reset_sink,
+		}
+	}
 }
 
 struct App {
@@ -996,5 +1084,45 @@ mod tests {
 			wall: Instant::now() - Duration::from_millis(20),
 		};
 		assert!(clock.now() >= Duration::from_millis(10_020));
+	}
+
+	#[test]
+	fn audio_timeline_restarts_when_media_time_rewinds() {
+		let mut timeline = AudioTimeline::default();
+		let first = timeline.push(Duration::from_secs(10), 960, 48_000, 24_000);
+		assert!(!first.reset_sink);
+
+		let rewound = timeline.push(Duration::from_secs(5), 960, 48_000, 24_000);
+		assert!(rewound.reset_sink);
+		assert_eq!(rewound.silence, 0);
+
+		let next = timeline.push(Duration::from_millis(5_020), 960, 48_000, 24_000);
+		assert!(!next.reset_sink);
+		assert_eq!(next.silence, 0);
+	}
+
+	#[test]
+	fn audio_timeline_tolerates_millisecond_stamp_rounding() {
+		let mut timeline = AudioTimeline::default();
+		let first = timeline.push(Duration::ZERO, 1024, 44_100, 22_050);
+		assert!(!first.reset_sink);
+
+		// 1024 frames end at 23.22 ms, but an FLV timestamp carries 23 ms.
+		let rounded = timeline.push(Duration::from_millis(23), 1024, 44_100, 22_050);
+		assert!(!rounded.reset_sink);
+	}
+
+	#[test]
+	fn audio_timeline_resets_sink_when_forward_hole_exceeds_fill_cap() {
+		let mut timeline = AudioTimeline::default();
+		timeline.push(Duration::ZERO, 960, 48_000, 4_800);
+
+		let filled = timeline.push(Duration::from_millis(100), 960, 48_000, 4_800);
+		assert!(!filled.reset_sink);
+		assert_eq!(filled.silence, 3_840);
+
+		let skipped = timeline.push(Duration::from_secs(1), 960, 48_000, 4_800);
+		assert!(skipped.reset_sink);
+		assert_eq!(skipped.silence, 4_800);
 	}
 }

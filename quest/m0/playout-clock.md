@@ -118,10 +118,6 @@ and the answer changes what the tests should assert.
   checking that a late start catches up to live rather than staying behind it,
   and that audio and video stay aligned at a non-zero delay.
 
-## Required
-
-- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - settles `play_audio`'s gap and silence handling first, so the clock rework is not rebased onto it
-
 ## Related
 
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - the same anchoring model in js/watch, gaining an absolute wall-clock target

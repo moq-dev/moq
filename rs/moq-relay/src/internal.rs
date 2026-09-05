@@ -34,6 +34,7 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::get,
 };
+use axum_server::accept::DefaultAcceptor;
 
 /// Configuration for the internal (ops) listener.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -170,7 +171,9 @@ impl Internal {
 		let listener = moq_tokio::bind::tcp(listen).context("failed to bind internal listener")?;
 		// No blanket "…server failed" context here: the caller (main.rs) adds
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
-		crate::listener::server(listener, self.health)?
+		// No accept-time work: the ops router never hands a connection to qmux, so
+		// capturing a descriptor per health check would spend one for nothing.
+		crate::listener::server(listener, self.health, DefaultAcceptor::new())?
 			.serve(app.into_make_service())
 			.await?;
 		Ok(())

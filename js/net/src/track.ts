@@ -152,11 +152,14 @@ export class Request {
 
 	#producer: Producer;
 	#sequences: TrackSequences;
+	#pending: Set<Request>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
 		this.#producer = options.producer;
 		this.#sequences = options.sequences;
+		this.#pending = options.pending;
+		this.#pending.add(this);
 	}
 
 	static {
@@ -175,12 +178,14 @@ export class Request {
 
 	/** Accept the request, committing the track's immutable {@link Info}. */
 	accept(info: Partial<Info> = {}): Producer {
+		this.#pending.delete(this);
 		bindProducer(this.name, this.#producer, this.#sequences);
 		return this.#producer.accept(info);
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
+		this.#pending.delete(this);
 		this.#producer.close(err);
 	}
 }
@@ -408,6 +413,7 @@ export class Producer {
 
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
 	accept(info: Partial<Info> = {}): this {
+		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).

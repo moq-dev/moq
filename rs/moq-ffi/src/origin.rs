@@ -92,77 +92,95 @@ struct Announced {
 	inner: moq_net::announce::Consumer,
 }
 
-/// Requests from every prefix this origin advertises through `announce`, shared
-/// by every live `MoqOriginDynamic`.
+/// The route behind one `MoqOriginProducer::announce` handle, shared between the
+/// handle and the task serving it. Emptied by the handle's cancel, which is what
+/// retracts the route: the task sees the empty slot and ends.
+type Slot = std::sync::Mutex<Option<moq_net::origin::Dynamic>>;
+
+/// Requests from every prefix this origin advertises through `announce`, parked
+/// until a `MoqOriginDynamic` takes them.
 ///
-/// A forwarder releases its requests into the queue only while a handler is
-/// alive, so an announced prefix nobody serves keeps requesters waiting the way
-/// a slow handler would, and cancelling the announcement is what rejects them.
+/// Parking is the point: an announced prefix nobody serves yet keeps requesters
+/// waiting the way a slow handler would, and cancelling the announcement is what
+/// rejects them. Each entry names the route that yielded it, so a cancelled
+/// announcement can reject exactly its own.
+#[derive(Default)]
 struct Requests {
-	sink: tokio::sync::mpsc::UnboundedSender<moq_net::origin::Request>,
-	// Handlers take turns on the receiver; a handler parked on it lets go as soon
-	// as its own root route yields instead.
-	source: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<moq_net::origin::Request>>,
-	// Live handler count, which forwarders wait on before releasing requests.
-	handlers: tokio::sync::watch::Sender<usize>,
+	parked: std::sync::Mutex<std::collections::VecDeque<(Arc<Slot>, moq_net::origin::Request)>>,
+	// Wakes a handler waiting for something to park.
+	notify: tokio::sync::Notify,
 }
 
-impl Default for Requests {
-	fn default() -> Self {
-		let (sink, source) = tokio::sync::mpsc::unbounded_channel();
-		Self {
-			sink,
-			source: tokio::sync::Mutex::new(source),
-			handlers: tokio::sync::watch::Sender::new(0),
-		}
+impl Requests {
+	fn push(&self, route: Arc<Slot>, request: moq_net::origin::Request) {
+		self.parked.lock().unwrap().push_back((route, request));
+		self.notify.notify_one();
+	}
+
+	fn pop(&self) -> Option<moq_net::origin::Request> {
+		self.parked.lock().unwrap().pop_front().map(|(_, request)| request)
 	}
 }
 
-/// A served route whose requests flow into the origin's [`Requests`] from a
-/// background task. Dropping this retracts the route before returning; the task
-/// then observes the closed route and ends, rejecting whatever it still held.
+/// A served route whose requests a background task parks in the origin's
+/// [`Requests`]. Dropping this retracts the route and rejects its parked
+/// requests, both before returning; the task then observes the empty slot and
+/// ends.
 struct Forwarder {
-	dynamic: Arc<moq_net::origin::Dynamic>,
+	slot: Arc<Slot>,
+	requests: Arc<Requests>,
 }
 
 impl Forwarder {
 	fn new(dynamic: moq_net::origin::Dynamic, requests: Arc<Requests>) -> Self {
-		let dynamic = Arc::new(dynamic);
-		let served = dynamic.clone();
-		let mut handlers = requests.handlers.subscribe();
+		let slot = Arc::new(Slot::new(Some(dynamic)));
+		let served = slot.clone();
+		let parked = requests.clone();
 		crate::ffi::spawn(async move {
-			// Held back until a handler exists. Dropped with the task once the
-			// route closes, which resolves their requesters `Unroutable`.
-			let mut waiting = Vec::new();
 			loop {
-				tokio::select! {
-					biased;
-					released = handlers.wait_for(|&alive| alive > 0), if !waiting.is_empty() => {
-						if released.is_err() {
-							break;
-						}
-						for request in waiting.drain(..) {
-							let _ = requests.sink.send(request);
-						}
-					}
-					request = served.requested_broadcast() => match request {
-						Ok(request) if *requests.handlers.borrow() > 0 => {
-							let _ = requests.sink.send(request);
-						}
-						Ok(request) => waiting.push(request),
-						// The route was closed or the origin torn down.
-						Err(_) => break,
-					},
+				// The slot is only borrowed per poll, never across an await, so the
+				// cancel can empty it at any time; the retraction that follows
+				// wakes this poll to observe that.
+				let request = kio::wait(|waiter| match served.lock().unwrap().as_ref() {
+					Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
+					None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
+				})
+				.await;
+				match request {
+					Ok(request) => parked.push(served.clone(), request),
+					// Cancelled, or the origin was torn down.
+					Err(_) => break,
 				}
 			}
 		});
-		Self { dynamic }
+		Self { slot, requests }
+	}
+
+	/// Re-price the route. Fails with `Closed` once cancelled.
+	fn update(&self, route: moq_net::origin::Route) -> Result<(), MoqError> {
+		let slot = self.slot.lock().unwrap();
+		let dynamic = slot.as_ref().ok_or(MoqError::Closed)?;
+		Ok(dynamic.update(route)?)
 	}
 }
 
 impl Drop for Forwarder {
 	fn drop(&mut self) {
-		self.dynamic.close();
+		// Taken under the slot lock and dropped outside it: the retraction locks
+		// the origin, which the serving task's poll takes under this same slot.
+		let dynamic = self.slot.lock().unwrap().take();
+		drop(dynamic);
+
+		// Rejected outside the queue lock too: dropping a request resolves its
+		// requesters, which may re-request on the spot.
+		let rejected: Vec<_> = {
+			let mut parked = self.requests.parked.lock().unwrap();
+			let (mine, others): (Vec<_>, Vec<_>) =
+				parked.drain(..).partition(|(route, _)| Arc::ptr_eq(route, &self.slot));
+			parked.extend(others);
+			mine
+		};
+		drop(rejected);
 	}
 }
 
@@ -174,23 +192,20 @@ struct OriginDynamic {
 }
 
 impl OriginDynamic {
-	fn new(root: moq_net::origin::Dynamic, requests: Arc<Requests>) -> Self {
-		requests.handlers.send_modify(|alive| *alive += 1);
-		Self { root, requests }
-	}
-
 	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		let request = tokio::select! {
-			request = self.root.requested_broadcast() => request?,
-			request = async { self.requests.source.lock().await.recv().await } => request.ok_or(MoqError::Closed)?,
-		};
-		Ok(Arc::new(MoqBroadcastRequest::new(request)))
-	}
-}
-
-impl Drop for OriginDynamic {
-	fn drop(&mut self) {
-		self.requests.handlers.send_modify(|alive| *alive -= 1);
+		loop {
+			if let Some(request) = self.requests.pop() {
+				return Ok(Arc::new(MoqBroadcastRequest::new(request)));
+			}
+			// A push between the pop and the wait leaves a permit behind, so the
+			// wait returns at once and the loop finds it.
+			tokio::select! {
+				request = self.root.requested_broadcast() => {
+					return Ok(Arc::new(MoqBroadcastRequest::new(request?)));
+				}
+				_ = self.requests.notify.notified() => {}
+			}
+		}
 	}
 }
 
@@ -347,11 +362,12 @@ impl MoqOriginProducer {
 		let _guard = crate::ffi::enter();
 		// The origin's driver is gone if this fails: `requested_broadcast` then
 		// reports `Closed`, the same end a handler observes once it is torn down.
-		let task = self
-			.inner
-			.dynamic("", Default::default())
-			.ok()
-			.map(|root| Arc::new(Task::new(OriginDynamic::new(root, self.requests.clone()))));
+		let task = self.inner.dynamic("", Default::default()).ok().map(|root| {
+			Arc::new(Task::new(OriginDynamic {
+				root,
+				requests: self.requests.clone(),
+			}))
+		});
 		Arc::new(MoqOriginDynamic {
 			task: std::sync::Mutex::new(task),
 		})
@@ -401,8 +417,7 @@ impl MoqAnnounce {
 		let route: moq_net::origin::Route = route.try_into()?;
 		let guard = self.inner.lock().unwrap();
 		let announcement = guard.as_ref().ok_or(MoqError::Closed)?;
-		announcement.dynamic.update(route)?;
-		Ok(())
+		announcement.update(route)
 	}
 
 	/// Retract the route. Terminal: the advertisement is withdrawn here, not when

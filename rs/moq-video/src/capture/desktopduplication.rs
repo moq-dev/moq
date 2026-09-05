@@ -291,7 +291,7 @@ impl Duplicator {
 	/// Capture the next frame, paced to the target frame rate. Coalesces a burst
 	/// of desktop updates into the latest frame, and re-emits the last frame when
 	/// the screen hasn't changed, so the output rate stays steady.
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let deadline = *self.next_deadline.get_or_insert_with(|| Instant::now() + self.interval);
 
 		loop {
@@ -310,7 +310,12 @@ impl Duplicator {
 		let next = deadline + self.interval;
 		self.next_deadline = Some(next.max(Instant::now()));
 
-		Ok(self.last.clone().map(Surface::I420))
+		// A screen that hasn't changed since the stream opened has no frame to hand
+		// back yet, which is not the duplication API going away.
+		Ok(self
+			.last
+			.clone()
+			.map_or(pump::Read::Idle, |frame| pump::Read::Frame(Surface::I420(frame))))
 	}
 }
 
@@ -395,7 +400,7 @@ mod tests {
 
 		for i in 0..5 {
 			let frame = cap.read().expect("read frame");
-			let Some(Surface::I420(i420)) = frame else {
+			let pump::Read::Frame(Surface::I420(i420)) = frame else {
 				panic!("frame {i} was not I420");
 			};
 			assert_eq!(i420.width, cap.width);

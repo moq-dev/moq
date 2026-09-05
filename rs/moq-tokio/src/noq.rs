@@ -1,5 +1,6 @@
 //! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
+use crate::RedactedUrl;
 use crate::connect;
 use crate::listen;
 use crate::quic::CongestionControl;
@@ -344,7 +345,7 @@ impl NoqClient {
 				fingerprint.set_query(None);
 				fingerprint.set_fragment(None);
 
-				tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
+				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await

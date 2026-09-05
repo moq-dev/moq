@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_tokio::Status;
 use moq_tokio::moq_net::{self, Hop, bytes::Bytes};
-use moq_tokio::moq_net::{broadcast, track};
+use moq_tokio::moq_net::{broadcast, group, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -409,6 +409,10 @@ fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Cons
 
 /// Subscribe to the broadcast's track, counting every frame received and tracking
 /// group-sequence gaps to report skipped groups.
+///
+/// Only a track- or session-level failure ends the subscription. A group that
+/// fails mid-read is the relay giving up on that one group, which a real player
+/// skips over while it keeps watching.
 async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
@@ -419,27 +423,40 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 	// `recv_group` yields groups in arrival order, including out of sequence, so we
 	// can spot holes. `next_group` would silently drop late arrivals and hide them.
 	while let Some(mut group) = track.recv_group().await? {
-		gaps.observe(group.sequence);
-
-		let mut first = true;
-		while let Some(frame) = group.read_frame().await? {
-			// The first frame of every group is the JSON keyframe. Parse it once to
-			// learn the publisher's shape (we may be watching a peer, not ourselves).
-			if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
-				stats.latency(header.timestamp_ms);
-				if !learned_shape {
-					tracing::debug!(
-						fps = header.fps,
-						frame_size = header.frame_size,
-						group_size = header.group_size,
-						"subscribed broadcast shape"
-					);
-					learned_shape = true;
-				}
+		let sequence = group.sequence;
+		match read_group(&mut group, &mut learned_shape, stats).await {
+			// Only a group read end to end counts as delivered.
+			Ok(()) => gaps.complete(sequence),
+			// The relay failed this one group: `Error::Lagged` once we fall behind.
+			Err(err) => {
+				gaps.fail(sequence);
+				tracing::debug!(sequence, %err, "group ended early");
 			}
-			first = false;
-			stats.frame_recv(frame.payload.len());
 		}
+	}
+	Ok(())
+}
+
+/// Read one group to its end, counting every frame and sampling the keyframe header.
+async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats: &Stats) -> moq_net::Result<()> {
+	let mut first = true;
+	while let Some(frame) = group.read_frame().await? {
+		// The first frame of every group is the JSON keyframe. Parse it once to
+		// learn the publisher's shape (we may be watching a peer, not ourselves).
+		if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
+			stats.latency(header.timestamp_ms);
+			if !*learned_shape {
+				tracing::debug!(
+					fps = header.fps,
+					frame_size = header.frame_size,
+					group_size = header.group_size,
+					"subscribed broadcast shape"
+				);
+				*learned_shape = true;
+			}
+		}
+		first = false;
+		stats.frame_recv(frame.payload.len());
 	}
 	Ok(())
 }
@@ -456,10 +473,10 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 /// settled once a higher group has confirmed it. A truly skipped group is counted
 /// once the frontier moves past it.
 ///
-/// Each observation feeds the shared [`Stats`] incrementally so the reporter sees
-/// losses live and many subscriptions sum correctly: `groups_expected` is the size
-/// of every settled span, `groups_present` is how many of those groups arrived, and
-/// `groups_expected - groups_present` is the total skipped.
+/// A group that explicitly fails is known lost immediately, even when it is the
+/// first or live-frontier group. Each observation feeds the shared [`Stats`]
+/// incrementally so the reporter sees losses live and many subscriptions sum
+/// correctly: `groups_expected - groups_present` is the total skipped or failed.
 struct GapTracker<'a> {
 	stats: &'a Stats,
 	min: u64,
@@ -467,9 +484,14 @@ struct GapTracker<'a> {
 	/// Second-highest sequence seen: the settled frontier we count up to. `None`
 	/// until a second group arrives.
 	cap: Option<u64>,
-	/// This subscription's current contribution to `groups_expected` (`cap - min + 1`),
-	/// remembered so each update pushes only the delta.
+	/// Number of groups that completed, including the live frontier when it completed.
+	complete: u64,
+	/// Whether the live frontier completed rather than failed.
+	frontier_complete: bool,
+	/// This subscription's current contributions, remembered so each update pushes
+	/// only the delta into the shared counters.
 	expected: u64,
+	present: u64,
 	started: bool,
 }
 
@@ -480,41 +502,54 @@ impl<'a> GapTracker<'a> {
 			min: 0,
 			max: 0,
 			cap: None,
+			complete: 0,
+			frontier_complete: false,
 			expected: 0,
+			present: 0,
 			started: false,
 		}
 	}
 
-	fn observe(&mut self, sequence: u64) {
+	fn complete(&mut self, sequence: u64) {
 		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
+		self.record(sequence, true);
+	}
 
-		// The first group is the lone frontier: nothing settled yet, so it doesn't count.
+	fn fail(&mut self, sequence: u64) {
+		self.record(sequence, false);
+	}
+
+	fn record(&mut self, sequence: u64, complete: bool) {
+		self.complete += u64::from(complete);
 		if !self.started {
 			self.started = true;
 			self.min = sequence;
 			self.max = sequence;
-			return;
+			self.frontier_complete = complete;
+		} else {
+			self.min = self.min.min(sequence);
+			if sequence > self.max {
+				// New frontier: the old `max` is now settled and becomes the cap.
+				self.cap = Some(self.max);
+				self.max = sequence;
+				self.frontier_complete = complete;
+			} else if self.cap.is_none_or(|cap| sequence > cap) {
+				self.cap = Some(sequence);
+			}
 		}
 
-		// Every later group sits at or below the settled frontier, so it's a present group.
-		self.stats.groups_present.fetch_add(1, Ordering::Relaxed);
-
-		self.min = self.min.min(sequence);
-		if sequence > self.max {
-			// New frontier: the old `max` is now settled and becomes the cap.
-			self.cap = Some(self.max);
-			self.max = sequence;
-		} else if self.cap.is_none_or(|cap| sequence > cap) {
-			self.cap = Some(sequence);
-		}
-
-		// `cap` is always set here: either the branch above set it, or a prior group did.
-		let cap = self.cap.expect("cap set once a second group arrives");
-		let expected = cap - self.min + 1;
+		// The frontier stays out of inferred spans, but a failed frontier is already
+		// known lost. Completed groups below the frontier are present.
+		let expected = self.cap.map_or(0, |cap| cap - self.min + 1) + u64::from(!self.frontier_complete);
+		let present = self.complete - u64::from(self.frontier_complete);
 		self.stats
 			.groups_expected
 			.fetch_add(expected - self.expected, Ordering::Relaxed);
+		self.stats
+			.groups_present
+			.fetch_add(present - self.present, Ordering::Relaxed);
 		self.expected = expected;
+		self.present = present;
 	}
 }
 
@@ -761,6 +796,64 @@ mod tests {
 		broadcast.finish();
 	}
 
+	/// The relay fails a group it gave up on (`Error::Lagged` once a subscriber
+	/// falls behind). That ends the group, not the subscription: the drain must
+	/// keep consuming later groups, and charge the failed one as a gap. Treating
+	/// it as terminal shrank the offered load as a run went on, so the relay was
+	/// measured under fewer subscribers than it was asked to serve.
+	#[tokio::test]
+	async fn drain_survives_a_failed_group() {
+		fn write_group(track: &mut track::Producer) {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// Group 0 lands intact.
+		write_group(&mut track);
+
+		let task = {
+			let stats = stats.clone();
+			tokio::spawn(async move { drain(consumer, &stats).await })
+		};
+
+		// Group 1 opens and is picked up by the drain, then the relay gives up on it.
+		// Aborting a group nobody is reading drops its cached frames, so wait for the
+		// drain to be parked inside it before failing it.
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		for _ in 0..100 {
+			if stats.frames_recv.load(Ordering::Relaxed) >= 2 {
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 2, "drain is inside group 1");
+		group.abort(moq_net::Error::Lagged).unwrap();
+
+		// Groups 2 and 3 land intact, then the publisher is done.
+		write_group(&mut track);
+		write_group(&mut track);
+		track.finish().unwrap();
+		broadcast.finish();
+
+		task.await
+			.unwrap()
+			.expect("a failed group must not end the subscription");
+
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 3, "the three intact groups");
+		assert_eq!(lost(&stats), 1, "the failed group counts as a gap");
+	}
+
 	/// Subscription targets must be picked at random from the announced stream.
 	/// Announcements replay in deterministic path order, so a first-come pick
 	/// put every subscriber on the same first rooms and turned the 1:N presets
@@ -799,7 +892,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [0, 1, 3, 4] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 1);
@@ -811,7 +904,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [2, 0, 1, 3] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 0);
@@ -826,12 +919,49 @@ mod tests {
 
 		// 3 is missing, 4 is the live frontier: nothing is settled past 2 yet.
 		for seq in [0, 1, 2, 4] {
-			gaps.observe(seq);
+			gaps.complete(seq);
 		}
 		assert_eq!(lost(&stats), 0);
 
 		// 5 advances the frontier, settling 4 and confirming 3 was skipped.
-		gaps.observe(5);
+		gaps.complete(5);
 		assert_eq!(lost(&stats), 1);
+	}
+
+	/// An explicitly failed first group is lost even before a frontier can settle it.
+	#[test]
+	fn gap_tracker_counts_failed_first_group() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		gaps.fail(0);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 0);
+		assert_eq!(lost(&stats), 1);
+
+		gaps.complete(1);
+		assert_eq!(
+			lost(&stats),
+			1,
+			"advancing the frontier must not count the failure twice"
+		);
+	}
+
+	/// An explicitly failed live frontier is lost without waiting for another group.
+	#[test]
+	fn gap_tracker_counts_failed_final_group() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		gaps.complete(0);
+		gaps.fail(1);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+		assert_eq!(lost(&stats), 1);
+
+		gaps.complete(2);
+		assert_eq!(
+			lost(&stats),
+			1,
+			"advancing the frontier must not count the failure twice"
+		);
 	}
 }

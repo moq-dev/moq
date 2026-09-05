@@ -38,7 +38,7 @@ tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
 url = { workspace = true }
 web-async = { workspace = true }
-webm-iterable = "0.6"
+webm-iterable = "0.7"
 
 [dev-dependencies]
 futures = { workspace = true }

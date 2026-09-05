@@ -31,10 +31,10 @@ The libmoq C ABI (`rs/libmoq/src/api.rs`) has fallen well behind moq-ffi. All of
 
 Suggest splitting off pieces as they're picked up rather than one mega-PR. Each addition also touches `cpp/obs` consumers only if used, plus `doc/lib/c` per the Cross-Package Sync table.
 
-Video decode is the widest hole: `moq-ffi` depends on `moq-audio` but not
-`moq-video`, so the UniFFI bindings only ever see raw encoded frames, and
-`libmoq`'s `moq_consume_video_raw` is H.264-only with no format or resolution
-knob. `moq play` is the worked example of what the shape should be.
+Video decode is the widest hole on the C side: `moq-ffi` has a `video`
+feature over `moq-video` (NVIDIA and VAAPI on), but `libmoq`'s
+`moq_consume_video_raw` is H.264-only with no format or resolution knob.
+`moq play` is the worked example of what the shape should be.
 
 ## Closes
 

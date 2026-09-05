@@ -71,6 +71,10 @@ default-members = [
 ]
 resolver = "2"
 
+[workspace.metadata.cargo-shear]
+# Feature-only dependency selecting the wasm_js backend for browser consumers.
+ignored = ["getrandom"]
+
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
 # what consumers of moq-net / hang / moq-tokio / etc. see. moq-relay overrides
@@ -201,7 +205,7 @@ web-transport-iroh = "0.7"
 # 0.3 for the `qlog` passthrough feature moq-tokio's `qlog` forwards to.
 web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
-web-transport-quiche = "0.6"
+web-transport-quiche = "0.7"
 web-transport-quinn = { version = "0.12", default-features = false }
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"

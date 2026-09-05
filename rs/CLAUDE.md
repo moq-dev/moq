@@ -182,7 +182,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since Usage reads env.
 
-- **Local checks only compile the host's platform and target, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
+- **Local checks only compile the host's platform and target, and PR CI is Linux-only apart from swift.yml.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners are throttled too hard for a per-PR gate, so those platforms run nightly instead of blocking a merge:
 
   - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++. It names `moq-cli/play` explicitly, since that feature is what pulls in moq-video's wgpu renderer and moq-audio's cpal output; a default-feature build compiles neither.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
@@ -191,11 +191,12 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
   What still compiles these automatically, and when:
 
-  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and Apple Silicon. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
-  - **moq-audio's macOS capture has no automated backstop at all.** ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). `just rs macos` is the only thing that compiles it, ever.
+  - `.github/workflows/nightly.yml` runs `just rs windows` and `just rs macos` on their own runners once a day. That is the only automated coverage either recipe has, and it is deliberately not a required check: a break lands on `main` and surfaces the next morning rather than in review.
+  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and Apple Silicon. That's a release-time backstop on top of the nightly one.
+  - moq-audio's macOS capture has no release-time backstop: ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). Nightly's `just rs macos` is the only thing that compiles it.
   - `.github/workflows/swift.yml` still runs on a Mac for `swift/**` and `rs/moq-ffi/**` PRs, so moq-ffi and the Swift wrapper keep a PR-time gate.
 
-  Run the matching recipe by hand when you touch this code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it.
+  Nightly catching it a day later is the fallback, not the plan: run the matching recipe by hand when you touch this code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it.
 
 - **`just rs loom` model-checks concurrent handoffs in kio and moq-net.** It stays outside `check` and `test`: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`. Use it when developing or diagnosing concurrent handoffs. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
 

@@ -1275,6 +1275,17 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 	}))
 }
 
+/// `SPA_VIDEO_TRANSFER_BT2020_10` and `SPA_VIDEO_TRANSFER_BT601`, spelled out.
+///
+/// Both were appended to libspa's `spa_video_transfer_function`, so a header
+/// older than they are does not define the names and `spa::sys` does not export
+/// them. The values travel on the wire either way, and a build against an older
+/// libspa still has to recognise a stream carrying one. libspa's own
+/// documentation notes that both are functionally the same transfer function as
+/// `BT709`, which is why all three are accepted together.
+const SPA_VIDEO_TRANSFER_BT2020_10: spa::sys::spa_video_transfer_function = 13;
+const SPA_VIDEO_TRANSFER_BT601: spa::sys::spa_video_transfer_function = 16;
+
 fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
 	let expected_primaries = match color {
 		Color::Bt601Limited | Color::Bt601Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
@@ -1289,8 +1300,8 @@ fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) ->
 		transfer,
 		spa::sys::SPA_VIDEO_TRANSFER_UNKNOWN
 			| spa::sys::SPA_VIDEO_TRANSFER_BT709
-			| spa::sys::SPA_VIDEO_TRANSFER_BT601
-			| spa::sys::SPA_VIDEO_TRANSFER_BT2020_10
+			| SPA_VIDEO_TRANSFER_BT601
+			| SPA_VIDEO_TRANSFER_BT2020_10
 	) {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"unsupported PipeWire NV12 transfer function {transfer}"

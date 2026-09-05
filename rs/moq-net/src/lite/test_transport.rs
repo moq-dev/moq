@@ -324,6 +324,9 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
+	/// every session that only ever opens its own streams expects.
+	accept_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -343,6 +346,7 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: None,
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -377,6 +381,25 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			accept_gate: None,
+			uni_gate: None,
+			uni_open_gate: None,
+			uni_open_park: kio::Park::default(),
+			protocol: None,
+			stats: Arc::new(Mutex::new(SinkStats::default())),
+		}
+	}
+
+	/// Accept bidi streams from the peer, holding every write until `gate` flips to true.
+	///
+	/// The accepted half of a control stream carries the answers (track info,
+	/// subscribe responses), so a test of what must be true before the first byte of
+	/// a reply reaches the wire needs a session that hands out accepted streams.
+	pub fn accepted_bi(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			accept_gate: Some(gate),
 			uni_gate: None,
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -390,6 +413,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: Some(gate),
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -403,6 +427,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: None,
 			uni_open_gate: Some(gate),
 			uni_open_park: kio::Park::default(),
@@ -422,7 +447,17 @@ impl poll::Session for SinkSession {
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		Poll::Pending
+		let Some(gate) = self.accept_gate.clone() else {
+			return Poll::Pending;
+		};
+
+		let send = SinkSend {
+			log: self.log.clone(),
+			gate: Some(gate),
+			park: kio::Park::default(),
+			finished: false,
+		};
+		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {

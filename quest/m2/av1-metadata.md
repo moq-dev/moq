@@ -14,9 +14,12 @@ are neither separated nor addressable. This is the AV1 analogue of SEI in
 H.26x, and it should follow whatever the `sei` section settles rather than
 inventing a second shape.
 
-Decide first whether AV1 metadata belongs in its own section or extends the
-`sei` one, given the payloads overlap heavily (both carry ITU-T T.35 user data,
-both carry timecode) but the framing does not.
+It gets its own section, like every timed-metadata format, but follows the
+sidecar rule the `sei` section defines: one track per AV1 rendition, the
+rendition's group sequence, the temporal unit's wire timestamp on each frame,
+raw OBU bytes. The payloads overlap with SEI (both carry ITU-T T.35 user data
+and timecode), so the typed helpers can be shared even though the framing is
+not.
 
 Preserve `metadata_type`, the payload bytes, and ordering within the temporal
 unit. Test HDR10+ T.35 metadata, timecode, an unknown metadata type, several

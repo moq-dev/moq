@@ -1,6 +1,7 @@
 //! QUIC backend built on [`web_transport_quiche`], speaking WebTransport over HTTP/3
 //! (`https://`) or raw QUIC (`moqt://` / `moql://`).
 
+use crate::RedactedUrl;
 use crate::crypto;
 use crate::listen;
 use crate::quic::CongestionControl;
@@ -490,7 +491,7 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 	fp.set_query(None);
 	fp.set_fragment(None);
 
-	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
+	tracing::warn!(url = %RedactedUrl::new(&fp), "performing insecure HTTP request for certificate fingerprint");
 
 	let resp = reqwest::get(fp.as_str())
 		.await

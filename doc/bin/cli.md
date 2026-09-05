@@ -218,7 +218,9 @@ AAC-LC core.
 `--max-age` controls how stale a media group may get before it is skipped and
 defaults to `500ms`. It is a staleness budget, not a playout delay: raising it
 never holds the picture back, it only waits longer on a late group before giving
-up. These flags all follow the `play` verb:
+up. It also bounds how long a hole in the audio is played as silence rather than
+closed up. A gap longer than this budget is one playback already chose to skip.
+These flags all follow the `play` verb:
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast conference.hang \
@@ -498,10 +500,12 @@ moq --connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
+On Linux the NVENC (NVIDIA), VAAPI (Intel/AMD), and V4L2 M2M (an ARM SoC's
+codec block, such as a Raspberry Pi's VideoCore) encoders and the PipeWire
 screen capture are compiled in by default. To build `capture` without any of
-them (software openh264 + V4L2 camera capture only), drop the default features. `capture` itself still needs libclang and the V4L2 headers for
-the camera, and ALSA for the microphone:
+them (software openh264 + V4L2 camera capture only), drop the default features.
+`capture` itself still needs libclang and the V4L2 headers for the camera, and
+ALSA for the microphone:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -522,9 +526,9 @@ The Linux screen backend links libpipewire and is behind the default-on
 `pipewire` feature; drop it (like the codecs above) for a build without the
 dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
 H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
-or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
-present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. A hardware encoder that was compiled in but
+VAAPI on Linux Intel/AMD, or an ARM SoC's V4L2 M2M encoder) when one is present,
+falling back to the built-in software encoder (openh264); force either with
+`--hardware` / `--software`. A hardware encoder that was compiled in but
 can't open, typically because its driver libraries aren't on the loader path,
 warns rather than falling back quietly. H.265 is hardware-only (VideoToolbox on macOS,
 Media Foundation on Windows). `--camera` takes a bare integer as a device index,

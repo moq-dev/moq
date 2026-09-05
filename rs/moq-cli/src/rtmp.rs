@@ -113,7 +113,8 @@ pub async fn listen_export(
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	let name = &target.name;
-	tracing::info!(%url, %name, "RTMP client pulling");
+	// The stream key is the ingest credential, so log the dial target and app instead.
+	tracing::info!(%addr, %app, %name, "RTMP client pulling");
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?.with_import_max_age(target.max_age);
@@ -135,7 +136,8 @@ pub async fn connect_export(
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 
-	tracing::info!(%url, %name, "RTMP client pushing");
+	// The stream key is the ingest credential, so log the dial target and app instead.
+	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?.with_export_max_age(max_age);
