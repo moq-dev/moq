@@ -71,7 +71,7 @@ That leaves `[track: 8][group: rest]`.
 
 Fairness between equal-priority subscriptions belongs in the transport
 scheduler, which is the only layer that can round-robin, and is out of scope
-here. See [Stream scheduler](/quest/m1/perf/stream-scheduler.md); this quest
+here. See [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md); this quest
 deliberately gives up that level to get the queue off the hot path first.
 
 Backends that cannot carry a 32-bit scalar compress it themselves rather than

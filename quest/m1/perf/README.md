@@ -49,7 +49,6 @@ backend we ship today.
 - [#3202](/quest/m1/perf/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
 - [#3204](/quest/m1/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
 - [Send order width](/quest/m1/perf/send-order-width.md) - a wider transport send order lets a group rank itself instead of taking the queue lock
-- [Stream scheduler](/quest/m1/perf/stream-scheduler.md) - round-robin between equal-priority subscriptions, prototyped as a quinn patch
 - [Priority set_track wakes](/quest/m1/perf/priority-set-track-wakes.md) - a track priority change stops waking groups that end up where they started
 - [#3203](/quest/m1/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
 - [#3205](/quest/m1/perf/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
