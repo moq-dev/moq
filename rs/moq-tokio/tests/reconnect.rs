@@ -119,12 +119,12 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 /// A GOAWAY naming another host is refused by the default policy, and the loop
 /// redials the URL it was configured with.
 ///
-/// The guard this replaced read the redirect URL and nothing else, so a peer that
-/// named a *host* rather than an address walked straight through it: the name is
-/// never resolved, and resolving it here would settle nothing either, since the
-/// dial resolves it again. `localhost` stands in for such a name (it is the only
-/// one a test can rely on resolving), and the point is that the default no longer
-/// lets a peer choose a host at all.
+/// Both servers are on loopback, so the host the peer names here is one we can
+/// obviously reach. That is the point: the guard this replaced judged the URL,
+/// and a peer that named a host rather than an address walked past it, since the
+/// name is never resolved (and resolving it here would settle nothing anyway,
+/// because the dial resolves it again). The default no longer lets the peer
+/// choose a host at all.
 #[tokio::test]
 async fn a_redirect_to_another_host_is_refused_by_default() {
 	let (port_a, mut sessions_a, _task_a) = spawn_server();
@@ -132,7 +132,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 	wait_listening(port_a).await;
 	wait_listening(port_b).await;
 
-	let url: url::Url = format!("tcp://127.0.0.1:{port_a}/").parse().expect("parse url");
+	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let _connection = quick_client(Default::default()).connect(url);
 
 	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
@@ -142,7 +142,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 
 	first
 		.drain()
-		.send(moq_net::goaway::Goaway::redirect(format!("tcp://localhost:{port_b}/")))
+		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
 	// Refused, so the redial goes back to A rather than to the host the peer named.
@@ -167,7 +167,7 @@ async fn follow_still_honors_a_cross_host_redirect() {
 	wait_listening(port_a).await;
 	wait_listening(port_b).await;
 
-	let url: url::Url = format!("tcp://127.0.0.1:{port_a}/").parse().expect("parse url");
+	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let _connection = quick_client(moq_tokio::Redirect::Follow).connect(url);
 
 	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
@@ -177,7 +177,7 @@ async fn follow_still_honors_a_cross_host_redirect() {
 
 	first
 		.drain()
-		.send(moq_net::goaway::Goaway::redirect(format!("tcp://localhost:{port_b}/")))
+		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
 	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())

@@ -243,11 +243,28 @@ fn scheme_tier(scheme: &str) -> u8 {
 /// "verified remote".
 fn is_local(url: &Url) -> bool {
 	match url.host() {
-		Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-		Some(url::Host::Ipv4(ip)) => is_local_v4(ip),
+		// A non-special scheme (`moqt://127.0.0.1`, and every other scheme this
+		// crate dials but `http`/`https`/`ws`/`wss`) parses its host as a domain
+		// even when it is an address literal, so the literal check can't be left to
+		// the URL parser. `crate::resolve::Candidates` handles the same thing.
+		Some(url::Host::Domain(host)) => match host.parse::<std::net::IpAddr>() {
+			Ok(ip) => is_local_ip(ip),
+			Err(_) => host == "localhost" || host.ends_with(".localhost"),
+		},
+		Some(url::Host::Ipv4(ip)) => is_local_ip(ip.into()),
+		Some(url::Host::Ipv6(ip)) => is_local_ip(ip.into()),
+		// No host at all, e.g. a `unix:` socket path.
+		None => true,
+	}
+}
+
+/// Whether an address literal is one only this host or network can reach.
+fn is_local_ip(ip: std::net::IpAddr) -> bool {
+	match ip {
+		std::net::IpAddr::V4(ip) => is_local_v4(ip),
 		// An IPv4-mapped address reaches the same host as the v4 it wraps, so judge
 		// it by that rather than by the v6 rules.
-		Some(url::Host::Ipv6(ip)) => match ip.to_ipv4_mapped() {
+		std::net::IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
 			Some(v4) => is_local_v4(v4),
 			// Loopback (::1), unspecified (::), unique local (fc00::/7), link local (fe80::/10).
 			None => {
@@ -257,8 +274,6 @@ fn is_local(url: &Url) -> bool {
 					|| (ip.segments()[0] & 0xffc0) == 0xfe80
 			}
 		},
-		// No host at all, e.g. a `unix:` socket path.
-		None => true,
 	}
 }
 
@@ -1361,6 +1376,33 @@ mod tests {
 			Redirect::Ignore.resolve("https://other.example/", &current),
 			current,
 			"Ignore never leaves the configured URL"
+		);
+	}
+
+	/// Every scheme this crate dials but `http`/`https`/`ws`/`wss` is non-special,
+	/// so the URL parser hands its host back as a domain even when it is an address
+	/// literal. Reading that as a name rather than an address is what let a
+	/// `moqt://127.0.0.1` target past the reachability check.
+	#[test]
+	fn a_non_special_scheme_classifies_its_literal_host() {
+		for url in [
+			"moqt://127.0.0.1/",
+			"moql://10.0.0.1/",
+			"tcp://169.254.169.254/",
+			"moqt://[::1]/",
+			"moqt://[::ffff:127.0.0.1]/",
+		] {
+			assert!(is_local(&url.parse().unwrap()), "{url} should be local");
+		}
+		for url in ["moqt://8.8.8.8/", "moql://[2606:4700::1]/", "tcp://relay.example/"] {
+			assert!(!is_local(&url.parse().unwrap()), "{url} should not be local");
+		}
+
+		let public: Url = "moqt://relay.example/".parse().unwrap();
+		assert_eq!(
+			Redirect::Follow.resolve("moqt://169.254.169.254/", &public),
+			public,
+			"a literal local target is refused whatever the scheme"
 		);
 	}
 
