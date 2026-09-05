@@ -152,7 +152,9 @@ impl DmaBufPlane {
 pub struct DmaBufExport {
 	fd: OwnedFd,
 	// The producer's lease, held so its buffer outlives the descriptor. Only the
-	// renderer ever reads it back out, through `into_parts`.
+	// renderer ever reads it back out, through `into_parts`; without that feature
+	// the field is held purely for its `Drop`, which reads as dead to rustc.
+	#[cfg_attr(not(feature = "render"), expect(dead_code))]
 	inner: Arc<dyn DmaBufFrame>,
 }
 

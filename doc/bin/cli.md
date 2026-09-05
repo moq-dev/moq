@@ -100,6 +100,11 @@ rendition and adds lower rungs that are decoded and encoded only while someone
 watches them. On NVIDIA the whole pipeline stays on the GPU. Requires the
 `transcode` feature.
 
+`--rung` takes the ladder in any order and ranks it by bitrate, lowest first. A
+ladder that cannot be ranked is refused before the relay is dialed: two rungs at
+the same bitrate, or a rung that costs more than the one below it without being
+taller, leaves "the next lower rendition" undefined.
+
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,

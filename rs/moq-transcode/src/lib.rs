@@ -22,6 +22,7 @@
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
 pub mod active;
+pub mod ladder;
 
 mod catalog;
 mod config;
@@ -29,7 +30,8 @@ mod error;
 mod feed;
 mod rung;
 
-pub use config::{Config, Rung};
+pub use config::Config;
+pub use ladder::{Ladder, Rung};
 
 #[allow(deprecated)]
 pub use config::source_reference;
@@ -230,6 +232,16 @@ mod tests {
 		_track: moq_net::track::Producer,
 	}
 
+	/// A ladder from `(height, bps)` pairs, in any order.
+	fn ladder<const N: usize>(rungs: [(u32, u64); N]) -> Ladder {
+		Ladder::new(
+			rungs
+				.into_iter()
+				.map(|(height, bps)| Rung::new(height, moq_net::bandwidth::Rate::from_bps(bps))),
+		)
+		.unwrap()
+	}
+
 	/// H.264 NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
 	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
 	fn nal_types(annexb: &[u8]) -> Vec<u8> {
@@ -386,10 +398,7 @@ mod tests {
 		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
-			rungs: vec![
-				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
-				Rung::new(60, moq_net::bandwidth::Rate::from_bps(50_000)),
-			],
+			rungs: ladder([(60, 50_000), (120, 100_000)]),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -455,10 +464,7 @@ mod tests {
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
 		let mut config = Config {
-			rungs: vec![
-				Rung::new(180, moq_net::bandwidth::Rate::from_bps(200_000)),
-				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
-			],
+			rungs: ladder([(120, 100_000), (180, 200_000)]),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -536,7 +542,7 @@ mod tests {
 
 		let source = source_broadcast(2, 5);
 		let mut config = Config {
-			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
+			rungs: ladder([(120, 100_000)]),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -575,7 +581,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
+			rungs: ladder([(120, 100_000)]),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -685,7 +691,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
+			rungs: ladder([(120, 100_000)]),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -745,7 +751,7 @@ mod tests {
 		let source = source_broadcast(1, 3);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
+			rungs: ladder([(120, 100_000)]),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,

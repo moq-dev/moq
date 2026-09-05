@@ -4,7 +4,7 @@
 use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
-use crate::{Error, Rung};
+use crate::{Error, Ladder};
 
 /// A rung resolved against the source: concrete geometry and encoder settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,9 +57,12 @@ fn is_supported_av1(av1: &AV1) -> bool {
 	av1.bitdepth == 8 && !av1.mono_chrome && av1.chroma_subsampling_x && av1.chroma_subsampling_y
 }
 
-/// Resolve the configured rungs against the source: derive geometry from the
+/// Resolve the configured ladder against the source: derive geometry from the
 /// source aspect ratio and drop any rung that isn't strictly below the source.
-pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
+///
+/// Dropping a rung never reorders the rest, so the result keeps the ladder's
+/// order: lowest rendition first, each one the next above its predecessor.
+pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
 	let Some((source_width, source_height)) = dimensions(source) else {
 		return Err(Error::SourceDimensions(source_name.to_string()));
 	};
@@ -70,9 +73,11 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 		.unwrap_or(30);
 
 	let mut resolved: Vec<Resolved> = Vec::new();
-	for rung in rungs {
-		let height = (rung.height & !1) as u64;
-		if height == 0 || height > source_height {
+	for rung in ladder.rungs() {
+		// Even, non-zero, and unique across the ladder: `Ladder::new` guarantees
+		// all three, so the track names below cannot collide.
+		let height = rung.height as u64;
+		if height > source_height {
 			// Never upscale.
 			continue;
 		}
@@ -90,17 +95,12 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 			continue;
 		}
 
-		let rung = Resolved {
+		resolved.push(Resolved {
 			name: format!("video/{height}p"),
 			size: moq_video::Size::new(width as u32, height as u32),
 			bitrate: rung.bitrate,
 			framerate,
-		};
-		// Duplicate heights in the config would collide on the track name.
-		if resolved.iter().any(|other| other.name == rung.name) {
-			continue;
-		}
-		resolved.push(rung);
+		});
 	}
 	Ok(resolved)
 }
@@ -185,6 +185,16 @@ mod tests {
 
 	use super::*;
 
+	/// A ladder from `(height, bps)` pairs, in any order.
+	fn ladder<const N: usize>(rungs: [(u32, u64); N]) -> Ladder {
+		Ladder::new(
+			rungs
+				.into_iter()
+				.map(|(height, bps)| crate::Rung::new(height, moq_net::bandwidth::Rate::from_bps(bps))),
+		)
+		.unwrap()
+	}
+
 	fn source(width: u32, height: u32, bitrate: Option<u64>) -> VideoConfig {
 		let mut config = VideoConfig::new(H264 {
 			inline: true,
@@ -206,12 +216,32 @@ mod tests {
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
 		// admitted only because its bitrate (1.2M) undercuts the source (2M).
-		assert_eq!(names, ["video/480p", "video/360p", "video/240p"]);
+		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
+	}
+
+	/// Filtering against the source removes rungs from the middle of the ladder,
+	/// and the survivors have to stay ranked: the rung before each one is still
+	/// the next rendition down, which is what "the next lower rendition" means
+	/// everywhere downstream.
+	#[test]
+	fn resolution_keeps_the_ladder_ordered() {
+		// Written top-down and with a gap the source will punch out: the 1080p
+		// rung is above a 720p source, and the 480p rung's 3M ceiling is over the
+		// source's 2.5M.
+		let rungs = ladder([(1080, 5_000_000), (480, 3_000_000), (360, 600_000), (240, 350_000)]);
+		let resolved = resolve_rungs(&rungs, "video", &source(1280, 720, Some(2_500_000))).unwrap();
+
+		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, ["video/240p", "video/360p"]);
+		for pair in resolved.windows(2) {
+			assert!(pair[0].bitrate < pair[1].bitrate);
+			assert!(pair[0].size.height < pair[1].size.height);
+		}
 	}
 
 	#[test]
 	fn same_height_needs_lower_bitrate() {
-		let rungs = vec![Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000))];
+		let rungs = ladder([(480, 1_200_000)]);
 		// Unknown source bitrate: a same-height rung can't prove it's below.
 		assert!(
 			resolve_rungs(&rungs, "video", &source(854, 480, None))
@@ -228,22 +258,12 @@ mod tests {
 
 	#[test]
 	fn rung_geometry_follows_source_aspect() {
-		let resolved = resolve_rungs(
-			&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
-			"video",
-			&source(1920, 1080, Some(6_000_000)),
-		)
-		.unwrap();
+		let resolved = resolve_rungs(&ladder([(360, 600_000)]), "video", &source(1920, 1080, Some(6_000_000))).unwrap();
 		assert_eq!(resolved.len(), 1);
 		assert_eq!(resolved[0].size, moq_video::Size::new(640, 360));
 
 		// Vertical video: aspect preserved, width rounded to even.
-		let resolved = resolve_rungs(
-			&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
-			"video",
-			&source(1080, 1920, Some(6_000_000)),
-		)
-		.unwrap();
+		let resolved = resolve_rungs(&ladder([(360, 600_000)]), "video", &source(1080, 1920, Some(6_000_000))).unwrap();
 		assert_eq!(resolved[0].size, moq_video::Size::new(202, 360));
 	}
 
@@ -268,19 +288,29 @@ mod tests {
 		assert_eq!(chosen.coded_width, Some(1920));
 	}
 
+	/// The ladder's order is a property of the configuration, not of the source,
+	/// so it is settled long before any dimensions are known. A source that has
+	/// not published its geometry yet is refused outright rather than resolved
+	/// into a ladder ranked on guesses.
 	#[test]
 	fn source_needs_dimensions() {
+		let rungs = ladder([(360, 600_000), (240, 350_000)]);
+		let heights: Vec<_> = rungs.rungs().iter().map(|rung| rung.height).collect();
+		assert_eq!(heights, [240, 360]);
+
 		let mut config = source(0, 0, Some(1_000_000));
 		config.coded_width = None;
 		config.coded_height = None;
 		assert!(matches!(
-			resolve_rungs(
-				&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
-				"video",
-				&config
-			),
+			resolve_rungs(&rungs, "video", &config),
 			Err(Error::SourceDimensions(_))
 		));
+
+		// The keyframe fills the geometry in and the same ladder resolves, in the
+		// order it already had.
+		let resolved = resolve_rungs(&rungs, "video", &source(1280, 720, Some(2_500_000))).unwrap();
+		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, ["video/240p", "video/360p"]);
 	}
 
 	/// A rung's entry describes the rung, not the source: the codec string's level and every
