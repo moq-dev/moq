@@ -411,6 +411,27 @@ windows *args:
 macos *args:
     {{ cargo_compile }} check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
+# Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
+# decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
+# are all `#[cfg(target_os = "android")]`, so a host-target check compiles none of
+# them and every error in them stays invisible.
+#
+# Unlike `windows` and `macos` this needs no special host: the Android targets
+# cross-compile from the Linux dev shell in about half a minute. It needs an NDK,
+# which `cargo-ndk` finds through `ANDROID_NDK_HOME` or the standard SDK layout,
+# so it is a manual gate rather than a CI one until the shell provides one.
+#
+# arm64-v8a alone: it is the only ABI anything here ships, and the code is not
+# ABI-specific, so the other two would compile the same source twice more.
+#
+# `check` rather than a `-D warnings` clippy, matching `windows` and `macos`:
+# the capture module's plumbing is dead on a target with no capture backend, so
+# a denying lint would fail on code this recipe is not here to police.
+
+# Compile the Android backends, which the host-target check skips.
+android *args:
+    cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets {{ args }}
+
 # Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
 # `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
 # compiles an empty crate and every error in it stays invisible. Only a wasm32
