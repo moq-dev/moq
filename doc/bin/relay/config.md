@@ -125,14 +125,15 @@ configured, and this mode will not guess.
 `qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
 workers, and writes the same JSON-SEQ traces into the same directory, so one
 workflow reads both runtimes. Files are named
-`moq-<started>-<process>-<sink>-<connection id>-<side>.qlog`, where `started` is when the relay
-came up, so a second run does not overwrite the first (an `io-uring-quinn`
-build writes one file per worker instead of per connection, because
-quinn-proto takes one trace sink per endpoint). A pinned worker never
-writes to the file itself: traces are staged in memory and handed to one
-background thread for the whole worker group, which is also why a trace that
-outruns the disk is truncated rather than allowed to grow the queue without
-bound (it says so in the log when it happens).
+`moq-<started>-<process>-<sink>-<connection id>-<side>.qlog`, where `started`
+is when the relay came up, so a second run does not overwrite the first. An
+`io-uring-quinn` build writes one file per worker instead of per connection,
+named `moq-<started>-<process>-<sink>-endpoint<N>-<side>.qlog`, because
+quinn-proto takes one trace sink per endpoint. A pinned worker never writes to
+the file itself: traces are staged in memory and handed to one background
+thread for the whole worker group, which is also why a trace that outruns the
+disk is truncated rather than allowed to grow the queue without bound (it says
+so in the log when it happens).
 
 `tls.root` works here as it does on the tokio listener: a client that presents
 a certificate chaining to one of those roots is authenticated by it, with full

@@ -288,12 +288,17 @@ impl Trace {
 }
 
 impl io::Write for Trace {
-	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		self.buf.extend_from_slice(buf);
-		if self.buf.len() >= CHUNK {
-			self.stage();
+	fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
+		let written = buf.len();
+		while !buf.is_empty() {
+			let len = (CHUNK - self.buf.len()).min(buf.len());
+			self.buf.extend_from_slice(&buf[..len]);
+			buf = &buf[len..];
+			if self.buf.len() == CHUNK {
+				self.stage();
+			}
 		}
-		Ok(buf.len())
+		Ok(written)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
@@ -404,5 +409,36 @@ mod tests {
 
 		drop(trace);
 		drop(sink);
+	}
+
+	#[test]
+	fn an_oversized_write_is_split_before_queueing() {
+		let (tx, rx) = mpsc::channel();
+		let inner = Arc::new(Inner {
+			dir: PathBuf::new(),
+			started: 0,
+			process: 0,
+			sink: 0,
+			tx: Some(tx),
+			queued: Arc::new(AtomicUsize::new(0)),
+			next: AtomicU64::new(0),
+			dropped: AtomicBool::new(false),
+			thread: None,
+		});
+		let mut trace = Trace {
+			inner,
+			file: 0,
+			close_queued: 0,
+			buf: Vec::with_capacity(CHUNK),
+		};
+
+		trace.write_all(&vec![0; CHUNK * 2 + 1]).expect("write trace");
+		for _ in 0..2 {
+			let Msg::Data { buf, .. } = rx.recv().expect("queued chunk") else {
+				panic!("expected trace data");
+			};
+			assert_eq!(buf.len(), CHUNK);
+		}
+		assert_eq!(trace.buf.len(), 1);
 	}
 }
