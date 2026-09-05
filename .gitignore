@@ -6,6 +6,15 @@
 # Ignore local Claude Code config
 *.local.json
 
+# Claude Code scratch space. These are untracked working directories, and
+# `just _changed` counts untracked files, so leaving them visible pushes the
+# changed-file list past its cap and silently turns every scoped `just check`
+# into `check-all`. The worktrees also carry their own biome.jsonc, which the
+# unscoped run then rejects as a nested root config.
+/.claude/cache/
+/.claude/tmp/
+/.claude/worktrees/
+
 # IDE
 .idea
 
