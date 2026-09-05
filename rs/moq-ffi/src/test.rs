@@ -187,8 +187,9 @@ async fn raw_audio_activity() {
 	use crate::audio::*;
 
 	const SAMPLE_RATE: u32 = 48_000;
-	const FRAME_DURATION_MS: u32 = 20;
-	const FRAME_SAMPLES: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1_000) as usize;
+	const FRAME_DURATION_US: u32 = 20_000;
+	// FRAME_DURATION_US at SAMPLE_RATE.
+	const FRAME_SAMPLES: usize = 960;
 	const FIRST_TIMESTAMP_US: u64 = 1_000_000;
 	const RESUMED_TIMESTAMP_US: u64 = 2_000_000;
 
@@ -208,7 +209,7 @@ async fn raw_audio_activity() {
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
-				frame_duration_ms: FRAME_DURATION_MS,
+				frame_duration_us: FRAME_DURATION_US,
 			},
 		)
 		.unwrap();
@@ -277,6 +278,45 @@ async fn raw_audio_activity() {
 	assert_eq!(resumed.timestamp_us, RESUMED_TIMESTAMP_US);
 
 	audio.finish().unwrap();
+	broadcast.finish().unwrap();
+}
+
+/// `frame_duration_us` is microseconds so Opus' 2.5 ms frame survives the trip, where
+/// the old integer millisecond field truncated it to 2 ms and libopus refused to encode.
+#[tokio::test]
+async fn raw_audio_frame_durations() {
+	use crate::audio::*;
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let input = || MoqAudioEncoderInput {
+		format: MoqAudioSampleFormat::F32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = |frame_duration_us| MoqAudioEncoderOutput {
+		codec: MoqAudioCodec::Opus,
+		sample_rate: None,
+		channels: None,
+		bitrate: None,
+		frame_duration_us,
+	};
+
+	let audio = broadcast.encode_audio("fine".into(), input(), output(2_500)).unwrap();
+	// 2.5 ms of silence at 48 kHz, mono f32: exactly one encoded frame.
+	audio
+		.write(MoqAudioFrame {
+			timestamp_us: 0,
+			data: vec![0; 120 * std::mem::size_of::<f32>()],
+		})
+		.unwrap();
+	audio.finish().unwrap();
+
+	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000));
+	assert!(
+		matches!(coarse, Err(MoqError::Audio(moq_audio::Error::Unsupported(_)))),
+		"2 ms is not an opus frame duration"
+	);
+
 	broadcast.finish().unwrap();
 }
 

@@ -2280,7 +2280,7 @@ fn audio_raw_publish() {
 		sample_rate: 0,
 		channels: 0,
 		bitrate: 0,
-		frame_duration_ms: 20,
+		frame_duration_us: 20_000,
 	};
 	let producer =
 		id(unsafe { moq_encode_audio(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) });
@@ -2301,6 +2301,52 @@ fn audio_raw_publish() {
 		unsafe { moq_encode_audio_frame(producer, &frame) } < 0,
 		"a finished producer should take no more frames"
 	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// `frame_duration_us` is microseconds so the C surface can ask for Opus' 2.5 ms
+/// frame, which no integer millisecond field can express. 0 keeps the 20 ms
+/// default, and a duration Opus does not code is refused.
+#[test]
+fn audio_raw_publish_frame_durations() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-frame-duration-test");
+
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let codec = b"opus";
+	let encode = |name: &[u8], frame_duration_us: u32| {
+		let output = moq_audio_encoder_output {
+			codec: codec.as_ptr() as *const c_char,
+			codec_len: codec.len(),
+			sample_rate: 0,
+			channels: 0,
+			bitrate: 0,
+			frame_duration_us,
+		};
+		unsafe { moq_encode_audio(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) }
+	};
+
+	let producer = id(encode(b"fine", 2_500));
+
+	// 2.5 ms of silence: interleaved stereo f32 at 48 kHz, one encoded frame's worth.
+	let samples = vec![0.0f32; 120 * 2];
+	let pcm = unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), std::mem::size_of_val(&samples[..])) };
+	let frame = moq_audio_frame {
+		timestamp_us: 0,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	assert_eq!(moq_encode_audio_finish(id(encode(b"default", 0))), 0, "0 = 20 ms");
+	assert!(encode(b"rounded", 2_000) < 0, "2 ms is not an opus frame duration");
 
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
