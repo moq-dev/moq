@@ -139,6 +139,28 @@ const char *obs_encoder_get_codec(const obs_encoder_t *)
 	return "h264";
 }
 
+// VideoInit reads coded size and CBR from the encoder. Any new libobs call in
+// src/moq-output.cpp needs a stub here or `just obs ci` fails at link.
+obs_data_t *obs_encoder_get_settings(const obs_encoder_t *)
+{
+	return reinterpret_cast<obs_data_t *>(0x4);
+}
+
+uint32_t obs_encoder_get_width(const obs_encoder_t *)
+{
+	return 1920;
+}
+
+uint32_t obs_encoder_get_height(const obs_encoder_t *)
+{
+	return 1080;
+}
+
+int64_t obs_data_get_int(obs_data_t *, const char *)
+{
+	return 8000;
+}
+
 } // extern "C"
 
 namespace MoQSettings {
