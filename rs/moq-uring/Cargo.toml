@@ -24,6 +24,10 @@ quiche = ["dep:boring", "dep:quiche"]
 # quinn-proto, with TLS through rustls, which is what the rest of this
 # workspace speaks. No second TLS stack to build or ship.
 quinn = ["dep:quinn-proto", "dep:rustls", "dep:rustls-platform-verifier"]
+# Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
+# qlog crate and its serde_json encoder into whichever backend is selected, which
+# a production build has no use for.
+qlog = ["noq-proto?/qlog", "quinn-proto?/qlog", "quiche?/qlog"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 boring = { version = "4.22", optional = true }
@@ -69,6 +73,9 @@ noq-udp = { workspace = true }
 quiche = "0.29"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
+# The qlog test parses every record of a trace, which is what catches a
+# truncated or interleaved write.
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
 web-transport-quinn = { workspace = true }

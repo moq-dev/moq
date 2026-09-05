@@ -40,8 +40,3 @@ Four groups, all cheap relaxed atomics on the worker thread:
 Per cross-package sync, update the `/metrics` documentation in
 `doc/bin/relay/http.md`. Cover the renderer with the exposition-format test
 that already guards the existing counters.
-
-## Related
-
-- [qlog](/quest/m1/uring-qlog.md) - the trace half of io_uring-mode
-  observability

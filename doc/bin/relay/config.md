@@ -105,10 +105,20 @@ The `io-uring` feature is off by default. Prebuilt binaries that ship it say so;
 building it yourself is `cargo build -p moq-relay --features io-uring`.
 
 The `[quic]` section applies to this listener too: `max_streams`,
-`idle_timeout`, `keep_alive`, `congestion_control` and `gso` are honored.
-`qlog` and `mtu_discovery` are not (the datagram path sends a fixed payload,
-so there is nothing to discover), and asking for either is a startup error
-rather than a setting that quietly does nothing.
+`idle_timeout`, `keep_alive`, `congestion_control`, `gso` and `qlog` are
+honored. `mtu_discovery` is not (the datagram path sends a fixed payload, so
+there is nothing to discover), and asking for it is a startup error rather than
+a setting that quietly does nothing.
+
+`qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
+workers, and writes the same JSON-SEQ traces into the same directory, so one
+workflow reads both runtimes. Files are named
+`moq-<started>-<connection id>-<side>.qlog`, where `started` is when the relay
+came up, so a second run does not overwrite the first. A pinned worker never
+writes to the file itself: traces are staged in memory and handed to one
+background thread for the whole worker group, which is also why a trace that
+outruns the disk is truncated rather than allowed to grow the queue without
+bound (it says so in the log when it happens).
 
 The same goes for the listener settings this mode cannot deliver: `lb_id`
 (QUIC-LB server ids, which cannot share the connection id with the shard

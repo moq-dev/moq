@@ -33,6 +33,12 @@ the UDP sockets bound through it.
   `connect_lite`/`accept_lite` run moq-lite sessions on the worker either
   way, with stream and close codes mapped through the HTTP/3 error space in
   web mode.
+- **qlog**: `quic::qlog::Sink` points a group of workers at a directory and
+  `quic::Transport::qlog` turns capture on. The pinned worker never writes to
+  the file: the QUIC stacks want a `Send + Sync` writer, which cannot hold the
+  worker's `!Send` ring handle, so a trace is staged in memory and handed to
+  one background thread for every worker sharing the sink. Behind the `qlog`
+  feature, so a production build compiles none of it.
 - **Steering**: an endpoint whose socket sits in a `moq-sock` steered
   `SO_REUSEPORT` group sets `endpoint::Config::shard`, and every issued
   connection id leads with the group's steering byte, so the kernel keeps a
@@ -66,6 +72,12 @@ cargo test -p moq-uring --no-default-features --features quinn
 
 `moq-relay` uses noq with `--features io-uring`. The
 `io-uring-quinn` and `io-uring-quiche` features select the alternatives.
+
+The `qlog` feature is orthogonal to the three, turning on whichever backend's
+own qlog support is compiled. Its per-backend shape follows the tokio stack:
+noq and quiche write one file per connection, while quinn-proto takes one sink
+per transport config and so writes one file per endpoint, tagging each event
+with the connection's qlog `group_id`.
 
 ## Validation
 

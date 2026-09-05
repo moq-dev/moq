@@ -445,14 +445,21 @@ windows *args:
 # The remaining pairs run the same suite over the alternative QUIC backends.
 # moq-uring compiles exactly one, so each gets its own invocation: feature
 # unification would otherwise fold the builds back together.
+#
+# `qlog` is a fourth axis on top of that, and the traces are what a debugging
+# run depends on, so each backend also gets a pass with it on.
 uring *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
+    cargo nextest run --locked -p moq-uring --no-default-features --features quinn,qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-relay --features io-uring-quinn --all-targets {{ args }} -- -D warnings
     cargo clippy --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }}
+    cargo nextest run --locked -p moq-uring --no-default-features --features quiche,qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-relay --features io-uring-quiche --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
