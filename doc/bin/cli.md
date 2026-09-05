@@ -55,6 +55,11 @@ MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. FLV
 covers H.264 + AAC.
 
+`export fmp4` writes a timeline starting at zero, so recording a broadcast that
+has been live for two hours still gives a file that begins at 00:00:00 rather
+than 02:00:00. One origin covers every track, so A/V sync and any gap the
+publisher left inside the recording are unchanged.
+
 ## Play
 
 ```bash

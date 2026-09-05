@@ -152,7 +152,7 @@ impl Fragmenter {
 
 	/// Encode one frame as its own fragment and advance the timeline past it.
 	fn emit(&mut self, frame: Frame, group_start: bool) -> crate::Result<Fragment> {
-		let pts = super::base_ticks(&frame, self.timescale)?;
+		let pts = super::timestamp_ticks(frame.timestamp, self.timescale)?;
 		// A group may open after a gap the durations didn't cover, so each group re-anchors
 		// the decode timeline at its first frame's presentation time. When
 		// the durations tile, the accumulated time already equals it and this is a no-op.
@@ -165,6 +165,9 @@ impl Fragmenter {
 			track_id: self.track_id,
 			timescale: self.timescale,
 			sequence_number: self.sequence,
+			// The fragmenter carries its own decode timeline in `dts`, on the source's
+			// presentation times; `encode_at` is handed that directly.
+			origin: 0,
 		};
 		let ticks = frame
 			.duration

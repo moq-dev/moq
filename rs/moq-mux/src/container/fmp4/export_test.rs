@@ -714,6 +714,146 @@ async fn opus_frame_duration_from_toc() {
 	);
 }
 
+/// A recorder that attaches to a broadcast already two hours old must still write a file whose
+/// timeline starts at zero.
+///
+/// A publisher's presentation clock counts from when *it* started, so a late subscriber's first
+/// frames arrive stamped near 7200 seconds. Carrying that straight into `tfdt` gives an
+/// HLS/VOD playlist that begins at media sequence 0 while its first fragment claims 02:00:00,
+/// and a player either presents a two hour initial offset or stalls seeking a timeline that was
+/// never written (moq-dev/moq#2248).
+///
+/// One origin covers the whole export, so the 10 ms the audio track starts behind the video
+/// survives. A per-track origin would drop both to zero and put them out of sync, and the
+/// second video fragment pins the shift as one constant rather than a per-fragment reset.
+#[tokio::test(start_paused = true)]
+async fn a_late_subscriber_exports_from_zero() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	// Two hours of publisher uptime before this subscriber joined.
+	const LATE: u64 = 7_200_000_000;
+	// TOC 0x08: config 1 (SILK 20 ms), code 0 (one frame). Opus states its own duration, so
+	// the audio timeline is exact without inferring anything from neighbours.
+	const OPUS: &[u8] = &[0x08, 0xaa, 0xbb, 0xcc];
+
+	let mut live = Live::avc3();
+	let mut audio = live.add(".opus", hang::catalog::PRIORITY.audio, |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = hang::catalog::Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// Two GOPs, a second apart. The second keyframe is what rolls the first fragment out.
+	for (offset, keyframe) in [(0, true), (33_333, false), (66_667, false), (1_000_000, true)] {
+		live.track.write(video_frame(LATE + offset, keyframe)).unwrap();
+	}
+	live.track.finish().unwrap();
+
+	// One audio group starting 10 ms after the video, at the Opus packet cadence.
+	for (index, offset) in [10_000, 30_000, 50_000, 70_000].into_iter().enumerate() {
+		audio.write(raw_frame(LATE + offset, OPUS, index == 0)).unwrap();
+	}
+	audio.finish().unwrap();
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
+	let timescales = track_timescales(&init);
+
+	// Video GOP 0, then the audio run and video GOP 1, both flushed once the tracks end.
+	let mut seconds = Vec::new();
+	for _ in 0..3 {
+		let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+		let (track_id, tfdt) = fragment_start(&fragment.data);
+		seconds.push((track_id, tfdt as f64 / timescales[&track_id] as f64));
+	}
+
+	let video = seconds[0].0;
+	let audio = seconds[1].0;
+	assert_ne!(video, audio, "the video and audio fragments are separate tracks");
+	assert_eq!(seconds[0].1, 0.0, "the export's first fragment starts at zero");
+	assert!(
+		(seconds[1].1 - 0.010).abs() < 1e-6,
+		"audio keeps the 10 ms it started behind the video, got {}",
+		seconds[1].1
+	);
+	assert_eq!(seconds[2], (video, 1.0), "the second GOP is shifted by the same origin");
+}
+
+/// A publisher pause inside the recording stays a gap, rather than starting a second epoch.
+///
+/// The export runs one recording-local clock: the origin is fixed at the first fragment and
+/// never re-derived. Re-anchoring at each discontinuity would rewind `tfdt` mid-track (which
+/// CMAF does not allow, and which would lay the resumed media over what came before), and no
+/// two tracks discover the same pause on the same frame, so it would pull audio and video apart
+/// at every resume. Only the age the export inherited from the publisher is removed.
+#[tokio::test(start_paused = true)]
+async fn a_pause_inside_the_recording_stays_a_gap() {
+	// A 40 minute pause, the moq-dev/moq.pro#814 sample, on top of two hours of uptime.
+	const LATE: u64 = 7_200_000_000;
+	const PAUSE: u64 = 2_405_000_000;
+
+	let mut live = Live::avc3();
+	for (offset, keyframe) in [(0, true), (33_333, false), (PAUSE, true)] {
+		live.track.write(video_frame(LATE + offset, keyframe)).unwrap();
+	}
+	live.track.finish().unwrap();
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
+	let timescales = track_timescales(&init);
+
+	let mut starts = Vec::new();
+	for _ in 0..2 {
+		let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+		let (track_id, tfdt) = fragment_start(&fragment.data);
+		starts.push(tfdt as f64 / timescales[&track_id] as f64);
+	}
+
+	assert_eq!(starts[0], 0.0, "the export's first fragment starts at zero");
+	assert_eq!(
+		starts[1], 2_405.0,
+		"the resumed fragment keeps the gap instead of re-anchoring at zero"
+	);
+}
+
+/// The `tfhd` track id and `tfdt` decode time of a fragment, in that track's own ticks.
+fn fragment_start(fragment: &bytes::Bytes) -> (u32, u64) {
+	let mut cursor = Cursor::new(fragment.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			let traf = &moof.traf[0];
+			return (
+				traf.tfhd.track_id,
+				traf.tfdt.as_ref().expect("tfdt").base_media_decode_time,
+			);
+		}
+	}
+	panic!("no moof");
+}
+
+/// Each track id in an init segment mapped to its media timescale.
+fn track_timescales(init: &bytes::Bytes) -> std::collections::HashMap<u32, u32> {
+	let mut cursor = Cursor::new(init.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			return moov
+				.trak
+				.iter()
+				.map(|trak| (trak.tkhd.track_id, trak.mdia.mdhd.timescale))
+				.collect();
+		}
+	}
+	panic!("no moov");
+}
+
 #[test]
 fn synthesize_opus_trak_preserves_pre_skip() {
 	use hang::catalog::{AudioCodec, AudioConfig};
