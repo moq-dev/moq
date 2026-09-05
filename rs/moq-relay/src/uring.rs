@@ -410,19 +410,33 @@ impl std::fmt::Debug for Workers {
 /// error here rather than a setting the operator believes is in force. GSO is
 /// the exception in the other direction: it belongs to the socket, so the
 /// caller applies it to the UDP config instead.
+///
+/// One qlog sink is built for the whole group and cloned into every worker, so
+/// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
-	anyhow::ensure!(
-		quic.qlog.is_none(),
-		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
-	);
 	// The datagram path fixes both payload ceilings at SEGMENT and hands
 	// `conn.send` slices of exactly that, so there is no larger size to find.
 	anyhow::ensure!(
 		!quic.mtu_discovery,
 		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
 	);
+	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
+	// which nothing builds here: this listener is the io_uring stack.
+	#[cfg(not(feature = "qlog"))]
+	anyhow::ensure!(
+		quic.qlog.is_none(),
+		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
+	);
 
 	let mut transport = moq_uring::quic::Transport::default();
+	#[cfg(feature = "qlog")]
+	if let Some(dir) = quic.qlog.as_deref() {
+		transport.qlog = Some(
+			moq_uring::quic::qlog::Sink::directory(dir)
+				.with_context(|| format!("failed to capture qlog into {}", dir.display()))?,
+		);
+		tracing::info!(dir = %dir.display(), "writing qlog");
+	}
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;

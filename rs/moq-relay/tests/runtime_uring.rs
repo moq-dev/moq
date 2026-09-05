@@ -349,3 +349,94 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	running.abort();
 	let _ = running.await;
 }
+
+/// `quic.qlog` captures traces from the io_uring workers, the same as it does
+/// from the tokio ones.
+///
+/// A real session keeps both trace writers active through worker shutdown, so
+/// the test covers capture on the io_uring data path and the final flush.
+#[cfg(feature = "qlog")]
+#[tokio::test]
+async fn uring_workers_write_qlog_traces() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let traces = dir.path().join("qlog");
+	std::fs::create_dir(&traces).expect("create qlog dir");
+	let port = free_udp_port();
+
+	let mut config = uring_config(&cert, &key, port);
+	config.quic.qlog = Some(traces.clone());
+	let relay = Relay::load(config).await.expect("load relay");
+	let running = tokio::spawn(relay.run());
+
+	// A real session, so a trace covers a handshake and application data
+	// rather than a connection that only ever exchanged Initials.
+	let url: url::Url = format!("moql://127.0.0.1:{port}/qlog").parse().expect("parse url");
+	let origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
+	let mut track = broadcast.create_track("video", None).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("write frame");
+	group.finish().expect("finish group");
+	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
+
+	let subscriber_origin = moq_tokio::origin::spawn(Hop::random());
+	let consumer = subscriber_origin.consume();
+	let mut announced = consumer.announced();
+	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
+	let update = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert!(update.active, "expected announce, got retraction");
+
+	assert!(!running.is_finished(), "the relay stopped while serving");
+	drop(track);
+	drop(broadcast);
+	drop(publisher);
+	drop(subscriber);
+	// Dropping the relay drops the worker group and with it the qlog sink,
+	// which flushes every trace before its writer thread joins.
+	running.abort();
+	let _ = running.await;
+
+	let written = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let files: Vec<_> = std::fs::read_dir(&traces)
+				.expect("read qlog dir")
+				.map(|entry| entry.expect("dir entry").path())
+				.filter(|path| path.metadata().is_ok_and(|meta| meta.len() > 0))
+				.collect();
+			if !files.is_empty() {
+				return files;
+			}
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("no qlog traces in {}", traces.display()));
+
+	// Every record has to be JSON on a line of its own, or the trace is not
+	// something a qlog reader can open.
+	for path in written {
+		let raw = std::fs::read_to_string(&path).expect("read trace");
+		let records: Vec<&str> = raw
+			.split('\n')
+			.map(|line| line.trim_matches(|c: char| c == '\u{1e}' || c.is_whitespace()))
+			.filter(|line| !line.is_empty())
+			.collect();
+		assert!(!records.is_empty(), "{} holds no records", path.display());
+		for record in records {
+			serde_json::from_str::<serde_json::Value>(record)
+				.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display()));
+		}
+	}
+}
