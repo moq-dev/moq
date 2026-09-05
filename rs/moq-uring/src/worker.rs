@@ -41,7 +41,7 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_millis(3200);
 ///
 /// The worker sizes its ring internally, with a completion queue that
 /// comfortably covers the per-socket pool ceilings in [`udp::Config`].
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Where the worker accumulates its counters.
@@ -50,8 +50,19 @@ pub struct Config {
 	/// [`Handle::metrics`]. Pass one in to hold a copy on the thread that
 	/// spawned the worker, which is how an ops surface scrapes a worker it
 	/// cannot otherwise reach. A [`Metrics`] clone shares one set of counters,
-	/// so give each worker its own.
+	/// so give each worker its own. Cloning this config starts a fresh set for
+	/// the cloned worker.
 	pub metrics: Metrics,
+}
+
+impl Clone for Config {
+	fn clone(&self) -> Self {
+		// A cloned construction plan targets a new worker, so its counters must
+		// not be folded into the source worker's per-worker series.
+		Self {
+			metrics: Metrics::default(),
+		}
+	}
 }
 
 /// A thread-pinned io_uring executor: the ring, a timer heap, and a local
@@ -612,6 +623,16 @@ mod tests {
 			}
 			Err(err) => panic!("worker setup failed: {err}"),
 		}
+	}
+
+	#[test]
+	fn cloned_config_has_fresh_metrics() {
+		let config = Config::default();
+		let clone = config.clone();
+		assert!(!std::sync::Arc::ptr_eq(
+			config.metrics.counters(),
+			clone.metrics.counters()
+		));
 	}
 
 	#[test]

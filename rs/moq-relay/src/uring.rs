@@ -95,7 +95,7 @@ pub struct Workers {
 	/// the first scrape, before the threads exist: a series that only appears
 	/// once a worker has done something reads as a healthy node until it is too
 	/// late to notice.
-	metrics: Vec<moq_uring::Metrics>,
+	metrics: Vec<moq_uring::metrics::Metrics>,
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
@@ -259,7 +259,7 @@ impl Workers {
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
 		Ok(Self {
-			metrics: (0..count).map(|_| moq_uring::Metrics::default()).collect(),
+			metrics: (0..count).map(|_| moq_uring::metrics::Metrics::default()).collect(),
 			members,
 			addr,
 			server,
@@ -285,7 +285,7 @@ impl Workers {
 	///
 	/// Available from [`bind`](Self::bind), so a scrape covers a worker that has
 	/// not started (or has died) instead of dropping its series.
-	pub fn metrics(&self) -> Vec<moq_uring::Metrics> {
+	pub fn metrics(&self) -> Vec<moq_uring::metrics::Metrics> {
 		self.metrics.clone()
 	}
 
@@ -453,7 +453,7 @@ struct Spawn {
 	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
 	/// This worker's counter set, shared with whoever scrapes `/metrics`.
-	metrics: moq_uring::Metrics,
+	metrics: moq_uring::metrics::Metrics,
 	server: moq_uring::quic::server::Config,
 	udp: moq_uring::udp::Config,
 	serve: Serve,

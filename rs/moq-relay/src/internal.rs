@@ -47,7 +47,7 @@ use axum_server::accept::DefaultAcceptor;
 /// `cfg`-ing the two fields, the two struct literals that fill them, the
 /// builder and the renderer's signature separately.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
-type UringWorker = moq_uring::Metrics;
+type UringWorker = moq_uring::metrics::Metrics;
 
 /// One io_uring worker's counters. See the io_uring build's alias.
 #[cfg(not(all(target_os = "linux", feature = "_uring")))]
@@ -458,11 +458,11 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 	if workers.is_empty() {
 		return;
 	}
-	let snaps: Vec<moq_uring::Snapshot> = workers.iter().map(|worker| worker.snapshot()).collect();
+	let snaps: Vec<moq_uring::metrics::Snapshot> = workers.iter().map(|worker| worker.snapshot()).collect();
 
 	// One HELP/TYPE header followed by a row per worker, as `render_metrics`
 	// does for the traffic counters.
-	let mut series = |name: &str, kind: &str, help: &str, field: fn(&moq_uring::Snapshot) -> u64| {
+	let mut series = |name: &str, kind: &str, help: &str, field: fn(&moq_uring::metrics::Snapshot) -> u64| {
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} {kind}");
 		for (worker, snap) in snaps.iter().enumerate() {
@@ -675,7 +675,10 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	#[test]
 	fn uring_metrics_list_every_worker_from_zero() {
-		let workers = vec![moq_uring::Metrics::default(), moq_uring::Metrics::default()];
+		let workers = vec![
+			moq_uring::metrics::Metrics::default(),
+			moq_uring::metrics::Metrics::default(),
+		];
 		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_uring(workers);
 		let body = render_metrics(
 			&moq_net::stats::Registry::disabled().snapshot(),

@@ -21,11 +21,11 @@
 //! `quinn`, or `quiche` feature; the module is the same either way, and a build with
 //! neither leaves it out.
 //!
-//! [`Metrics`] is how the worker's own health leaves its thread: relaxed
-//! counters for the buffer pools, the batching mechanisms, the ring, and the
-//! scheduler, snapshotted from anywhere. Hand one to [`Config::metrics`] to
-//! keep a copy where the worker was spawned, or read the worker's own through
-//! [`Handle::metrics`].
+//! [`metrics::Metrics`] is how the worker's own health leaves its thread:
+//! relaxed counters for the buffer pools, the batching mechanisms, the ring,
+//! and the scheduler, snapshotted from anywhere. Hand one to
+//! [`Config::metrics`] to keep a copy where the worker was spawned, or read the
+//! worker's own through [`Handle::metrics`].
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
 //! error instead of degrading. The crate compiles to nothing off Linux.
@@ -34,7 +34,7 @@
 #![cfg(target_os = "linux")]
 
 mod error;
-mod metrics;
+pub mod metrics;
 mod park;
 #[cfg(any(feature = "noq", feature = "quiche", feature = "quinn"))]
 pub mod quic;
@@ -44,7 +44,6 @@ pub mod udp;
 mod worker;
 
 pub use error::Error;
-pub use metrics::{Metrics, Snapshot};
 pub use timer::Timer;
 pub use worker::{Config, Handle, Worker};
 
