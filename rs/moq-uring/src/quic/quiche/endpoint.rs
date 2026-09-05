@@ -228,9 +228,11 @@ impl Endpoint {
 		#[cfg(feature = "qlog")]
 		let conn = super::with_qlog(
 			conn,
-			config.transport.qlog.as_ref(),
-			&scid,
-			crate::quic::qlog::Side::Client,
+			super::Qlog {
+				sink: config.transport.qlog.as_ref(),
+				cid: &scid,
+				side: crate::quic::qlog::Side::Client,
+			},
 		);
 		let (shared, _key) = self
 			.inner
@@ -404,15 +406,18 @@ impl Inner {
 		{
 			conn = super::with_qlog(
 				conn,
-				self.accepting
-					.borrow()
-					.as_ref()
-					.expect("checked above")
-					.transport
-					.qlog
-					.as_ref(),
-				&hdr.dcid,
-				crate::quic::qlog::Side::Server,
+				super::Qlog {
+					sink: self
+						.accepting
+						.borrow()
+						.as_ref()
+						.expect("checked above")
+						.transport
+						.qlog
+						.as_ref(),
+					cid: &hdr.dcid,
+					side: crate::quic::qlog::Side::Server,
+				},
 			);
 		}
 		if let Err(err) = conn.recv(segment, info) {

@@ -132,9 +132,9 @@ peer-selected connection ids repeat. An
 named `moq-<started>-<process>-<sink>-endpoint<N>-<side>.qlog`, because
 quinn-proto takes one trace sink per endpoint. A pinned worker never writes to
 the file itself: traces are staged in memory and handed to one background
-thread for the whole worker group, which is also why a trace that outruns the
-disk is truncated rather than allowed to grow the queue without bound (it says
-so in the log when it happens).
+thread for the whole worker group. Staging buffers and queued output share a
+64 MiB memory budget, so a trace that outruns the disk is truncated instead of
+growing memory without bound (it says so in the log when it happens).
 
 `tls.root` works here as it does on the tokio listener: a client that presents
 a certificate chaining to one of those roots is authenticated by it, with full

@@ -44,20 +44,23 @@ impl quiche::BufFactory for BytesFactory {
 
 pub(crate) type RawConnection = quiche::Connection<BytesFactory>;
 
+/// The context needed to attach one connection's qlog trace.
+#[cfg(feature = "qlog")]
+struct Qlog<'a> {
+	sink: Option<&'a qlog::Sink>,
+	cid: &'a [u8],
+	side: qlog::Side,
+}
+
 /// Stream this connection's qlog trace into the configured sink, if any.
 ///
 /// quiche takes the writer on the connection rather than the config, so the
 /// trace is per connection and has to be attached before the first packet is
 /// fed in: earlier events are simply not recorded.
 #[cfg(feature = "qlog")]
-pub(crate) fn with_qlog(
-	mut conn: RawConnection,
-	sink: Option<&qlog::Sink>,
-	cid: &[u8],
-	side: qlog::Side,
-) -> RawConnection {
-	if let Some(sink) = sink {
-		conn.set_qlog(sink.trace(cid, side), "moq-uring".to_string(), String::new());
+fn with_qlog(mut conn: RawConnection, qlog: Qlog<'_>) -> RawConnection {
+	if let Some(sink) = qlog.sink {
+		conn.set_qlog(sink.trace(qlog.cid, qlog.side), "moq-uring".to_string(), String::new());
 	}
 	conn
 }

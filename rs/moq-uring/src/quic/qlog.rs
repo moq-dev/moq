@@ -28,13 +28,15 @@ use super::Error;
 /// as fresh on disk here as it is there.
 const CHUNK: usize = 8 * 1024;
 
-/// Most bytes queued for the writer thread at once, across every trace.
+/// Most estimated qlog memory held at once, across every trace.
 ///
-/// A disk that cannot keep up with the traces must not grow the queue without
-/// bound, and blocking the worker is the one thing this sink exists to avoid,
-/// so chunks past the ceiling are dropped. JSON-SEQ records are newline
-/// delimited, so a reader resynchronizes after the gap.
-const QUEUED_MAX: usize = 64 * 1024 * 1024;
+/// This covers worker-side staging buffers, queued messages and their owned
+/// buffers, and the control messages reserved for live traces. A disk that
+/// cannot keep up must not grow any of them without bound, and blocking the
+/// worker is the one thing this sink exists to avoid, so traces and chunks past
+/// the ceiling are dropped. JSON-SEQ records are newline delimited, so a reader
+/// resynchronizes after the gap.
+const MEMORY_MAX: usize = 64 * 1024 * 1024;
 
 /// A process-local id for each sink, keeping filenames unique when multiple
 /// worker groups start during the same millisecond.
@@ -91,12 +93,12 @@ impl Sink {
 		let _ = std::fs::remove_file(&probe);
 
 		let (tx, rx) = mpsc::channel();
-		let queued = Arc::new(AtomicUsize::new(0));
+		let memory = Arc::new(AtomicUsize::new(0));
 		let thread = std::thread::Builder::new()
 			.name("moq-qlog".to_string())
 			.spawn({
-				let queued = queued.clone();
-				move || write_traces(rx, &queued)
+				let memory = memory.clone();
+				move || write_traces(rx, &memory)
 			})
 			.map_err(|err| Error::Qlog(format!("failed to spawn the qlog writer: {err}")))?;
 
@@ -107,7 +109,7 @@ impl Sink {
 				process,
 				sink,
 				tx: Some(tx),
-				queued,
+				memory,
 				next: AtomicU64::new(0),
 				dropped: AtomicBool::new(false),
 				thread: Some(thread),
@@ -154,20 +156,26 @@ impl Sink {
 			inner.sink,
 			side.as_str()
 		));
-		let queued = std::mem::size_of::<Msg>() + path.capacity();
-		let close_queued = std::mem::size_of::<Msg>();
-		if !inner.reserve(queued + close_queued) {
+		let open_accounted = std::mem::size_of::<Msg>() + path.capacity();
+		let close_accounted = std::mem::size_of::<Msg>();
+		let staging_accounted = CHUNK;
+		if !inner.reserve(open_accounted + close_accounted + staging_accounted) {
 			inner.warn_dropped();
 			return Box::new(io::sink());
 		}
-		if !inner.send(Msg::Open { file, path, queued }) {
-			inner.release(queued + close_queued);
+		if !inner.send(Msg::Open {
+			file,
+			path,
+			accounted: open_accounted,
+		}) {
+			inner.release(open_accounted + close_accounted + staging_accounted);
 			return Box::new(io::sink());
 		}
 		Box::new(Trace {
 			inner,
 			file,
-			close_queued,
+			close_accounted,
+			staging_accounted,
 			buf: Vec::with_capacity(CHUNK),
 		})
 	}
@@ -190,8 +198,8 @@ struct Inner {
 	sink: u64,
 	/// `Option` so [`Drop`] can close the channel before joining the thread.
 	tx: Option<mpsc::Sender<Msg>>,
-	/// Memory handed to the thread or reserved for a trace's close message.
-	queued: Arc<AtomicUsize>,
+	/// Estimated memory staged, queued, or reserved across all traces.
+	memory: Arc<AtomicUsize>,
 	/// The next trace's slot in the writer thread's table.
 	next: AtomicU64,
 	/// Whether a chunk has been dropped, so the warning is logged once.
@@ -209,40 +217,28 @@ impl Inner {
 	}
 
 	fn reserve(&self, bytes: usize) -> bool {
-		let mut queued = self.queued.load(Ordering::Relaxed);
+		let mut memory = self.memory.load(Ordering::Relaxed);
 		loop {
-			let Some(next) = queued.checked_add(bytes).filter(|next| *next <= QUEUED_MAX) else {
+			let Some(next) = memory.checked_add(bytes).filter(|next| *next <= MEMORY_MAX) else {
 				return false;
 			};
 			match self
-				.queued
-				.compare_exchange_weak(queued, next, Ordering::Relaxed, Ordering::Relaxed)
+				.memory
+				.compare_exchange_weak(memory, next, Ordering::Relaxed, Ordering::Relaxed)
 			{
 				Ok(_) => return true,
-				Err(actual) => queued = actual,
+				Err(actual) => memory = actual,
 			}
 		}
 	}
 
 	fn release(&self, bytes: usize) {
-		self.queued.fetch_sub(bytes, Ordering::Relaxed);
+		self.memory.fetch_sub(bytes, Ordering::Relaxed);
 	}
 
 	fn warn_dropped(&self) {
 		if !self.dropped.swap(true, Ordering::Relaxed) {
-			tracing::warn!("dropping qlog output: over {QUEUED_MAX} bytes are queued for the writer");
-		}
-	}
-
-	/// Queue a chunk, dropping it when the writer thread is too far behind.
-	fn send_chunk(&self, file: u64, buf: Vec<u8>) {
-		let queued = std::mem::size_of::<Msg>() + buf.capacity();
-		if !self.reserve(queued) {
-			self.warn_dropped();
-			return;
-		}
-		if !self.send(Msg::Data { file, buf, queued }) {
-			self.release(queued);
+			tracing::warn!("dropping qlog output: over {MEMORY_MAX} bytes of trace memory are in use");
 		}
 	}
 }
@@ -261,9 +257,9 @@ impl Drop for Inner {
 
 /// What the writer thread is told to do.
 enum Msg {
-	Open { file: u64, path: PathBuf, queued: usize },
-	Data { file: u64, buf: Vec<u8>, queued: usize },
-	Close { file: u64, queued: usize },
+	Open { file: u64, path: PathBuf, accounted: usize },
+	Data { file: u64, buf: Vec<u8>, accounted: usize },
+	Close { file: u64, accounted: usize },
 }
 
 /// One connection's trace: the `io::Write` a QUIC stack streams into.
@@ -275,8 +271,10 @@ enum Msg {
 struct Trace {
 	inner: Arc<Inner>,
 	file: u64,
-	/// Queue space reserved when the trace opens, guaranteeing its close.
-	close_queued: usize,
+	/// Memory reserved when the trace opens, guaranteeing its close.
+	close_accounted: usize,
+	/// Memory reserved for the trace's retained staging buffer.
+	staging_accounted: usize,
 	buf: Vec<u8>,
 }
 
@@ -285,8 +283,23 @@ impl Trace {
 		if self.buf.is_empty() {
 			return;
 		}
-		let buf = std::mem::replace(&mut self.buf, Vec::with_capacity(CHUNK));
-		self.inner.send_chunk(self.file, buf);
+		// The old buffer transfers its staging reservation to the Data message.
+		// Reserve the replacement buffer and message before allocating either.
+		let accounted = std::mem::size_of::<Msg>() + self.staging_accounted;
+		if !self.inner.reserve(accounted) {
+			self.inner.warn_dropped();
+			self.buf.clear();
+			return;
+		}
+		let buf = std::mem::replace(&mut self.buf, Vec::with_capacity(self.staging_accounted));
+		debug_assert_eq!(buf.capacity(), self.staging_accounted);
+		if !self.inner.send(Msg::Data {
+			file: self.file,
+			buf,
+			accounted,
+		}) {
+			self.inner.release(accounted);
+		}
 	}
 }
 
@@ -313,54 +326,47 @@ impl io::Write for Trace {
 impl Drop for Trace {
 	fn drop(&mut self) {
 		self.stage();
+		drop(std::mem::take(&mut self.buf));
+		self.inner.release(self.staging_accounted);
 		if !self.inner.send(Msg::Close {
 			file: self.file,
-			queued: self.close_queued,
+			accounted: self.close_accounted,
 		}) {
-			self.inner.release(self.close_queued);
+			self.inner.release(self.close_accounted);
 		}
 	}
 }
 
 /// The writer thread: open, append, close, until the last sender is gone.
-fn write_traces(rx: mpsc::Receiver<Msg>, queued: &AtomicUsize) {
+fn write_traces(rx: mpsc::Receiver<Msg>, memory: &AtomicUsize) {
 	use std::io::Write as _;
 
 	let mut files: HashMap<u64, std::fs::File> = HashMap::new();
 	for msg in rx {
 		match msg {
-			Msg::Open {
-				file,
-				path,
-				queued: accounted,
-			} => {
-				queued.fetch_sub(accounted, Ordering::Relaxed);
+			Msg::Open { file, path, accounted } => {
 				match std::fs::File::create(&path) {
 					Ok(handle) => {
 						files.insert(file, handle);
 					}
 					Err(err) => tracing::warn!(path = %path.display(), %err, "failed to open a qlog trace"),
 				}
+				drop(path);
+				memory.fetch_sub(accounted, Ordering::Relaxed);
 			}
-			Msg::Data {
-				file,
-				buf,
-				queued: accounted,
-			} => {
-				queued.fetch_sub(accounted, Ordering::Relaxed);
+			Msg::Data { file, buf, accounted } => {
 				if let Some(handle) = files.get_mut(&file)
 					&& let Err(err) = handle.write_all(&buf)
 				{
 					tracing::warn!(%err, "failed to write a qlog trace");
 					files.remove(&file);
 				}
+				drop(buf);
+				memory.fetch_sub(accounted, Ordering::Relaxed);
 			}
-			Msg::Close {
-				file,
-				queued: accounted,
-			} => {
-				queued.fetch_sub(accounted, Ordering::Relaxed);
+			Msg::Close { file, accounted } => {
 				files.remove(&file);
+				memory.fetch_sub(accounted, Ordering::Relaxed);
 			}
 		}
 	}
@@ -417,22 +423,38 @@ mod tests {
 	}
 
 	#[test]
-	fn an_open_trace_reserves_its_close_message() {
+	fn an_open_trace_accounts_for_staging_and_close() {
 		let dir = tempfile::tempdir().expect("temp dir");
 		let sink = Sink::directory(dir.path()).expect("sink");
 		let trace = sink.endpoint_trace(Side::Server);
 
-		let close_queued = std::mem::size_of::<Msg>();
+		let accounted = CHUNK + std::mem::size_of::<Msg>();
 		for _ in 0..10_000 {
-			if sink.inner.queued.load(Ordering::Relaxed) == close_queued {
+			if sink.inner.memory.load(Ordering::Relaxed) == accounted {
 				break;
 			}
 			std::thread::yield_now();
 		}
-		assert_eq!(sink.inner.queued.load(Ordering::Relaxed), close_queued);
+		assert_eq!(sink.inner.memory.load(Ordering::Relaxed), accounted);
 
 		drop(trace);
 		drop(sink);
+	}
+
+	#[test]
+	fn a_trace_without_staging_memory_is_dropped() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let sink = Sink::directory(dir.path()).expect("sink");
+		let held = MEMORY_MAX - CHUNK + 1;
+		assert!(sink.inner.reserve(held));
+
+		let mut trace = sink.endpoint_trace(Side::Server);
+		trace.write_all(b"dropped").expect("write dropped trace");
+		drop(trace);
+		sink.inner.release(held);
+		drop(sink);
+
+		assert_eq!(std::fs::read_dir(dir.path()).expect("read qlog directory").count(), 0);
 	}
 
 	#[test]
@@ -444,7 +466,7 @@ mod tests {
 			process: 0,
 			sink: 0,
 			tx: Some(tx),
-			queued: Arc::new(AtomicUsize::new(0)),
+			memory: Arc::new(AtomicUsize::new(CHUNK)),
 			next: AtomicU64::new(0),
 			dropped: AtomicBool::new(false),
 			thread: None,
@@ -452,7 +474,8 @@ mod tests {
 		let mut trace = Trace {
 			inner,
 			file: 0,
-			close_queued: 0,
+			close_accounted: 0,
+			staging_accounted: CHUNK,
 			buf: Vec::with_capacity(CHUNK),
 		};
 
