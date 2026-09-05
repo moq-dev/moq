@@ -167,10 +167,7 @@ if(ENABLE_FRONTEND_API AND ENABLE_QT)
   target_sources(obs-moq PRIVATE src/moq-dock.cpp src/moq-dock.h src/moq-advanced-dialog.cpp src/moq-advanced-dialog.h)
   target_compile_definitions(
     obs-moq
-    PRIVATE
-      MOQ_FRONTEND_ENABLED
-      MOQ_VERSION_STRING="${_moq_link_version}"
-      PLUGIN_VERSION_STRING="${PLUGIN_VERSION}"
+    PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}" PLUGIN_VERSION_STRING="${PLUGIN_VERSION}"
   )
 endif()
 
