@@ -57,6 +57,7 @@ with the current dev tree before starting.
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - Video rotation metadata not propagated from mobile camera publish to watch renderer
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: video decoder captures the rewind generation at output time, not submit time
 - [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so TOML survives CLI defaults and empty lists, and env outranks the file
+- [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
 - [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - Fold moq-token into moq token via a Usage executable view
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
 - [#816](/quest/m1/816-expose-transportconfig.md) - QUIC flow-control windows on quic::Client and quic::Server, applied or refused per backend

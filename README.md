@@ -102,7 +102,6 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 | **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
 | **[@moq/watch](js/watch)**         | Subscribe to and render MoQ broadcasts (Web Component + JS API).                                                        | [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)     |
 | **[@moq/publish](js/publish)**     | Publish media to MoQ broadcasts (Web Component + JS API).                                                               | [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish) |
-| **[@moq/ui-core](js/ui-core)**     | Shared UI components (Button, Icon, Stats, CSS theme) used by `@moq/watch/ui` and `@moq/publish/ui`.                    | [![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core) |
 
 ## Protocol
 
