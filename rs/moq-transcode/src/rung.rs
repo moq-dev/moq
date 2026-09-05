@@ -139,7 +139,7 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 		let _ = finished.send(true);
 		result
 	};
-	let (live, fetches) = tokio::join!(live, fetches(&rung, &dynamic, &mut finishing));
+	let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
 
 	// Finished here rather than in `live`, because the boundary is only known once
 	// every fetch has claimed its group. `finish` takes the live edge, which on a
@@ -355,13 +355,16 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 /// The fetch path: serve requests for specific (past) groups.
 ///
 /// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached. Retirement stops taking new work, serves whatever the handler
-/// already had queued, and drains every group below the track's final sequence.
-/// Other teardown aborts them, so no source subscription or encoder session
-/// survives a failed track. A semaphore bounds how many run at once.
+/// detached. Retirement takes whatever the handler already had queued, closes
+/// admission by dropping it, and drains every group below the track's final
+/// sequence. Other teardown aborts them, so no source subscription or encoder
+/// session survives a failed track. A semaphore bounds how many run at once.
+///
+/// Owns the handler rather than borrowing it, since closing admission is
+/// dropping it.
 async fn fetches(
 	rung: &Rung,
-	dynamic: &moq_net::track::Dynamic,
+	dynamic: moq_net::track::Dynamic,
 	finishing: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
 	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
@@ -408,9 +411,13 @@ async fn fetches(
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
 		// dropping the handler below does not cancel a fetch that beat retirement.
 		//
-		// Taken in one pass, before waiting on anything. A consumer holding the
-		// retired track can keep fetching, so a drain that waited for a slot between
-		// pops would keep taking those in too and the rung would never finish.
+		// Taken in one pass, before waiting on anything, and then the handler is
+		// dropped. A consumer holding the retired track can keep fetching, and the
+		// handler admits a cache miss for as long as it is alive, so a drain that
+		// waited for a slot with it still open would keep taking those in too and
+		// the rung would never finish. Dropping it closes admission and releases
+		// whatever arrived after the pass; the requests already popped are held
+		// here, so they are unaffected.
 		let mut queued = Vec::new();
 		loop {
 			tokio::select! {
@@ -424,6 +431,8 @@ async fn fetches(
 				() = std::future::ready(()) => break,
 			}
 		}
+		drop(dynamic);
+
 		for request in queued {
 			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
 			spawn_fetch(&mut tasks, rung.clone(), request, permit);
