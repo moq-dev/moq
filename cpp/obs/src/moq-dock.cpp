@@ -386,25 +386,22 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	urlEdit = new QLineEdit(streamPage);
 	urlEdit->setText("https://cdn.moq.dev/anon");
 	urlEdit->setPlaceholderText("http://localhost:4443/anon");
-	const QString urlHelp =
-		"Relay origin URL, for example https://cdn.moq.dev/anon. "
-		"Paste a URL with ?jwt= and the token is moved into Publish token.";
+	const QString urlHelp = "Relay origin URL, for example https://cdn.moq.dev/anon. "
+				"Paste a URL with ?jwt= and the token is moved into Publish token.";
 	urlEdit->setToolTip(urlHelp);
 
 	tokenEdit = new QLineEdit(streamPage);
 	tokenEdit->setPlaceholderText("(optional) publish JWT");
 	tokenEdit->setEchoMode(QLineEdit::Password);
-	const QString tokenHelp =
-		"Optional relay publish token. Leave empty for public relays such as /anon. "
-		"Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL.";
+	const QString tokenHelp = "Optional relay publish token. Leave empty for public relays such as /anon. "
+				  "Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL.";
 	tokenEdit->setToolTip(tokenHelp);
 
 	pathEdit = new QLineEdit(streamPage);
 	pathEdit->setText(QString::fromStdString(RandomBroadcastName()));
 	pathEdit->setPlaceholderText("(optional) broadcast name");
-	const QString pathHelp =
-		"Broadcast path on the relay. Viewers subscribe to this name. "
-		"A .hang suffix is the usual hang catalog convention.";
+	const QString pathHelp = "Broadcast path on the relay. Viewers subscribe to this name. "
+				 "A .hang suffix is the usual hang catalog convention.";
 	pathEdit->setToolTip(pathHelp);
 
 	auto *form = new QFormLayout();
@@ -422,9 +419,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	advancedButton = new QPushButton("Advanced…", streamPage);
 	advancedButton->setCursor(Qt::PointingHandCursor);
-	advancedButton->setToolTip(
-		"Same knobs as the Advanced tab: protocol pin, TLS, reconnect, QUIC, WebSocket. "
-		"Opens them in a window. Changes apply on the next Go Live.");
+	advancedButton->setToolTip("Same knobs as the Advanced tab: protocol pin, TLS, reconnect, QUIC, WebSocket. "
+				   "Opens them in a window. Changes apply on the next Go Live.");
 	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
 
 	advanced = OBSDataAutoRelease(obs_data_create());
@@ -437,9 +433,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	statusFont.setBold(true);
 	status->setFont(statusFont);
 
-	const QString statsHelp =
-		"While live: Quality encode, negotiated MoQ draft and transport. "
-		"RTT / bitrate / loss live in the timeline panels.";
+	const QString statsHelp = "While live: Quality encode, negotiated MoQ draft and transport. "
+				  "RTT / bitrate / loss live in the timeline panels.";
 	showStats = new QCheckBox("Show stats", streamPage);
 	showStats->setChecked(true);
 	showStats->setToolTip(statsHelp);
@@ -493,8 +488,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	streamLibmoq->setAlignment(Qt::AlignRight | Qt::AlignBottom);
 	streamLibmoq->setStyleSheet("color: #888888; font-size: 10px;");
 	streamLibmoq->setOpenExternalLinks(true);
-	streamLibmoq->setText(QString("<a href=\"https://doc.moq.dev/lib/c/\" style=\"color:#888888; text-decoration:none;\">libmoq %1</a>")
-				     .arg(MOQ_VERSION_STRING));
+	streamLibmoq->setText(
+		QString("<a href=\"https://doc.moq.dev/lib/c/\" style=\"color:#888888; text-decoration:none;\">libmoq %1</a>")
+			.arg(MOQ_VERSION_STRING));
 	streamLibmoq->setToolTip("Open libmoq docs on doc.moq.dev");
 
 	auto *streamLayout = new QVBoxLayout(streamPage);
@@ -513,9 +509,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	auto *qualityPage = new QWidget(tabs);
 	qualityToggle = new QCheckBox("Custom source quality", qualityPage);
-	qualityToggle->setToolTip(
-		"What OBS encodes and publishes. Off uses Settings → Output. On uses "
-		"the Quality / Performance profile and codec picks below.");
+	qualityToggle->setToolTip("What OBS encodes and publishes. Off uses Settings → Output. On uses "
+				  "the Quality / Performance profile and codec picks below.");
 
 	qualityBox = new QGroupBox("Source encode", qualityPage);
 	auto *qForm = new QFormLayout(qualityBox);
@@ -570,15 +565,15 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	auto *pluginVer = new QLabel(versionPage);
 	pluginVer->setOpenExternalLinks(true);
 	pluginVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
-	pluginVer->setText(QString("<a href=\"https://doc.moq.dev/bin/obs\">%1</a>")
-				   .arg(QString::fromUtf8(PLUGIN_VERSION_STRING)));
+	pluginVer->setText(
+		QString("<a href=\"https://doc.moq.dev/bin/obs\">%1</a>").arg(QString::fromUtf8(PLUGIN_VERSION_STRING)));
 	pluginVer->setToolTip("OBS plugin docs on doc.moq.dev");
 
 	auto *libmoqVer = new QLabel(versionPage);
 	libmoqVer->setOpenExternalLinks(true);
 	libmoqVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
-	libmoqVer->setText(QString("<a href=\"https://doc.moq.dev/lib/c/\">%1</a>")
-				   .arg(QString::fromUtf8(MOQ_VERSION_STRING)));
+	libmoqVer->setText(
+		QString("<a href=\"https://doc.moq.dev/lib/c/\">%1</a>").arg(QString::fromUtf8(MOQ_VERSION_STRING)));
 	libmoqVer->setToolTip("libmoq C API docs on doc.moq.dev");
 
 	auto *moqDevLink = new QLabel(versionPage);
@@ -911,13 +906,14 @@ bool MoQDock::CreateConfiguredEncoders()
 	const QString audioCodec = NormalizeCodec(obs_get_encoder_codec(audioId));
 	const char *videoDisplay = obs_encoder_get_display_name(videoId);
 	const char *audioDisplay = obs_encoder_get_display_name(audioId);
-	publishSummary =
-		QString("Preset OBS Output\nVideo %1 · %2\nAudio %3 · %4 · %5 kbps")
-			.arg(videoCodec.isEmpty() ? QStringLiteral("video") : videoCodec.toUpper(),
-			     videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay) : QString::fromUtf8(videoId),
-			     audioCodec.isEmpty() ? QStringLiteral("audio") : audioCodec.toUpper(),
-			     audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay) : QString::fromUtf8(audioId))
-			.arg(audioBitrate);
+	publishSummary = QString("Preset OBS Output\nVideo %1 · %2\nAudio %3 · %4 · %5 kbps")
+				 .arg(videoCodec.isEmpty() ? QStringLiteral("video") : videoCodec.toUpper(),
+				      videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay)
+								    : QString::fromUtf8(videoId),
+				      audioCodec.isEmpty() ? QStringLiteral("audio") : audioCodec.toUpper(),
+				      audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay)
+								    : QString::fromUtf8(audioId))
+				 .arg(audioBitrate);
 	return true;
 }
 
@@ -994,15 +990,14 @@ bool MoQDock::CreateTranscodeEncoders()
 	const char *videoDisplay = obs_encoder_get_display_name(videoId.toUtf8().constData());
 	const char *audioDisplay = obs_encoder_get_display_name(audioId.toUtf8().constData());
 	const QString pathLabel = preferHw ? QStringLiteral("Hardware") : QStringLiteral("Software");
-	publishSummary =
-		QString("Preset %1 · %2\nVideo %3 · %4 · %5 kbps\nAudio %6 · %7 · %8 kbps")
-			.arg(profileLabel, pathLabel,
-			     codec.isEmpty() ? QStringLiteral("video") : codec.toUpper(),
-			     videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay) : videoId)
-			.arg(videoBitrate)
-			.arg(audioChoice.isEmpty() ? QStringLiteral("audio") : audioChoice.toUpper(),
-			     audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay) : audioId)
-			.arg(audioBitrate);
+	publishSummary = QString("Preset %1 · %2\nVideo %3 · %4 · %5 kbps\nAudio %6 · %7 · %8 kbps")
+				 .arg(profileLabel, pathLabel,
+				      codec.isEmpty() ? QStringLiteral("video") : codec.toUpper(),
+				      videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay) : videoId)
+				 .arg(videoBitrate)
+				 .arg(audioChoice.isEmpty() ? QStringLiteral("audio") : audioChoice.toUpper(),
+				      audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay) : audioId)
+				 .arg(audioBitrate);
 	return true;
 }
 
@@ -1165,8 +1160,8 @@ void MoQDock::UpdateStatus()
 			moq->CopyLastFailure(&failCode, &failReason);
 		const QString latest = ExplainFailure(failCode, failReason);
 
-		if (!latest.isEmpty() && (latest.contains(QStringLiteral("Unauthorized")) ||
-					  latest.contains(QStringLiteral("Forbidden")))) {
+		if (!latest.isEmpty() &&
+		    (latest.contains(QStringLiteral("Unauthorized")) || latest.contains(QStringLiteral("Forbidden")))) {
 			QString text = QString("● %1").arg(latest);
 			if (reconnects > 0)
 				text += QString(" · reconnects %1").arg(reconnects);

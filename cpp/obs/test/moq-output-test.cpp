@@ -156,7 +156,7 @@ uint32_t obs_encoder_get_height(const obs_encoder_t *)
 	return 1080;
 }
 
-int64_t obs_data_get_int(obs_data_t *, const char *)
+long long obs_data_get_int(obs_data_t *, const char *)
 {
 	return 8000;
 }
