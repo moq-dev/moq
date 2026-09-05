@@ -20,7 +20,7 @@ features:
   - icon:
       src: /emoji/rocket.svg
     title: Low latency
-    details: Every group of frames rides its own QUIC stream, so congestion drops old media instead of delaying new media.
+    details: Independent QUIC streams let congestion drop old media instead of delaying new media, while tiny single-frame groups can use datagrams.
 
   - icon:
       src: /emoji/stonk.svg
@@ -42,8 +42,9 @@ features:
 
 Media over QUIC (MoQ) is a live media protocol built on QUIC. A publisher
 sends a **broadcast** made of **tracks**; each track is a series of **groups**
-(a group of pictures, a second of audio, one JSON snapshot) delivered over
-independent QUIC streams. Relays forward and cache those groups without parsing
+(a group of pictures, a second of audio, one JSON snapshot). Most groups use
+independent QUIC streams; eligible single-frame groups can use unreliable
+datagrams. Relays forward and cache the stream-delivered groups without parsing
 them, so the same infrastructure carries video, audio, and arbitrary data.
 
 This project is the reference implementation: a Rust relay and toolchain, a

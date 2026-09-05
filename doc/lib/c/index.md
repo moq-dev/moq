@@ -9,7 +9,8 @@ description: libmoq, the stable C ABI over the Rust core
 
 `libmoq` exposes MoQ to C, C++, and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
-runtime in, and a dynamic library. The [OBS plugin](/bin/obs) is built on it.
+runtime in, and a pkg-config file for its native link dependencies. The
+[OBS plugin](/bin/obs) is built on it.
 
 ## Install
 
