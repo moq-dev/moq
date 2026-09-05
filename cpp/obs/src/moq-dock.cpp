@@ -1042,10 +1042,13 @@ bool MoQDock::CreateTranscodeEncoders()
 		obs_video_encoder_create(videoId.toUtf8().constData(), "moq_dock_video", videoSettings, nullptr));
 	size_t audioMixerIdx = 0;
 	if (config_t *config = obs_frontend_get_profile_config()) {
-		int track = (int)config_get_int(config, "AdvOut", "TrackIndex");
-		if (track < 1 || track > 6)
-			track = 1;
-		audioMixerIdx = (size_t)(track - 1);
+		const char *mode = config_get_string(config, "Output", "Mode");
+		if (mode && strcmp(mode, "Advanced") == 0) {
+			int track = (int)config_get_int(config, "AdvOut", "TrackIndex");
+			if (track < 1 || track > 6)
+				track = 1;
+			audioMixerIdx = (size_t)(track - 1);
+		}
 	}
 
 	audioEncoder = OBSEncoderAutoRelease(obs_audio_encoder_create(audioId.toUtf8().constData(), "moq_dock_audio",
