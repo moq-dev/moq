@@ -18,7 +18,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// presentation end is unknown until the next group arrives. With non-sequential group ids we
 	// therefore cannot prove the timeline is unbroken across a jump: a large id gap is
 	// indistinguishable from a real missing segment that may still be in transit. So the consumer
-	// waits (and lets #checkLatency / #tryDurationSkip decide once the latency budget or duration
+	// waits (and lets #checkMaxAge / #tryDurationSkip decide once the max age budget or duration
 	// coverage proves the gap too old) rather than eagerly skipping ahead, which would drop an
 	// in-transit group and wreck audio.
 	//
@@ -26,7 +26,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// as a trailing frame carrying the group's end timestamp. Until the container carries that, expect
 	// the wait. The CMAF path (per-sample duration in the moof) is covered in consumer.test.ts.
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 5000 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), maxAge: 5000 as Time.Milli });
 
 	// Group A at a large sequence, completed so the cursor advances past it.
 	const a = new Group.Producer(1_000_000);
@@ -55,7 +55,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 		timestamp: Time.Timestamp.now(),
 	});
 
-	// Within the latency budget (5s), the parked next() stays parked: no duration means no proof of
+	// Within the max age budget (5s), the parked next() stays parked: no duration means no proof of
 	// contiguity, so the consumer waits instead of eagerly delivering across the gap.
 	const result = await Promise.race([
 		pending,

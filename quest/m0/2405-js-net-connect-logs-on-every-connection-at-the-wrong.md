@@ -27,9 +27,5 @@ helper.
   `MODE`, assert no connect diagnostic is emitted at all, so a redacted URL
   logged in production still fails.
 
-The moq-native and moq-rtmp half of the same finding is
-[Rust log redaction](/quest/m0/rust-log-redaction.md).
-
-## Related
-
-- [Rust log redaction](/quest/m0/rust-log-redaction.md) - the native half, which closes the issue
+The moq-native and moq-rtmp half of the same finding is already fixed, and its
+PR carries the issue-closing keyword.

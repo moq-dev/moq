@@ -30,14 +30,13 @@ mod tests {
 		let mut announced = origin.consume().announced();
 
 		let mut broadcast = origin.create_broadcast("cam").expect("create broadcast");
-		let announcement = origin.announce("cam", Default::default()).expect("create broadcast");
+		broadcast.announce(Default::default()).expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");
 		assert_eq!(update.prefix.as_path().as_str(), "cam");
 		assert!(update.active);
 
 		broadcast.finish();
-		drop(announcement);
 		let update = announced.next().await.expect("retraction");
 		assert!(!update.active);
 	}

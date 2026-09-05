@@ -137,9 +137,22 @@ export class Producer {
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
 	#used = new Signal<boolean>(false);
 
+	// When the group was created or last written. Retention ages a group from this,
+	// not from its creation, so a group still being filled is never reclaimed.
+	#activity = performance.now();
+
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
+	}
+
+	/**
+	 * When the group was created or last written, in `performance.now()` milliseconds.
+	 *
+	 * @internal Track retention only.
+	 */
+	get activity(): number {
+		return this.#activity;
 	}
 
 	/**
@@ -228,6 +241,7 @@ export class Producer {
 		// `Error::FrameTooLarge`; do the same rather than silently dropping it.
 		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
 
+		this.#activity = performance.now();
 		appendFrame(this.#state, frame);
 
 		if (this.#mirrors) {

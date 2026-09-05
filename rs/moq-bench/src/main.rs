@@ -50,7 +50,11 @@ async fn main() -> anyhow::Result<()> {
 		.fanout()
 		.map(|name| format!("{}/{run_id:08x}/{name}", config.name()));
 
-	tracing::info!(connections = count, url = %config.client.url.as_ref().unwrap(), "starting benchmark");
+	tracing::info!(
+		connections = count,
+		url = %moq_tokio::RedactedUrl::new(config.client.url.as_ref().unwrap()),
+		"starting benchmark"
+	);
 
 	let mut tasks = tokio::task::JoinSet::new();
 	for i in 0..count {

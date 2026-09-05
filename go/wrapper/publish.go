@@ -239,7 +239,7 @@ type BroadcastDynamic struct {
 
 // RequestedTrack waits for the next subscriber-requested track.
 func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
 	}
@@ -299,17 +299,14 @@ func (m *MediaProducer) Name() (string, error) {
 	return m.inner.Name()
 }
 
-// Used blocks until the track has at least one active subscriber. There is no
-// underlying cancel, so a cancelled ctx returns ctx.Err() while the wait
-// unwinds when the track is finished or dropped.
+// Used blocks until the track has at least one active subscriber.
 func (m *MediaProducer) Used(ctx context.Context) error {
-	return runErr(ctx, nil, m.inner.Used)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return m.inner.Used(&cancel) })
 }
 
-// Unused blocks until the track has no active subscribers. See Used regarding
-// cancellation.
+// Unused blocks until the track has no active subscribers.
 func (m *MediaProducer) Unused(ctx context.Context) error {
-	return runErr(ctx, nil, m.inner.Unused)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return m.inner.Unused(&cancel) })
 }
 
 // WriteFrame appends frame to the media track. The importer derives keyframe status from
@@ -414,16 +411,14 @@ func (t *TrackProducer) Name() (string, error) {
 	return t.inner.Name()
 }
 
-// Used blocks until the track has at least one active subscriber. See
-// MediaProducer.Used regarding cancellation.
+// Used blocks until the track has at least one active subscriber.
 func (t *TrackProducer) Used(ctx context.Context) error {
-	return runErr(ctx, nil, t.inner.Used)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return t.inner.Used(&cancel) })
 }
 
-// Unused blocks until the track has no active subscribers. See
-// MediaProducer.Used regarding cancellation.
+// Unused blocks until the track has no active subscribers.
 func (t *TrackProducer) Unused(ctx context.Context) error {
-	return runErr(ctx, nil, t.inner.Unused)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return t.inner.Unused(&cancel) })
 }
 
 // Dynamic serves fetches for groups that are not currently cached.
@@ -531,7 +526,7 @@ type TrackDynamic struct {
 
 // RequestedGroup waits for the next uncached group request.
 func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -587,16 +582,14 @@ func (a *AudioProducer) Name() (string, error) {
 	return a.inner.Name()
 }
 
-// Used blocks until the audio track has at least one active subscriber. See
-// MediaProducer.Used regarding cancellation.
+// Used blocks until the audio track has at least one active subscriber.
 func (a *AudioProducer) Used(ctx context.Context) error {
-	return runErr(ctx, nil, a.inner.Used)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return a.inner.Used(&cancel) })
 }
 
-// Unused blocks until the audio track has no active subscribers. See
-// MediaProducer.Used regarding cancellation.
+// Unused blocks until the audio track has no active subscribers.
 func (a *AudioProducer) Unused(ctx context.Context) error {
-	return runErr(ctx, nil, a.inner.Unused)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return a.inner.Unused(&cancel) })
 }
 
 // ResetEpoch re-anchors the timeline to the next frame after an idle gap.
@@ -625,16 +618,14 @@ func (v *VideoProducer) Name() (string, error) {
 	return v.inner.Name()
 }
 
-// Used blocks until the video track has at least one active subscriber. See
-// MediaProducer.Used regarding cancellation.
+// Used blocks until the video track has at least one active subscriber.
 func (v *VideoProducer) Used(ctx context.Context) error {
-	return runErr(ctx, nil, v.inner.Used)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return v.inner.Used(&cancel) })
 }
 
-// Unused blocks until the video track has no active subscribers. See
-// MediaProducer.Used regarding cancellation.
+// Unused blocks until the video track has no active subscribers.
 func (v *VideoProducer) Unused(ctx context.Context) error {
-	return runErr(ctx, nil, v.inner.Unused)
+	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return v.inner.Unused(&cancel) })
 }
 
 // Write encodes and publishes one frame in the configured input format. A

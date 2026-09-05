@@ -3,6 +3,7 @@ package moq
 import (
 	"context"
 	"errors"
+	"sync"
 
 	ffi "moq.dev/moq-ffi/moq"
 )
@@ -91,17 +92,36 @@ func IsAuthError(err error) bool {
 	return errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden)
 }
 
-// runCancellable runs a blocking FFI call on a goroutine and races it against
-// ctx. uniffi-bindgen-go renders Rust async fns as blocking Go calls with no
-// context parameter, so cancellation is wired by calling the object's own
-// cancel() (which aborts the in-flight task) when ctx is done. The blocked
-// goroutine then unwinds on its own and is discarded; the result channel is
-// buffered so that send never blocks and the goroutine can't leak.
+// handle is a native object the wrapper owns. Every uniffi-generated object has
+// Destroy, which drops the Rust-side Arc, and comparable so an optional one can
+// be checked for nil before it is destroyed.
+type handle interface {
+	comparable
+	Destroy()
+}
+
+// run races a blocking FFI call against ctx.
 //
-// When cancel is nil there is no way to abort the underlying call, so a
-// cancelled ctx returns ctx.Err() immediately while the goroutine stays parked
-// until the call completes on its own. See the package doc for the consequences.
-func runCancellable[T any](ctx context.Context, cancel func(), call func() (T, error)) (T, error) {
+// uniffi-bindgen-go renders Rust async fns as blocking Go calls with no context
+// parameter, so cancellation is wired by calling cancel (which aborts the
+// in-flight native task) when ctx is done. The blocked goroutine then unwinds on
+// its own; the result channel is buffered so its send never blocks and it can't
+// leak.
+//
+// release, for a call that returns a native handle, disposes of a result nobody
+// received. Cancelling is not a retraction: select picks at random when the
+// deadline and the result are both ready, so a call can succeed and still lose,
+// and the handle it produced is live either way.
+func run[T any](ctx context.Context, cancel func(), call func() (T, error), release func(T)) (T, error) {
+	// A context that is already done starts no native work at all. Racing it
+	// instead would let a call that resolves immediately (a subscribe to a track
+	// already there) win the select and hand back a live handle the caller asked
+	// not to have, and every such call has side effects on the way.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+
 	type result struct {
 		val T
 		err error
@@ -117,11 +137,38 @@ func runCancellable[T any](ctx context.Context, cancel func(), call func() (T, e
 		if cancel != nil {
 			cancel()
 		}
+		if release != nil {
+			// Exactly one receiver takes the result, so it is this one once the
+			// caller has given up. Waiting here would put the native unwind on
+			// the caller's deadline, so it happens off to the side.
+			go func() {
+				if r := <-ch; r.err == nil {
+					release(r.val)
+				}
+			}()
+		}
 		var zero T
 		return zero, ctx.Err()
 	case r := <-ch:
 		return r.val, r.err
 	}
+}
+
+// runCancellable runs a blocking FFI call that yields no handle of its own, so a
+// result the caller never sees costs nothing to drop.
+//
+// cancel is the object's own cancel() for a call that owns its stream, and a
+// per-call token for everything else. See runOperation.
+func runCancellable[T any](ctx context.Context, cancel func(), call func() (T, error)) (T, error) {
+	return run(ctx, cancel, call, nil)
+}
+
+// runHandle is runCancellable for a call that returns a native handle, which is
+// destroyed rather than abandoned when the caller has already given up. Left to
+// the Go finalizer it would stay live in the meantime: a subscription still
+// running on the wire, or an incoming request accepted and never answered.
+func runHandle[T handle](ctx context.Context, cancel func(), call func() (T, error)) (T, error) {
+	return run(ctx, cancel, call, releaseHandle[T])
 }
 
 // runErr is runCancellable for calls that return only an error.
@@ -130,4 +177,99 @@ func runErr(ctx context.Context, cancel func(), call func() error) error {
 		return struct{}{}, call()
 	})
 	return err
+}
+
+// token is the per-call cancellation object plus the synchronization its two
+// users need. `cancel` runs on the caller's goroutine and `release` on the one
+// running the call, and the generated bindings panic on any use of a destroyed
+// object, so the two are serialized and only one of them ever frees it.
+//
+// Releasing on the call's own goroutine is what makes the object outlive every
+// use of it: the call cannot start after its own deferred release, and a cancel
+// that arrives later finds the token already gone and does nothing. Nothing else
+// may release it, since a token freed while its goroutine is between spawn and
+// first use would panic that goroutine.
+//
+// So a token is minted only once its call is going to start, which is why the
+// callers check the context first. A context that becomes done in the window
+// between that check and `run`'s leaves one token to the finalizer, which is
+// what a finalizer is for; what it cannot do is accumulate, since every
+// subsequent call with that context mints nothing at all.
+type token struct {
+	// Set once at construction and never reassigned, so the call can read it
+	// without the lock.
+	inner *ffi.MoqCancel
+
+	mu       sync.Mutex
+	released bool
+}
+
+func newToken() *token {
+	return &token{inner: ffi.NewMoqCancel()}
+}
+
+// cancel aborts the call this token was minted for, or does nothing once that
+// call has returned and released it.
+func (t *token) cancel() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.released {
+		t.inner.Cancel()
+	}
+}
+
+// release frees the native object, once. Without it a run of quick calls piles
+// tokens up until the Go finalizer notices them.
+func (t *token) release() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.released {
+		t.released = true
+		t.inner.Destroy()
+	}
+}
+
+// runOperation runs a blocking FFI call that takes a per-call cancellation token
+// and returns a native handle.
+//
+// Cancelling ctx aborts that one call and leaves the object it was made on usable,
+// which is what the object-wide cancel() can't express: a deadline on a subscribe
+// must not close the broadcast, and one on Accept must not close the server. The
+// native task unwinds with the token, so nothing outlives the caller that gave up.
+func runOperation[T handle](ctx context.Context, call func(*ffi.MoqCancel) (T, error)) (T, error) {
+	// Mint nothing for a context already done: `run` starts no call, so the
+	// closure that would release the token never runs. See `token`.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+
+	tok := newToken()
+	return runHandle(ctx, tok.cancel, func() (T, error) {
+		defer tok.release()
+		return call(tok.inner)
+	})
+}
+
+// runOperationErr is runOperation for calls that return only an error.
+func runOperationErr(ctx context.Context, call func(*ffi.MoqCancel) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tok := newToken()
+	return runErr(ctx, tok.cancel, func() error {
+		defer tok.release()
+		return call(tok.inner)
+	})
+}
+
+// releaseHandle drops a handle the caller never received. A successful call can
+// still yield none (an Accept once the server has stopped), which is the zero
+// value rather than something to destroy.
+func releaseHandle[T handle](val T) {
+	var zero T
+	if val != zero {
+		val.Destroy()
+	}
 }

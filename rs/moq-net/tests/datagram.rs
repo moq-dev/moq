@@ -28,7 +28,6 @@ struct Fixture {
 	producer: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
 	_broadcast: moq_net::broadcast::Producer,
-	_announcement: moq_net::announce::Producer,
 	_pair: MockPair,
 }
 
@@ -39,8 +38,8 @@ async fn connect_datagram_track() -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let mut broadcast = publisher.create_broadcast("bench").unwrap();
-	let announcement = publisher.announce("bench", Default::default()).unwrap();
 	let producer = broadcast.create_track("datagrams", None).unwrap();
+	broadcast.announce(Default::default()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher);
@@ -56,7 +55,6 @@ async fn connect_datagram_track() -> Fixture {
 		producer,
 		subscriber,
 		_broadcast: broadcast,
-		_announcement: announcement,
 		_pair: pair,
 	}
 }

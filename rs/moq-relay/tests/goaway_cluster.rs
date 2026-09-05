@@ -186,9 +186,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn(Hop::random());
 		let mut broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-		let _announce_broadcast = upstream_origin
-			.announce("cam", Default::default())
-			.expect("create broadcast");
+		broadcast.announce(Default::default()).expect("create broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone());
@@ -384,9 +382,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
-	let _announce_broadcast = top_origin
-		.announce("diamond", Default::default())
-		.expect("create broadcast");
+	broadcast.announce(Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone());
@@ -658,9 +654,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let upstream_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	let _announce_broadcast = upstream_origin
-		.announce("cam", Default::default())
-		.expect("create broadcast");
+	broadcast.announce(Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone());

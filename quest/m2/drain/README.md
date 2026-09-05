@@ -11,9 +11,11 @@ node anyway (a cached resolve, or a pool alias) just gets another GOAWAY. Only
 after sessions drain or the stop deadline expires does the process exit and
 the new software boot.
 
-GOAWAY only reaches MoQ sessions, and today nobody acts on it: moq-net (Rust
-and JS) decodes and logs the message without closing or migrating the session,
-and the wire message is lite04+/IETF only besides. So the stop deadline is the
+GOAWAY only reaches MoQ sessions, and only the Rust client acts on it today:
+`moq_tokio::Connection` migrates, while `js/net` decodes and logs the message
+and at most closes the session afterwards (the IETF path does, the lite path
+does not), leaving any reconnect to the ordinary close-triggered backoff
+rather than migrating. The wire message is lite04+/IETF only besides. So the stop deadline is the
 real backstop - for pre-lite04 versions, for client SDKs deployed before
 client-goaway ships, and for in-process ingest gateways (RTMP/SRT/WHIP/WHEP),
 which have no GOAWAY equivalent at all: their grace is the DNS-drain window
@@ -32,8 +34,9 @@ immediately GOAWAYs any new arrival, so an embedding process can enter drain
 on SIGTERM after the DNS window and still bound the total stop time. Expose
 enough phase/session state to prove which bound ended a drain.
 
-**client-goaway.** Rust and JS reconnectors preserve the app-visible session
-but discard the pinned address and resolve DNS again before dialing. This is a
+**client-goaway.** The JS reconnector migrates like the Rust one, preserving
+the app-visible session while resolving DNS again before dialing, and the Rust
+path gains the regression test it lacks. This is a
 scale-down prerequisite, not merely a deploy improvement. RTMP/SRT/WHIP/WHEP
 cannot receive MoQ GOAWAY, so their contract remains DNS withdrawal followed
 by the stop deadline and encoder reconnect.
@@ -43,9 +46,9 @@ by the stop deadline and encoder reconnect.
 - [Relay drain api](/quest/m2/drain/relay-drain-api.md) - a drain hook that
   GOAWAYs every session, including new arrivals, triggered by the embedding
   process on SIGTERM
-- [Client goaway](/quest/m2/drain/client-goaway.md) - native and JavaScript
-  clients reconnect through a fresh DNS resolve after GOAWAY; today both only
-  log it
+- [Client goaway](/quest/m2/drain/client-goaway.md) - the JavaScript client
+  migrates on GOAWAY with a handover and the guarded redirect the Rust client
+  already has, and the Rust drain path gets its regression test
 
 ## Related
 

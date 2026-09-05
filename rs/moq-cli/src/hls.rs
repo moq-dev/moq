@@ -54,8 +54,8 @@ pub async fn import(
 	// catalog as soon as it observes the announcement.
 	let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
-	let _announcement = origin
-		.announce(&name, Default::default())
+	producer
+		.announce(Default::default())
 		.context("failed to announce broadcast")?;
 
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;

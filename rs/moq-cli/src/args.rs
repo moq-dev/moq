@@ -633,7 +633,11 @@ pub struct Import {
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
 	/// which is retained unconditionally.
-	#[usage(long = "latency-max")]
+	// `--latency-max` was the released spelling and keeps parsing. A field-level `alias` is
+	// already hidden (`visible_alias` is the advertised form), so the dead name stays out of
+	// `--help`. An implementation comment rather than a doc one for the same reason: `///`
+	// here *is* the help text.
+	#[usage(long, alias = "latency-max")]
 	pub max_age: Option<moq_tokio::Duration>,
 
 	/// The single source feeding the Origin.
@@ -773,8 +777,8 @@ impl ExportSink {
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
-	/// Maximum latency before skipping a stalled group (e.g. `500ms`, `1s`).
-	#[usage(long = "latency-max", default = "500ms")]
+	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
+	#[usage(long, alias = "latency-max", default = "500ms")]
 	pub max_age: moq_tokio::Duration,
 }
 
@@ -1249,26 +1253,37 @@ mod tests {
 		assert_eq!(import.max_age, None);
 
 		// It sits on the parent `import`, so it parses ahead of any source, gateway or not.
+		let cli = Invocation::try_parse_from(["moq", "import", "--max-age", "5s", "ts"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("expected import")
+		};
+		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
+
+		let cli =
+			Invocation::try_parse_from(["moq", "import", "--max-age", "5s", "rtmp", "--listen", "127.0.0.1:1935"])
+				.unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("expected import")
+		};
+		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
+	}
+
+	/// The released spelling keeps parsing, so a script written against it still runs.
+	#[test]
+	fn latency_max_still_parses_as_max_age() {
 		let cli = Invocation::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
 		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
 
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"import",
-			"--latency-max",
-			"5s",
-			"rtmp",
-			"--listen",
-			"127.0.0.1:1935",
-		])
-		.unwrap();
-		let Command::Import(import) = &cli.stages[0] else {
-			panic!("expected import")
+		let cli =
+			Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("expected export")
 		};
-		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
+		let (_, max_age, _) = export.sink.stdout().expect("ts writes to stdout");
+		assert_eq!(max_age, Duration::from_secs(1));
 	}
 
 	#[test]

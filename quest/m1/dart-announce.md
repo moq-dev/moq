@@ -1,13 +1,13 @@
-# [S] Dart: createBroadcast, setAnnounce, and announce
+# [S] Dart: createBroadcast, announce, and dynamic
 
 ## Goal
 
 The Dart wrapper, its generated `moq_ffi` bindings, tests, and
 `doc/lib/dart` expose the same three announce operations as every other
-binding: `createBroadcast` creates an unadvertised broadcast, `setAnnounce`
-flips its exact-path advert, and `announce(prefix, route)` returns the handle
-that advertises and serves requests. Nothing in Dart announces on the caller's
-behalf.
+binding: `createBroadcast` creates an unadvertised broadcast, `announce(route)`
+and `unannounce()` flip its exact-path advert, and `dynamic(prefix, route)`
+returns the handle that advertises and serves requests. Nothing in Dart
+announces on the caller's behalf.
 
 ## Plan
 
@@ -17,8 +17,8 @@ Today `dart/moq/lib/moq.dart` documents `createBroadcast` as create-and-announce
 and `dart/moq/test/moq_test.dart` asserts the immediate announcement; both
 change with the semantics. Regenerate `dart/moq_ffi` from `rs/moq-ffi`, adapt
 the hand-written `dart/moq` wrapper, update the test to create, populate, then
-`setAnnounce(true)`, add a test for `announce(prefix)` serving a request, and
-update `doc/lib/dart/moq.md`.
+`announce(route)`, add a test for `dynamic(prefix, route)` serving a request,
+and update `doc/lib/dart/moq.md`.
 
 ## Required
 

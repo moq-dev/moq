@@ -164,9 +164,9 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			// Initial target latency in samples.
-			const latency = this.sync.out.buffer.peek();
-			const latencySamples = ringSamples(sampleRate, latency);
+			// Initial ring depth in samples.
+			const delay = this.sync.out.delay.peek();
+			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
@@ -213,11 +213,11 @@ export class Decoder {
 		const ring = this.#ring;
 		if (!ring) return;
 
-		const latency = effect.get(this.sync.out.buffer);
-		ring.setLatency(ringSamples(ring.rate, latency));
+		const delay = effect.get(this.sync.out.delay);
+		ring.setLatency(ringSamples(ring.rate, delay));
 	}
 
-	// Re-anchor when the latency floor *increases*. A larger floor needs a deeper cushion: video
+	// Re-anchor when the delay floor *increases*. A larger floor needs a deeper cushion: video
 	// rebuilds it implicitly (its per-frame sync.wait() reads the live buffer, so it just holds
 	// longer), but the audio ring keeps draining at its old depth -- resize() (via setLatency) only
 	// re-stalls an *empty* ring, so a mid-playback ring never refills to the new floor and audio runs
@@ -227,7 +227,7 @@ export class Decoder {
 	// natural catch-up.
 	#runLatencyReanchor(effect: Effect): void {
 		const floor = reanchorFloor({
-			latency: effect.get(this.sync.in.latency),
+			delay: effect.get(this.sync.in.delay),
 			audio: effect.get(this.sync.in.audio),
 			video: effect.get(this.sync.in.video),
 		});
@@ -274,7 +274,7 @@ export class Decoder {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.audio,
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 
 		if (config.container.kind === "cmaf") {
@@ -293,7 +293,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -398,7 +398,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 		effect.cleanup(() => consumer.close());
 

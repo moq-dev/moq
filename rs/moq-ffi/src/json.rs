@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -134,29 +135,42 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used.
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
 	pub async fn subscribe_json_snapshot(
 		&self,
 		name: String,
 		config: MoqJsonSnapshotConfig,
+		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqJsonSnapshotConsumer>, MoqError> {
-		let track = self.inner().track(&name)?.subscribe(None).await?;
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
-		Ok(Arc::new(MoqJsonSnapshotConsumer {
-			task: Task::new(SnapshotConsumer { inner: consumer }),
-		}))
+		cancel::guard(cancel, async {
+			let track = self.inner().track(&name)?.subscribe(None).await?;
+			let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
+			Ok(Arc::new(MoqJsonSnapshotConsumer {
+				task: Task::new(SnapshotConsumer { inner: consumer }),
+			}))
+		})
+		.await
 	}
 
 	/// Subscribe to a JSON stream track (lossless append-log) by name.
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
 	pub async fn subscribe_json_stream(
 		&self,
 		name: String,
 		config: MoqJsonStreamConfig,
+		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqJsonStreamConsumer>, MoqError> {
-		let track = self.inner().track(&name)?.subscribe(None).await?;
-		let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
-		Ok(Arc::new(MoqJsonStreamConsumer {
-			task: Task::new(StreamConsumer { inner: consumer }),
-		}))
+		cancel::guard(cancel, async {
+			let track = self.inner().track(&name)?.subscribe(None).await?;
+			let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
+			Ok(Arc::new(MoqJsonStreamConsumer {
+				task: Task::new(StreamConsumer { inner: consumer }),
+			}))
+		})
+		.await
 	}
 }
 

@@ -41,17 +41,16 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{
-		AnnounceConsumer as Consumer, AnnounceProducer as Producer, AnnounceUpdate as Update,
-	};
+	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceUpdate as Update};
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role
 // module; keep them flat at the crate root.
 pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
-// The per-route request queue handed to sessions by `origin::Producer::announce_served`.
-pub(crate) use origin_impl::RouteServer;
+// The advertise-only route guard, for tests shaping the route table.
+#[cfg(test)]
+pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(test)]
 pub(crate) use origin_impl::ProduceTest;

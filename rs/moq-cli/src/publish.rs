@@ -1,3 +1,4 @@
+use anyhow::Context;
 use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
@@ -130,6 +131,29 @@ pub struct CaptureArgs {
 	pub no_audio: bool,
 }
 
+/// Report the streams whose frame-sync counters moved since `previous`, one line each.
+///
+/// The importer already warns on each individual resync; this is the running total, which is
+/// what an operator turns into a rate.
+fn log_stats(latest: Option<&ts::Stats>, previous: Option<&ts::Stats>) {
+	let Some(latest) = latest else {
+		return;
+	};
+	for (pid, stream) in &latest.streams {
+		if previous.and_then(|previous| previous.streams.get(pid)) == Some(stream) {
+			continue;
+		}
+		tracing::info!(
+			pid = *pid,
+			track = stream.track,
+			resyncs = stream.resyncs,
+			discarded = stream.discarded,
+			unconfirmed = stream.unconfirmed,
+			"audio frame sync lost"
+		);
+	}
+}
+
 enum PublishDecoder {
 	Avc3 {
 		split: Box<moq_mux::codec::h264::Split>,
@@ -157,6 +181,15 @@ impl PublishDecoder {
 			Self::Flv(d) => d.decode(chunk)?,
 		}
 		Ok(())
+	}
+
+	/// Audio frame sync the decoder has lost so far, for the formats that scan for it.
+	/// `None` where the container frames audio explicitly and so can't lose sync.
+	fn stats(&self) -> Option<ts::Stats> {
+		match self {
+			Self::Ts(d) => Some(d.stats()),
+			Self::Avc3 { .. } | Self::Fmp4(_) | Self::Flv(_) => None,
+		}
 	}
 
 	/// Flush any buffered trailing frame and close the tracks at end of input.
@@ -214,16 +247,13 @@ pub struct Publish {
 	// tracks and importers don't. Only the capture path also writes through it.
 	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 	broadcast: moq_net::broadcast::Producer,
-	// Keeps the broadcast's exact-path route advertised for the same lifetime.
-	// Attached after construction so the announce lands with the tracks in place.
-	_announcement: Option<moq_net::announce::Producer>,
 }
 
 impl Publish {
 	/// Build a publisher decoding the given container format from stdin into
-	/// `broadcast`. Announce the path afterwards (see [`Self::with_announcement`]):
-	/// this constructor creates the catalog tracks, so announcing after it lands
-	/// the advertisement with the tracks already in place.
+	/// `broadcast`. Announce the broadcast afterwards: this constructor creates
+	/// the catalog tracks, so announcing after it lands the advertisement with
+	/// the tracks already in place.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
@@ -242,7 +272,6 @@ impl Publish {
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
 				broadcast,
-				_announcement: None,
 			});
 		}
 
@@ -268,11 +297,7 @@ impl Publish {
 			}
 		};
 
-		Ok(Self {
-			source,
-			broadcast,
-			_announcement: None,
-		})
+		Ok(Self { source, broadcast })
 	}
 
 	/// Build a publisher capturing local devices (camera/screen and microphone).
@@ -301,17 +326,14 @@ impl Publish {
 		Ok(Self {
 			source: Source::Capture { catalog, video, audio },
 			broadcast,
-			_announcement: None,
 		})
 	}
 
-	/// Hold the broadcast's advertisement for this publisher's lifetime.
-	///
-	/// Announce after construction, so the route lands with the catalog tracks
-	/// already in place.
-	pub fn with_announcement(mut self, announcement: moq_net::announce::Producer) -> Self {
-		self._announcement = Some(announcement);
-		self
+	/// Advertise the broadcast's path, now that the catalog tracks are in place.
+	pub fn announce(&self) -> anyhow::Result<()> {
+		self.broadcast
+			.announce(Default::default())
+			.context("failed to announce broadcast")
 	}
 
 	/// Drive the source until stdin EOF (or the capture devices stop).
@@ -320,6 +342,11 @@ impl Publish {
 			Source::Stream(mut decoder) => {
 				let mut stdin = tokio::io::stdin();
 				let mut buffer = bytes::BytesMut::new();
+
+				// Damage reported so far, so only the change is logged. A live feed is
+				// diagnosed by the rate at which these climb, and stdin may never end, so
+				// they have to surface as they accumulate rather than at exit.
+				let mut reported = decoder.stats();
 
 				// Run the read/decode loop so an error surfaces here rather than
 				// dropping the decoder (and its tracks) with a bare Error::Dropped.
@@ -331,6 +358,12 @@ impl Publish {
 							return Ok(()); // EOF
 						}
 						decoder.decode_chunk(&buffer)?;
+
+						let latest = decoder.stats();
+						if latest != reported {
+							log_stats(latest.as_ref(), reported.as_ref());
+							reported = latest;
+						}
 					}
 				}
 				.await;
@@ -339,6 +372,9 @@ impl Publish {
 				// itself) abort with the real cause so subscribers see it instead of
 				// a bare Error::Dropped.
 				let outcome = result.and_then(|()| decoder.finish());
+				// The drain at end of input can publish a frame nothing vouched for, so the
+				// final snapshot is only complete after `finish`.
+				log_stats(decoder.stats().as_ref(), reported.as_ref());
 				if let Err(err) = &outcome {
 					decoder.abort(moq_net::Error::Transport(err.to_string()));
 				}
@@ -350,8 +386,9 @@ impl Publish {
 				// broadcast + catalog. A single shared clock keeps the audio and
 				// video timelines aligned even though the devices open at
 				// different times. Video encodes on demand (camera opens only
-				// while subscribed); audio (cpal) is blocking, so it runs on a
-				// dedicated thread.
+				// while subscribed). Both run on this task rather than a spawn:
+				// on macOS the audio future holds ObjC handles across an await,
+				// so it is `!Send`.
 				let clock = moq_mux::Clock::new();
 				let video_fut = {
 					let broadcast = self.broadcast.clone();
@@ -525,7 +562,7 @@ mod tests {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast("cli").unwrap();
-		let _announce_broadcast = origin.announce("cli", Default::default()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();

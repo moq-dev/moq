@@ -28,6 +28,8 @@ use quinn_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+#[cfg(feature = "qlog")]
+use super::qlog;
 use super::{Congestion, Error, Identity, SEGMENT, Transport, client, endpoint::CID_LEN, server};
 
 /// Per-stream flow control credit, matching the quiche backend.
@@ -159,7 +161,10 @@ pub(crate) fn client_config(config: &client::Config) -> Result<quinn_proto::Clie
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
 	let mut client = quinn_proto::ClientConfig::new(Arc::new(crypto));
-	client.transport_config(transport_config(&config.transport)?);
+	let transport = transport_config(&config.transport)?;
+	#[cfg(feature = "qlog")]
+	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
+	client.transport_config(Arc::new(transport));
 	Ok(client)
 }
 
@@ -195,12 +200,74 @@ pub(crate) fn server_config(config: &server::Config) -> Result<quinn_proto::Serv
 
 	let crypto = QuicServerConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
 	let mut server = quinn_proto::ServerConfig::with_crypto(Arc::new(crypto));
-	server.transport_config(transport_config(&config.transport)?);
+	let transport = transport_config(&config.transport)?;
+	#[cfg(feature = "qlog")]
+	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
+	server.transport_config(Arc::new(transport));
 	Ok(server)
 }
 
+/// Attach the configured qlog sink, if any.
+///
+/// noq-proto asks a factory per connection, so each gets a file of its own.
+/// quinn-proto holds one sink per transport config instead, which is per
+/// endpoint on the accept side and per dial on the connect side; its events
+/// carry the connection's qlog `group_id` either way.
+#[cfg(feature = "qlog")]
+fn with_qlog(
+	mut transport: quinn_proto::TransportConfig,
+	config: &Transport,
+	side: qlog::Side,
+) -> quinn_proto::TransportConfig {
+	let Some(sink) = config.qlog.clone() else {
+		return transport;
+	};
+
+	#[cfg(feature = "noq")]
+	{
+		// The factory is told each connection's own side, so the config's is
+		// not needed here.
+		let _ = side;
+		transport.qlog_factory(Arc::new(Traces { sink }));
+	}
+
+	#[cfg(not(feature = "noq"))]
+	{
+		let mut qlog = quinn_proto::QlogConfig::default();
+		qlog.writer(sink.endpoint_trace(side));
+		transport.qlog_stream(qlog.into_stream());
+	}
+
+	transport
+}
+
+/// Opens one trace per connection, which is what noq-proto's factory hook is
+/// for.
+#[cfg(all(feature = "qlog", feature = "noq"))]
+#[derive(Debug)]
+struct Traces {
+	sink: qlog::Sink,
+}
+
+#[cfg(all(feature = "qlog", feature = "noq"))]
+impl quinn_proto::QlogFactory for Traces {
+	fn for_connection(
+		&self,
+		side: quinn_proto::Side,
+		_remote: std::net::SocketAddr,
+		initial_dst_cid: quinn_proto::ConnectionId,
+		_now: std::time::Instant,
+	) -> Option<quinn_proto::QlogConfig> {
+		let side = match side {
+			quinn_proto::Side::Client => qlog::Side::Client,
+			quinn_proto::Side::Server => qlog::Side::Server,
+		};
+		Some(quinn_proto::QlogConfig::new(self.sink.trace(&initial_dst_cid, side)))
+	}
+}
+
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<Arc<quinn_proto::TransportConfig>, Error> {
+fn transport_config(config: &Transport) -> Result<quinn_proto::TransportConfig, Error> {
 	use quinn_proto::VarInt;
 
 	let idle = quinn_proto::IdleTimeout::try_from(config.idle_timeout)
@@ -231,7 +298,7 @@ fn transport_config(config: &Transport) -> Result<Arc<quinn_proto::TransportConf
 		#[cfg(not(feature = "noq"))]
 		Congestion::Delay => Arc::new(quinn_proto::congestion::BbrConfig::default()),
 	});
-	Ok(Arc::new(transport))
+	Ok(transport)
 }
 
 /// ALPN protocols on the wire, which is a length-prefixed list of byte

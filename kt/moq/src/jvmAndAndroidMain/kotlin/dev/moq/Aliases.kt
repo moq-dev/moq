@@ -23,7 +23,7 @@ typealias OriginProducer = uniffi.moq.MoqOriginProducer
 typealias OriginOptions = uniffi.moq.MoqOriginOptions
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
-/** A stream of broadcasts requested by subscribers, for serving unannounced paths on demand. */
+/** A stream of broadcasts requested by subscribers, for serving paths nothing publishes on demand, under the root or an announced prefix. */
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or abort it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest

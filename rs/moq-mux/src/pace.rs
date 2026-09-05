@@ -11,8 +11,8 @@ use moq_net::Timestamp;
 /// timestamp on the contract that the caller delivers the bytes at the time the
 /// stamp asserts. That matters most for MPEG-TS, where the byte stream itself
 /// carries no per-frame timing: [`ts::Export`](crate::container::ts::Export)
-/// emits its PCR grid as standalone frames stamped at their slot boundaries, and
-/// a caller that drains them on arrival collapses the clock into position
+/// slices its output on the PCR grid and stamps each slice at its slot boundary,
+/// and a caller that drains them on arrival collapses the clock into position
 /// clusters no downstream stage can repair. "Deliver" is up to the transport:
 /// a paced sink sleeps until the returned instant before writing, while a
 /// transport with receiver-side buffering (e.g. SRT's TSBPD) stamps the payload
@@ -21,9 +21,9 @@ use moq_net::Timestamp;
 /// `send_at = anchor + (ts - base)` maps the frame's media time onto the wall
 /// clock, where `base`'s media time and `anchor`'s wall instant were pinned to
 /// each other at the last re-anchor. Offsets are computed in nanoseconds, so the
-/// frames may change [`Timescale`](moq_net::Timescale) mid-stream (the TS
-/// exporter stamps PCR frames in microseconds and media frames at the source's
-/// own scale).
+/// frames may change [`Timescale`](moq_net::Timescale) mid-stream: each exporter
+/// picks its own, and the TS one stamps grid boundaries in microseconds whatever
+/// scale the source's frames carry.
 ///
 /// When `send_at` would lead `now` by more than the configured
 /// [`lead`](Self::with_lead), the media clock has outrun wall-clock by more than
@@ -33,6 +33,15 @@ use moq_net::Timestamp;
 /// ever moves the anchor *forward*: a frame that merely arrives late (network
 /// or CPU jitter, or a reordered B-frame whose timestamp trails the edge) keeps
 /// its earlier media instant instead of collapsing to its arrival instant.
+///
+/// The other direction is the standing lag. Every producer delivers some fixed
+/// distance behind the media clock (a muxer's buffer, a hop of network), and the
+/// first frame pins an offset that has no room for it, so every later frame is
+/// due the instant it arrives, the sleep is a no-op, and the sink ends up writing
+/// at whatever cadence frames turned up in. So the anchor slides back by however
+/// much a frame fell behind, up to `lead` in total: it discovers that distance
+/// rather than assuming one, and the bound is the buffer the caller already said
+/// it would hold.
 #[derive(Default)]
 pub struct Pacer {
 	/// How far ahead of `now` a frame may be scheduled before re-anchoring.
@@ -40,6 +49,8 @@ pub struct Pacer {
 	/// The wall instant and media time (in nanoseconds) pinned to each other at
 	/// the last re-anchor; every frame paces relative to this pair.
 	anchor: Option<(Instant, u128)>,
+	/// How far the anchor has slid back to absorb late arrivals, capped at `lead`.
+	slack: Duration,
 }
 
 impl Pacer {
@@ -79,10 +90,39 @@ impl Pacer {
 		match send_at {
 			// `saturating_duration_since` is zero for an `at` in the past, which any
 			// lead admits; the subtraction form can't overflow on a huge lead.
-			Some(at) if at.saturating_duration_since(now) <= self.lead => at,
+			Some(at) if at.saturating_duration_since(now) <= self.lead => self.absorb(at, now),
 			// Media outran wall-clock (or overflowed the platform clock).
 			_ => self.hurry(ts, now),
 		}
+	}
+
+	/// Slide the anchor back by however much `at` fell behind `now`, and return the
+	/// instant that leaves.
+	///
+	/// This is how the pacer finds the producer's standing delivery lag (see the
+	/// type docs). The shift is capped so the total never exceeds the lead, and it
+	/// can only ever raise a past instant toward `now`, never past it, so absorbing
+	/// never schedules a frame later than it would have gone out anyway.
+	fn absorb(&mut self, at: Instant, now: Instant) -> Instant {
+		let behind = now.saturating_duration_since(at);
+		let shift = behind.min(self.lead.saturating_sub(self.slack));
+		if shift.is_zero() {
+			return at;
+		}
+		self.slack += shift;
+		if let Some((anchor, _)) = self.anchor.as_mut() {
+			*anchor += shift;
+		}
+		at + shift
+	}
+
+	/// How much of the producer's standing delivery lag the anchor has absorbed.
+	///
+	/// A caller running its own lag budget has to know this: the pacer is holding
+	/// it deliberately (see the type docs), so counting it as lag would have the
+	/// caller shedding the very margin that makes its sleeps do anything.
+	pub fn slack(&self) -> Duration {
+		self.slack
 	}
 
 	/// Deliver `ts` at `now` and make it the live edge: later frames pace
@@ -96,6 +136,8 @@ impl Pacer {
 	/// have arrived and hurries when that overshoots.
 	pub fn hurry(&mut self, ts: Timestamp, now: Instant) -> Instant {
 		self.anchor = Some((now, ts.as_nanos()));
+		// A fresh pin has no lag absorbed into it yet, so the budget starts over.
+		self.slack = Duration::ZERO;
 		now
 	}
 }
@@ -169,13 +211,66 @@ mod tests {
 	}
 
 	/// Regression: the lead comparison must not construct `now + lead`, which
-	/// panics on a large but valid `Duration` (`--latency-max` is unbounded).
+	/// panics on a large but valid `Duration` (`--max-age` is unbounded).
 	#[test]
 	fn huge_lead_does_not_overflow() {
 		let start = Instant::now();
 		let mut pacer = Pacer::default().with_lead(Duration::MAX);
 		assert_eq!(pacer.pace(ms(0), start), start);
 		assert_eq!(pacer.pace(ms(40), start), start + Duration::from_millis(40));
+	}
+
+	/// A producer that delivers a constant distance behind the media clock (the TS
+	/// exporter's mux buffer, or a hop of network) would otherwise pin that distance
+	/// into the first frame's anchor and never get it back: every later frame is due
+	/// exactly when it arrives, so the sleep is a no-op and the sink writes at the
+	/// arrival cadence rather than the media one.
+	#[test]
+	fn absorbs_a_standing_delivery_lag() {
+		let start = Instant::now();
+		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
+		assert_eq!(pacer.pace(ms(0), start), start, "the first frame anchors at now");
+
+		// Steady state: the producer is 40ms behind, so this frame is already due.
+		let now = start + Duration::from_millis(80);
+		assert_eq!(pacer.pace(ms(40), now), now, "a late frame still goes out at once");
+
+		// The anchor absorbed those 40ms, so the next frame has room to be paced.
+		assert_eq!(
+			pacer.pace(ms(80), now),
+			now + Duration::from_millis(40),
+			"the discovered lag becomes the sink's margin"
+		);
+	}
+
+	/// The absorbed lag is a buffer the caller holds, so it is capped by the lead
+	/// rather than growing with every outlier.
+	#[test]
+	fn absorbed_lag_is_capped_by_the_lead() {
+		let start = Instant::now();
+		let mut pacer = Pacer::default().with_lead(Duration::from_millis(50));
+		assert_eq!(pacer.pace(ms(0), start), start);
+
+		// 200ms behind, but only 50ms of that may be taken.
+		let now = start + Duration::from_millis(240);
+		assert_eq!(pacer.pace(ms(40), now), start + Duration::from_millis(90));
+		assert_eq!(
+			pacer.pace(ms(80), now),
+			start + Duration::from_millis(130),
+			"the anchor moved by the cap, not by the shortfall"
+		);
+	}
+
+	/// Zero lead (SRT, whose receiver owns the jitter buffer) absorbs nothing.
+	#[test]
+	fn zero_lead_absorbs_nothing() {
+		let start = Instant::now();
+		let mut pacer = Pacer::default();
+		assert_eq!(pacer.pace(ms(0), start), start);
+
+		let now = start + Duration::from_millis(80);
+		assert_eq!(pacer.pace(ms(40), now), start + Duration::from_millis(40));
+		assert_eq!(pacer.pace(ms(80), now), start + Duration::from_millis(80));
 	}
 
 	#[test]

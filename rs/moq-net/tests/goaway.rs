@@ -319,9 +319,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
 		let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		let _announce = pub_origin
-			.announce("test", moq_net::origin::Route::default())
-			.expect("announce");
+		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		// A second track with content ready, so the gated subscribe below would
 		// deliver immediately if it reached the wire.
@@ -417,10 +415,8 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 async fn goaway_drains_routes(version: Version) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Hop::random());
-		let _broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		let _announce = pub_origin
-			.announce("test", moq_net::origin::Route::default())
-			.expect("announce");
+		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
 
 		let sub_origin = produce_origin(Hop::random());
 

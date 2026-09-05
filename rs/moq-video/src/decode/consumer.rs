@@ -24,6 +24,10 @@ pub struct Consumer {
 	/// One AU yields one frame in the low-delay path, but a backend may hand back
 	/// more, so we buffer to keep `read` one-frame-per-call.
 	pending: VecDeque<Frame>,
+	/// Whether the ended track's decoder has already been drained.
+	drained: bool,
+	/// Last container discontinuity observed. A change starts a fresh codec epoch.
+	discontinuity: u64,
 }
 
 impl Consumer {
@@ -56,6 +60,8 @@ impl Consumer {
 			decoder,
 			track,
 			pending: VecDeque::new(),
+			drained: false,
+			discontinuity: 0,
 		})
 	}
 
@@ -64,15 +70,32 @@ impl Consumer {
 		self.decoder.name()
 	}
 
-	/// Read the next decoded I420 frame, or `None` when the track ends.
+	/// Read the next decoded I420 frame, or `None` after the track ends and the
+	/// decoder's buffered tail has been drained.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			if let Some(frame) = self.pending.pop_front() {
 				return Ok(Some(frame));
 			}
-
-			let Some(mux_frame) = self.track.read().await? else {
+			if self.drained {
 				return Ok(None);
+			}
+
+			let mux_frame = self.track.read().await?;
+			let discontinuity = self.track.discontinuity();
+			if discontinuity != self.discontinuity {
+				// The tail belongs to the abandoned codec epoch. Draining resets the
+				// backend for reuse, but none of those pictures may cross the seam.
+				self.decoder.flush().await?;
+				self.pending.clear();
+				self.discontinuity = discontinuity;
+			}
+
+			let Some(mux_frame) = mux_frame else {
+				let tail = self.decoder.flush().await?;
+				self.pending.extend(tail);
+				self.drained = true;
+				continue;
 			};
 
 			self.pending.extend(
@@ -86,6 +109,9 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+	use bytes::Bytes;
+	use moq_net::Timestamp;
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
@@ -98,9 +124,9 @@ mod tests {
 		}
 		producer
 	}
-
 	use super::*;
 	use crate::decode::Kind;
+	use crate::decode::backend::probe;
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
 
 	#[tokio::test]
@@ -124,7 +150,7 @@ mod tests {
 		}
 
 		let origin = produce_origin();
-		let mut requests = origin.dynamic();
+		let requests = origin.dynamic("", Default::default()).unwrap();
 		let served = source_subscriber.clone();
 		tokio::spawn(async move {
 			while let Ok(request) = requests.requested_broadcast().await {
@@ -168,5 +194,170 @@ mod tests {
 
 		let frame = consumer.read().await.unwrap().expect("decoded frame");
 		assert_eq!(frame.size(), crate::Size::new(320, 240));
+	}
+
+	/// A track ends before a decoder that reorders pictures does. The consumer
+	/// drains the backend once and returns its tail before reporting the end.
+	#[tokio::test]
+	async fn track_end_drains_buffered_decoder() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		for index in 0..2u64 {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: index == 0,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Config {
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut timestamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(timestamps, vec![0, 33_333]);
+		assert!(
+			consumer.read().await.unwrap().is_none(),
+			"the decoder was drained twice"
+		);
+	}
+
+	/// A declared discontinuity abandons the previous codec epoch. A delayed
+	/// picture from before the seam is drained and discarded before the first new
+	/// keyframe is decoded.
+	#[tokio::test]
+	async fn discontinuity_discards_buffered_tail() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(100_000).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"old access unit"),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.discontinuity().unwrap();
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				duration: None,
+				payload: Bytes::from_static(b"new access unit"),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Config {
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut timestamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(timestamps, vec![0]);
+	}
+
+	/// Cancellation while a threaded flush is in flight leaves the sink poisoned.
+	/// The next read surfaces that error rather than reporting a clean end and
+	/// silently discarding the tail.
+	#[cfg(not(target_os = "macos"))]
+	#[tokio::test]
+	async fn cancelled_track_end_flush_is_not_reported_as_drained() {
+		probe::prepare_blocking_flush();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Config {
+				kind: Kind::Named(probe::BLOCKING_FLUSH_NAME.into()),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut read = Box::pin(consumer.read());
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+		loop {
+			tokio::select! {
+				_result = &mut read => panic!("flush returned before cancellation"),
+				_ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+					if probe::flush_entered() {
+						break;
+					}
+					if tokio::time::Instant::now() >= deadline {
+						probe::release_flush();
+						panic!("flush never reached the codec thread");
+					}
+				}
+			}
+		}
+		drop(read);
+		probe::release_flush();
+
+		let err = match consumer.read().await {
+			Err(err) => err,
+			Ok(_) => panic!("cancelled flush must poison the sink"),
+		};
+		assert!(err.to_string().contains("cancelled call"), "unexpected error: {err}");
 	}
 }

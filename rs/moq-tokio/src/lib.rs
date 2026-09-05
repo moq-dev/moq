@@ -83,7 +83,7 @@ pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, R
 pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use error::{Error, Result};
-pub use log::Log;
+pub use log::{Log, RedactedUrl};
 #[cfg(any(
 	feature = "noq",
 	feature = "quinn",
