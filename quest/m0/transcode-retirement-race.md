@@ -11,8 +11,8 @@ produce.
 
 What is known: the test in `rs/moq-transcode/src/lib.rs` caught the boundary
 bug on a loaded CI runner against the un-fixed implementation, and has never
-failed on a developer machine. Two constructions for determinism were tried in
-#3381 and both passed against the reverted fix, which is a failed negative
+failed on a developer machine. Two constructions for determinism were tried
+in #3381 and both passed against the reverted fix, which is a failed negative
 control, so the fix landed resting on its structural argument instead. The
 attempts are on that pull request thread.
 
