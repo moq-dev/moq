@@ -407,17 +407,24 @@ async fn fetches(
 		// it, whether or not this loop had reached it yet: the request queues on the
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
 		// dropping the handler below does not cancel a fetch that beat retirement.
+		//
+		// Taken in one pass, before waiting on anything. A consumer holding the
+		// retired track can keep fetching, so a drain that waited for a slot between
+		// pops would keep taking those in too and the rung would never finish.
+		let mut queued = Vec::new();
 		loop {
-			let request = tokio::select! {
+			tokio::select! {
 				biased;
 				request = dynamic.requested_group() => match request {
-					Ok(request) => request,
+					Ok(request) => queued.push(request),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
 				// Nothing queued: everything that beat retirement is spoken for.
 				() = std::future::ready(()) => break,
-			};
+			}
+		}
+		for request in queued {
 			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
 			spawn_fetch(&mut tasks, rung.clone(), request, permit);
 		}

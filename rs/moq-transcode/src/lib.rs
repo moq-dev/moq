@@ -976,7 +976,9 @@ mod tests {
 	/// before `GroupRequest::accept` creates the group, so the retirement below
 	/// really does land while the fetch is still opening its decoder. Which side
 	/// of `accept` it lands on is up to the scheduler, so this catches the second
-	/// case some of the time rather than every time. It caught it in CI.
+	/// case some of the time rather than every time. It caught it on a loaded CI
+	/// runner; it has never lost that race on a developer machine, which is also
+	/// why forcing it deterministically here needs a hook the rung does not have.
 	#[tokio::test]
 	async fn retirement_finishes_an_in_flight_fetch() {
 		let mut source = source_catalog(320, 240);
