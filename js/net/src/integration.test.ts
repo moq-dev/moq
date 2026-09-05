@@ -638,6 +638,86 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	server.close();
 });
 
+// The publisher caches TRACK_INFO so it only asks the application once per track. The cache
+// has to expire with the broadcast that answered it: a republish puts a different producer
+// on the path, and its immutable properties are its own.
+test("integration: lite draft-05 track info follows a republished broadcast", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const path = Path.from("test");
+	const first = origin.publish(path);
+	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: 1000 });
+
+	const remote = client.consume(path);
+	const before = await remote.track("video").info();
+	expect(before.priority).toBe(1);
+	expect(before.timescale).toBe(Timescale.MILLI);
+	expect(before.maxAge).toBe(1000);
+
+	// Replace the broadcast on the same path with one whose track declares different
+	// immutable properties.
+	const second = origin.publish(path);
+	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: 5000 });
+
+	const after = await remote.track("video").info();
+	expect(after.priority).toBe(7);
+	expect(after.timescale).toBe(Timescale.MICRO);
+	expect(after.maxAge).toBe(5000);
+
+	first.close();
+	second.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+// FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
+// quantizes the successor's timestamps to the predecessor's resolution.
+test("integration: lite draft-05 fetch uses the republished track's timescale", async () => {
+	const enc = new TextEncoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const path = Path.from("test");
+	const first = origin.publish(path);
+	const firstTrack = first.createTrack("video", { timescale: Timescale.MILLI });
+	const firstGroup = firstTrack.appendGroup();
+	firstGroup.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	firstGroup.close();
+
+	// Prime the publisher's TRACK_INFO cache against the predecessor.
+	const remote = client.consume(path);
+	expect((await remote.track("video").info()).timescale).toBe(Timescale.MILLI);
+
+	const second = origin.publish(path);
+	const secondTrack = second.createTrack("video", { timescale: Timescale.MICRO });
+	const secondGroup = secondTrack.appendGroup();
+	secondGroup.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMicros(1234) });
+	secondGroup.close();
+
+	// A millisecond timescale would round this to 1000us.
+	const fetched = await remote.track("video").fetchGroup(0);
+	const frame = await fetched.readFrame();
+	expect(frame?.timestamp.asMicros()).toBe(1234);
+
+	first.close();
+	second.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: ietf fetch group is unsupported", async () => {
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 	const origin = new OriginProducer();

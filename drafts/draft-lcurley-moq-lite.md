@@ -412,6 +412,8 @@ A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher p
 The subscriber sends a TRACK message containing the broadcast path and track name.
 The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
 The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path and track name, and reuse it across every SUBSCRIBE and FETCH of the same track over the session that served it.
+The properties are fixed for one track, not for the path it arrived on: a path outlives the broadcast on it, and a different broadcast reaching the same path brings its own.
+Anything cached against a path, on either side, is therefore scoped to the announcement that carried it and is discarded when that announcement is retracted.
 If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
 Because a subscriber cannot parse buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.

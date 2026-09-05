@@ -327,9 +327,11 @@ export class Publisher {
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
-	// and reuse it for every later TRACK request of the same track. Keyed by
-	// `broadcast\0track`. A rejected lookup is evicted so a retry can re-probe.
-	#trackInfo = new Map<string, Promise<TrackInfoMessage>>();
+	// and reuse it for every later TRACK request of the same track. Keyed by the
+	// routing front rather than the path: immutability holds for one broadcast, and a
+	// republish puts a different one on the path, so its entries must not be reused.
+	// A rejected lookup is evicted so a retry can re-probe.
+	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, Promise<TrackInfoMessage>>>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -480,14 +482,14 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
-		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
-		if (!broadcast) {
+		const front = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new Error("not found"));
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, {
+		const track = front.subscribe(msg.track, {
 			priority: msg.priority,
 			maxAge: servingMaxAge(this.version, msg.maxAge),
 			startGroup: msg.startGroup,
@@ -586,8 +588,8 @@ export class Publisher {
 			return;
 		}
 
-		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
-		if (!broadcast) {
+		const front = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!front) {
 			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new Error("not found"));
 			return;
@@ -599,9 +601,10 @@ export class Publisher {
 
 		let group: group.Consumer | undefined;
 		try {
-			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.
-			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
-			group = await broadcast.track(msg.track).fetchGroup(msg.group, { priority: msg.priority });
+			// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
+			// come off the same front, so the metadata and the frames are one generation.
+			const info = await this.#resolveTrackInfo(front, msg.track);
+			group = await front.fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -774,7 +777,10 @@ export class Publisher {
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
 		try {
-			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
+			const front = this.#broadcasts.peek()?.get(msg.broadcast);
+			if (!front) throw new Error("not found");
+
+			const info = await this.#resolveTrackInfo(front, msg.track);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.close();
@@ -785,20 +791,21 @@ export class Publisher {
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
-	// `broadcast.track(name).info()` triggers a TrackRequest the app answers with
-	// accept(TrackInfo); only the immutable properties are needed (not the groups).
-	// Cached because they're fixed for the track's lifetime. Rejects if the broadcast
-	// or track is unavailable.
-	#resolveTrackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfoMessage> {
-		const key = `${broadcast}\0${track}`;
-		const cached = this.#trackInfo.get(key);
+	// `resolveTrackInfo` triggers a TrackRequest the app answers with accept(TrackInfo);
+	// only the immutable properties are needed (not the groups). Cached because they're
+	// fixed for the track's lifetime. Rejects if the track is unavailable.
+	#resolveTrackInfo(front: broadcast.Consumer, track: string): Promise<TrackInfoMessage> {
+		let tracks = this.#trackInfo.get(front);
+		if (!tracks) {
+			tracks = new Map();
+			this.#trackInfo.set(front, tracks);
+		}
+
+		const cached = tracks.get(track);
 		if (cached) return cached;
 
 		const pending = (async () => {
-			const published = this.#broadcasts.peek()?.get(broadcast);
-			if (!published) throw new Error("not found");
-
-			const info = await published.track(track).info();
+			const info = await front.resolveTrackInfo(track);
 			return new TrackInfoMessage({
 				priority: info.priority,
 				// Publisher Max Age: the publisher's retention bound, advertised so
@@ -811,8 +818,8 @@ export class Publisher {
 		})();
 
 		// Don't poison the cache on failure: a later request may succeed.
-		pending.catch(() => this.#trackInfo.delete(key));
-		this.#trackInfo.set(key, pending);
+		pending.catch(() => tracks.delete(track));
+		tracks.set(track, pending);
 		return pending;
 	}
 
