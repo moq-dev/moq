@@ -17,7 +17,10 @@ regression test per Root Cause First.
 
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
+- [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - moq export ts: a rewound timeline stalls SI tables, PCR, and pacing until the media clock catches up
 - [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
+- [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
+- [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
