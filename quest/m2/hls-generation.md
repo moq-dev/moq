@@ -18,10 +18,13 @@ inline-parameter-set codec (`avc3`) that restarts at a new resolution keeps
 its URL while `Rendition::init` caches the old init for the life of the
 pooled rendition, and the segment window's `push`
 (`rs/moq-hls/src/export/segments.rs`) resets only the playlist. Version the
-init URL with a hash of the rendition config (codec string, dimensions, and
-the parameter sets the init carries), so a reconfigure changes the URL and
-the cached init is invalidated with it. A hash rather than a counter because
-two edges rendering the same broadcast must agree without coordinating.
+init URL with a hash of the init segment bytes `Muxer::init` actually
+produces, so every input that shapes the init (codec string, dimensions,
+parameter sets, the catalog `Cmaf` init, audio sample rate and channel count,
+codec description, the effective timescale) is covered without a field list
+that can drift, and a reconfigure changes the URL and invalidates the cached
+init with it. A hash rather than a counter because two edges rendering the
+same broadcast must agree without coordinating.
 
 **A publisher restart** reuses segment numbers: `moq-net` splices a
 re-attached source into the existing broadcast by hop ID so consumers never
@@ -36,8 +39,9 @@ playlist renderers in `rs/moq-hls/src/export` emit it in `init.mp4` and
 segment URLs and the export resets its window when it changes. There is no
 DASH renderer in the tree, so nothing here promises an MPD. Absent means unversioned URLs, never
 a wall-clock or a relay-local counter. The cache-header half stays downstream:
-the edge restores its long `max-age` once the paths it accepts are the ones the
-renderers emit.
+the edge restores its long `max-age` only on generation-bearing URLs once the
+paths it accepts are the ones the renderers emit, and unversioned URLs keep
+`no-store`, since a restart reuses their segment numbers for different bytes.
 
 Acceptance: a mid-broadcast reconfigure that cannot be decoded against the
 previous init gets a new init URL on both edges; a supplied generation appears

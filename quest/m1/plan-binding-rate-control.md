@@ -3,8 +3,10 @@
 ## Goal
 
 A settled shape for how a non-Rust publisher follows the connection's send
-estimate, so an OBS, Python, Swift, Kotlin, or Go publisher stops encoding at
-its configured bitrate regardless of congestion. Run `/plan-quest`; the settled
+estimate with its configured bitrate as the ceiling, the contract
+`moq_video::encode::Options::{bitrate, bandwidth}` already gives Rust, so an
+OBS, Python, Swift, Kotlin, or Go publisher stops holding that ceiling through
+congestion. Run `/plan-quest`; the settled
 plan becomes the implementing quest that closes the issue.
 
 ## Plan

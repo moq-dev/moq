@@ -18,18 +18,31 @@ bytes. Not a `moq-json` stream of typed records.
 - **A `scte35` catalog section**, as its own `CatalogExt` like the `mpegts`
   one, naming one sidecar track per rendition that carries cues. Cues from a
   TS program attach to its video rendition, or to its audio rendition when
-  there is no video; the import already stamps them with video PTS.
+  there is no video. One timestamp contract for both: a cue's wire timestamp
+  is its `splice_time` (or the section's arrival time when it has none)
+  converted to the owning rendition's clock, so the importer, which stamps
+  from the video `last_pts` today, learns to stamp from audio PTS for an
+  audio-only program, and the draft, both implementations, and the export
+  tests use the same rule.
 - **Framing.** Each frame is one complete `splice_info_section`, byte for
   byte, in the group of the media it applies to, stamped with the splice
-  time's wire timestamp. Cues are sparse, so most groups are empty; a joiner
-  at a keyframe gets that GOP's cues.
+  time's wire timestamp. A section with no splice time (`splice_null`,
+  `private_command`, `bandwidth_reservation`, an immediate `splice_insert`)
+  keeps the arrival media clock the importer stamps it with today and lands
+  in the group current at arrival, so raw commands stay available. Cues are
+  sparse, so most groups are empty; a joiner at a keyframe gets that GOP's
+  cues.
 - **Typed decode is a helper, not the wire.** A parser for `splice_insert`,
   `time_signal`, and segmentation descriptors (a maintained crate if one is
   adequate) lives beside the section in Rust and JS, and `js/watch` raises a
   cue event from it. Applications that want the rest parse the bytes.
 - **The TS lanes stay.** The importer keeps the verbatim `mpegts` track for
   contribution fidelity and additionally emits the sidecar; the exporter must
-  not double-emit, and section-framed export still needs the video clock.
+  not double-emit. Section-framed export takes its clock from the video
+  rendition today and rejects an audio-only program
+  (`scte35_without_video_export_is_rejected`); extend it to derive the clock
+  from the mapped audio rendition, or the audio-only mapping above is a
+  promise export cannot keep.
 
 Wire and catalog schema: a new optional section, additive, so it lands on
 `main`, with `drafts/draft-lcurley-moq-hang.md` updated in the same PR as the
