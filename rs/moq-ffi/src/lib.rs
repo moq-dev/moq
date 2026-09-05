@@ -16,6 +16,7 @@ mod android;
 // since they are the heaviest thing in the dependency graph.
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 pub mod audio;
+pub mod cancel;
 pub mod consumer;
 pub mod error;
 mod ffi;

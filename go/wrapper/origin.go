@@ -87,7 +87,7 @@ type OriginDynamic struct {
 // RequestedBroadcast blocks until a consumer requests a path with no existing
 // exact-path broadcast.
 func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
+	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +157,10 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 // (served on demand by the session that announced it), or a dynamic fallback on
 // the origin; errors if nothing can serve it. Unlike AnnouncedBroadcast, it
 // does not wait for a future announcement. Blocks until resolved.
-func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
-	inner, err := o.inner.RequestBroadcast(path)
+func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqBroadcastConsumer, error) {
+		return o.inner.RequestBroadcast(path, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -196,14 +198,17 @@ type Announced struct {
 
 // Next returns the next announcement, or (nil, nil) when the stream ends.
 func (a *Announced) Next(ctx context.Context) (*Announcement, error) {
-	res, err := runCancellable(ctx, a.inner.Cancel, a.inner.Next)
-	if err != nil {
+	res, err := runHandle(ctx, a.inner.Cancel, func() (*ffi.MoqAnnouncement, error) {
+		res, err := a.inner.Next()
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
 		return nil, err
 	}
-	if res == nil {
-		return nil, nil
-	}
-	return &Announcement{inner: *res}, nil
+	return &Announcement{inner: res}, nil
 }
 
 // All ranges over announcements until the stream ends or the loop breaks.
@@ -223,7 +228,7 @@ type AnnouncedBroadcast struct {
 
 // Available blocks until the broadcast is available and returns its consumer.
 func (a *AnnouncedBroadcast) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := runCancellable(ctx, a.inner.Cancel, a.inner.Available)
+	inner, err := runHandle(ctx, a.inner.Cancel, a.inner.Available)
 	if err != nil {
 		return nil, err
 	}

@@ -52,7 +52,7 @@ for ann, err := range announced.All(ctx) {
 	// An announcement is a route; its path is relative to the prefix.
 	fmt.Println("got route", ann.Path())
 
-	broadcast, err := client.RequestBroadcast("demos/" + ann.Path())
+	broadcast, err := client.RequestBroadcast(ctx, "demos/" + ann.Path())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -236,6 +236,22 @@ if moq.IsAuthError(err) {
 }
 ```
 
+## Cancellation
+
+Every call that can block takes a `context.Context` as its first argument. Cancelling it (or hitting its deadline) returns `ctx.Err()` promptly and tears the in-flight native work down with it, so a per-call deadline is a real bound on resource use rather than just on how long you wait.
+
+What a cancel tears down depends on the call:
+
+- A one-shot call aborts on its own and leaves the object it was made on usable. `SubscribeTrack`, `SubscribeMedia`, `SubscribeCatalog`, `SubscribeJSONSnapshot`, `SubscribeJSONStream`, `FetchGroup`, `FetchMediaGroup`, `Resolve`, `DecodeAudio`, `DecodeVideo`, `RequestBroadcast`, the producer-side `Used` / `Unused` waits, and `Server.Accept` are all in this group. Giving up on one subscribe does not close the broadcast, and giving up on one accept does not close the server.
+- A stream read cancels the stream it reads. Every `Next`, `RecvGroup`, `NextGroup`, `ReadFrame`, `RecvDatagram`, and the `iter.Seq2` iterators over them behave this way, which is what a range loop over a cancelled context wants: the consumer is finished, not merely this read. To bound one read without ending the stream, cancel the whole consumer's context instead.
+
+```go
+// Give up on this subscribe after a second; the broadcast is still usable.
+subCtx, cancel := context.WithTimeout(ctx, time.Second)
+defer cancel()
+track, err := broadcast.SubscribeTrack(subCtx, "events", nil)
+```
+
 ## Publishing lifetime
 
 A broadcast stays live only while you hold its `BroadcastProducer`. Once the producer is garbage-collected the path unannounces and subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
@@ -297,7 +313,7 @@ video.Finish()
 catalog, err := broadcast.Catalog(ctx)
 // pick a rendition from catalog.Video
 
-video, err := broadcast.DecodeVideo(name, rendition, moq.VideoDecoderOutput{})
+video, err := broadcast.DecodeVideo(ctx, name, rendition, moq.VideoDecoderOutput{})
 if err != nil {
     // handle error
 }
@@ -322,14 +338,14 @@ Raw audio takes an explicit track name at publish time. Read it back through `au
 A catalog rendition may name a *different* broadcast: `Video.Broadcast` / `Audio.Broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `DecodeAudio` and `DecodeVideo` follow it for you. `SubscribeMedia`, `SubscribeTrack`, `FetchGroup`, and `FetchMediaGroup` take a track name rather than a rendition, so resolve first:
 
 ```go
-source, err := broadcast.Resolve(rendition.Broadcast)
+source, err := broadcast.Resolve(ctx, rendition.Broadcast)
 if err != nil {
     // handle error
 }
-consumer, err := source.SubscribeMedia(name, rendition.Container, nil)
+consumer, err := source.SubscribeMedia(ctx, name, rendition.Container, nil)
 ```
 
-`Resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call unconditionally. It needs an origin to fetch a sibling from, so it fails on a broadcast consumed straight from a local producer. `Resolve` reports a sibling that exists but has not been announced yet as unroutable rather than waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
+`Resolve(ctx, nil)` (or an empty reference) returns the same broadcast, so it is safe to call unconditionally. It needs an origin to fetch a sibling from, so it fails on a broadcast consumed straight from a local producer. `Resolve` reports a sibling that exists but has not been announced yet as unroutable rather than waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
 
 ## Raw Track Controls
 
@@ -337,7 +353,7 @@ Raw track subscribers can query the publisher's track properties and change thei
 
 ```go
 subscription := moq.Subscription{Priority: 10, Ordered: true}
-track, err := broadcast.SubscribeTrack("events", &subscription)
+track, err := broadcast.SubscribeTrack(ctx, "events", &subscription)
 if err != nil {
 	log.Fatal(err)
 }
@@ -366,7 +382,7 @@ Use `PublishJSONSnapshot` / `SubscribeJSONSnapshot` for lossy latest state and `
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:
 
 ```go
-group, err := consumer.FetchGroup("events", 42, &moq.FetchGroupOptions{Priority: 10})
+group, err := consumer.FetchGroup(ctx, "events", 42, &moq.FetchGroupOptions{Priority: 10})
 if err != nil {
     log.Fatal(err)
 }
@@ -429,7 +445,7 @@ if err != nil {
     log.Fatal(err)
 }
 
-group, err := consumer.FetchMediaGroup("audio0", 42, catalog.Audio["audio0"].Container, nil)
+group, err := consumer.FetchMediaGroup(ctx, "audio0", 42, catalog.Audio["audio0"].Container, nil)
 if err != nil {
     log.Fatal(err)
 }
@@ -542,7 +558,7 @@ for request, err := range dynamic.Requests(ctx) {
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
+The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(ctx, path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 
 ## Local development
 

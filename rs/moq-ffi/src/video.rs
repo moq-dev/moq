@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::producer::MoqBroadcastProducer;
@@ -233,15 +234,21 @@ impl MoqVideoProducer {
 	}
 
 	/// Wait until this video track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		crate::ffi::detached(async move { demand.used().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
 	}
 
 	/// Wait until this video track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		crate::ffi::detached(async move { demand.unused().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
 	}
 
 	/// Encode and publish one raw frame.
@@ -495,30 +502,37 @@ impl MoqBroadcastConsumer {
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
 	pub async fn decode_video(
 		&self,
 		name: String,
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
+		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
-		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
-		// dynamic handler and open an upstream subscription we would immediately drop.
-		let reference = catalog_video.broadcast.clone();
-		let cfg = video_config(catalog_video)?;
-		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		cancel::guard(cancel, async {
+			// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+			// dynamic handler and open an upstream subscription we would immediately drop.
+			let reference = catalog_video.broadcast.clone();
+			let cfg = video_config(catalog_video)?;
+			let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
-		let mut config = moq_video::decode::Config::default();
-		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		config.max_age = output
-			.max_age_ms
-			.map(std::time::Duration::from_millis)
-			.unwrap_or_default();
+			let mut config = moq_video::decode::Config::default();
+			config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
+			config.max_age = output
+				.max_age_ms
+				.map(std::time::Duration::from_millis)
+				.unwrap_or_default();
 
-		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+			let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
-		Ok(Arc::new(MoqVideoConsumer {
-			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
-		}))
+			Ok(Arc::new(MoqVideoConsumer {
+				task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
+			}))
+		})
+		.await
 	}
 }
 

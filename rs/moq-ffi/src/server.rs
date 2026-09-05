@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::cancel::{self, MoqCancel};
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::MoqOriginProducer;
@@ -137,9 +138,11 @@ impl MoqServer {
 
 	/// Accept the next incoming session. Returns `None` when the server has closed.
 	///
-	/// `listen()` must be called first.
-	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
-		self.task.run(|mut state| async move { state.accept().await }).await
+	/// `listen()` must be called first. `cancel` aborts this call alone, leaving the
+	/// server listening; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn accept(&self, cancel: Option<Arc<MoqCancel>>) -> Result<Option<Arc<MoqRequest>>, MoqError> {
+		cancel::guard(cancel, self.task.run(|mut state| async move { state.accept().await })).await
 	}
 
 	/// SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
