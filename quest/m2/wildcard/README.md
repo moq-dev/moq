@@ -146,7 +146,8 @@ field.
   availability there.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
-  refusal it is (`Error::to_code` already puts a typed code on the wire).
+  refusal it is (`Error::to_code` already puts a typed code on the wire; the
+  capacity code is NO_CAPACITY, 0x30, in moq-lite's own 48-63 range).
 
   A capacity refusal is unavoidable: an advertiser's capacity and a relay's view
   of it are separated by at least half a round trip, so a retraction and a
@@ -177,8 +178,15 @@ field.
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
 - **The spec home is moq-lite core, mirrored in moq-cluster**, following how
-  route cost landed. moq-lite-06 is still WIP, so this goes into it rather than
-  opening an 07.
+  route cost landed. moq-lite-06 is still WIP, so this went into it rather than
+  opening an 07: ANNOUNCE_PATTERN (0x3) on the announce stream, and a
+  NAMESPACE_PATTERN parameter on moq-transport's PUBLISH_NAMESPACE/NAMESPACE.
+- **A pattern travels as typed segments, not text.** Each wire segment is a
+  kind (0 literal, 1 wildcard, 2 globstar) plus a length-prefixed value, so no
+  glob syntax reaches the wire, an unknown kind is skipped by its length and
+  the advertisement ignored rather than the stream killed, and a later
+  revision can add kinds (in-segment stars, regexes) without a new message.
+  The `*` and `**` spellings exist only in `moq-path` / `@moq/path`.
 
 ### Where derived output lives
 
@@ -242,8 +250,6 @@ than announce state.
 
 ## Quests
 
-- [Draft](/quest/m2/wildcard/draft.md) - specify the wildcard advertisement in
-  moq-lite and mirror it in the moq-cluster extension
 - [Advertise](/quest/m2/wildcard/advertise.md) - moq-net encodes, forwards, and
   authorizes wildcard advertisements, without yet resolving one into a
   subscription
