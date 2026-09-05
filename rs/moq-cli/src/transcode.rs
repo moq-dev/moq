@@ -22,8 +22,10 @@ pub struct Args {
 	pub output: Option<String>,
 
 	/// A ladder rung as `height:bitrate` (pixels : bits per second), repeatable,
-	/// e.g. `--rung 720:2500000 --rung 360:600000`. Rungs at or above the source
-	/// are dropped at runtime. Defaults to a 1080p..240p ladder.
+	/// e.g. `--rung 720:2500000 --rung 360:600000`. Order doesn't matter, but the
+	/// rungs must rank: two rungs at one bitrate, or a taller rung that costs
+	/// less, is refused. Rungs at or above the source are dropped at runtime.
+	/// Defaults to a 240p..1080p ladder.
 	#[usage(long = "rung")]
 	rungs: Vec<RungArg>,
 
@@ -86,6 +88,28 @@ impl std::str::FromStr for AccelerationArg {
 /// Run the transcoder: subscribe to the source through the relay, publish the
 /// derivative back through the same session, and serve rungs until either ends.
 pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
+	// Resolve the ladder before touching the network: an ambiguous one is an
+	// operator typo, and reporting it after a dial and an announcement wait buries
+	// it under whatever the relay was doing.
+	let mut config = moq_transcode::Config::default();
+	if !args.rungs.is_empty() {
+		config.rungs =
+			moq_transcode::Ladder::new(args.rungs.iter().map(|rung| rung.0)).context("invalid --rung ladder")?;
+	}
+	config.encoder = match args.encoder.as_str() {
+		"auto" => moq_video::encode::Kind::Auto,
+		"hardware" => moq_video::encode::Kind::Hardware,
+		"software" => moq_video::encode::Kind::Software,
+		name => moq_video::encode::Kind::Named(name.to_string()),
+	};
+	config.decoder = match args.decoder.as_str() {
+		"auto" => moq_video::decode::Kind::Auto,
+		"hardware" => moq_video::decode::Kind::Hardware,
+		"software" => moq_video::decode::Kind::Software,
+		name => moq_video::decode::Kind::Named(name.to_string()),
+	};
+	config.resize.acceleration = args.resize_acceleration.0;
+
 	let source_path = moq_net::PathOwned::from(
 		moq.broadcast
 			.clone()
@@ -137,23 +161,6 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		}
 	};
 
-	let mut config = moq_transcode::Config::default();
-	if !args.rungs.is_empty() {
-		config.rungs = args.rungs.into_iter().map(|rung| rung.0).collect();
-	}
-	config.encoder = match args.encoder.as_str() {
-		"auto" => moq_video::encode::Kind::Auto,
-		"hardware" => moq_video::encode::Kind::Hardware,
-		"software" => moq_video::encode::Kind::Software,
-		name => moq_video::encode::Kind::Named(name.to_string()),
-	};
-	config.decoder = match args.decoder.as_str() {
-		"auto" => moq_video::decode::Kind::Auto,
-		"hardware" => moq_video::decode::Kind::Hardware,
-		"software" => moq_video::decode::Kind::Software,
-		name => moq_video::decode::Kind::Named(name.to_string()),
-	};
-	config.resize.acceleration = args.resize_acceleration.0;
 	// Point the derivative catalog at the source renditions so players fetch them from the
 	// source directly. An empty reference would name the derivative broadcast itself, which
 	// publishes the rungs and nothing else.
