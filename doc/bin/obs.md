@@ -11,6 +11,39 @@ OBS Studio install.
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a MoQ dock shows connection state and opens the advanced settings.
+  **Stream** is Go Live, token, stats, and timeline. Status is Connecting,
+  Connected, Reconnecting (libmoq is between connections), or Disconnected.
+  Reconnect delay / cap / give up live under Advanced. **Quality** is the OBS
+  source encode (off uses Settings > Output; on uses Auto / Quality /
+  Performance plus hardware vs software and H.264 / HEVC / AV1, AAC or Opus).
+  The **Version** tab lists the plugin and libmoq versions.
+  **Publish token** is optional (leave empty for public relays such as `/anon`).
+  Paste a URL with `?jwt=` into Relay URL and the dock peels the token into that field.
+  **Show stats** (on by default) lists the active Quality encode and negotiated
+  MoQ draft and dial URL scheme. **Show timeline** is five compact sparklines (RTT,
+  send, recv, loss, bytes sent) for the last minute, from `moq_session_stats`.
+  The Stream tab keeps a libmoq version footer; the **Version** tab links plugin
+  / libmoq docs plus [moq.dev](https://moq.dev) and [moq.pro](https://moq.pro).
+
+## Source quality and moq-transcode
+
+OBS publishes **one** hang mezzanine. It does not encode a viewer ladder inside
+the plugin. When a relay or moq.pro enables [`moq-transcode`](/bin/cli#transcode),
+the ladder catalog appears beside that source as `{broadcast}/transcode.hang`
+(the same path the `moq … transcode` CLI uses). Prefer a broadcast name ending
+in `.hang`, a canvas at least as tall as the top rung you want (1080p for the
+default ladder), and a source bitrate above the top rung ceiling (Quality
+targets 8 Mbps CBR so the default 5 Mbps 1080p rung can undercut it). The catalog
+carries coded size and configured bitrate so the transcoder can size rungs
+before measured rates arrive.
+
+Local check before moq.pro:
+
+```bash
+# OBS Go Live to e.g. my-obs.hang on a local relay, then:
+moq --client-connect https://localhost:4443/anon --broadcast my-obs.hang transcode
+# Watch my-obs.hang/transcode.hang
+```
 
 ## Install
 
