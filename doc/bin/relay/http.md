@@ -198,8 +198,8 @@ thing to look at when throughput sags with no errors anywhere. For actual drops,
 read the socket's own counters (`netstat -su`, `RcvbufErrors`).
 `moq_relay_uring_rx_exhausted_total` is the same shortage seen from userspace, a
 re-arm that found every buffer still held by an unread packet.
-`moq_relay_uring_tx_stalls_total` is the send-side equivalent, a send waiting on
-the staging pool at its ceiling.
+`moq_relay_uring_tx_stalls_total` is the send-side equivalent, counting each
+time the staging pool becomes drained at its ceiling and a send has to wait.
 
 `moq_relay_uring_wakes_total` counts the `futex` syscalls other threads had to
 make to wake a parked worker, which is the cost of work crossing threads rather

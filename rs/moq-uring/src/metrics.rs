@@ -119,8 +119,8 @@ pub struct Snapshot {
 	/// `sendmsg` operations staged. `tx_datagrams` over this is the GSO
 	/// batching actually achieved.
 	pub tx_sends: u64,
-	/// Send-buffer acquisitions that found the pool drained at its ceiling and
-	/// had to wait. Send-side backpressure.
+	/// Times the send-buffer pool became drained at its ceiling and an
+	/// acquisition had to wait. Send-side backpressure.
 	pub tx_stalls: u64,
 	/// Submission queue entries the kernel accepted.
 	pub submissions: u64,

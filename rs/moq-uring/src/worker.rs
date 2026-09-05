@@ -1134,6 +1134,7 @@ mod tests {
 		};
 		// The pool is one buffer deep and that one is checked out.
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert_eq!(metrics.snapshot().tx_stalls, 1);
 		tx.send(1200, to, 1200).expect("send");
 
@@ -1158,6 +1159,15 @@ mod tests {
 			"a re-arm with every buffer held went unreported: {:?}",
 			metrics.snapshot()
 		);
+
+		// A completed send ends the first stall. Draining the pool again starts
+		// exactly one new episode, however often its waiter is polled.
+		let Poll::Ready(Ok(_tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("completed tx buffer was not released");
+		};
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert_eq!(metrics.snapshot().tx_stalls, 2);
 	}
 
 	/// Timer churn is the thing #3122 needs a baseline for, so an arm, a

@@ -305,6 +305,8 @@ struct Tx {
 	bufs: Vec<TxSlot>,
 	free: Vec<u16>,
 	waiters: kio::WaiterList,
+	/// Whether an acquisition is already waiting for the drained pool.
+	stalled: bool,
 	/// Terminal failure, surfaced by `poll_acquire`.
 	error: Option<i32>,
 }
@@ -373,6 +375,7 @@ impl SockShared {
 		let mut tx = self.tx.borrow_mut();
 		debug_assert_eq!(tx.bufs[id as usize].in_flight, 0);
 		tx.free.push(id);
+		tx.stalled = false;
 		tx.waiters.wake();
 	}
 
@@ -387,6 +390,7 @@ impl SockShared {
 		slot.in_flight -= 1;
 		if slot.in_flight == 0 {
 			tx.free.push(id);
+			tx.stalled = false;
 			tx.waiters.wake();
 		}
 	}
@@ -524,6 +528,7 @@ impl Socket {
 			bufs: (0..tx_count).map(|_| TxSlot::new(config.tx_buffer_len)).collect(),
 			free: (0..tx_count).collect(),
 			waiters: kio::WaiterList::new(),
+			stalled: false,
 			error: None,
 		};
 
@@ -622,7 +627,10 @@ impl Socket {
 				armed: false,
 			}));
 		}
-		self.shared.metrics.tx_stalls.add(1);
+		if !tx.stalled {
+			tx.stalled = true;
+			self.shared.metrics.tx_stalls.add(1);
+		}
 		waiter.register(&mut tx.waiters);
 		Poll::Pending
 	}

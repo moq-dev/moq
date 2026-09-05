@@ -504,7 +504,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 	);
 	counter(
 		"moq_relay_uring_tx_stalls_total",
-		"Send-buffer acquisitions that found the pool drained at its ceiling and had to wait.",
+		"Times the send-buffer pool became drained at its ceiling and an acquisition had to wait.",
 		|snap| snap.tx_stalls,
 	);
 	counter(
