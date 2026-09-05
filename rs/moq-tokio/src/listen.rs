@@ -141,14 +141,13 @@ pub struct Config {
 	pub quic: Option<crate::quic::Config>,
 }
 
-/// One server's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
+/// One server's claim on a slot in a `SO_REUSEPORT` group, and the slot it
+/// names once bound.
 ///
-/// Crate-private on purpose: a shard is only meaningful inside a group that was
-/// bound once, in index order, and is never resized, and
-/// [`crate::worker::Workers`] is what holds that invariant here. A shard a
-/// caller could mint, clone, or bind twice would break steering with no error
-/// to show for it.
-pub(crate) use moq_sock::shard::Shard;
+/// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
+/// forms a group here, and a member a caller could mint for itself would bind
+/// outside one.
+pub(crate) use moq_sock::shard::{Member, Shard};
 
 /// The `--server-*` flags from before the accept side was named `listen`.
 ///
