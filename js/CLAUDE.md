@@ -12,7 +12,7 @@ Bun workspaces; members listed in the repo-root `package.json` (not in `js/`). D
 
 **Transport / protocol**
 
-- `@moq/net` (`net/`): browser networking. Connect to a relay, then publish/consume broadcasts/tracks/groups/frames over WebTransport (WebSocket fallback). Negotiates `moq-lite` (`lite/`) or IETF `moq-transport` (`ietf/`). Mirror of `rs/moq-net`. Optional `zod` + `@zod/mini` peer deps for `./zod` JSON-frame helpers.
+- `@moq/net` (`net/`): browser networking. Connect to a relay, then publish/consume broadcasts/tracks/groups/frames over WebTransport (WebSocket fallback). Negotiates `moq-lite` (`lite/`) or IETF `moq-transport` (`ietf/`). Mirror of `rs/moq-net`. `path.ts` holds both literal paths and `Pattern`/`Patterns` (the wildcard grammar grants and advertisements share), held to the same golden vectors as Rust (`rs/moq-net/tests/pattern.json`). Optional `zod` + `@zod/mini` peer deps for `./zod` JSON-frame helpers.
 - `@moq/wasm` (`wasm/`): experimental browser bindings for `rs/moq-wasm` (wasm-bindgen over `moq-net`); typed npm wrapper built via `just wasm`.
 
 **Container / catalog formats**

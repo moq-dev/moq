@@ -1,0 +1,1048 @@
+{
+	"$comment": "Golden vectors shared by rs/moq-net (tests/pattern.rs) and js/net (src/pattern.test.ts). Both test suites read this file, so the two implementations cannot drift apart silently.",
+	"parse": [
+		{
+			"text": "",
+			"segments": []
+		},
+		{
+			"text": "a",
+			"segments": [
+				{
+					"kind": "literal",
+					"value": "a"
+				}
+			]
+		},
+		{
+			"text": "a/b.hang",
+			"segments": [
+				{
+					"kind": "literal",
+					"value": "a"
+				},
+				{
+					"kind": "literal",
+					"value": "b.hang"
+				}
+			]
+		},
+		{
+			"text": "*",
+			"segments": [
+				{
+					"kind": "wildcard"
+				}
+			]
+		},
+		{
+			"text": "**",
+			"segments": [
+				{
+					"kind": "globstar"
+				}
+			]
+		},
+		{
+			"text": "a/*/**/b",
+			"segments": [
+				{
+					"kind": "literal",
+					"value": "a"
+				},
+				{
+					"kind": "wildcard"
+				},
+				{
+					"kind": "globstar"
+				},
+				{
+					"kind": "literal",
+					"value": "b"
+				}
+			]
+		},
+		{
+			"text": "**/transcode.pro",
+			"segments": [
+				{
+					"kind": "globstar"
+				},
+				{
+					"kind": "literal",
+					"value": "transcode.pro"
+				}
+			]
+		},
+		{
+			"text": "/a",
+			"error": "empty-segment"
+		},
+		{
+			"text": "a/",
+			"error": "empty-segment"
+		},
+		{
+			"text": "a//b",
+			"error": "empty-segment"
+		},
+		{
+			"text": "/",
+			"error": "empty-segment"
+		},
+		{
+			"text": "**/**",
+			"error": "multiple-globstars"
+		},
+		{
+			"text": "a/**/b/**",
+			"error": "multiple-globstars"
+		},
+		{
+			"text": "***",
+			"error": "invalid-segment"
+		},
+		{
+			"text": "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e/f",
+			"segments": null
+		},
+		{
+			"text": "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/a/b/c/d/e/f/g",
+			"error": "too-many-segments"
+		},
+		{
+			"text": "*.hang",
+			"segments": [
+				{
+					"kind": "partial",
+					"prefix": "",
+					"suffix": ".hang"
+				}
+			]
+		},
+		{
+			"text": "foo*",
+			"segments": [
+				{
+					"kind": "partial",
+					"prefix": "foo",
+					"suffix": ""
+				}
+			]
+		},
+		{
+			"text": "foo.*.hang",
+			"segments": [
+				{
+					"kind": "partial",
+					"prefix": "foo.",
+					"suffix": ".hang"
+				}
+			]
+		},
+		{
+			"text": "**/*.hang",
+			"segments": [
+				{
+					"kind": "globstar"
+				},
+				{
+					"kind": "partial",
+					"prefix": "",
+					"suffix": ".hang"
+				}
+			]
+		},
+		{
+			"text": "a*b*c",
+			"error": "invalid-segment"
+		},
+		{
+			"text": "*a*",
+			"error": "invalid-segment"
+		}
+	],
+	"literal": [
+		{
+			"path": "/foo//bar/",
+			"pattern": "foo/bar"
+		},
+		{
+			"path": "",
+			"pattern": ""
+		},
+		{
+			"path": "a/*",
+			"error": "invalid-segment"
+		},
+		{
+			"path": "**",
+			"error": "invalid-segment"
+		},
+		{
+			"path": "a.*",
+			"error": "invalid-segment"
+		}
+	],
+	"subtree": [
+		{
+			"path": "foo",
+			"pattern": "foo/**"
+		},
+		{
+			"path": "/",
+			"pattern": "**"
+		},
+		{
+			"path": "a/b/",
+			"pattern": "a/b/**"
+		}
+	],
+	"head": [
+		{
+			"pattern": "a/b/*/c",
+			"head": "a/b",
+			"literal": false,
+			"globstar": false
+		},
+		{
+			"pattern": "**/a",
+			"head": "",
+			"literal": false,
+			"globstar": true
+		},
+		{
+			"pattern": "a/b",
+			"head": "a/b",
+			"literal": true,
+			"globstar": false
+		},
+		{
+			"pattern": "",
+			"head": "",
+			"literal": true,
+			"globstar": false
+		},
+		{
+			"pattern": "a/**",
+			"head": "a",
+			"literal": false,
+			"globstar": true
+		},
+		{
+			"pattern": "a/b*/c",
+			"head": "a",
+			"literal": false,
+			"globstar": false
+		}
+	],
+	"matches": [
+		{
+			"pattern": "",
+			"path": "",
+			"expect": true
+		},
+		{
+			"pattern": "",
+			"path": "a",
+			"expect": false
+		},
+		{
+			"pattern": "a",
+			"path": "a",
+			"expect": true
+		},
+		{
+			"pattern": "a",
+			"path": "/a/",
+			"expect": true
+		},
+		{
+			"pattern": "a",
+			"path": "a/b",
+			"expect": false
+		},
+		{
+			"pattern": "a",
+			"path": "ab",
+			"expect": false
+		},
+		{
+			"pattern": "*",
+			"path": "a",
+			"expect": true
+		},
+		{
+			"pattern": "*",
+			"path": "",
+			"expect": false
+		},
+		{
+			"pattern": "*",
+			"path": "a/b",
+			"expect": false
+		},
+		{
+			"pattern": "**",
+			"path": "",
+			"expect": true
+		},
+		{
+			"pattern": "**",
+			"path": "a/b/c",
+			"expect": true
+		},
+		{
+			"pattern": "a/**",
+			"path": "a",
+			"expect": true
+		},
+		{
+			"pattern": "a/**",
+			"path": "a/b/c",
+			"expect": true
+		},
+		{
+			"pattern": "a/**",
+			"path": "b",
+			"expect": false
+		},
+		{
+			"pattern": "**/c",
+			"path": "c",
+			"expect": true
+		},
+		{
+			"pattern": "**/c",
+			"path": "a/b/c",
+			"expect": true
+		},
+		{
+			"pattern": "**/c",
+			"path": "a/c/b",
+			"expect": false
+		},
+		{
+			"pattern": "a/**/c",
+			"path": "a/c",
+			"expect": true
+		},
+		{
+			"pattern": "a/**/c",
+			"path": "a/x/y/c",
+			"expect": true
+		},
+		{
+			"pattern": "a/**/c",
+			"path": "a",
+			"expect": false
+		},
+		{
+			"pattern": "a/*/c",
+			"path": "a/x/c",
+			"expect": true
+		},
+		{
+			"pattern": "a/*/c",
+			"path": "a/c",
+			"expect": false
+		},
+		{
+			"pattern": "a/*/**",
+			"path": "a",
+			"expect": false
+		},
+		{
+			"pattern": "a/*/**",
+			"path": "a/b",
+			"expect": true
+		},
+		{
+			"pattern": "**/transcode.pro",
+			"path": "pid/foo.hang/transcode.pro",
+			"expect": true
+		},
+		{
+			"pattern": "**/transcode.pro",
+			"path": "pid/foo.transcode.pro",
+			"expect": false
+		},
+		{
+			"pattern": "pid/*/chat",
+			"path": "pid/room/chat",
+			"expect": true
+		},
+		{
+			"pattern": "pid/*/chat",
+			"path": "pid/room/x/chat",
+			"expect": false
+		},
+		{
+			"pattern": "**/*.hang",
+			"path": "pid/cam.hang",
+			"expect": true
+		},
+		{
+			"pattern": "**/*.hang",
+			"path": ".hang",
+			"expect": true
+		},
+		{
+			"pattern": "**/*.hang",
+			"path": "pid/cam.hang/x",
+			"expect": false
+		},
+		{
+			"pattern": "foo*",
+			"path": "foo",
+			"expect": true
+		},
+		{
+			"pattern": "foo*",
+			"path": "foobar",
+			"expect": true
+		},
+		{
+			"pattern": "foo*",
+			"path": "fo",
+			"expect": false
+		},
+		{
+			"pattern": "foo.*.hang",
+			"path": "foo..hang",
+			"expect": true
+		},
+		{
+			"pattern": "foo.*.hang",
+			"path": "foo.1.hang",
+			"expect": true
+		},
+		{
+			"pattern": "foo.*.hang",
+			"path": "foo.hang",
+			"expect": false
+		},
+		{
+			"pattern": "a*a",
+			"path": "a",
+			"expect": false
+		},
+		{
+			"pattern": "a*a",
+			"path": "aa",
+			"expect": true
+		}
+	],
+	"contains": [
+		{
+			"outer": "**",
+			"inner": "**",
+			"expect": true
+		},
+		{
+			"outer": "**",
+			"inner": "",
+			"expect": true
+		},
+		{
+			"outer": "**",
+			"inner": "a/*/b",
+			"expect": true
+		},
+		{
+			"outer": "",
+			"inner": "**",
+			"expect": false
+		},
+		{
+			"outer": "",
+			"inner": "",
+			"expect": true
+		},
+		{
+			"outer": "*",
+			"inner": "a",
+			"expect": true
+		},
+		{
+			"outer": "a",
+			"inner": "*",
+			"expect": false
+		},
+		{
+			"outer": "a/**",
+			"inner": "a",
+			"expect": true
+		},
+		{
+			"outer": "a/**",
+			"inner": "a/b/**",
+			"expect": true
+		},
+		{
+			"outer": "a/**",
+			"inner": "**",
+			"expect": false
+		},
+		{
+			"outer": "a/**",
+			"inner": "**/a",
+			"expect": false
+		},
+		{
+			"outer": "**/a",
+			"inner": "a",
+			"expect": true
+		},
+		{
+			"outer": "**/a",
+			"inner": "**/b/a",
+			"expect": true
+		},
+		{
+			"outer": "**/a",
+			"inner": "a/**",
+			"expect": false
+		},
+		{
+			"outer": "*/**",
+			"inner": "**",
+			"expect": false
+		},
+		{
+			"outer": "*/**",
+			"inner": "a/**",
+			"expect": true
+		},
+		{
+			"outer": "*/*/**",
+			"inner": "a/**",
+			"expect": false
+		},
+		{
+			"outer": "*/*/**",
+			"inner": "a/b/**",
+			"expect": true
+		},
+		{
+			"outer": "a/**/c",
+			"inner": "a/c",
+			"expect": true
+		},
+		{
+			"outer": "a/**/c",
+			"inner": "a/x/c",
+			"expect": true
+		},
+		{
+			"outer": "a/**/c",
+			"inner": "a/**/x/c",
+			"expect": true
+		},
+		{
+			"outer": "a/*/**/*",
+			"inner": "a/**/b",
+			"expect": false
+		},
+		{
+			"outer": "a/*/c",
+			"inner": "a/b/c",
+			"expect": true
+		},
+		{
+			"outer": "a/*/c",
+			"inner": "a/**/c",
+			"expect": false
+		},
+		{
+			"outer": "pid/**",
+			"inner": "pid/*/chat",
+			"expect": true
+		},
+		{
+			"outer": "pid/**",
+			"inner": "**/transcode.pro",
+			"expect": false
+		},
+		{
+			"outer": "*",
+			"inner": "*.hang",
+			"expect": true
+		},
+		{
+			"outer": "*.hang",
+			"inner": "*",
+			"expect": false
+		},
+		{
+			"outer": "*.hang",
+			"inner": "cam.hang",
+			"expect": true
+		},
+		{
+			"outer": "*.hang",
+			"inner": "cam.hang2",
+			"expect": false
+		},
+		{
+			"outer": "*.hang",
+			"inner": "*.hang",
+			"expect": true
+		},
+		{
+			"outer": "*.hang",
+			"inner": "cam*.hang",
+			"expect": true
+		},
+		{
+			"outer": "*.hang",
+			"inner": "cam*hang",
+			"expect": false
+		},
+		{
+			"outer": "foo*",
+			"inner": "foo.*.hang",
+			"expect": true
+		},
+		{
+			"outer": "foo.*",
+			"inner": "foo*",
+			"expect": false
+		},
+		{
+			"outer": "**/*.hang",
+			"inner": "pid/*/cam.hang",
+			"expect": true
+		}
+	],
+	"overlaps": [
+		{
+			"a": "a",
+			"b": "a",
+			"expect": true
+		},
+		{
+			"a": "a",
+			"b": "b",
+			"expect": false
+		},
+		{
+			"a": "a",
+			"b": "*",
+			"expect": true
+		},
+		{
+			"a": "a",
+			"b": "a/*",
+			"expect": false
+		},
+		{
+			"a": "a/**",
+			"b": "**/b",
+			"expect": true
+		},
+		{
+			"a": "a/**",
+			"b": "b/**",
+			"expect": false
+		},
+		{
+			"a": "a/*",
+			"b": "*/b",
+			"expect": true
+		},
+		{
+			"a": "a/*",
+			"b": "b/*",
+			"expect": false
+		},
+		{
+			"a": "*/*",
+			"b": "a/**",
+			"expect": true
+		},
+		{
+			"a": "*",
+			"b": "a/**",
+			"expect": true
+		},
+		{
+			"a": "*",
+			"b": "a/*/**",
+			"expect": false
+		},
+		{
+			"a": "**",
+			"b": "",
+			"expect": true
+		},
+		{
+			"a": "a/**/b",
+			"b": "**/c",
+			"expect": false
+		},
+		{
+			"a": "a/**/b",
+			"b": "**/*",
+			"expect": true
+		},
+		{
+			"a": "a/**/b",
+			"b": "x/**",
+			"expect": false
+		},
+		{
+			"a": "a/**/b",
+			"b": "**/x",
+			"expect": false
+		},
+		{
+			"a": "*.hang",
+			"b": "cam*",
+			"expect": true
+		},
+		{
+			"a": "*.hang",
+			"b": "cam.msf",
+			"expect": false
+		},
+		{
+			"a": "*.hang",
+			"b": "*.msf",
+			"expect": false
+		},
+		{
+			"a": "foo*",
+			"b": "foo.bar*",
+			"expect": true
+		},
+		{
+			"a": "foo*",
+			"b": "fob*",
+			"expect": false
+		},
+		{
+			"a": "a*b",
+			"b": "ab",
+			"expect": true
+		},
+		{
+			"a": "ab*",
+			"b": "*ab",
+			"expect": true
+		}
+	],
+	"specificity": {
+		"$comment": "Each list is strictly descending; each pair in `equal` is one tier.",
+		"descending": [
+			[
+				"a/b/c",
+				"a/b",
+				"a/*.hang",
+				"a/*",
+				"a/**",
+				"*.hang",
+				"*",
+				"**"
+			],
+			[
+				"a/**",
+				"**/a"
+			],
+			[
+				"a/*/b",
+				"a/*/**",
+				"a/**"
+			],
+			[
+				"*/*",
+				"*/**",
+				"**"
+			],
+			[
+				"cam*.hang",
+				"*.hang",
+				"*"
+			]
+		],
+		"equal": [
+			[
+				"*/a",
+				"*/b"
+			],
+			[
+				"*/a/**",
+				"*/**/a"
+			],
+			[
+				"*.hang",
+				"*.dash"
+			]
+		]
+	},
+	"rebase": [
+		{
+			"pattern": "**",
+			"root": "a",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "**/a",
+			"root": "a",
+			"expect": [
+				"",
+				"**/a"
+			]
+		},
+		{
+			"pattern": "a/**",
+			"root": "a",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "a/**",
+			"root": "a/b",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "a/**",
+			"root": "b",
+			"expect": []
+		},
+		{
+			"pattern": "a/b",
+			"root": "a",
+			"expect": [
+				"b"
+			]
+		},
+		{
+			"pattern": "a/b",
+			"root": "a/b",
+			"expect": [
+				""
+			]
+		},
+		{
+			"pattern": "a/b",
+			"root": "a/b/c",
+			"expect": []
+		},
+		{
+			"pattern": "*/b",
+			"root": "a",
+			"expect": [
+				"b"
+			]
+		},
+		{
+			"pattern": "a/*/c",
+			"root": "a/x",
+			"expect": [
+				"c"
+			]
+		},
+		{
+			"pattern": "a/**/b/c",
+			"root": "a/b",
+			"expect": [
+				"**/b/c",
+				"c"
+			]
+		},
+		{
+			"pattern": "a/**/b",
+			"root": "a/b/b",
+			"expect": [
+				"**/b",
+				""
+			]
+		},
+		{
+			"pattern": "**/b/c",
+			"root": "b",
+			"expect": [
+				"**/b/c",
+				"c"
+			]
+		},
+		{
+			"pattern": "",
+			"root": "",
+			"expect": [
+				""
+			]
+		},
+		{
+			"pattern": "",
+			"root": "a",
+			"expect": []
+		},
+		{
+			"pattern": "**",
+			"root": "",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "**",
+			"root": "/a//b/",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "*.hang/**",
+			"root": "cam.hang",
+			"expect": [
+				"**"
+			]
+		},
+		{
+			"pattern": "*.hang/**",
+			"root": "cam.msf",
+			"expect": []
+		},
+		{
+			"pattern": "**/*.hang",
+			"root": "a.hang",
+			"expect": [
+				"",
+				"**/*.hang"
+			]
+		}
+	],
+	"rooted": [
+		{
+			"pattern": "**",
+			"root": "a/b",
+			"expect": "a/b/**"
+		},
+		{
+			"pattern": "",
+			"root": "a",
+			"expect": "a"
+		},
+		{
+			"pattern": "*/c",
+			"root": "",
+			"expect": "*/c"
+		},
+		{
+			"pattern": "*/c",
+			"root": "/r//",
+			"expect": "r/*/c"
+		},
+		{
+			"pattern": "a",
+			"root": "*",
+			"error": "invalid-segment"
+		}
+	],
+	"union": [
+		{
+			"input": [
+				"a/b",
+				"a/c",
+				"a/*"
+			],
+			"reduced": [
+				"a/*"
+			]
+		},
+		{
+			"input": [
+				"a/**",
+				"a/b",
+				"**/c"
+			],
+			"reduced": [
+				"**/c",
+				"a/**"
+			]
+		},
+		{
+			"input": [
+				"**",
+				"a",
+				"*/**"
+			],
+			"reduced": [
+				"**"
+			]
+		},
+		{
+			"input": [
+				"b",
+				"a"
+			],
+			"reduced": [
+				"a",
+				"b"
+			]
+		},
+		{
+			"input": [],
+			"reduced": []
+		},
+		{
+			"input": [
+				"*.hang",
+				"cam.hang",
+				"*"
+			],
+			"reduced": [
+				"*"
+			]
+		},
+		{
+			"input": [
+				"*.hang",
+				"cam.hang"
+			],
+			"reduced": [
+				"*.hang"
+			]
+		}
+	],
+	"unionContains": [
+		{
+			"union": [
+				"a",
+				"a/*",
+				"a/*/**"
+			],
+			"pattern": "a/**",
+			"expect": false
+		},
+		{
+			"union": [
+				"a",
+				"a/*",
+				"a/*/**"
+			],
+			"pattern": "a/x/**",
+			"expect": true
+		},
+		{
+			"union": [
+				"**/c",
+				"a/**"
+			],
+			"pattern": "a/b",
+			"expect": true
+		},
+		{
+			"union": [],
+			"pattern": "",
+			"expect": false
+		}
+	]
+}

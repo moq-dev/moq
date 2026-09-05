@@ -26,6 +26,3 @@ exact v1 wire shape:
   cross-version interoperability vectors, including old-reader fail-closed
   behavior.
 
-## Required
-
-- [Matcher](/quest/m2/path-patterns/matcher.md)
