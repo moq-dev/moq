@@ -337,8 +337,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		const std::string next = message && *message ? message : "offline";
 		std::lock_guard<std::mutex> lock(session_mutex);
 		// Keep a more specific prior failure (unauthorized) over a generic offline blip.
-		if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason) || !LooksGenericOffline(next) ||
-		    IsAuthFailure(rc, next)) {
+		if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason) ||
+		    !LooksGenericOffline(next) || IsAuthFailure(rc, next)) {
 			last_failure_code = rc;
 			last_failure_reason = next;
 		}
