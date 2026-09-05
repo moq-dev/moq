@@ -16,9 +16,12 @@ Quinn and quiche backends, and the merge recorded matched throughput with a
 lower RSS. What remains is the gate that lets quiche go.
 
 Benchmark chat, media 1:1, media fanout, handshake churn, and idle-connection
-memory on `moq-uring` with noq against quiche, on the same worker and crypto
-configuration, with `just bench`. Adoption requires no material latency,
-capacity, or RSS regression and a written explanation of any CPU tradeoff.
+memory with `just bench`, on the same worker and crypto configuration, across
+four cells: noq and quiche on `moq-uring`, and noq and quinn on the tokio
+workers. noq on both runtimes is the matched control #3124 asked for, since
+quiche cannot serve per-core tokio workers; the report states which QUIC
+stack each runtime mode ran, so runtime and stack are never confounded again.
+Adoption requires no material latency, capacity, or RSS regression and a written explanation of any CPU tradeoff.
 
 Run the browser and interop gates on the noq path: `just test wasm`, the
 TypeScript interop cases, `just test smoke-full`, and connection draining
@@ -40,3 +43,7 @@ backend docs and feature matrix in the same PR.
   parity cannot be claimed without it
 - [Release the fork stack](/quest/m2/quic/release.md) - the relay must pin
   released noq sources before quiche goes
+
+## Closes
+
+- [#3124](https://github.com/moq-dev/moq/issues/3124) - the parity report is the matched runtime-versus-QUIC-stack measurement the issue asked for

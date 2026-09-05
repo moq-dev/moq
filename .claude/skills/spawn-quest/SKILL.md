@@ -36,11 +36,29 @@ conflating the two strands a quest forever:
   claimed. Delete the local ref too when it points at that same tip, or the
   agent cannot cut the branch it was told to cut.
 - **Real commits.** Do not cut a fresh branch over them. Hand the agent the
-  existing branch to continue, rebased onto its base. It still claims, with a
-  fresh UUID placeholder pushed under a lease pinned to the tip you inspected.
-  Two runs that both adopt the same branch would otherwise both skip the claim,
-  and a rebase that changes nothing gives neither of them the rejected push
-  that decides the race.
+  existing branch to continue, and name the inspected remote SHA, not just the
+  branch. A same-named local ref at an older or divergent tip is what a plain
+  checkout picks, and the lease only asserts the remote's old value, not that
+  the pushed history contains it, so rebasing that local ref and pushing it
+  would drop the remote-only commits while the lease passes.
+
+  The agent resets to that SHA with `git checkout -B <branch> <sha>` before
+  rebasing onto the base. Check for a local `refs/heads/<branch>` first. When
+  there is none, which is the ordinary case for a branch that only ever existed
+  on the remote, the reset creates it at the inspected tip and there is nothing
+  to lose. When one does exist, gate the reset on
+  `git merge-base --is-ancestor <local> <sha>`: a failure means the local ref
+  carries commits the remote does not, and resetting would trade the
+  remote-loss bug for a local one, so leave the ref alone and treat the quest
+  as claimed. Test for the ref rather than inferring it from the ancestry
+  check, which exits 128 against a missing ref instead of answering.
+
+  It still claims, pushing a fresh UUID placeholder as `git push --force-with-lease=<branch>:<sha> origin HEAD:refs/heads/<branch>`. Spell the
+  lease out: a bare `--force-with-lease` takes its expected value from the
+  remote-tracking ref that the fetch just updated, so it asserts nothing. Two
+  runs adopting the same branch would otherwise both skip the claim, and a
+  rebase that changes nothing gives neither of them the rejected push that
+  decides the race.
 - **Checked out in a worktree, or carrying an open PR.** Treat the quest as
   claimed and take it out of the pool.
 
@@ -78,9 +96,14 @@ itself. Instruct it to:
   it with an empty placeholder commit whose message contains a freshly
   generated UUID, pushed immediately with `git push origin HEAD` after
   pointing the upstream at the base. When triage hands over an existing branch to
-  continue, rebase it onto the base and claim it the same way, but push the
-  placeholder with `--force-with-lease` pinned to the tip triage inspected, so
-  a second adopter loses the race rather than joining it. The UUID is what makes the claim a race:
+  continue, reset to the SHA triage inspected, point the upstream at the base
+  with `git branch --set-upstream-to=origin/<base>`, rebase onto it, and claim
+  it with the same explicit lease (`--force-with-lease=<branch>:<sha>`, pushing
+  `HEAD:refs/heads/<branch>`), so a second adopter loses the race rather than
+  joining it. Set that upstream explicitly: `git checkout -B` leaves the branch
+  without one and an explicit refspec push does not add one, so the
+  diff-aware `just check` and `just test` would silently fall back to
+  `origin/main` and drag every dev-only commit into their scope. The UUID is what makes the claim a race:
   two agents claiming the same quest from the same base in the same second
   otherwise produce the same commit object, and the loser's push succeeds as
   already-up-to-date instead of being rejected. A rejected push lost the race:

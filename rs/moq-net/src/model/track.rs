@@ -48,10 +48,15 @@ const EVICT_SLACK: usize = 64;
 /// groups, small enough that a write never scans a long queue.
 const EVICT_SCAN: usize = 4;
 
-/// One bounded pass over the eviction order at a fixed cache time.
+/// One pass over the eviction order at a fixed cache time.
 #[derive(Clone, Copy)]
 pub(super) struct ExpiryScan {
 	start: usize,
+	// Ceiling on how many entries this pass examines. `EVICT_SCAN` from the write
+	// path, the whole queue from the pool's sweep. Either way the pass stops once it
+	// has retained `EVICT_SCAN` entries, so its cost tracks what it reclaims rather
+	// than how much the track has cached.
+	width: usize,
 	now: u64,
 	max_ticks: u64,
 }
@@ -577,7 +582,8 @@ impl TrackState {
 	/// entries beyond one scan window can't be starved by fresh (recently read,
 	/// fetched, or written) entries in front of them: every position is revisited
 	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
-	/// byte budget reclaims the remainder under memory pressure.
+	/// byte budget reclaims the remainder under memory pressure, and the pool's sweep
+	/// ([`Self::expiry_scan_full`]) covers a track that stopped writing entirely.
 	pub(super) fn evict_expired(&mut self) {
 		let scan = self.expiry_scan();
 		self.evict_expired_scan(scan);
@@ -587,17 +593,41 @@ impl TrackState {
 	pub(super) fn expiry_scan(&self) -> ExpiryScan {
 		ExpiryScan {
 			start: self.cache.next_expiry_scan(EVICT_SCAN),
+			width: EVICT_SCAN,
+			now: self.cache.pool().now(),
+			max_ticks: self.cache.pool().expiry_ticks(),
+		}
+	}
+
+	/// Describe a scan that drains the stale front of the eviction order, for the
+	/// pool's sweep.
+	///
+	/// A write's rotating window is fine while writes keep coming, because the next
+	/// one revisits the rest. The sweep is the only thing running on a track nobody
+	/// writes, so that window would take a backlog's length in sweeps to reach the
+	/// oldest entry. This starts at the front, where the oldest entries are, and the
+	/// shared stop rule ends it once the front stops yielding victims. A track that
+	/// went quiet has its whole backlog stale and contiguous there, so one sweep takes
+	/// all of it; a track with nothing due costs `EVICT_SCAN` entries, not its depth.
+	pub(super) fn expiry_scan_drain(&self) -> ExpiryScan {
+		ExpiryScan {
+			start: 0,
+			width: self.evict.len(),
 			now: self.cache.pool().now(),
 			max_ticks: self.cache.pool().expiry_ticks(),
 		}
 	}
 
 	/// Whether an expiry scan would change observable track state.
+	///
+	/// Mirrors [`Self::evict_expired_scan`]'s walk exactly, stop rule included: a memo
+	/// that scanned further would report work the scan itself will not do.
 	pub(super) fn expiry_mutation_due(&self, scan: ExpiryScan) -> bool {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
-			for step in 0..len.min(EVICT_SCAN) {
+			let mut retained = 0;
+			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
 					continue;
@@ -610,6 +640,10 @@ impl TrackState {
 						&& scan.now.saturating_sub(slot.group.cache_accessed_tick()) > scan.max_ticks)
 				{
 					return true;
+				}
+				retained += 1;
+				if retained >= EVICT_SCAN {
+					break;
 				}
 			}
 		}
@@ -624,12 +658,14 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Apply a scan previously selected by [`Self::expiry_scan`].
+	/// Apply a scan previously selected by [`Self::expiry_scan`] or
+	/// [`Self::expiry_scan_drain`].
 	pub(super) fn evict_expired_scan(&mut self, scan: ExpiryScan) {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
-			for step in 0..len.min(EVICT_SCAN) {
+			let mut retained = 0;
+			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
 					continue;
@@ -647,6 +683,13 @@ impl TrackState {
 				if Some(sequence) == self.latest_group
 					|| scan.now.saturating_sub(slot.group.cache_accessed_tick()) <= scan.max_ticks
 				{
+					// Nothing to reclaim here. The front of the queue is the oldest
+					// content, so a run of these means the rest is fresher still: stop
+					// rather than walk a whole cache to find nothing.
+					retained += 1;
+					if retained >= EVICT_SCAN {
+						break;
+					}
 					continue;
 				}
 				// Take the group out of the cache and abort it, so any consumer
@@ -4504,7 +4547,11 @@ mod test {
 
 	/// Mint a track under an origin whose pool has the given wall-clock LRU window.
 	fn track_producer_expiring(name: impl Into<Arc<str>>, expiry: impl Into<Option<Duration>>) -> Producer {
-		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
+		track_producer_pooled(name, cache::Pool::new(cache::Config::default().with_expiry(expiry)))
+	}
+
+	/// Mint a track under an origin caching into `pool`.
+	fn track_producer_pooled(name: impl Into<Arc<str>>, pool: cache::Pool) -> Producer {
 		let origin = crate::origin::Info::default().with_pool(pool);
 		Producer::new(
 			Arc::new(broadcast::Info {
@@ -4514,6 +4561,50 @@ mod test {
 			name,
 			None,
 		)
+	}
+
+	/// The write path is not the only thing that runs expiry: a pool sweep reclaims a
+	/// track's idle groups even when the track never writes again, which is the only
+	/// bound on a publisher that stalls with a group still open.
+	#[tokio::test]
+	async fn pool_sweep_expires_without_a_write() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let mut stalled = producer.append_group().unwrap(); // seq 0, left open
+		stalled.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		producer.append_group().unwrap(); // seq 1, the live edge
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.sweep();
+
+		assert!(
+			!producer.state.read().lookup.contains_key(&0),
+			"the sweep reclaimed an idle open group with no write behind it"
+		);
+	}
+
+	/// One sweep drains a whole idle backlog, not a rotating window of it: a quiet
+	/// track has no writes left to revisit the rest of the queue with, so a bounded
+	/// pass would leave the oldest groups parked for a backlog's length in windows.
+	#[tokio::test]
+	async fn pool_sweep_drains_a_deep_backlog() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+
+		// Comfortably more than one write-driven scan window (EVICT_SCAN).
+		let backlog = 4 * EVICT_SCAN;
+		for _ in 0..backlog {
+			let mut group = producer.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		producer.append_group().unwrap(); // the live edge, always protected
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.sweep();
+
+		let state = producer.state.read();
+		let stale = (0..backlog as u64).filter(|seq| state.lookup.contains_key(seq)).count();
+		assert_eq!(stale, 0, "one sweep reclaimed the whole idle backlog");
 	}
 
 	#[tokio::test]
