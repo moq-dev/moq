@@ -20,7 +20,7 @@ sudo apt update && sudo apt install moq-relay
 
 The package drops a `moq-relay.service` systemd unit and an
 `/etc/moq-relay/relay.toml` config file. See
-[Linux Installation](https://doc.moq.dev/setup/linux) for the full
+[Linux Installation](https://doc.moq.dev/setup/install) for the full
 walkthrough.
 
 ### Fedora / RHEL / Rocky / AlmaLinux

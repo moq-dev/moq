@@ -1,90 +1,67 @@
 ---
 title: Production Deployment
-description: Deploy moq-relay with production networking, TLS, and authentication
+description: Run moq-relay publicly with TLS, authentication, and host tuning
 ---
 
 # Production Deployment
 
-A production relay needs a reachable QUIC endpoint, a trusted TLS certificate,
-and an explicit access policy. Start with a working local configuration, then
-make each of these changes before exposing it publicly.
+A public relay needs a reachable UDP port, a trusted certificate, and an
+explicit access policy. Start from the local config and change these:
 
-## Deployment checklist
-
-1. Assign the relay a stable hostname.
-2. Route the configured UDP port to the relay for QUIC and WebTransport.
-3. Route TCP if the relay also serves HTTPS, WebSocket, or HTTP endpoints.
-4. Install a certificate whose names include the public hostname.
-5. Configure [authentication](/bin/relay/auth); do not leave the entire path
-   tree anonymous unless that is intentional.
-6. Bind operational endpoints only where trusted monitoring systems can reach
-   them.
-7. Raise UDP socket limits on Linux and monitor startup warnings.
-
-The [relay configuration reference](/bin/relay/config) documents the relevant
-`server`, `server.tls`, `web`, `internal`, and `auth` sections.
-
-## Networking and TLS
-
-QUIC uses UDP and performs TLS in the relay process. Network infrastructure must
-forward UDP to a relay that can terminate the QUIC connection. If HTTPS or the
-WebSocket fallback is enabled, forward the corresponding TCP port as well.
-
-Use a certificate from a CA trusted by your clients. QUIC and HTTPS/WSS have
-separate TLS sections, although they can reuse the same certificate files:
+1. Give the relay a stable hostname and forward its UDP port (QUIC and WebTransport). Forward TCP too if you enable HTTPS or the WebSocket fallback.
+2. Install a publicly trusted certificate. Generated certificates and disabled verification are for development.
+3. Configure [authentication](/bin/relay/auth). Leave nothing anonymous unless you mean to.
+4. Keep the operational endpoints (`/metrics`, `/nodes`) on the `[internal]` listener, bound to loopback or a private network.
+5. Raise Linux UDP socket buffers (below).
 
 ```toml
+[server]
+bind = "[::]:443"
+
 [server.tls]
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 
+# HTTPS and WebSocket fallback on TCP. The same certificate works.
 [web.https]
 listen = "[::]:443"
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+[auth]
+key = "/etc/moq/public.jwk"
+
+[internal]
+listen = "127.0.0.1:9101"
 ```
 
-Generated certificates and disabled verification are intended for development.
+Certificate files are watched and reloaded for new connections. See the
+[configuration reference](/bin/relay/config) for every section.
 
-Browser clients can use certificate fingerprint verification for short-lived
-self-signed development certificates. Native clients can use custom root CAs,
-but a public service should normally use a publicly trusted certificate.
+## Socket buffers
 
-## Access and topology
-
-Use JWT authentication to scope which paths a client can publish or subscribe
-to. Keep operational HTTP endpoints on the `internal` listener when they should
-not be public.
-
-For multiple regions or failure domains, connect relays with the
-[clustering configuration](/bin/relay/cluster). Each relay should have a stable
-external URL and a topology chosen for the deployment. Clustering complements
-load distribution; it does not decide how clients discover or select an entry
-relay.
-
-## Linux socket buffers
-
-A relay multiplexes connections over UDP sockets. If an incoming burst exceeds
-the kernel socket buffer, packets are dropped before the relay can process them.
-
-`moq-relay` requests an 8 MiB buffer in each direction. Linux may clamp that
-request to `net.core.rmem_max` and `net.core.wmem_max`; the relay logs a warning
-when the granted size is too small. Raise both limits and persist them across
-reboots:
+The relay asks for 8 MiB UDP buffers and logs a warning when the kernel clamps
+them. On Linux, raise the limits and persist them:
 
 ```bash
-printf 'net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n' | \
-  sudo tee /etc/sysctl.d/60-moq.conf
+printf 'net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n' | sudo tee /etc/sysctl.d/60-moq.conf
 sudo sysctl --system
 ```
 
-macOS uses `kern.ipc.maxsockbuf`. Windows sizes each socket directly and does
-not use these Linux limits.
+macOS uses `kern.ipc.maxsockbuf`; Windows sizes each socket directly.
 
-## Verify the deployment
+## Scaling out
 
-- Connect with [moq-cli](/bin/cli) from outside the relay network.
-- Publish and subscribe through the paths allowed by a test token.
-- Check the [health and metrics endpoints](/bin/relay/http).
-- Confirm startup logs show the expected certificate, listeners, and socket
-  buffer sizes.
+Connect relays into a [cluster](/bin/relay/cluster) to serve multiple regions
+or add redundancy. Clustering routes broadcasts between relays; how clients
+pick an entry relay (DNS, anycast, a load balancer) is up to you. `/health`
+is the liveness probe.
+
+If you would rather not run infrastructure, [moq.pro](https://moq.pro) hosts
+relays behind an API.
+
+## Verify
+
+- Connect with [moq-cli](/bin/cli) from outside the network and publish with a test token.
+- Watch it with the [web player](/lib/js/watch) or `moq play`.
+- Check [`/health` and `/metrics`](/bin/relay/http), and confirm the startup log shows the expected listeners, certificate, and buffer sizes.
