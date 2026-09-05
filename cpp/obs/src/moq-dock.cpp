@@ -2,6 +2,7 @@
 #include "moq-dock.h"
 #include "moq-advanced-dialog.h"
 #include "moq-output.h"
+#include "moq-quality-defaults.h"
 #include "moq-settings.h"
 #include "logger.h"
 
@@ -643,7 +644,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	});
 	connect(qualityToggle, &QCheckBox::toggled, this, &MoQDock::OnQualityToggled);
 	connect(profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-		RefreshQualityOptions();
+		// Profile owns the recommended path / codec / encoder / audio. Path and
+		// codec edits only rebuild the dependent lists without wiping those picks.
+		RefreshQualityOptions(true);
 		SaveSettings();
 	});
 	connect(pathCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
@@ -751,25 +754,27 @@ void MoQDock::OnQualityToggled(bool enabled)
 	SaveSettings();
 }
 
-void MoQDock::RefreshQualityOptions()
+void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 {
 	const auto offers = EnumerateEncoders();
 
-	bool haveHw = false;
+	std::vector<MoQEncoderCapability> caps;
+	caps.reserve(offers.size());
 	QStringList hwNames;
 	for (const auto &o : offers) {
-		if (!o.video)
-			continue;
-		if (o.hardware) {
-			haveHw = true;
-			if (!hwNames.contains(o.display))
-				hwNames.append(o.display);
-		}
+		caps.push_back({o.codec.toStdString(), o.hardware, o.video});
+		if (o.video && o.hardware && !hwNames.contains(o.display))
+			hwNames.append(o.display);
 	}
 
-	if (profileCombo->currentData().toString() == "auto") {
+	const QString profile = profileCombo->currentData().toString();
+	const MoQQualityDefaults recommended = RecommendQualityDefaults(profile.toStdString(), caps);
+	const bool haveHw = recommended.path == "hardware";
+	const bool high = recommended.high;
+
+	if (applyProfileDefaults || profile == "auto") {
 		QSignalBlocker bPath(pathCombo);
-		SelectComboData(pathCombo, haveHw ? "hardware" : "software");
+		SelectComboData(pathCombo, QString::fromStdString(recommended.path));
 	}
 
 	const QString savedCodec = videoCodecCombo->currentData().toString();
@@ -807,7 +812,9 @@ void MoQDock::RefreshQualityOptions()
 	if (videoCodecCombo->count() == 0)
 		videoCodecCombo->addItem("H.264 (fallback)", "h264");
 
-	if (!savedCodec.isEmpty())
+	if (applyProfileDefaults)
+		SelectComboData(videoCodecCombo, QString::fromStdString(recommended.video_codec));
+	else if (!savedCodec.isEmpty())
 		SelectComboData(videoCodecCombo, savedCodec);
 	else
 		videoCodecCombo->setCurrentIndex(0);
@@ -832,7 +839,9 @@ void MoQDock::RefreshQualityOptions()
 		}
 	}
 
-	if (!savedEncoder.isEmpty())
+	if (applyProfileDefaults)
+		SelectComboData(videoEncoderCombo, QString::fromStdString(recommended.video_encoder));
+	else if (!savedEncoder.isEmpty())
 		SelectComboData(videoEncoderCombo, savedEncoder);
 	else
 		videoEncoderCombo->setCurrentIndex(0);
@@ -853,15 +862,21 @@ void MoQDock::RefreshQualityOptions()
 	if (audioCodecCombo->count() == 0)
 		audioCodecCombo->addItem("AAC (fallback)", "aac");
 
-	if (!savedAudio.isEmpty())
+	if (applyProfileDefaults)
+		SelectComboData(audioCodecCombo, QString::fromStdString(recommended.audio_codec));
+	else if (!savedAudio.isEmpty())
 		SelectComboData(audioCodecCombo, savedAudio);
 	else
 		audioCodecCombo->setCurrentIndex(0);
 
 	QString detected = haveHw ? QString("Detected: hardware available (%1)").arg(hwNames.join(", "))
 				  : QString("Detected: software encoders only");
-	if (profileCombo->currentData().toString() == "auto")
+	if (profile == "auto")
 		detected += haveHw ? " · Auto → Quality" : " · Auto → Performance";
+	else if (high)
+		detected += QStringLiteral(" · Quality · 8 Mbps");
+	else
+		detected += QStringLiteral(" · Performance · 2.5 Mbps");
 	detectedLabel->setText(detected);
 }
 
@@ -994,11 +1009,11 @@ bool MoQDock::CreateTranscodeEncoders()
 {
 	const auto offers = EnumerateEncoders();
 	const QString profile = profileCombo->currentData().toString();
-	const bool high = profile == "high" || (profile == "auto" && pathCombo->currentData().toString() == "hardware");
+	const bool preferHw = pathCombo->currentData().toString() != "software";
+	const bool high = profile == "high" || (profile == "auto" && preferHw);
 	const QString codec = videoCodecCombo->currentData().toString();
 	const QString encoderChoice = videoEncoderCombo->currentData().toString();
 	const QString audioChoice = audioCodecCombo->currentData().toString();
-	const bool preferHw = pathCombo->currentData().toString() != "software";
 
 	QString videoId;
 	if (encoderChoice != "auto" && !encoderChoice.isEmpty()) {
