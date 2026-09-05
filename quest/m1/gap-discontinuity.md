@@ -6,7 +6,8 @@ A consumer resets codec state and its timeline whenever the group sequence it
 delivers has a hole it cannot prove harmless, whatever made it: the publisher
 skipped a sequence to declare a break, the relay or the subscriber's budget
 shed a group, or a group was lost. A hole is harmless only when the previous
-group's end equals the next group's first timestamp, which keeps the legal
+group's end meets the next group's first timestamp within the rounding
+tolerance the js consumer already uses (`CONTIGUITY_TOLERANCE`), which keeps the legal
 non-sequential numbering (DTS-derived ids, the HLS importer's packed epoch
 bits) playing through. No signal that has to arrive carries the reset,
 because moq-lite is lossy and any marker group can be shed before the
@@ -33,8 +34,10 @@ never sees the marker and the reset is lost end to end (#3291).
   declares a discontinuity by skipping at least one group sequence. A consumer
   MUST reset codec state, reapplying startup delay and pre-skip, before
   decoding the first group after a gap in the sequence it delivers, declared
-  or not, unless the previous group's end equals the next group's first
-  timestamp. Video knows its end from the
+  or not, unless the previous group's end meets the next group's first
+  timestamp within a rounding tolerance of about a microsecond, since a
+  1024-sample AAC frame has no integer microsecond duration and independently
+  rounded stamps differ by one. Video knows its end from the
   [duration marker](/quest/m2/duration-marker.md); audio from its
   codec-defined frame durations. An empty group is permitted and carries no
   meaning. Group sequences stay free to be non-sequential.

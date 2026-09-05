@@ -2,9 +2,10 @@
 
 ## Goal
 
-In the legacy (hang) and LOC containers, every video group ends with an empty
-frame stamped at the exclusive end of its last frame, so a group's last frame
-has a duration without peeking at the next group. Audio writes no empty
+In the legacy (hang) container every video group ends with an empty frame
+stamped at the exclusive end of its last frame, so a group's last frame has a
+duration without peeking at the next group, and the LOC consumers are ready
+to skip the same marker before LOC producers start writing it. Audio writes no empty
 frames: its durations are codec-defined, and the end-of-track marker and its
 terminal-packet rule go. CMAF is untouched, since it carries sample durations.
 An empty frame is never submitted to a decoder and never means the track
