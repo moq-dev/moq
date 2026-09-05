@@ -21,16 +21,23 @@ func (s *stubHandle) Destroy() {
 // its context expires, and the caller returns ctx.Err() with the handle already
 // allocated; left to the Go finalizer it stays live in the meantime, which for a
 // subscribe is a stream still running on the wire and for an Accept is an
-// incoming request nobody answers. An expired context here is what a lost
-// select race is downstream: a result nobody is waiting for.
+// incoming request nobody answers.
+//
+// The call parks until the context is cancelled, so the deadline branch wins
+// without a race, and only then produces the handle nobody is left to receive.
 func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	stub := &stubHandle{destroyed: make(chan struct{})}
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	started := make(chan struct{})
 	finish := make(chan struct{})
+	stub := &stubHandle{destroyed: make(chan struct{})}
+
+	go func() {
+		<-started
+		cancelCtx()
+	}()
 
 	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+		close(started)
 		<-finish
 		return stub, nil
 	})
@@ -41,8 +48,6 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 		t.Fatalf("val = %v, want nil", val)
 	}
 
-	// The call completes after the caller has gone, which is the case that has
-	// nobody left to hand the handle to.
 	close(finish)
 	select {
 	case <-stub.destroyed:
@@ -55,22 +60,53 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 // server has stopped. Destroying that is a nil dereference, so the release has
 // to skip it.
 func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	returned := make(chan struct{})
 
-	done := make(chan struct{})
+	go func() {
+		<-started
+		cancelCtx()
+	}()
+
 	_, err := runHandle(ctx, nil, func() (*stubHandle, error) {
-		defer close(done)
+		close(started)
+		<-finish
+		close(returned)
 		return nil, nil
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 
-	<-done
-	// The release runs on its own goroutine, so a panic there takes the process
-	// down rather than failing here; give it a moment to happen.
+	close(finish)
+	<-returned
+	// The release runs on its own goroutine, so a nil dereference there takes the
+	// process down rather than failing here; give it a moment to happen.
 	time.Sleep(50 * time.Millisecond)
+}
+
+// A context that is already done starts no call at all, so a request that would
+// have resolved immediately never reaches the native side.
+func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	cancelCtx()
+
+	called := false
+	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+		called = true
+		return &stubHandle{destroyed: make(chan struct{})}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if val != nil {
+		t.Fatalf("val = %v, want nil", val)
+	}
+	if called {
+		t.Fatal("the call ran for a context that was already done")
+	}
 }
 
 // A call that beats its context keeps its result: the reconciliation must not

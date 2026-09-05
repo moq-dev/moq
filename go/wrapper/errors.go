@@ -112,6 +112,15 @@ type handle interface {
 // deadline and the result are both ready, so a call can succeed and still lose,
 // and the handle it produced is live either way.
 func run[T any](ctx context.Context, cancel func(), call func() (T, error), release func(T)) (T, error) {
+	// A context that is already done starts no native work at all. Racing it
+	// instead would let a call that resolves immediately (a subscribe to a track
+	// already there) win the select and hand back a live handle the caller asked
+	// not to have, and every such call has side effects on the way.
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err
+	}
+
 	type result struct {
 		val T
 		err error
