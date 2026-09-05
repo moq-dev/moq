@@ -1289,8 +1289,10 @@ mod tests {
 		assert!(playback.pending().is_some(), "the final snapshot was never offered");
 		assert!(!playback.done(), "playback ended with a replacement still unread");
 
-		// Read it, find nothing playable, and only then stop.
+		// Read it for both halves, the way the selection pass does, find nothing
+		// playable in it, and only then stop.
 		playback.read(Kind::Video);
+		playback.read(Kind::Audio);
 		assert!(playback.done());
 	}
 
