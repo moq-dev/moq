@@ -1,225 +1,265 @@
-//! The ladder a transcoder publishes for one source, and the rungs serving it.
+//! The output ladder: rungs in a canonical order, or no ladder at all.
 //!
-//! The ladder is sized against the source picture, so it has to follow it.
-//! `moq_video::encode::publish_capture` opens its source twice by design (once
-//! to probe the mode, once when the first subscriber arrives), and a window
-//! capture derives its geometry from the window on every open, so the picture a
-//! ladder was resolved against is routinely not the one the source ends up
-//! carrying. A reconnecting publisher and a renegotiated screen share do the
-//! same thing later in the stream.
-//!
-//! So every source catalog snapshot re-resolves the ladder and diffs it: rungs
-//! the new picture has no room for retire, rungs it makes room for are added,
-//! and the rest carry on untouched. A rung whose picture changed retires and its
-//! replacement is published under a fresh name, because a retired track ends for
-//! good (see [`catalog::Names`]).
+//! Everything downstream of the ladder reads "the next lower rendition", so a
+//! ladder has to have one. [`Ladder`] resolves the configured rungs into
+//! strictly ascending maximum bitrate and refuses the shapes that have no
+//! lower-is-lower reading, rather than picking an order for them and producing
+//! a ranking that looks right while protecting the wrong rendition.
 
-use std::collections::HashMap;
+/// One candidate output rendition: a target resolution (by height) and bitrate.
+///
+/// The width is derived from the source aspect ratio at runtime, and a rung is
+/// only offered when it is strictly below the source (see [`Ladder`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Rung {
+	/// Output height in pixels. Rounded down to even when it enters a [`Ladder`]
+	/// (I420 chroma is 2x2).
+	pub height: u32,
 
-use hang::catalog::{Video, VideoConfig};
+	/// The configured maximum: the CBR target and the bitrate advertised in the
+	/// derivative catalog.
+	pub bitrate: u64,
+}
 
-use crate::catalog::{self, Names, Published};
-use crate::feed::Feed;
-use crate::{Config, Error, active, rung};
+impl Rung {
+	/// A rung at `height` pixels and `bitrate` bits per second.
+	pub fn new(height: u32, bitrate: u64) -> Self {
+		Self { height, bitrate }
+	}
+}
 
-/// Everything a transcoder publishes for one source rendition.
-pub(crate) struct Ladder {
-	source: moq_net::broadcast::Consumer,
-	config: Config,
-	active: active::Producer,
+/// Why a set of rungs is not a ladder.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// A rung that encodes nothing: a height that rounds to zero pixels, or no
+	/// bitrate to spend.
+	#[error("rung {height}p at {bitrate} bps encodes nothing")]
+	Empty {
+		/// The configured height, before rounding to even.
+		height: u32,
+		/// The configured maximum, in bits per second.
+		bitrate: u64,
+	},
 
-	/// The source rendition the rungs are sized against.
-	name: String,
-	rendition: VideoConfig,
-	/// The shared live decode of that rendition: one subscription and one
-	/// decoder for every rung serving off it.
-	feed: Feed,
+	/// Two rungs claim the same maximum bitrate, so neither one is the lower of
+	/// the pair.
+	#[error("rungs {first}p and {second}p share a maximum of {bitrate} bps")]
+	DuplicateBitrate {
+		/// The shared maximum, in bits per second.
+		bitrate: u64,
+		/// The shorter rung's height, in pixels.
+		first: u32,
+		/// The taller rung's height, in pixels.
+		second: u32,
+	},
 
-	/// The rungs published for it, each with its catalog entry.
-	rungs: Vec<Published>,
-	/// The track names handed out so far, so a re-resolved rung never reuses one.
-	names: Names,
-	/// The retirement signal for each rung name being served. Keyed by name
-	/// rather than reaped when a task exits, since the entry a name maps to is
-	/// always the newest task for it and a signal sent to one that already ended
-	/// goes nowhere.
-	serving: HashMap<String, tokio::sync::watch::Sender<bool>>,
+	/// Resolution runs backwards against bitrate: a rung costs more than the one
+	/// below it without being taller, so bitrate and picture disagree on which
+	/// rendition is lower.
+	#[error("rung {height}p at {bitrate} bps does not rise above {below_height}p at {below_bitrate} bps")]
+	Unordered {
+		/// The more expensive rung's height, in pixels.
+		height: u32,
+		/// The more expensive rung's maximum, in bits per second.
+		bitrate: u64,
+		/// The cheaper rung's height, in pixels.
+		below_height: u32,
+		/// The cheaper rung's maximum, in bits per second.
+		below_bitrate: u64,
+	},
+}
+
+/// The output ladder, in canonical order: strictly ascending maximum bitrate,
+/// and strictly ascending height with it.
+///
+/// Built through [`Ladder::new`], which is the only way to hold one, so a rung's
+/// neighbour in [`Ladder::rungs`] is always the next rendition up or down. The
+/// rungs are still filtered against the source at runtime (nothing above it
+/// survives), which drops rungs but never reorders them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ladder {
+	// Ascending by bitrate, and by height with it. Heights are even.
+	rungs: Vec<Rung>,
 }
 
 impl Ladder {
-	/// Resolve the ladder against the chosen source rendition, probing a catalog
-	/// entry per rung.
-	pub(crate) async fn new(
-		source: moq_net::broadcast::Consumer,
-		config: Config,
-		active: active::Producer,
-		name: String,
-		rendition: VideoConfig,
-	) -> Result<Self, Error> {
-		// One shared live decode for every rung of this source: N active rungs
-		// share one subscription and one decoder instead of N.
-		let feed = Feed::new(source.track(&name)?, rendition.clone(), config.decoder.clone());
-
-		let mut ladder = Self {
-			source,
-			config,
-			active,
-			name,
-			rendition,
-			feed,
-			rungs: Vec::new(),
-			names: Names::default(),
-			serving: HashMap::new(),
-		};
-
-		// `resolve` takes the source it resolves against, since `follow` calls it
-		// with one the ladder has not adopted yet. Here it is the ladder's own.
-		let (name, rendition) = (ladder.name.clone(), ladder.rendition.clone());
-		let rungs = ladder.resolve(&name, &rendition, &[]).await?;
-		tracing::info!(source = %ladder.name, rungs = rungs.len(), "transcoding");
-		// Publish the ladder before any rung can be asked for, so a cursor holds
-		// every handle and can bill a pipeline too short to show up as an edge.
-		ladder.active.declare(rungs.iter().map(|published| &published.rung));
-		ladder.rungs = rungs;
-		Ok(ladder)
-	}
-
-	/// Resolve the configured rungs against a source rendition.
+	/// Resolve `rungs` into a ladder, in any order.
 	///
-	/// `carry` is the published ladder a rung may carry forward from: one that
-	/// comes out identical to a rung in it keeps that rung's name and catalog
-	/// entry, so it serves on untouched and pays for no second probe. Anything
-	/// else is a fresh incarnation and takes a name the ladder has never handed
-	/// out. Pass an empty slice when every rung is retiring regardless of shape,
-	/// since a name one of them was serving can never come back.
-	///
-	/// Nothing is committed here: a probe that fails leaves the ladder exactly as
-	/// it was.
-	async fn resolve(
-		&mut self,
-		source_name: &str,
-		source: &VideoConfig,
-		carry: &[Published],
-	) -> Result<Vec<Published>, Error> {
-		let resolved = catalog::resolve_rungs(&self.config.rungs, source_name, source)?;
-
-		let mut published = Vec::new();
-		for mut rung in resolved {
-			let reused = carry.iter().find(|other| other.rung.same_shape(&rung)).cloned();
-			let entry = match reused {
-				Some(reused) => {
-					rung.name = reused.rung.name;
-					let mut entry = reused.entry;
-					// Belongs to the source rather than the ladder, so it tracks the
-					// source even on a rung that skipped the probe.
-					entry.optimize_for_latency = source.optimize_for_latency;
-					entry
-				}
-				None => {
-					rung.name = self.names.mint(rung.height);
-					catalog::rung_entry(&rung, source, &self.config.encoder).await?
-				}
-			};
-			published.push(Published { rung, entry });
+	/// Heights round down to even, and the result is sorted by maximum bitrate.
+	/// An ambiguous ladder is an [`Error`] rather than a guess: two rungs at the
+	/// same maximum have no lower one, and a rung that costs more without being
+	/// taller means bitrate and picture disagree about which rendition is lower.
+	/// An empty ladder is fine; it just offers nothing.
+	pub fn new(rungs: impl IntoIterator<Item = Rung>) -> Result<Self, Error> {
+		let mut rungs: Vec<Rung> = rungs.into_iter().collect();
+		for rung in &mut rungs {
+			if rung.height < 2 || rung.bitrate == 0 {
+				return Err(Error::Empty {
+					height: rung.height,
+					bitrate: rung.bitrate,
+				});
+			}
+			// Normalize before checking uniqueness: odd heights can share a track name.
+			rung.height &= !1;
 		}
-		Ok(published)
+
+		rungs.sort_by_key(|rung| (rung.bitrate, rung.height));
+
+		for pair in rungs.windows(2) {
+			let (below, rung) = (pair[0], pair[1]);
+			if below.bitrate == rung.bitrate {
+				return Err(Error::DuplicateBitrate {
+					bitrate: rung.bitrate,
+					first: below.height,
+					second: rung.height,
+				});
+			}
+			if rung.height <= below.height {
+				return Err(Error::Unordered {
+					height: rung.height,
+					bitrate: rung.bitrate,
+					below_height: below.height,
+					below_bitrate: below.bitrate,
+				});
+			}
+		}
+
+		Ok(Self { rungs })
 	}
 
-	/// The rungs currently published, to fill the derivative catalog with.
-	pub(crate) fn rungs(&self) -> &[Published] {
+	/// The rungs, lowest first: ascending maximum bitrate and ascending height.
+	pub fn rungs(&self) -> &[Rung] {
 		&self.rungs
 	}
+}
 
-	/// The rung to serve a requested track with, or `None` if the ladder has no
-	/// such rung right now.
-	pub(crate) fn rung(&mut self, name: &str) -> Result<Option<rung::Rung>, Error> {
-		let Some(published) = self.rungs.iter().find(|published| published.rung.name == name) else {
-			return Ok(None);
-		};
-		let (retired, retire) = rung::Retire::channel();
-		self.serving.insert(published.rung.name.clone(), retired);
+impl Default for Ladder {
+	/// The default ladder: 240p to 1080p, filtered against the source at runtime
+	/// so only strictly-lower renditions are offered.
+	fn default() -> Self {
+		Self::new([
+			Rung::new(240, 350_000),
+			Rung::new(360, 600_000),
+			Rung::new(480, 1_200_000),
+			Rung::new(720, 2_500_000),
+			Rung::new(1080, 5_000_000),
+		])
+		.expect("the default ladder is ordered")
+	}
+}
 
-		Ok(Some(rung::Rung {
-			source: self.source.track(&self.name)?,
-			feed: self.feed.clone(),
-			broadcast: self.source.clone(),
-			config: self.rendition.clone(),
-			encoder: self.config.encoder.clone(),
-			decoder: self.config.decoder.clone(),
-			resize: self.config.resize,
-			active: self.active.clone(),
-			info: published.rung.clone(),
-			retire,
-		}))
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn heights(ladder: &Ladder) -> Vec<u32> {
+		ladder.rungs().iter().map(|rung| rung.height).collect()
 	}
 
-	/// Resolve the ladder again against a new source catalog snapshot.
-	pub(crate) async fn follow(&mut self, video: &Video) -> Result<(), Error> {
-		let (name, rendition) = match catalog::follow_source(video, &self.name) {
-			Ok(chosen) => chosen,
-			// Nothing transcodable in this snapshot: keep serving the ladder we
-			// have rather than tearing it down over an edit the source may undo.
-			Err(err) => {
-				tracing::debug!(%err, "no transcodable rendition in the catalog update");
-				return Ok(());
-			}
-		};
-		if name == self.name && rendition == self.rendition {
-			return Ok(());
-		}
+	#[test]
+	fn default_ladder_is_ordered() {
+		let ladder = Ladder::default();
+		assert_eq!(heights(&ladder), [240, 360, 480, 720, 1080]);
+	}
 
-		// A different track, or a different codec on the same one: every rung is
-		// decoding the wrong thing, so all of them retire whatever they resolve to
-		// and none of their names carries forward.
-		let rebuilt = name != self.name || !catalog::same_stream(&self.rendition, &rendition);
-		let carry = match rebuilt {
-			true => Vec::new(),
-			false => self.rungs.clone(),
-		};
+	/// The operator writes the ladder top-down (or in whatever order), and it
+	/// still resolves to one canonical bottom-up ranking.
+	#[test]
+	fn custom_ladder_out_of_order() {
+		let ladder = Ladder::new([
+			Rung::new(720, 2_500_000),
+			Rung::new(240, 350_000),
+			Rung::new(480, 1_200_000),
+		])
+		.unwrap();
+		assert_eq!(heights(&ladder), [240, 480, 720]);
+		// The neighbour is the next rendition down, which is what the band
+		// formula reads.
+		assert_eq!(ladder.rungs()[1].bitrate, 1_200_000);
+		assert_eq!(ladder.rungs()[0].bitrate, 350_000);
+	}
 
-		// Resolve against the new source before committing to it, so a failure
-		// leaves the ladder exactly as it was and the next snapshot tries again.
-		// Probing opens a real encoder, and a picture this machine cannot encode at
-		// is a reason to keep serving the ladder that works, not to end the
-		// broadcast.
-		let rungs = match self.resolve(&name, &rendition, &carry).await {
-			Ok(rungs) => rungs,
-			Err(err) => {
-				tracing::warn!(%err, source = %name, "could not resolve a ladder for the new source");
-				return Ok(());
+	/// Two rungs at one maximum: neither is the lower, so there is no ladder.
+	#[test]
+	fn duplicate_ceiling_is_refused() {
+		let err = Ladder::new([
+			Rung::new(720, 2_500_000),
+			Rung::new(480, 2_500_000),
+		])
+		.unwrap_err();
+		assert_eq!(
+			err,
+			Error::DuplicateBitrate {
+				bitrate: 2_500_000,
+				first: 480,
+				second: 720,
 			}
-		};
+		);
+	}
 
-		if rebuilt {
-			for retired in self.serving.values() {
-				let _ = retired.send(true);
+	/// Odd heights round to even, so a ladder can collide on a height it never
+	/// literally wrote. Silently dropping one rung would move its neighbour's
+	/// "next lower rendition", so it is refused too.
+	#[test]
+	fn duplicate_height_is_refused() {
+		let err = Ladder::new([
+			Rung::new(721, 2_500_000),
+			Rung::new(720, 1_200_000),
+		])
+		.unwrap_err();
+		assert_eq!(
+			err,
+			Error::Unordered {
+				height: 720,
+				bitrate: 2_500_000,
+				below_height: 720,
+				below_bitrate: 1_200_000,
 			}
-			self.serving.clear();
-			self.feed = Feed::new(
-				self.source.track(&name)?,
-				rendition.clone(),
-				self.config.decoder.clone(),
-			);
-		}
-		self.name = name;
-		self.rendition = rendition;
+		);
+	}
 
-		// Retire whatever the new ladder does not carry forward: a height it has no
-		// room for, and a height it kept at a picture it is no longer serving,
-		// whose replacement is a fresh name. Either way the track ends, so a
-		// subscriber reselects the way it would on any other rendition change.
-		for published in &self.rungs {
-			if rungs.iter().any(|other| other.rung == published.rung) {
-				continue;
+	/// Paying more for a smaller picture: bitrate and resolution disagree about
+	/// which rendition is lower, and guessing either one mis-ranks the ladder.
+	#[test]
+	fn resolution_inversion_is_refused() {
+		let err = Ladder::new([
+			Rung::new(1080, 1_000_000),
+			Rung::new(360, 3_000_000),
+		])
+		.unwrap_err();
+		assert_eq!(
+			err,
+			Error::Unordered {
+				height: 360,
+				bitrate: 3_000_000,
+				below_height: 1080,
+				below_bitrate: 1_000_000,
 			}
-			if let Some(retired) = self.serving.remove(&published.rung.name) {
-				let _ = retired.send(true);
-			}
-		}
+		);
+	}
 
-		tracing::info!(source = %self.name, rungs = rungs.len(), "source changed; ladder resolved again");
-		self.active.declare(rungs.iter().map(|published| &published.rung));
-		self.rungs = rungs;
-		Ok(())
+	#[test]
+	fn rung_without_a_rendition_is_refused() {
+		assert_eq!(
+			Ladder::new([Rung::new(1, 350_000)]).unwrap_err(),
+			Error::Empty {
+				height: 1,
+				bitrate: 350_000
+			}
+		);
+		assert_eq!(
+			Ladder::new([Rung::new(240, 0)]).unwrap_err(),
+			Error::Empty {
+				height: 240,
+				bitrate: 0
+			}
+		);
+	}
+
+	#[test]
+	fn empty_ladder_is_allowed() {
+		assert!(Ladder::new([]).unwrap().rungs().is_empty());
 	}
 }

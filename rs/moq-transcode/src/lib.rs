@@ -27,10 +27,12 @@ mod catalog;
 mod config;
 mod error;
 mod feed;
-mod ladder;
+pub mod ladder;
+mod pipeline;
 mod rung;
 
-pub use config::{Config, Rung};
+pub use config::Config;
+pub use ladder::{Ladder, Rung};
 
 #[allow(deprecated)]
 pub use config::source_reference;
@@ -134,7 +136,7 @@ impl Transcoder {
 		// Resolved again on every source catalog snapshot, so a source that resizes
 		// mid-stream takes the ladder with it.
 		let mut ladder =
-			ladder::Ladder::new(source.clone(), config.clone(), active, source_name, source_config).await?;
+			pipeline::Pipeline::new(source.clone(), config.clone(), active, source_name, source_config).await?;
 
 		// Publish the derivative catalog before any encoder exists, so subscribers
 		// can pick a rung immediately.
@@ -463,7 +465,7 @@ mod tests {
 		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000), Rung::new(60, 50_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000), Rung::new(60, 50_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -529,7 +531,7 @@ mod tests {
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
 		let mut config = Config {
-			rungs: vec![Rung::new(180, 200_000), Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(180, 200_000), Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -607,7 +609,7 @@ mod tests {
 
 		let source = source_broadcast(2, 5);
 		let mut config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -646,7 +648,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -746,7 +748,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -808,7 +810,7 @@ mod tests {
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -879,11 +881,11 @@ mod tests {
 		let config = Config {
 			// 360p is admitted at 640x360 only because its bitrate undercuts the
 			// source's; 240p and 120p fit outright.
-			rungs: vec![
+			rungs: Ladder::new([
 				Rung::new(360, 900_000),
 				Rung::new(240, 300_000),
 				Rung::new(120, 100_000),
-			],
+			]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -988,7 +990,7 @@ mod tests {
 		write_keyframe(&mut group);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1052,7 +1054,7 @@ mod tests {
 		let mut source = source_catalog(320, 240);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1116,7 +1118,7 @@ mod tests {
 		let source = source_broadcast(1, 3);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,

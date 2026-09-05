@@ -110,6 +110,12 @@ does one whose own picture moved, and the latter comes back under a new name
 (`video/360p.2`), so a viewer on either reselects as it would on any other
 rendition change.
 
+Custom `--rung` values may be supplied in any order. Heights round down to even;
+heights and bitrates must then increase strictly together. Duplicate heights or
+bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
+before connecting.
+
+
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,
