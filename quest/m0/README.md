@@ -30,3 +30,11 @@ regression test per Root Cause First.
 - [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - stop the headroom task after setup failure or the last owner drops
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
+- [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
+- [Merge evidence](/quest/m0/merge-verification-evidence.md) - bind local, CI, and device results to the current source and merge candidate
+- [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
+- [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - give concurrent worktrees explicit bases, endpoints, and process ownership
+- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - retain inspectable traces, logs, and rerun commands when QA fails
+- [Browser media QA](/quest/m0/browser-media-qa.md) - measure actual playback output and lifecycle recovery beyond successful delivery
+- [Transport failure drills](/quest/m0/transport-failure-drills.md) - exercise disruption, cancellation, and races with non-vacuous regressions
+- [Packaged consumer QA](/quest/m0/packaged-consumer-qa.md) - install candidate archives outside the workspace before publication
