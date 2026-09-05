@@ -532,11 +532,14 @@ audit:
 # feature on for it. `--each-feature` carries `aws-lc-rs` because a rustls backend
 # without a crypto provider is a refused build by design; `tokio-features` owns the
 # rest of moq-tokio's matrix, including the zero-feature build and that refusal.
+# No `--no-dev-deps`: it rewrites the manifest, which `--locked` then refuses as a
+# lockfile it would have to update. Nothing dev-depends on moq-tokio from inside
+# moq-tokio, so there is no feature to hide from the matrix anyway.
 
 # Compile the workspace at the feature extremes.
 features:
     {{ cargo_compile }} check --locked --workspace --no-default-features
-    cargo hack check --locked -p moq-tokio --each-feature --no-dev-deps --features aws-lc-rs
+    cargo hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
     {{ cargo_compile }} check --locked -p moq-relay --no-default-features
     {{ cargo_compile }} check --locked -p moq-cli --no-default-features
     {{ cargo_compile }} check --locked -p moq-bench --no-default-features

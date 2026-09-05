@@ -68,7 +68,6 @@ pub mod tls;
 pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.

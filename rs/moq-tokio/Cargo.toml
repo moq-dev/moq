@@ -35,7 +35,14 @@ qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
 # are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
 # A provider is also all it takes to sign and serve certificates, so each turns on
 # `_certs` even where there is no QUIC backend to serve them for.
-aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs", "web-transport-quinn?/aws-lc-rs"]
+aws-lc-rs = [
+    "_certs",
+    "rustls/aws-lc-rs",
+    "rcgen/aws_lc_rs",
+    "quinn?/rustls-aws-lc-rs",
+    "web-transport-noq?/aws-lc-rs",
+    "web-transport-quinn?/aws-lc-rs",
+]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
