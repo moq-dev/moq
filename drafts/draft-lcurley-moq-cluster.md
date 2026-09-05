@@ -202,10 +202,12 @@ NAMESPACE_PATTERN Parameter {
 |------|----------|-------------|
 | 0x2  | Globstar | Empty. Matches any run of zero or more fields; at most one per namespace. |
 |------|----------|-------------|
+| 0x3  | Partial  | Prefix Length (vi64), Prefix (..), Suffix (..). Matches any one field starting with Prefix and ending with Suffix. |
+|------|----------|-------------|
 
 A namespace matches a pattern when its fields can be assigned to the pattern's segments in order, the globstar taking any number of them.
-Every wildcard is a whole field, and a pattern is exact: without the parameter an advertisement covers its namespace and everything beneath it, which is the pattern ending in a globstar.
-A receiver MUST close the session with a PROTOCOL_VIOLATION if the number of kinds differs from the number of tuple fields, a Wildcard or Globstar field is non-empty, or a second Globstar appears.
+Every kind matches whole fields, and a pattern is exact: without the parameter an advertisement covers its namespace and everything beneath it, which is the pattern ending in a globstar.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if the number of kinds differs from the number of tuple fields, a Wildcard or Globstar field is non-empty, a Partial's Prefix and Suffix are both empty, or a second Globstar appears.
 Other kinds are reserved for extensions: a receiver MUST NOT select or forward an advertisement carrying one, but MUST otherwise process the message.
 
 The parameter is sent only on a session that negotiated Relay Hops.
@@ -250,7 +252,7 @@ The expected case is a ROUTE_COST-only change, which is how a relay signals that
 
 # Path Selection {#selection}
 A receiver resolving a request against the advertisements covering its namespace, prefixes and patterns alike, consults only the most specific.
-Specificity is structural: more literal fields first, then no globstar over one, then more wildcards, then a longer literal head, so an advertisement strictly inside another's namespaces ranks above it, a concrete namespace shadows every pattern covering it, and equally specific advertisements form one tier.
+Specificity is structural: more literal fields first, then no globstar over one, then more partials, then more wildcards, then more bytes pinned by partials, then a longer literal head, so an advertisement strictly inside another's namespaces ranks above it, a concrete namespace shadows every pattern covering it, and equally specific advertisements form one tier.
 A refusal from that tier never falls through to a less specific one.
 
 Within the tier, a receiver SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.

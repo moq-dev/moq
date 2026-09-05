@@ -365,12 +365,13 @@ A pattern is a sequence of segments, each one of:
 
 - a literal, matching exactly that path segment;
 - a wildcard, matching any one segment;
+- a partial, a prefix and a suffix, matching any one segment that starts with the prefix and ends with the suffix without overlap;
 - a globstar, matching any run of zero or more segments, at most once per pattern.
 
 A path matches a pattern when its segments can be assigned to the pattern's segments in order, the globstar taking any number of them.
-Every wildcard is a whole segment, and a pattern is exact: a pattern with no wildcard matches one path, and a subtree is a prefix followed by a globstar.
+Every segment kind matches whole segments, and a pattern is exact: a pattern with no wildcard matches one path, and a subtree is a prefix followed by a globstar.
 A prefix route is therefore the pattern ending in a globstar, and every rule for routes in this document applies to both forms.
-Where an implementation spells a pattern as text, `*` is the wildcard and `**` the globstar; a literal MUST NOT contain `*`, which is reserved for a later revision, so `*.hang` is an error rather than a literal.
+Where an implementation spells a pattern as text, `*` is the wildcard, `**` the globstar, and a partial is its prefix, `*`, and suffix (`*.hang`, `foo*`, `foo.*.hang`); a literal never contains `*`, and a segment with more than one `*` is reserved for a later revision.
 
 A pattern route claims capability, not inventory, like any route: it says matching paths can be served, never that any exist.
 An advertiser that will not serve a requested path refuses the request (see [Resolution](#resolution)), which is why a pattern claiming more than the advertiser can serve, up to the globstar alone, is well-formed.
@@ -414,7 +415,7 @@ Equal first hops promise the same origin, not interchangeable bytes; what a resu
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, prefix and pattern alike, after the per-subscriber exclusion above.
 
 Only the most specific covering routes are consulted.
-Specificity is structural: more literal segments first, then a route without a globstar over one with, then more wildcards, then a longer literal head.
+Specificity is structural: more literal segments first, then a route without a globstar over one with, then more partials, then more wildcards, then more bytes pinned by partials, then a longer literal head.
 A route strictly inside another's paths always ranks above it, a broadcast's exact path is the most specific route there is, so a concrete announcement shadows every pattern covering it at any cost, and equally specific routes form one tier.
 The winning tier is the whole answer: a refusal from it never falls through to a less specific route, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
 
@@ -934,8 +935,11 @@ The following kinds are defined:
 |------|----------|-------------|
 | 0x2  | Globstar | Empty. Matches any run of zero or more segments; at most one per pattern. |
 |------|----------|-------------|
+| 0x3  | Partial  | Prefix Length (i), Prefix (..), Suffix (..). Matches any one segment starting with Prefix and ending with Suffix. |
+|------|----------|-------------|
 
-A receiver MUST close the session with a PROTOCOL_VIOLATION on an empty Literal, a Literal containing `/` or `*`, a non-empty Wildcard or Globstar value, a second Globstar, or a pattern that together with the requested prefix exceeds 32 segments, the limit a path has.
+A Partial's Suffix runs to the end of the Value; a matching segment is at least as long as the two together.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on an empty Literal, a Literal, Prefix, or Suffix containing `/` or `*`, a Partial whose Prefix and Suffix are both empty (that is a Wildcard), a non-empty Wildcard or Globstar value, a second Globstar, or a pattern that together with the requested prefix exceeds 32 segments, the limit a path has.
 Other kinds are reserved for extensions.
 A receiver MUST skip an unknown kind by its Segment Length and MUST NOT select or forward the advertisement, but MUST still assign and track its Announce ID so that a later ANNOUNCE_END or ANNOUNCE_UPDATE referencing it is not a violation.
 
@@ -1384,8 +1388,8 @@ The `Message Length` describes the payload size on the wire.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.
 - Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
 - Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_UPDATE (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
-- Added ANNOUNCE_PATTERN (0x3): a route over a path pattern of literal, wildcard, and at most one globstar segment, every wildcard a whole segment, encoded as typed segments (kind, length, value) relative to the requested prefix rather than as text, with the hop list and a single Route Cost. It shares the Announce ID space with ANNOUNCE_START, so ANNOUNCE_END and ANNOUNCE_UPDATE apply unchanged, an update writing the cost in both fields. An unknown segment kind is skipped by its length and the advertisement ignored rather than a violation. A pattern presents under a request as the set of its residuals, one advertisement each. Not sent to a peer whose version predates it.
-- Specified resolution of a request against the routes covering its path, prefix and pattern alike: only the most specific tier is consulted (literal segments, then no globstar, then wildcards, then literal head, so a concrete path shadows every pattern), a refusal never falls through, cost and the existing tie-breaks order the tier, and pattern routes tied at the lowest cost form a pool distributed by a seeded FNV-1a hash of the requested path against the advertiser's first hop. A relay never announces a path because it resolved it; the advertiser announces the concrete path once producing. A standby seed MUST exceed any accumulated topology cost, with 2^32 RECOMMENDED.
+- Added ANNOUNCE_PATTERN (0x3): a route over a path pattern of literal, wildcard, partial (prefix and suffix within one segment), and at most one globstar segment, each matching whole segments, encoded as typed segments (kind, length, value) relative to the requested prefix rather than as text, with the hop list and a single Route Cost. It shares the Announce ID space with ANNOUNCE_START, so ANNOUNCE_END and ANNOUNCE_UPDATE apply unchanged, an update writing the cost in both fields. An unknown segment kind is skipped by its length and the advertisement ignored rather than a violation. A pattern presents under a request as the set of its residuals, one advertisement each. Not sent to a peer whose version predates it.
+- Specified resolution of a request against the routes covering its path, prefix and pattern alike: only the most specific tier is consulted (literal segments, then no globstar, then partials, then wildcards, then pinned bytes, then literal head, so a concrete path shadows every pattern), a refusal never falls through, cost and the existing tie-breaks order the tier, and pattern routes tied at the lowest cost form a pool distributed by a seeded FNV-1a hash of the requested path against the advertiser's first hop. A relay never announces a path because it resolved it; the advertiser announces the concrete path once producing. A standby seed MUST exceed any accumulated topology cost, with 2^32 RECOMMENDED.
 - Split the reserved stream error range: 32 through 47 stays reserved for the placeholders implementations emit today, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x30 NO_CAPACITY there: it permits one re-resolution within the tier excluding the refusing advertiser, and a receiver that has spent or lacks that retry resets downstream with another code. Every other code is terminal.
 - Required a receiver to discard a pattern advertisement not contained by what the sender may publish, to present patterns to applications as routes and never as broadcasts, and to combine duplicate advertisers of one pattern into a single entry.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.

@@ -182,11 +182,12 @@ field.
   opening an 07: ANNOUNCE_PATTERN (0x3) on the announce stream, and a
   NAMESPACE_PATTERN parameter on moq-transport's PUBLISH_NAMESPACE/NAMESPACE.
 - **A pattern travels as typed segments, not text.** Each wire segment is a
-  kind (0 literal, 1 wildcard, 2 globstar) plus a length-prefixed value, so no
-  glob syntax reaches the wire, an unknown kind is skipped by its length and
-  the advertisement ignored rather than the stream killed, and a later
-  revision can add kinds (in-segment stars, regexes) without a new message.
-  The `*` and `**` spellings exist only in `moq-path` / `@moq/path`.
+  kind (0 literal, 1 wildcard, 2 globstar, 3 partial = prefix + suffix) plus a
+  length-prefixed value, so no glob syntax reaches the wire, an unknown kind
+  is skipped by its length and the advertisement ignored rather than the
+  stream killed, and a later revision can add kinds (multi-star segments,
+  regexes) without a new message. The `*` and `**` spellings exist only in
+  `moq_net::path` and `@moq/net`.
 
 ### Where derived output lives
 

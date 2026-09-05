@@ -13,12 +13,12 @@ uses so older peers neither send nor receive it.
 
 The draft settled on a message of its own: ANNOUNCE_PATTERN (type 0x3 on the
 announce stream) carries the pattern as typed segments (kind 0 literal, 1
-wildcard, 2 globstar, each with a length-prefixed value; an unknown kind is
+wildcard, 2 globstar, 3 partial, each with a length-prefixed value; an unknown kind is
 skipped by length and the advertisement ignored), relative to the requested
 prefix, plus the hop list and ONE cost varint. It shares the Announce ID
 counter with ANNOUNCE_START, so ANNOUNCE_END and ANNOUNCE_UPDATE apply
 unchanged (an update writes the cost in both fields). The wire type maps onto
-`moq_path::Segment`, so the codec is a kind byte per variant and nothing
+`moq_net::path::Segment`, so the codec is a kind byte per variant and nothing
 parses text. The skew hazard below applies, and the decode side lands first.
 
 That gate is NOT sufficient on its own. `moq-lite-06-wip` is one ALPN with no
