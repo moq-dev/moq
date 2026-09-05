@@ -23,13 +23,16 @@ same counter a declared discontinuity bumps. The hang draft says an empty
 group declares a discontinuity "whether the resumed timestamps move backward
 or forward". That machinery is what goes.
 
-- **Publisher side, in moq-mux.** The track producer refuses a frame whose
-  timestamp is below the live edge established by the groups before its own,
-  returning an error the way an oversized frame does, so a rewind never
-  reaches the wire. moqsink already re-anchors forward on a flush and rejects
-  a rewinding base; check the CLI importers and the capture publishers do the
-  same on a source restart, and re-anchor rather than refuse where the source
-  is trusted.
+- **Publisher side, in both container producers.** The track producer refuses
+  a frame whose timestamp is below the live edge established by the groups
+  before its own, returning an error the way an oversized frame does, so a
+  rewind never reaches the wire. That is `moq-mux`'s producer and the
+  `js/hang` container producer (`js/hang/src/container/legacy.ts` has no
+  cross-group live-edge check today), so a browser publisher cannot emit a
+  sequence the updated consumers reject. moqsink already re-anchors forward
+  on a flush and rejects a rewinding base; check the CLI importers, the
+  capture publishers, and `js/publish` do the same on a source restart, and
+  re-anchor rather than refuse where the source is trusted.
 - **Consumer side, in hang.** Delete the rewind boundary and its
   classification in both languages. A group below the live edge aborts the
   track as malformed. The discontinuity counter stays, counting declared
@@ -47,14 +50,18 @@ or forward". That machinery is what goes.
   PCR jump over 100 ms without it is a TR 101 290 error whichever direction
   the jump goes.
 
-Tests: the producer refuses a group below the live edge; the consumer aborts
-on one; a group with reordered B-frames is accepted; an open-GOP group whose
+Tests, in both languages: the producer refuses a group below the live edge;
+the consumer aborts on one; a group with reordered B-frames is accepted; an open-GOP group whose
 leading pictures sit below its keyframe but above the previous group passes;
 a declared discontinuity followed by a forward jump passes and bumps the
 counter once; moqsink's flush re-anchor produces a forward timeline.
 
 Branch from `dev`, where the container consumers carry the current `Rewind`
 state.
+
+## Required
+
+- [moq#3375](https://github.com/moq-dev/moq/pull/3375) has merged, so the TS export reset it adds is keyed on the discontinuity counter before this quest trims it
 
 ## Related
 

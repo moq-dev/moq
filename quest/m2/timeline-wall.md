@@ -17,13 +17,22 @@ synced. Metrics and applications that control both ends may inspect it.
 `moq_mux::timeline::Producer::set_wall(pts, SystemTime)` and the JS
 `setWall(pts, Date)` exist and nothing outside tests calls them. Anchor on the
 first frame each publisher emits, with the wall time it observed that frame,
-and re-anchor after a declared discontinuity so one `wall` value always
-describes one linear mapping over the advertised records. Republish the
-rendition's catalog entry once the anchor is set.
+and republish the rendition's catalog entry once the anchor is set.
+
+One `wall` value describes one linear mapping, so a declared discontinuity
+that breaks linearity (a seek, a source restart) must not overwrite it:
+records already advertised on the timeline track would then resolve against
+the wrong epoch in DVR, HLS `PROGRAM-DATE-TIME`, and correlation consumers.
+Instead the first timeline record after a discontinuity carries the new
+anchor itself, and a consumer resolves a record against the latest anchor at
+or before it. The catalog `wall` stays the anchor for records before the
+first such carried one. That is a record-schema addition, so it lands with a
+`drafts/draft-lcurley-moq-hang.md` update in the same PR.
 
 Tests: each publisher's catalog carries `wall` after its first frame;
 `(wall + pts) / timescale` resolves to the observed duration since the MoQ
-epoch; a discontinuity re-anchors rather than stretching the old mapping.
+epoch; after a discontinuity, records before it still resolve against the old
+anchor and records after it against the one they carry.
 
 ## Related
 
