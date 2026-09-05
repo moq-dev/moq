@@ -235,7 +235,11 @@ impl Pattern {
 		match self.globstar {
 			None => {
 				parts.len() == self.segments.len()
-					&& self.segments.iter().zip(&parts).all(|(segment, part)| segment.matches(part))
+					&& self
+						.segments
+						.iter()
+						.zip(&parts)
+						.all(|(segment, part)| segment.matches(part))
 			}
 			Some(_) => {
 				let (head, tail) = self.split();
@@ -266,7 +270,11 @@ impl Pattern {
 				let (head, tail) = self.split();
 				other.segments.len() >= head.len() + tail.len()
 					&& head.iter().zip(&other.segments).all(|(a, b)| a.covers(b))
-					&& tail.iter().rev().zip(other.segments.iter().rev()).all(|(a, b)| a.covers(b))
+					&& tail
+						.iter()
+						.rev()
+						.zip(other.segments.iter().rev())
+						.all(|(a, b)| a.covers(b))
 			}
 			(Some(_), Some(_)) => {
 				let (head, tail) = self.split();
@@ -293,10 +301,13 @@ impl Pattern {
 	/// Whether some path matches both patterns.
 	pub fn overlaps(&self, other: &Self) -> bool {
 		let compatible_run = |a: &[Segment], b: &[Segment]| a.iter().zip(b).all(|(a, b)| a.compatible(b));
-		let compatible_tail = |a: &[Segment], b: &[Segment]| a.iter().rev().zip(b.iter().rev()).all(|(a, b)| a.compatible(b));
+		let compatible_tail =
+			|a: &[Segment], b: &[Segment]| a.iter().rev().zip(b.iter().rev()).all(|(a, b)| a.compatible(b));
 
 		match (self.globstar, other.globstar) {
-			(None, None) => self.segments.len() == other.segments.len() && compatible_run(&self.segments, &other.segments),
+			(None, None) => {
+				self.segments.len() == other.segments.len() && compatible_run(&self.segments, &other.segments)
+			}
 			(None, Some(_)) => other.overlaps(self),
 			(Some(_), None) => {
 				let (head, tail) = self.split();
@@ -420,7 +431,10 @@ impl FromStr for Pattern {
 		if text.is_empty() {
 			return Self::new([]);
 		}
-		text.split('/').map(Segment::parse).collect::<Result<Vec<_>, _>>().and_then(Self::new)
+		text.split('/')
+			.map(Segment::parse)
+			.collect::<Result<Vec<_>, _>>()
+			.and_then(Self::new)
 	}
 }
 
@@ -488,15 +502,28 @@ mod tests {
 
 	#[test]
 	fn parses_and_prints_canonically() {
-		for text in ["", "a", "a/b", "*", "**", "a/*/b", "**/transcode.pro", "a/**/b/*", "*/**"] {
+		for text in [
+			"",
+			"a",
+			"a/b",
+			"*",
+			"**",
+			"a/*/b",
+			"**/transcode.pro",
+			"a/**/b/*",
+			"*/**",
+		] {
 			assert_eq!(pattern(text).to_string(), text);
 		}
-		assert_eq!(pattern("a/*/**/b").segments(), &[
-			Segment::Literal("a".into()),
-			Segment::Wildcard,
-			Segment::Globstar,
-			Segment::Literal("b".into()),
-		]);
+		assert_eq!(
+			pattern("a/*/**/b").segments(),
+			&[
+				Segment::Literal("a".into()),
+				Segment::Wildcard,
+				Segment::Globstar,
+				Segment::Literal("b".into()),
+			]
+		);
 	}
 
 	#[test]
@@ -519,7 +546,10 @@ mod tests {
 			Pattern::new([Segment::Literal("a/b".into())]),
 			Err(Error::InvalidLiteral("a/b".into()))
 		);
-		assert_eq!(Pattern::new([Segment::Literal(String::new())]), Err(Error::EmptySegment));
+		assert_eq!(
+			Pattern::new([Segment::Literal(String::new())]),
+			Err(Error::EmptySegment)
+		);
 	}
 
 	#[test]
@@ -596,7 +626,11 @@ mod tests {
 			("a/*/c", "a/**/c", false),
 		];
 		for (outer, inner, expected) in cases {
-			assert_eq!(pattern(outer).contains(&pattern(inner)), expected, "{outer} contains {inner}");
+			assert_eq!(
+				pattern(outer).contains(&pattern(inner)),
+				expected,
+				"{outer} contains {inner}"
+			);
 		}
 	}
 
