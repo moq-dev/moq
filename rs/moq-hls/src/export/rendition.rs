@@ -66,10 +66,6 @@ impl std::str::FromStr for Kind {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
-///
-/// Normalized on the way in, so equality answers "decodes and muxes the same" rather than "is
-/// byte-identical": see [`normalize_video`] / [`normalize_audio`].
-#[derive(PartialEq)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -139,12 +135,18 @@ impl Rendition {
 	/// (its bitrate and jitter estimates, a label) are ignored here and picked up by
 	/// [`refresh`](Self::refresh) instead.
 	pub(crate) fn matches_video(&self, config: &VideoConfig) -> bool {
-		self.config == Config::Video(normalize_video(config))
+		let Config::Video(current) = &self.config else {
+			return false;
+		};
+		normalize_video(current) == normalize_video(config)
 	}
 
 	/// The audio counterpart of [`matches_video`](Self::matches_video).
 	pub(crate) fn matches_audio(&self, config: &AudioConfig) -> bool {
-		self.config == Config::Audio(normalize_audio(config))
+		let Config::Audio(current) = &self.config else {
+			return false;
+		};
+		normalize_audio(current) == normalize_audio(config)
 	}
 
 	/// The advertised bitrate in bits per second, for the master playlist `BANDWIDTH` attribute
@@ -173,7 +175,7 @@ impl Rendition {
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
-			config: Config::Video(normalize_video(config)),
+			config: Config::Video(config.clone()),
 			section,
 			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
 			source: upstream.source.clone(),
@@ -191,7 +193,7 @@ impl Rendition {
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
-			config: Config::Audio(normalize_audio(config)),
+			config: Config::Audio(config.clone()),
 			section,
 			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
 			source: upstream.source.clone(),

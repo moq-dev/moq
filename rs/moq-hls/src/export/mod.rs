@@ -446,7 +446,12 @@ mod tests {
 
 	/// A catalog with one video and one audio rendition, both servable.
 	fn catalog_with_both() -> moq_mux::catalog::hang::Catalog {
-		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let mut audio = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 2 }),
+			44_100,
+			2,
+		);
+		audio.description = Some(bytes::Bytes::from_static(&[0x12, 0x10]));
 		audio.bitrate = Some(96_000);
 
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
@@ -483,6 +488,16 @@ mod tests {
 
 		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
 		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
+		let audio_init = audio.init().await.unwrap().expect("AAC init segment");
+		let wire = moq_mux::container::fmp4::Wire::from_init(&audio_init).unwrap();
+		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
+		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+			panic!("expected mp4a, got {codec:?}");
+		};
+		assert_eq!(
+			mp4a.esds.es_desc.dec_config.avg_bitrate, 96_000,
+			"the muxer keeps the declared catalog bitrate"
+		);
 		assert_eq!(video.bandwidth(), 2_000_000, "the catalog carries no video bitrate yet");
 		assert_eq!(audio.bandwidth(), 96_000);
 		assert!(matches!(
@@ -515,6 +530,11 @@ mod tests {
 			"the master playlist advertises the estimate"
 		);
 		assert_eq!(audio.bandwidth(), 110_000);
+		assert_eq!(
+			audio.init().await.unwrap().expect("cached AAC init segment"),
+			audio_init,
+			"an estimate update preserves the cached init segment"
+		);
 		assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
 
 		// A bitrate the publisher retracts falls back to the advertised default.
@@ -551,7 +571,7 @@ mod tests {
 
 		// A resolution change and a sample-rate change both invalidate the init segment.
 		catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(640);
-		catalog.audio.renditions.get_mut("audio0").unwrap().sample_rate = 44_100;
+		catalog.audio.renditions.get_mut("audio0").unwrap().sample_rate = 48_000;
 		renditions.sync(&upstream, &catalog);
 
 		let rebuilt = renditions.get(Kind::Video, "video0").expect("video rendition");
