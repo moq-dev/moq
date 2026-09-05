@@ -457,9 +457,8 @@ impl Producer {
 	/// consumers can drain what they already have (an abort does not cascade into
 	/// the tracks), while a name nothing ever served resolves with `err` the same
 	/// way [`finish`](Self::finish) resolves it. Unlike a finish, consumers observe `err` from
-	/// [`Consumer::closed`], and an origin treats the source as ungracefully lost,
-	/// so the path may linger for a replacement (see
-	/// [`origin::Info::linger`](crate::origin::Info::linger)).
+	/// [`Consumer::closed`], and an origin treats the source as lost rather than
+	/// ended.
 	///
 	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
 	/// already finished or aborted.

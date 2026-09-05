@@ -1945,6 +1945,42 @@ async fn announced_prefix_survives_a_cancelled_second_handler() {
 	served.finish().unwrap();
 }
 
+/// Cancelling an announcement rejects what it parked, and a handler created
+/// afterwards never receives a request for the retracted prefix.
+#[tokio::test]
+async fn cancelled_announce_leaves_no_phantom_request() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+	};
+	// Let the request reach the forwarder, then retract under it.
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	route.cancel();
+	let err = tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the retraction to reject the request")
+		.expect("request task panicked")
+		.err()
+		.expect("a cancelled announcement rejects its requests");
+	assert!(
+		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
+		"unexpected error: {err:?}"
+	);
+
+	// Nothing of the retracted prefix is left for a later handler.
+	let dynamic = origin.dynamic();
+	let phantom = tokio::time::timeout(std::time::Duration::from_millis(200), dynamic.requested_broadcast()).await;
+	assert!(
+		phantom.is_err(),
+		"a cancelled announcement must not leave a request behind"
+	);
+	dynamic.cancel();
+}
+
 /// The sequence cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.

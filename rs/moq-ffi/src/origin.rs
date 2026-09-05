@@ -146,10 +146,23 @@ impl Forwarder {
 					None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
 				})
 				.await;
-				match request {
-					Ok(request) => parked.push(served.clone(), request),
+				let request = match request {
+					Ok(request) => request,
 					// Cancelled, or the origin was torn down.
 					Err(_) => break,
+				};
+				// Parked under the slot lock, so a cancel that took the slot first
+				// finds nothing of ours left to park, and one that comes later
+				// finds this entry when it drains. Dropping the request unparked
+				// rejects its requesters.
+				let slot = served.lock().unwrap();
+				match slot.is_some() {
+					true => parked.push(served.clone(), request),
+					false => {
+						drop(slot);
+						drop(request);
+						break;
+					}
 				}
 			}
 		});

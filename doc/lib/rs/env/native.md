@@ -104,11 +104,15 @@ To serve a whole subtree on demand instead of publishing each path, advertise a 
 
 ```rust
 // Claims every path under "room/" and hands each request to this loop.
-let mut dynamic = origin.dynamic("room/", Default::default())?;
+let dynamic = origin.dynamic("room/", Default::default())?;
+let mut served = Vec::new();
 while let Ok(request) = dynamic.requested_broadcast().await {
     let broadcast = moq_net::broadcast::Info::new().produce();
     // ... populate the broadcast for `request.path()` ...
     request.accept(&broadcast);
+    // The producer is what keeps the broadcast alive: hold it for as long as
+    // the path should serve, and `finish()` it when done.
+    served.push(broadcast);
 }
 ```
 
