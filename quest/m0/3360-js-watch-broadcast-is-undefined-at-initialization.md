@@ -24,17 +24,20 @@ the class sets is absent until the upgrade.
   synchronously on import as 0.3.2 did; if the framework simply reads early,
   document `await customElements.whenDefined("moq-watch")` in `doc/lib/js`
   and make the element's own `connectedCallback` tolerate late upgrade.
-- Regression: a test that creates the element before the definition is
-  registered, reads `broadcast` after `whenDefined` resolves, and asserts it
-  is set.
+- Regression on the ordering itself, not on the upgrade: the browser
+  upgrades an existing node when the definition is registered, so a test
+  that waits on `whenDefined` before reading passes either way. Assert
+  instead that importing the entrypoint has defined `moq-watch` before the
+  import resolves (`customElements.get("moq-watch")` is set synchronously
+  after `import "@moq/watch/element"`), so a framework that mounts after the
+  import can never observe a pre-upgrade node.
 
-The issue's side question, reacting to catalog changes from a framework, is
-independent API work: [Catalog signal](/quest/m2/watch-catalog-signal.md).
+The issue's side question, reacting to catalog changes from a framework,
+needs no new API: `broadcast.out.catalog` is already a read-only `Getter`,
+which `demo/web` reacts to with `effect.get(watch.broadcast.out.catalog)`.
+Document that in `doc/lib/js` as part of this quest, with a custom section
+read through it.
 
 ## Closes
 
 - [#3360](https://github.com/moq-dev/moq/issues/3360) - close this issue when the quest finishes
-
-## Related
-
-- [Catalog signal](/quest/m2/watch-catalog-signal.md) - the reactive catalog access the same report asked for
