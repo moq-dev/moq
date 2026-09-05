@@ -284,7 +284,7 @@ mod tests {
 		node: &str,
 		hops: &[u64],
 		cost: u64,
-	) -> moq_net::announce::Producer {
+	) -> moq_net::origin::Dynamic {
 		let hops = Hops::try_from(
 			hops.iter()
 				.map(|id| Hop::new(*id).expect("valid test origin"))
@@ -293,7 +293,7 @@ mod tests {
 		.unwrap();
 		let path = moq_net::Path::new(MESH_PREFIX).join(node);
 		let announcement = origin
-			.announce(&path, moq_net::origin::Route::default().with_hops(hops).with_cost(cost))
+			.dynamic(&path, moq_net::origin::Route::default().with_hops(hops).with_cost(cost))
 			.unwrap();
 		origin.consume().routed(&path).await.expect("test node announced");
 		announcement

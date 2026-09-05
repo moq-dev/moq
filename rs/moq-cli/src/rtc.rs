@@ -93,9 +93,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 		.context("failed to create broadcast")?;
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
-	let _announcement = target
-		.origin
-		.announce(name, Default::default())
+	producer
+		.announce(Default::default())
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");

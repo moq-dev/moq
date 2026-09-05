@@ -137,7 +137,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
+	broadcast.announce(Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -299,7 +299,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
+	broadcast.announce(Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -379,7 +379,7 @@ async fn uring_workers_write_qlog_traces() {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/qlog").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-	let _announce_broadcast = origin.announce("test", Default::default()).expect("create broadcast");
+	broadcast.announce(Default::default()).expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group

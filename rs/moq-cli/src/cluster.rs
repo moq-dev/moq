@@ -603,8 +603,8 @@ mod tests {
 
 		// Published before the session exists; announcements flow once it connects.
 		let _from_a = origin_a.create_broadcast("from-a").expect("failed to create broadcast");
-		let _announce_from_a = origin_a
-			.announce("from-a", Default::default())
+		_from_a
+			.announce(Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -638,8 +638,8 @@ mod tests {
 		// And the reverse direction over the same session. This stream replays a's
 		// own "from-a" first, so read until the remote broadcast shows up.
 		let _from_b = origin_b.create_broadcast("from-b").expect("failed to create broadcast");
-		let _announce_from_b = origin_b
-			.announce("from-b", Default::default())
+		_from_b
+			.announce(Default::default())
 			.expect("failed to create broadcast");
 		let mut announced_on_a = origin_a.consume().announced();
 		loop {
@@ -660,8 +660,8 @@ mod tests {
 		let origin_a = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let origin_b = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let _from_b = origin_b.create_broadcast("from-b").expect("failed to create broadcast");
-		let _announce_from_b = origin_b
-			.announce("from-b", Default::default())
+		_from_b
+			.announce(Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
@@ -703,8 +703,8 @@ mod tests {
 		let _published = origin
 			.create_broadcast("secret-stream")
 			.expect("failed to create broadcast");
-		let _announce_published = origin
-			.announce("secret-stream", Default::default())
+		_published
+			.announce(Default::default())
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();

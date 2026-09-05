@@ -29,13 +29,9 @@ Candidates, none chosen:
 - Document `MoqRoute.cost` as a production cost that must not be echoed. The
   weakest option; `CLAUDE.md` prefers unrepresentable over documented.
 
-Decide against `announce` / `announced` on `dev`, after
-[Announce handle](/quest/m1/announce-handle.md) settles the surface the
-bindings mirror.
-
-## Required
-
-- [Announce handle](/quest/m1/announce-handle.md) - the `announce` / `announced` surface the bindings mirror must be settled before the cost shape is decided against it
+Decide against `dynamic(prefix, route)` and `broadcast::Producer::announce(route)`
+on `dev`, the surface the bindings mirror (see
+[#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md)).
 
 ## Related
 

@@ -91,8 +91,8 @@ mod tests {
 		let mut source = source_origin
 			.create_broadcast("source")
 			.expect("create source broadcast");
-		let _source_announcement = source_origin
-			.announce("source", moq_net::origin::Route::default())
+		source
+			.announce(moq_net::origin::Route::default())
 			.expect("announce source broadcast");
 		let catalog = moq_mux::catalog::Producer::new(&mut source).expect("create source catalog");
 		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");

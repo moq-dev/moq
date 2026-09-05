@@ -150,7 +150,7 @@ mod tests {
 		}
 
 		let origin = produce_origin();
-		let mut requests = origin.dynamic();
+		let requests = origin.dynamic("", Default::default()).unwrap();
 		let served = source_subscriber.clone();
 		tokio::spawn(async move {
 			while let Ok(request) = requests.requested_broadcast().await {

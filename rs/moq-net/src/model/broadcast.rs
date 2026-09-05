@@ -14,7 +14,9 @@ use std::{
 };
 
 use crate::Error;
+use crate::origin::Route;
 
+use super::origin_impl::Announcer;
 use super::{Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
@@ -221,6 +223,40 @@ impl Producer {
 		self
 	}
 
+	/// Attach the advertisement of this broadcast's exact path. Set by
+	/// `origin::Producer::create_broadcast`; a standalone broadcast has none.
+	pub(crate) fn with_announcer(self, announcer: Announcer) -> Self {
+		*self.alive.announcer.lock() = Some(announcer);
+		self
+	}
+
+	/// Advertise this broadcast's exact path as a route, or re-price the standing
+	/// advertisement in place.
+	///
+	/// Call it once the tracks a subscriber needs first (a catalog) exist, so the
+	/// advertisement lands with them in place: an announced path is what
+	/// [`origin::Consumer::announced`](super::origin::Consumer::announced)
+	/// enumerates, and a subscriber acts on it immediately. The broadcast is
+	/// reachable by exact path either way; announcing only makes it discoverable.
+	/// The route retracts on [`unannounce`](Self::unannounce), [`finish`](Self::finish),
+	/// [`abort`](Self::abort), or the last producer dropping.
+	///
+	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
+	/// through an origin, so there is nothing to announce into) or once the
+	/// origin's driver has been dropped.
+	pub fn announce(&self, route: Route) -> Result<(), Error> {
+		let mut announcer = self.alive.announcer.lock();
+		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
+		announcer.announce(route)
+	}
+
+	/// Retract the advertisement of this broadcast's path, if any. The broadcast
+	/// stays reachable by exact path; this is how a publisher goes off the air
+	/// without ending the broadcast.
+	pub fn unannounce(&self) {
+		self.alive.unannounce();
+	}
+
 	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
 	/// tracks that are spliced across per-session tracks, queued for a route to
 	/// serve. Used by the origin for broadcasts reached over the network.
@@ -411,6 +447,7 @@ impl Producer {
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
 		let _ = self.alive.token.close();
+		self.alive.retire();
 	}
 
 	/// Abort the broadcast, ending it for consumers with `err`.
@@ -438,6 +475,7 @@ impl Producer {
 			state.reject_unserved(err);
 		}
 		let _ = self.alive.token.close();
+		self.alive.retire();
 		Ok(())
 	}
 
@@ -455,6 +493,10 @@ impl Producer {
 struct Alive {
 	token: kio::Producer<()>,
 	state: kio::Shared<BroadcastState>,
+	// The advertisement of the broadcast's exact path, owned here so it retracts
+	// with the broadcast: on finish, abort, or the last producer-side handle
+	// dropping. `None` for a standalone broadcast.
+	announcer: web_async::Lock<Option<Announcer>>,
 }
 
 impl Alive {
@@ -462,7 +504,24 @@ impl Alive {
 		Arc::new(Self {
 			token: kio::Producer::default(),
 			state,
+			announcer: web_async::Lock::new(None),
 		})
+	}
+
+	/// Retract the path's advertisement, if any.
+	fn unannounce(&self) {
+		let announcement = self.announcer.lock().as_mut().and_then(Announcer::take);
+		// Retracted outside the announcer lock: the retraction re-syncs the origin's
+		// announce cursors under the origin's own lock.
+		drop(announcement);
+	}
+
+	/// End the broadcast's advertising for good: retract the standing advertisement
+	/// and drop the announcer, so a later `announce` fails with `Closed`.
+	fn retire(&self) {
+		let announcer = self.announcer.lock().take();
+		// Dropped outside the announcer lock, like `unannounce`.
+		drop(announcer);
 	}
 }
 
@@ -476,6 +535,7 @@ impl Drop for Alive {
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
 			);
 		}
+		self.retire();
 	}
 }
 
