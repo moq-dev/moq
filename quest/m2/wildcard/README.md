@@ -17,13 +17,13 @@ subtree pattern `<pid>/chat/**` expresses them. An archive serving recordings
 over FETCH wants to say "if nobody is publishing this live, I have it", which
 is the catch-all `**`, a claim about every path at once.
 
-The cost of enumerating is measured, not assumed.
-[relay-memory](/quest/m2/relay-memory/README.md) puts one announcement at
-8.8 KB per relay with one route, plus 4.3 KB per additional route, and every
-relay that hears it materializes that whether or not anything there subscribes.
-So "workers times broadcasts" is not just a large number of messages; it is that
-number multiplied across the fleet in resident memory, which is the same growth
-that questline exists to stop.
+The cost of enumerating is real even though its last measurement is stale.
+[relay-memory](/quest/m2/relay-memory.md) measured one announcement at 8.8 KB
+per relay plus 4.3 KB per additional route before prefix routes made a
+standby route a table entry, and owns remeasuring it. Whatever the current
+number, every relay that hears an announcement pays it whether or not anything
+there subscribes, so "workers times broadcasts" is that number multiplied
+across the fleet in resident memory.
 
 ## Plan
 

@@ -1,96 +1,37 @@
-# [L] watch: absolute wall-clock latency target for synchronized playback across viewers
+# [S] hang: a timeline consumer exposes the wall anchor
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2278](https://github.com/moq-dev/moq/issues/2278)
-within the issue's stated scope and boundaries.
+A browser application can read a rendition's `Timeline.wall` and its records
+through a `Timeline.Consumer` in `js/hang`, so an application that knows its
+viewers share a clock can compute the delay that renders one frame at one
+instant everywhere, and a DVR view can map presentation time to wall time.
+
+The library itself never synchronizes playback on wall time. That is the
+decision behind [#2278](https://github.com/moq-dev/moq/issues/2278): frame
+timestamps are relative by design, `Timestamp::now()` is a one-way bridge with
+a per-process jitter to deter wall-clock readings, and two machines' clocks are
+only comparable when the application already knows they are synced. No
+absolute `delay` mode, no client clock estimation from the session RTT, and no
+sync exchange over a track.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+`js/hang` has a timeline producer (`setWall(pts, wall)`) and no consumer;
+`js/watch/src/sync.ts` anchors on first-frame arrival against
+`performance.now()`. Add the consumer beside the producer, mirroring the Rust
+timeline consumer's records and exposing `wall` as a signal, and keep `Sync`
+untouched. Document in `doc/concept` how an application derives a `delay`
+from `wall + pts` against its own clock, and what it gives up when the clocks
+are not synced.
 
-### Issue context
+Nothing populates `wall` from the built-in publishers today, so this waits on
+[Publishers anchor the timeline](/quest/m2/timeline-wall.md).
 
-Let every viewer render the same frame at the same instant. Watch parties, sports bars, betting, second-screen, and multi-camera sync all need it. HLS does it badly via `EXT-X-PROGRAM-DATE-TIME`; WebRTC doesn't try.
+## Required
 
-The pieces are closer than they look: **the PTS → wall-clock mapping already exists in the catalog and the player just never reads it.**
-
-#### What exists today
-
-**`Timeline.wall` is the mapping, and it's already shipping.** `rs/hang/src/catalog/timeline.rs`:
-
-```rust
-pub struct Timeline {
-    pub track: String,
-    pub timescale: u32,          // default 1000 (ms)
-    pub wall: Option<u64>,       // wall-clock of pts 0, in timescale units since the MoQ epoch
-}
-pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;  // 2020-01-01
-```
-
-Set via `moq_mux::timeline::Producer::set_wall(pts, wall)` (`rs/moq-mux/src/timeline.rs`), attached per-rendition on `VideoConfig.timeline` / `AudioConfig.timeline`. JS mirrors the schema (`js/hang/src/catalog/timeline.ts`) and the producer (`js/hang/src/container/timeline.ts`  -  `setWall(pts, wall)`).
-
-So `wall + pts` → Unix time, per rendition, today.
-
-**Frame timestamps are PTS, deliberately, and must not be repurposed.** Worth stating clearly because it's easy to get wrong:
-
-- `hang::container::Frame::timestamp` doc (`rs/hang/src/container/frame.rs:27`): "the presentation timestamp... This is NOT a wall clock time."
-- `rs/moq-net/src/model/time.rs:119`: "All timestamps within a track are relative, so zero for one track is not zero for another."
-- `Timestamp::now()` is a deliberately one-way bridge with **no inverse**, and the anchor is 2020-01-01 **minus a per-process random 0..69420ms jitter**, explicitly "to deter nerds trying to use timestamp as wall clock time" (`time.rs:412`).
-- The lite-05 wire field is a **zigzag delta of PTS at the track timescale** (`rs/moq-net/src/lite/publisher.rs:828` `encode_frame_timing`), not a wall-clock value.
-
-The codebase actively fights wall-clock interpretation of frame timestamps. `Timeline.wall` is the sanctioned channel and this issue should stay on it.
-
-#### What's missing
-
-**Latency is relative (buffer depth), never absolute.** `js/watch/src/sync.ts`:
-
-```ts
-export type Delay = "instant" | "auto" | Time.Milli;
-// plus a separate `buffer: Getter<Time.Milli>` input on Sync
-```
-
-`Sync.received(timestamp)` computes `ref = Time.Milli.now() - timestamp`, and `Time.Milli.now()` is `performance.now()` (`js/net/src/time.ts:68`)  -  monotonic since page load, explicitly "not wall-clock time". So `reference` is an arbitrary local-clock↔PTS offset anchored by whichever frame happened to arrive first. Two viewers who tune in 3 seconds apart are 3 seconds apart forever, and nothing in the model can tell.
-
-`Sync` never reads `Timeline.wall`. There is no JS `Timeline.Consumer` at all (producer only).
-
-#### Proposed shape
-
-1. **A JS `Timeline.Consumer`** in `js/hang` (needed by the DVR work too).
-2. **A third mode alongside `delay` and `buffer`**: something like `delay: { absolute: Time.Milli }` meaning "render pts P at wall time `wall + P + absolute`". `Sync` then anchors on `Timeline.wall` instead of first-frame arrival, and `now()` becomes a wall-clock computation rather than an offset.
-3. **Client clock sync.** This is the real work. `Timeline.wall` is the *publisher's* wall clock; the viewer's `Date.now()` can be off by seconds. Options, roughly in order of cost:
-   - trust `Date.now()` (fine for a watch party, useless for betting)
-   - estimate offset from the session RTT (we already track min RTT via PROBE in `#runJitter` for exactly this kind of anchoring)
-   - NTP-ish round trips over a MoQ track
-   - let the app inject a clock
-     Suggest: an injectable clock with an RTT-based default, so the app can bring its own.
-4. **Degrade honestly.** If the target wall time has already passed (viewer joined late, or clock skew is large) the player must either skip forward or admit it can't hit the target. Silently drifting back to relative is worse than an error.
-5. **Surface the achieved offset** so an app can show "you are 240ms behind the reference".
-
-#### Open questions
-
-- An absolute target is a *point* while `delay` and `buffer` are two spans either side of the live edge. Does absolute replace `delay`, or sit alongside it with `buffer` still capping the lookahead?
-- `Timeline.wall` is per-rendition. Are audio and video guaranteed consistent? A rendition switch must not re-anchor.
-- Does this need anything on the publisher, or is `set_wall` sufficient? Today nothing in `moq-video`/`js/publish` calls `set_wall` as far as I can tell  -  so step 0 might be "actually populate `wall`".
-
-#### Naming note
-
-Mostly resolved: `js/watch`'s `Latency` / `Bound` types are gone, replaced by `Delay` plus a separate `buffer`, leaving `class Latency` (`js/hang/src/util/latency.ts`, jitter+buffer) as the only remaining use. Pick a name for the absolute mode that does not reintroduce the collision.
-
-#### Branch
-
-`main`  -  additive on the player. Unless `Timeline` gains fields, in which case check `#[non_exhaustive]` (it has it) and the JS schema.
-
-#### Cross-package sync
-
-`js/watch`, `js/hang`, `rs/hang`; `demo/web` if it exposes the knob; `doc/concept`.
+- [Publishers anchor the timeline](/quest/m2/timeline-wall.md) - there is no anchor to expose until publishers set one
 
 ## Closes
 
 - [#2278](https://github.com/moq-dev/moq/issues/2278) - close this issue when the quest finishes
-
-## Related
-
-- [Playout clock](/quest/m0/playout-clock.md) - ports the same anchoring model to Rust as `moq_mux::Clock`

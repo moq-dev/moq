@@ -838,6 +838,40 @@ mod tests {
 		assert_eq!(pts, vec![1_000_000]);
 	}
 
+	/// The encoder needs no correction for the resampler's own delay: it anchors
+	/// the epoch to the first input timestamp and advances by emitted samples,
+	/// while `Resampler::process` drops its startup silence rather than passing it
+	/// on, so the first sample published is the first sample written. Anything
+	/// that let that delay through would shift every PTS on a resampled track,
+	/// which no `reset_epoch` would ever correct.
+	#[tokio::test]
+	async fn resampling_does_not_shift_the_first_pts() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+
+		// 44.1 kHz in, and Opus only runs at 48 kHz, so this one resamples.
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+
+		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
+
+		// A second of audio, so the filter's delay is nowhere near the whole write.
+		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();
+
+		let first = reader.read().await.unwrap().expect("a packet");
+		assert_eq!(first.timestamp.as_micros(), 1_000_000);
+	}
+
 	#[tokio::test]
 	async fn pts_advances_by_frame_duration_ignoring_later_timestamps() {
 		// Second frame's own timestamp (way ahead) is ignored; PTS advances by

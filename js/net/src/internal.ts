@@ -52,6 +52,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Sequence namespaces shared by the broadcast generation. */
 	sequences: TrackSequences;
+	/** Requests not yet accepted or rejected by the publisher. */
+	pending: Set<Request>;
 }
 
 /** Hooks assigned in static blocks by the owning class. */

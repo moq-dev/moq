@@ -4,6 +4,12 @@
 //! dispatch queue; the delegate wraps each as a [`Surface::PixelBuffer`] and pushes it
 //! into the shared [`FrameChannel`], which the encode loop awaits. Frames reach
 //! VideoToolbox with no copy and no color conversion.
+//!
+//! Sample delivery is the only callback AVFoundation makes on the happy path, so
+//! the same delegate also observes the notifications that say the session died:
+//! a camera that vanishes simply stops delivering, and without them a parked
+//! [`Stream::read`] would never return. See [`observe`] for which notifications
+//! are terminal and why an interruption is not.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,15 +17,17 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject};
-use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_av_foundation::{
-	AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput, AVCaptureOutput,
-	AVCaptureSession, AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaType,
-	AVMediaTypeVideo,
+	AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
+	AVCaptureDeviceWasDisconnectedNotification, AVCaptureOutput, AVCaptureSession, AVCaptureSessionErrorKey,
+	AVCaptureSessionInterruptionEndedNotification, AVCaptureSessionRuntimeErrorNotification,
+	AVCaptureSessionWasInterruptedNotification, AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate,
+	AVError, AVFoundationErrorDomain, AVMediaType, AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSString};
 
 use super::surface::surface_frame;
 use super::{Camera, Config, FrameChannel, Stream};
@@ -84,7 +92,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		.map_err(|e| Error::Codec(anyhow::anyhow!("camera input: {e:?}")))?;
 
 	let chan = FrameChannel::new();
-	let delegate = Delegate::new(chan.clone());
+	let delegate = Delegate::new(chan.clone(), device_id.clone());
 	let dispatch = DispatchQueue::new("dev.moq.video.capture", None);
 
 	let output = unsafe { AVCaptureVideoDataOutput::new() };
@@ -96,8 +104,16 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	}
 
 	let session = unsafe { AVCaptureSession::new() };
+
+	// Own the session (and register the failure observers) before configuring it,
+	// so an early return here still unregisters and releases everything. It also
+	// means a session that fails during `startRunning` is observed: that failure
+	// arrives as a runtime-error notification, which an observer added afterwards
+	// would miss.
+	let guard = SessionGuard::new(session.clone(), delegate, dispatch);
+
+	let configuration = SessionConfiguration::new(&session);
 	unsafe {
-		session.beginConfiguration();
 		if !session.canAddInput(&input) {
 			return Err(Error::Codec(anyhow::anyhow!("cannot add camera input")));
 		}
@@ -106,18 +122,9 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 			return Err(Error::Codec(anyhow::anyhow!("cannot add video output")));
 		}
 		session.addOutput(&output);
-		session.commitConfiguration();
-		session.startRunning();
 	}
-
-	// The session keeps capturing until dropped; this guard stops it and closes
-	// the channel when the Stream goes away.
-	let guard = SessionGuard {
-		session,
-		chan: chan.clone(),
-		_delegate: delegate,
-		_dispatch: dispatch,
-	};
+	drop(configuration);
+	unsafe { session.startRunning() };
 
 	// Await the first frame to learn the negotiated resolution (and to surface a
 	// permission failure as an error rather than a silent hang).
@@ -194,17 +201,153 @@ async fn ensure_camera_access(media: &AVMediaType) -> Result<(), Error> {
 	))
 }
 
+/// Subscribe `delegate` to the notifications that mean the camera stopped
+/// producing frames for good.
+///
+/// AVFoundation has no per-frame error path: the only thing it calls on a
+/// healthy session is the sample-buffer delegate, so a camera that is unplugged
+/// or revoked just goes quiet. These notifications are the whole signal.
+///
+/// - **Runtime error** ends the session; [`runtime_error`] sorts a revoked grant
+///   from a vanished device. Terminal.
+/// - **Device disconnected** is the unplug, which is terminal even when the
+///   session hasn't noticed yet.
+/// - **Interruption is not terminal.** AVFoundation stops an interrupted session
+///   and restarts it itself once the interruption ends, so frames resume and the
+///   parked read simply wakes with the next one; failing here would tear down a
+///   publish the OS is about to resume. macOS also gives us no way to tell a
+///   recoverable interruption from a hopeless one, because
+///   `AVCaptureSessionInterruptionReasonKey` is iOS-only, so guessing "terminal"
+///   would be guessing. The causes that really are fatal (unplug, revoked
+///   permission, a session-killing error) each post their own notification
+///   above, so nothing is lost by letting an interruption ride.
+fn observe(delegate: &Delegate, session: &AVCaptureSession) {
+	let center = NSNotificationCenter::defaultCenter();
+	let observer: &AnyObject = delegate;
+	let session: &AnyObject = session;
+
+	// SAFETY: the observer outlives the registration; `SessionGuard::drop`
+	// removes it before releasing the delegate, and every selector below is
+	// defined on that class taking the notification.
+	unsafe {
+		center.addObserver_selector_name_object(
+			observer,
+			sel!(moqSessionRuntimeError:),
+			Some(AVCaptureSessionRuntimeErrorNotification),
+			Some(session),
+		);
+		center.addObserver_selector_name_object(
+			observer,
+			sel!(moqSessionWasInterrupted:),
+			Some(AVCaptureSessionWasInterruptedNotification),
+			Some(session),
+		);
+		center.addObserver_selector_name_object(
+			observer,
+			sel!(moqSessionInterruptionEnded:),
+			Some(AVCaptureSessionInterruptionEndedNotification),
+			Some(session),
+		);
+		// Matched by `uniqueID` in the handler rather than by filtering on our
+		// `AVCaptureDevice` here: the notification carries whichever instance
+		// AVFoundation holds for the camera, and filtering on ours would silently
+		// never fire if the two ever differ.
+		center.addObserver_selector_name_object(
+			observer,
+			sel!(moqDeviceWasDisconnected:),
+			Some(AVCaptureDeviceWasDisconnectedNotification),
+			None,
+		);
+	}
+}
+
+/// The `NSError` an `AVCaptureSessionRuntimeErrorNotification` carries under
+/// `AVCaptureSessionErrorKey`.
+fn notification_error(notification: &NSNotification) -> Option<Retained<NSError>> {
+	let info = notification.userInfo()?;
+	let key: &AnyObject = unsafe { AVCaptureSessionErrorKey };
+	info.objectForKey(key)?.downcast::<NSError>().ok()
+}
+
+/// Translate a session runtime error into the error the consumer sees.
+///
+/// A revoked camera grant and a camera that went away both arrive as this one
+/// notification, so the `AVError` code is what separates "you may not" from
+/// "it's gone". Every other cause still stopped the session, so it is terminal
+/// too and reports the system's own description.
+fn runtime_error(error: Option<&NSError>) -> Error {
+	let Some(error) = error else {
+		return Error::SourceUnavailable("camera session stopped without a reason".to_string());
+	};
+
+	let reason = error.localizedDescription().to_string();
+	let domain = error.domain();
+	let av = unsafe { AVFoundationErrorDomain }.is_some_and(|expected| *domain == *expected);
+	let code = AVError(error.code());
+
+	if av && (code == AVError::ApplicationIsNotAuthorizedToUseDevice || code == AVError::ApplicationIsNotAuthorized) {
+		return Error::PermissionDenied(reason);
+	}
+
+	Error::SourceUnavailable(reason)
+}
+
+/// Commits the session configuration before any later guard stops the session.
+///
+/// `stopRunning` raises an Objective-C exception while a configuration is open,
+/// so this must also cover the early error returns from `open`.
+struct SessionConfiguration<'a> {
+	session: &'a AVCaptureSession,
+}
+
+impl<'a> SessionConfiguration<'a> {
+	fn new(session: &'a AVCaptureSession) -> Self {
+		unsafe { session.beginConfiguration() };
+		Self { session }
+	}
+}
+
+impl Drop for SessionConfiguration<'_> {
+	fn drop(&mut self) {
+		unsafe { self.session.commitConfiguration() };
+	}
+}
+
 /// Keeps the capture session (and its delegate) alive; stops it on drop, which
 /// turns the camera LED off and closes the channel so a parked read returns.
 struct SessionGuard {
 	session: Retained<AVCaptureSession>,
 	chan: Arc<FrameChannel>,
-	_delegate: Retained<Delegate>,
+	delegate: Retained<Delegate>,
 	_dispatch: DispatchRetained<DispatchQueue>,
+}
+
+impl SessionGuard {
+	/// Take ownership of a session and subscribe its delegate to the failure
+	/// notifications, which the guard unsubscribes on drop.
+	fn new(
+		session: Retained<AVCaptureSession>,
+		delegate: Retained<Delegate>,
+		dispatch: DispatchRetained<DispatchQueue>,
+	) -> Self {
+		observe(&delegate, &session);
+		let chan = delegate.ivars().chan.clone();
+		Self {
+			session,
+			chan,
+			delegate,
+			_dispatch: dispatch,
+		}
+	}
 }
 
 impl Drop for SessionGuard {
 	fn drop(&mut self) {
+		// Unregister first. NSNotificationCenter does not retain its observers, so
+		// a notification posted after the delegate is released would message freed
+		// memory.
+		// SAFETY: `delegate` is the object `observe` registered.
+		unsafe { NSNotificationCenter::defaultCenter().removeObserver(&self.delegate) };
 		unsafe { self.session.stopRunning() };
 		self.chan.close();
 	}
@@ -212,6 +355,9 @@ impl Drop for SessionGuard {
 
 struct DelegateIvars {
 	chan: Arc<FrameChannel>,
+	/// The `uniqueID` of the camera being captured, to match disconnect
+	/// notifications against.
+	device_id: String,
 }
 
 define_class!(
@@ -235,11 +381,205 @@ define_class!(
 			}
 		}
 	}
+
+	// The notification handlers registered by `observe`. Prefixed so they can't
+	// collide with anything AVFoundation declares on our superclass.
+	impl Delegate {
+		#[unsafe(method(moqSessionRuntimeError:))]
+		fn session_runtime_error(&self, notification: &NSNotification) {
+			let error = runtime_error(notification_error(notification).as_deref());
+			tracing::warn!(device = %self.ivars().device_id, %error, "camera session failed");
+			self.ivars().chan.fail(error);
+		}
+
+		#[unsafe(method(moqDeviceWasDisconnected:))]
+		fn device_was_disconnected(&self, notification: &NSNotification) {
+			let Some(object) = notification.object() else { return };
+			// SAFETY: this notification's object is always the AVCaptureDevice that
+			// went away. A checked `downcast` is not an option: AVFoundation's private
+			// device subclasses declare `isKindOfClass:` with a malformed type
+			// encoding, which objc2's debug-build message verification aborts on.
+			let device: Retained<AVCaptureDevice> = unsafe { Retained::cast_unchecked(object) };
+
+			let id = unsafe { device.uniqueID() }.to_string();
+			if id != self.ivars().device_id {
+				return; // some other camera came or went
+			}
+
+			tracing::warn!(device = %id, "camera was disconnected");
+			self.ivars().chan.fail(Error::SourceUnavailable(format!("camera {id} was disconnected")));
+		}
+
+		#[unsafe(method(moqSessionWasInterrupted:))]
+		fn session_was_interrupted(&self, _notification: &NSNotification) {
+			// Recoverable by design; see `observe`. Frames stop until the
+			// interruption ends, which the reader sees as a gap, not an error.
+			tracing::warn!(device = %self.ivars().device_id, "camera session interrupted; waiting for it to resume");
+		}
+
+		#[unsafe(method(moqSessionInterruptionEnded:))]
+		fn session_interruption_ended(&self, _notification: &NSNotification) {
+			tracing::info!(device = %self.ivars().device_id, "camera session resumed");
+		}
+	}
 );
 
 impl Delegate {
-	fn new(chan: Arc<FrameChannel>) -> Retained<Self> {
-		let this = Self::alloc().set_ivars(DelegateIvars { chan });
+	fn new(chan: Arc<FrameChannel>, device_id: String) -> Retained<Self> {
+		let this = Self::alloc().set_ivars(DelegateIvars { chan, device_id });
 		unsafe { msg_send![super(this), init] }
+	}
+}
+
+/// The notification observers are the whole fix, and the only way to trigger
+/// them for real is to unplug a camera. `NSNotificationCenter` is the injection
+/// point AVFoundation already uses, so these tests post the same notifications
+/// AVFoundation would and assert what the channel does, without a device, a TCC
+/// grant, or a test-only hook in the capture path.
+#[cfg(test)]
+mod tests {
+	use objc2_foundation::{NSDictionary, NSInteger};
+
+	use super::*;
+
+	/// A delegate wired up exactly as `open` wires it, minus the camera: the
+	/// session is never configured or started, so nothing lights up.
+	fn wire(device_id: &str) -> (Arc<FrameChannel>, Retained<AVCaptureSession>, SessionGuard) {
+		let chan = FrameChannel::new();
+		let session = unsafe { AVCaptureSession::new() };
+		let delegate = Delegate::new(chan.clone(), device_id.to_string());
+		let dispatch = DispatchQueue::new("dev.moq.video.capture.test", None);
+		let guard = SessionGuard::new(session.clone(), delegate, dispatch);
+		(chan, session, guard)
+	}
+
+	/// Teardown must never call `stopRunning` while configuration is open. This
+	/// is the setup-failure path when `canAddInput` or `canAddOutput` returns false.
+	#[test]
+	fn an_early_configuration_error_commits_before_teardown() {
+		let session = unsafe { AVCaptureSession::new() };
+		let configuration = SessionConfiguration::new(&session);
+		drop(configuration);
+
+		// Raises `NSGenericException` if the configuration was not committed.
+		unsafe { session.stopRunning() };
+	}
+
+	/// Post an `AVCaptureSessionRuntimeErrorNotification` for `session` carrying
+	/// an `AVFoundationErrorDomain` error with `code`, the way a session that dies
+	/// mid-capture does.
+	fn post_runtime_error(session: &AVCaptureSession, code: NSInteger) {
+		let domain = unsafe { AVFoundationErrorDomain }.expect("AVFoundationErrorDomain");
+		let error = unsafe { NSError::errorWithDomain_code_userInfo(domain, code, None) };
+
+		let key: &NSString = unsafe { AVCaptureSessionErrorKey };
+		let info = NSDictionary::<NSString, NSError>::from_slices(&[key], &[&*error]);
+		// SAFETY: NSDictionary's type parameters are phantom, so erasing them
+		// changes nothing about the object; the posting API takes the untyped form.
+		let info: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(info) };
+
+		let object: &AnyObject = session;
+		unsafe {
+			NSNotificationCenter::defaultCenter().postNotificationName_object_userInfo(
+				AVCaptureSessionRuntimeErrorNotification,
+				Some(object),
+				Some(&info),
+			);
+		}
+	}
+
+	/// Post `name` for `session` with no user info.
+	fn post(name: &NSString, session: &AVCaptureSession) {
+		let object: &AnyObject = session;
+		unsafe { NSNotificationCenter::defaultCenter().postNotificationName_object(name, Some(object)) };
+	}
+
+	/// The regression: a session that dies has to reach a parked reader. Without
+	/// the observers this `recv` never returns.
+	#[tokio::test]
+	async fn a_runtime_error_ends_the_stream() {
+		let (chan, session, _guard) = wire("runtime-error");
+		post_runtime_error(&session, AVError::DeviceWasDisconnected.0);
+
+		assert!(matches!(chan.recv().await, Err(Error::SourceUnavailable(_))));
+	}
+
+	/// A grant revoked mid-capture arrives as the same notification, so the code
+	/// is what has to separate it from a device that vanished.
+	#[tokio::test]
+	async fn a_revoked_grant_ends_the_stream_as_a_permission_error() {
+		let (chan, session, _guard) = wire("revoked-grant");
+		post_runtime_error(&session, AVError::ApplicationIsNotAuthorizedToUseDevice.0);
+
+		assert!(matches!(chan.recv().await, Err(Error::PermissionDenied(_))));
+	}
+
+	/// A runtime error with no attached cause is still terminal.
+	#[test]
+	fn a_runtime_error_without_a_cause_is_still_terminal() {
+		assert!(matches!(runtime_error(None), Error::SourceUnavailable(_)));
+	}
+
+	/// Interruptions are recoverable, so they must leave the channel alone: the
+	/// next frame still arrives.
+	#[tokio::test]
+	async fn an_interruption_does_not_end_the_stream() {
+		let (chan, session, _guard) = wire("interrupted");
+		post(unsafe { AVCaptureSessionWasInterruptedNotification }, &session);
+		post(unsafe { AVCaptureSessionInterruptionEndedNotification }, &session);
+
+		chan.push(crate::frame::Surface::I420(crate::frame::I420 {
+			width: 16,
+			height: 16,
+			data: Vec::new(),
+			color: None,
+		}));
+		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 16);
+	}
+
+	/// Unplugging the camera. Needs a real `AVCaptureDevice` to name in the
+	/// notification (enumeration needs no TCC grant), so it skips on a machine
+	/// with no camera at all.
+	#[tokio::test]
+	async fn disconnecting_the_captured_camera_ends_the_stream() {
+		let Some(camera) = cameras().expect("list cameras").into_iter().next() else {
+			return; // headless machine
+		};
+		let id = NSString::from_str(&camera.id);
+		let device = unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }.expect("camera by id");
+
+		let (chan, _session, _guard) = wire(&camera.id);
+		let object: &AnyObject = &device;
+		unsafe {
+			NSNotificationCenter::defaultCenter()
+				.postNotificationName_object(AVCaptureDeviceWasDisconnectedNotification, Some(object));
+		}
+
+		assert!(matches!(chan.recv().await, Err(Error::SourceUnavailable(_))));
+	}
+
+	/// ...but another camera coming or going is not our problem.
+	#[tokio::test]
+	async fn disconnecting_another_camera_leaves_the_stream_alone() {
+		let Some(camera) = cameras().expect("list cameras").into_iter().next() else {
+			return; // headless machine
+		};
+		let id = NSString::from_str(&camera.id);
+		let device = unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }.expect("camera by id");
+
+		let (chan, _session, _guard) = wire("some-other-camera");
+		let object: &AnyObject = &device;
+		unsafe {
+			NSNotificationCenter::defaultCenter()
+				.postNotificationName_object(AVCaptureDeviceWasDisconnectedNotification, Some(object));
+		}
+
+		chan.push(crate::frame::Surface::I420(crate::frame::I420 {
+			width: 32,
+			height: 32,
+			data: Vec::new(),
+			color: None,
+		}));
+		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 32);
 	}
 }

@@ -39,6 +39,15 @@ the UDP sockets bound through it.
   worker's `!Send` ring handle, so a trace is staged in memory and handed to
   one background thread for every worker sharing the sink. Behind the `qlog`
   feature, so a production build compiles none of it.
+- **Metrics**: a set of relaxed atomic counters per worker, read from any
+  thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
+  provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
+  per receive and per send), ring traffic (submissions, completions,
+  `io_uring_enter` calls), and scheduling (parks, remote futex wakes, timer
+  churn). Pass a `metrics::Metrics` to `Config::metrics` to hold a copy on the
+  thread that spawned the worker, or read the worker's own with
+  `Handle::metrics`. `moq-relay` publishes them at `/metrics` on its internal
+  listener.
 - **Steering**: an endpoint whose socket sits in a `moq-sock` steered
   `SO_REUSEPORT` group sets `endpoint::Config::shard`, and every issued
   connection id leads with the group's steering byte, so the kernel keeps a

@@ -632,7 +632,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-transport-20".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
-	let mut server = server.listen().await.expect("failed to listen");
+	let mut server = server.listen().await.expect("listen");
 	let addr = server.local_addr().expect("local addr");
 
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
@@ -664,7 +664,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	let announced = next_announce(&mut announcements).await;
 	assert_eq!(announced.prefix.as_path().as_str(), "test");
 	assert!(announced.active, "expected an announce");
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(announced.prefix.as_path()))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");

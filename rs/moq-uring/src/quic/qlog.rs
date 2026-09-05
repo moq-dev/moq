@@ -36,6 +36,10 @@ const CHUNK: usize = 8 * 1024;
 /// delimited, so a reader resynchronizes after the gap.
 const QUEUED_MAX: usize = 64 * 1024 * 1024;
 
+/// A process-local id for each sink, keeping filenames unique when multiple
+/// worker groups start during the same millisecond.
+static NEXT_SINK: AtomicU64 = AtomicU64::new(0);
+
 /// Which end of a connection a trace was captured from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Side {
@@ -67,11 +71,13 @@ pub struct Sink {
 impl Sink {
 	/// Write traces into `dir`, which must already exist and be writable.
 	///
-	/// Files are named `moq-<started>-<id>-<side>.qlog`, where `started` is
-	/// the sink's creation time in milliseconds since the epoch (so a second
-	/// run does not overwrite the first) and `id` names the connection.
+	/// Files are named `moq-<started>-<process>-<sink>-<id>-<side>.qlog`, where
+	/// `started` is the sink's creation time in milliseconds since the epoch
+	/// and `id` names the connection.
 	pub fn directory(dir: impl Into<PathBuf>) -> Result<Self, Error> {
 		let dir = dir.into();
+		let process = std::process::id();
+		let sink = NEXT_SINK.fetch_add(1, Ordering::Relaxed);
 		let started = std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
 			.unwrap_or_default()
@@ -80,7 +86,7 @@ impl Sink {
 		// A read-only or missing directory is reported here, where the
 		// operator set it, rather than as a warning per connection once the
 		// traces they went looking for are already not being written.
-		let probe = dir.join(format!(".moq-qlog-{}-{started}", std::process::id()));
+		let probe = dir.join(format!(".moq-qlog-{process}-{sink}-{started}"));
 		std::fs::write(&probe, b"").map_err(|err| Error::Qlog(format!("{}: {err}", dir.display())))?;
 		let _ = std::fs::remove_file(&probe);
 
@@ -98,6 +104,8 @@ impl Sink {
 			inner: Arc::new(Inner {
 				dir,
 				started,
+				process,
+				sink,
 				tx: Some(tx),
 				queued,
 				next: AtomicU64::new(0),
@@ -136,13 +144,27 @@ impl Sink {
 			}),
 			None => format!("endpoint{file}"),
 		};
-		let path = inner
-			.dir
-			.join(format!("moq-{}-{id}-{}.qlog", inner.started, side.as_str()));
-		inner.send(Msg::Open { file, path });
+		let path = inner.dir.join(format!(
+			"moq-{}-{}-{}-{id}-{}.qlog",
+			inner.started,
+			inner.process,
+			inner.sink,
+			side.as_str()
+		));
+		let queued = std::mem::size_of::<Msg>() + path.capacity();
+		let close_queued = std::mem::size_of::<Msg>();
+		if !inner.reserve(queued + close_queued) {
+			inner.warn_dropped();
+			return Box::new(io::sink());
+		}
+		if !inner.send(Msg::Open { file, path, queued }) {
+			inner.release(queued + close_queued);
+			return Box::new(io::sink());
+		}
 		Box::new(Trace {
 			inner,
 			file,
+			close_queued,
 			buf: Vec::with_capacity(CHUNK),
 		})
 	}
@@ -159,9 +181,13 @@ struct Inner {
 	dir: PathBuf,
 	/// Milliseconds since the epoch when the sink was built, in every filename.
 	started: u128,
+	/// Process id in every filename.
+	process: u32,
+	/// Process-local sink id in every filename.
+	sink: u64,
 	/// `Option` so [`Drop`] can close the channel before joining the thread.
 	tx: Option<mpsc::Sender<Msg>>,
-	/// Bytes handed to the thread and not yet written, against [`QUEUED_MAX`].
+	/// Memory handed to the thread or reserved for a trace's close message.
 	queued: Arc<AtomicUsize>,
 	/// The next trace's slot in the writer thread's table.
 	next: AtomicU64,
@@ -172,23 +198,49 @@ struct Inner {
 }
 
 impl Inner {
-	fn send(&self, msg: Msg) {
+	fn send(&self, msg: Msg) -> bool {
 		if let Some(tx) = &self.tx {
-			let _ = tx.send(msg);
+			return tx.send(msg).is_ok();
+		}
+		false
+	}
+
+	fn reserve(&self, bytes: usize) -> bool {
+		let mut queued = self.queued.load(Ordering::Relaxed);
+		loop {
+			let Some(next) = queued.checked_add(bytes).filter(|next| *next <= QUEUED_MAX) else {
+				return false;
+			};
+			match self
+				.queued
+				.compare_exchange_weak(queued, next, Ordering::Relaxed, Ordering::Relaxed)
+			{
+				Ok(_) => return true,
+				Err(actual) => queued = actual,
+			}
+		}
+	}
+
+	fn release(&self, bytes: usize) {
+		self.queued.fetch_sub(bytes, Ordering::Relaxed);
+	}
+
+	fn warn_dropped(&self) {
+		if !self.dropped.swap(true, Ordering::Relaxed) {
+			tracing::warn!("dropping qlog output: over {QUEUED_MAX} bytes are queued for the writer");
 		}
 	}
 
 	/// Queue a chunk, dropping it when the writer thread is too far behind.
 	fn send_chunk(&self, file: u64, buf: Vec<u8>) {
-		let queued = self.queued.fetch_add(buf.len(), Ordering::Relaxed) + buf.len();
-		if queued > QUEUED_MAX {
-			self.queued.fetch_sub(buf.len(), Ordering::Relaxed);
-			if !self.dropped.swap(true, Ordering::Relaxed) {
-				tracing::warn!("dropping qlog output: over {QUEUED_MAX} bytes are queued for the writer");
-			}
+		let queued = std::mem::size_of::<Msg>() + buf.capacity();
+		if !self.reserve(queued) {
+			self.warn_dropped();
 			return;
 		}
-		self.send(Msg::Data { file, buf });
+		if !self.send(Msg::Data { file, buf, queued }) {
+			self.release(queued);
+		}
 	}
 }
 
@@ -206,9 +258,9 @@ impl Drop for Inner {
 
 /// What the writer thread is told to do.
 enum Msg {
-	Open { file: u64, path: PathBuf },
-	Data { file: u64, buf: Vec<u8> },
-	Close { file: u64 },
+	Open { file: u64, path: PathBuf, queued: usize },
+	Data { file: u64, buf: Vec<u8>, queued: usize },
+	Close { file: u64, queued: usize },
 }
 
 /// One connection's trace: the `io::Write` a QUIC stack streams into.
@@ -220,6 +272,8 @@ enum Msg {
 struct Trace {
 	inner: Arc<Inner>,
 	file: u64,
+	/// Queue space reserved when the trace opens, guaranteeing its close.
+	close_queued: usize,
 	buf: Vec<u8>,
 }
 
@@ -251,7 +305,12 @@ impl io::Write for Trace {
 impl Drop for Trace {
 	fn drop(&mut self) {
 		self.stage();
-		self.inner.send(Msg::Close { file: self.file });
+		if !self.inner.send(Msg::Close {
+			file: self.file,
+			queued: self.close_queued,
+		}) {
+			self.inner.release(self.close_queued);
+		}
 	}
 }
 
@@ -262,14 +321,25 @@ fn write_traces(rx: mpsc::Receiver<Msg>, queued: &AtomicUsize) {
 	let mut files: HashMap<u64, std::fs::File> = HashMap::new();
 	for msg in rx {
 		match msg {
-			Msg::Open { file, path } => match std::fs::File::create(&path) {
-				Ok(handle) => {
-					files.insert(file, handle);
+			Msg::Open {
+				file,
+				path,
+				queued: accounted,
+			} => {
+				queued.fetch_sub(accounted, Ordering::Relaxed);
+				match std::fs::File::create(&path) {
+					Ok(handle) => {
+						files.insert(file, handle);
+					}
+					Err(err) => tracing::warn!(path = %path.display(), %err, "failed to open a qlog trace"),
 				}
-				Err(err) => tracing::warn!(path = %path.display(), %err, "failed to open a qlog trace"),
-			},
-			Msg::Data { file, buf } => {
-				queued.fetch_sub(buf.len(), Ordering::Relaxed);
+			}
+			Msg::Data {
+				file,
+				buf,
+				queued: accounted,
+			} => {
+				queued.fetch_sub(accounted, Ordering::Relaxed);
 				if let Some(handle) = files.get_mut(&file)
 					&& let Err(err) = handle.write_all(&buf)
 				{
@@ -277,9 +347,62 @@ fn write_traces(rx: mpsc::Receiver<Msg>, queued: &AtomicUsize) {
 					files.remove(&file);
 				}
 			}
-			Msg::Close { file } => {
+			Msg::Close {
+				file,
+				queued: accounted,
+			} => {
+				queued.fetch_sub(accounted, Ordering::Relaxed);
 				files.remove(&file);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Write as _;
+
+	use super::*;
+
+	#[test]
+	fn concurrent_sinks_use_distinct_files() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let first = Sink::directory(dir.path()).expect("first sink");
+		let second = Sink::directory(dir.path()).expect("second sink");
+
+		let mut first_trace = first.endpoint_trace(Side::Server);
+		let mut second_trace = second.endpoint_trace(Side::Server);
+		first_trace.write_all(b"first").expect("write first trace");
+		second_trace.write_all(b"second").expect("write second trace");
+		drop(first_trace);
+		drop(second_trace);
+		drop(first);
+		drop(second);
+
+		let mut contents: Vec<_> = std::fs::read_dir(dir.path())
+			.expect("read qlog directory")
+			.map(|entry| std::fs::read(entry.expect("directory entry").path()).expect("read qlog file"))
+			.collect();
+		contents.sort();
+		assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
+	}
+
+	#[test]
+	fn an_open_trace_reserves_its_close_message() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let sink = Sink::directory(dir.path()).expect("sink");
+		let trace = sink.endpoint_trace(Side::Server);
+
+		let close_queued = std::mem::size_of::<Msg>();
+		for _ in 0..10_000 {
+			if sink.inner.queued.load(Ordering::Relaxed) == close_queued {
+				break;
+			}
+			std::thread::yield_now();
+		}
+		assert_eq!(sink.inner.queued.load(Ordering::Relaxed), close_queued);
+
+		drop(trace);
+		drop(sink);
 	}
 }

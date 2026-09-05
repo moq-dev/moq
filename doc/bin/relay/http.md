@@ -148,6 +148,66 @@ Nothing here reports host CPU, memory, disk, or network; run a node exporter for
 those. The QUIC listener has no accept counters at all: it multiplexes every
 session over one UDP socket, so it never calls `accept` and cannot exhaust it.
 
+#### io\_uring worker counters
+
+A relay running its QUIC workers on io\_uring (`--runtime-io-uring`, see
+[Configuration](/bin/relay/config)) also publishes what each worker thread is doing, one
+`worker` label per worker in shard order:
+
+```text
+moq_relay_uring_rx_datagrams_total{worker="0"} 918442
+moq_relay_uring_rx_receives_total{worker="0"} 214905
+moq_relay_uring_rx_enobufs_total{worker="0"} 0
+moq_relay_uring_rx_exhausted_total{worker="0"} 0
+moq_relay_uring_tx_datagrams_total{worker="0"} 1243180
+moq_relay_uring_tx_sends_total{worker="0"} 92311
+moq_relay_uring_tx_stalls_total{worker="0"} 0
+moq_relay_uring_submissions_total{worker="0"} 401552
+moq_relay_uring_completions_total{worker="0"} 401544
+moq_relay_uring_enters_total{worker="0"} 118207
+moq_relay_uring_parks_total{worker="0"} 74390
+moq_relay_uring_wakes_total{worker="0"} 6117
+moq_relay_uring_timers_armed_total{worker="0"} 233417
+moq_relay_uring_timers_fired_total{worker="0"} 74102
+moq_relay_uring_timers_cancelled_total{worker="0"} 159299
+moq_relay_uring_timers_active{worker="0"} 16
+```
+
+Every worker gets a full row from the moment the port is bound, so a worker that
+failed to start or has died shows stuck zeros rather than vanishing from the
+scrape. These describe the *runtime*, not the traffic: they are Prometheus-only
+and never appear on the `.stats` broadcast, which carries what crosses the relay
+rather than how this process is coping with it.
+
+The ratios are the point, not the raw counts:
+
+- `rx_datagrams / rx_receives` is the `UDP_GRO` coalescing actually achieved, and
+  `tx_datagrams / tx_sends` the `UDP_SEGMENT` batching. Both collapse toward 1 as
+  connections multiply, which is normal; a sudden drop at constant connection
+  count is not.
+- Datagrams over `moq_relay_uring_enters_total` is the syscall amortization the
+  io\_uring path exists for. If it approaches 1, the runtime is buying nothing
+  over the tokio workers.
+
+The two backpressure counters are what to alert on. A rising
+`moq_relay_uring_rx_enobufs_total` means the kernel had a datagram and no free
+buffer to select, so it never ran the receive. The datagram stays in the socket
+queue, so this is not itself packet loss; it becomes loss once the socket buffer
+fills while the pool is still dry. It is receive-side backpressure, and the first
+thing to look at when throughput sags with no errors anywhere. For actual drops,
+read the socket's own counters (`netstat -su`, `RcvbufErrors`).
+`moq_relay_uring_rx_exhausted_total` is the same shortage seen from userspace, a
+re-arm that found every buffer still held by an unread packet.
+`moq_relay_uring_tx_stalls_total` is the send-side equivalent, counting each
+time the staging pool becomes drained at its ceiling and a send has to wait.
+
+`moq_relay_uring_wakes_total` counts the `futex` syscalls other threads had to
+make to wake a parked worker, which is the cost of work crossing threads rather
+than staying on the one that owns the connection. The timer counters are churn:
+a re-arm counts as one cancel plus one arm, so a large
+`timers_cancelled / timers_fired` ratio means deadlines are being rewritten far
+more often than they expire.
+
 ### GET /nodes
 
 Returns this relay's local view of cluster nodes. A node is included when it is

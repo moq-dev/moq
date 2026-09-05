@@ -68,27 +68,42 @@ nix develop
 just obs compile
 ```
 
-This is the gate to run while working, because it needs headers rather than libraries, and the dev shell carries all of them on every platform. `libobs` comes from the `libobs-headers` package in `flake.nix`, which unpacks the headers from the same OBS release `buildspec.json` pins (`just obs check` fails if the two versions drift); `Qt6` and `ffmpeg` come from nixpkgs. It regenerates `target/include/moq.h` first, so a call to a `libmoq` function whose signature has since changed is a compile error rather than something you find out about later.
+This is the gate to run while working, because it needs headers rather than libraries, and the dev shell carries all of them on every platform. `libobs` comes from the `libobs-headers` package in `flake.nix`, which unpacks the headers from the same OBS release `buildspec.json` pins; `Qt6` and `ffmpeg` come from nixpkgs. It regenerates `target/include/moq.h` first, so a call to a `libmoq` function whose signature has since changed is a compile error rather than something you find out about later.
 
 It compiles the Qt sources too, which the CMake build only does when `ENABLE_QT` and `ENABLE_FRONTEND_API` are on. `just check` runs it for you when a branch touches `cpp/obs/` or `rs/libmoq/`.
 
 ### Compiling in CI
 
-[`obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml) compiles **and links** the plugin on every PR that touches the plugin, `rs/libmoq/`, a workspace manifest or build script, or the flake. It runs on Linux, the one platform where the whole dependency set (`libobs`, `Qt6`, `ffmpeg`) comes from nixpkgs with no obs-deps bundle to download. The plugin is platform-independent C++ over libmoq's C ABI, so this catches what a macOS developer would otherwise ship uncompiled. `just obs ci` is the same recipe locally.
+[`obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml) compiles **and links** the plugin, then runs the [unit tests](#tests), on every PR that touches the plugin, `rs/libmoq/`, a workspace manifest or build script, or the flake. It runs on Linux, the one platform where the whole dependency set (`libobs`, `Qt6`, `ffmpeg`) comes from nixpkgs with no obs-deps bundle to download. The plugin is platform-independent C++ over libmoq's C ABI, so this catches what a macOS developer would otherwise ship uncompiled. `just obs ci` is the same recipe locally.
 
 The filter reaches past `cpp/obs/` because this is the only place `libmoq.a` is linked from outside cargo, which needs the hand-maintained native-library lists in `rs/libmoq/native-libs/`. A dependency that starts pulling in a new native library leaves those stale, and every Rust gate stays green because cargo passes the flag itself. No list of paths catches all of those, so [`nightly.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/nightly.yml) runs the same recipe diff-independently as the backstop.
 
+### Which OBS version
+
+Three places name an OBS release, and `just obs check` compares all three:
+
+- `cpp/obs/buildspec.json` names the obs-deps bundle the macOS and Windows builds download, so this is what the released binaries link.
+- `flake.nix`'s `libobs-headers` is what `just obs compile` type-checks against on every platform. It must equal `buildspec.json` exactly; both unpack the same OBS tag.
+- nixpkgs' `obs-studio` is what `just obs ci` links on Linux. This one comes from `flake.lock` rather than from us, so only its `major.minor` has to match: a patch release carries no libobs API change, and the guard should fire on the nixpkgs bump that opens a real gap, not on every one.
+
+Bumping the first two together means new SHA-256 hashes for the OBS source archive (`.tar.gz` for macOS, `.zip` for Windows), the prebuilt obs-deps and Qt6 archives, and the nix `fetchzip` hash. The obs-deps version and hashes to use are the ones in the target OBS release's own `CMakePresets.json`, under the `dependencies` configure preset.
+
 ### Tests
 
-`just obs test` compiles the plugin sources against stubbed `libobs`/`libmoq` under ThreadSanitizer and drives the session status callback's orderings directly: a connection that fails permanently, a terminal arriving mid-`Start()`, a restart, and one arriving while the output is being destroyed. Run it after touching `cpp/obs/src/`.
+`just obs test` compiles the plugin sources against stubbed `libobs`, `libmoq` and FFmpeg under ThreadSanitizer, and drives the callback orderings directly rather than waiting for them. There is one binary per source under test, because each test file defines its own stubs:
 
-It finds the `libobs` headers the same way `just obs compile` does, and regenerates `moq.h` the same way; set `OBS_INCLUDE_DIR` to point it somewhere else. That shared step asks cargo where the header landed and reads the answer with `jq`, so outside the dev shell (running from WSL, say) `jq` has to be installed alongside cargo and the compiler. It stays a manual gate, like `just rs macos`: CI links the plugin but doesn't run these, since ThreadSanitizer needs its own build.
+- `test/moq-output-test.cpp` covers the publish side: a connection that fails permanently, a terminal arriving mid-`Start()`, a restart, and one arriving while the output is being destroyed.
+- `test/moq-source-test.cpp` covers the consume side: an announcement that arrives after the session reports connected, a broadcast that is never announced, a delivery belonging to a connection that has already been replaced, and the subscription reference count returning to zero on the delivered, errored and closed paths.
 
-It also needs a Clang or GCC whose ThreadSanitizer runtime *runs* on the host, so it fails rather than skipping when one isn't available. On Windows run it from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer.
+Run them after touching `cpp/obs/src/`.
 
 ```bash
 just obs test
 ```
+
+`just obs ci` runs the same tests without the sanitizer, and that is the copy which gates a merge: `obs.yml` invokes that recipe, while `just obs test` is manual. ThreadSanitizer adds the interleavings on top, needs its own build, and needs a Clang or GCC whose runtime *runs* on the host, so `just obs test` fails rather than skipping when one isn't available. On Windows run it from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer.
+
+Both find the `libobs` headers the same way `just obs compile` does, and regenerate `moq.h` the same way; set `OBS_INCLUDE_DIR` to point somewhere else. That shared step asks cargo where the header landed and reads the answer with `jq`, so outside the dev shell (running from WSL, say) `jq` has to be installed alongside cargo and the compiler.
 
 ## Releases
 

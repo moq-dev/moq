@@ -137,8 +137,8 @@ replaces the active session while an identical render is a no-op. It also
 preserves the last-good topology on malformed input, keeps an identical fallback
 session alive, redacts credentials from parse errors, and tracks overlapping
 gossip paths so an old unannounce cannot stale a replacement. The remaining
-boundary is structured policy that does not live in the URL, especially selected
-wire version and the two directional costs of one bidirectional session.
+boundary is structured policy that does not live in the URL: the two directional
+costs of one bidirectional session, which one `?cost=` cannot split.
 
 ## Quests
 
@@ -147,12 +147,12 @@ wire version and the two directional costs of one bidirectional session.
   draining or idle
 - [Rank](/quest/m2/pop-skipping/rank.md) - rank warm relay candidates by cold
   cost and adopt only downhill, with a hold that outlasts cost propagation
-- [Peer reconfigure](/quest/m2/pop-skipping/peer-reconfigure.md) - reconfigure
-  peer policy when negotiated versions or directional costs change, proving
-  both sides of an asymmetric link
+- [Peer reconfigure](/quest/m2/pop-skipping/peer-reconfigure.md) - structured
+  peer entries carry the charged cost, the declared cost, and the credential,
+  and a change redials, proving both sides of an asymmetric link
 
 ## Related
 
 - [drain](/quest/m2/drain/README.md) - a second relay per PoP makes the same-PoP link price and its connection cardinality operationally important
 - [wildcard](/quest/m2/wildcard/README.md) - it reuses this questline's route cost, and needs a cluster on Lite06
-- [relay-memory](/quest/m2/relay-memory/README.md) - a denser mesh multiplies whatever a non-selected route costs
+- [relay-memory](/quest/m2/relay-memory.md) - a denser mesh multiplies whatever a non-selected route costs

@@ -3,13 +3,13 @@
 ## Goal
 
 Record a measured verdict on WebRTC-style delay-based congestion control for
-subscriber-facing media egress against the selected fork's production
+subscriber-facing media egress against noq's production
 controller. Ship it only if it reduces queueing delay and rate variation
 without collapsing throughput. A written abandonment is a successful outcome.
 
 ## Plan
 
-Implement the candidate in the selected Quinn-family fork and expose it under
+Implement the candidate in noq and expose it under
 moq's backend-neutral `delay` congestion family. Egress only: relay ingest
 keeps the production controller.
 
@@ -24,5 +24,5 @@ behavior against production cross traffic or real wifi and cellular loss.
 
 ## Required
 
-- [Cut moq-uring WebTransport over to the selected QUIC core](/quest/m2/quic/uring-webtransport.md) -
-  experiment on the backend intended for production
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - experiment on the
+  backend intended for production

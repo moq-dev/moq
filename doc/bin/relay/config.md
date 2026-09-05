@@ -104,6 +104,10 @@ io_uring = false
 The `io-uring` feature is off by default. Prebuilt binaries that ship it say so;
 building it yourself is `cargo build -p moq-relay --features io-uring`.
 
+Each worker publishes its own runtime counters at `/metrics` on the internal
+listener: buffer-pool health, GRO/GSO batching, ring traffic, and scheduling.
+See [HTTP Endpoints](/bin/relay/http) for what to watch.
+
 The `[quic]` section applies to this listener too: `max_streams`,
 `idle_timeout`, `keep_alive`, `congestion_control`, `gso` and `qlog` are
 honored. `mtu_discovery` is not (the datagram path sends a fixed payload, so
@@ -121,7 +125,7 @@ configured, and this mode will not guess.
 `qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
 workers, and writes the same JSON-SEQ traces into the same directory, so one
 workflow reads both runtimes. Files are named
-`moq-<started>-<connection id>-<side>.qlog`, where `started` is when the relay
+`moq-<started>-<process>-<sink>-<connection id>-<side>.qlog`, where `started` is when the relay
 came up, so a second run does not overwrite the first (an `io-uring-quinn`
 build writes one file per worker instead of per connection, because
 quinn-proto takes one trace sink per endpoint). A pinned worker never

@@ -1,6 +1,5 @@
 import { Mutex } from "async-mutex";
 import { Reader, Stream, type Writer } from "../stream.ts";
-import { decodeUtf8 } from "../util/utf8.ts";
 import * as Varint from "../varint.ts";
 import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -72,6 +71,8 @@ interface StreamEntry {
 	controller: ReadableStreamDefaultController<Uint8Array>;
 }
 
+type NamespaceDirection = "incoming" | "outgoing";
+
 /**
  * Converts v14-v16 control stream multiplexing into virtual bidi streams.
  *
@@ -92,11 +93,15 @@ export class ControlStreamAdapter implements Session {
 	// Virtual streams keyed by requestId
 	#streams = new Map<bigint, StreamEntry>();
 
-	// Namespace → requestId reverse lookup (v14/v15 namespace-keyed messages)
-	#namespaces = new Map<string, bigint>();
+	// Namespace → requestId reverse lookups for v14/v15 namespace-keyed messages.
+	// DONE names an incoming announcement and CANCEL names an outgoing one, so a relay
+	// may legitimately hold the same namespace in both maps at once.
+	#incomingNamespaces = new Map<string, bigint>();
+	#outgoingNamespaces = new Map<string, bigint>();
 
-	// requestId → namespace reverse lookup (for cleanup in #closeStream)
-	#namespacesByRequestId = new Map<bigint, string>();
+	// requestId → namespace reverse lookup, one entry per request including a refused
+	// duplicate, so #forget can clean up whichever request goes away.
+	#namespacesByRequestId = new Map<bigint, { namespace: string; direction: NamespaceDirection }>();
 
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
@@ -166,7 +171,7 @@ export class ControlStreamAdapter implements Session {
 			},
 			cancel: () => {
 				if (registeredRequestId !== undefined) {
-					this.#streams.delete(registeredRequestId);
+					this.#forget(registeredRequestId);
 				}
 			},
 		});
@@ -193,7 +198,7 @@ export class ControlStreamAdapter implements Session {
 
 					if (!registered) {
 						// First message: extract requestId and register before flushing
-						const parsed = this.#tryParseOutgoing(toFlush);
+						const parsed = await this.#tryParseOutgoing(toFlush);
 						if (parsed) {
 							registeredRequestId = parsed.requestId;
 							this.#streams.set(parsed.requestId, { controller });
@@ -319,7 +324,7 @@ export class ControlStreamAdapter implements Session {
 				controller = c;
 			},
 			cancel: () => {
-				this.#streams.delete(requestId);
+				this.#forget(requestId);
 			},
 		});
 
@@ -358,20 +363,35 @@ export class ControlStreamAdapter implements Session {
 
 	#closeStream(requestId: bigint) {
 		const entry = this.#streams.get(requestId);
+		this.#forget(requestId);
 		if (!entry) return;
 		console.debug(`adapter: closing stream requestId=${requestId}`);
-		this.#streams.delete(requestId);
-		this.#subscribeNamespaces.delete(requestId);
-		const namespace = this.#namespacesByRequestId.get(requestId);
-		if (namespace !== undefined) {
-			this.#namespaces.delete(namespace);
-			this.#namespacesByRequestId.delete(requestId);
-		}
 		try {
 			entry.controller.close();
 		} catch {
 			// Already closed
 		}
+	}
+
+	/**
+	 * Drop every routing entry a request owns, keeping the two namespace maps in step.
+	 *
+	 * Runs even when the virtual stream is already gone, so a request that was torn down
+	 * locally still gives its namespace back.
+	 */
+	#forget(requestId: bigint) {
+		this.#streams.delete(requestId);
+		this.#subscribeNamespaces.delete(requestId);
+
+		const registered = this.#namespacesByRequestId.get(requestId);
+		if (registered === undefined) return;
+		this.#namespacesByRequestId.delete(requestId);
+		const namespaces = this.#namespaceRequests(registered.direction);
+
+		// Only the request holding the live announcement may retract it. A refused duplicate
+		// carries the same name, and letting its close withdraw the name would strand the
+		// original: its own DONE would then resolve to nothing.
+		if (namespaces.get(registered.namespace) === requestId) namespaces.delete(registered.namespace);
 	}
 
 	/**
@@ -399,7 +419,7 @@ export class ControlStreamAdapter implements Session {
 	 * Try to parse the first outgoing message from accumulated bytes.
 	 * Returns the requestId if enough data is available, undefined otherwise.
 	 */
-	#tryParseOutgoing(buffer: Uint8Array): { requestId: bigint } | undefined {
+	async #tryParseOutgoing(buffer: Uint8Array): Promise<{ requestId: bigint } | undefined> {
 		if (buffer.length === 0) return undefined;
 
 		// Check typeId varint size before decoding
@@ -426,8 +446,7 @@ export class ControlStreamAdapter implements Session {
 		// PublishNamespace (0x06): also parse namespace for v14/v15 reverse lookup
 		if (typeId === 0x06) {
 			try {
-				const [, afterReqId] = Varint.decode(body);
-				this.#parseAndRegisterNamespace(afterReqId, requestId);
+				await this.#registerNamespace(body, "outgoing");
 			} catch {
 				// Non-critical: only needed for v14/v15 PublishNamespaceDone/Cancel
 			}
@@ -442,20 +461,31 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * Parse a namespace from raw bytes and register it for reverse lookup.
+	 * Decode a PublishNamespace body and register its namespace for the v14/v15
+	 * namespace-keyed withdrawals. Returns the request ID it carried.
+	 *
+	 * The one decode site for both directions: outgoing announcements go through
+	 * #tryParseOutgoing and incoming ones through #classify. The direction selects the
+	 * map that the peer's DONE or CANCEL will later consult.
 	 */
-	#parseAndRegisterNamespace(buf: Uint8Array, requestId: bigint) {
-		const [partCount, afterCount] = Varint.decode(buf);
-		let cursor = afterCount;
-		const parts: string[] = [];
-		for (let i = 0; i < partCount; i++) {
-			const [len, afterLen] = Varint.decode(cursor);
-			parts.push(decodeUtf8(afterLen.subarray(0, len)));
-			cursor = afterLen.subarray(len);
-		}
-		const namespace = Namespace.fromTuple(parts);
-		this.#namespaces.set(namespace, requestId);
-		this.#namespacesByRequestId.set(requestId, namespace);
+	async #registerNamespace(body: Uint8Array, direction: NamespaceDirection): Promise<bigint> {
+		const r = new Reader(undefined, body, this.version);
+		const requestId = await r.u62();
+		const namespace = await Namespace.decode(r);
+		const namespaces = this.#namespaceRequests(direction);
+
+		this.#namespacesByRequestId.set(requestId, { namespace, direction });
+
+		// First announcement in this direction wins. A duplicate is refused with 409, and
+		// overwriting here would point the first request's withdrawal at the refused one,
+		// which has no stream left, leaving the namespace announced forever.
+		if (!namespaces.has(namespace)) namespaces.set(namespace, requestId);
+
+		return requestId;
+	}
+
+	#namespaceRequests(direction: NamespaceDirection): Map<string, bigint> {
+		return direction === "incoming" ? this.#incomingNamespaces : this.#outgoingNamespaces;
 	}
 
 	/** Create a WritableStream that buffers and writes complete messages to the control stream under mutex. */
@@ -504,12 +534,16 @@ export class ControlStreamAdapter implements Session {
 			return await r.u62();
 		};
 
-		const readNamespaceRequestId = async (): Promise<bigint> => {
+		// v14/v15 name their withdrawals instead of numbering them. A name we have no
+		// announcement for is dropped, not fatal: it belongs to a duplicate we already
+		// refused, or to a request that is already gone, so there is nothing left to close.
+		// The mapping itself is released by #forget when the stream goes.
+		const readNamespaceRequestId = async (direction: NamespaceDirection): Promise<bigint | undefined> => {
 			const r = new Reader(undefined, body, this.version);
 			const namespace = await Namespace.decode(r);
-			const requestId = this.#namespaces.get(namespace);
-			if (requestId === undefined) throw new Error(`unknown namespace: ${namespace}`);
-			this.#namespaces.delete(namespace);
+			const namespaces = this.#namespaceRequests(direction);
+			const requestId = namespaces.get(namespace);
+			if (requestId === undefined) console.warn(`adapter: no announcement for namespace: ${namespace}`);
 			return requestId;
 		};
 
@@ -531,12 +565,8 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.NewRequest, requestId };
 			}
 			case 0x06: {
-				// PublishNamespace — also store namespace for v14/v15 reverse lookup
-				const r = new Reader(undefined, body, this.version);
-				const requestId = await r.u62();
-				const namespace = await Namespace.decode(r);
-				this.#namespaces.set(namespace, requestId);
-				this.#namespacesByRequestId.set(requestId, namespace);
+				// PublishNamespace: also store the namespace for v14/v15 reverse lookup
+				const requestId = await this.#registerNamespace(body, "incoming");
 				return { route: Route.NewRequest, requestId };
 			}
 			case 0x11: {
@@ -635,21 +665,25 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x09: {
-				// PublishNamespaceDone: v16 uses requestId, v14/v15 uses namespace
+				// PublishNamespaceDone: v16 uses requestId, v14/v15 names the incoming
+				// announcement its sender is withdrawing.
 				if (this.version === Version.DRAFT_16) {
 					const requestId = await readRequestId();
 					return { route: Route.CloseStream, requestId };
 				}
-				const requestId = await readNamespaceRequestId();
+				const requestId = await readNamespaceRequestId("incoming");
+				if (requestId === undefined) return { route: Route.Ignore, requestId: 0n };
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x0c: {
-				// PublishNamespaceCancel: v16 uses requestId, v14/v15 uses namespace
+				// PublishNamespaceCancel: v16 uses requestId, v14/v15 names the outgoing
+				// announcement its sender is rejecting.
 				if (this.version === Version.DRAFT_16) {
 					const requestId = await readRequestId();
 					return { route: Route.CloseStream, requestId };
 				}
-				const requestId = await readNamespaceRequestId();
+				const requestId = await readNamespaceRequestId("outgoing");
+				if (requestId === undefined) return { route: Route.Ignore, requestId: 0n };
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x14: {
@@ -704,7 +738,8 @@ export class ControlStreamAdapter implements Session {
 		this.#incomingWaiters = [];
 
 		// Clear namespace mappings
-		this.#namespaces.clear();
+		this.#incomingNamespaces.clear();
+		this.#outgoingNamespaces.clear();
 		this.#namespacesByRequestId.clear();
 		this.#subscribeNamespaces.clear();
 

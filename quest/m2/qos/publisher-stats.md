@@ -23,7 +23,7 @@ yet, so writing the implementation is this quest's work and nothing external
 gates a start. The moq.pro (downstream) health badge consumes the released
 section downstream.
 
-Independent of [backlog](/quest/m2/qos/backlog.md): the two halves land in
+Independent of [starvation](/quest/m2/qos/starvation.md): the two halves land in
 either order, and a health verdict needs both. Keep connection-scoped sender
 transport in its own quest because it has a different wire owner and consumer.
 

@@ -1,52 +1,49 @@
-# [L] HLS generation
+# [M] HLS generation
 
 ## Goal
 
-Media URLs carry a generation ID so segment caching can be re-enabled safely. The
-same ID keeps a restarted publisher from being decoded against the previous run's
-init segment.
+`moq-hls` emits media URLs a CDN can cache. The init segment URL changes
+whenever the rendition it initializes changes, and an embedder can hand the
+exporter a generation string that every segment URL carries, so a restarted
+publisher is never decoded against the previous run's init or served under
+the previous run's segment numbers. A publisher that provides no generation
+keeps today's unversioned URLs.
 
 ## Plan
 
-Two bugs, one missing ingredient. A CDN edge must serve `.../seg/{n}.m4s` and
-`init.mp4` with `no-store` today because the URLs are reused across publisher
-generations. And `Rendition::init` caches the init for the life of the pooled
-rendition with no invalidation, so an inline-parameter-set codec (`avc3`) that
-restarts at a new resolution decodes new segments against the old parameter
-sets; the segment window's `push` (`rs/moq-hls/src/export/segments.rs`) detects
-that restart already and resets only the playlist.
+Two collision sources, settled separately after a 2026-09 planning pass.
 
-The missing ingredient is the identity itself: nothing in the stack mints a
-generation today. Where it comes from is
-[Plan: HLS identity](/quest/m2/plan-hls-identity.md)'s job. Whatever it turns
-out to be, it must be minted by the publisher and travel with the content;
-never a wall-clock or a relay-local counter, since a CDN needs one URL to mean
-the same bytes on every edge.
+**A live reconfigure** reuses `init.mp4` for different bytes: an
+inline-parameter-set codec (`avc3`) that restarts at a new resolution keeps
+its URL while `Rendition::init` caches the old init for the life of the
+pooled rendition, and the segment window's `push`
+(`rs/moq-hls/src/export/segments.rs`) resets only the playlist. Version the
+init URL with a hash of the init segment bytes `Muxer::init` actually
+produces, so every input that shapes the init (codec string, dimensions,
+parameter sets, the catalog `Cmaf` init, audio sample rate and channel count,
+codec description, the effective timescale) is covered without a field list
+that can drift, and a reconfigure changes the URL and invalidates the cached
+init with it. A hash rather than a counter because two edges rendering the
+same broadcast must agree without coordinating.
 
-So this quest is the consumption: the moq-hls playlist and MPD renderers EMIT
-generation-versioned `init.mp4` and segment URLs, and the cached init is
-invalidated when the generation changes. Both are CONDITIONAL on the identity
-being present: a publisher that declares none cannot version anything, so those
-broadcasts keep unversioned URLs rather than being cached against an identity
-that does not exist. The cache-header half is moq.pro (downstream) work: its
-edge parses the versioned paths and restores the long `max-age` (where
-`immutable` is finally true) once the renderers emit them; versioning the
-accepted paths without versioning the emitted ones changes nothing.
+**A publisher restart** reuses segment numbers: `moq-net` splices a
+re-attached source into the existing broadcast by hop ID so consumers never
+observe it, and group sequences restart at zero. No protocol carries an
+identity for this and none will: an epoch on the announce messages was
+rejected (announcements are capability routes that must keep stitching by hop
+ID), and a `TRACK_INFO` epoch, a catalog `generation`, and an epoch path
+segment were all declined in favor of the managed edge minting one per
+publisher session downstream. So `moq-hls` gains an optional generation input,
+one string per broadcast the embedder supplies, and when it is present the
+playlist renderers in `rs/moq-hls/src/export` emit it in `init.mp4` and
+segment URLs and the export resets its window when it changes. There is no
+DASH renderer in the tree, so nothing here promises an MPD. Absent means unversioned URLs, never
+a wall-clock or a relay-local counter. The cache-header half stays downstream:
+the edge restores its long `max-age` only on generation-bearing URLs once the
+paths it accepts are the ones the renderers emit, and unversioned URLs keep
+`no-store`, since a restart reuses their segment numbers for different bytes.
 
-There are two collision sources, and a per-broadcast identity only covers one
-of them. A live publisher that reconfigures a rendition (a resolution change,
-say) reuses the same `init.mp4` URL and segment numbers for different bytes
-without restarting the broadcast, so caching on a restart-scoped generation
-alone would let a CDN keep serving the previous configuration. Either the URL
-gains a rendition-generation component or the identity is required (and tested)
-to move on every reconfigure. Settle it in
-[Plan: HLS identity](/quest/m2/plan-hls-identity.md); it is the reason that
-plan exists rather than a detail of this one.
-
-Acceptance: a publisher restart mid-playback exercised end to end, a publisher
-declaring no identity still served with unversioned URLs, and a mid-broadcast
-reconfigure that cannot be decoded against the previous configuration.
-
-## Required
-
-- [Plan: HLS identity](/quest/m2/plan-hls-identity.md) - a generation ID has to exist before a URL can carry it
+Acceptance: a mid-broadcast reconfigure that cannot be decoded against the
+previous init gets a new init URL on both edges; a supplied generation appears
+in every media URL and a changed one resets the export; no generation keeps
+the URLs byte-identical to today.

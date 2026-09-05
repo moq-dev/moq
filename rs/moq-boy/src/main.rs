@@ -249,7 +249,7 @@ async fn run(config: &Config) -> Result<()> {
 		.expect("viewer prefix should be valid")
 		.consume();
 
-	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publisher(&publish_origin)
