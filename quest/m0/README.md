@@ -31,4 +31,4 @@ regression test per Root Cause First.
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [play tests](/quest/m0/play-feature-tests.md) - moq-cli: the `play` module is off by default, so nothing in the merge gate compiles its tests
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
-- [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: the retirement boundary regression test only catches the bug when it loses a race
+- [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: retirement has no coverage for a fetch that is still opening its decoder

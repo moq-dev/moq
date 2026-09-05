@@ -966,19 +966,22 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// Retiring a rung stops taking new fetches, but one already in flight has to
-	/// run to a clean end. Two things can cut it short: dropping the handler while
-	/// its request is still queued, and finishing the track at a live edge that
-	/// sits at or below the group it is about to claim (sequence 0, on a rung that
-	/// only ever served fetches).
+	/// Retiring a rung stops taking new work, but a group already being produced
+	/// has to run to a clean end: the consumer reads it out and then sees the
+	/// track finish, rather than the group going away under it.
 	///
-	/// `Consumer::fetch_group` resolves as soon as the attempt is registered, well
-	/// before `GroupRequest::accept` creates the group, so the retirement below
-	/// really does land while the fetch is still opening its decoder. Which side
-	/// of `accept` it lands on is up to the scheduler, so this catches the second
-	/// case some of the time rather than every time. It caught it on a loaded CI
-	/// runner; it has never lost that race on a developer machine, which is also
-	/// why forcing it deterministically here needs a hook the rung does not have.
+	/// Which half produces group 0 is a race. A rung consumer is demand on its
+	/// own, so `live` starts the moment the track is taken below, and it usually
+	/// wins: by the time `fetch_group` is called the group is already in the
+	/// track cache, so the fetch resolves from there and the fetch handler is
+	/// never asked. What that ordering pins down is `live` riding out the group
+	/// it is part way through after retirement, plus `serve` joining its two
+	/// halves rather than letting either cancel the other.
+	///
+	/// The other ordering, where the fetch handler serves group 0 and retirement
+	/// lands while it is still opening its decoder, is the one CI caught. It has
+	/// never come up on a developer machine, so treat that half as uncovered
+	/// here.
 	#[tokio::test]
 	async fn retirement_finishes_an_in_flight_fetch() {
 		let mut source = source_catalog(320, 240);
@@ -1017,8 +1020,8 @@ mod tests {
 		rung.info().await.unwrap();
 		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 
-		// The fetch is queued against a source group that is still open, so retiring
-		// now has to leave it running until that group ends.
+		// Group 0 is still being written from a source group that is still open, so
+		// retiring now has to leave it running until that source group ends.
 		source.resize(160, 90);
 		tokio::time::timeout(
 			std::time::Duration::from_secs(5),
