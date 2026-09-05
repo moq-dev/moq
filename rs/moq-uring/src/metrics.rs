@@ -104,8 +104,11 @@ pub struct Snapshot {
 	/// is the GRO coalescing actually achieved.
 	pub rx_receives: u64,
 	/// Receives the kernel ended with `ENOBUFS`: the provided-buffer ring was
-	/// empty when a datagram arrived, so it was dropped. Receive-side
-	/// backpressure, and the first thing to look at when throughput sags.
+	/// empty, so no buffer could be selected and the receive was never
+	/// performed. The datagram stays in the socket queue, so this is
+	/// receive-side backpressure rather than a confirmed loss; sustained, it
+	/// becomes one, once the socket buffer fills. The first thing to look at
+	/// when throughput sags.
 	pub rx_enobufs: u64,
 	/// Re-arms that found no free receive buffer at all, so the socket was left
 	/// unarmed until a packet released one. The pool is at its ceiling and

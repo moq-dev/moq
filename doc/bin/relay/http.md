@@ -190,9 +190,12 @@ The ratios are the point, not the raw counts:
   over the tokio workers.
 
 The two backpressure counters are what to alert on. A rising
-`moq_relay_uring_rx_enobufs_total` means the kernel had a datagram and no buffer
-to put it in, so it dropped it: receive-side backpressure, and the first thing to
-look at when throughput sags with no errors anywhere.
+`moq_relay_uring_rx_enobufs_total` means the kernel had a datagram and no free
+buffer to select, so it never ran the receive. The datagram stays in the socket
+queue, so this is not itself packet loss; it becomes loss once the socket buffer
+fills while the pool is still dry. It is receive-side backpressure, and the first
+thing to look at when throughput sags with no errors anywhere. For actual drops,
+read the socket's own counters (`netstat -su`, `RcvbufErrors`).
 `moq_relay_uring_rx_exhausted_total` is the same shortage seen from userspace, a
 re-arm that found every buffer still held by an unread packet.
 `moq_relay_uring_tx_stalls_total` is the send-side equivalent, a send waiting on

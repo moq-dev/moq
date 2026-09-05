@@ -44,13 +44,14 @@ use axum_server::accept::DefaultAcceptor;
 ///
 /// Uninhabited when the relay is built without the io_uring listener, so the
 /// list is always empty there and the renderer skips itself, rather than
-/// spreading a `cfg` over every field and call site that touches it.
+/// `cfg`-ing the two fields, the two struct literals that fill them, the
+/// builder and the renderer's signature separately.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
-pub type UringWorker = moq_uring::Metrics;
+type UringWorker = moq_uring::Metrics;
 
 /// One io_uring worker's counters. See the io_uring build's alias.
 #[cfg(not(all(target_os = "linux", feature = "_uring")))]
-pub type UringWorker = std::convert::Infallible;
+type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -153,6 +154,9 @@ impl Internal {
 	/// Register them before the threads start, so a worker that never came up
 	/// (or has died) still has a series that has stopped moving rather than no
 	/// series at all.
+	///
+	/// Off the io_uring build the item type is uninhabited, so there is nothing
+	/// to register and nothing is rendered.
 	pub fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
 		self.uring.extend(workers);
 		self
@@ -439,8 +443,9 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 /// pool, the batching mechanisms, and the ring itself are holding up on each
 /// pinned thread. A worker is a thread that never yields to anything else on the
 /// node, so nothing else here can report that one of them has gone sick, and the
-/// failure modes are quiet ones: a receive pool running dry drops datagrams with
-/// no error anywhere, and batching that has collapsed just costs syscalls.
+/// failure modes are quiet ones: a receive pool running dry leaves datagrams
+/// queued in the kernel with no error anywhere, and batching that has collapsed
+/// just costs syscalls.
 ///
 /// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
 /// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
@@ -479,7 +484,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 	);
 	counter(
 		"moq_relay_uring_rx_enobufs_total",
-		"Receives the kernel ended with ENOBUFS: the provided-buffer ring was empty, so datagrams were dropped.",
+		"Receives the kernel ended with ENOBUFS: no provided buffer was free, so the receive never ran. Backpressure, not a confirmed loss.",
 		|snap| snap.rx_enobufs,
 	);
 	counter(
@@ -665,9 +670,8 @@ mod tests {
 	/// Every io_uring worker gets a full row of series from zero, for the same
 	/// reason the accept counters do: `rate()` over a series that does not exist
 	/// yet is empty rather than zero, so an alert on a worker whose receive pool
-	/// has started dropping datagrams is unwritable until it has already
-	/// happened. A worker that never started has to publish stuck zeros, not
-	/// nothing.
+	/// has started running dry is unwritable until it has already happened. A
+	/// worker that never started has to publish stuck zeros, not nothing.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	#[test]
 	fn uring_metrics_list_every_worker_from_zero() {
