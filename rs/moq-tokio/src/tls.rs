@@ -2112,6 +2112,40 @@ mod tests {
 		assert!(config.build().is_ok());
 	}
 
+	/// Rotating a file-backed pair reloads every source, but the self-signed
+	/// certificate is not one of them: minting a fresh leaf would break anyone
+	/// pinning the old fingerprint even though nothing asked for a new identity.
+	#[test]
+	fn generated_certificate_survives_a_reload() {
+		use std::io::Write;
+
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let cert = params.self_signed(&key).unwrap();
+
+		let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+		cert_file.write_all(cert.pem().as_bytes()).unwrap();
+		let mut key_file = tempfile::NamedTempFile::new().unwrap();
+		key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+
+		let config = Listen {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			generate: vec!["generated.invalid".to_string()],
+			..Default::default()
+		};
+
+		let certs = ServeCerts::new(crypto::provider());
+		certs.load_certs(&config).unwrap();
+		let before = Certificates::new(certs.info.clone()).fingerprints();
+
+		// What a rotation of the file-backed pair does: reload every source.
+		certs.load_certs(&config).unwrap();
+		let after = Certificates::new(certs.info.clone()).fingerprints();
+
+		assert_eq!(before, after);
+	}
+
 	/// Only one client certificate can go on the wire, so asking for two is a
 	/// configuration error rather than a silent preference for either.
 	#[test]
@@ -2716,6 +2750,8 @@ mod tests {
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<Info>>,
 	provider: crypto::Provider,
+	/// The self-signed certificate, kept so a reload doesn't mint a new one.
+	generated: RwLock<Option<Arc<Certified>>>,
 }
 
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
@@ -2724,6 +2760,7 @@ impl ServeCerts {
 		Self {
 			info: Arc::new(RwLock::new(Info::default())),
 			provider,
+			generated: RwLock::new(None),
 		}
 	}
 
@@ -2748,9 +2785,9 @@ impl ServeCerts {
 			certs.push(Arc::new(self.load(cert, key)?));
 		}
 
-		// Generate a new certificate if requested.
+		// Generate a self-signed certificate if requested.
 		if !config.generate.is_empty() {
-			certs.push(Arc::new(generate(&self.provider, &config.generate)?));
+			certs.push(self.generated(&config.generate)?);
 		}
 
 		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -2760,6 +2797,22 @@ impl ServeCerts {
 
 		self.set_certs(certs);
 		Ok(())
+	}
+
+	/// The self-signed certificate, minted on the first load and reused afterwards.
+	///
+	/// Rotating a file-backed pair triggers a reload of every source, and a fresh
+	/// self-signed leaf would break anyone who pinned the old one even though nothing
+	/// asked for it to change.
+	fn generated(&self, hostnames: &[String]) -> Result<Arc<Certified>> {
+		let mut generated = self.generated.write().expect("generated write lock poisoned");
+		if let Some(existing) = generated.as_ref() {
+			return Ok(existing.clone());
+		}
+
+		let certified = Arc::new(generate(&self.provider, hostnames)?);
+		*generated = Some(certified.clone());
+		Ok(certified)
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
