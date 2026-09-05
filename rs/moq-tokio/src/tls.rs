@@ -2891,13 +2891,40 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 
 // ── reload_certs ────────────────────────────────────────────────────
 
+/// Holds the certificate reload watcher for as long as the listener that spawned it.
+///
+/// The watcher parks in [`crate::watch::FileWatcher::changed`] and never returns on
+/// its own, so a listener that goes away without this leaves the task, the keys it
+/// holds, and an OS directory watch behind. An embedder that builds listeners
+/// repeatedly in one process would accumulate all three.
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[derive(Debug)]
+pub(crate) struct Reload(tokio::task::JoinHandle<()>);
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl Reload {
+	/// Start watching the file-backed pairs in `config`, if it has any.
+	///
+	/// Call it only once the listener exists, so a failed bind leaves no watcher behind.
+	pub(crate) fn spawn(certs: Arc<ServeCerts>, config: Listen) -> Self {
+		Self(tokio::spawn(reload_certs(certs, config)))
+	}
+}
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl Drop for Reload {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// Watch the on-disk cert/key files and reload them whenever they change.
 ///
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
 /// `mv`-into-place rotate certs with no external signal. Returns immediately when
 /// only generated certs are configured: there's nothing on disk to watch.
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
+async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
 	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
 	if paths.is_empty() {
 		return;

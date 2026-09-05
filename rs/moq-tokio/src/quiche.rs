@@ -586,6 +586,7 @@ fn proto_status(err: &web_transport_quiche::proto::ConnectError) -> Option<u16> 
 pub(crate) struct QuicheServer {
 	pub server: web_transport_quiche::ez::Server,
 	certs: Arc<ServeCerts>,
+	_reload: crate::tls::Reload,
 }
 
 /// Serve the certificate whose subject names cover the client's SNI.
@@ -676,9 +677,9 @@ impl QuicheServer {
 			.map_err(Error::ServerBuild)?;
 
 		// Spawned only once the listener exists, so a failed bind leaves no watcher behind.
-		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
+		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
 
-		Ok(Self { server, certs })
+		Ok(Self { server, certs, _reload })
 	}
 
 	pub fn accept(&mut self) -> impl std::future::Future<Output = Option<web_transport_quiche::ez::Incoming>> + '_ {
