@@ -3,8 +3,11 @@
 ## Goal
 
 A settled contract for which fields a revalidation reply can change on a live
-session and which force a reconnect. Scope narrowing is settled (close, and
-the client reconnects into the narrower grant); `tier` and `alias` are not.
+session and which force a reconnect. Scope narrowing is settled by the
+[relay auth](/quest/m2/path-patterns/relay-auth.md) contract: the session
+stays up, resized to the narrower grant, and only the subscriptions and
+publications the grant no longer covers are closed; `tier` and `alias` are
+not settled.
 Run `/plan-quest`; the settled plan becomes the implementing quest that closes
 the issue.
 

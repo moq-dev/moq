@@ -19,9 +19,12 @@ rendition, and group 7 of the sidecar holds the SEI for group 7 of its video.
 
 Metadata that precedes the first media unit (an `emsg` before the first
 `moof`, an FLV script tag before the first media tag) rides the rendition's
-first group, ordered before that group's media, stamped with its own
-presentation time when it has one and otherwise with the first media frame's,
-and an exporter emits it before the first media unit.
+first group, stamped with its own presentation time when it has one and
+otherwise with the first media frame's. A timestamp cannot order it before
+that frame, since a tag at timestamp zero and the first frame share one, so
+the sidecar frame's placement field, the same one that records prefix versus
+suffix SEI, carries an explicit before-first-media value, and an exporter
+emits those frames before the first media unit.
 
 Within a group the frame's wire timestamp is the key, so an application
 syncing to presentation time reads it directly instead of joining against the
