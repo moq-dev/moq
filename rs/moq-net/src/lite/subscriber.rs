@@ -2476,9 +2476,9 @@ enum Teardown {
 	/// The route or session failed: abort the track so the origin re-splices it
 	/// from another source.
 	GiveBack(Error),
-	/// The origin released this copy: nobody is reading it, so drop it (and the
-	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
-	/// may never come back.
+	/// The origin released this copy: nobody was reading it, so it has been aborted
+	/// (while still unused) and the state behind it, including the `TRACK_INFO`, is
+	/// dropped rather than held for a reader that may never come back.
 	Released,
 }
 
@@ -2917,12 +2917,11 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							// re-splices the track from the next source.
 							let _ = serve_loop.serving.abort(err);
 						}
-						Teardown::Released => {
-							// A deliberate end with no reader to observe it, which also
-							// drops the cached groups. The origin re-requests the track from
-							// this session if one comes back.
-							let _ = serve_loop.serving.abort(Error::Cancel);
-						}
+						// Already aborted, atomically with the decision to release: a
+						// deliberate end with no reader to observe it, which also drops the
+						// cached groups. The origin re-requests the track from this session
+						// if one comes back.
+						Teardown::Released => {}
 					}
 					return Poll::Ready(());
 				}
@@ -3142,7 +3141,15 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// idle linger, so drop it instead of holding the track state (and its
 					// TRACK_INFO) for a reader that may never return. In-flight fetches
 					// keep it alive: work already accepted still gets finished.
+					//
+					// The wake is a level snapshot, so the release only counts once it
+					// commits while the copy is still unused: a reader that came back in
+					// the gap would otherwise be handed a track this is about to cancel.
+					// `Declined` says one did, so keep serving on the same subscription.
 					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
+						if self.serving.abort_unused(Error::Cancel) == track::Teardown::Declined {
+							continue;
+						}
 						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "track released (idle)");
 						return Poll::Ready(Teardown::Released);
 					}

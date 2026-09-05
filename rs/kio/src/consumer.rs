@@ -14,6 +14,49 @@ pub struct Consumer<T> {
 	pub(crate) counts: Arc<Counts>,
 }
 
+/// Mint a consumer, or `None` if `only_open` and the channel has closed.
+///
+/// The count moves under the state lock, in step with the `closed` flag it is
+/// weighed against. Bumping it outside would let a consumer appear between
+/// [`Producer::write_unused`](crate::Producer::write_unused) reading the count and
+/// the teardown it guards committing, which is a live consumer holding a channel
+/// that is about to be aborted.
+fn mint<T>(state: &Lock<State<T>>, counts: &Arc<Counts>, only_open: bool) -> Option<Consumer<T>> {
+	let waiters = {
+		let mut guard = state.lock();
+		if only_open && guard.closed {
+			return None;
+		}
+
+		// Wake `used()` waiters when the first consumer appears, after the lock is
+		// released.
+		match counts.consumers.fetch_add(1, Ordering::AcqRel) {
+			0 => Some(guard.waiters_consumer.take()),
+			_ => None,
+		}
+	};
+
+	if let Some(mut waiters) = waiters {
+		waiters.wake();
+	}
+
+	Some(Consumer {
+		state: state.clone(),
+		counts: counts.clone(),
+	})
+}
+
+/// Mint a consumer, whether or not the channel is still open. A closed channel's
+/// consumer reads its final value and then reports the closure.
+pub(crate) fn consume<T>(state: &Lock<State<T>>, counts: &Arc<Counts>) -> Consumer<T> {
+	mint(state, counts, false).expect("minting is infallible for an open-or-closed channel")
+}
+
+/// Mint a consumer only while the channel is open.
+pub(crate) fn consume_open<T>(state: &Lock<State<T>>, counts: &Arc<Counts>) -> Option<Consumer<T>> {
+	mint(state, counts, true)
+}
+
 impl<T> Consumer<T> {
 	/// Poll the shared state with a closure.
 	///
@@ -126,6 +169,9 @@ impl<T> Drop for Consumer<T> {
 
 impl<T> Clone for Consumer<T> {
 	fn clone(&self) -> Self {
+		// Unlike minting one from scratch, this needs no lock: `self` is already
+		// counted, so the count runs 1 -> 2 and a teardown holding the lock can never
+		// read the zero that would let it commit.
 		self.counts.consumers.fetch_add(1, Ordering::Relaxed);
 
 		Self {

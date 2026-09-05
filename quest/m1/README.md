@@ -40,7 +40,6 @@ with the current dev tree before starting.
 - [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [Plan: binding rate control](/quest/m1/plan-binding-rate-control.md) - settle how a non-Rust publisher follows the send estimate before wiring five bindings
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
-- [#3000](/quest/m1/3000-track-teardown-on-poll-unused-is-not-atomic-against-a.md) - Track teardown on poll_unused is not atomic against a consumer reattaching
 - [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - js/net: a locally raised group error reaches the wire as INTERNAL_ERROR
 - [#3002](/quest/m1/3002-no-test-drives-a-late-group-through-the-ietf-dispatch-loop.md) - No test drives a late group through the IETF dispatch loop
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings

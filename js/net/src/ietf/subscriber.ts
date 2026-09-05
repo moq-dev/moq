@@ -515,11 +515,16 @@ export class Subscriber {
 				break;
 			}
 
+			// Close before the cancellation is written, not after: awaiting the write first
+			// reopens the window the demand re-check above just closed, and a subscriber that
+			// returned during it would be closed by this line. The lite subscriber closes
+			// straight out of its loop for the same reason.
+			producer.close();
+
 			// The publisher already ended the request, so there is nothing to cancel. Sending
 			// UNSUBSCRIBE here would name a request it has already torn down.
 			if (terminal !== publisherEnded) await this.#cancelSubscribe(stream, requestId);
 
-			producer.close();
 			stream.close();
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {

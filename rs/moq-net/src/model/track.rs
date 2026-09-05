@@ -1072,6 +1072,28 @@ impl TrackState {
 	}
 }
 
+/// What an unused-gated teardown did. See [`Producer::abort_unused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+	/// The track was aborted, or had already ended: nothing is consuming it, and
+	/// nothing can attach to it now.
+	Committed,
+	/// A consumer attached after the unused wake, so the track was left alone.
+	Declined,
+}
+
+/// Record `err` and close the track: the shared tail of [`Producer::abort`] and
+/// [`Producer::abort_unused`].
+fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
+	// Snapshot the frame boundary before the cache it's derived from goes away: an
+	// abort is exactly when a replacement route asks where to resume.
+	state.resume = state.resume_position();
+	state.abort = Some(err);
+	state.clear_cache();
+	state.datagrams.clear();
+	state.close();
+}
+
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct Producer {
@@ -1341,15 +1363,44 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
-		let mut guard = self.modify()?;
-		// Snapshot the frame boundary before the cache it's derived from goes away: an
-		// abort is exactly when a replacement route asks where to resume.
-		guard.resume = guard.resume_position();
-		guard.abort = Some(err);
-		guard.clear_cache();
-		guard.datagrams.clear();
-		guard.close();
+		commit_abort(self.modify()?, err);
 		Ok(())
+	}
+
+	/// Abort the track, but only while nothing is consuming it.
+	///
+	/// The consumer count is checked under the lock a new consumer has to take, so
+	/// the abort lands while the track is genuinely unused or not at all. That is
+	/// what [`poll_unused`](Self::poll_unused) followed by [`abort`](Self::abort)
+	/// can't promise: the poll is a level snapshot, so a consumer obtained from the
+	/// broadcast in the gap would be cancelled along with the track it just asked
+	/// for. Every teardown a zero-consumer observation decided belongs here.
+	///
+	/// [`Teardown::Declined`] means a consumer got there first: keep serving and
+	/// wait for the next unused wake. That is also why this borrows the handle
+	/// instead of consuming it like [`abort`](Self::abort): a declined teardown
+	/// leaves the caller with a track it is still publishing.
+	#[must_use]
+	pub fn abort_unused(&self, err: Error) -> Teardown {
+		match self.state.write_unused() {
+			kio::Unused::Idle(guard) => {
+				commit_abort(guard, err);
+				Teardown::Committed
+			}
+			// Finished, aborted, or dropped already: the teardown has nothing left to do.
+			kio::Unused::Closed => Teardown::Committed,
+			kio::Unused::Used => Teardown::Declined,
+		}
+	}
+
+	/// Whether anyone is consuming the track right now.
+	///
+	/// A point-in-time snapshot for gating work on demand (on-demand capture,
+	/// dropping cached state nobody is watching). Acting on it to *end* the track
+	/// is the race [`abort_unused`](Self::abort_unused) exists for; use
+	/// [`unused`](Self::unused) to wait for the edge.
+	pub fn is_used(&self) -> bool {
+		self.state.is_used()
 	}
 
 	/// Block until there are no active consumers.
@@ -1874,8 +1925,14 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn consume(&self) -> Consumer {
-		Consumer::plain(self.name.clone(), self.state.consume())
+	/// A [`Consumer`] for the cached track, or `None` once it has closed.
+	///
+	/// The count moves under the same lock the close takes, which is the other half
+	/// of [`Producer::abort_unused`]: a lookup either gets a consumer in time to
+	/// decline the teardown, or gets nothing and re-requests the track. It is never
+	/// handed a track that is already on its way out.
+	pub fn consume(&self) -> Option<Consumer> {
+		Some(Consumer::plain(self.name.clone(), self.state.consume()?))
 	}
 
 	/// The shared name handle, for use as a broadcast lookup key (clone is a

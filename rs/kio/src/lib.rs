@@ -45,7 +45,7 @@ mod tests;
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard, WeakLock};
 pub use pollable::{Pending, Pollable};
-pub use producer::{Mut, Producer, Ref};
+pub use producer::{Mut, Producer, Ref, Unused};
 pub use queue::{PushError, Queue};
 pub use send::MaybeSend;
 pub use shared::Shared;

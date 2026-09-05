@@ -44,13 +44,7 @@ impl<T> Producer<T> {
 	/// cached state nobody is watching, safe to drop and recreate on the next
 	/// request.
 	pub fn is_used(&self) -> bool {
-		self.inner
-			.lock()
-			.unwrap()
-			.track
-			.inner
-			.poll_unused(&moq_net::kio::Waiter::noop())
-			.is_pending()
+		self.inner.lock().unwrap().track.inner.is_used()
 	}
 }
 
