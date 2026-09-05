@@ -2834,11 +2834,23 @@ async fn repointed_si_entry_resubscribes() {
 		},
 	);
 
+	// The repointed entry resubscribes through the origin, whose driver mints and
+	// splices the new track between polls: give it the scheduler before the frames
+	// that should carry the new sections, or the exporter drains them all first.
+	let mut after = BytesMut::new();
 	write_key(&mut producer, 2);
+	let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("a frame after the switch")
+		.unwrap()
+		.unwrap();
+	after.extend_from_slice(&frame.payload);
+	for _ in 0..100 {
+		tokio::task::yield_now().await;
+	}
 	write_key(&mut producer, 3);
 	write_key(&mut producer, 4);
 	producer.finish().unwrap();
-	let mut after = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
 		let Some(frame) = res.unwrap() else { break };
 		after.extend_from_slice(&frame.payload);

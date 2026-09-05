@@ -1467,6 +1467,7 @@ impl Announcing {
 		for prefix in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
+			shared.generation += 1;
 			shared.routes.push(RouteEntry {
 				id,
 				prefix: prefix.clone(),
@@ -1556,20 +1557,22 @@ impl AnnounceProducer {
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			let prefix = entry.prefix.clone();
+			shared.generation += 1;
 			shared.sync_route(&prefix.as_path());
 		}
 		Ok(())
 	}
-}
 
-impl Drop for AnnounceProducer {
-	fn drop(&mut self) {
+	/// Retract the route now: remove its table entries and reject anything still
+	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
+	fn retract(&self) {
 		let mut shared = self.shared.lock();
 		for id in &self.ids {
 			let Some(index) = shared.routes.iter().position(|entry| entry.id == *id) else {
 				continue;
 			};
 			let entry = shared.routes.swap_remove(index);
+			shared.generation += 1;
 			// Reject anything still waiting on this route's server; a request
 			// already handed to the handler resolves through its own `Request`.
 			if let Some(server) = &entry.server {
@@ -1583,6 +1586,12 @@ impl Drop for AnnounceProducer {
 			}
 			shared.sync_route(&entry.prefix.as_path());
 		}
+	}
+}
+
+impl Drop for AnnounceProducer {
+	fn drop(&mut self) {
+		self.retract();
 	}
 }
 
@@ -2766,6 +2775,9 @@ struct OriginState {
 	// holds one entry per live advertisement, not one per broadcast consumer.
 	routes: Vec<RouteEntry>,
 	next_route: u64,
+	// Bumped on every change to `routes` (insert, re-price, retract), so a
+	// requester can tell whether the table moved since it asked.
+	generation: u64,
 
 	// The registered announce cursors, each with its own coalescing buffer.
 	cursors: HashMap<ConsumerId, TableCursor>,
@@ -2964,6 +2976,15 @@ impl Dynamic {
 		self.announcement.update(route)
 	}
 
+	/// Retract the route now, without waiting for the handle to drop.
+	///
+	/// For a handle shared with a serving task: the advertisement is withdrawn and
+	/// the queued requests rejected before this returns, and the task's next
+	/// [`requested_broadcast`](Self::requested_broadcast) reports [`Error::Closed`].
+	pub fn close(&self) {
+		self.announcement.retract();
+	}
+
 	/// Poll for the next requested path under this route, without blocking.
 	///
 	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
@@ -3125,6 +3146,9 @@ pub struct Requesting {
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
+	// The route table's generation when the request was made, so a retry can
+	// wait for the table to move rather than re-ask the same routes.
+	generation: u64,
 }
 
 enum RequestState {
@@ -3167,12 +3191,23 @@ impl Requesting {
 			inner,
 			path: PathOwned::default(),
 			stats: stats::Scope::default(),
+			generation: 0,
 		}
 	}
 
 	fn with_path(mut self, path: PathOwned) -> Self {
 		self.path = path;
 		self
+	}
+
+	fn with_generation(mut self, generation: u64) -> Self {
+		self.generation = generation;
+		self
+	}
+
+	/// The route table's generation when the request was made.
+	fn generation(&self) -> u64 {
+		self.generation
 	}
 
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -3455,46 +3490,49 @@ impl Consumer {
 	/// [`Self::request_broadcast`], retried when the two race.
 	///
 	/// The wait and the resolution are separate steps, so the covering route can
-	/// retract between them (failover churn), and a route can cover the path while
-	/// nothing serves it yet (an advertise-only announce racing its handler). This
-	/// rides out the churn by retrying whenever the path's coverage changes, which
-	/// is what makes it the right call for resolving a path right after
-	/// connecting. Returns [`Error::Unauthorized`] for a path outside this
-	/// consumer's scope, [`Error::Closed`] once the origin closes, and any other
-	/// resolution failure as-is.
+	/// retract between them (failover churn), a route can cover the path while
+	/// nothing serves it yet (an advertise-only announce racing its handler), and
+	/// a handler can turn the path down. This rides out the churn by retrying
+	/// whenever the route table moves, which is what makes it the right call for
+	/// resolving a path right after connecting. Returns [`Error::Unauthorized`]
+	/// for a path outside this consumer's scope, [`Error::Closed`] once the origin
+	/// closes, and any other resolution failure as-is.
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
-		// Watch the path's coverage for the retry wake: scoped so it only wakes
-		// for covering routes, untagged because this is a lookup, not egress
-		// announce forwarding.
-		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
 		// `scope` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
+		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
 		if !scoped.allowed().any(|allowed| path.has_prefix(allowed)) {
 			return Err(Error::Unauthorized);
 		}
-		let mut announced = scoped.untagged().announced();
 		loop {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
 			let request = self.request_broadcast(&path);
-			// A queued request and an instant verdict fail differently. A request
-			// that queued and then failed `Unroutable` was killed by its serving
-			// route retracting, and an identical standby swaps in without any
-			// announce update, so retry through the already-updated table
-			// immediately; each such retry consumed a real retraction, so this
-			// cannot spin. An instant `Unroutable` means nothing serves the path
-			// right now, and only a coverage change fixes that: park on the
-			// announce stream (it replays the current coverage first, so at most
-			// one extra attempt runs before this genuinely blocks).
-			let queued = request.is_queued();
+			// `Unroutable` is a verdict of the table as it stood when the request
+			// was made: nothing covered the path, the serving route retracted
+			// under the request, or its handler declined. Re-asking the same
+			// table would spin, so wait for it to move (an identical standby
+			// swapping in counts, even though no announce update reports it)
+			// and try again. A retraction that already happened bumped the
+			// generation before the error was observed, so that retry is
+			// immediate.
+			let seen = request.generation();
 			match request.await {
 				Ok(broadcast) => return Ok(broadcast),
-				Err(Error::Unroutable) if queued => {}
 				Err(Error::Unroutable) => {
-					if announced.next().await.is_none() {
+					let closed = kio::wait(|waiter| {
+						self.shared
+							.poll(waiter, |table| match table.closed || table.generation != seen {
+								true => Poll::Ready(()),
+								false => Poll::Pending,
+							})
+							.map(|table| table.closed)
+					})
+					.await;
+					if closed {
 						return Err(Error::Closed);
 					}
 				}
@@ -3578,7 +3616,8 @@ impl Consumer {
 		if let Some(front) = state.fronts.get(&key) {
 			let pending = Requesting::pending(front.request.consume())
 				.with_path(requested)
-				.with_stats(scope);
+				.with_stats(scope)
+				.with_generation(state.generation);
 			return kio::Pending::new(pending);
 		}
 
@@ -3606,6 +3645,7 @@ impl Consumer {
 		});
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
+		let generation = state.generation;
 		state.fronts.insert(
 			key,
 			RemoteFront {
@@ -3623,7 +3663,12 @@ impl Consumer {
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		}));
-		kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope))
+		kio::Pending::new(
+			Requesting::pending(consumer)
+				.with_path(requested)
+				.with_stats(scope)
+				.with_generation(generation),
+		)
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -4369,8 +4414,97 @@ mod tests {
 		let pending = consumer.request_broadcast("room/bob");
 		let request = queued(&server).await;
 		assert_eq!(request.path().as_str(), "room/bob");
-		request.accept(&broadcast::Info::new().produce());
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
 		pending.await.expect("resolves");
+	}
+
+	/// `routed_broadcast` treats a handler's rejection as the table's verdict:
+	/// it waits for the table to move instead of re-asking the same route.
+	#[tokio::test]
+	async fn routed_broadcast_waits_out_a_rejection() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+		let request = queued(&server).await;
+		request.reject(Error::Unroutable);
+
+		// Parked: the route stands, so nothing changed that a retry could use.
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!((&mut resolving).now_or_never().is_none());
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+
+		// A re-price moves the table: the retry reaches the handler, which serves it.
+		server.update(Route::default().with_cost(2)).unwrap();
+		assert!((&mut resolving).now_or_never().is_none());
+		let request = queued(&server).await;
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		resolving.await.expect("resolves");
+	}
+
+	#[tokio::test]
+	async fn dynamic_close_retracts_synchronously() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+		announced.assert_next_active("room");
+
+		let pending = consumer.request_broadcast("room/alice");
+		server.close();
+		announced.assert_next_ended("room");
+		assert!(matches!(
+			server.poll_requested_broadcast(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Closed))
+		));
+		let err = pending.await.err().unwrap();
+		assert!(matches!(err, Error::Unroutable));
+	}
+
+	/// A track first subscribed after the front is already serving another still
+	/// replays what its source holds, like the first track did.
+	#[tokio::test]
+	async fn late_track_on_a_served_front_replays() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut source = broadcast::Info::new().produce();
+		for name in ["a", "b"] {
+			let mut track = source.create_track(name, None).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
+			group.finish().unwrap();
+			// The producer stays alive: the track is open, like a live SI track.
+			std::mem::forget(track);
+		}
+
+		let pending = consumer.request_broadcast("room/alice");
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.expect("resolves");
+
+		let budget = track::Subscription::default().with_max_age(Duration::from_secs(3600));
+		for name in ["a", "b"] {
+			let mut subscription = resolved
+				.track(name)
+				.unwrap()
+				.subscribe(budget.clone())
+				.await
+				.expect("subscribe");
+			let mut group = tokio::time::timeout(Duration::from_secs(5), subscription.recv_group())
+				.await
+				.expect("the late track must replay, not park")
+				.expect("recv group")
+				.expect("track ended early");
+			let frame = group.read_frame().await.expect("read frame").expect("frame");
+			assert_eq!(&frame.payload[..], name.as_bytes());
+		}
 	}
 
 	#[tokio::test]

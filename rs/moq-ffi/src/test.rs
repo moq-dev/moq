@@ -1852,36 +1852,32 @@ async fn dynamic_broadcast_request() {
 }
 
 /// An announced prefix serves through the origin's dynamic handler: a request
-/// beneath it reaches `requested_broadcast()` rather than parking on the route.
+/// beneath it waits for a handler, reaches `requested_broadcast()` once one
+/// exists, and is rejected when the announcement is cancelled first.
 #[tokio::test]
 async fn announced_prefix_requests_reach_dynamic() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let consumer = origin.consume();
-
-	// Without a handler the prefix is advertise-only: nothing serves beneath it.
 	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
-	let err = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live/cam".into()))
-		.await
-		.expect("timed out requesting under an unserved prefix")
-		.err()
-		.expect("nothing serves the prefix yet");
-	assert!(
-		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
-		"unexpected error: {err:?}"
-	);
 
-	let dynamic = origin.dynamic();
+	// Without a handler the request waits, like any served route with a slow handler.
 	let request_broadcast = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
 	};
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(
+		!request_broadcast.is_finished(),
+		"an unserved prefix must park, not fail"
+	);
 
+	// A handler picks up the waiting request and serves it.
+	let dynamic = origin.dynamic();
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("timed out waiting for the announced prefix's request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-
 	let served = MoqBroadcastProducer::new().unwrap();
 	request.accept(&served).unwrap();
 	tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -1890,11 +1886,23 @@ async fn announced_prefix_requests_reach_dynamic() {
 		.expect("request task panicked")
 		.expect("the handler served the path");
 
-	// Cancelling the handler turns the prefix advertise-only again.
+	// Cancelling the handler parks later requests again; cancelling the
+	// announcement is what rejects them.
 	dynamic.cancel();
-	let err = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live/other".into()))
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/other".into()).await })
+	};
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(
+		!request_broadcast.is_finished(),
+		"an unserved prefix must park, not fail"
+	);
+	route.cancel();
+	let err = tokio::time::timeout(TIMEOUT, request_broadcast)
 		.await
-		.expect("timed out requesting after the handler was cancelled")
+		.expect("timed out waiting for the retraction to reject the request")
+		.expect("request task panicked")
 		.err()
 		.expect("nothing serves the prefix any more");
 	assert!(
@@ -1902,7 +1910,37 @@ async fn announced_prefix_requests_reach_dynamic() {
 		"unexpected error: {err:?}"
 	);
 
-	route.cancel();
+	served.finish().unwrap();
+}
+
+/// A second handler shares the queue with the first, and cancelling it leaves the
+/// first serving the announced prefix.
+#[tokio::test]
+async fn announced_prefix_survives_a_cancelled_second_handler() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let _route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+
+	let first = origin.dynamic();
+	let second = origin.dynamic();
+	second.cancel();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
+		.await
+		.expect("timed out waiting for the first handler's request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "live/cam");
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the first handler served the path");
 	served.finish().unwrap();
 }
 
