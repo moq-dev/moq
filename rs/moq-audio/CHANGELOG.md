@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.22...moq-audio-v0.0.23) - 2026-09-05
+
+### Added
+
+- *(moq-audio)* [**breaking**] let publish_capture carry a catalog extension ([#3356](https://github.com/moq-dev/moq/pull/3356))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(moq-audio)* treat a media gap as a hole rather than a splice ([#3386](https://github.com/moq-dev/moq/pull/3386))
+
+### Other
+
+- *(moq-audio)* scope the local-task guidance to macOS ([#3436](https://github.com/moq-dev/moq/pull/3436))
+- *(moq-audio,moq-cli)* assert publish_capture stays Send off macOS ([#3433](https://github.com/moq-dev/moq/pull/3433))
+- *(deps)* bump the cargo group across 1 directory with 5 updates ([#3395](https://github.com/moq-dev/moq/pull/3395))
+
 ## [0.0.22](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.21...moq-audio-v0.0.22) - 2026-09-02
 
 ### Added
