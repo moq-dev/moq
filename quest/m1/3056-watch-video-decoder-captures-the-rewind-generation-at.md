@@ -14,8 +14,12 @@ Rescoped in the 2026-09 planning pass: undeclared rewinds are going away
 mismatch below no longer produces the sixty-second park, but the bug it
 describes still applies to a declared discontinuity, where a stale frame must
 not be presented at all. Fix it the first way the issue suggests: call
-`decoder.reset()` and re-`configure()` in `#onDiscontinuity`, and drop the
-output-time generation guard, which then has nothing left to catch. The
+`decoder.reset()` and re-`configure()` in `#onDiscontinuity`, so queued chunks
+never surface. Keep the post-await generation guard as well: `reset()` cannot
+cancel an output callback that already holds a frame and is parked in
+`#park()` or `sync.wait()`, and `sync.reset()` releases exactly that wait, so
+the guard is what stops a stale callback writing `timestamp` and `frame`
+after the reset. The
 regression needs a real WebCodecs decoder, so it lives in a browser harness
 rather than a bun unit test.
 
