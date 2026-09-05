@@ -26,9 +26,14 @@ a commit, so "carries no work" is not the same as "has nothing unmerged", and
 conflating the two strands a quest forever:
 
 - **Placeholder commits only.** Someone claimed the quest and abandoned it
-  without starting. Delete the ref, local and remote, and keep the quest in the
-  pool. Nothing is lost, and treating it as claimed would retire the quest
-  permanently on the strength of an empty commit.
+  without starting. Delete the ref and keep the quest in the pool: nothing is
+  lost, and treating it as claimed would retire the quest permanently on the
+  strength of an empty commit. Pin the remote delete to the tip you inspected,
+  with `git push --force-with-lease=<branch>:<sha> origin --delete <branch>`.
+  An unconditional delete races the owner coming back, and would erase a real
+  commit pushed between the inspection and the delete along with the claim it
+  renewed. A rejected lease means that is what happened, so treat the quest as
+  claimed.
 - **Real commits.** Do not cut a fresh branch over them. Hand the agent the
   existing branch to continue, rebased onto its base, and tell it to skip the
   claim step, since the branch already is the claim.
