@@ -133,7 +133,13 @@ fn rooted_inverts_rebase() {
 			assert!(rooted.rebase(&root).contains(&pattern), "{pattern} under {root:?}");
 			for p in paths(4) {
 				let expect = pattern.matches(&p);
-				let full = if root.is_empty() { p.clone() } else if p.is_empty() { root.clone() } else { format!("{root}/{p}") };
+				let full = if root.is_empty() {
+					p.clone()
+				} else if p.is_empty() {
+					root.clone()
+				} else {
+					format!("{root}/{p}")
+				};
 				assert_eq!(rooted.matches(&full), expect, "{rooted} on {full:?}");
 			}
 		}
@@ -180,7 +186,9 @@ fn random_text_round_trips() {
 	const PIECES: &[&str] = &["a", "b", "*", "**", "/", "", "a*", ".hang", "//"];
 	for _ in 0..20_000 {
 		let len = (next() % 8) as usize;
-		let text: String = (0..len).map(|_| PIECES[(next() % PIECES.len() as u64) as usize]).collect();
+		let text: String = (0..len)
+			.map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+			.collect();
 		if let Ok(pattern) = text.parse::<Pattern>() {
 			assert_eq!(pattern.to_string(), text, "parse accepted a non-canonical text");
 			assert_eq!(text.parse::<Pattern>().unwrap(), pattern);

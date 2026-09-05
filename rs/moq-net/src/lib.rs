@@ -106,9 +106,9 @@ pub use error::*;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;
-pub use path::*;
 /// The path patterns grants and advertisements are written in; see [`moq_path`].
 pub use moq_path::{Pattern, Patterns};
+pub use path::*;
 pub use runtime::{Runtime, Timers};
 pub use server::*;
 pub use session::*;

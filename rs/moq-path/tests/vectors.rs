@@ -12,7 +12,11 @@ fn pattern(text: &str) -> Pattern {
 }
 
 fn patterns(list: &Value) -> Patterns {
-	list.as_array().unwrap().iter().map(|v| pattern(v.as_str().unwrap())).collect()
+	list.as_array()
+		.unwrap()
+		.iter()
+		.map(|v| pattern(v.as_str().unwrap()))
+		.collect()
 }
 
 fn error_code(err: &Error) -> &'static str {
@@ -60,7 +64,11 @@ fn literal_and_subtree() {
 		let path = case["path"].as_str().unwrap();
 		match Pattern::literal(path) {
 			Ok(got) => assert_eq!(got, pattern(case["pattern"].as_str().unwrap()), "literal {path:?}"),
-			Err(err) => assert_eq!(error_code(&err), case["error"].as_str().unwrap_or("ok"), "literal {path:?}"),
+			Err(err) => assert_eq!(
+				error_code(&err),
+				case["error"].as_str().unwrap_or("ok"),
+				"literal {path:?}"
+			),
 		}
 	}
 	for case in vectors["subtree"].as_array().unwrap() {
@@ -88,7 +96,11 @@ fn matches() {
 	for case in vectors()["matches"].as_array().unwrap() {
 		let p = pattern(case["pattern"].as_str().unwrap());
 		let path = case["path"].as_str().unwrap();
-		assert_eq!(p.matches(path), case["expect"].as_bool().unwrap(), "{p} matches {path:?}");
+		assert_eq!(
+			p.matches(path),
+			case["expect"].as_bool().unwrap(),
+			"{p} matches {path:?}"
+		);
 	}
 }
 
@@ -97,7 +109,11 @@ fn contains() {
 	for case in vectors()["contains"].as_array().unwrap() {
 		let outer = pattern(case["outer"].as_str().unwrap());
 		let inner = pattern(case["inner"].as_str().unwrap());
-		assert_eq!(outer.contains(&inner), case["expect"].as_bool().unwrap(), "{outer} contains {inner}");
+		assert_eq!(
+			outer.contains(&inner),
+			case["expect"].as_bool().unwrap(),
+			"{outer} contains {inner}"
+		);
 	}
 }
 
@@ -116,7 +132,12 @@ fn overlaps() {
 fn specificity() {
 	let vectors = vectors();
 	for list in vectors["specificity"]["descending"].as_array().unwrap() {
-		let ranked: Vec<Pattern> = list.as_array().unwrap().iter().map(|v| pattern(v.as_str().unwrap())).collect();
+		let ranked: Vec<Pattern> = list
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|v| pattern(v.as_str().unwrap()))
+			.collect();
 		for pair in ranked.windows(2) {
 			assert!(
 				pair[0].specificity() > pair[1].specificity(),
@@ -149,7 +170,11 @@ fn rooted() {
 		let root = case["root"].as_str().unwrap();
 		match p.rooted(root) {
 			Ok(got) => assert_eq!(got, pattern(case["expect"].as_str().unwrap()), "{p} rooted at {root:?}"),
-			Err(err) => assert_eq!(error_code(&err), case["error"].as_str().unwrap_or("ok"), "{p} rooted at {root:?}"),
+			Err(err) => assert_eq!(
+				error_code(&err),
+				case["error"].as_str().unwrap_or("ok"),
+				"{p} rooted at {root:?}"
+			),
 		}
 	}
 }
@@ -165,11 +190,21 @@ fn union() {
 			.iter()
 			.map(|v| pattern(v.as_str().unwrap()))
 			.collect();
-		assert_eq!(reduced.iter().cloned().collect::<Vec<_>>(), expected, "{}", case["input"]);
+		assert_eq!(
+			reduced.iter().cloned().collect::<Vec<_>>(),
+			expected,
+			"{}",
+			case["input"]
+		);
 	}
 	for case in vectors["unionContains"].as_array().unwrap() {
 		let set = patterns(&case["union"]);
 		let p = pattern(case["pattern"].as_str().unwrap());
-		assert_eq!(set.contains(&p), case["expect"].as_bool().unwrap(), "{} contains {p}", case["union"]);
+		assert_eq!(
+			set.contains(&p),
+			case["expect"].as_bool().unwrap(),
+			"{} contains {p}",
+			case["union"]
+		);
 	}
 }
