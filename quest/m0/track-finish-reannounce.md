@@ -15,11 +15,15 @@ verdict from the sources attached at the time rather than a property of the
 name, so the next request should reach a source again. A finished one is kept,
 because its cache is still readable. There is no third state.
 
-The consequence is that behind a relay, once a track finishes, every later
-subscriber gets the finished cache. Nothing drains the pending queue, so the
-route is never asked to serve that name again however many times upstream
-re-creates it. Aborted is retryable, finished is terminal, and a publisher has
-no way to say it is done for now.
+This is specific to the spliced logical tracks a route-fed broadcast mints. On
+the plain path a few lines below, the weak cache drops any closed entry,
+finished or aborted alike, and the request falls through to a source again. So
+the same publisher is reachable in process and unreachable one relay hop away:
+once the spliced track finishes, every later subscriber gets the finished
+cache, nothing drains the pending queue, and the route is never asked to serve
+that name again however many times upstream re-creates it. Aborted is
+retryable, finished is terminal, and a publisher has no way to say it is done
+for now.
 
 This surfaced through `moq-transcode`: a resized ladder retires a rung by
 finishing its track, and reusing the rung's name for the replacement looks
