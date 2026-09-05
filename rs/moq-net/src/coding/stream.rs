@@ -1,7 +1,7 @@
 use std::task::{Context, Poll, ready};
 
 use crate::Error;
-use crate::coding::{Reader, Writer};
+use crate::coding::{Reader, StreamCodes, Writer};
 
 /// The send order every control stream is opened at.
 ///
@@ -25,7 +25,7 @@ pub struct Stream<S: crate::transport::poll::Session, V> {
 	pub reader: Reader<S::RecvStream, V>,
 }
 
-impl<S: crate::transport::poll::Session, V> Stream<S, V> {
+impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	/// Poll opening a new stream with the given version.
 	pub fn poll_open(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
 	where
