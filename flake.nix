@@ -259,7 +259,7 @@
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, go/scripts/check.sh, and
-        # doc/lib/go/moq-ffi.md.
+        # doc/lib/go/index.md.
         #
         # This points at a fork rather than NordSecurity because upstream has no
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even

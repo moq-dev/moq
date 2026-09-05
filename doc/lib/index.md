@@ -5,67 +5,44 @@ description: MoQ libraries for Rust, TypeScript, C, Python, Kotlin, Swift, Go, a
 
 # Libraries
 
-MoQ ships libraries in a handful of languages. **Rust** (native) and **TypeScript** (web) are the primary implementations; everything else wraps the Rust core under the hood.
+Two primary implementations and six bindings, all speaking the same wire
+protocol. A publisher in Python is consumable by a subscriber in Swift.
 
-## Primary
+| Language | Package | Best for |
+| --- | --- | --- |
+| [Rust](/lib/rs/) | `moq-net`, `hang`, and friends on crates.io | Servers, CLIs, native apps, anything that needs the full stack including hardware codecs. |
+| [TypeScript](/lib/js/) | `@moq/*` on npm | Browsers (WebTransport + WebCodecs) and Node/Bun/Deno. |
+| [Swift](/lib/swift/) | `Moq` via SwiftPM | iOS, iPadOS, macOS. |
+| [Kotlin](/lib/kt/) | `dev.moq:moq` on Maven Central | Android and the JVM. |
+| [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
+| [Go](/lib/go/) | `github.com/moq-dev/moq-go` | Go services and tooling. |
+| [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
+| [C](/lib/c/) | `libmoq` | C/C++ and any language with a C FFI. |
 
-### [Rust](/lib/rs/) <Badge type="tip" text="native" />
+## How they relate
 
-The reference implementation. Used by every server-side tool and by the FFI core that the other language bindings link against.
+Rust is the reference implementation; every server-side tool is built on it.
+TypeScript is a from-scratch browser implementation. The other six wrap the
+Rust core: Python, Kotlin, Swift, Go, and Dart are generated from one
+[UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
+wrapped in an idiomatic layer, while C gets a hand-written stable ABI
+(`libmoq`). A feature added to the core lands in all of them together.
 
-- [`moq-net`](/lib/rs/crate/moq-net) - Real-time pub/sub
-- [`hang`](/lib/rs/crate/hang) - Media catalog and container
-- [`moq-mux`](/lib/rs/crate/moq-mux) - fMP4/CMAF, MPEG-TS, and FLV import/export
-- [`moq-native`](/lib/rs/crate/moq-native) - QUIC endpoint helpers
-- [...and more](/lib/rs/)
+## What every binding can do
 
-### [TypeScript](/lib/js/) <Badge type="tip" text="web" />
+The wrapped bindings share one feature set, so the language pages only show
+how it looks in that language:
 
-The browser implementation. Uses [WebTransport](/concept/layer/web-transport), WebCodecs, and WebAudio to run MoQ natively in the browser without polyfills (in supported browsers).
+- **Connect** to a relay with TLS options (system roots, custom CA, fingerprint pinning, mTLS) and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
+- **Discover** broadcasts by prefix, wait for a specific one, or request an unannounced one.
+- **Publish and subscribe to media** with the hang catalog filled in from the bitstream, plus raw pixels or PCM in and out with the codec running inside the binding (VideoToolbox, Media Foundation, NVENC, openh264, Opus).
+- **Raw tracks** of arbitrary bytes with timestamps, sparse or replayed groups, per-subscriber priority and latency, and best-effort datagrams.
+- **JSON tracks** in snapshot mode (latest value, merge-patch deltas, optional compression) or stream mode (append log).
+- **Fetch** a single group by sequence from the cache, decoded through the container or raw.
+- **Serve on demand**: accept track and broadcast requests as they arrive instead of publishing up front.
+- **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
+- **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
+- **Errors** distinguish auth rejection (don't retry) from shutdown (expected) from transport failure.
 
-- [`@moq/net`](/lib/js/@moq/net) - Real-time pub/sub
-- [`@moq/hang`](/lib/js/@moq/hang/) - Media library
-- [`@moq/watch`](/lib/js/@moq/watch) - Subscribe + render
-- [`@moq/publish`](/lib/js/@moq/publish) - Capture + publish
-- [...and more](/lib/js/)
-
-## FFI bindings
-
-Python, Kotlin, Swift, Go, and Dart are generated from the same [`moq-ffi`](https://crates.io/crates/moq-ffi) UniFFI crate, then wrapped with idiomatic APIs. C uses the separate [`libmoq`](/lib/rs/crate/libmoq) ABI over the same Rust protocol and media crates.
-
-### [C](/lib/c/)
-
-Raw C bindings via `libmoq`. It is independent of the UniFFI-generated bindings.
-
-### [Python](/lib/py/)
-
-Async/await with `asyncio`. Published as [`moq-rs`](https://pypi.org/project/moq-rs/) on PyPI (the ergonomic wrapper, imported as `moq`), atop the raw [`moq-ffi`](https://pypi.org/project/moq-ffi/) bindings.
-
-### [Kotlin](/lib/kt/)
-
-Coroutines and `Flow` for Android and the JVM. Published as `dev.moq:moq` on Maven Central.
-
-### [Swift](/lib/swift/)
-
-Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distributed via Swift Package Manager as [`Moq`](https://github.com/moq-dev/moq-swift) (the ergonomic wrapper, versioned independently), atop the raw [`MoqFFI`](https://github.com/moq-dev/moq-swift-ffi) bindings.
-
-### [Go](/lib/go/)
-
-cgo bindings with prebuilt static libraries per platform. Published as [`github.com/moq-dev/moq-go`](https://github.com/moq-dev/moq-go) (the ergonomic wrapper, imported as `moq`), atop the raw [`github.com/moq-dev/moq-go-ffi`](https://github.com/moq-dev/moq-go-ffi) bindings.
-
-### [Dart and Flutter](/lib/dart/)
-
-Futures and streams for Dart and Flutter. Published as [`moq`](https://pub.dev/packages/moq), atop the raw [`moq_ffi`](https://pub.dev/packages/moq_ffi) bindings with native assets for Android, iOS, Linux, macOS, and Windows.
-
-## Picking a language
-
-- **Server, CLI, or anything native** → [Rust](/lib/rs/)
-- **Web browser or Node/Bun/Deno** → [TypeScript](/lib/js/)
-- **iOS / macOS app** → [Swift](/lib/swift/)
-- **Android app or JVM service** → [Kotlin](/lib/kt/)
-- **Scripts, ML pipelines, prototypes** → [Python](/lib/py/)
-- **Go service or tooling** → [Go](/lib/go/)
-- **Cross-platform Flutter app** → [Dart](/lib/dart/)
-- **Anything else with a C ABI** → [C](/lib/c/)
-
-Every binding uses the same wire protocol, so a publisher in Python can be consumed by a Swift subscriber.
+Dart is the exception on codecs: its published binaries carry no encoder or
+decoder, so it moves already-encoded frames.

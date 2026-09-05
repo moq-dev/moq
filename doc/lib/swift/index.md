@@ -1,90 +1,67 @@
 ---
-title: Swift Libraries
-description: Swift Package for Media over QUIC on Apple platforms
+title: Swift
+description: Async sequences for iOS and macOS via the Moq package
 ---
 
-# Swift Libraries
+# Swift
 
-The Swift bindings expose [Media over QUIC](/) to iOS, iPadOS, macOS, and the iOS Simulator. Built on the same Rust core ([moq-ffi](https://crates.io/crates/moq-ffi)) as the Python and Kotlin packages, wrapped with an idiomatic async/await API.
+[![Swift Package Index](https://img.shields.io/github/v/release/moq-dev/moq-swift?label=moq-swift)](https://github.com/moq-dev/moq-swift/releases)
 
-## Packages
-
-Two Swift packages, split so the ergonomic API can evolve on its own cadence:
-
-### Moq
-
-[moq-dev/moq-swift](https://github.com/moq-dev/moq-swift)
-
-The package you want. A Swift-native wrapper: de-prefixed types (`Client`, `Session`, `BroadcastProducer`), `AsyncSequence` conformance on every consumer, structured-concurrency cancellation, and `Sendable` handles. The raw `MoqFFI` types stay behind it.
-
-**Features:**
-
-- iOS 15+, iPadOS 15+, macOS 12.3+
-- Apple Silicon binary for macOS and the iOS Simulator
-- iOS device + iOS Simulator slices (arm64)
-- Cancellation through Swift `Task` propagates to native consumers
-- Versioned independently of the Rust crates; floats to the latest compatible `MoqFFI` patch
-
-[Learn more](/lib/swift/moq)
-
-### MoqFFI
-
-[moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
-
-The raw UniFFI bindings (the `Moq`-prefixed classes) plus the prebuilt `MoqFFI.xcframework`, tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `Moq` pulls this in for you; depend on it directly only if you need the unwrapped API.
-
-## Installation
-
-Add the `Moq` wrapper; SPM resolves `MoqFFI` (and its XCFramework) transitively:
+The `Moq` Swift package: de-prefixed types, `AsyncSequence` on every
+consumer, `Sendable` handles, and `Task` cancellation that reaches the native
+side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
+slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.6"),
+    .package(url: "https://github.com/moq-dev/moq-swift", from: "<version>"),   // latest: see the badge above
 ],
 targets: [
-    .target(
-        name: "MyApp",
-        dependencies: [
-            .product(name: "Moq", package: "moq-swift"),
-        ],
-    ),
+    .target(name: "MyApp", dependencies: [.product(name: "Moq", package: "moq-swift")]),
 ]
 ```
-
-Or in Xcode: File → Add Package Dependencies → enter the URL.
-
-The transitive `MoqFFI.xcframework` is attached to the matching [`moq-ffi-v*` release](https://github.com/moq-dev/moq/releases) on the source repo. SPM downloads it transparently; no manual asset handling required.
-
-## Quickstart
 
 ```swift
 import Moq
 
+// Subscribe. The sequence is live, so run it in its own Task.
 let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
-// session.publisher and session.consumer are always populated: by whatever
-// origin you wired via setPublish / setConsume before connect, or by a fresh
-// auto-created one. The duplex no-config path (the typical client) shares one
-// origin between both sides.
-let announced = try session.consumer.announced(prefix: "demos/")
-for try await announcement in announced {
-    print("got broadcast \(announcement.path)")
-
-    let catalog = try announcement.broadcast.subscribeCatalog()
-    for try await update in catalog {
-        print("catalog: \(update)")
+for try await announcement in try session.consumer.announced(prefix: "live/") {
+    for try await catalog in try announcement.broadcast.subscribeCatalog() {
+        print(catalog)
     }
 }
+```
+
+```swift
+// Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
+// opusInit, packet, pts, and rgba come from your encoder or capture source.
+let broadcast = try session.publisher.createBroadcast(path: "my-stream.hang")
+let audio = try broadcast.publishMedia(format: "opus", initData: opusInit)
+try audio.writeFrame(packet, timestampUs: 20_000)
+
+let video = try broadcast.publishVideo(
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
+    output: VideoEncoderOutput(codec: .h264, track: "camera", bitrate: nil, gop: nil, kind: .auto)
+)
+try video.write(VideoFrame(timestampUs: pts, data: rgba))
 
 session.shutdown()
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.
+For a self-signed relay on your own test network, `client.setTlsVerify(false)`
+accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
 
-## Source and issues
+`Server` binds, generates or loads TLS, and hands you each request to
+`accept()` or `reject(code:)`. JSON tracks take `Codable` types
+(`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
+rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
+to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/
+`datagrams`, `setCatalogSection`, `used()`/`unused()`. `MoqError.isAuth` and
+`isShutdown` classify errors.
 
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
-- Source: [swift/](https://github.com/moq-dev/moq/tree/main/swift) (in the monorepo)
-- Mirrors (what SPM resolves): [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) (wrapper), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) (raw bindings)
-- README: [swift/README.md](https://github.com/moq-dev/moq/blob/main/swift/README.md)
+- Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
+- Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)

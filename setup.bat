@@ -5,7 +5,7 @@ REM MoQ developer setup for Windows.
 REM
 REM Installs the toolchain needed to build the Rust workspace and JS packages
 REM using winget. Safe to re-run: winget skips or upgrades anything already
-REM present. See doc/setup/windows.md for the manual steps and known caveats.
+REM present. See doc/setup/dev.md for the manual steps and known caveats.
 REM ---------------------------------------------------------------------------
 
 echo === MoQ Windows setup ===
@@ -67,6 +67,6 @@ echo Next steps:
 echo   cargo build                                     ^(build the Rust workspace^)
 echo   cargo run --bin moq-relay -- demo/relay/localhost.toml   ^(run a local relay^)
 echo.
-echo See doc/setup/windows.md for running the demo components and the `just` PATH note.
+echo See doc/setup/dev.md for running the demo components and the `just` PATH note.
 
 endlocal
