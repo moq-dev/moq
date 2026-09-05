@@ -18,20 +18,21 @@ latency budget, video skippable, prompts fully reliable, all on one connection.
 ## Faster than real time
 
 A TTS model emits a whole sentence in a burst with timestamps in the future.
-WebRTC renders on arrival; MoQ delivers the burst and the player paces it. In
-the browser, set a latency ceiling on [`<moq-watch>`](/lib/js/watch#buffered-playback)
-to buffer ahead and call `reset()` on an interruption. The
+WebRTC keeps buffering and playout inside its media engine; MoQ exposes the
+timestamped burst to the application, and the player paces it. In the browser,
+set a latency ceiling on [`<moq-watch>`](/lib/js/watch#buffered-playback) to
+buffer ahead and call `reset()` on an interruption. The
 [Pipecat](https://github.com/pipecat-ai/pipecat) voice-agent framework ships
 a MoQ transport built on this.
 
 ## Inference on demand
 
-Announcements and the catalog are cheap and always flow, but media is only
-transmitted once someone subscribes to a track, and a publisher can defer
-encoding until then too. A `captions`
-track backed by Whisper runs only while a viewer has captions on. Object
-detection can consume a 360p 10 fps rendition while the full-resolution track
-stays idle until a human asks for it.
+Announcements and catalog metadata can advertise tracks before their frames
+exist. Media frames are transmitted only once someone subscribes to the track,
+and a publisher can defer encoding until then too. A `captions` track backed by
+Whisper runs only while a viewer has captions on. Object detection can consume
+a 360p 10 fps rendition while the full-resolution track stays idle until a
+human asks for it.
 
 ## Media and data together
 

@@ -30,7 +30,7 @@ final broadcast = await moq.requestBroadcast('live/camera');
 ```
 
 ```dart
-// Publish
+// Publish. bytes comes from your encoder or application source.
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
 track.appendGroup().writeFrame(frame: MoqFrame(payload: bytes));
