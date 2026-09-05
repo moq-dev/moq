@@ -161,6 +161,10 @@ std::atomic<int> g_closed_handle{0};
 // its runtime thread, which is the ordering signal_mutex has to handle.
 std::atomic<bool> g_connect_fires_terminal{false};
 std::atomic<bool> g_connect_fires_terminal_threaded{false};
+// When true, moq_session_stats fails even for the live handle (reconnect gap).
+std::atomic<bool> g_stats_offline{false};
+// When true, only RTT is marked valid (dock must omit the rest).
+std::atomic<bool> g_stats_partial{false};
 std::thread g_connect_terminal_thread;
 const char *g_error = "unauthorized";
 } // namespace
@@ -193,6 +197,11 @@ int32_t moq_publish_finish(uint32_t)
 }
 
 int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_t)
+{
+	return 7;
+}
+
+int32_t moq_publish_media_hint(uint32_t, const char *, size_t, const uint8_t *, size_t, const moq_video_hint *)
 {
 	return 7;
 }
@@ -245,6 +254,37 @@ int32_t moq_session_close(uint32_t session)
 {
 	g_closed_handle = static_cast<int>(session);
 	return 0;
+}
+
+int32_t moq_session_stats(uint32_t session, moq_connection_stats *dst)
+{
+	if (!dst || static_cast<int>(session) != g_last_handle.load())
+		return -1;
+	if (g_stats_offline.load())
+		return -2;
+
+	*dst = {};
+	dst->rtt_us = 12500;
+	dst->rtt_valid = true;
+	if (g_stats_partial.load())
+		return 0;
+
+	dst->send_rate_bps = 2'500'000;
+	dst->send_rate_valid = true;
+	dst->recv_rate_bps = 120'000;
+	dst->recv_rate_valid = true;
+	dst->bytes_sent = 4'000'000;
+	dst->bytes_sent_valid = true;
+	dst->packets_sent = 100;
+	dst->packets_sent_valid = true;
+	dst->packets_lost = 1;
+	dst->packets_lost_valid = true;
+	return 0;
+}
+
+int32_t moq_session_version(uint32_t, moq_string *)
+{
+	return -1;
 }
 
 } // extern "C"
@@ -320,6 +360,8 @@ void reset()
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
+	g_stats_offline = false;
+	g_stats_partial = false;
 	g_stall_last_error = false;
 	g_in_report_window = false;
 }
@@ -577,6 +619,82 @@ int main()
 		fire(0);
 	}
 	printf("connect time cleared on teardown: ok\n");
+
+	// Dock polls TryGetConnectionStats once a second. Cover reconnect epochs,
+	// exact field mapping, partial validity, and the offline gap mid-reconnect.
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		MoQOutput::ConnectionStats stats;
+
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(o.GetReconnectCount() == 0);
+
+		CHECK(o.Start());
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_valid);
+		CHECK(stats.rtt_ms > 12.4 && stats.rtt_ms < 12.6);
+		CHECK(stats.send_rate_valid);
+		CHECK(stats.send_rate_bps == 2'500'000.0);
+		CHECK(stats.recv_rate_valid);
+		CHECK(stats.recv_rate_bps == 120'000.0);
+		CHECK(stats.bytes_sent_valid);
+		CHECK(stats.bytes_sent == 4'000'000ULL);
+		CHECK(stats.loss_valid);
+		CHECK(stats.loss_pct > 0.9 && stats.loss_pct < 1.1);
+		CHECK(stats.reconnects == 0);
+		CHECK(o.GetReconnectCount() == 0);
+
+		fire(1);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 0);
+
+		fire(2);
+		CHECK(o.GetReconnectCount() == 1);
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 1);
+
+		fire(5);
+		CHECK(o.GetReconnectCount() == 4);
+
+		g_stats_offline = true;
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(o.GetReconnectCount() == 4);
+		g_stats_offline = false;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 4);
+
+		g_stats_partial = true;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_valid);
+		CHECK(!stats.send_rate_valid);
+		CHECK(!stats.recv_rate_valid);
+		CHECK(!stats.bytes_sent_valid);
+		CHECK(!stats.loss_valid);
+		CHECK(stats.reconnects == 4);
+		g_stats_partial = false;
+
+		o.Stop(false);
+		fire(0);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(!o.TryGetConnectionStats(&stats));
+	}
+	printf("connection stats snapshot: ok\n");
+
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		MoQOutput::ConnectionStats stats;
+		CHECK(o.Start());
+		fire(1);
+		fire(3);
+		CHECK(o.GetReconnectCount() == 2);
+		fire(-34);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(!o.TryGetConnectionStats(&stats));
+	}
+	printf("reconnect count cleared on fatal: ok\n");
 
 	// The terminal callback racing a user-initiated stop, repeatedly. Whichever
 	// wins, the failure signal fires at most once per Start().

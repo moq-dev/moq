@@ -25,6 +25,38 @@ public:
 
 	inline int GetConnectTime() { return connect_time_ms; }
 
+	// Point-in-time QUIC/WebTransport health for the live session. False when
+	// there is no session or libmoq is between reconnects (no live connection).
+	struct ConnectionStats {
+		int reconnects = 0;
+		bool rtt_valid = false;
+		double rtt_ms = 0;
+		bool send_rate_valid = false;
+		double send_rate_bps = 0;
+		bool recv_rate_valid = false;
+		double recv_rate_bps = 0;
+		bool bytes_sent_valid = false;
+		uint64_t bytes_sent = 0;
+		bool loss_valid = false;
+		double loss_pct = 0;
+		// Negotiated draft name (e.g. moq-lite-05), empty when unavailable.
+		std::string protocol;
+		// Transport label derived from the dial URL scheme (WebTransport, QUIC, …).
+		std::string transport;
+	};
+	bool TryGetConnectionStats(ConnectionStats *out);
+
+	// Successful (re)connects after the first for this Start(); 0 until epoch >= 2.
+	inline int GetReconnectCount()
+	{
+		const int epoch = session_epoch.load(std::memory_order_relaxed);
+		return epoch > 1 ? epoch - 1 : 0;
+	}
+
+	// Most recent connect/reconnect failure for this Start(), or empty when none.
+	// Thread-safe; the dock polls this while reconnecting and on stop.
+	void CopyLastFailure(int *code, std::string *reason);
+
 private:
 	// Handed to libmoq as the status callback's user_data. Carries everything a
 	// callback needs about its own Start() attempt, so it never has to read a
@@ -91,6 +123,7 @@ private:
 	// Written by the session status callback (libmoq runtime thread), read by
 	// GetConnectTime() (OBS thread); atomic to avoid a data race.
 	std::atomic<int> connect_time_ms;
+	std::atomic<int> session_epoch;
 
 	int origin;
 	int broadcast;
@@ -120,6 +153,8 @@ private:
 	// Whether the current attempt ever reached the server, which picks between
 	// telling OBS the connection failed and telling it the stream dropped.
 	bool session_connected;
+	int last_failure_code;
+	std::string last_failure_reason;
 
 	std::map<obs_encoder_t *, int> video_tracks;
 	std::map<obs_encoder_t *, int> audio_tracks;
