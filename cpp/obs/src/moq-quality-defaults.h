@@ -29,6 +29,7 @@ inline MoQQualityDefaults RecommendQualityDefaults(const std::string &profile,
 	bool haveHwHevc = false;
 	bool haveH264 = false;
 	bool haveHevc = false;
+	bool haveAv1 = false;
 	bool haveAac = false;
 	bool haveOpus = false;
 
@@ -42,6 +43,8 @@ inline MoQQualityDefaults RecommendQualityDefaults(const std::string &profile,
 				haveHevc = true;
 				if (o.hardware)
 					haveHwHevc = true;
+			} else if (o.codec == "av1") {
+				haveAv1 = true;
 			}
 			if (o.hardware)
 				haveHw = true;
@@ -65,8 +68,14 @@ inline MoQQualityDefaults RecommendQualityDefaults(const std::string &profile,
 			video_codec = "h264";
 		else if (haveHevc)
 			video_codec = "hevc";
+		else if (haveH264)
+			video_codec = "h264";
+		else if (haveAv1)
+			video_codec = "av1";
 	} else if (!haveH264 && haveHevc) {
 		video_codec = "hevc";
+	} else if (!haveH264 && !haveHevc && haveAv1) {
+		video_codec = "av1";
 	}
 
 	const std::string audio_codec = high ? (haveOpus ? "opus" : "aac") : (haveAac ? "aac" : "opus");

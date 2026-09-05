@@ -451,7 +451,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	advancedButton = new QPushButton("Advanced…", streamPage);
 	advancedButton->setCursor(Qt::PointingHandCursor);
-	advancedButton->setToolTip("Same knobs as the Advanced tab: protocol pin, TLS, reconnect, QUIC, WebSocket. "
+	advancedButton->setToolTip("Protocol pin, TLS, reconnect, QUIC and WebSocket settings. "
 				   "Opens them in a window. Changes apply on the next Go Live.");
 	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
 
@@ -460,6 +460,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	status = new QLabel(streamPage);
 	status->setWordWrap(true);
+	status->setTextFormat(Qt::PlainText);
 	status->setToolTip("Live session state: connecting, connected, reconnecting, or the last failure.");
 	QFont statusFont = status->font();
 	statusFont.setBold(true);
@@ -477,6 +478,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	statsBox = new QLabel(streamPage);
 	statsBox->setWordWrap(true);
+	statsBox->setTextFormat(Qt::PlainText);
 	statsBox->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	statsBox->setMinimumHeight(40);
 	statsBox->setAlignment(Qt::AlignTop | Qt::AlignLeft);
@@ -926,7 +928,7 @@ void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 	QString detected = haveHw ? QString("Detected: hardware available (%1)").arg(hwNames.join(", "))
 				  : QString("Detected: software encoders only");
 	if (profile == "auto")
-		detected += haveHw ? " · Auto → Quality" : " · Auto → Performance";
+		detected += preferHw ? " · Auto → Quality" : " · Auto → Performance";
 	else if (high)
 		detected += QStringLiteral(" · Quality · 8 Mbps");
 	else
@@ -1107,10 +1109,13 @@ bool MoQDock::CreateTranscodeEncoders()
 		obs_video_encoder_create(videoId.toUtf8().constData(), "moq_dock_video", videoSettings, nullptr));
 	size_t audioMixerIdx = 0;
 	if (config_t *config = obs_frontend_get_profile_config()) {
-		int track = (int)config_get_int(config, "AdvOut", "TrackIndex");
-		if (track < 1 || track > 6)
-			track = 1;
-		audioMixerIdx = (size_t)(track - 1);
+		const char *mode = config_get_string(config, "Output", "Mode");
+		if (mode && strcmp(mode, "Advanced") == 0) {
+			int track = (int)config_get_int(config, "AdvOut", "TrackIndex");
+			if (track < 1 || track > 6)
+				track = 1;
+			audioMixerIdx = (size_t)(track - 1);
+		}
 	}
 
 	audioEncoder = OBSEncoderAutoRelease(obs_audio_encoder_create(audioId.toUtf8().constData(), "moq_dock_audio",
@@ -1551,7 +1556,7 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	const QPointer<MoQDock> dock(self);
 	auto bridge = cookie->bridge;
 	endBridge.disarm();
-	QMetaObject::invokeMethod(
+	const bool posted = QMetaObject::invokeMethod(
 		qApp,
 		[bridge, dock, code, failText, stopped]() {
 			struct Done {
@@ -1582,6 +1587,8 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 			}
 		},
 		Qt::QueuedConnection);
+	if (!posted)
+		bridge->end();
 }
 
 void register_moq_dock()

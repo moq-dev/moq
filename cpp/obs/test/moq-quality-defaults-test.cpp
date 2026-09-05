@@ -93,6 +93,17 @@ int main()
 	}
 	printf("Profile switch changes codec and audio: ok\n");
 
+	{
+		const auto av1_only = std::vector<MoQEncoderCapability>{
+			{"av1", false, true},
+			{"aac", false, false},
+		};
+		const auto d = RecommendQualityDefaults("high", av1_only);
+		CHECK(d.high);
+		CHECK(d.video_codec == "av1");
+	}
+	printf("AV1-only Quality falls back to av1: ok\n");
+
 	if (g_failures) {
 		fprintf(stderr, "%d failure(s)\n", g_failures);
 		return 1;

@@ -23,6 +23,7 @@ extern "C" {
 }
 
 #include "moq-source.h"
+#include "moq-url.h"
 #include "logger.h"
 
 // Map codec string from moq_video_config to FFmpeg codec ID
@@ -312,31 +313,8 @@ static void moq_source_destroy(void *data)
 	bfree(ctx);
 }
 
-// Relay URLs can embed credentials (userinfo) or a query/path token, and OBS
-// logs are frequently shared for support. Reduce a URL to scheme://host[:port]
-// for logging so secrets never reach persistent logs.
-static std::string redact_url(const char *url)
-{
-	if (!url || !*url)
-		return "(null)";
-
-	std::string s(url);
-	size_t scheme = s.find("://");
-	std::string prefix = (scheme == std::string::npos) ? "" : s.substr(0, scheme + 3);
-	size_t rest = (scheme == std::string::npos) ? 0 : scheme + 3;
-
-	// The authority ends at the first '/', '?' or '#'.
-	size_t auth_end = s.find_first_of("/?#", rest);
-	std::string authority = s.substr(rest, auth_end == std::string::npos ? std::string::npos : auth_end - rest);
-
-	// Drop any userinfo (user:pass@). Use the last '@' so an unescaped '@' in a
-	// password can't leave part of it behind.
-	size_t at = authority.rfind('@');
-	if (at != std::string::npos)
-		authority = authority.substr(at + 1);
-
-	return prefix + authority;
-}
+// Relay URLs can embed credentials (userinfo) or a query/path token; MoQRedactUrl
+// strips those for logging (see moq-url.h).
 
 static void moq_source_update(void *data, obs_data_t *settings)
 {
@@ -368,7 +346,7 @@ static void moq_source_update(void *data, obs_data_t *settings)
 
 	// If settings changed and are valid, reconnect
 	if (settings_changed && valid) {
-		LOG_INFO("Settings changed, reconnecting (url=%s, broadcast=%s)", redact_url(url).c_str(),
+		LOG_INFO("Settings changed, reconnecting (url=%s, broadcast=%s)", MoQRedactUrl(url).c_str(),
 			 broadcast ? broadcast : "(null)");
 		moq_source_reconnect(ctx);
 	} else if (settings_changed && !valid) {

@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-settings.h"
+#include "moq-url.h"
 #include "logger.h"
 #include "util/util_uint64.h"
 
@@ -165,7 +166,7 @@ bool MoQOutput::Start()
 		return false;
 	}
 
-	LOG_INFO("Connecting to MoQ server: %s", server_url.c_str());
+	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(server_url).c_str());
 
 	// Held from the connect through obs_output_begin_data_capture. The status
 	// callback takes the same lock before reporting anything, so this attempt's
@@ -226,7 +227,7 @@ bool MoQOutput::Start()
 		// The session died during connect without going through the callback's
 		// signal path. Refuse the start rather than capturing into a dead session;
 		// OBS surfaces the last error we recorded when info.start returns false.
-		LOG_ERROR("MoQ session failed before the output started: %s", server_url.c_str());
+		LOG_ERROR("MoQ session failed before the output started: %s", MoQRedactUrl(server_url).c_str());
 		return false;
 	}
 
@@ -426,7 +427,7 @@ void MoQOutput::SessionConnected(const SessionRef &ref, int epoch)
 		last_failure_reason.clear();
 	}
 
-	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", ms, epoch, ref.url.c_str());
+	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", ms, epoch, MoQRedactUrl(ref.url).c_str());
 }
 
 void MoQOutput::SessionClosed(const SessionRef &ref, int code)
@@ -468,9 +469,9 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 	}
 
 	if (code == 0) {
-		LOG_INFO("MoQ session closed: %s", ref.url.c_str());
+		LOG_INFO("MoQ session closed: %s", MoQRedactUrl(ref.url).c_str());
 	} else {
-		LOG_ERROR("MoQ session failed (%d): %s: %s", code, ref.url.c_str(), reason.c_str());
+		LOG_ERROR("MoQ session failed (%d): %s: %s", code, MoQRedactUrl(ref.url).c_str(), reason.c_str());
 	}
 
 	// Reconnection gave up, so nothing is reaching the server any more. Without
