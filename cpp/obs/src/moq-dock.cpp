@@ -12,6 +12,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QFormLayout>
 #include <QVBoxLayout>
 #include <QLineEdit>
@@ -23,6 +24,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QTabWidget>
@@ -696,16 +698,29 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 		SaveSettings();
 	});
 
-	RefreshQualityOptions();
+	RefreshQualityOptions(true);
 	LoadSettings();
 	UpdateLadderHint();
 	ApplyView();
 	SetRunning(false);
+
+	{
+		std::lock_guard<std::mutex> lock(stopCookie->dockMutex);
+		stopCookie->dock = this;
+	}
 }
 
 MoQDock::~MoQDock()
 {
+	// Mark closing first so a deferred OBS stop callback refuses begin(), then
+	// disconnect and clear the dock pointer before waiting for in-flight work.
+	stopCookie->bridge->markClosing();
 	StopStream();
+	{
+		std::lock_guard<std::mutex> lock(stopCookie->dockMutex);
+		stopCookie->dock = nullptr;
+	}
+	stopCookie->bridge->waitIdle(std::chrono::seconds(2));
 }
 
 void MoQDock::ToggleStream()
@@ -1189,7 +1204,7 @@ void MoQDock::StartStream()
 	obs_output_set_video_encoder(output, videoEncoder);
 	obs_output_set_audio_encoder(output, audioEncoder, 0);
 
-	signal_handler_connect(obs_output_get_signal_handler(output), "stop", OnOutputStopped, this);
+	signal_handler_connect(obs_output_get_signal_handler(output), "stop", OnOutputStopped, stopCookie.get());
 
 	if (!obs_output_start(output)) {
 		const char *err = obs_output_get_last_error(output);
@@ -1211,7 +1226,8 @@ void MoQDock::StopStream()
 	pollTimer->stop();
 
 	if (output) {
-		signal_handler_disconnect(obs_output_get_signal_handler(output), "stop", OnOutputStopped, this);
+		signal_handler_disconnect(obs_output_get_signal_handler(output), "stop", OnOutputStopped,
+					  stopCookie.get());
 		obs_output_stop(output);
 	}
 
@@ -1488,7 +1504,29 @@ void MoQDock::SaveSettings()
 
 void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 {
-	auto *self = static_cast<MoQDock *>(data);
+	auto *cookie = static_cast<StopCookie *>(data);
+	if (!cookie || !cookie->bridge || !cookie->bridge->begin())
+		return;
+
+	struct EndBridge {
+		std::shared_ptr<MoQDockStopBridge> bridge;
+		bool armed = true;
+		~EndBridge()
+		{
+			if (armed && bridge)
+				bridge->end();
+		}
+		void disarm() { armed = false; }
+	} endBridge{cookie->bridge};
+
+	MoQDock *self = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(cookie->dockMutex);
+		self = cookie->dock;
+	}
+	if (!self)
+		return;
+
 	const long long code = calldata_int(params, "code");
 	auto *stopped = static_cast<obs_output_t *>(calldata_ptr(params, "output"));
 
@@ -1508,24 +1546,39 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	}
 	const QString failText = ExplainFailure(failCode, failReason);
 
-	// Signals arrive on an OBS thread; bounce to the Qt thread before touching widgets.
+	// Queue onto the application object, not the dock: the dock may be destroyed
+	// before the event runs. The bridge keep-alive + QPointer cover that window.
+	const QPointer<MoQDock> dock(self);
+	auto bridge = cookie->bridge;
+	endBridge.disarm();
 	QMetaObject::invokeMethod(
-		self,
-		[self, code, failText, stopped]() {
-			// A late stop for a superseded output must not tear down a newer Go Live.
-			if (stopped && self->output && static_cast<obs_output_t *>(self->output) != stopped)
+		qApp,
+		[bridge, dock, code, failText, stopped]() {
+			struct Done {
+				std::shared_ptr<MoQDockStopBridge> bridge;
+				~Done()
+				{
+					if (bridge)
+						bridge->end();
+				}
+			} done{bridge};
+
+			if (!dock)
 				return;
-			self->StopStream();
+			// A late stop for a superseded output must not tear down a newer Go Live.
+			if (stopped && dock->output && static_cast<obs_output_t *>(dock->output) != stopped)
+				return;
+			dock->StopStream();
 			if (code == OBS_OUTPUT_SUCCESS)
 				return;
 			if (!failText.isEmpty()) {
-				self->status->setText(QString("● %1").arg(failText));
-				self->status->setStyleSheet("color: #c0392b;");
-				if (self->showStats->isChecked())
-					self->statsBox->setText(failText);
+				dock->status->setText(QString("● %1").arg(failText));
+				dock->status->setStyleSheet("color: #c0392b;");
+				if (dock->showStats->isChecked())
+					dock->statsBox->setText(failText);
 			} else {
-				self->status->setText(QString("● Stopped (code %1)").arg(code));
-				self->status->setStyleSheet("color: #c0392b;");
+				dock->status->setText(QString("● Stopped (code %1)").arg(code));
+				dock->status->setStyleSheet("color: #c0392b;");
 			}
 		},
 		Qt::QueuedConnection);

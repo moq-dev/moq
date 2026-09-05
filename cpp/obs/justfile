@@ -309,6 +309,9 @@ _unit mode="plain":
     "$cxx" "${flags[@]}" "${includes[@]}" \
         -o "$out/moq-quality-defaults-test" "test/moq-quality-defaults-test.cpp"
     TSAN_OPTIONS="halt_on_error=1" "$out/moq-quality-defaults-test"
+    "$cxx" "${flags[@]}" -I src \
+        -o "$out/moq-dock-stop-test" "test/moq-dock-stop-test.cpp"
+    TSAN_OPTIONS="halt_on_error=1" "$out/moq-dock-stop-test"
 
 # Lint formatting. Skips a tool silently if it isn't on $PATH (matches repo convention).
 check:
