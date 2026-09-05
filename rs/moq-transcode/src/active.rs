@@ -68,6 +68,9 @@ impl Rendition {
 	}
 
 	/// The output resolution, derived from the source aspect ratio.
+	///
+	/// Fixed for the life of the rendition: a source that resizes the ladder
+	/// under it retires this rung and publishes the replacement under a new name.
 	pub fn size(&self) -> moq_video::Size {
 		self.0.rung.size
 	}
@@ -165,8 +168,12 @@ impl Producer {
 	}
 
 	/// Publish the resolved ladder, so a cursor holds every handle before any
-	/// rung can encode. Called once, before the first rung is served.
-	pub(crate) fn declare(&self, rungs: &[Resolved]) {
+	/// rung can encode.
+	///
+	/// Called again whenever the source resizes the ladder. A rung re-resolved
+	/// under a new picture is a new name and so a new handle; the retired one
+	/// keeps its own, since the bill for what it already encoded outlives it.
+	pub(crate) fn declare<'a>(&self, rungs: impl IntoIterator<Item = &'a Resolved>) {
 		let Ok(mut state) = self.state.write() else { return };
 		for rung in rungs {
 			state.entry(rung);
@@ -359,6 +366,7 @@ mod tests {
 	fn resolved(name: &str, height: u32) -> Resolved {
 		Resolved {
 			name: name.to_string(),
+			height,
 			size: moq_video::Size::new(height * 16 / 9, height),
 			bitrate: 100_000,
 			framerate: 30,

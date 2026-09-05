@@ -9,12 +9,64 @@ use crate::{Error, Rung};
 /// A rung resolved against the source: concrete geometry and encoder settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Resolved {
-	/// The rendition/track name, e.g. `video/360p`.
+	/// The rendition/track name serving this incarnation, e.g. `video/360p`.
+	///
+	/// Later incarnations of the same configured height carry a revision suffix
+	/// (`video/360p.2`); see [`Names`].
 	pub name: String,
+	/// The configured height this rung serves, which the name is derived from.
+	pub height: u32,
 	/// The output resolution, derived from the source aspect ratio.
 	pub size: moq_video::Size,
 	pub bitrate: u64,
 	pub framerate: u32,
+}
+
+impl Resolved {
+	/// Whether `other` resolves to exactly this picture, whatever it is named.
+	pub fn same_shape(&self, other: &Self) -> bool {
+		self.height == other.height
+			&& self.size == other.size
+			&& self.bitrate == other.bitrate
+			&& self.framerate == other.framerate
+	}
+}
+
+/// The track names a ladder has handed out, so it never hands one out twice.
+///
+/// A retired rung ends its track for good, and a clean end is terminal: a relay
+/// keeps the finished logical track (`broadcast::Consumer::track_inner` only
+/// drops an *aborted* one) and serves its EOF to every later subscriber, so a
+/// request for that name never reaches the transcoder again. A rung re-resolved
+/// under a new picture is therefore published under a name the ladder has never
+/// used, rather than reusing the one it just finished.
+#[derive(Default)]
+pub(crate) struct Names {
+	/// The revision last issued per configured height. The first is the bare
+	/// `video/360p`, so a suffix only ever appears on a rung that was resolved
+	/// again.
+	revisions: std::collections::HashMap<u32, u32>,
+}
+
+impl Names {
+	/// A name for a fresh incarnation of `height`.
+	pub fn mint(&mut self, height: u32) -> String {
+		let revision = self.revisions.entry(height).and_modify(|r| *r += 1).or_insert(1);
+		match *revision {
+			1 => format!("video/{height}p"),
+			revision => format!("video/{height}p.{revision}"),
+		}
+	}
+}
+
+/// A resolved rung together with the catalog entry advertising it.
+///
+/// The two are built and replaced as a unit, so an entry can never describe a
+/// geometry the rung no longer encodes.
+#[derive(Clone, Debug)]
+pub(crate) struct Published {
+	pub rung: Resolved,
+	pub entry: VideoConfig,
 }
 
 /// Pick the rendition to transcode from: the highest-resolution decodable
@@ -35,6 +87,33 @@ pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Erro
 		.max_by_key(|(_, config)| (config.coded_height, config.coded_width, config.bitrate))
 		.map(|(name, config)| (name.clone(), config.clone()))
 		.ok_or(Error::NoSource)
+}
+
+/// Re-pick the source rendition for a new snapshot, preferring the one already
+/// chosen while it is still on offer.
+///
+/// Running [`choose_source`] afresh on every snapshot would hand the ladder to a
+/// taller rendition the moment a publisher advertises one, retiring every rung
+/// that was serving. Sticking to the current name follows the picture it now
+/// carries (the point of this path) without treating a momentary catalog edit as
+/// a source switch.
+pub(crate) fn follow_source(video: &Video, current: &str) -> Result<(String, VideoConfig), Error> {
+	match video.renditions.get(current) {
+		Some(config) if config.broadcast.is_none() && can_decode(config) && dimensions(config).is_some() => {
+			Ok((current.to_string(), config.clone()))
+		}
+		_ => choose_source(video),
+	}
+}
+
+/// Whether a rung decoding `old` can keep decoding `new` untouched.
+///
+/// Decoders are opened from the codec, container, and any out-of-band codec
+/// description. They read geometry changes from the bitstream, so a source that
+/// only resized is still the same stream: the shared decode and every rung that
+/// still fits carry on, and only the ladder moves.
+pub(crate) fn same_stream(old: &VideoConfig, new: &VideoConfig) -> bool {
+	old.codec == new.codec && old.container == new.container && old.description == new.description
 }
 
 /// The source geometry a ladder can be sized against, if it's known at all.
@@ -59,6 +138,9 @@ fn is_supported_av1(av1: &AV1) -> bool {
 
 /// Resolve the configured rungs against the source: derive geometry from the
 /// source aspect ratio and drop any rung that isn't strictly below the source.
+///
+/// The names are placeholders: [`Names`] decides whether a rung keeps the name
+/// its predecessor was serving or takes a fresh one.
 pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
 	let Some((source_width, source_height)) = dimensions(source) else {
 		return Err(Error::SourceDimensions(source_name.to_string()));
@@ -90,17 +172,18 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 			continue;
 		}
 
-		let rung = Resolved {
-			name: format!("video/{height}p"),
-			size: moq_video::Size::new(width as u32, height as u32),
-			bitrate: rung.bitrate,
-			framerate,
-		};
+		let height = height as u32;
 		// Duplicate heights in the config would collide on the track name.
-		if resolved.iter().any(|other| other.name == rung.name) {
+		if resolved.iter().any(|other: &Resolved| other.height == height) {
 			continue;
 		}
-		resolved.push(rung);
+		resolved.push(Resolved {
+			name: format!("video/{height}p"),
+			height,
+			size: moq_video::Size::new(width as u32, height),
+			bitrate: rung.bitrate,
+			framerate,
+		});
 	}
 	Ok(resolved)
 }
@@ -129,11 +212,11 @@ pub(crate) async fn rung_entry(
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
-/// update; the rung entries are fixed, the passthrough entries track the source.
+/// update, with whatever the ladder resolved to for that snapshot.
 pub(crate) fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
-	rungs: &[(String, VideoConfig)],
+	rungs: &[Published],
 	source_rel: Option<&PathRelativeOwned>,
 ) -> Result<(), Error> {
 	out.video = Video::default();
@@ -144,8 +227,8 @@ pub(crate) fn populate(
 	out.video.rotation = source.video.rotation;
 	out.video.flip = source.video.flip;
 
-	for (name, config) in rungs {
-		out.video.insert(name, config.clone())?;
+	for published in rungs {
+		out.video.insert(&published.rung.name, published.entry.clone())?;
 	}
 
 	let Some(rel) = source_rel else {
@@ -279,6 +362,23 @@ mod tests {
 		));
 	}
 
+	/// An out-of-band parameter-set change changes what the decoder injects ahead
+	/// of every keyframe, even when the codec string and container stay the same.
+	#[test]
+	fn a_new_description_is_a_new_decode_stream() {
+		let mut before = source(1920, 1080, Some(6_000_000));
+		let VideoCodec::H264(h264) = &mut before.codec else {
+			unreachable!()
+		};
+		h264.inline = false;
+		before.description = Some(bytes::Bytes::from_static(b"old avcC"));
+
+		let mut after = before.clone();
+		after.description = Some(bytes::Bytes::from_static(b"new avcC"));
+
+		assert!(!same_stream(&before, &after));
+	}
+
 	/// A rung's entry describes the rung, not the source: the codec string's level and every
 	/// dimension come from what this rung will encode, since a player picks between rungs on
 	/// exactly those fields before a single frame exists.
@@ -286,6 +386,7 @@ mod tests {
 	async fn rung_entry_describes_the_rung() {
 		let rung = Resolved {
 			name: "video/360p".to_string(),
+			height: 360,
 			size: moq_video::Size::new(640, 360),
 			bitrate: 600_000,
 			framerate: 30,
@@ -311,6 +412,19 @@ mod tests {
 		assert_eq!(entry.framerate, Some(30.0));
 		// Inherited from the source: latency is a property of the stream, not the ladder.
 		assert_eq!(entry.optimize_for_latency, Some(true));
+	}
+
+	/// A name is handed out once and never again: a retired rung's track ends for
+	/// good, so its replacement has to be a name no subscriber can already hold a
+	/// finished copy of.
+	#[test]
+	fn names_are_never_reused() {
+		let mut names = Names::default();
+		assert_eq!(names.mint(360), "video/360p");
+		assert_eq!(names.mint(120), "video/120p");
+		assert_eq!(names.mint(360), "video/360p.2");
+		assert_eq!(names.mint(360), "video/360p.3");
+		assert_eq!(names.mint(120), "video/120p.2");
 	}
 
 	#[test]
