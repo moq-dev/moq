@@ -16,7 +16,6 @@ with the current dev tree before starting.
 
 ## Quests
 
-- [Worker metrics](/quest/m1/uring-metrics.md) - per-worker io_uring counters at `/metrics`, so the runtime's own health is visible
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [qlog](/quest/m1/uring-qlog.md) - io_uring workers write qlog traces instead of refusing the setting
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model: copies, locks, clock reads, allocations, syscalls
@@ -31,7 +30,6 @@ with the current dev tree before starting.
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
-- [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, announce/unannounce on the broadcast, and dynamic(prefix, route) with one meaning
 - [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, a broadcast-owned announcement, and the dynamic handle

@@ -17,7 +17,7 @@ mechanisms, and the fix depends on which one it is:
   track on each toggle, and `js/watch` treats the second appearance of the
   same rendition name as the end of the one it was playing (a stale
   `closed` handler from the first subscription evicting the second, the
-  shape [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md)
+  shape [#2985](https://github.com/moq-dev/moq/issues/2985)
   describes on the publisher side).
 - The watch audio backend keys its "already started" state on the rendition
   and never re-arms after the track ends, so the resubscribe races its own

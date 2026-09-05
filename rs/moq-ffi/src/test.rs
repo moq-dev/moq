@@ -1981,6 +1981,35 @@ async fn cancelled_announce_leaves_no_phantom_request() {
 	dynamic.cancel();
 }
 
+/// Two live handlers share one root route: whichever is waiting receives a
+/// request for an unannounced path, even the older one.
+#[tokio::test]
+async fn two_handlers_share_root_requests() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	let first = origin.dynamic();
+	let _second = origin.dynamic();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("anything/at/all".into()).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
+		.await
+		.expect("the older handler must receive the root request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "anything/at/all");
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the older handler served the path");
+	served.finish().unwrap();
+}
+
 /// The sequence cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.

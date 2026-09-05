@@ -8,10 +8,13 @@
 //! Today it serves:
 //! - `/metrics` - this node's own traffic counters as Prometheus text
 //!   exposition, plus the accept-loop health of its TCP listeners
-//!   ([`with_listeners`](Internal::with_listeners)). A distinct plane from both the
-//!   customer `web` surface and the MoQ `.stats` broadcast: the same atomics, but
-//!   a different transport and audience (an ops scraper, not a customer or the
-//!   dashboard/billing aggregators).
+//!   ([`with_listeners`](Internal::with_listeners)) and the per-worker health of
+//!   its io_uring runtime ([`with_uring`](Internal::with_uring)). A distinct plane
+//!   from both the customer `web` surface and the MoQ `.stats` broadcast: the same
+//!   atomics, but a different transport and audience (an ops scraper, not a
+//!   customer or the dashboard/billing aggregators). The runtime counters are
+//!   Prometheus-only on purpose: they describe this process, not the traffic
+//!   crossing it, so they have no place on the `moq-stats` wire.
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
 //! - `/nodes` - the cluster nodes visible through gossip plus established
@@ -35,6 +38,20 @@ use axum::{
 	routing::get,
 };
 use axum_server::accept::DefaultAcceptor;
+
+/// One io_uring worker's counters, as [`with_uring`](Internal::with_uring) takes
+/// them.
+///
+/// Uninhabited when the relay is built without the io_uring listener, so the
+/// list is always empty there and the renderer skips itself, rather than
+/// `cfg`-ing the two fields, the two struct literals that fill them, the
+/// builder and the renderer's signature separately.
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+type UringWorker = moq_uring::metrics::Metrics;
+
+/// One io_uring worker's counters. See the io_uring build's alias.
+#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -63,6 +80,7 @@ pub struct Internal {
 	nodes: Option<crate::nodes::Nodes>,
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
+	uring: Vec<UringWorker>,
 }
 
 #[derive(Clone)]
@@ -70,6 +88,7 @@ struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
 	listeners: Vec<moq_tokio::accept::Health>,
+	uring: Vec<UringWorker>,
 }
 
 impl Internal {
@@ -92,6 +111,7 @@ impl Internal {
 			nodes: None,
 			health,
 			listeners,
+			uring: Vec::new(),
 		}
 	}
 
@@ -127,6 +147,21 @@ impl Internal {
 		self
 	}
 
+	/// Report the io_uring QUIC workers' runtime counters at `/metrics`.
+	///
+	/// Takes the counter sets `uring::Workers::metrics` hands out at bind time,
+	/// in shard order: the position in the iterator is the `worker` label.
+	/// Register them before the threads start, so a worker that never came up
+	/// (or has died) still has a series that has stopped moving rather than no
+	/// series at all.
+	///
+	/// Off the io_uring build the item type is uninhabited, so there is nothing
+	/// to register and nothing is rendered.
+	pub fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
+		self.uring.extend(workers);
+		self
+	}
+
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
 	pub fn with_cluster(mut self, cluster: &crate::Cluster) -> Self {
 		self.nodes = Some(cluster.nodes.clone());
@@ -148,6 +183,7 @@ impl Internal {
 				stats: self.stats.clone(),
 				nodes: self.nodes.clone(),
 				listeners: self.listeners.clone(),
+				uring: self.uring.clone(),
 			})
 	}
 
@@ -207,7 +243,7 @@ async fn serve_health() -> Response {
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
-	let body = render_metrics(&state.stats.snapshot(), &state.listeners);
+	let body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
@@ -226,7 +262,11 @@ async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::S
 /// already are the registry, and a snapshot is a fixed handful of labeled
 /// counters, so a registry would only add a second source of truth to keep in
 /// sync.
-fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_tokio::accept::Health]) -> String {
+fn render_metrics(
+	snap: &moq_net::stats::Snapshot,
+	listeners: &[moq_tokio::accept::Health],
+	uring: &[UringWorker],
+) -> String {
 	use std::fmt::Write as _;
 
 	let traffic = snap.traffic();
@@ -347,6 +387,7 @@ fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_tokio::accep
 	}
 
 	render_accepts(&mut out, listeners);
+	render_uring(&mut out, uring);
 
 	out
 }
@@ -395,6 +436,130 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 	}
 }
 
+/// The io_uring runtime's per-worker counters, one `worker` label per bound
+/// worker.
+///
+/// These describe the runtime rather than the traffic: how well the receive
+/// pool, the batching mechanisms, and the ring itself are holding up on each
+/// pinned thread. A worker is a thread that never yields to anything else on the
+/// node, so nothing else here can report that one of them has gone sick, and the
+/// failure modes are quiet ones: a receive pool running dry leaves datagrams
+/// queued in the kernel with no error anywhere, and batching that has collapsed
+/// just costs syscalls.
+///
+/// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
+/// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
+/// batching, and datagrams over `enters` the syscall amortization the runtime
+/// exists for.
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+fn render_uring(out: &mut String, workers: &[UringWorker]) {
+	use std::fmt::Write as _;
+
+	if workers.is_empty() {
+		return;
+	}
+	let snaps: Vec<moq_uring::metrics::Snapshot> = workers.iter().map(|worker| worker.snapshot()).collect();
+
+	// One HELP/TYPE header followed by a row per worker, as `render_metrics`
+	// does for the traffic counters.
+	let mut series = |name: &str, kind: &str, help: &str, field: fn(&moq_uring::metrics::Snapshot) -> u64| {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} {kind}");
+		for (worker, snap) in snaps.iter().enumerate() {
+			let _ = writeln!(out, "{name}{{worker=\"{worker}\"}} {}", field(snap));
+		}
+	};
+
+	let mut counter = |name, help, field| series(name, "counter", help, field);
+
+	counter(
+		"moq_relay_uring_rx_datagrams_total",
+		"UDP datagrams received by an io_uring worker, counting each UDP_GRO segment.",
+		|snap| snap.rx_datagrams,
+	);
+	counter(
+		"moq_relay_uring_rx_receives_total",
+		"Receive completions that delivered datagrams; datagrams over this is the GRO coalescing achieved.",
+		|snap| snap.rx_receives,
+	);
+	counter(
+		"moq_relay_uring_rx_enobufs_total",
+		"Receives the kernel ended with ENOBUFS: no provided buffer was free, so the receive never ran. Backpressure, not a confirmed loss.",
+		|snap| snap.rx_enobufs,
+	);
+	counter(
+		"moq_relay_uring_rx_exhausted_total",
+		"Receive re-arms that found no free buffer, leaving the socket unarmed until a packet was read.",
+		|snap| snap.rx_exhausted,
+	);
+	counter(
+		"moq_relay_uring_tx_datagrams_total",
+		"UDP datagrams sent by an io_uring worker, counting each UDP_SEGMENT segment.",
+		|snap| snap.tx_datagrams,
+	);
+	counter(
+		"moq_relay_uring_tx_sends_total",
+		"sendmsg operations staged; datagrams over this is the GSO batching achieved.",
+		|snap| snap.tx_sends,
+	);
+	counter(
+		"moq_relay_uring_tx_stalls_total",
+		"Times the send-buffer pool became drained at its ceiling and an acquisition had to wait.",
+		|snap| snap.tx_stalls,
+	);
+	counter(
+		"moq_relay_uring_submissions_total",
+		"Submission queue entries the kernel accepted.",
+		|snap| snap.submissions,
+	);
+	counter(
+		"moq_relay_uring_completions_total",
+		"Completion queue entries dispatched.",
+		|snap| snap.completions,
+	);
+	counter(
+		"moq_relay_uring_enters_total",
+		"io_uring_enter calls; datagrams over this is the syscall amortization.",
+		|snap| snap.enters,
+	);
+	counter(
+		"moq_relay_uring_parks_total",
+		"Times a worker parked in io_uring_enter with nothing left to poll.",
+		|snap| snap.parks,
+	);
+	counter(
+		"moq_relay_uring_wakes_total",
+		"futex wakes another thread had to issue because the worker was parked.",
+		|snap| snap.wakes,
+	);
+	counter(
+		"moq_relay_uring_timers_armed_total",
+		"Timers armed, re-arms included.",
+		|snap| snap.timers_armed,
+	);
+	counter(
+		"moq_relay_uring_timers_fired_total",
+		"Timers that reached their deadline.",
+		|snap| snap.timers_fired,
+	);
+	counter(
+		"moq_relay_uring_timers_cancelled_total",
+		"Timers dropped or re-armed before their deadline.",
+		|snap| snap.timers_cancelled,
+	);
+	series(
+		"moq_relay_uring_timers_active",
+		"gauge",
+		"Timers currently in a worker's heap.",
+		|snap| snap.timers_active(),
+	);
+}
+
+/// Off the io_uring path there are no workers to describe, and [`UringWorker`]
+/// is uninhabited, so the list handed here is always empty.
+#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -416,7 +581,11 @@ mod tests {
 	#[test]
 	fn absent_listeners_are_not_reported_as_healthy() {
 		let disabled = Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled());
-		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &disabled.listeners);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&disabled.listeners,
+			&[],
+		);
 		assert!(
 			!body.contains("listener=\"internal\""),
 			"a disabled internal listener must not publish counters:\n{body}"
@@ -426,7 +595,11 @@ mod tests {
 		let stream_only = Internal::new(listening(), moq_net::stats::Registry::disabled())
 			.with_listeners(None)
 			.with_listeners([moq_tokio::accept::Health::new("tcp")]);
-		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &stream_only.listeners);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&stream_only.listeners,
+			&[],
+		);
 		assert!(
 			body.contains("moq_relay_accept_failures_total{listener=\"tcp\",class=\"exhausted\"} 0"),
 			"the tcp listener must be reported:\n{body}"
@@ -450,7 +623,11 @@ mod tests {
 		let web = moq_tokio::accept::Health::new("web");
 		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_listeners([web.clone()]);
 
-		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&internal.listeners,
+			&[],
+		);
 
 		for listener in ["internal", "web"] {
 			for class in ["connection", "exhausted", "unknown"] {
@@ -473,7 +650,11 @@ mod tests {
 			moq_tokio::accept::Failure::Exhausted
 		);
 		let _ = web.failed(&emfile);
-		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&internal.listeners,
+			&[],
+		);
 		assert!(body.contains("moq_relay_accept_failures_total{listener=\"web\",class=\"exhausted\"} 1"));
 
 		let prefix = "moq_relay_accept_stalled_seconds{listener=\"web\"} ";
@@ -484,6 +665,74 @@ mod tests {
 			.parse()
 			.expect("stall gauge is a number");
 		assert!(stalled > 0.0, "a stalled listener must not report zero seconds");
+	}
+
+	/// Every io_uring worker gets a full row of series from zero, for the same
+	/// reason the accept counters do: `rate()` over a series that does not exist
+	/// yet is empty rather than zero, so an alert on a worker whose receive pool
+	/// has started running dry is unwritable until it has already happened. A
+	/// worker that never started has to publish stuck zeros, not nothing.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	#[test]
+	fn uring_metrics_list_every_worker_from_zero() {
+		let workers = vec![
+			moq_uring::metrics::Metrics::default(),
+			moq_uring::metrics::Metrics::default(),
+		];
+		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_uring(workers);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&internal.listeners,
+			&internal.uring,
+		);
+
+		// Every counter the module documents, for every worker, plus the derived
+		// gauge. A name that drifts out of the renderer silently deletes a
+		// dashboard, so the list is spelled out rather than derived from it.
+		let counters = [
+			"rx_datagrams",
+			"rx_receives",
+			"rx_enobufs",
+			"rx_exhausted",
+			"tx_datagrams",
+			"tx_sends",
+			"tx_stalls",
+			"submissions",
+			"completions",
+			"enters",
+			"parks",
+			"wakes",
+			"timers_armed",
+			"timers_fired",
+			"timers_cancelled",
+		];
+		for counter in counters {
+			let name = format!("moq_relay_uring_{counter}_total");
+			assert!(
+				body.contains(&format!("# TYPE {name} counter")),
+				"missing type for {name}"
+			);
+			for worker in 0..2 {
+				let line = format!("{name}{{worker=\"{worker}\"}} 0");
+				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
+		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
+		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+	}
+
+	/// A relay with no io_uring workers publishes no worker series at all,
+	/// rather than a `worker="0"` row that is permanently zero because nothing
+	/// is behind it.
+	#[test]
+	fn absent_uring_workers_are_not_reported() {
+		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled());
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&internal.listeners,
+			&internal.uring,
+		);
+		assert!(!body.contains("moq_relay_uring_"), "unexpected worker series:\n{body}");
 	}
 
 	/// `serve` hosts the router it is HANDED, so an embedder's extra ops routes
@@ -553,6 +802,7 @@ mod tests {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: None,
 			listeners: Vec::new(),
+			uring: Vec::new(),
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
@@ -568,6 +818,7 @@ mod tests {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
 			listeners: Vec::new(),
+			uring: Vec::new(),
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
@@ -634,7 +885,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let body = render_metrics(&stats.snapshot(), &[]);
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
 
 		assert!(
 			body.contains("# TYPE moq_relay_bytes_total counter"),

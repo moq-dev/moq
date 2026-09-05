@@ -104,6 +104,10 @@ io_uring = false
 The `io-uring` feature is off by default. Prebuilt binaries that ship it say so;
 building it yourself is `cargo build -p moq-relay --features io-uring`.
 
+Each worker publishes its own runtime counters at `/metrics` on the internal
+listener: buffer-pool health, GRO/GSO batching, ring traffic, and scheduling.
+See [HTTP Endpoints](/bin/relay/http) for what to watch.
+
 The `[quic]` section applies to this listener too: `max_streams`,
 `idle_timeout`, `keep_alive`, `congestion_control` and `gso` are honored.
 `qlog` and `mtu_discovery` are not (the datagram path sends a fixed payload,

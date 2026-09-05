@@ -745,6 +745,9 @@ mod tests {
 			"audio",
 			Config {
 				sample_rate: Some(out_rate),
+				// The packets are all written before the first read: a budget keeps that
+				// backlog, where the default sheds everything the newest group supersedes.
+				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
 		)
@@ -860,9 +863,18 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				// Written before the first read; see `pcm_gaps`.
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		// A 20 ms packet at 0, then the next one at 22.5 ms: the 2.5 ms packet
 		// between them was lost.
@@ -947,9 +959,18 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				// Written before the first read; see `pcm_gaps`.
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		let pcm = vec![0.25f32; encoder.frame_size()];
 		for packet in 0..2 {
@@ -1048,9 +1069,18 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				// Written before the first read; see `pcm_gaps`.
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
 		producer
 			.write(moq_mux::container::Frame {

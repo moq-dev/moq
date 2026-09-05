@@ -30,9 +30,9 @@ quests don't re-litigate them:
   the egress `Prefetch`) already exists in moq-net; egress is amortized,
   ingest and the stream-send path are not.
 
-[Worker metrics](/quest/m1/uring-metrics.md) is a soft dependency: it adds
-the ring-level counters (enters, park/wake, batch effectiveness) several
-quests want as evidence. Use bench CPU/RSS until it lands. The
+The relay's `/metrics` endpoint already carries the ring-level counters
+(enters, park/wake, batch effectiveness) several quests want as evidence, one
+row per io_uring worker. The
 [noq parity gate](/quest/m2/quic/noq-parity.md) benchmarks noq against the
 quiche backend; the zero-copy quests here stay independently measured on the
 backend we ship today.
@@ -55,6 +55,5 @@ backend we ship today.
 
 ## Related
 
-- [Worker metrics](/quest/m1/uring-metrics.md) - the counters these quests are judged by
 - [noq parity gate](/quest/m2/quic/noq-parity.md) - the benchmark that
   decides whether quiche can go, run on these worker primitives

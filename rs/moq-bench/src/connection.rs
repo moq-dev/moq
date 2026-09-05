@@ -574,6 +574,12 @@ impl Drop for Gauge<'_> {
 mod tests {
 	use super::*;
 
+	async fn wait_for(counter: &AtomicU64, value: u64) {
+		while counter.load(Ordering::Relaxed) < value {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	fn rolled(fps: u64, frame_size: u64, group_size: u64) -> Rolled {
 		Rolled {
 			broadcasts: 1,
@@ -823,6 +829,10 @@ mod tests {
 			let stats = stats.clone();
 			tokio::spawn(async move { drain(consumer, &stats).await })
 		};
+		// `subscribe(None)` starts at the live frontier. Let the drain consume
+		// group 0 before opening group 1, or the task may subscribe to group 1
+		// and the frame count can never reach two.
+		wait_for(&stats.frames_recv, 1).await;
 
 		// Group 1 opens and is picked up by the drain, then the relay gives up on it.
 		// Aborting a group nobody is reading drops its cached frames, so wait for the
@@ -831,18 +841,14 @@ mod tests {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
 			.unwrap();
-		for _ in 0..100 {
-			if stats.frames_recv.load(Ordering::Relaxed) >= 2 {
-				break;
-			}
-			tokio::task::yield_now().await;
-		}
-		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 2, "drain is inside group 1");
+		wait_for(&stats.frames_recv, 2).await;
 		group.abort(moq_net::Error::Lagged).unwrap();
 
 		// Groups 2 and 3 land intact, then the publisher is done.
 		write_group(&mut track);
+		wait_for(&stats.groups_recv, 2).await;
 		write_group(&mut track);
+		wait_for(&stats.groups_recv, 3).await;
 		track.finish().unwrap();
 		broadcast.finish();
 
