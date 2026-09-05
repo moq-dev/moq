@@ -1,71 +1,68 @@
 ---
 title: Quick Start
-description: Run the MoQ demo locally
+description: Run the MoQ demo locally or against the public relay
 ---
 
 # Quick Start
 
-The default demo starts a relay, publishes a test video, and opens the web client.
-Everything runs on your machine.
-
-First, clone the repository:
+The default demo starts a relay, publishes a test video, and opens the web
+player. Everything runs on your machine.
 
 ```bash
 git clone https://github.com/moq-dev/moq
 cd moq
 ```
 
-## With Nix
+## With Nix (recommended)
 
-Nix is the recommended setup because it uses the tool versions pinned by the
-repository. Install [Nix](https://nixos.org/download.html) with flakes enabled,
-then run:
+Install [Nix](https://nixos.org/download.html) with flakes enabled, then:
 
 ```bash
 nix develop --command just
 ```
 
-With [nix-direnv](https://github.com/nix-community/nix-direnv), entering the
-repository loads the development shell and the command becomes `just`.
+The dev shell pins every tool the repository uses. With
+[nix-direnv](https://github.com/nix-community/nix-direnv), entering the
+directory loads the shell and the command becomes `just`.
 
 ## Without Nix
 
-Install these tools first:
-
-- [Just](https://github.com/casey/just)
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Bun](https://bun.sh/)
-- [FFmpeg](https://ffmpeg.org/download.html)
-
-Then install the workspace tools and start the demo:
+Install [Just](https://github.com/casey/just),
+[Rust](https://www.rust-lang.org/tools/install), [Bun](https://bun.sh/), and
+[FFmpeg](https://ffmpeg.org/download.html), then:
 
 ```bash
 just install
 just
 ```
 
-Some optional targets need additional system libraries. GStreamer development
-packages are required for `moq-gst`; a C toolchain is required for `libmoq`;
-and the language bindings need their respective toolchains. The Nix development
-shell includes these dependencies.
-
-Windows users should follow the [Windows setup](/setup/windows). Linux packages
-for running released binaries are covered in the [Linux guide](/setup/linux).
+Windows users should run `setup.bat` first; see [Development](/setup/dev#windows).
 
 ## What starts
 
-The default recipe runs three components:
+1. [moq-relay](/bin/relay/) on `localhost:4443` with a generated certificate and anonymous access.
+2. [moq-cli](/bin/cli) publishing Big Buck Bunny through the relay.
+3. The [web demo](/bin/demo) at [localhost:5173](http://localhost:5173), where you can watch the stream or publish your camera.
 
-1. [moq-relay](/bin/relay/) routes broadcasts between publishers and subscribers.
-2. [moq-cli](/bin/cli) publishes a test video through the relay.
-3. The [web demo](/setup/demo/web) opens at [localhost:5173](http://localhost:5173).
+## Skip the relay
 
-The local relay uses a generated certificate and fingerprint verification. A
-public deployment needs a stable hostname, trusted TLS certificate, and an open
-UDP port. See [production deployment](/setup/prod).
+A public test relay runs at `https://cdn.moq.dev/anon`. Anything published
+there is public and discoverable, so pick a unique name and don't publish
+private media.
+
+```bash
+# Publish a file, then open https://moq.dev/watch?name=<your-name>
+ffmpeg -re -i video.mp4 -c copy -f mpegts - | \
+    moq --client-connect https://cdn.moq.dev/anon --broadcast <your-name>.hang import ts
+```
+
+Every client, in every language, connects the same way: a relay URL whose path
+scopes [authentication](/bin/relay/auth), plus a broadcast name. Media
+broadcasts end in `.hang`.
 
 ## Next steps
 
-- Use the [development guide](/setup/dev) for tests, debugging, and more demos.
-- Try publishing with [OBS](/bin/obs) or [GStreamer](/bin/gstreamer).
-- Explore the [applications](/bin/) and [libraries](/lib/).
+- [Install](/setup/install) the relay and CLI as packages instead of building them.
+- Publish from [OBS](/bin/obs), [GStreamer](/bin/gstreamer), or [RTMP/SRT/WebRTC](/bin/cli).
+- Embed a player with the [web components](/lib/js/) or pick a [library](/lib/).
+- [Deploy](/setup/prod) a relay with real TLS and authentication.

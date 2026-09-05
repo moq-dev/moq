@@ -175,6 +175,26 @@ _includes:
         exit 1
     fi
 
+    # obs.h reaches <simde/x86/sse2.h> as of OBS 32, which used to be vendored
+    # under libobs/util/ and so came along with the headers above. The dev shell
+    # carries it (see flake.nix); the obs-deps bundle ships its own copy beside
+    # libobs, which is how the macOS and Windows builds get it.
+    simde_include=""
+    if command -v pkg-config >/dev/null && pkg-config --exists simde; then
+        simde_include=$(pkg-config --variable=includedir simde)
+    else
+        for candidate in .deps/obs-deps-*/include; do
+            if [ -f "$candidate/simde/x86/sse2.h" ]; then
+                simde_include="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$simde_include" ]; then
+        echo "simde headers not found; run inside 'nix develop', which supplies them" >&2
+        exit 1
+    fi
+
     (cd ../.. && {{ cargo_compile }} check --locked --quiet -p libmoq)
 
     # Ask cargo where its build script ran rather than reconstructing the path.
@@ -199,7 +219,7 @@ _includes:
 
     # One flag per line, path glued to the -I, so a caller can rebuild the
     # arguments without splitting on the spaces in a path.
-    printf -- '-I%s\n' src "$obs_include" "$moq_include"
+    printf -- '-I%s\n' src "$obs_include" "$simde_include" "$moq_include"
 
 # Unit-test the plugin sources against stubbed libobs/libmoq/ffmpeg, under
 # ThreadSanitizer.
@@ -309,6 +329,30 @@ check:
     if [ "$spec_obs" != "$flake_obs" ]; then
         echo "obs-studio is $spec_obs in buildspec.json but $flake_obs in flake.nix (libobs-headers)" >&2
         exit 1
+    fi
+    # And a third: `just obs ci` links against nixpkgs' obs-studio, the one OBS
+    # this repo doesn't pick. Without this the released macOS/Windows binaries
+    # could be a whole libobs API apart from what CI ever compiles. Patch
+    # releases carry no API change, so only the major.minor has to agree; that
+    # also keeps the guard quiet until flake.lock actually moves OBS, which is
+    # the change that opens the gap and so the one that should fail.
+    # OBS_LINKED_VERSION comes from the dev shell (see flake.nix), so this leg
+    # is skipped outside it, where there is no nixpkgs obs-studio to compare.
+    # MOQ_STRICT turns that skip into an error for the same reason it turns a
+    # missing tool into one: in CI a leg that checks nothing still reports green.
+    if [ -z "${OBS_LINKED_VERSION:-}" ]; then
+        if [ -n "${MOQ_STRICT:-}" ]; then
+            echo "MOQ_STRICT is set but OBS_LINKED_VERSION is unset; run inside 'nix develop', which exports it" >&2
+            exit 1
+        fi
+    else
+        spec_api=$(echo "$spec_obs" | cut -d. -f1,2)
+        linked_api=$(echo "$OBS_LINKED_VERSION" | cut -d. -f1,2)
+        if [ "$spec_api" != "$linked_api" ]; then
+            echo "obs-studio is $spec_obs in buildspec.json but $OBS_LINKED_VERSION in nixpkgs, which is what 'just obs ci' links" >&2
+            echo "bump buildspec.json and flake.nix's libobs-headers to $OBS_LINKED_VERSION, or pin nixpkgs back" >&2
+            exit 1
+        fi
     fi
     if command -v cmake >/dev/null; then
         build_dir=$(mktemp -d)

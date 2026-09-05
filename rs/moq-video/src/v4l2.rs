@@ -33,8 +33,8 @@ use v4l::v4l_sys::{
 	V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_EVENT_SOURCE_CHANGE, V4L2_SEL_TGT_COMPOSE, timeval,
 	v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, v4l2_buffer,
 	v4l2_capability, v4l2_colorspace_V4L2_COLORSPACE_REC709, v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M, v4l2_control,
-	v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_field_V4L2_FIELD_NONE, v4l2_fmtdesc, v4l2_format,
-	v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane, v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE,
+	v4l2_decoder_cmd, v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_field_V4L2_FIELD_NONE, v4l2_fmtdesc,
+	v4l2_format, v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane, v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE,
 	v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE, v4l2_requestbuffers, v4l2_selection, v4l2_streamparm,
 	v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
 };
@@ -72,11 +72,11 @@ pub(crate) const RAW: &[u32] = &[NV12, NV12M, YUV420, YUV420M];
 /// Planes a format may use here: Y, U, and V.
 const MAX_PLANES: usize = 3;
 
-/// The three requests the `v4l` crate does not export, built the way
+/// Requests the `v4l` crate does not export, built the way
 /// `linux/ioctl.h` builds them. The shifts are `asm-generic`'s, which is what
 /// `v4l`'s own table already assumes.
 mod request {
-	use v4l::v4l_sys::{v4l2_event, v4l2_event_subscription, v4l2_selection};
+	use v4l::v4l_sys::{v4l2_decoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_selection};
 	use v4l::v4l2::vidioc::_IOC_TYPE;
 
 	const READ: u32 = 2;
@@ -89,6 +89,7 @@ mod request {
 	pub(super) const DQEVENT: _IOC_TYPE = code(READ, 89, size_of::<v4l2_event>());
 	pub(super) const SUBSCRIBE_EVENT: _IOC_TYPE = code(WRITE, 90, size_of::<v4l2_event_subscription>());
 	pub(super) const G_SELECTION: _IOC_TYPE = code(READ | WRITE, 94, size_of::<v4l2_selection>());
+	pub(super) const DECODER_CMD: _IOC_TYPE = code(READ | WRITE, 96, size_of::<v4l2_decoder_cmd>());
 
 	#[cfg(test)]
 	mod tests {
@@ -97,7 +98,7 @@ mod request {
 
 		use super::*;
 
-		/// The three codes above have to come out the way `linux/ioctl.h` builds
+		/// The codes above have to come out the way `linux/ioctl.h` builds
 		/// the rest, and nothing else here would notice if they did not: a wrong
 		/// code is `ENOTTY` at runtime on whichever board reaches it first.
 		///
@@ -109,6 +110,9 @@ mod request {
 			assert_eq!(code(READ, 0, size_of::<v4l2_capability>()), vidioc::VIDIOC_QUERYCAP);
 			assert_eq!(code(WRITE, 18, size_of::<std::ffi::c_int>()), vidioc::VIDIOC_STREAMON);
 			assert_eq!(code(READ | WRITE, 5, size_of::<v4l2_format>()), vidioc::VIDIOC_S_FMT);
+			// `v4l` 0.14 omits this newer request. This is the value from
+			// `videodev2.h`, and also checks the generated command struct's ABI size.
+			assert_eq!(DECODER_CMD, 0xc048_5660);
 		}
 	}
 }
@@ -132,6 +136,7 @@ unsafe trait Arg: Sized {
 // same, with no reference, no enum, and no niche.
 unsafe impl Arg for v4l2_buffer {}
 unsafe impl Arg for v4l2_capability {}
+unsafe impl Arg for v4l2_decoder_cmd {}
 unsafe impl Arg for v4l2_encoder_cmd {}
 unsafe impl Arg for v4l2_event {}
 unsafe impl Arg for v4l2_event_subscription {}
@@ -567,6 +572,17 @@ impl Device {
 			.map_err(|err| self.err(format_args!("ENCODER_CMD {cmd}"), err))
 	}
 
+	/// Issue a `VIDIOC_DECODER_CMD`, which drains or resumes a stateful decoder.
+	pub(crate) fn decoder_cmd(&self, cmd: u32) -> Result<(), Error> {
+		// The stateful drain sequence wants `flags` and `pts` zero, which is where
+		// every request starts.
+		let mut command = v4l2_decoder_cmd::zeroed();
+		command.cmd = cmd;
+		// SAFETY: `VIDIOC_DECODER_CMD` takes a `v4l2_decoder_cmd`.
+		unsafe { self.ioctl(request::DECODER_CMD, &mut command) }
+			.map_err(|err| self.err(format_args!("DECODER_CMD {cmd}"), err))
+	}
+
 	/// Set a codec control, failing if the driver rejects it.
 	pub(crate) fn set_control(&self, id: u32, value: i32) -> Result<(), Error> {
 		let mut control = v4l2_control { id, value };
@@ -874,9 +890,24 @@ impl Queue {
 		Ok(())
 	}
 
+	/// Stop and restart a queue, taking every buffer back from the driver.
+	pub(crate) fn restart(&mut self, device: &Device) -> Result<(), Error> {
+		if self.streaming {
+			device.stream(self.dir, false)?;
+			self.streaming = false;
+		}
+		self.free = (0..self.buffers.len() as u32).collect();
+		self.stream_on(device)
+	}
+
 	/// Whether the queue has been started.
 	pub(crate) fn streaming(&self) -> bool {
 		self.streaming
+	}
+
+	/// Buffers currently owned by the driver.
+	pub(crate) fn outstanding(&self) -> usize {
+		self.buffers.len() - self.free.len()
 	}
 
 	/// Stop the queue and hand its buffers back to the driver, which is how a

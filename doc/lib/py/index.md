@@ -1,91 +1,72 @@
 ---
-title: Python Libraries
-description: Python implementation for MoQ pub/sub
+title: Python
+description: Async pub/sub for Python via the moq-rs package
 ---
 
-# Python Libraries
-
-The Python bindings expose [Media over QUIC](/) to scripts, services, and prototype tooling. Built on the same Rust core ([moq-ffi](https://crates.io/crates/moq-ffi)) as the Swift and Kotlin packages, wrapped with an idiomatic asyncio API.
-
-## Packages
-
-Two packages, split so the ergonomic API can evolve on its own cadence:
-
-### moq-rs
+# Python
 
 [![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
 
-The package you want. Install `moq-rs` (the `moq` name is taken on PyPI), import `moq`. Real-time pub/sub with built-in caching, fan-out, and prioritization on top of QUIC, with a Pythonic API (no `Moq` prefixes, async context managers, async iterators). At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
-
-It is pure Python and depends on `moq-ffi` via a compatible-release pin, so it floats to the latest `moq-ffi` patch automatically. It is versioned independently of the Rust crates.
-
-### moq-ffi
-
-[![PyPI](https://img.shields.io/pypi/v/moq-ffi)](https://pypi.org/project/moq-ffi/)
-
-The raw UniFFI bindings (the `Moq`-prefixed classes), tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `moq-rs` pulls this in for you. Install it directly only if you need the unwrapped API or are building your own wrapper.
-
-## Installation
+`moq-rs` on PyPI (the `moq` name was taken), imported as `moq`. It wraps the
+generated `moq-ffi` bindings in asyncio: async context managers for sessions,
+async iterators for announcements, groups, and frames, and no `Moq` prefixes.
+Python 3.10+, with wheels for Linux x86\_64/aarch64, macOS arm64, and Windows
+x64.
 
 ```bash
-pip install moq-rs
-
-# or with uv
-uv add moq-rs        # into a project
-uv pip install moq-rs # into the active environment
+pip install moq-rs      # or: uv add moq-rs
 ```
 
-This pulls in `moq-ffi`, for which prebuilt wheels are published for:
-
-- Linux x86\_64 / aarch64 (manylinux\_2\_28)
-- macOS aarch64
-- Windows x86\_64
-
-For other platforms (Alpine, BSD, etc.) `pip` falls back to building `moq-ffi` from source via the published sdist. You'll need a Rust toolchain and a C compiler; source builds are not part of the supported release matrix.
-
-## Quickstart
-
-### Subscribe
-
 ```python
-import asyncio
-import moq
+import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        async for announcement in client.announced():
+        # Subscribe to media
+        async for announcement in client.announced("live/"):
             catalog = await announcement.broadcast.catalog()
-
-            for name in catalog.audio:
-                async for frame in announcement.broadcast.subscribe_media(name):
-                    print(f"frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
+            name, track = next(iter(catalog.audio.items()))
+            async for frame in await announcement.broadcast.subscribe_media(name, track):
+                print(frame.timestamp_us, len(frame.payload))
 
 asyncio.run(main())
 ```
-
-### Publish
 
 ```python
-import asyncio
-import moq
+import asyncio, moq
 
 async def main():
+    # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        broadcast = client.create_broadcast("my-stream")
+        broadcast = client.create_broadcast("my-stream.hang")
+
+        # Already-encoded frames: the catalog is filled from the bitstream
         audio = broadcast.publish_media("opus", opus_init_bytes)
-
         audio.write_frame(payload, timestamp_us=0)
-        audio.write_frame(payload, timestamp_us=20_000)
 
-        audio.finish()
-        broadcast.finish()
+        # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
+        video = broadcast.publish_video(
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
+            moq.VideoEncoderOutput(codec=moq.VideoCodec.H264, track="camera", kind=moq.VideoEncoderKind.AUTO()),
+        )
+        video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+
+        # Raw bytes and JSON
+        events = broadcast.publish_track("events")
+        events.write_frame(b'{"cmd": "ready"}', 0)
+        status = broadcast.publish_json_snapshot("status", compression=True)
+        status.update({"state": "live", "viewers": 42})
 
 asyncio.run(main())
 ```
 
-## Source and issues
+Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
+here: `moq.Server` with per-request accept/reject, `fetch_group` and
+`fetch_media_group`, `dynamic()` handlers for on-demand tracks and
+broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
+`route_updates()`, and `used()`/`unused()` so capture can idle when nobody is
+subscribed. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors.
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
-- Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
-- README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
-- Example scripts: [py/moq-rs/examples](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples)
+- Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
+- Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API

@@ -39,4 +39,4 @@ codes as 1088 rows and the compose rectangle crops it back, and the other
 
 ## Related
 
-- [vaapi](/quest/m3/teleop/vaapi.md) - the other unproven encoder backend
+- [Video hardware validation](/quest/m3/video-hardware.md) - the other unproven encoder backend, VAAPI

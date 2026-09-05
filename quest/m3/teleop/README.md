@@ -105,8 +105,6 @@ stating plainly because it is what a builder is comparing against.
 - [Cross-track correlation](/quest/m3/teleop/correlation.md) - a command, the
   telemetry it produced, and the video frame showing the result share one
   timebase
-- [Validate VAAPI encoding](/quest/m3/teleop/vaapi.md) - prove `moq-video`'s
-  VAAPI backend on real hardware so it stops being opt-in
 
 ## Related
 
@@ -116,3 +114,5 @@ stating plainly because it is what a builder is comparing against.
 - [Publisher-reported media stats](/quest/m2/qos/publisher-stats.md) -
   publisher-reported stats as a catalog section (moq#2734); teleop's latency
   instrumentation extends that track rather than adding a second one
+- [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
+  that covers Intel ground robots and NUC companions

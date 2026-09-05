@@ -493,8 +493,8 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 }
 
 /// Transcode one fetched source group to completion into one output group,
-/// draining the encoder at the end. (The live path rides the shared feed
-/// instead; see [`live`].)
+/// draining the decoder and encoder at the end. (The live path rides the shared
+/// feed instead; see [`live`].)
 async fn transcode_group(
 	pipeline: Pipeline,
 	container: &moq_mux::catalog::hang::Container,
@@ -545,8 +545,8 @@ async fn transcode_group_inner(
 		}
 	}
 
-	// One-shot group: drain whatever the encoder still buffers. Each packet keeps
-	// the timestamp of the frame it was encoded from, so the tail stays in step.
+	// One-shot group: drain both codec stages. Each packet keeps the timestamp of
+	// the frame it was encoded from, so the tail stays in step.
 	write(output, active, pipeline.finish().await?)?;
 	Ok(())
 }
@@ -639,35 +639,44 @@ impl Pipeline {
 
 		let mut encoded = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe).await? {
-			// Already at the rung size (the decoder scaled): feed the frame through
-			// as-is, keeping a GPU frame on the GPU.
-			let raw = match raw.size() == self.size {
-				true => raw,
-				false => raw.resize_with(self.size, &self.rung.resize)?,
-			};
-			if self.encoder.is_none() {
-				let mut opened = self.rung.encode(raw.surface.color()).await?;
-				if std::mem::take(&mut self.pending_keyframe) {
-					opened.keyframe();
-				}
-				self.encoder = Some(opened);
-			}
-			let encoder = self.encoder.as_mut().expect("just opened");
-			encoded.extend(encoder.encode(raw).await?);
+			encoded.extend(self.encode_frame(raw).await?);
 		}
 		Ok(encoded)
 	}
 
-	/// Drain the encoder, keeping each buffered packet's own timestamp.
-	///
-	/// Consumes the pipeline, since flushing the encoder consumes it: a one-shot
-	/// group's pipeline is done once drained.
-	async fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
-		// No encoder means no frame ever decoded, so there is nothing buffered.
-		match self.encoder {
-			Some(encoder) => encoder.finish().await.map_err(Into::into),
-			None => Ok(Vec::new()),
+	/// Resize and encode one decoded frame.
+	async fn encode_frame(&mut self, raw: moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+		// Already at the rung size (the decoder scaled): feed the frame through
+		// as-is, keeping a GPU frame on the GPU.
+		let raw = match raw.size() == self.size {
+			true => raw,
+			false => raw.resize_with(self.size, &self.rung.resize)?,
+		};
+		if self.encoder.is_none() {
+			let mut opened = self.rung.encode(raw.surface.color()).await?;
+			if std::mem::take(&mut self.pending_keyframe) {
+				opened.keyframe();
+			}
+			self.encoder = Some(opened);
 		}
+		let encoder = self.encoder.as_mut().expect("just opened");
+		Ok(encoder.encode(raw).await?)
+	}
+
+	/// Drain the decoder and then the encoder, keeping every frame's timestamp.
+	///
+	/// Consumes the pipeline, since finishing the encoder consumes it: a one-shot
+	/// group's pipeline is done once both codec stages are drained.
+	async fn finish(mut self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+		let mut encoded = Vec::new();
+		for raw in self.decoder.flush().await? {
+			encoded.extend(self.encode_frame(raw).await?);
+		}
+
+		if let Some(encoder) = self.encoder {
+			encoded.extend(encoder.finish().await?);
+		}
+		Ok(encoded)
 	}
 }
 

@@ -117,8 +117,8 @@ impl Engine {
 			shared: shared.clone(),
 		};
 
-		// cpal streams are `!Send`, so the device has to live on the thread that
-		// opens it.
+		// Everything slow or fallible about the device happens here, off the async
+		// runtime: opening it, switching it, and rebuilding it after an error.
 		std::thread::Builder::new()
 			.name("moq-audio-playback".into())
 			.spawn(move || driver::run(requests, commands, shared, config.device, opened))

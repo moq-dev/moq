@@ -1,323 +1,89 @@
 ---
-title: Rust Libraries
-description: Rust implementation of MoQ protocol and tools
+title: Rust
+description: The reference implementation, as a set of crates on crates.io
 ---
 
-# Rust Libraries
-
-The Rust implementation provides the reference implementation of the MoQ protocol, along with server-side tools and native applications.
-
-## Core Libraries
-
-### moq-net
-
-[![crates.io](https://img.shields.io/crates/v/moq-net)](https://crates.io/crates/moq-net)
-[![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)
-
-The networking layer for MoQ. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
-
-**Features:**
-
-- Broadcasts, tracks, groups, and frames
-- Built-in concurrency and deduplication
-- QUIC stream management
-- Prioritization and backpressure
-
-[Learn more](/lib/rs/crate/moq-net)
-
-### hang
-
-[![crates.io](https://img.shields.io/crates/v/hang)](https://crates.io/crates/hang)
-[![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)
-
-Media-specific encoding/streaming library built on top of `moq-net`.
-
-**Features:**
-
-- Catalog for track discovery
-- Container format (timestamp + codec bitstream)
-- Support for H.264/265, VP8/9, AV1, AAC, Opus
-
-[Learn more](/lib/rs/crate/hang)
-
-### moq-mux
-
-[![crates.io](https://img.shields.io/crates/v/moq-mux)](https://crates.io/crates/moq-mux)
-[![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)
-
-Media muxers and demuxers for importing existing formats into MoQ.
-
-**Features:**
-
-- fMP4/CMAF import
-- MPEG-TS and FLV import/export
-- H.264/H.265 Annex B parsing
-- AAC and Opus codec support
-
-[Learn more](/lib/rs/crate/moq-mux)
-
-## Native Media
-
-What a browser gets from WebCodecs and `getUserMedia`, for native applications:
-devices, hardware codecs, and the playback path back out. No ffmpeg, no
-GStreamer.
-
-### moq-video
-
-[![crates.io](https://img.shields.io/crates/v/moq-video)](https://crates.io/crates/moq-video)
-[![docs.rs](https://docs.rs/moq-video/badge.svg)](https://docs.rs/moq-video)
-
-Camera, display, and window capture, hardware H.264/H.265 encode and decode, and
-GPU rendering of decoded frames.
-
-**Features:**
-
-- VideoToolbox, Media Foundation, NVENC/NVDEC, VAAPI, with openh264 as the H.264 software fallback
-- Decoded frames stay on the GPU where the platform allows, so transcoding skips the round trip
-- `wgpu` renderer handing back a texture you present, importing the decoder's surface zero-copy on macOS
-- Linux hardware libraries `dlopen`'d, so a build links and starts without a GPU
-
-[Learn more](/lib/rs/crate/moq-video)
-
-### moq-audio
-
-[![crates.io](https://img.shields.io/crates/v/moq-audio)](https://crates.io/crates/moq-audio)
-[![docs.rs](https://docs.rs/moq-audio/badge.svg)](https://docs.rs/moq-audio)
-
-Microphone and macOS system-audio capture, Opus and PCM codecs, speaker playback,
-and acoustic echo cancellation.
-
-**Features:**
-
-- CoreAudio / WASAPI / ALSA devices via cpal
-- One output device mixing every track in a call
-- Echo cancellation so a laptop without a headset doesn't send itself back
-- Rust codecs and DSP: no C toolchain, no CMake, no codec to install (ALSA headers are the one Linux build dependency)
-
-[Learn more](/lib/rs/crate/moq-audio)
-
-## Authentication
-
-### moq-token
-
-[![crates.io](https://img.shields.io/crates/v/moq-token)](https://crates.io/crates/moq-token)
-[![docs.rs](https://docs.rs/moq-token/badge.svg)](https://docs.rs/moq-token)
-
-JWT authentication library and CLI tool for generating tokens.
-
-**Features:**
-
-- HMAC and RSA/ECDSA signing
-- Path-based authorization
-- Token generation and verification
-- Available as library and CLI
-
-[Learn more](/lib/rs/crate/moq-token)
-
-## Networking
-
-### web-transport
-
-QUIC and WebTransport implementation for Rust.
-
-**Features:**
-
-- Quinn-based QUIC
-- WebTransport protocol support
-- TLS certificate management
-- Server and client modes
-
-[Learn more](/lib/rs/crate/web-transport)
-
-### moq-native
-
-[![docs.rs](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native)
-
-Opinionated helpers to configure a Quinn QUIC endpoint.
-
-**Features:**
-
-- TLS certificate management
-- QUIC transport configuration
-- Connection setup helpers
-
-## CLI Tools
-
-### moq-cli
-
-Command-line tool for media operations (binary name: `moq`).
-
-**Features:**
-
-- Publish video from files or FFmpeg
-- Test and development
-- Media server deployments
-
-**Installation:**
-
-```bash
-cargo install moq-cli
-```
-
-**Usage:**
-
-```bash
-# Publish a video file (remux to MPEG-TS and pipe it in)
-ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
-
-# Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
-```
-
-[Learn more](/bin/cli)
-
-### moq-token CLI
-
-Command-line tool for JWT token management (binary name: `moq-token`). The same
-commands are built into moq-cli as `moq token ...`.
-
-**Installation:**
-
-```bash
-cargo install moq-token-cli
-```
-
-**Usage:**
-
-```bash
-# Generate a key
-moq-token generate --out root.jwk
-
-# Generate a key that can only ever grant publish below rooms/123
-moq-token generate --root "rooms/123" --publish "" --out scoped.jwk
-
-# Sign a token
-moq-token sign --key root.jwk \
-  --root "rooms/123" \
-  --publish "alice" \
-  --expires 1735689600
-```
-
-See [Authentication guide](/bin/relay/auth) for details.
-
-## Utilities
-
-### libmoq
-
-[![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)
-
-C bindings for `moq-net` via FFI.
-
-**Use cases:**
-
-- Integrate with C/C++ applications
-- Bindings for other languages
-- Legacy system integration
-
-## Installation
-
-### Libraries (crates.io)
-
-Add the crates you need to your `Cargo.toml`:
-
-```toml
-[dependencies]
-moq-net = "0.1"
-hang = "0.1"
-```
-
-All crates are published to [crates.io](https://crates.io/search?q=moq) with API
-docs on [docs.rs](https://docs.rs).
-
-### Binaries
-
-The relay and CLI ship through several channels. Pick whichever fits:
-
-```bash
-# crates.io (any platform with a Rust toolchain)
-cargo install moq-relay moq-cli moq-token-cli
-
-# Homebrew (macOS / Linux)
-brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
-
-# Debian / Ubuntu (see the Linux packages guide for repo setup)
-sudo apt install moq-relay moq-cli
-
-# Fedora / RHEL (see the Linux packages guide for repo setup)
-sudo dnf install moq-relay moq-cli
-
-# Nix
-nix build github:moq-dev/moq#moq-relay
-nix build github:moq-dev/moq#moq-cli
-
-# Docker
-docker run moqdev/moq-relay
-docker run moqdev/moq-cli
-```
-
-See [Linux packages](/setup/linux) for apt/dnf repository setup and the
-[Applications](/bin/) docs for usage.
-
-### From source
-
-```bash
-git clone https://github.com/moq-dev/moq
-cd moq/rs
-cargo build --release
-```
-
-## Quick Start
-
-[`moq-native`](/lib/rs/crate/moq-native) configures the QUIC endpoint and TLS for
-you, then [`moq-net`](/lib/rs/crate/moq-net) handles the MoQ handshake. Connect to
-a relay with a few lines:
+# Rust
+
+The reference implementation. Every crate is on
+[crates.io](https://crates.io/search?q=moq) with API docs on docs.rs.
+
+## Crates
+
+| Crate | Does |
+| --- | --- |
+| [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
+| [moq-native](https://docs.rs/moq-native) | Stands up QUIC (quinn, quiche, or noq), TLS, WebSocket fallback, and iroh, from config or CLI flags. |
+| [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
+| [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
+| [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
+| [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
+| [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
+| [moq-token](/lib/rs/moq-token) | JWT keys, signing, verification, path authorization. |
+| [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
+| [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
+| [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
+| [moq-ffi](https://docs.rs/moq-ffi), [libmoq](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
+| [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
+| [web-transport](https://github.com/moq-dev/web-transport) | The QUIC/WebTransport/qmux transports, in a sibling repository. |
+
+## Quick start
+
+`moq-native` configures the endpoint; `moq-net` does the protocol.
 
 ```rust
+// The Origin is the local hub: the session fills it with remote broadcasts
+// and serves your local broadcasts out of it.
+let origin = moq_net::Origin::random().produce();
+
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
-let session = client.connect(url).await?;
-```
+let session = client.with_subscriber(origin.clone()).with_publisher(&origin).connect(url).await?;
 
-To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
-into the session before connecting:
-
-```rust
-// Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::new().produce();
-let mut consumer = origin.consume();
-let session = client.with_subscriber(origin).connect(url).await?;
-
-while let Some((path, broadcast)) = consumer.announced().await {
-    // ... subscribe to tracks on each broadcast ...
+// Subscribe: wait for a broadcast, read its catalog, then its tracks.
+let mut announced = origin.consume().announced();
+while let Some(update) = announced.next().await {
+    let Some(broadcast) = update.broadcast else { continue };
+    let catalog = broadcast
+        .track(hang::Catalog::DEFAULT_NAME)?
+        .subscribe(hang::Catalog::default_subscription())
+        .await?;
+    // moq-mux decodes the catalog; moq-video / moq-audio decode the media.
 }
 ```
 
-The [Native guide](/lib/rs/env/native) walks through publishing, subscribing,
-reading the catalog, and decoding frames end to end. For runnable code see the
-[`hang/examples`](https://github.com/moq-dev/moq/tree/main/rs/hang/examples)
-directory: [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
-(publish) and [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
+```rust
+// Publish: create a broadcast on the origin and add tracks to it.
+let route = moq_net::broadcast::Route::new().with_announce(true);
+let mut broadcast = origin.create_broadcast("my-stream.hang", route)?;
+// moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
+```
 
-## API Documentation
+The examples run the session and the origin work concurrently (`tokio::select!` or
+`spawn`), since the announcement loop is live. Runnable examples:
+[`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
+(publish) and
+[`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
+URLs may be `https://` (WebTransport, with raw QUIC preferred for native),
+`moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
+token. `http://` is for a relay on localhost only: it fetches the certificate
+fingerprint unauthenticated before upgrading, so never send a token over it. Connections race
+QUIC against WebSocket and remember which won.
 
-Full API documentation is available on [docs.rs](https://docs.rs):
+## WebAssembly
 
-- [moq-net API](https://docs.rs/moq-net)
-- [hang API](https://docs.rs/hang)
-- [moq-mux API](https://docs.rs/moq-mux)
-- [moq-video API](https://docs.rs/moq-video)
-- [moq-audio API](https://docs.rs/moq-audio)
-- [moq-token API](https://docs.rs/moq-token)
-- [moq-native API](https://docs.rs/moq-native)
-- [libmoq API](https://docs.rs/libmoq)
+`moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own
+`WebTransport` through the `web-transport` crate, so Rust logic can be shared
+between native and web. Skip `moq-native` there, build the transport with
+`web_transport::ClientBuilder`, and drive the returned session future with
+`wasm_bindgen_futures::spawn_local` (nothing is `Send` on wasm). If you just
+want MoQ in a page, the [TypeScript libraries](/lib/js/) are the easier path.
 
-## Next Steps
+## Conventions
 
-- Explore [moq-net](/lib/rs/crate/moq-net) - Networking layer
-- Explore [hang](/lib/rs/crate/hang) - Media library
-- Explore [moq-mux](/lib/rs/crate/moq-mux) - Media import
-- Explore [moq-video](/lib/rs/crate/moq-video) and [moq-audio](/lib/rs/crate/moq-audio) - Native capture, codecs, and playback
-- Deploy [moq-relay](/bin/relay/) - Relay server
-- View [code examples](https://github.com/moq-dev/moq/tree/main/rs)
+The API is producer/consumer pairs at every level (origin, broadcast, track,
+group). Producers write and consumers read; cloning a consumer shares the
+subscription, and the last clone dropping closes it. Everything is
+`async`, executor-agnostic, and errors are typed enums with `thiserror`.

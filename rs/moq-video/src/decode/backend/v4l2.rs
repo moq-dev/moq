@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use moq_net::Timestamp;
-use v4l::v4l_sys::V4L2_CID_MIN_BUFFERS_FOR_CAPTURE;
+use v4l::v4l_sys::{V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, V4L2_DEC_CMD_START, V4L2_DEC_CMD_STOP};
 
 use super::{Backend, Codec, Config};
 use crate::v4l2::{self, Dequeue, Device, Dir, Format, Planes, Queue, Rect, Request, Role};
@@ -178,16 +178,7 @@ impl V4l2 {
 	fn submit(&mut self, access_unit: &Bytes, timestamp: Timestamp) -> Result<(), Error> {
 		let deadline = Instant::now() + BUFFER_TIMEOUT;
 		let index = loop {
-			while let Some(buffer) = self.coded.dequeue(&self.device)?.buffer() {
-				if buffer.failed() {
-					tracing::warn!(
-						decoder = NAME,
-						buffer = buffer.index,
-						"V4L2 decoder could not decode an access unit"
-					);
-				}
-				self.coded.reclaim(buffer.index);
-			}
+			self.reclaim_coded()?;
 			if let Some(index) = self.coded.take_free() {
 				break index;
 			}
@@ -216,6 +207,23 @@ impl V4l2 {
 		self.coded.queue(&self.device, index, &bytesused, key)?;
 		remember(&mut self.submitted, key, timestamp);
 		Ok(())
+	}
+
+	/// Reclaim every access-unit buffer the driver has finished reading.
+	fn reclaim_coded(&mut self) -> Result<usize, Error> {
+		let mut reclaimed = 0;
+		while let Some(buffer) = self.coded.dequeue(&self.device)?.buffer() {
+			if buffer.failed() {
+				tracing::warn!(
+					decoder = NAME,
+					buffer = buffer.index,
+					"V4L2 decoder could not decode an access unit"
+				);
+			}
+			self.coded.reclaim(buffer.index);
+			reclaimed += 1;
+		}
+		Ok(reclaimed)
 	}
 
 	/// Negotiate the CAPTURE queue against the size the driver has just reported.
@@ -387,6 +395,44 @@ impl V4l2 {
 			self.device.wait(POLL_INTERVAL);
 		}
 	}
+
+	/// Drive an explicit drain until CAPTURE reaches LAST and OUTPUT is reclaimed.
+	///
+	/// Returns whether a source change arrived during the drain. That event stops
+	/// the decoder at the old format, so the caller must renegotiate before it can
+	/// continue through any access units queued for the new format.
+	fn drain_sequence(&mut self) -> Result<(Vec<Frame>, bool), Error> {
+		let mut frames = Vec::new();
+		let mut ended = false;
+		let mut changed = false;
+		let mut deadline = Instant::now() + DRAIN_TIMEOUT;
+		loop {
+			let before = frames.len();
+			let reclaimed = self.reclaim_coded()?;
+			changed |= self.device.take_source_change();
+			if !ended {
+				ended = self.drain(&mut frames)?;
+			}
+
+			// A source change stops the old sequence at LAST while access units for
+			// the new format may remain on OUTPUT. Renegotiation is what lets those
+			// continue, so do not wait here for buffers the stopped decoder cannot
+			// return yet.
+			if ended && (changed || self.coded.outstanding() == 0) {
+				return Ok((frames, changed));
+			}
+
+			if reclaimed > 0 || frames.len() > before {
+				deadline = Instant::now() + DRAIN_TIMEOUT;
+			} else if Instant::now() >= deadline {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"V4L2 decoder did not finish its drain within {DRAIN_TIMEOUT:?}, holding {} access unit(s)",
+					self.coded.outstanding()
+				)));
+			}
+			self.device.wait(POLL_INTERVAL);
+		}
+	}
 }
 
 /// The `struct timeval` an access unit rides the driver under, which the
@@ -456,6 +502,45 @@ impl Backend for V4l2 {
 		}
 
 		self.drain(&mut frames)?;
+		Ok(frames)
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		// A drain only begins with both queues streaming. Before the driver has
+		// reported a format there is no CAPTURE queue and therefore no picture it
+		// can hand back.
+		if self.pictures.is_none() {
+			// OUTPUT may still hold undecodable access units. Restarting it triggers
+			// the stateful decoder's seek/reset sequence and returns those buffers,
+			// so none can surface after the next stream's keyframe.
+			self.coded.restart(&self.device)?;
+			self.submitted.clear();
+			self.since = None;
+			return Ok(Vec::new());
+		}
+
+		let mut frames = Vec::new();
+		loop {
+			self.device.decoder_cmd(V4L2_DEC_CMD_STOP)?;
+			let (tail, changed) = self.drain_sequence()?;
+			frames.extend(tail);
+
+			if changed {
+				self.negotiate()?;
+			}
+			self.device.decoder_cmd(V4L2_DEC_CMD_START)?;
+
+			// A source change can leave work for the new format inside the decoder
+			// even after every OUTPUT buffer was returned. Resume it, then always run
+			// a fresh drain so the flush still covers everything submitted before it.
+			if changed {
+				continue;
+			}
+			break;
+		}
+
+		self.submitted.clear();
+		self.since = None;
 		Ok(frames)
 	}
 

@@ -39,7 +39,7 @@ Validate that the value is exactly one of `2.5, 5, 10, 20, 40, 60`.
 #### Implementation plan
 
 1. Change the FFI and C scalar types to floating-point milliseconds and perform exact supported-value validation before converting to `Duration`.
-2. Add the UniFFI 20 ms default in coordination with #3189 so the field is changed once.
+2. Keep the UniFFI 20 ms default that [#3227](https://github.com/moq-dev/moq/pull/3227) added on the integer field when the type changes, so the field moves once.
 3. Preserve the exact JavaScript frame duration separately from catalog metadata.
 4. Encode catalog jitter as the ceiling of the duration because jitter is an integer upper-bound hint, not the exact encoder cadence.
 5. Update Python, Swift, Kotlin, Go, and C documentation and examples generated or wrapped from these types.
@@ -52,7 +52,3 @@ Changing the published FFI and C field types is source-breaking, so this targets
 ## Closes
 
 - [#3208](https://github.com/moq-dev/moq/issues/3208) - close this issue when the quest finishes
-
-## Related
-
-- [#3189: Add UniFFI defaults to caller-constructed configuration records](/quest/m2/3189-add-uniffi-defaults-to-caller-constructed-configuration.md) - related open work

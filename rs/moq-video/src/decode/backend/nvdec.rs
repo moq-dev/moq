@@ -14,12 +14,12 @@
 //! rides the decoder itself: [`Config::resize`] maps to cuvid's target size, so
 //! the hardware emits frames already at the output resolution.
 //!
-//! The cuvid parser is driven synchronously: each access unit is pushed with
-//! `CUVID_PKT_ENDOFPICTURE` and zero display delay, so its callbacks (sequence /
-//! decode / display) all fire inside `cuvidParseVideoData` on the calling
-//! thread, and the display queue is drained before `decode` returns. Timestamps
-//! are threaded through the parser (`ulClockRate` is set to microseconds), so
-//! output frames keep correct presentation times even across reordering.
+//! The cuvid parser is driven synchronously: callbacks (sequence / decode /
+//! display) fire inside `cuvidParseVideoData` on the calling thread. Each access
+//! unit uses `CUVID_PKT_ENDOFPICTURE`, and an explicit end-of-stream packet drains
+//! any pictures the display queue still holds. Timestamps are threaded through
+//! the parser (`ulClockRate` is set to microseconds), so output frames keep
+//! correct presentation times even across reordering.
 
 use core::ffi::{c_int, c_uint, c_ulong, c_ulonglong, c_void};
 use std::ptr;
@@ -52,6 +52,8 @@ pub(crate) struct Nvdec {
 	/// Boxed so its address is stable: the parser holds a raw pointer to it for
 	/// the lifetime of the parser (callbacks dereference it during parse).
 	state: Box<State>,
+	/// Mark the first access unit after a drain as a new parser epoch.
+	discontinuity: bool,
 }
 
 // Used from one thread at a time (the decode loop); the CUDA context is rebound
@@ -157,43 +159,74 @@ impl Nvdec {
 		}
 
 		tracing::info!(decoder = NAME, codec = ?codec, resize = ?config.resize, "opened video decoder");
-		Ok(Box::new(Self { parser, state }))
+		Ok(Box::new(Self {
+			parser,
+			state,
+			discontinuity: false,
+		}))
 	}
-}
 
-impl Backend for Nvdec {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		// The parser callbacks (decoder create, decode) and the map/copy below
-		// all need the CUDA context current on this thread.
+	/// Submit one parser packet and copy every picture its display callback made
+	/// ready before returning.
+	fn parse(&mut self, packet: &mut CUVIDSOURCEDATAPACKET) -> Result<Vec<Frame>, Error> {
+		// Parser callbacks and the map/copy below all need the CUDA context current
+		// on this thread.
 		self.state
 			.ctx
 			.bind_to_thread()
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 
+		// SAFETY: parser and packet are valid. A non-null payload is owned by the
+		// caller for the duration of this synchronous call.
+		let result = unsafe { (self.state.api.parse_video_data)(self.parser, packet) };
+		if let Some(error) = self.state.error.take() {
+			self.state.ready.clear();
+			return Err(codec_err(error));
+		}
+		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+			self.state.ready.clear();
+			return Err(codec_err(format!("cuvidParseVideoData: {result:?}")));
+		}
+
+		let ready = std::mem::take(&mut self.state.ready);
+		ready.iter().map(|disp| self.state.map_frame(disp)).collect()
+	}
+}
+
+impl Backend for Nvdec {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		let mut flags = (CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong)
+			| (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong);
+		if self.discontinuity {
+			flags |= CUvideopacketflags::CUVID_PKT_DISCONTINUITY as c_ulong;
+		}
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// ENDOFPICTURE: each payload is one complete access unit, so the
-			// parser emits it immediately instead of waiting for the next AU to
-			// detect the picture boundary (one-in one-out latency).
-			flags: (CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong)
-				| (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong),
+			// parser sees the picture boundary without waiting for the next AU.
+			flags,
 			payload_size: access_unit.len() as c_ulong,
 			payload: access_unit.as_ptr(),
 			// cuvid's clock rate is microseconds (set at parser creation).
 			timestamp: timestamp.as_micros() as i64,
 		};
 
-		// SAFETY: parser and packet are valid; the payload outlives the call
-		// (the parser copies what it needs before returning).
-		let result = unsafe { (self.state.api.parse_video_data)(self.parser, &mut packet) };
-		if let Some(error) = self.state.error.take() {
-			return Err(codec_err(error));
-		}
-		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-			return Err(codec_err(format!("cuvidParseVideoData: {result:?}")));
-		}
+		let frames = self.parse(&mut packet)?;
+		self.discontinuity = false;
+		Ok(frames)
+	}
 
-		let ready = std::mem::take(&mut self.state.ready);
-		ready.iter().map(|disp| self.state.map_frame(disp)).collect()
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		let mut packet = CUVIDSOURCEDATAPACKET {
+			// NVIDIA requires an explicit EOS packet to release every picture still
+			// waiting in display order, even with zero display delay.
+			flags: CUvideopacketflags::CUVID_PKT_ENDOFSTREAM as c_ulong,
+			payload_size: 0,
+			payload: ptr::null(),
+			timestamp: 0,
+		};
+		let frames = self.parse(&mut packet)?;
+		self.discontinuity = true;
+		Ok(frames)
 	}
 
 	fn name(&self) -> &str {
@@ -526,6 +559,10 @@ mod tests {
 					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
 			}
+		}
+		for decoded in decoder.flush().unwrap() {
+			let i420 = decoded.surface.to_i420().unwrap().into_owned();
+			out.push((decoded.timestamp.as_micros() as u64, i420));
 		}
 		assert!(!out.is_empty(), "NVDEC produced no frames");
 		out

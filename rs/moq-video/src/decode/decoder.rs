@@ -37,8 +37,8 @@ pub enum Kind {
 	Hardware,
 	/// Software (openh264) only.
 	Software,
-	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvdec"`, `"v4l2"`,
-	/// or `"openh264"`.
+	/// A specific backend by name, e.g. `"videotoolbox"`, `"mediacodec"`,
+	/// `"nvdec"`, `"v4l2"`, or `"openh264"`.
 	Named(String),
 }
 
@@ -181,6 +181,16 @@ impl Decoder {
 
 		self.backend.decode(access_unit, timestamp, keyframe)
 	}
+
+	/// Return the frames the backend still holds once the stream has ended.
+	///
+	/// Call this after the last access unit and before dropping the decoder. The
+	/// decoder remains reusable and waits for a keyframe before accepting the
+	/// next stream.
+	pub fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		self.got_keyframe = false;
+		self.backend.flush()
+	}
 }
 
 fn is_supported_av1(av1: &AV1) -> bool {
@@ -246,15 +256,16 @@ mod tests {
 				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
 			}
 		}
+		decoded.extend(decoder.flush().unwrap());
 
 		assert!(!decoded.is_empty(), "decoder produced no frames");
 		for out in &decoded {
 			assert_gray(&out.surface.to_i420().unwrap(), 320, 240);
 		}
 
-		// The timestamp rides through the codec and comes back on each picture. These
-		// backends don't reorder, so it returns in feed order: strictly increasing and
-		// drawn from the values we fed.
+		// The timestamp rides through the codec and comes back on each picture,
+		// including any tail released by the drain. It returns in presentation order:
+		// strictly increasing and drawn from the values we fed.
 		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
