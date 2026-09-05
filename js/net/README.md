@@ -8,11 +8,11 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
 A TypeScript [Media over QUIC](https://moq.dev/) (MoQ) client for both browsers and server JS/TS environments.
-`@moq/net` is the **networking layer**: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols, either the simplified [moq-lite](https://doc.moq.dev/concept/layer/moq-lite) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft.
+`@moq/net` is the **networking layer**: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols, either the simplified [moq-lite](https://doc.moq.dev/concept/moq-lite) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft.
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
-> **Note:** moq-lite is a subset of moq-transport and is forwards compatible with it, so this client works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). See the [compatibility docs](https://doc.moq.dev/concept/layer/moq-lite#compatibility) for details.
+> **Note:** moq-lite is a subset of moq-transport and is forwards compatible with it, so this client works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). See the [compatibility docs](https://doc.moq.dev/concept/moq-lite#compatibility) for details.
 
 ## Quick Start
 

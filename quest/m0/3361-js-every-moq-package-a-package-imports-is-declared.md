@@ -27,6 +27,8 @@ Firefox 140 takes the WebSocket path either way.
 - Reproduce on Firefox 140 ESR against `just relay` and `just pub bbb` with a
   source map. If the undeclared dependency was the mechanism, close; otherwise
   record the real stack in the issue and rescope.
+- Firefox is not in the browser harness: add it to `test/wasm`'s Playwright
+  matrix if the harness can drive it, or record why it cannot.
 
 ## Closes
 

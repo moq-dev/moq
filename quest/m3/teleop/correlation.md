@@ -19,8 +19,12 @@ operator's command to a robot's frame; `timeline.rs`'s `set_wall` is what can.
 
 So the contract is: the robot anchors its video and telemetry timelines, the
 operator anchors its command track, and a recording joins the three on
-`wall + pts`. State the assumption beside the API, and report the anchor's
-presence so a consumer can tell "unsynced" from "synced".
+`wall + pts`, resolving each sample against the latest anchor at or before it
+(the catalog `wall` until a timeline record after a discontinuity carries a
+new one). State the clock assumption beside the API. Report only whether an
+anchor is present; presence says nothing about whether the hosts are synced,
+and a join across unsynced hosts looks valid while being wrong, so synchronization
+is a declared deployment property, never inferred from the data.
 
 This is also the answer to Kyber's headline claim of continuous drift
 computation onto one unified timeline. Worth answering on the merits:

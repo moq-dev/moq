@@ -1,60 +1,62 @@
 ---
-title: Kotlin Libraries
-description: Kotlin Multiplatform library for Media over QUIC on JVM and Android
+title: Kotlin
+description: Coroutines and Flow for Android and the JVM via dev.moq:moq
 ---
 
-# Kotlin Libraries
+# Kotlin
 
-The Kotlin bindings expose [Media over QUIC](/) to Android apps and JVM-based services. Built on the same Rust core ([moq-ffi](https://crates.io/crates/moq-ffi)) as the Python and Swift packages, wrapped with idiomatic `Flow` and coroutines.
+[![Maven Central](https://img.shields.io/maven-central/v/dev.moq/moq)](https://central.sonatype.com/artifact/dev.moq/moq)
 
-## Packages
-
-Two Kotlin Multiplatform artifacts, each publishing JVM and Android variants under one coordinate.
-
-### dev.moq:moq
-
-The ergonomic wrapper. Pure Kotlin layered on `dev.moq:moq-ffi`: a `Moq.connect(...)` facade, `Flow`-based async sequences with structured cancellation, and clean `dev.moq` typealiases for the FFI types. Versioned independently of the crate. **Most consumers want this.**
-
-### dev.moq:moq-ffi
-
-The raw UniFFI bindings (`uniffi.moq.*`) plus the native binaries (JNI on Android, JNA on desktop JVM: Linux, macOS, Windows; arm64-v8a, armeabi-v7a, x86\_64). Auto-released on every `moq-ffi-v*` tag, so its version tracks the crate. Depend on it directly only if you want the FFI surface without the wrapper.
-
-[Learn more](/lib/kt/moq)
-
-## Installation
+`dev.moq:moq` on Maven Central: a Kotlin Multiplatform wrapper with a
+`Moq.connect(...)` facade, `Flow`s for every live sequence, and structured
+cancellation that reaches the native consumer. It pulls in `dev.moq:moq-ffi`,
+which carries the native binaries for Android (arm64-v8a, armeabi-v7a,
+x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 
 ```kotlin
-// build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.5")
+    implementation("dev.moq:moq:<version>")   // latest: see the badge above
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
 
-The wrapper depends on `dev.moq:moq-ffi:[0.3,0.4)`, so Gradle pulls the newest bindings patch (with its bundled native binaries) automatically; no extra setup is needed on the consumer side. The wrapper publishes via [release-kt-lib.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-lib.yml) and the bindings via [release-kt-ffi.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-ffi.yml).
-
-## Quickstart
-
 ```kotlin
 import dev.moq.*
-import kotlinx.coroutines.flow.collect
 
-Moq.connect("https://relay.example.com").use { moq ->
-    moq.announcements("demos/").collect { announcement ->
-        println("got broadcast ${announcement.path()}")
-
-        announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
-            println("catalog: $catalog")
-        }
+// Subscribe. The Flow is live, so run it in its own coroutine.
+Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
+    moq.announcements("live/").collect { announcement ->
+        val catalog = announcement.broadcast().catalog()
+        println(catalog)
     }
 }
 ```
 
-`Moq.connect` wires an internal origin for publish + subscribe and returns a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
+```kotlin
+// Publish encoded frames, or raw pixels with the codec inside the binding.
+// opusInit, packet, pts, and rgba come from your encoder or capture source.
+Moq.connect("https://relay.example.com").use { moq ->
+    val broadcast = moq.createBroadcast("my-stream.hang")
+    val audio = broadcast.publishMedia(Init(format = "opus", data = opusInit, video = null))
+    audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
 
-## Source and issues
+    val video = broadcast.publishVideo(
+        VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = 30u),
+        VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
+    )
+    video.write(VideoFrame(timestampUs = pts, data = rgba))
+}
+```
+
+`Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request
+`accept()`/`reject()`. JSON tracks take `@Serializable` types
+(`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
+the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
+`fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/`datagrams()`,
+`setCatalogSection`, `used()`/`unused()`. `MoqException.isAuth` and
+`isShutdown` classify errors. Cancelling the collecting coroutine cancels the
+native side.
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
-- Source: [kt/](https://github.com/moq-dev/moq/tree/main/kt) (in the monorepo)
-- README: [kt/README.md](https://github.com/moq-dev/moq/blob/main/kt/README.md)
-- Maven Central: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq)
+- Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
+- Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)

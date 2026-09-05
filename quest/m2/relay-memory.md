@@ -3,7 +3,10 @@
 ## Goal
 
 A relay's memory scales with what it serves, not with what the mesh knows,
-and the numbers behind that claim are current.
+and the numbers behind that claim are current. Two costs to keep apart when
+measuring: the route table and per-announcement state (`RouteEntry` plus
+`ServeState`) scale with announcements and routes, while the served-content
+cache a `ServeState` materializes scales with demand.
 
 ## Plan
 

@@ -95,7 +95,7 @@ regenerates the repository metadata, signs it, and uploads the diff.
 If the key needs to be rotated, repeat steps 3 through 5 with a new key
 (keeping the apt-binary / rpm-armored split). Upload the new keyring under a
 versioned filename, e.g. `moq-keyring-2026.gpg`, alongside the existing
-`moq-keyring.gpg`, and update the install docs at `doc/setup/linux.md` to point
+`moq-keyring.gpg`, and update the install docs at `doc/setup/install.md` to point
 users at the new URL. Existing installations keep validating against the old
 key until they re-import.
 

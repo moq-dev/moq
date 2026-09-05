@@ -16,6 +16,9 @@
 //! - `Surface::DmaBuf` is a Linux DRM allocation, produced by PipeWire capture.
 //!   The Vulkan renderer imports supported packed formats directly, while CPU
 //!   consumers map linear allocations only.
+//! - `Surface::HardwareBuffer` is an Android `AHardwareBuffer`, produced by the
+//!   MediaCodec decoder rendering into an `ImageReader`. A GPU consumer imports
+//!   it as a GL or Vulkan image; `into_i420` reads the planes back instead.
 //! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
@@ -150,7 +153,6 @@ pub struct DmaBufExport {
 	fd: OwnedFd,
 	// The producer's lease, held so its buffer outlives the descriptor. Only the
 	// renderer ever reads it back out, through `into_parts`.
-	#[cfg_attr(not(feature = "render"), expect(dead_code))]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -375,6 +377,10 @@ pub enum Surface {
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	DmaBuf(DmaBuf),
+	/// Zero-copy GPU buffer (Android `AHardwareBuffer`, 4:2:0 8-bit). Produced
+	/// only by the MediaCodec decoder.
+	#[cfg(all(target_os = "android", feature = "mediacodec"))]
+	HardwareBuffer(android::HardwareBuffer),
 	/// CPU-resident planar I420.
 	I420(I420),
 }
@@ -391,6 +397,8 @@ impl Surface {
 			Surface::Cuda(c) => c.width,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.width,
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(b) => b.width,
 			Surface::I420(i) => i.width,
 		}
 	}
@@ -406,6 +414,8 @@ impl Surface {
 			Surface::Cuda(c) => c.height,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.height,
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(b) => b.height,
 			Surface::I420(i) => i.height,
 		}
 	}
@@ -578,6 +588,8 @@ impl Surface {
 			Surface::Cuda(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.color,
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(_) => None,
 			Surface::I420(i) => i.color(),
 		}
 	}
@@ -593,6 +605,8 @@ impl Surface {
 			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(b) => Ok(Cow::Owned(b.download_i420()?)),
 			Surface::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
@@ -1056,6 +1070,260 @@ mod cache_tests {
 
 		assert_eq!(attempts, 1);
 		assert!(failed.lock().unwrap().is_err());
+	}
+}
+
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+pub mod android {
+	//! Android graphics surfaces: the [`HardwareBuffer`] behind
+	//! `Surface::HardwareBuffer`, plus the read-back to CPU I420.
+
+	use std::sync::Arc;
+
+	use ndk::hardware_buffer::HardwareBufferRef;
+	use ndk::media::image_reader::{Image, ImageReader};
+
+	use super::I420;
+	use crate::Error;
+
+	// Plane indices of an `AIMAGE_FORMAT_YUV_420_888` image. The format always
+	// reports three planes in this order, whether the device laid the picture out
+	// planar (I420) or semi-planar (NV12/NV21); only the pixel strides differ, and
+	// `HardwareBuffer::plane` reads those rather than assuming a layout.
+	const Y: i32 = 0;
+	const U: i32 = 1;
+	const V: i32 = 2;
+
+	/// The `ImageReader` a decoded picture came out of.
+	///
+	/// A newtype rather than the `ndk` type directly so the thread-safety
+	/// assertion lives in one place that the decoder and the frames outliving it
+	/// both share.
+	pub(crate) struct Reader(ImageReader);
+
+	// No `unsafe impl` here on purpose. Both holders of a `Reader` carry their
+	// own (`HardwareBuffer` below, and the decoder backend), so auto-trait
+	// derivation over this type is never consulted, and asserting `Sync` for it
+	// would claim concurrent acquires are sound when nothing performs them.
+
+	impl Reader {
+		pub(crate) fn new(reader: ImageReader) -> Self {
+			Self(reader)
+		}
+	}
+
+	impl std::ops::Deref for Reader {
+		type Target = ImageReader;
+
+		fn deref(&self) -> &ImageReader {
+			&self.0
+		}
+	}
+
+	/// A decoded picture still in GPU memory, as an Android `AHardwareBuffer`.
+	///
+	/// The MediaCodec decoder renders into an `ImageReader` and hands out the
+	/// images it acquires, so the picture reaches a GL or Vulkan consumer without
+	/// a CPU round trip. [`buffer`](Self::buffer) is that handle; everything else
+	/// goes through [`Surface::into_i420`](crate::Surface::into_i420), which reads
+	/// the planes back.
+	///
+	/// A frame occupies a slot in the decoder's fixed-size buffer queue for as long
+	/// as it lives, and the decoder stalls once the queue is empty. Draw and drop
+	/// rather than holding a backlog.
+	pub struct HardwareBuffer {
+		/// The reader owns the queue each image is a slot in, and deleting it
+		/// invalidates images already acquired from it, so a frame outliving its
+		/// decoder has to keep the reader alive too.
+		_reader: Arc<Reader>,
+		image: Image,
+		pub(crate) left: u32,
+		pub(crate) top: u32,
+		pub(crate) width: u32,
+		pub(crate) height: u32,
+	}
+
+	// SAFETY: an `AImage` is an owned handle to one buffer-queue slot, so it is not
+	// tied to the thread that acquired it. Every method here is a read
+	// (`AImage_getPlane*`, `AImage_getHardwareBuffer`) of an image nothing else can
+	// reach: the decoder acquires it and hands ownership straight out, and it is
+	// never re-acquired. The reader alongside it carries its own assertion. `Sync`
+	// is load-bearing the same way it is for the macOS pixel buffer, since
+	// moq-transcode fans decoded frames out as `Arc<Frame>`.
+	unsafe impl Send for HardwareBuffer {}
+	unsafe impl Sync for HardwareBuffer {}
+
+	impl HardwareBuffer {
+		pub(crate) fn new(reader: Arc<Reader>, image: Image, left: u32, top: u32, width: u32, height: u32) -> Self {
+			Self {
+				_reader: reader,
+				image,
+				left,
+				top,
+				width,
+				height,
+			}
+		}
+
+		/// The visible picture's horizontal offset within the hardware buffer.
+		pub fn left(&self) -> u32 {
+			self.left
+		}
+
+		/// The visible picture's vertical offset within the hardware buffer.
+		pub fn top(&self) -> u32 {
+			self.top
+		}
+
+		/// The picture width in pixels.
+		pub fn width(&self) -> u32 {
+			self.width
+		}
+
+		/// The picture height in pixels.
+		pub fn height(&self) -> u32 {
+			self.height
+		}
+
+		/// The `AHardwareBuffer` holding the pixels, with a reference acquired for
+		/// the caller, to import as a GL image (`EGL_ANDROID_image_native_buffer`) or
+		/// a Vulkan one (`VK_ANDROID_external_memory_android_hardware_buffer`).
+		///
+		/// The reference keeps the allocation alive, but only this surface keeps the
+		/// *picture* in it: dropping the surface returns the slot to the decoder,
+		/// which writes the next picture over the same memory. Sample the visible
+		/// rectangle reported by [`left`](Self::left), [`top`](Self::top),
+		/// [`width`](Self::width), and [`height`](Self::height) while you still hold
+		/// the surface.
+		///
+		/// # Errors
+		///
+		/// Fails when the image has no hardware buffer behind it, which is what a
+		/// software `ImageReader` allocation reports.
+		pub fn buffer(&self) -> Result<HardwareBufferRef, Error> {
+			let buffer = self
+				.image
+				.hardware_buffer()
+				.map_err(|e| Error::Codec(anyhow::anyhow!("AImage_getHardwareBuffer failed: {e}")))?;
+			// The getter borrows: it hands back the image's own handle without
+			// touching the refcount, so the caller needs a reference of its own.
+			Ok(buffer.acquire())
+		}
+
+		/// Read the picture back to packed I420 (the CPU path).
+		///
+		/// A layout change, not a color conversion, so the samples keep whatever
+		/// space they arrived in. The device chooses the layout and the strides, and
+		/// both are read off the image rather than assumed, so a planar device and a
+		/// semi-planar one produce the same bytes here.
+		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
+			let (w, h) = (self.width as usize, self.height as usize);
+			let (cw, ch) = (w / 2, h / 2);
+
+			let mut data = vec![0u8; I420::len(self.width, self.height)];
+			let (luma, chroma) = data.split_at_mut(w * h);
+			let (u_dst, v_dst) = chroma.split_at_mut(cw * ch);
+
+			self.plane(Y)?
+				.gather(luma, self.left as usize, self.top as usize, w, h)?;
+			self.plane(U)?
+				.gather(u_dst, self.left as usize / 2, self.top as usize / 2, cw, ch)?;
+			self.plane(V)?
+				.gather(v_dst, self.left as usize / 2, self.top as usize / 2, cw, ch)?;
+
+			Ok(I420 {
+				width: self.width,
+				height: self.height,
+				data,
+				color: None,
+			})
+		}
+
+		/// One plane's bytes and the two strides needed to walk them.
+		fn plane(&self, index: i32) -> Result<Plane<'_>, Error> {
+			let fail = |what: &str, e: ndk::media_error::MediaError| {
+				Error::Codec(anyhow::anyhow!("AImage_getPlane{what} failed for plane {index}: {e}"))
+			};
+			Ok(Plane {
+				data: self.image.plane_data(index).map_err(|e| fail("Data", e))?,
+				row: self.image.plane_row_stride(index).map_err(|e| fail("RowStride", e))? as usize,
+				pixel: self
+					.image
+					.plane_pixel_stride(index)
+					.map_err(|e| fail("PixelStride", e))? as usize,
+			})
+		}
+	}
+
+	/// A borrowed image plane: its bytes, its row pitch, and the gap between
+	/// horizontally adjacent samples (2 where the device interleaved U and V).
+	struct Plane<'a> {
+		data: &'a [u8],
+		row: usize,
+		pixel: usize,
+	}
+
+	impl Plane<'_> {
+		/// Copy a `width` x `height` sample window into `dst`, tightly packed.
+		///
+		/// # Errors
+		///
+		/// Fails when the plane is shorter than its own strides say it should be,
+		/// rather than reading past the mapping.
+		fn gather(&self, dst: &mut [u8], left: usize, top: usize, width: usize, height: usize) -> Result<(), Error> {
+			let (Some(rows), Some(cols)) = (height.checked_sub(1), width.checked_sub(1)) else {
+				return Ok(());
+			};
+			let needed = top
+				.checked_add(rows)
+				.and_then(|row| row.checked_mul(self.row))
+				.and_then(|offset| {
+					left.checked_add(cols)
+						.and_then(|col| col.checked_mul(self.pixel))
+						.and_then(|col| offset.checked_add(col))
+				})
+				.and_then(|offset| offset.checked_add(1))
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("image plane strides overflow the address space")))?;
+			if self.data.len() < needed {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"image plane is {} bytes, needs {needed} for {width}x{height} at ({left}, {top}), row stride {}, and pixel stride {}",
+					self.data.len(),
+					self.row,
+					self.pixel
+				)));
+			}
+
+			for (row, out) in dst.chunks_exact_mut(width).enumerate().take(height) {
+				let offset = (top + row) * self.row + left * self.pixel;
+				let src = &self.data[offset..];
+				if self.pixel == 1 {
+					out.copy_from_slice(&src[..width]);
+				} else {
+					for (col, sample) in out.iter_mut().enumerate() {
+						*sample = src[col * self.pixel];
+					}
+				}
+			}
+			Ok(())
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		#[test]
+		fn plane_gather_applies_the_crop_origin() {
+			let data: Vec<u8> = (0..24).collect();
+			let plane = Plane {
+				data: &data,
+				row: 6,
+				pixel: 2,
+			};
+			let mut out = [0; 4];
+			plane.gather(&mut out, 1, 1, 2, 2).unwrap();
+			assert_eq!(out, [8, 10, 14, 16]);
+		}
 	}
 }
 

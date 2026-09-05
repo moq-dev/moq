@@ -712,6 +712,23 @@ pub async fn publish_capture<E: CatalogExt>(
 	.await
 }
 
+/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// `tokio::spawn` it. This is never called; it exists only to fail compilation
+/// if the future ever regains a `!Send` component. macOS is exempt: the TCC
+/// prompt and ScreenCaptureKit both hold ObjC handles across an await.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn assert_publish_capture_send(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	capture: capture::Config,
+	encode: Options,
+	clock: moq_mux::Clock,
+) {
+	fn is_send<T: Send>(_: &T) {}
+	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
+}
+
 /// A capture backend as the supervisor sees it. Kept separate from cpal so the
 /// retry and cancellation lifecycle can be tested without audio hardware.
 trait CaptureSource {
