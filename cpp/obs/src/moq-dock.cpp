@@ -1457,7 +1457,7 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	const QPointer<MoQDock> dock(self);
 	auto bridge = cookie->bridge;
 	endBridge.disarm();
-	QMetaObject::invokeMethod(
+	const bool posted = QMetaObject::invokeMethod(
 		qApp,
 		[bridge, dock, code, failText, stopped]() {
 			struct Done {
@@ -1488,6 +1488,8 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 			}
 		},
 		Qt::QueuedConnection);
+	if (!posted)
+		bridge->end();
 }
 
 void register_moq_dock()
