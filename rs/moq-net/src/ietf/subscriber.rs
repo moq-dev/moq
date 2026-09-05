@@ -1449,42 +1449,54 @@ where
 
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
-			kio::wait(|waiter| {
-				// An answer that has already arrived wins over the local terminals. Both can
-				// be ready in one poll, and taking abandonment there would discard a response
-				// the publisher has already sent: if it was a rejection, the request is gone
-				// and cancelling it names a dead id back at a peer entitled to object.
-				if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
-					return Poll::Ready(Setup::Response(res));
+			loop {
+				let setup = kio::wait(|waiter| {
+					// An answer that has already arrived wins over the local terminals. Both can
+					// be ready in one poll, and taking abandonment there would discard a response
+					// the publisher has already sent: if it was a rejection, the request is gone
+					// and cancelling it names a dead id back at a peer entitled to object.
+					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+						return Poll::Ready(Setup::Response(res));
+					}
+					if track.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Setup::Unused);
+					}
+					if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+						return Poll::Ready(Setup::BroadcastClosed(err));
+					}
+					Poll::Pending
+				})
+				.await;
+
+				// The unused wake is a level snapshot, so the teardown is only real once it
+				// commits while the track is still unused. A subscriber that returned in the
+				// gap keeps this request, which is why the abort happens here rather than
+				// after the loop.
+				if matches!(setup, Setup::Unused) && track.abort_unused(Error::Cancel) == track::Teardown::Declined {
+					continue;
 				}
-				if track.poll_unused(waiter).is_ready() {
-					return Poll::Ready(Setup::Unused);
-				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(Setup::BroadcastClosed(err));
-				}
-				Poll::Pending
-			})
-			.await
+
+				break setup;
+			}
 		};
 
 		// Abandoned before the publisher answered. It may already be serving, so this still
 		// owes it a cancellation rather than a silent walk away.
 		let response = match setup {
 			Setup::Response(res) => res,
-			Setup::Unused | Setup::BroadcastClosed(_) => {
-				let err = match setup {
-					Setup::BroadcastClosed(err) => err,
-					_ => Error::Cancel,
-				};
-
+			setup => {
 				tracing::info!(
 					broadcast = %self.origin.absolute(&broadcast_path),
 					track = %track.name(),
 					"subscribe abandoned before it was accepted"
 				);
 
-				let _ = track.abort(err);
+				// `Unused` already aborted the track above, atomically with the decision;
+				// a closed broadcast still owes it that error.
+				if let Setup::BroadcastClosed(err) = setup {
+					let _ = track.abort(err);
+				}
+
 				self.remove_subscribe(request_id);
 				self.cancel_subscribe(stream, request_id).await;
 				return;
@@ -1557,24 +1569,35 @@ where
 			StreamClosed(Result<(), Error>),
 		}
 
-		let end = kio::wait(|waiter| {
-			if track.poll_unused(waiter).is_ready() {
-				return Poll::Ready(End::Unused);
+		let end = loop {
+			let end = kio::wait(|waiter| {
+				if track.poll_unused(waiter).is_ready() {
+					return Poll::Ready(End::Unused);
+				}
+				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+					return Poll::Ready(End::BroadcastClosed(err));
+				}
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
+			})
+			.await;
+
+			// The unused wake is a level snapshot, so committing the teardown is what
+			// decides it: a subscriber that returned in the gap keeps this subscription
+			// on the same stream instead of being cancelled along with it.
+			if matches!(end, End::Unused) && track.abort_unused(Error::Cancel) == track::Teardown::Declined {
+				continue;
 			}
-			if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-				return Poll::Ready(End::BroadcastClosed(err));
-			}
-			let mut cx = std::task::Context::from_waker(waiter.waker());
-			stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
-		})
-		.await;
+
+			break end;
+		};
 
 		// Whether we are walking away from a subscription the publisher still considers
 		// Established, which is what obliges us to cancel it rather than just close.
 		let cancelled = match end {
+			// The track was aborted above, atomically with the decision to end here.
 			End::Unused => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe cancelled");
-				let _ = track.abort(Error::Cancel);
 				true
 			}
 			End::BroadcastClosed(err) => {

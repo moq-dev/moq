@@ -106,20 +106,17 @@ impl<T> ProducerWeak<T> {
 		})
 	}
 
-	/// Create a new [`Consumer`] that shares this state.
-	pub fn consume(&self) -> Consumer<T> {
-		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
-
-		// Wake `used()` waiters when the first consumer appears.
-		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
-		}
-
-		Consumer {
-			state: self.state.clone(),
-			counts: self.counts.clone(),
-		}
+	/// Create a new [`Consumer`] that shares this state, or `None` once the channel
+	/// has closed.
+	///
+	/// The closed check and the count bump happen under one lock, mirroring
+	/// [`produce`](Self::produce): a consumer minted here is always one a
+	/// [`Producer::write_unused`] teardown will see and decline for. The `None` is
+	/// the other half of that deal, so a caller that reaches a torn-down channel
+	/// through a cached weak handle re-requests the resource instead of handing out
+	/// a consumer that can only report the teardown.
+	pub fn consume(&self) -> Option<Consumer<T>> {
+		crate::consumer::consume_open(&self.state, &self.counts)
 	}
 
 	/// Get read-only access to the shared state.
@@ -253,19 +250,12 @@ pub struct ConsumerWeak<T> {
 
 impl<T> ConsumerWeak<T> {
 	/// Create a new [`Consumer`] that shares this state.
+	///
+	/// Unlike [`ProducerWeak::consume`] this always succeeds: the handle it came
+	/// from is a read handle, so there is no teardown on this side to coordinate
+	/// with, and a closed channel's consumer still drains the final value.
 	pub fn consume(&self) -> Consumer<T> {
-		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
-
-		// Wake `used()` waiters when the first consumer appears.
-		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
-		}
-
-		Consumer {
-			state: self.state.clone(),
-			counts: self.counts.clone(),
-		}
+		crate::consumer::consume(&self.state, &self.counts)
 	}
 
 	/// Get read-only access to the shared state.

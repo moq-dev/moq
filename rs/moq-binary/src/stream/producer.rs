@@ -64,12 +64,7 @@ impl Producer {
 	/// The demand signal for a producer serving on request: an unused track is cached state nobody is
 	/// watching, safe to drop and recreate on the next request.
 	pub fn is_used(&self) -> bool {
-		self.inner
-			.lock()
-			.unwrap()
-			.track
-			.poll_unused(&kio::Waiter::noop())
-			.is_pending()
+		self.inner.lock().unwrap().track.is_used()
 	}
 
 	/// Append one payload to the log.
