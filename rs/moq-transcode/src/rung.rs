@@ -37,7 +37,9 @@ const MAX_CONCURRENT_FETCHES: usize = 4;
 ///
 /// Retiring is a clean track end rather than a dropped task, so a subscriber
 /// sees the same thing it would on any other rendition going away and picks
-/// another one, instead of an abort it would read as a failure.
+/// another one, instead of an abort it would read as a failure. The end waits
+/// on the fetches still in flight, since the track's final sequence has to sit
+/// above every group they are about to claim.
 #[derive(Clone)]
 pub(crate) struct Retire(tokio::sync::watch::Receiver<bool>);
 
@@ -115,6 +117,14 @@ impl Rung {
 	}
 }
 
+/// What the live path leaves the output track in.
+enum Ended {
+	/// Still open: finish it once nothing else can add a group.
+	Open,
+	/// Already terminal (aborted), or closed under us.
+	Closed,
+}
+
 /// Serve one requested rung track until it closes or the source ends.
 pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Result<(), Error> {
 	// Grab the group-request handle before accepting: a Request is dynamic from
@@ -130,7 +140,16 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 		result
 	};
 	let (live, fetches) = tokio::join!(live, fetches(&rung, &dynamic, &mut finishing));
-	let result = live.and(fetches);
+
+	// Finished here rather than in `live`, because the boundary is only known once
+	// every fetch has claimed its group. `finish` takes the live edge, which on a
+	// rung that only ever served fetches is sequence 0, and a group at or above
+	// the boundary is refused: finishing while a fetch was still opening its
+	// decoder would reject the very fetch retirement drained the loop to keep.
+	let result = match (live, fetches) {
+		(Ok(Ended::Open), Ok(())) => producer.finish().map_err(Into::into),
+		(live, fetches) => live.map(|_| ()).and(fetches),
+	};
 	if result.is_err() {
 		// End the track so subscribers see an error rather than a stall.
 		let _ = producer.abort(moq_net::Error::Cancel);
@@ -142,7 +161,10 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 /// resize + encode its frames group for group until demand goes away. The
 /// heavy lifting (subscription, decode) is shared with every other active rung
 /// of this source; only the per-rung resize and encode happen here.
-async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<(), Error> {
+///
+/// Reports whether the track is still open rather than finishing it: [`serve`]
+/// owns that, once the fetches in flight can no longer add a group.
+async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<Ended, Error> {
 	let demand = producer.demand();
 	let mut retire = rung.retire.clone();
 	// Set once the ladder retires this rung. The track is finished at the next
@@ -152,19 +174,18 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 
 	loop {
 		if retiring {
-			producer.finish()?;
-			return Ok(());
+			return Ok(Ended::Open);
 		}
 
 		tokio::select! {
 			used = demand.used() => if used.is_err() {
 				// The output track closed; nothing more to serve.
-				return Ok(());
+				return Ok(Ended::Closed);
 			},
 			err = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
 				producer.clone().abort(err)?;
-				return Ok(());
+				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {
 				// Retired while idle, which is the common case: the ladder is
@@ -314,8 +335,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
-					producer.finish()?;
-					return Ok(());
+					return Ok(Ended::Open);
 				}
 				None => {
 					// The feed died mid-stream (source or decode error).
@@ -323,7 +343,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						let _ = output.abort(moq_net::Error::Cancel);
 					}
 					producer.clone().abort(moq_net::Error::Cancel)?;
-					return Ok(());
+					return Ok(Ended::Closed);
 				}
 			}
 		}

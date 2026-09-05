@@ -75,7 +75,7 @@ impl Ladder {
 		// `resolve` takes the source it resolves against, since `follow` calls it
 		// with one the ladder has not adopted yet. Here it is the ladder's own.
 		let (name, rendition) = (ladder.name.clone(), ladder.rendition.clone());
-		let rungs = ladder.resolve(&name, &rendition).await?;
+		let rungs = ladder.resolve(&name, &rendition, &[]).await?;
 		tracing::info!(source = %ladder.name, rungs = rungs.len(), "transcoding");
 		// Publish the ladder before any rung can be asked for, so a cursor holds
 		// every handle and can bill a pipeline too short to show up as an edge.
@@ -84,21 +84,28 @@ impl Ladder {
 		Ok(ladder)
 	}
 
-	/// Resolve the configured rungs against the current source rendition.
+	/// Resolve the configured rungs against a source rendition.
 	///
-	/// A rung that comes out identical to one already published keeps that rung's
-	/// name and catalog entry, so it carries on untouched and pays for no second
-	/// probe. Anything else is a fresh incarnation and takes a name the ladder has
-	/// never handed out.
+	/// `carry` is the published ladder a rung may carry forward from: one that
+	/// comes out identical to a rung in it keeps that rung's name and catalog
+	/// entry, so it serves on untouched and pays for no second probe. Anything
+	/// else is a fresh incarnation and takes a name the ladder has never handed
+	/// out. Pass an empty slice when every rung is retiring regardless of shape,
+	/// since a name one of them was serving can never come back.
 	///
 	/// Nothing is committed here: a probe that fails leaves the ladder exactly as
 	/// it was.
-	async fn resolve(&mut self, source_name: &str, source: &VideoConfig) -> Result<Vec<Published>, Error> {
+	async fn resolve(
+		&mut self,
+		source_name: &str,
+		source: &VideoConfig,
+		carry: &[Published],
+	) -> Result<Vec<Published>, Error> {
 		let resolved = catalog::resolve_rungs(&self.config.rungs, source_name, source)?;
 
 		let mut published = Vec::new();
 		for mut rung in resolved {
-			let reused = self.rungs.iter().find(|other| other.rung.same_shape(&rung)).cloned();
+			let reused = carry.iter().find(|other| other.rung.same_shape(&rung)).cloned();
 			let entry = match reused {
 				Some(reused) => {
 					rung.name = reused.rung.name;
@@ -161,12 +168,21 @@ impl Ladder {
 			return Ok(());
 		}
 
+		// A different track, or a different codec on the same one: every rung is
+		// decoding the wrong thing, so all of them retire whatever they resolve to
+		// and none of their names carries forward.
+		let rebuilt = name != self.name || !catalog::same_stream(&self.rendition, &rendition);
+		let carry = match rebuilt {
+			true => Vec::new(),
+			false => self.rungs.clone(),
+		};
+
 		// Resolve against the new source before committing to it, so a failure
 		// leaves the ladder exactly as it was and the next snapshot tries again.
 		// Probing opens a real encoder, and a picture this machine cannot encode at
 		// is a reason to keep serving the ladder that works, not to end the
 		// broadcast.
-		let rungs = match self.resolve(&name, &rendition).await {
+		let rungs = match self.resolve(&name, &rendition, &carry).await {
 			Ok(rungs) => rungs,
 			Err(err) => {
 				tracing::warn!(%err, source = %name, "could not resolve a ladder for the new source");
@@ -174,10 +190,7 @@ impl Ladder {
 			}
 		};
 
-		if name != self.name || !catalog::same_stream(&self.rendition, &rendition) {
-			// A different track, or a different codec on the same one: every rung
-			// is decoding the wrong thing, so retire them all and rebuild the
-			// shared decode against the new source.
+		if rebuilt {
 			for retired in self.serving.values() {
 				let _ = retired.send(true);
 			}

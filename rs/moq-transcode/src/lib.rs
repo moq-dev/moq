@@ -201,6 +201,9 @@ mod tests {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		_track: moq_net::track::Producer,
+		/// The picture the catalog currently advertises, so a republish that only
+		/// changes the description keeps it.
+		size: (u32, u32),
 	}
 
 	impl Source {
@@ -208,6 +211,17 @@ mod tests {
 		/// whatever the catalog said before. An importer does exactly this when
 		/// the picture changes size: the next keyframe's SPS is republished.
 		fn resize(&mut self, width: u32, height: u32) {
+			self.publish(width, height, None);
+		}
+
+		/// Republish the current rendition with new out-of-band parameter sets,
+		/// which is a new decode stream at the same picture.
+		fn describe(&mut self, description: Option<bytes::Bytes>) {
+			let (width, height) = self.size;
+			self.publish(width, height, description);
+		}
+
+		fn publish(&mut self, width: u32, height: u32, description: Option<bytes::Bytes>) {
 			let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 				inline: true,
 				profile: 0x42,
@@ -218,6 +232,8 @@ mod tests {
 			video.coded_height = Some(height);
 			video.bitrate = Some(1_000_000);
 			video.framerate = Some(30.0);
+			video.description = description;
+			self.size = (width, height);
 
 			let mut guard = self.catalog.lock();
 			guard.video = hang::catalog::Video::default();
@@ -236,6 +252,7 @@ mod tests {
 			broadcast,
 			catalog,
 			_track: track,
+			size: (width, height),
 		};
 		source.resize(width, height);
 		source
@@ -281,6 +298,27 @@ mod tests {
 			}
 		}
 		types
+	}
+
+	/// Write one gray 320x240 keyframe into `group`, so a fetch of it has something
+	/// to decode while the group is still open.
+	fn write_keyframe(group: &mut moq_net::group::Producer) {
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, 30);
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		encoder.keyframe();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
+			hang::container::Frame {
+				timestamp: encoded.timestamp,
+				payload: encoded.payload,
+			}
+			.write_to(group)
+			.unwrap();
+		}
 	}
 
 	/// Wrap a gray 320x240 RGBA buffer as a raw frame at `timestamp` microseconds.
@@ -340,6 +378,7 @@ mod tests {
 			broadcast,
 			catalog,
 			_track: track,
+			size: (320, 240),
 		}
 	}
 
@@ -372,6 +411,7 @@ mod tests {
 			// The producing task owns the real track producer; park a clone so
 			// the struct shape matches `source_broadcast`.
 			_track: track.clone(),
+			size: (320, 240),
 		};
 
 		let task = tokio::spawn(async move {
@@ -926,30 +966,22 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// Retiring a rung stops accepting new fetches, but a group already accepted
-	/// from the dynamic handler remains part of the track below its final sequence
-	/// and must finish cleanly.
+	/// Retiring a rung stops taking new fetches, but one already in flight has to
+	/// run to a clean end. Two things can cut it short: dropping the handler while
+	/// its request is still queued, and finishing the track at a live edge that
+	/// sits at or below the group it is about to claim (sequence 0, on a rung that
+	/// only ever served fetches).
+	///
+	/// `Consumer::fetch_group` resolves as soon as the attempt is registered, well
+	/// before `GroupRequest::accept` creates the group, so the retirement below
+	/// really does land while the fetch is still opening its decoder. Which side
+	/// of `accept` it lands on is up to the scheduler, so this catches the second
+	/// case some of the time rather than every time. It caught it in CI.
 	#[tokio::test]
 	async fn retirement_finishes_an_in_flight_fetch() {
 		let mut source = source_catalog(320, 240);
 		let mut group = source._track.create_group(0u64.into()).unwrap();
-
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, 30);
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		encoder.keyframe();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
-			hang::container::Frame {
-				timestamp: encoded.timestamp,
-				payload: encoded.payload,
-			}
-			.write_to(&mut group)
-			.unwrap();
-		}
+		write_keyframe(&mut group);
 
 		let config = Config {
 			rungs: vec![Rung::new(120, 100_000)],
@@ -1003,6 +1035,72 @@ mod tests {
 		.await
 		.expect("the accepted fetch never finished");
 		assert!(finished.is_ok(), "retirement aborted the accepted group: {finished:?}");
+
+		transcoder.abort();
+	}
+
+	/// A source whose codec description changes rebuilds the shared decode, so
+	/// every rung retires with it. The picture may not have moved at all, so shape
+	/// alone would hand the replacements the names that just ended. They have to be
+	/// fresh names for the same reason a resized rung's is.
+	#[tokio::test]
+	async fn a_rebuilt_decode_renames_every_rung() {
+		let mut source = source_catalog(320, 240);
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+		let mut retired = subscribe(&consumer, "video/120p").await;
+
+		// Same picture, new out-of-band parameter sets: the rungs still resolve to
+		// 160x120, but their decoder is rebuilt so none of them survives.
+		source.describe(Some(bytes::Bytes::from_static(&[0x01, 0x42, 0x00, 0x1e])));
+
+		let derived = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p.2")
+			}),
+		)
+		.await
+		.expect("the rebuilt decode kept the retired rung name");
+		assert!(
+			!derived.video.renditions.contains_key("video/120p"),
+			"the retired name is still advertised"
+		);
+		assert_eq!(
+			derived.video.renditions.get("video/120p.2").and_then(|v| v.coded_width),
+			Some(160),
+			"the replacement should serve the same picture under a new name"
+		);
+
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.next_group())
+			.await
+			.expect("the retired rung never ended its track")
+			.expect("the retired rung aborted instead of finishing");
+		assert!(ended.is_none(), "expected a clean end, got a group");
+		subscribe(&consumer, "video/120p.2").await;
 
 		transcoder.abort();
 	}
