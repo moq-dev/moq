@@ -80,6 +80,9 @@ pub struct MoqAnnounced {
 /// A dynamic origin handler that serves broadcast requests not resolved by an existing route.
 pub struct MoqOriginDynamic {
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
+	// This handle's share of the origin's root route, released by `cancel`
+	// itself so the last handler's cancel retracts the route before returning.
+	root: std::sync::Mutex<Option<Arc<Forwarder>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -128,8 +131,13 @@ impl Requests {
 		self.parked.lock().unwrap().pop_front().map(|(_, request)| request)
 	}
 
+	/// The origin was torn down: nothing parked can be served any more (their
+	/// requesters were already rejected), so drop it all and wake every handler
+	/// to report `Closed`.
 	fn close(&self) {
 		self.closed.store(true, std::sync::atomic::Ordering::Release);
+		let stale: Vec<_> = self.parked.lock().unwrap().drain(..).collect();
+		drop(stale);
 		self.notify.notify_waiters();
 	}
 
@@ -221,10 +229,7 @@ impl Drop for Forwarder {
 }
 
 struct OriginDynamic {
-	/// The root route, shared with the origin's other live handlers: every path
-	/// no local broadcast resolves reaches one of them. Retracted with the last.
-	_root: Arc<Forwarder>,
-	/// The queue the root and every announced prefix park into.
+	/// The queue the root route and every announced prefix park into.
 	requests: Arc<Requests>,
 }
 
@@ -236,11 +241,13 @@ impl OriginDynamic {
 			let notified = self.requests.notify.notified();
 			tokio::pin!(notified);
 			notified.as_mut().enable();
-			if let Some(request) = self.requests.pop() {
-				return Ok(Arc::new(MoqBroadcastRequest::new(request)));
-			}
+			// Closure first: a teardown drains the queue, and a pop that raced it
+			// would hand out a request whose requesters are already gone.
 			if self.requests.is_closed() {
 				return Err(MoqError::Closed);
+			}
+			if let Some(request) = self.requests.pop() {
+				return Ok(Arc::new(MoqBroadcastRequest::new(request)));
 			}
 			notified.await;
 		}
@@ -413,14 +420,14 @@ impl MoqOriginProducer {
 				}),
 			}
 		};
-		let task = root.map(|root| {
+		let task = root.as_ref().map(|_| {
 			Arc::new(Task::new(OriginDynamic {
-				_root: root,
 				requests: self.requests.clone(),
 			}))
 		});
 		Arc::new(MoqOriginDynamic {
 			task: std::sync::Mutex::new(task),
+			root: std::sync::Mutex::new(root),
 		})
 	}
 
@@ -554,6 +561,10 @@ impl MoqOriginDynamic {
 	/// last handler is cancelled the root route retracts and its pending requests
 	/// are rejected, while announced prefixes keep theirs parked.
 	pub fn cancel(&self) {
+		// The root share goes first, synchronously: as the last one it retracts
+		// the route before this returns. The task's state drops on the runtime.
+		let root = self.root.lock().unwrap().take();
+		drop(root);
 		if let Some(task) = self.task.lock().unwrap().take() {
 			task.cancel();
 		}

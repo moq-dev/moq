@@ -2010,6 +2010,57 @@ async fn two_handlers_share_root_requests() {
 	served.finish().unwrap();
 }
 
+/// Tearing the origin down ends every handler with `Closed`. A parked request
+/// keeps the origin's driver alive (its front is lifecycle work the driver
+/// drains before resolving), so the teardown never runs underneath one; the
+/// case that does happen is a live handler with nothing parked.
+#[tokio::test]
+async fn origin_teardown_closes_dynamic_handlers() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+	let dynamic = origin.dynamic();
+
+	// The last producer handle: the origin's driver resolves and tears it down.
+	drop(origin);
+	match tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the handler must observe the teardown")
+	{
+		Err(MoqError::Closed) => {}
+		Err(err) => panic!("unexpected error: {err:?}"),
+		Ok(_) => panic!("a request was handed out after the teardown"),
+	}
+	route.cancel();
+}
+
+/// Cancelling the last handler retracts the shared root route before returning.
+#[tokio::test]
+async fn last_handler_cancel_retracts_the_root_synchronously() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let first = origin.dynamic();
+	let second = origin.dynamic();
+	let inner = origin.inner().consume();
+
+	// One handler left: the root still stands, so a request queues on it.
+	first.cancel();
+	let queued = inner.request_broadcast("x").into_inner();
+	assert!(
+		queued.poll_ok(&kio::Waiter::noop()).is_pending(),
+		"the root route must still serve while a handler lives"
+	);
+	drop(queued);
+
+	// None left: the route is gone by the time cancel returns.
+	second.cancel();
+	let verdict = inner.request_broadcast("y").into_inner();
+	match verdict.poll_ok(&kio::Waiter::noop()) {
+		std::task::Poll::Ready(Err(moq_net::Error::Unroutable)) => {}
+		std::task::Poll::Ready(Err(err)) => panic!("unexpected error: {err}"),
+		std::task::Poll::Ready(Ok(_)) => panic!("resolved through a retracted route"),
+		std::task::Poll::Pending => panic!("queued on a route that cancel should have retracted"),
+	}
+}
+
 /// The sequence cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.

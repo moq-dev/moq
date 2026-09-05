@@ -862,7 +862,10 @@ mod tests {
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 
-		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		// The whole second is written before the first read: a budget keeps that
+		// backlog, where the default sheds everything the newest packet supersedes.
+		let budget = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(5));
+		let track = consumer.track("audio").unwrap().subscribe(budget).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 
 		// A second of audio, so the filter's delay is nowhere near the whole write.
