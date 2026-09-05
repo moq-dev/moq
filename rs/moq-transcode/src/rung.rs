@@ -335,10 +335,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 /// The fetch path: serve requests for specific (past) groups.
 ///
 /// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached. Retirement stops accepting new work and drains groups already
-/// accepted below the track's final sequence. Other teardown aborts them, so no
-/// source subscription or encoder session survives a failed track. A semaphore
-/// bounds how many run at once.
+/// detached. Retirement stops taking new work, serves whatever the handler
+/// already had queued, and drains every group below the track's final sequence.
+/// Other teardown aborts them, so no source subscription or encoder session
+/// survives a failed track. A semaphore bounds how many run at once.
 async fn fetches(
 	rung: &Rung,
 	dynamic: &moq_net::track::Dynamic,
@@ -379,17 +379,29 @@ async fn fetches(
 			},
 		};
 
-		let rung = rung.clone();
-		tasks.spawn(async move {
-			let _permit = permit;
-			let sequence = request.sequence();
-			if let Err(err) = fetch(rung, request).await {
-				tracing::warn!(%err, sequence, "transcode fetch failed");
-			}
-		});
+		spawn_fetch(&mut tasks, rung.clone(), request, permit);
 	}
 
 	if retired {
+		// A consumer that asked for a group before retirement is already waiting on
+		// it, whether or not this loop had reached it yet: the request queues on the
+		// dynamic handler the moment the fetch is made. Take what is queued now, so
+		// dropping the handler below does not cancel a fetch that beat retirement.
+		loop {
+			let request = tokio::select! {
+				biased;
+				request = dynamic.requested_group() => match request {
+					Ok(request) => request,
+					// The output track closed; nothing left to serve.
+					Err(_) => break,
+				},
+				// Nothing queued: everything that beat retirement is spoken for.
+				() = std::future::ready(()) => break,
+			};
+			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
+			spawn_fetch(&mut tasks, rung.clone(), request, permit);
+		}
+
 		// The track may already have declared its final sequence, but groups below
 		// that boundary remain writable. Finish every one the handler accepted, or
 		// its producer stays open and the fetch stalls forever.
@@ -404,6 +416,22 @@ async fn fetches(
 	}
 
 	Ok(())
+}
+
+/// Spawn one fetch, holding its concurrency slot for the life of the task.
+fn spawn_fetch(
+	tasks: &mut tokio::task::JoinSet<()>,
+	rung: Rung,
+	request: moq_net::track::GroupRequest,
+	permit: tokio::sync::OwnedSemaphorePermit,
+) {
+	tasks.spawn(async move {
+		let _permit = permit;
+		let sequence = request.sequence();
+		if let Err(err) = fetch(rung, request).await {
+			tracing::warn!(%err, sequence, "transcode fetch failed");
+		}
+	});
 }
 
 /// Transcode one specifically requested group, fetching it from the source.

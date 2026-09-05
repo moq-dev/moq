@@ -975,15 +975,16 @@ mod tests {
 		})
 		.await;
 
-		let mut fetched = consumer
-			.track("video/120p")
-			.unwrap()
-			.fetch_group(0, None)
-			.await
-			.unwrap();
+		// Resolving the info waits for the transcoder to accept the track, so the
+		// resize below cannot land first and retire the rung out from under a
+		// request that was never served. That is correct behavior (the rendition is
+		// gone), just not what this test is about.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.info().await.unwrap();
+		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 
-		// The output group has been accepted while its source group is still open,
-		// so retiring now has to leave the fetch running until that group ends.
+		// The fetch is queued against a source group that is still open, so retiring
+		// now has to leave it running until that group ends.
 		source.resize(160, 90);
 		tokio::time::timeout(
 			std::time::Duration::from_secs(5),
