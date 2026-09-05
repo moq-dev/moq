@@ -310,13 +310,16 @@ public:
 
 	void Push(bool valid, double value)
 	{
-		if (!valid)
-			return;
-		have_ = true;
-		latest_ = value;
-		samples_.push_back(value);
+		Sample s;
+		s.valid = valid;
+		s.value = value;
+		samples_.push_back(s);
 		while (samples_.size() > 60)
 			samples_.pop_front();
+		if (valid) {
+			have_ = true;
+			latest_ = value;
+		}
 		update();
 	}
 
@@ -339,25 +342,45 @@ protected:
 		p.setFont(f);
 		p.drawText(QRect(6, 0, labelW, height()), Qt::AlignVCenter | Qt::AlignLeft, title_);
 
-		if (samples_.size() >= 2 && plot.width() > 8 && plot.height() > 4) {
-			double lo = samples_.front();
-			double hi = samples_.front();
-			for (double v : samples_) {
-				lo = std::min(lo, v);
-				hi = std::max(hi, v);
+		size_t validCount = 0;
+		for (const Sample &s : samples_) {
+			if (s.valid)
+				validCount++;
+		}
+		if (validCount >= 2 && plot.width() > 8 && plot.height() > 4) {
+			double lo = 0;
+			double hi = 0;
+			bool haveRange = false;
+			for (const Sample &s : samples_) {
+				if (!s.valid)
+					continue;
+				if (!haveRange) {
+					lo = hi = s.value;
+					haveRange = true;
+				} else {
+					lo = std::min(lo, s.value);
+					hi = std::max(hi, s.value);
+				}
 			}
 			if (unit_ != SparkUnit::Bytes)
 				lo = 0;
 			const double span = std::max(hi - lo, 1e-9);
 			QPainterPath path;
+			bool drawing = false;
 			for (size_t i = 0; i < samples_.size(); i++) {
+				if (!samples_[i].valid) {
+					drawing = false;
+					continue;
+				}
 				const double x = plot.left() + (plot.width() * static_cast<double>(i) /
 								static_cast<double>(samples_.size() - 1));
-				const double y = plot.bottom() - (plot.height() * ((samples_[i] - lo) / span));
-				if (i == 0)
+				const double y = plot.bottom() - (plot.height() * ((samples_[i].value - lo) / span));
+				if (!drawing) {
 					path.moveTo(x, y);
-				else
+					drawing = true;
+				} else {
 					path.lineTo(x, y);
+				}
 			}
 			p.setPen(QPen(color_, 1.25));
 			p.drawPath(path);
@@ -366,15 +389,20 @@ protected:
 		p.setPen(QColor("#e0e0e0"));
 		f.setPointSize(9);
 		p.setFont(f);
-		const QString value = have_ ? FormatSpark(unit_, latest_) : QStringLiteral("—");
+		const QString value = have_ ? FormatSpark(unit_, latest_) : QStringLiteral("-");
 		p.drawText(QRect(width() - valueW - 4, 0, valueW, height()), Qt::AlignVCenter | Qt::AlignRight, value);
 	}
 
 private:
+	struct Sample {
+		bool valid = false;
+		double value = 0;
+	};
+
 	QString title_;
 	SparkUnit unit_;
 	QColor color_;
-	std::deque<double> samples_;
+	std::deque<Sample> samples_;
 	double latest_ = 0;
 	bool have_ = false;
 };
@@ -434,7 +462,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	statusFont.setBold(true);
 	status->setFont(statusFont);
 
-	const QString statsHelp = "While live: Quality encode, negotiated MoQ draft and transport. "
+	const QString statsHelp = "While live: Quality encode, negotiated MoQ draft and dial URL scheme. "
 				  "RTT / bitrate / loss live in the timeline panels.";
 	showStats = new QCheckBox("Show stats", streamPage);
 	showStats->setChecked(true);
@@ -546,7 +574,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	qualityNote->setWordWrap(true);
 	qualityNote->setStyleSheet("color: #888888;");
 	qualityNote->setText("While publishing, Stream → Show stats lists this encode, "
-			     "plus protocol and transport.");
+			     "plus protocol and dial URL scheme.");
 
 	auto *qualityLayout = new QVBoxLayout(qualityPage);
 	qualityLayout->setContentsMargins(0, 8, 0, 0);
@@ -680,6 +708,12 @@ void MoQDock::PeelJwtFromRelayUrl()
 	urlEdit->setText(url.toString());
 }
 
+static bool IsCleartextDialScheme(const QString &scheme)
+{
+	return scheme.compare(QStringLiteral("ws"), Qt::CaseInsensitive) == 0 ||
+	       scheme.compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0;
+}
+
 QString MoQDock::ConnectUrl() const
 {
 	QString text = urlEdit->text().trimmed();
@@ -693,6 +727,10 @@ QString MoQDock::ConnectUrl() const
 		const QChar sep = text.contains('?') ? '&' : '?';
 		return text + sep + "jwt=" + QUrl::toPercentEncoding(token);
 	}
+
+	// Never put a JWT on cleartext dial URLs (ws:// / http://).
+	if (IsCleartextDialScheme(url.scheme()))
+		return text;
 
 	QUrlQuery query(url);
 	query.removeAllQueryItems("jwt");
@@ -727,7 +765,9 @@ void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 	const bool haveHw = recommended.path == "hardware";
 	const bool high = recommended.high;
 
-	if (applyProfileDefaults || profile == "auto") {
+	// Only reset path when the profile itself changed. Auto must not wipe a
+	// manual Software/Hardware pick on every dependent refresh.
+	if (applyProfileDefaults) {
 		QSignalBlocker bPath(pathCombo);
 		SelectComboData(pathCombo, QString::fromStdString(recommended.path));
 	}
@@ -985,8 +1025,16 @@ bool MoQDock::CreateTranscodeEncoders()
 
 	videoEncoder = OBSEncoderAutoRelease(
 		obs_video_encoder_create(videoId.toUtf8().constData(), "moq_dock_video", videoSettings, nullptr));
-	audioEncoder = OBSEncoderAutoRelease(
-		obs_audio_encoder_create(audioId.toUtf8().constData(), "moq_dock_audio", audioSettings, 0, nullptr));
+	size_t audioMixerIdx = 0;
+	if (config_t *config = obs_frontend_get_profile_config()) {
+		int track = (int)config_get_int(config, "AdvOut", "TrackIndex");
+		if (track < 1 || track > 6)
+			track = 1;
+		audioMixerIdx = (size_t)(track - 1);
+	}
+
+	audioEncoder = OBSEncoderAutoRelease(obs_audio_encoder_create(audioId.toUtf8().constData(), "moq_dock_audio",
+								      audioSettings, audioMixerIdx, nullptr));
 	if (!videoEncoder || !audioEncoder) {
 		LOG_ERROR("Failed to create transcode encoders (%s / %s)", videoId.toUtf8().constData(),
 			  audioId.toUtf8().constData());
@@ -1020,12 +1068,23 @@ void MoQDock::StartStream()
 {
 	PeelJwtFromRelayUrl();
 
-	const std::string url = ConnectUrl().toStdString();
-	const std::string path = pathEdit->text().toStdString();
-	if (urlEdit->text().trimmed().isEmpty()) {
+	const QString relayText = urlEdit->text().trimmed();
+	if (relayText.isEmpty()) {
 		status->setText("Relay URL is required");
 		return;
 	}
+
+	const QString token = tokenEdit->text().trimmed();
+	if (!token.isEmpty()) {
+		const QUrl dial(relayText);
+		if (dial.isValid() && IsCleartextDialScheme(dial.scheme())) {
+			status->setText("Publish token requires https:// or wss:// (not cleartext ws:// or http://)");
+			return;
+		}
+	}
+
+	const std::string url = ConnectUrl().toStdString();
+	const std::string path = pathEdit->text().toStdString();
 
 	SaveSettings();
 
@@ -1152,7 +1211,7 @@ void MoQDock::UpdateStatus()
 		moq->CopyLastFailure(&failCode, &failReason);
 	const QString failText = ExplainFailure(failCode, failReason);
 
-	const bool everConnected = obs_output_get_connect_time_ms(output) > 0;
+	const bool everConnected = moq && (moq->IsLiveSession() || obs_output_get_connect_time_ms(output) > 0);
 	if (!everConnected) {
 		if (!failText.isEmpty()) {
 			status->setText(QString("● %1").arg(failText));
@@ -1167,6 +1226,16 @@ void MoQDock::UpdateStatus()
 		}
 		return;
 	}
+
+	auto pushGap = [this]() {
+		if (!showTimeline->isChecked())
+			return;
+		rttSpark->Push(false, 0);
+		sendSpark->Push(false, 0);
+		recvSpark->Push(false, 0);
+		lossSpark->Push(false, 0);
+		sentSpark->Push(false, 0);
+	};
 
 	MoQOutput::ConnectionStats stats;
 	if (!moq || !moq->TryGetConnectionStats(&stats)) {
@@ -1184,6 +1253,7 @@ void MoQDock::UpdateStatus()
 			status->setStyleSheet("color: #c0392b;");
 			if (showStats->isChecked())
 				statsBox->setText(latest);
+			pushGap();
 			return;
 		}
 
@@ -1201,6 +1271,7 @@ void MoQDock::UpdateStatus()
 			lines << (latest.isEmpty() ? QString("Offline · waiting for reconnect.") : latest);
 			statsBox->setText(lines.join('\n'));
 		}
+		pushGap();
 		return;
 	}
 
@@ -1214,8 +1285,8 @@ void MoQDock::UpdateStatus()
 			lines << publishSummary;
 		if (!stats.protocol.empty())
 			lines << QString("Protocol %1").arg(QString::fromStdString(stats.protocol));
-		if (!stats.transport.empty())
-			lines << QString("Transport %1").arg(QString::fromStdString(stats.transport));
+		if (!stats.dial.empty())
+			lines << QString("Dial %1").arg(QString::fromStdString(stats.dial));
 		statsBox->setText(lines.isEmpty() ? QString("Connected.") : lines.join('\n'));
 	}
 
@@ -1259,10 +1330,14 @@ void MoQDock::LoadSettings()
 	if (saved)
 		obs_data_apply(advanced, saved);
 
-	if (obs_data_has_user_value(data, "show_stats"))
-		showStats->setChecked(obs_data_get_bool(data, "show_stats"));
-	if (obs_data_has_user_value(data, "show_timeline"))
-		showTimeline->setChecked(obs_data_get_bool(data, "show_timeline"));
+	{
+		QSignalBlocker bStats(showStats);
+		QSignalBlocker bTimeline(showTimeline);
+		if (obs_data_has_user_value(data, "show_stats"))
+			showStats->setChecked(obs_data_get_bool(data, "show_stats"));
+		if (obs_data_has_user_value(data, "show_timeline"))
+			showTimeline->setChecked(obs_data_get_bool(data, "show_timeline"));
+	}
 
 	obs_data_t *qualityRaw = obs_data_get_obj(data, "quality");
 	if (!qualityRaw)
@@ -1270,6 +1345,11 @@ void MoQDock::LoadSettings()
 	if (qualityRaw) {
 		OBSDataAutoRelease quality(qualityRaw);
 		QSignalBlocker bToggle(qualityToggle);
+		QSignalBlocker bProfile(profileCombo);
+		QSignalBlocker bPath(pathCombo);
+		QSignalBlocker bCodec(videoCodecCombo);
+		QSignalBlocker bEnc(videoEncoderCombo);
+		QSignalBlocker bAud(audioCodecCombo);
 		const bool enabled = obs_data_get_bool(quality, "enabled");
 		qualityToggle->setChecked(enabled);
 		qualityBox->setEnabled(enabled);
@@ -1315,15 +1395,20 @@ void MoQDock::SaveSettings()
 void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 {
 	auto *self = static_cast<MoQDock *>(data);
-	long long code = calldata_int(params, "code");
+	const long long code = calldata_int(params, "code");
+	auto *stopped = static_cast<obs_output_t *>(calldata_ptr(params, "output"));
 
+	// Capture failure text from the stopped output on this thread. Do not read
+	// self->output here: a concurrent StartStream may already have replaced it.
 	int failCode = 0;
 	std::string failReason;
-	auto *moq = self->output ? static_cast<MoQOutput *>(obs_obj_get_data(self->output)) : nullptr;
+	auto *moq = stopped ? static_cast<MoQOutput *>(obs_obj_get_data(stopped)) : nullptr;
 	if (moq)
 		moq->CopyLastFailure(&failCode, &failReason);
-	if (failReason.empty() && self->output) {
-		const char *err = obs_output_get_last_error(self->output);
+	if (failReason.empty()) {
+		const char *err = calldata_string(params, "last_error");
+		if ((!err || !*err) && stopped)
+			err = obs_output_get_last_error(stopped);
 		if (err && *err)
 			failReason = err;
 	}
@@ -1332,7 +1417,10 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	// Signals arrive on an OBS thread; bounce to the Qt thread before touching widgets.
 	QMetaObject::invokeMethod(
 		self,
-		[self, code, failText]() {
+		[self, code, failText, stopped]() {
+			// A late stop for a superseded output must not tear down a newer Go Live.
+			if (stopped && self->output && static_cast<obs_output_t *>(self->output) != stopped)
+				return;
 			self->StopStream();
 			if (code == OBS_OUTPUT_SUCCESS)
 				return;

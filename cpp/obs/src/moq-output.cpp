@@ -44,9 +44,9 @@ bool IsAuthFailure(int code, const std::string &reason)
 	return lower.find("unauthorized") != std::string::npos || lower.find("forbidden") != std::string::npos;
 }
 
-// Human label for the dial URL scheme. The negotiated MoQ draft is separate
-// (moq_session_version); this is which transport carried the session.
-std::string TransportLabel(const std::string &url)
+// Dial URL scheme only. https races WebTransport vs WebSocket in moq-native;
+// libmoq does not yet expose which won, so do not invent a transport name here.
+std::string DialSchemeLabel(const std::string &url)
 {
 	const auto colon = url.find(':');
 	if (colon == std::string::npos || colon == 0)
@@ -56,16 +56,12 @@ std::string TransportLabel(const std::string &url)
 		if (c >= 'A' && c <= 'Z')
 			c = static_cast<char>(c - 'A' + 'a');
 	}
-	if (scheme == "https" || scheme == "http")
-		return "WebTransport";
 	if (scheme == "moqt" || scheme == "moql" || scheme == "quic")
-		return "QUIC";
-	if (scheme == "wss" || scheme == "ws")
-		return "WebSocket";
+		return "quic";
 	if (scheme == "tcp")
-		return "TCP";
+		return "tcp";
 	if (scheme == "unix")
-		return "Unix";
+		return "unix";
 	return scheme;
 }
 
@@ -323,12 +319,16 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		return false;
 
 	uint32_t handle;
+	uint64_t attempt;
+	std::string dialUrl;
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
+		if (session == 0)
+			return false;
 		handle = static_cast<uint32_t>(session);
+		attempt = session_attempt;
+		dialUrl = server_url;
 	}
-	if (handle == 0)
-		return false;
 
 	moq_connection_stats raw{};
 	const int32_t rc = moq_session_stats(handle, &raw);
@@ -336,6 +336,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		const char *message = moq_error();
 		const std::string next = message && *message ? message : "offline";
 		std::lock_guard<std::mutex> lock(session_mutex);
+		if (session_attempt != attempt)
+			return false;
 		// Keep a more specific prior failure (unauthorized) over a generic offline blip.
 		if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason) ||
 		    !LooksGenericOffline(next) || IsAuthFailure(rc, next)) {
@@ -359,17 +361,25 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		out->loss_valid = true;
 		out->loss_pct = 100.0 * static_cast<double>(raw.packets_lost) / static_cast<double>(raw.packets_sent);
 	}
-
-	{
-		std::lock_guard<std::mutex> lock(session_mutex);
-		out->transport = TransportLabel(server_url);
-	}
+	out->dial = DialSchemeLabel(dialUrl);
 
 	moq_string version{};
 	if (moq_session_version(handle, &version) == 0 && version.data && version.len > 0)
 		out->protocol.assign(version.data, version.len);
 
+	{
+		std::lock_guard<std::mutex> lock(session_mutex);
+		if (session_attempt != attempt || static_cast<uint32_t>(session) != handle)
+			return false;
+	}
+
 	return true;
+}
+
+bool MoQOutput::IsLiveSession()
+{
+	std::lock_guard<std::mutex> lock(session_mutex);
+	return session_connected && session != 0;
 }
 
 void MoQOutput::CopyLastFailure(int *code, std::string *reason)
@@ -408,10 +418,9 @@ void MoQOutput::SessionConnected(const SessionRef &ref, int epoch)
 		if (session_attempt != ref.attempt)
 			return;
 		session_connected = true;
-		// The dock reads this as the live connected indicator, so publish it under
-		// the same lock as the stamp check: a restart must not be able to clear it
-		// between the two and leave the old attempt's time showing.
-		connect_time_ms = ms;
+		// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
+		// Clamp sub-millisecond connects to 1 so that sentinel stays honest.
+		connect_time_ms = ms > 0 ? ms : 1;
 		session_epoch = epoch;
 		last_failure_code = 0;
 		last_failure_reason.clear();

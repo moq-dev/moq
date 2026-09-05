@@ -20,7 +20,7 @@ OBS Studio install.
   **Publish token** is optional (leave empty for public relays such as `/anon`).
   Paste a URL with `?jwt=` into Relay URL and the dock peels the token into that field.
   **Show stats** (on by default) lists the active Quality encode and negotiated
-  MoQ draft and transport. **Show timeline** is five compact sparklines (RTT,
+  MoQ draft and dial URL scheme. **Show timeline** is five compact sparklines (RTT,
   send, recv, loss, bytes sent) for the last minute, from `moq_session_stats`.
   The Stream tab keeps a libmoq version footer; the **Version** tab links plugin
   / libmoq docs plus [moq.dev](https://moq.dev) and [moq.pro](https://moq.pro).
