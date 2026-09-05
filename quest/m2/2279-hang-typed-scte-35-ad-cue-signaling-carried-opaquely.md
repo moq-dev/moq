@@ -31,10 +31,11 @@ bytes. Not a `moq-json` stream of typed records.
   contribution fidelity and additionally emits the sidecar; the exporter must
   not double-emit, and section-framed export still needs the video clock.
 
-Wire and catalog schema: a new optional section, so it lands on `main` as a
-`CatalogExt` first and in `drafts/draft-lcurley-moq-hang.md` when it is
-promoted. Cross-package sync: `rs/hang`, `js/hang`, `rs/moq-mux`,
-`doc/concept`.
+Wire and catalog schema: a new optional section, additive, so it lands on
+`main`, with `drafts/draft-lcurley-moq-hang.md` updated in the same PR as the
+schema: the draft is the normative spec, and a section Rust and JS emit must
+be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
+`rs/moq-mux`, `doc/concept`.
 
 ## Closes
 

@@ -33,6 +33,10 @@ Decide against `announce` / `announced` on `dev`, after
 [Announce handle](/quest/m1/announce-handle.md) settles the surface the
 bindings mirror.
 
+## Required
+
+- [Announce handle](/quest/m1/announce-handle.md) - the `announce` / `announced` surface the bindings mirror must be settled before the cost shape is decided against it
+
 ## Related
 
 - [#2933](https://github.com/moq-dev/moq/issues/2933) - the issue the implementing quest closes

@@ -32,8 +32,9 @@ ID), and a `TRACK_INFO` epoch, a catalog `generation`, and an epoch path
 segment were all declined in favor of the managed edge minting one per
 publisher session downstream. So `moq-hls` gains an optional generation input,
 one string per broadcast the embedder supplies, and when it is present the
-playlist and MPD renderers emit it in `init.mp4` and segment URLs and the
-export resets its window when it changes. Absent means unversioned URLs, never
+playlist renderers in `rs/moq-hls/src/export` emit it in `init.mp4` and
+segment URLs and the export resets its window when it changes. There is no
+DASH renderer in the tree, so nothing here promises an MPD. Absent means unversioned URLs, never
 a wall-clock or a relay-local counter. The cache-header half stays downstream:
 the edge restores its long `max-age` once the paths it accepts are the ones the
 renderers emit.

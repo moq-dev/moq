@@ -4,8 +4,10 @@
 
 Every built-in publisher sets `Timeline.wall` so a consumer can read when
 presentation timestamp zero happened on the publisher's clock: the moq-video
-capture publisher, the moq-cli import paths, and `js/publish`. moq-gst has its
-own quest for the same anchor.
+capture publisher, `moq_audio::encode::publish_capture` and its public
+`Producer` (an audio-only broadcast advertises a timeline too), the moq-cli
+import paths, and `js/publish`. moq-gst has its own quest for the same
+anchor.
 
 The anchor is data, not a synchronization source. Nothing in the library
 times playback against it: frame timestamps stay relative, and two machines'

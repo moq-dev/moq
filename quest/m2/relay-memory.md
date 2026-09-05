@@ -3,8 +3,7 @@
 ## Goal
 
 A relay's memory scales with what it serves, not with what the mesh knows,
-and the numbers behind that claim are current. An operator can also see how
-many routes a relay holds for a path.
+and the numbers behind that claim are current.
 
 ## Plan
 
@@ -31,12 +30,8 @@ chat-shaped traffic (one broadcast per channel or per chatter) and
 [PoP skipping](/quest/m2/pop-skipping/README.md), which triples average
 degree and adds a second, more specific route per carried broadcast.
 
-Then expose the count of routes covering a path from `origin`, next to what
-`best_server` already walks, and surface it wherever `moq-relay` reports node
-state. A count, not an iterator: the caller is a gauge, and a routes iterator
-is a much larger surface to keep stable.
-
 ## Related
 
+- [Routes per broadcast gauge](/quest/m2/route-gauge.md) - the operator-facing count, shippable on its own
 - [Group charge](/quest/m0/group-charge.md) - the group cache charges what a cached group really costs; a group holds one of the same state cells
 - [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost
