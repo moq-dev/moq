@@ -1,4 +1,4 @@
-# [S] js/watch: `<moq-watch>` fails on Firefox ESR
+# [S] js/watch: moq-watch fails on Firefox ESR
 
 ## Goal
 

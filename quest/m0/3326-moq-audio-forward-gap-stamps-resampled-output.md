@@ -21,9 +21,8 @@ codec rate, since there is no resampler otherwise.
 Track the source timestamp of the samples fed to the resampler alongside the
 samples, so `starts_at` reads the held samples' real origin instead of
 deriving it. A gap larger than the resampler's hold then produces two
-correctly stamped chunks with a hole between them, which is the shape
-[#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md)
-defines for gaps.
+correctly stamped chunks with a hole between them, which is the shape the
+`dev` gap quest for the decode path (#2981) defines for gaps.
 
 Tests: the 10 ms then 1 s case stamps the first chunk at `0`; contiguous
 packets are unchanged; the activity label follows the corrected stamp.
@@ -31,7 +30,3 @@ packets are unchanged; the activity label follows the corrected stamp.
 ## Closes
 
 - [#3326](https://github.com/moq-dev/moq/issues/3326) - close this issue when the quest finishes
-
-## Related
-
-- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - what a gap means in the decode path

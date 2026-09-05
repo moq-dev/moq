@@ -1,4 +1,4 @@
-# [S] js/watch: `MoqWatch.broadcast` exists from construction
+# [S] js/watch: MoqWatch.broadcast exists from construction
 
 ## Goal
 
