@@ -101,7 +101,7 @@ Run them after touching `cpp/obs/src/`.
 just obs test
 ```
 
-`just obs ci` runs the same tests without the sanitizer, and that is the copy which gates a merge: `obs.yml` invokes that recipe, while `just obs test` is manual like `just rs macos`. ThreadSanitizer adds the interleavings on top, needs its own build, and needs a Clang or GCC whose runtime *runs* on the host, so `just obs test` fails rather than skipping when one isn't available. On Windows run it from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer.
+`just obs ci` runs the same tests without the sanitizer, and that is the copy which gates a merge: `obs.yml` invokes that recipe, while `just obs test` is manual. ThreadSanitizer adds the interleavings on top, needs its own build, and needs a Clang or GCC whose runtime *runs* on the host, so `just obs test` fails rather than skipping when one isn't available. On Windows run it from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer.
 
 Both find the `libobs` headers the same way `just obs compile` does, and regenerate `moq.h` the same way; set `OBS_INCLUDE_DIR` to point somewhere else. That shared step asks cargo where the header landed and reads the answer with `jq`, so outside the dev shell (running from WSL, say) `jq` has to be installed alongside cargo and the compiler.
 

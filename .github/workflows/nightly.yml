@@ -10,10 +10,10 @@ name: Nightly
 # that a PR gate can't justify for how rarely it catches something. `obs` is
 # diff-independent because its PR-time counterpart can't be: obs.yml has to
 # name the paths that can break an external link to libmoq.a, and no list of
-# paths covers every one of them (see the comment there). `windows` is
-# diff-independent because what it catches is a whole target's worth of
-# `#[cfg(target_os = "windows")]` code that no Linux job compiles at all, and a
-# Windows runner is too slow to gate every PR on.
+# paths covers every one of them (see the comment there). `windows` and `macos`
+# are diff-independent because what they catch is a whole target's worth of
+# `#[cfg(target_os = ...)]` code that no Linux job compiles at all, and those
+# runners are throttled too hard to gate every PR on.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -134,3 +134,38 @@ jobs:
       - name: Check
         shell: bash
         run: just rs windows
+
+  # `just rs macos` is the only thing that compiles moq-video's VideoToolbox
+  # encode/decode and its ScreenCaptureKit / AVFoundation capture, plus
+  # moq-audio's ScreenCaptureKit system audio and its TCC permission pre-check.
+  # The Linux gate skips all of it. moq-video has a release-time backstop, since
+  # libmoq's `libmoq-v*` tag build compiles it on Apple Silicon, but moq-audio
+  # has none: libmoq and moq-ffi take it codecs-only, so no release build ever
+  # compiles its capture backend.
+  #
+  # Same shape as `windows` and for the same reasons: a separate job because it
+  # needs an Apple host and the runner-native toolchain, and no Swatinem cache
+  # because a once-a-day job shouldn't evict the Linux `target/` that every pull
+  # request restores. swift.yml already compiles moq-ffi here, so this stays
+  # scoped to the two crates holding the Apple-gated code.
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # Pinned: `--locked` fixes just's own dependencies, not which version of
+      # just cargo selects.
+      - name: Install just
+        run: cargo install --locked just@1.52.0
+
+      - name: Check
+        run: just rs macos
