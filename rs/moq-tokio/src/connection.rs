@@ -287,9 +287,10 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GoawayConfig {
-	/// What to do with the URI a peer names in its GOAWAY. Defaults to
-	/// [`Redirect::SameHost`], so a peer moves us between ports and schemes;
-	/// letting it name the host too is [`Redirect::Follow`], an opt-in.
+	/// What to do with the URI a peer names in its GOAWAY. `same-host` (the
+	/// default) lets it move us between ports and schemes on the host we already
+	/// chose, `follow` also lets it name the host, and `ignore` redials the
+	/// configured URL.
 	#[usage(
 		name = "goaway-redirect",
 		long,
