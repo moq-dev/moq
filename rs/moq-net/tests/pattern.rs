@@ -1,10 +1,10 @@
-//! Replays the golden vectors shared with `js/path`, so the two implementations agree.
+//! Replays the golden vectors shared with `js/net`, so the two implementations agree.
 
-use moq_path::{Error, Pattern, Patterns, Segment};
+use moq_net::path::{InvalidPattern, Pattern, Patterns, Segment};
 use serde_json::Value;
 
 fn vectors() -> Value {
-	serde_json::from_str(include_str!("vectors.json")).expect("vectors.json parses")
+	serde_json::from_str(include_str!("pattern.json")).expect("pattern.json parses")
 }
 
 fn pattern(text: &str) -> Pattern {
@@ -19,12 +19,12 @@ fn patterns(list: &Value) -> Patterns {
 		.collect()
 }
 
-fn error_code(err: &Error) -> &'static str {
+fn error_code(err: &InvalidPattern) -> &'static str {
 	match err {
-		Error::EmptySegment => "empty-segment",
-		Error::InvalidLiteral(_) => "invalid-literal",
-		Error::MultipleGlobstars => "multiple-globstars",
-		Error::TooManySegments => "too-many-segments",
+		InvalidPattern::EmptySegment => "empty-segment",
+		InvalidPattern::InvalidSegment(_) => "invalid-segment",
+		InvalidPattern::MultipleGlobstars => "multiple-globstars",
+		InvalidPattern::TooManySegments => "too-many-segments",
 		_ => "unknown",
 	}
 }
@@ -33,6 +33,10 @@ fn segment(value: &Value) -> Segment {
 	match value["kind"].as_str().unwrap() {
 		"literal" => Segment::Literal(value["value"].as_str().unwrap().to_string()),
 		"wildcard" => Segment::Wildcard,
+		"partial" => Segment::Partial {
+			prefix: value["prefix"].as_str().unwrap().to_string(),
+			suffix: value["suffix"].as_str().unwrap().to_string(),
+		},
 		"globstar" => Segment::Globstar,
 		other => panic!("unknown segment kind {other}"),
 	}

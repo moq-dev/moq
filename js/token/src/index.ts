@@ -9,9 +9,6 @@
  * @module
  */
 
-export type { Segment as PatternSegment, Specificity } from "@moq/path";
-/** Re-export of {@link https://jsr.io/@moq/path | @moq/path}: the path patterns grants are written in. */
-export { compareSpecificity, Pattern, PatternError, Patterns } from "@moq/path";
 export * from "./algorithm.ts";
 export * from "./claims.ts";
 export * from "./generate.ts";

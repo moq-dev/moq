@@ -6,7 +6,7 @@ Rust and TypeScript token libraries verify v0 prefix claims forever and add an
 exact v1 wire shape:
 
 ```json
-{"v":1,"root":"pid","publish":["*/chat"],"subscribe":["**/cam.hang"]}
+{"v":1,"root":"pid","publish":["*/chat"],"subscribe":["**/*.hang"]}
 ```
 
 ## Plan

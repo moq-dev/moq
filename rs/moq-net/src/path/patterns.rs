@@ -1,4 +1,4 @@
-use crate::{Error, Pattern};
+use super::{InvalidPattern, Pattern};
 
 /// A union of patterns, reduced so no member is contained by another.
 ///
@@ -60,7 +60,7 @@ impl Patterns {
 	}
 
 	/// Every member placed beneath `root`. See [`Pattern::rooted`].
-	pub fn rooted(&self, root: &str) -> Result<Self, Error> {
+	pub fn rooted(&self, root: &str) -> Result<Self, InvalidPattern> {
 		self.0.iter().map(|member| member.rooted(root)).collect()
 	}
 
@@ -77,6 +77,19 @@ impl Patterns {
 	/// Whether there are no members, so nothing matches.
 	pub fn is_empty(&self) -> bool {
 		self.0.is_empty()
+	}
+}
+
+impl serde::Serialize for Patterns {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.collect_seq(self.iter())
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for Patterns {
+	/// Reads a list and reduces it, so a persisted union is canonical after a round trip.
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Ok(Vec::<Pattern>::deserialize(deserializer)?.into_iter().collect())
 	}
 }
 
@@ -182,6 +195,12 @@ mod tests {
 		assert!(set.overlaps(&pattern("*/c")));
 		assert!(!set.overlaps(&pattern("b/d")));
 		assert!(!Patterns::new().matches(""));
+	}
+
+	#[test]
+	fn serde_round_trips_reduced() {
+		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();
+		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["**/c","a/*"]"#);
 	}
 
 	#[test]

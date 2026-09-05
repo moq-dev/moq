@@ -54,7 +54,7 @@ lookup the old `origin::Dynamic` could not provide, and it is what
 [Resolve](/quest/m2/wildcard/resolve.md) now extends rather than replaces.
 
 Route matching, by contrast, is prefix-only. The pattern matcher itself
-exists: `moq-path` (re-exported by `moq-net`) and `@moq/path` own the shared
+exists: `moq_net::path` and `@moq/net`'s `Path` module own the shared
 matching, containment, specificity, and rebasing that
 [Advertise](/quest/m2/wildcard/advertise.md) builds on.
 
@@ -71,7 +71,7 @@ field.
 
 - **One pattern: the [path-patterns](/quest/m2/path-patterns/README.md)
   dialect.** An advertisement carries the same path pattern token rules use
-  (literal or `*` segments, at most one `**`, every wildcard a whole segment),
+  (literal, `*`, or `lit*lit` segments, at most one `**`),
   matched by the same shared matcher, so nothing resembles a second grammar. Exact set-valued
   rebasing preserves every match inside a rooted view, including both the root
   and deeper residuals when `**` consumes zero or more segments.

@@ -89,7 +89,7 @@ pub mod fuzz;
 mod ietf;
 mod lite;
 mod model;
-mod path;
+pub mod path;
 mod server;
 mod session;
 mod setup;
@@ -106,9 +106,9 @@ pub use error::*;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;
-/// The path patterns grants and advertisements are written in; see [`moq_path`].
-pub use moq_path::{Pattern, Patterns};
-pub use path::*;
+pub use path::{
+	AsPath, InvalidPattern, Path, PathOwned, PathPrefixes, PathRelative, PathRelativeOwned, Pattern, Patterns,
+};
 pub use runtime::{Runtime, Timers};
 pub use server::*;
 pub use session::*;
@@ -122,6 +122,3 @@ pub use web_transport_trait;
 
 // Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
 pub use kio;
-
-// Re-export the moq-path crate for the rest of the pattern API (segments, specificity, errors).
-pub use moq_path;

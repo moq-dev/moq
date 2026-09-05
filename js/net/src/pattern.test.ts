@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, type Segment } from "./pattern.ts";
+import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, type Segment } from "./path.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
@@ -18,7 +18,7 @@ interface Vectors {
 	unionContains: { union: string[]; pattern: string; expect: boolean }[];
 }
 const vectors = JSON.parse(
-	await Bun.file(join(import.meta.dir, "../../../rs/moq-path/tests/vectors.json")).text(),
+	await Bun.file(join(import.meta.dir, "../../../rs/moq-net/tests/pattern.json")).text(),
 ) as Vectors;
 
 function errorCode(fn: () => unknown): ErrorCode | "ok" {
@@ -148,22 +148,53 @@ describe("vectors", () => {
 	});
 });
 
-// Every pattern over a, b, *, ** with up to three segments, and every path over a, b, c
-// with up to `max` segments. Small enough to enumerate, large enough that any witness a
-// structural rule could miss is inside the bound.
-function allPatterns(): Pattern[] {
-	const choices: Segment[] = [
-		{ kind: "literal", value: "a" },
-		{ kind: "literal", value: "b" },
-		{ kind: "wildcard" },
-		{ kind: "globstar" },
-	];
+// Every pattern over an alphabet of segments with up to `maxPattern` of them, and every
+// path over `parts` with up to `max` segments. Two alphabets: one exercises the segment
+// structure (globstar head and tail interplay needs three-segment patterns and
+// six-segment paths for every witness to fit), the other exercises partial segments
+// against multi-byte parts.
+interface Alphabet {
+	segments: Segment[];
+	maxPattern: number;
+	parts: string[];
+	maxPath: number;
+}
+
+const ALPHABETS: Alphabet[] = [
+	{
+		segments: [
+			{ kind: "literal", value: "a" },
+			{ kind: "literal", value: "b" },
+			{ kind: "wildcard" },
+			{ kind: "globstar" },
+		],
+		maxPattern: 3,
+		parts: ["a", "b", "c"],
+		maxPath: 6,
+	},
+	{
+		segments: [
+			{ kind: "literal", value: "a" },
+			{ kind: "literal", value: "ab" },
+			{ kind: "partial", prefix: "a", suffix: "" },
+			{ kind: "partial", prefix: "", suffix: "b" },
+			{ kind: "partial", prefix: "a", suffix: "b" },
+			{ kind: "wildcard" },
+			{ kind: "globstar" },
+		],
+		maxPattern: 2,
+		parts: ["a", "b", "ab", "ba", "aab"],
+		maxPath: 4,
+	},
+];
+
+function allPatterns(alphabet: Alphabet): Pattern[] {
 	const out = [Pattern.empty()];
 	let layer: Segment[][] = [[]];
-	for (let len = 0; len < 3; len++) {
+	for (let len = 0; len < alphabet.maxPattern; len++) {
 		const next: Segment[][] = [];
 		for (const prefix of layer) {
-			for (const choice of choices) {
+			for (const choice of alphabet.segments) {
 				const segments = [...prefix, choice];
 				try {
 					out.push(Pattern.from(segments));
@@ -178,13 +209,13 @@ function allPatterns(): Pattern[] {
 	return out;
 }
 
-function allPaths(max: number): string[] {
+function allPaths(alphabet: Alphabet, max: number): string[] {
 	const out = [""];
 	let layer: string[][] = [[]];
 	for (let len = 0; len < max; len++) {
 		const next: string[][] = [];
 		for (const prefix of layer) {
-			for (const part of ["a", "b", "c"]) {
+			for (const part of alphabet.parts) {
 				const parts = [...prefix, part];
 				out.push(parts.join("/"));
 				next.push(parts);
@@ -200,58 +231,73 @@ function joinPath(root: string, rel: string): string {
 }
 
 describe("exhaustive", () => {
-	const patterns = allPatterns();
-
 	test("contains and overlaps agree with matching", () => {
-		const paths = allPaths(6);
-		for (const a of patterns) {
-			for (const b of patterns) {
-				const contains = paths.every((p) => !b.matches(p) || a.matches(p));
-				expect(a.contains(b), `${a} contains ${b}`).toBe(contains);
-				const overlaps = paths.some((p) => a.matches(p) && b.matches(p));
-				expect(a.overlaps(b), `${a} overlaps ${b}`).toBe(overlaps);
-				if (contains && !b.contains(a)) {
-					expect(compareSpecificity(a.specificity(), b.specificity()), `${a} ranks below ${b}`).toBeLessThan(
-						0,
-					);
+		for (const alphabet of ALPHABETS) {
+			const patterns = allPatterns(alphabet);
+			const paths = allPaths(alphabet, alphabet.maxPath);
+			// Which paths each pattern matches, computed once so the pairwise checks
+			// compare tables instead of re-matching strings.
+			const table = patterns.map((pattern) => paths.map((p) => pattern.matches(p)));
+			for (const [i, a] of patterns.entries()) {
+				for (const [j, b] of patterns.entries()) {
+					let contains = true;
+					let overlaps = false;
+					for (let k = 0; k < paths.length; k++) {
+						if (table[j][k] && !table[i][k]) contains = false;
+						if (table[i][k] && table[j][k]) overlaps = true;
+					}
+					expect(a.contains(b), `${a} contains ${b}`).toBe(contains);
+					expect(a.overlaps(b), `${a} overlaps ${b}`).toBe(overlaps);
+					if (contains && !b.contains(a)) {
+						expect(
+							compareSpecificity(a.specificity(), b.specificity()),
+							`${a} ranks below ${b}`,
+						).toBeLessThan(0);
+					}
 				}
 			}
 		}
 	});
 
 	test("rebase matches exactly what lies beneath the root", () => {
-		const relative = allPaths(4);
-		for (const pattern of patterns) {
-			for (const root of allPaths(3)) {
-				const rebased = pattern.rebase(root);
-				for (const rel of relative) {
-					expect(rebased.matches(rel), `${pattern} at ${root} on ${rel}`).toBe(
-						pattern.matches(joinPath(root, rel)),
-					);
+		for (const alphabet of ALPHABETS) {
+			const relative = allPaths(alphabet, 3);
+			for (const pattern of allPatterns(alphabet)) {
+				for (const root of allPaths(alphabet, 2)) {
+					const rebased = pattern.rebase(root);
+					for (const rel of relative) {
+						expect(rebased.matches(rel), `${pattern} at ${root} on ${rel}`).toBe(
+							pattern.matches(joinPath(root, rel)),
+						);
+					}
 				}
 			}
 		}
 	});
 
 	test("rooted inverts rebase", () => {
-		for (const pattern of patterns) {
-			for (const root of allPaths(2)) {
-				const rooted = pattern.rooted(root);
-				expect(rooted.rebase(root).contains(pattern), `${pattern} under ${root}`).toBe(true);
-				for (const p of allPaths(3)) {
-					expect(rooted.matches(joinPath(root, p)), `${rooted} on ${joinPath(root, p)}`).toBe(
-						pattern.matches(p),
-					);
+		for (const alphabet of ALPHABETS) {
+			for (const pattern of allPatterns(alphabet)) {
+				for (const root of allPaths(alphabet, 2)) {
+					const rooted = pattern.rooted(root);
+					expect(rooted.rebase(root).contains(pattern), `${pattern} under ${root}`).toBe(true);
+					for (const p of allPaths(alphabet, 3)) {
+						expect(rooted.matches(joinPath(root, p)), `${rooted} on ${joinPath(root, p)}`).toBe(
+							pattern.matches(p),
+						);
+					}
 				}
 			}
 		}
 	});
 
 	test("text round trips", () => {
-		for (const pattern of patterns) {
-			expect(Pattern.parse(pattern.text).equals(pattern)).toBe(true);
-			expect(Pattern.from(pattern.segments).equals(pattern)).toBe(true);
-			expect(JSON.parse(JSON.stringify(pattern))).toBe(pattern.text);
+		for (const alphabet of ALPHABETS) {
+			for (const pattern of allPatterns(alphabet)) {
+				expect(Pattern.parse(pattern.text).equals(pattern)).toBe(true);
+				expect(Pattern.from(pattern.segments).equals(pattern)).toBe(true);
+				expect(JSON.parse(JSON.stringify(pattern))).toBe(pattern.text);
+			}
 		}
 	});
 });
@@ -266,7 +312,7 @@ describe("random text", () => {
 			state ^= state << 5;
 			return state >>> 0;
 		};
-		const pieces = ["a", "b", "*", "**", "/", "", "a*", ".hang", "//"];
+		const pieces = ["a", "b", "*", "**", "/", "", "a*", ".hang", "//", "*."];
 		for (let i = 0; i < 20_000; i++) {
 			const len = next() % 8;
 			let text = "";

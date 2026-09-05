@@ -21,7 +21,3 @@ pub use error::*;
 pub use key::*;
 pub use key_id::*;
 pub use set::*;
-
-pub use moq_path;
-/// The path patterns grants are written in; see [`moq_path`] for the rest of the API.
-pub use moq_path::{Pattern, Patterns};

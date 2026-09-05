@@ -35,7 +35,7 @@ The state has a home already. Since
 extension point a pattern type slots into: matching is segment-wise
 intersection in one place, so a pattern extends `Prefix` internally without
 touching `Route` or any signature. Teach `Prefix` the dialect the shared
-matcher (`moq_path::Pattern`, re-exported by `moq-net`) provides rather than
+matcher (`moq_net::path::Pattern`) provides rather than
 adding a parallel table beside it. The set stays small either way (one entry per
 advertiser per service, not per broadcast).
 
