@@ -40,10 +40,14 @@ caller passes `cut(Some(end))`.
   of a sticky `end`; the audio terminal phase goes; js/hang and js/watch
   follow. The fragmenter and the HLS export use the boundary for the trailing
   sample.
-- Compatibility: released video consumers already skip empty frames, since
-  only the audio decoder reads `end()`, so a new publisher is safe against an
-  old player, and a new consumer still skips an audio marker from an old
-  publisher. This lands on main.
+- Compatibility: released legacy video consumers already skip empty frames,
+  since only the audio decoder reads `end()`, so a legacy publisher is safe
+  against an old player, and a new consumer still skips an audio marker from
+  an old publisher. Released LOC consumers (`rs/moq-mux/src/container/loc`,
+  `js/loc`) submit an empty payload to the decoder, so this quest lands the
+  LOC consumer-side skip only; LOC producers start writing the marker in
+  [LOC duration marker](/quest/m2/loc-duration-marker.md) once skipping
+  consumers have shipped. This lands on main.
 - Tests: a group's last frame carries the marker's duration through fmp4
   export and HLS; an audio track end has no marker and plays out; an old-style
   audio marker is skipped; CMAF is unchanged.
@@ -54,3 +58,4 @@ caller passes `cut(Some(end))`.
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - the forward-only rule the boundary sits under
 - [Timeline](/quest/m1/archive/timeline.md) - the archive index that wants honest final durations
 - [#3326](/quest/m0/3326-moq-audio-held-resampler-frames-keep-their-source-timestamp.md) - covers the terminal phase this quest removes
+- [LOC duration marker](/quest/m2/loc-duration-marker.md) - the LOC producer half, gated on a release

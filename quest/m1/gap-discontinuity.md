@@ -38,6 +38,11 @@ never sees the marker and the reset is lost end to end (#3291).
   [duration marker](/quest/m2/duration-marker.md); audio from its
   codec-defined frame durations. An empty group is permitted and carries no
   meaning. Group sequences stay free to be non-sequential.
+  A contiguous boundary is what every ordinary group boundary already is:
+  the keyframe that opens the next group resets prediction state and carries
+  its parameter sets, and a codec config change rides the catalog, so an
+  encoder replacement on a continuous clock needs nothing more. A publisher
+  that wants the consumer to re-apply startup delay presents a hole.
 - Consumers, both languages: `discontinuity()` bumps when the delivered
   sequence advances by more than one and the boundary is not contiguous
   (`ptsContiguous` in the js consumer is the shape, now exact rather than

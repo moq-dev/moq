@@ -36,6 +36,7 @@ can act on. Each still carries its own plan and regression test.
 - [Processor](/quest/m2/processor/README.md) - a customer-run worker publishes an on-demand contribution with scoped access
 - [Timeline wall](/quest/m2/timeline-wall.md) - every built-in publisher anchors its timeline to wall time; the anchor is data, never a sync source
 - [Duration marker](/quest/m2/duration-marker.md) - a video group ends with an empty frame that closes its last frame's duration; audio never writes one
+- [LOC duration marker](/quest/m2/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: a timeline consumer exposes the wall anchor, and the library never syncs playback on it
 - [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues ride a per-rendition sidecar a player can act on
 - [Caption import](/quest/m2/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
