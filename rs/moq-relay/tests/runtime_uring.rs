@@ -353,9 +353,8 @@ async fn an_mtls_client_authenticates_without_a_token() {
 /// `quic.qlog` captures traces from the io_uring workers, the same as it does
 /// from the tokio ones.
 ///
-/// The setting used to be refused outright here, so a congestion-control or
-/// stall investigation had to move to a different runtime, and therefore a
-/// different data path, to get a trace of the path it was investigating.
+/// A real session keeps both trace writers active through worker shutdown, so
+/// the test covers capture on the io_uring data path and the final flush.
 #[cfg(feature = "qlog")]
 #[tokio::test]
 async fn uring_workers_write_qlog_traces() {
