@@ -862,10 +862,12 @@ mod tests {
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 
+		// A whole second goes out before the first read, so the default budget of zero
+		// would shed all but the last packet and the first PTS read would be the tail's.
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 			.await
 			.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);

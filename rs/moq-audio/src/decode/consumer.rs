@@ -480,8 +480,6 @@ mod tests {
 	use crate::Format;
 	use crate::encode::{Encoder, Input, Options, Producer};
 
-	const TEST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
-
 	#[tokio::test]
 	async fn remixes_mono_stream_to_stereo_output() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -745,9 +743,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
+			// These tests publish a whole track up front and read it back afterwards,
+			// so every packet but the last is already old by the time the consumer
+			// looks. The default budget is zero, which sheds all of them.
 			Config {
 				sample_rate: Some(out_rate),
-				max_age: TEST_MAX_AGE,
+				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
 		)
@@ -868,7 +869,7 @@ mod tests {
 			&catalog,
 			"audio",
 			Config {
-				max_age: TEST_MAX_AGE,
+				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
 		)
@@ -963,7 +964,7 @@ mod tests {
 			&catalog,
 			"audio",
 			Config {
-				max_age: TEST_MAX_AGE,
+				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
 		)
