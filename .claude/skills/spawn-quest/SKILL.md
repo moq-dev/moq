@@ -40,12 +40,19 @@ conflating the two strands a quest forever:
   branch. A same-named local ref at an older or divergent tip is what a plain
   checkout picks, and the lease only asserts the remote's old value, not that
   the pushed history contains it, so rebasing that local ref and pushing it
-  would drop the remote-only commits while the lease passes. The agent resets
-  to the inspected SHA (`git checkout -B <branch> <sha>`) before rebasing onto
-  the base. It still claims, with a fresh UUID placeholder pushed under a lease
-  pinned to that SHA: two runs adopting the same branch would otherwise both
-  skip the claim, and a rebase that changes nothing gives neither of them the
-  rejected push that decides the race.
+  would drop the remote-only commits while the lease passes.
+
+  The agent resets to that SHA with `git checkout -B <branch> <sha>` before
+  rebasing onto the base, and only when `git merge-base --is-ancestor <local> <sha>` holds. When it does not, the local ref carries commits the remote does
+  not, and resetting would trade the remote-loss bug for a local one, so leave
+  the ref alone and treat the quest as claimed.
+
+  It still claims, pushing a fresh UUID placeholder as `git push --force-with-lease=<branch>:<sha> origin HEAD:refs/heads/<branch>`. Spell the
+  lease out: a bare `--force-with-lease` takes its expected value from the
+  remote-tracking ref that the fetch just updated, so it asserts nothing. Two
+  runs adopting the same branch would otherwise both skip the claim, and a
+  rebase that changes nothing gives neither of them the rejected push that
+  decides the race.
 - **Checked out in a worktree, or carrying an open PR.** Treat the quest as
   claimed and take it out of the pool.
 
@@ -83,9 +90,10 @@ itself. Instruct it to:
   it with an empty placeholder commit whose message contains a freshly
   generated UUID, pushed immediately with `git push origin HEAD` after
   pointing the upstream at the base. When triage hands over an existing branch to
-  continue, reset to the SHA triage inspected (`git checkout -B <branch> <sha>`), rebase onto the base, and claim it the same way, pushing the
-  placeholder with `--force-with-lease` pinned to that SHA, so a second adopter
-  loses the race rather than joining it. The UUID is what makes the claim a race:
+  continue, reset to the SHA triage inspected, rebase onto the base, and claim
+  it with the same explicit lease (`--force-with-lease=<branch>:<sha>`, pushing
+  `HEAD:refs/heads/<branch>`), so a second adopter loses the race rather than
+  joining it. The UUID is what makes the claim a race:
   two agents claiming the same quest from the same base in the same second
   otherwise produce the same commit object, and the loser's push succeeds as
   already-up-to-date instead of being rejected. A rejected push lost the race:
