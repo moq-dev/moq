@@ -67,6 +67,7 @@ can act on. Each still carries its own plan and regression test.
 - [Cluster flags](/quest/m2/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
 - [Plan: revalidation updates](/quest/m2/plan-revalidation-updates.md) - settle which fields an auth re-check may update on a live session and which force a reconnect
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
+- [cpal release](/quest/m2/cpal-release.md) - a cpal release that emits errors from its real-time paths without allocating
 - [#3247](/quest/m2/3247-moq-audio-cpal-allocates-on-the-audio-thread.md) - moq-audio: cpal allocates and frees on the audio thread when it reports a stream error
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
