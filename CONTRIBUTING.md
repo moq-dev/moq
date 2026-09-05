@@ -63,6 +63,12 @@ Reply to review comments as you address them, saying what changed or why you dis
 
 When reviewing a PR, always include the same public API changes list described above, and call out anything breaking per [Branch Targeting](#branch-targeting).
 
+Don't silently drop a real finding just because it's pre-existing or outside
+the PR's diff. If the review surfaces a genuine problem (a bug, a footgun, a
+convention the repo now violates) that you're not fixing in this PR, CREATE OR
+UPDATE A QUEST for it (see [quest/AGENTS.md](quest/AGENTS.md)). "Out of scope"
+is a reason to defer the fix, never a reason to forget it.
+
 ## Releases
 
 - **Rust**: release-plz opens release PRs and publishes to crates.io on merge to `main` (`release-rs.yml`). `moq-relay` and `moq-cli` take patch bumps even for breaking changes (no external consumers yet). `moq-cli` is the one crate bumped by hand, in a dedicated chore PR rather than a feature PR, since release-plz can't see CLI surface changes.
