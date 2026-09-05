@@ -21,9 +21,8 @@
 //! Frames are the unit rather than wall-clock time, because the two only agree
 //! on the live path. A group fetch encodes seconds of media in milliseconds, and
 //! a subscriber attached to a stalled source holds a pipeline open for minutes
-//! while producing nothing; counting frames is right in both. Use
-//! [`Rendition::media_duration`] when the bill is media time: it stays correct
-//! when the source changes framerate under a same-named rung.
+//! while producing nothing; counting frames is right in both. Media seconds, if
+//! that is the bill, are [`Rendition::frames`] over [`Rendition::framerate`].
 //!
 //! A rendition counts as encoding from its first encoded frame, not from the
 //! moment a consumer asked, for the same reason.
@@ -58,32 +57,32 @@ pub struct Rendition(Arc<Meter>);
 impl Rendition {
 	fn new(rung: &Resolved) -> Self {
 		Self(Arc::new(Meter {
-			name: rung.name.clone(),
-			counts: kio::Lock::new(Counts::new(rung)),
+			rung: rung.clone(),
+			counts: kio::Lock::new(Counts::default()),
 		}))
 	}
 
 	/// The rendition/track name, e.g. `video/360p`.
 	pub fn name(&self) -> &str {
-		&self.0.name
+		&self.0.rung.name
 	}
 
 	/// The output resolution, derived from the source aspect ratio.
 	///
-	/// Follows the source: a source that changes resolution mid-stream resizes
-	/// the ladder under it, so read this when you use it rather than caching it.
+	/// Fixed for the life of the rendition: a source that resizes the ladder
+	/// under it retires this rung and publishes the replacement under a new name.
 	pub fn size(&self) -> moq_video::Size {
-		self.0.counts.lock().size
+		self.0.rung.size
 	}
 
 	/// The target bitrate, in bits per second.
 	pub fn bitrate(&self) -> u64 {
-		self.0.counts.lock().bitrate
+		self.0.rung.bitrate
 	}
 
 	/// The output framerate, inherited from the source.
 	pub fn framerate(&self) -> u32 {
-		self.0.counts.lock().framerate
+		self.0.rung.framerate
 	}
 
 	/// How many frames this rendition has encoded, over every pipeline.
@@ -91,8 +90,9 @@ impl Rendition {
 	/// This is the meter to bill: monotonic, never reset, and counting what was
 	/// produced rather than how long a pipeline stayed alive, so a group fetch
 	/// and a live session are charged the same way. Subtracting two reads bills
-	/// the span between them. Use [`media_duration`](Self::media_duration) when the
-	/// rate can change. Frames that failed to reach the output group are not counted.
+	/// the span between them, and `frames / framerate` is the media seconds that
+	/// reached consumers. Frames that failed to reach the output group are not
+	/// counted.
 	pub fn frames(&self) -> u64 {
 		self.0.counts.lock().frames
 	}
@@ -104,34 +104,11 @@ impl Rendition {
 		self.0.counts.lock().bytes
 	}
 
-	/// How much media time this rendition has encoded, over every pipeline.
-	///
-	/// Unlike dividing [`frames`](Self::frames) by [`framerate`](Self::framerate),
-	/// this remains correct when the source changes framerate mid-stream. A
-	/// pipeline banks its frames at the rate it was opened with, including one
-	/// finishing a group after the ladder has already moved to a new rate.
-	pub fn media_duration(&self) -> std::time::Duration {
-		self.0.counts.lock().media_duration
-	}
-
 	/// Bank encoded output. Called on the writing path, off the cursor's lock.
-	fn produced(&self, frames: u64, bytes: u64, framerate: u32) {
+	fn produced(&self, frames: u64, bytes: u64) {
 		let mut counts = self.0.counts.lock();
 		counts.frames += frames;
 		counts.bytes += bytes;
-		counts.media_duration = counts.media_duration.saturating_add(frame_duration(frames, framerate));
-	}
-
-	/// Adopt a re-resolved geometry, keeping the totals.
-	///
-	/// A rung retired and re-admitted at a new size under the same name is the
-	/// same rendition to a caller billing it, so the counters carry across while
-	/// the geometry follows the source.
-	fn resize(&self, rung: &Resolved) {
-		let mut counts = self.0.counts.lock();
-		counts.size = rung.size;
-		counts.bitrate = rung.bitrate;
-		counts.framerate = rung.framerate;
 	}
 }
 
@@ -145,49 +122,17 @@ impl std::fmt::Debug for Rendition {
 }
 
 struct Meter {
-	/// The track name, which keys the ladder and so never moves.
-	name: String,
+	rung: Resolved,
 	counts: kio::Lock<Counts>,
 }
 
 /// Everything a caller bills against, behind one lock the cursors never touch.
+#[derive(Default)]
 struct Counts {
-	/// The output resolution, which follows the source.
-	size: moq_video::Size,
-	/// The target bitrate, in bits per second.
-	bitrate: u64,
-	/// The output framerate, inherited from the source.
-	framerate: u32,
 	/// Frames written to the output track.
 	frames: u64,
 	/// Bytes of encoded bitstream written to the output track.
 	bytes: u64,
-	/// Media time encoded at each pipeline's own framerate.
-	media_duration: std::time::Duration,
-}
-
-impl Counts {
-	fn new(rung: &Resolved) -> Self {
-		Self {
-			size: rung.size,
-			bitrate: rung.bitrate,
-			framerate: rung.framerate,
-			frames: 0,
-			bytes: 0,
-			media_duration: std::time::Duration::ZERO,
-		}
-	}
-}
-
-/// Convert a frame count at one fixed rate without floating-point drift.
-fn frame_duration(frames: u64, framerate: u32) -> std::time::Duration {
-	if framerate == 0 {
-		return std::time::Duration::ZERO;
-	}
-	let rate = u64::from(framerate);
-	let seconds = frames / rate;
-	let nanos = ((frames % rate) * 1_000_000_000 / rate) as u32;
-	std::time::Duration::new(seconds, nanos)
 }
 
 /// One rendition's entry in the shared ladder.
@@ -225,17 +170,13 @@ impl Producer {
 	/// Publish the resolved ladder, so a cursor holds every handle before any
 	/// rung can encode.
 	///
-	/// Called again whenever the source resizes the ladder. A rung that survives
-	/// under a new geometry keeps its handle and its totals; a rung the new
-	/// picture has no room for keeps both too, since the bill for what it already
-	/// encoded outlives it.
+	/// Called again whenever the source resizes the ladder. A rung re-resolved
+	/// under a new picture is a new name and so a new handle; the retired one
+	/// keeps its own, since the bill for what it already encoded outlives it.
 	pub(crate) fn declare<'a>(&self, rungs: impl IntoIterator<Item = &'a Resolved>) {
 		let Ok(mut state) = self.state.write() else { return };
 		for rung in rungs {
-			// Only the ladder resizes a handle. A rung task outliving its own
-			// retirement still attaches with the geometry it was serving, and
-			// must not drag the entry back to it.
-			state.entry(rung).rendition.resize(rung);
+			state.entry(rung);
 		}
 	}
 
@@ -256,7 +197,6 @@ impl Producer {
 		Guard {
 			state: self.state.clone(),
 			rendition,
-			framerate: rung.framerate,
 			producing: AtomicBool::new(false),
 		}
 	}
@@ -287,9 +227,6 @@ impl State {
 pub(crate) struct Guard {
 	state: kio::Producer<State>,
 	rendition: Rendition,
-	/// The rate this pipeline opened with, which may differ from the ladder by
-	/// the time its last group finishes.
-	framerate: u32,
 	/// Whether this pipeline has produced a frame, so it is counted in the
 	/// rendition's refs and has to take itself back out on drop. Atomic rather
 	/// than a `Cell` only so a `&Guard` can cross an `.await` in a spawned task.
@@ -306,7 +243,7 @@ impl Guard {
 		if frames == 0 {
 			return;
 		}
-		self.rendition.produced(frames, bytes, self.framerate);
+		self.rendition.produced(frames, bytes);
 
 		if self.producing.swap(true, Ordering::Relaxed) {
 			return;
@@ -429,6 +366,7 @@ mod tests {
 	fn resolved(name: &str, height: u32) -> Resolved {
 		Resolved {
 			name: name.to_string(),
+			height,
 			size: moq_video::Size::new(height * 16 / 9, height),
 			bitrate: 100_000,
 			framerate: 30,
@@ -458,43 +396,6 @@ mod tests {
 
 		drop(guard);
 		assert!(!cursor.next().await.unwrap().encoding);
-	}
-
-	/// A source that resizes re-resolves the ladder, and a rung of the same name
-	/// comes back at a new size. The handle a caller is already holding has to
-	/// follow it, or it bills the geometry the rung stopped encoding, while the
-	/// totals it accrued have to survive the move. Media time is banked at each
-	/// pipeline's own rate, including one finishing after the move.
-	#[tokio::test]
-	async fn a_redeclared_rung_follows_the_ladder() {
-		let active = Producer::default();
-		let before = resolved("video/360p", 360);
-		active.declare(std::slice::from_ref(&before));
-
-		let mut cursor = active.consume();
-		let rendition = cursor.next().await.unwrap().rendition;
-		let stale = active.attach(&before);
-		stale.produced(30, 1_000);
-
-		let mut after = resolved("video/360p", 360);
-		after.size = moq_video::Size::new(480, 360);
-		after.framerate = 60;
-		active.declare(std::slice::from_ref(&after));
-		let current = active.attach(&after);
-		current.produced(60, 1_000);
-		// The retired pipeline rides its group out at the rate it opened with.
-		stale.produced(30, 1_000);
-
-		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
-		assert_eq!(rendition.framerate(), 60);
-		assert_eq!(rendition.frames(), 120, "the resize reset the bill");
-		assert_eq!(rendition.media_duration(), std::time::Duration::from_secs(3));
-
-		// A rung task outliving its own retirement must not drag the ladder's
-		// current geometry backwards.
-		assert_eq!(rendition.size(), moq_video::Size::new(480, 360));
-		drop(current);
-		drop(stale);
 	}
 
 	/// A pipeline is billable when it produces, not when it attaches: a viewer

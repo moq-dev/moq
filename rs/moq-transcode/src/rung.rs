@@ -651,6 +651,7 @@ mod tests {
 	fn write_banks_the_frames_that_reached_the_group() {
 		let rung = Resolved {
 			name: "video/120p".to_string(),
+			height: 120,
 			size: moq_video::Size::new(160, 120),
 			bitrate: 100_000,
 			framerate: 30,

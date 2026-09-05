@@ -757,6 +757,77 @@ mod tests {
 	///
 	/// `moq_video::encode::publish_capture` opens its source twice by design (once
 	/// to probe the mode, once when the first subscriber arrives), and a window
+	/// A source that changes aspect ratio keeps every rung height while moving
+	/// every rung width, so a rung retires and its replacement serves the same
+	/// height. That replacement must not reuse the retired track's name: a clean
+	/// end is terminal, and a relay keeps the finished logical track (only an
+	/// *aborted* one is dropped and requested again), so a subscriber asking for
+	/// the old name would get its EOF forever and never reach the transcoder.
+	#[tokio::test]
+	async fn a_resized_rung_takes_a_fresh_name() {
+		let mut source = source_catalog(640, 360);
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+		assert_eq!(
+			derived.video.renditions.get("video/120p").and_then(|v| v.coded_width),
+			Some(212),
+			"640x360 should give 120p a 212 wide picture"
+		);
+		let mut retired = subscribe(&consumer, "video/120p").await;
+
+		// Same height, wider pixels: 120p stays 120 tall and goes from 212 to 160.
+		source.resize(480, 360);
+
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			!snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+		let replacement = derived
+			.video
+			.renditions
+			.get("video/120p.2")
+			.expect("the resized rung was not republished under a fresh name");
+		assert_eq!(replacement.coded_width, Some(160));
+		assert_eq!(replacement.coded_height, Some(120));
+
+		// The retired name ends cleanly, and the replacement is a track the
+		// transcoder has never finished, so it serves.
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), retired.next_group())
+			.await
+			.expect("the retired rung never ended its track")
+			.expect("the retired rung aborted instead of finishing");
+		assert!(ended.is_none(), "expected a clean end, got a group");
+
+		// The replacement is a track the transcoder has never finished, so it serves.
+		subscribe(&consumer, "video/120p.2").await;
+
+		transcoder.abort();
+	}
+
 	/// capture derives its geometry from the window on each open, so the picture a
 	/// transcoder advertises a ladder for is routinely not the one it ends up
 	/// carrying. The rungs that no longer fit have to retire, the ones that still
@@ -911,8 +982,8 @@ mod tests {
 			.await
 			.unwrap();
 
-		// The output group has been accepted, but its source group is still open.
-		// Retiring now used to drop the fetch JoinSet and abort this group.
+		// The output group has been accepted while its source group is still open,
+		// so retiring now has to leave the fetch running until that group ends.
 		source.resize(160, 90);
 		tokio::time::timeout(
 			std::time::Duration::from_secs(5),

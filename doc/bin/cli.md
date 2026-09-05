@@ -463,9 +463,11 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang transco
 
 The ladder is sized against the source picture, and follows it: a source that
 changes resolution mid-stream (a window capture renegotiated by a resize, a
-publisher reconnecting at a new size) resolves the rungs again. Rungs the new
-picture has no room for finish their tracks, so a viewer on one reselects the
-way it would on any other rendition change; rungs that still fit keep serving.
+publisher reconnecting at a new size) resolves the rungs again. Rungs that still
+fit keep serving. A rung the new picture has no room for finishes its track, as
+does one whose own picture moved, and the latter is republished under a new name
+(`video/360p.2`). So a viewer on either reselects the way it would on any other
+rendition change.
 
 Windows uses the Direct3D11 video processor by default. Pass
 `--resize-acceleration cpu` to force frames through CPU resizing.
