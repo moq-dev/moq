@@ -79,11 +79,6 @@ already taken while it was outstanding; a
 session close mid-group counts as dropped; two subscriptions of one broadcast
 sum into one row; the aggregate consumer sums two nodes bucket by bucket.
 
-## Closes
-
-- [#2733](https://github.com/moq-dev/moq/issues/2733) - close this issue when
-  the quest finishes
-
 ## Related
 
 - [Starvation at frame granularity](/quest/m2/qos/starvation-frames.md) -

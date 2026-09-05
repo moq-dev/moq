@@ -422,9 +422,9 @@ fix-changed $FILES:
 # builds vendored C++ that needs an MSVC toolchain and openh264 is a
 # non-optional dependency.
 #
-# Windows runners cost too much for a per-PR gate, so nightly.yml runs this
-# once a day instead. A break there lands on main rather than being caught in
-# review, which is the same trade the other nightly gates make.
+# Windows runners are throttled too hard for a per-PR gate, so nightly.yml runs
+# this once a day instead. A break there lands on main rather than being caught
+# in review, which is the same trade the other nightly gates make.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
 # backend don't build on MSVC, while moq-video's Linux-only `nvidia` default
@@ -459,11 +459,11 @@ uring *args:
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
 # plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
 #
-# Nothing in CI runs this either; Mac runners cost too much for a per-PR gate.
-# The moq-video half has a release-time backstop, since libmoq's `libmoq-v*` tag
-# build compiles it on Apple Silicon. The moq-audio half has none: libmoq and
-# moq-ffi take it codecs-only, so no release build compiles its capture
-# backend and this recipe is the only thing that ever does.
+# Same trade as `windows`: nightly.yml runs this once a day rather than gating a
+# merge on a Mac runner. The moq-video half also has a release-time backstop,
+# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
+# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
+# build compiles its capture backend and this recipe is the only thing that does.
 #
 # Scoped to those two crates instead of the workspace, because they hold all
 # the Apple-gated code the Linux gate misses. moq-ffi (and through it the

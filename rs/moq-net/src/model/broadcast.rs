@@ -115,6 +115,22 @@ impl BroadcastState {
 		}
 	}
 
+	/// Resolve every name the broadcast never filled, so subscribers waiting on a
+	/// [`track::Info`] that can no longer arrive fail with `err` instead of parking.
+	///
+	/// Covers a reservation nobody accepted, a request handed to a [`Dynamic`] that
+	/// never answered it, and one still queued for a handler. A track that carries
+	/// its info has a publisher and is left alone: an end there is that publisher's
+	/// call, and its cache stays readable.
+	fn reject_unserved(&mut self, err: Error) {
+		for request in self.requests.drain_queued() {
+			request.reject(err.clone());
+		}
+		for track in self.tracks.iter() {
+			track.reject(err.clone());
+		}
+	}
+
 	/// Live demand: a subscribed spliced track (route-fed broadcast), or a
 	/// pending request / consumed track (ordinary broadcast). See [`Demand`].
 	fn is_used(&self) -> bool {
@@ -281,6 +297,10 @@ impl Producer {
 	/// the producer can't pick the track's properties (e.g. timescale) until it has
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`Dynamic::requested_track`].
+	///
+	/// Subscribers wait on the name until it is accepted, so a reservation the producer
+	/// ends up never filling has to be dropped or rejected. Ending the broadcast
+	/// ([`Self::finish`] or [`Self::abort`]) resolves whatever is left.
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let request = track::Request::new(self.info.clone(), name).with_stats(self.stats.clone());
 		self.state.lock().insert_track(request.weak())?;
@@ -371,6 +391,10 @@ impl Producer {
 	/// new tracks are served, whether or not other producer clones are still alive.
 	/// Existing tracks stay readable so consumers can drain what they already have.
 	///
+	/// A name that was reserved or requested but never served resolves with
+	/// [`Error::NotFound`]: nothing can fill it now, so its subscribers fail rather
+	/// than waiting on a [`track::Info`] that is never coming.
+	///
 	/// Borrows rather than consumes, matching [`track::Producer::finish`]. Finishing
 	/// declares the end, so it must not depend on the caller also surrendering the
 	/// handle.
@@ -379,6 +403,10 @@ impl Producer {
 			let mut state = self.state.lock();
 			state.closing = true;
 			state.finished = true;
+			// A name that was reserved or requested but never served can't arrive now,
+			// and `Consumer::track` already answers `NotFound` for one asked about after
+			// this point. Say the same to whoever asked earlier.
+			state.reject_unserved(Error::NotFound);
 		}
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
@@ -390,9 +418,11 @@ impl Producer {
 	/// Like [`finish`](Self::finish) the end is immediate, whether or not other
 	/// producer clones are still alive, and existing tracks stay readable so
 	/// consumers can drain what they already have (an abort does not cascade into
-	/// the tracks). Unlike a finish, consumers observe `err` from
-	/// [`Consumer::closed`], so the end reads as a failure rather than a
-	/// deliberate one.
+	/// the tracks), while a name nothing ever served resolves with `err` the same
+	/// way [`finish`](Self::finish) resolves it. Unlike a finish, consumers observe `err` from
+	/// [`Consumer::closed`], and an origin treats the source as ungracefully lost,
+	/// so the path may linger for a replacement (see
+	/// [`origin::Info::linger`](crate::origin::Info::linger)).
 	///
 	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
 	/// already finished or aborted.
@@ -403,7 +433,10 @@ impl Producer {
 				return Err(Error::Closed);
 			}
 			state.closing = true;
-			state.abort = Some(err);
+			state.abort = Some(err.clone());
+			// Same as a finish: an unserved name is answerable now, with the reason the
+			// broadcast ended. Published tracks keep their cache (no cascade).
+			state.reject_unserved(err);
 		}
 		let _ = self.alive.token.close();
 		Ok(())
@@ -1320,5 +1353,165 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// A reserved name nobody accepts is the parking case a publisher has to be able to
+	/// end. Ending the broadcast is where it does: `Consumer::track` already answers
+	/// `NotFound` for a name asked about after this point, so whoever asked earlier gets
+	/// the same answer instead of waiting on info that can never arrive.
+	#[tokio::test]
+	async fn finish_resolves_a_reserved_name() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let _request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		producer.finish();
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+	}
+
+	/// An abort says why the broadcast ended, and an unserved name resolves with that
+	/// reason rather than a generic failure.
+	#[tokio::test]
+	async fn abort_resolves_a_reserved_name_with_its_reason() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(pending.await, Err(Error::Cancel)));
+
+		let track = request.accept(None);
+		let mut subscriber = track.subscribe(None);
+		assert!(matches!(subscriber.recv_group().await, Err(Error::Cancel)));
+	}
+
+	/// A request still queued for a handler is the same parking case reached from the
+	/// consumer side, so it ends the same way.
+	#[tokio::test]
+	async fn finish_resolves_a_queued_request() {
+		let mut producer = Info::new().produce();
+		let dynamic = producer.dynamic();
+		let consumer = dynamic.consume();
+
+		let pending = subscribe_pending!(consumer, "track1");
+
+		producer.finish();
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+		drop(dynamic);
+	}
+
+	/// A request a handler already took parks the same way if the handler never answers
+	/// it, so the sweep has to reach that one too.
+	#[tokio::test]
+	async fn finish_resolves_a_request_a_handler_never_answered() {
+		let mut producer = Info::new().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = dynamic.consume();
+
+		let pending = subscribe_pending!(consumer, "track1");
+		let _request = dynamic.requested_track().await.unwrap();
+
+		producer.finish();
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+		drop(dynamic);
+	}
+
+	/// A reverse fetch can install the track metadata before the live request is
+	/// accepted, but it does not create a live publisher. Finishing the broadcast
+	/// must still reject that name so an arrival-order subscriber does not park on
+	/// backfill that is deliberately absent from its queue.
+	#[tokio::test]
+	async fn finish_resolves_an_unaccepted_track_with_fetched_info() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let dynamic = request.dynamic();
+		let track = consumer.track("track1").unwrap();
+		let pending_fetch = track.fetch_group(0, None);
+		let fetch = dynamic.requested_group().await.unwrap();
+		let mut group = fetch.accept(None).unwrap();
+		group.finish().unwrap();
+		pending_fetch.await.unwrap();
+
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		producer.finish();
+		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
+
+		let mut stale = request.accept(None);
+		assert!(stale.append_group().is_err());
+	}
+
+	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps
+	/// its cache and its publisher decides when it ends.
+	#[tokio::test]
+	async fn finish_spares_a_served_track() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let mut track = producer.create_track("track1", None).unwrap();
+		let mut subscriber = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
+
+		producer.finish();
+
+		track.append_group().unwrap();
+		subscriber.assert_group();
+		track.finish().unwrap();
+	}
+
+	/// The publisher may still be holding the `track::Request` for a name the broadcast
+	/// just gave up on. Accepting it afterwards must not resurrect the track, or a
+	/// subscriber that was told `NotFound` could be contradicted by a later one.
+	#[tokio::test]
+	async fn finish_leaves_a_stale_reservation_inert() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		producer.finish();
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+
+		let mut track = request.accept(None);
+		assert!(track.append_group().is_err());
+		let mut subscriber = track.subscribe(None);
+		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
+		assert!(consumer.track("track1").is_err());
+	}
+
+	/// Dropping a `track::Request` is not a verdict about the name, so it resolves as
+	/// `Dropped` (a handler lost to a crashed publisher or a dead transport), never as
+	/// `NotFound`. Only an explicit rejection may claim the track is absent.
+	#[tokio::test]
+	async fn dropping_a_reserved_request_resolves_dropped() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		drop(request);
+		assert!(matches!(pending.await, Err(Error::Dropped)));
+		producer.finish();
+	}
+
+	/// `track::Request::reject` carries its reason the same way, which is what lets a
+	/// subscriber tell "no such track" from "the publisher went away".
+	#[tokio::test]
+	async fn rejecting_a_reserved_request_carries_the_reason() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+
+		let request = producer.reserve_track("track1").unwrap();
+		let pending = subscribe_pending!(consumer, "track1");
+
+		request.reject(Error::NotFound);
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+		producer.finish();
 	}
 }

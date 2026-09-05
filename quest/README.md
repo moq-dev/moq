@@ -8,10 +8,12 @@ grouped into milestones ordered by priority.
 ## Plan
 
 Milestones sort by kind, which tracks urgency here: m0 fixes what is broken,
-m1 is the dev branch line, m2 grows the surface, m3 explores. Every open
-GitHub issue that survived the 2026-08 grooming is represented by a quest, and
-the upstream-facing questlines from the downstream moq.pro tree were migrated
-in. New work joins the milestone matching its kind, at its priority rank.
+m1 is the dev branch line, m2 grows the surface, m3 explores. The 2026-08
+grooming turned every surviving GitHub issue into a quest and migrated the
+upstream-facing questlines from the downstream moq.pro tree; issues opened
+since are imported in periodic grooming passes, and an issue already fixed on
+`dev` stays open until `dev` merges. New work joins the milestone matching its
+kind, at its priority rank.
 
 ## Quests
 

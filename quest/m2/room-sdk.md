@@ -37,6 +37,14 @@ AccessToken analogue). hang.live migrates onto the package as proof.
   a crude demo): a headless library, no element. Custom elements and
   framework bindings are follow-ups if wanted.
 
+The conferencing demo [#697](https://github.com/moq-dev/moq/issues/697)
+asked for is this package's proof: hang.live's room, migrated onto it, is the
+demo, and `<moq-meet>` is not coming back as an element.
+
+## Closes
+
+- [#697](https://github.com/moq-dev/moq/issues/697) - close this issue when the quest finishes
+
 ## Related
 
 - [LiveKit client shim](/quest/m2/livekit-shim.md) - builds its

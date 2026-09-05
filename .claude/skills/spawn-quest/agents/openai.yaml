@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spawn Quest"
+  short_description: "Triage a milestone's quests and spawn agents for the ready ones"
+  default_prompt: "Use $spawn-quest to triage a scope's quests and spawn agents for the ones worth starting now."

@@ -336,14 +336,15 @@
         # bundle. `just obs compile` type-checks the plugin against it.
         #
         # Keep `version` equal to buildspec.json's obs-studio version; `just obs
-        # check` fails when the two drift.
+        # check` fails when the two drift, and when either drifts a minor
+        # release from the nixpkgs obs-studio below.
         obs-headers = pkgs.stdenvNoCC.mkDerivation rec {
           pname = "libobs-headers";
-          version = "31.1.1";
+          version = "32.2.2";
 
           src = pkgs.fetchzip {
             url = "https://github.com/obsproject/obs-studio/archive/refs/tags/${version}.tar.gz";
-            hash = "sha256-ycfROxgm3wUVyC2d1r3vIr7yWb6ErYIoDZX8xZrc+Vk=";
+            hash = "sha256-miLe4MhiVhLlPvwzDjL31BwdcjVhgWvmcSzH9pgZV6U=";
           };
 
           dontBuild = true;
@@ -367,8 +368,8 @@
         # Dependencies for the OBS plugin (`just obs build`, `just obs compile`,
         # `just obs check`). ffmpeg + cmake come from rustDeps.
         #
-        # Only the *build* is Linux-only: nixpkgs marks obs-studio broken on
-        # Darwin, so macOS and Windows link libobs/Qt6 from the OBS buildspec
+        # Only the *build* is Linux-only: nixpkgs' obs-studio lists no Darwin
+        # platform, so macOS and Windows link libobs/Qt6 from the OBS buildspec
         # bundle instead (see cpp/obs/buildspec.json and doc/bin/obs.md).
         # Type-checking needs headers rather than libraries, and those are
         # cross-platform -- obs-headers above, plus qt6.qtbase, which does build
@@ -378,6 +379,13 @@
           with pkgs;
           [
             obs-headers
+            # libobs' public headers include <simde/x86/sse2.h> as of OBS 32,
+            # which used to be vendored under libobs/util/ and so travelled with
+            # obs-headers. obs-deps ships it beside libobs for the macOS and
+            # Windows builds, and nixpkgs' obs-studio propagates it for the
+            # Linux one; listed here so the header-only path has it on Darwin
+            # too. Same 0.8.2 that obs-deps carries.
+            simde
             qt6.qtbase
             clang-tools
             gersemi
@@ -386,6 +394,14 @@
             obs-studio
             ninja
           ];
+
+        # The obs-studio `just obs ci` links against on Linux, which is a third
+        # version alongside buildspec.json and obs-headers and the only one this
+        # repo doesn't choose. Read the string on every platform, Darwin
+        # included, so `just obs check` compares it everywhere rather than only
+        # where the package builds. It moves when flake.lock does, so the guard
+        # fails on the nixpkgs bump that opens the gap.
+        obs-linked-version = pkgs.obs-studio.version;
 
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
@@ -480,6 +496,11 @@
             # on every platform so the plugin type-checks against the pinned OBS
             # release everywhere, rather than whatever the host happens to have.
             OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
+
+            # What `just obs check` compares the two in-repo OBS pins against.
+            # Exported rather than read back out of nix, so the guard costs a
+            # variable lookup instead of a nested evaluation of this flake.
+            OBS_LINKED_VERSION = obs-linked-version;
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
