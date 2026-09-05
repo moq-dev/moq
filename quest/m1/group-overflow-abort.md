@@ -6,8 +6,15 @@ An open group that outgrows its cache budget errors for every reader instead
 of evicting frames from its front. One consistent failure replaces today's
 split, where a reader that kept up streams the whole group while a late or new
 one gets `Lagged`, and the head-shedding machinery becomes dead code to
-delete. The writer learns about its own overrun instead of being told nothing,
-and a remote peer can tell the overrun apart from its own lag.
+delete. The writer learns about its own overrun instead of being told nothing.
+
+A remote peer can tell the overrun apart from its own lag when the publisher is
+Rust. From a JS publisher it still arrives as `Internal` until
+[JS stream codes](/quest/m1/js-net-stream-error-codes.md) lands, because
+`Writer.reset` cannot put a code on the wire for a locally raised error at all.
+That is a gap in js/net rather than in this change, so it does not block this
+quest; it does bound what this quest can promise, so it is stated here rather
+than left to be discovered.
 
 This is a semantics change to the model in both languages, not a bug fix. It
 was settled in a planning pass; the decisions are recorded below rather than
