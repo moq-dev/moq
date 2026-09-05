@@ -5319,6 +5319,7 @@ dependencies = [
  "moq-nvenc",
  "moq-tokio",
  "moq-vaapi",
+ "ndk",
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-core-foundation",

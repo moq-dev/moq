@@ -26,8 +26,8 @@ Four role modules, symmetric on both ends of the wire:
 | Module | Does | Platform |
 | --- | --- | --- |
 | `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI/GDI (Windows) |
-| `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, openh264 |
-| `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, openh264 |
+| `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, MediaCodec, openh264 |
+| `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, MediaCodec, openh264 |
 | `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
 
 A picture is a `Frame` wherever it crosses the API: a `moq_net::Timestamp` and a
@@ -55,7 +55,7 @@ slow path. AV1 is decode-only, via NVDEC.
 cargo add moq-video
 ```
 
-Capture, the Linux hardware codecs, and the GPU renderer are on by default.
+Capture, the platform hardware codecs, and the GPU renderer are on by default.
 PipeWire screen capture is not, since it links `libpipewire-0.3` at build time:
 
 ```bash
@@ -65,6 +65,7 @@ cargo add moq-video --features pipewire
 | Feature | Default | Pulls in |
 | --- | --- | --- |
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
+| `mediacodec` | yes | MediaCodec encode/decode and `AHardwareBuffer` frames on Android API 26+ |
 | `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`), dlopen'd at runtime |
 | `vaapi` | yes | Intel/AMD encode on Linux (`moq-vaapi`), dlopen'd at runtime; not yet validated on hardware |
 | `v4l2` | yes | V4L2 M2M encode and decode on ARM SoCs (Raspberry Pi and friends), validated on a Raspberry Pi 4 |
@@ -72,9 +73,9 @@ cargo add moq-video --features pipewire
 | `pipewire` | no | Wayland screen capture via xdg-desktop-portal and DMA-BUF |
 
 `--no-default-features` gives a codec-only build that still encodes and decodes
-H.264 with openh264 but omits native capture, the renderer, and the Linux GPU
-backends. A relay or language binding that only handles supplied frames needs
-none of them.
+H.264 with openh264 but omits native capture, the renderer, and platform GPU
+backends. The language bindings use that shape, which keeps their Android API
+24 floor instead of opting into MediaCodec's API 26 entry points.
 
 ## Publishing
 
@@ -148,6 +149,7 @@ rather than a blanket promise:
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
 | Linux | `Cuda` (NVDEC) | yes, straight into NVENC | decoded CUDA frames: no; packed PipeWire DMA-BUF capture: yes, via Vulkan |
 | Windows | `Texture` (Media Foundation / DXVA) | yes, through the Direct3D11 video processor | no, downloaded to I420 first |
+| Android | `HardwareBuffer` (MediaCodec) | no, the encoder takes NV12 in a ByteBuffer | not here: the buffer imports through EGL in the application's own GL context |
 
 `Frame::resize` stays on the GPU through a `VTPixelTransferSession`, CUDA kernel,
 or Direct3D11 video processor. Call `Frame::resize_with` with

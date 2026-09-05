@@ -10,7 +10,7 @@
 //! Output is stamped with the timestamp of the frame it was encoded from, not
 //! whichever frame happened to be going in. A backend that flushes each frame
 //! before returning just echoes the input timestamp; one that buffers (Media
-//! Foundation) correlates through the codec's own sample clock.
+//! Foundation, MediaCodec) correlates through the codec's own sample clock.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
@@ -31,6 +31,9 @@ mod videotoolbox;
 
 #[cfg(target_os = "windows")]
 mod mediafoundation;
+
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+mod mediacodec;
 
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvenc;
@@ -101,6 +104,12 @@ const HARDWARE: &[Candidate] = &[
 		name: mediafoundation::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
+	},
+	#[cfg(all(target_os = "android", feature = "mediacodec"))]
+	Candidate {
+		name: mediacodec::NAME,
+		codecs: &[Codec::H264, Codec::H265],
+		open: mediacodec::MediaCodec::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {

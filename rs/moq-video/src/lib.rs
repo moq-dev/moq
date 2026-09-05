@@ -62,9 +62,9 @@
 //!
 //! The one deliberate exception is [`Surface`], the enum behind every frame.
 //! Its variants name platform representations (`CVPixelBuffer`, Direct3D11,
-//! CUDA) so you can render or re-encode a frame yourself without a CPU round
-//! trip, which means a major bump of one of those platform crates is a breaking
-//! change here. It is `#[non_exhaustive]` and every variant has a universal
+//! CUDA, `AHardwareBuffer`) so you can render or re-encode a frame yourself
+//! without a CPU round trip, which means a major bump of one of those platform
+//! crates is a breaking change here. It is `#[non_exhaustive]` and every variant has a universal
 //! fallback in [`Surface::into_i420`], so matching on it stays portable: take the
 //! fast path you recognize and let the `_` arm handle the rest.
 
@@ -100,6 +100,13 @@ pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
 pub use size::Size;
 
+/// The NDK bindings [`frame::android::HardwareBuffer::buffer`] hands back,
+/// re-exported for the same reason as the Apple and Windows ones: name the
+/// exact version this crate links rather than guessing at a matching one, since a
+/// hardware buffer from a different `ndk` build is a different type. A major bump
+/// here is a breaking change for this crate.
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+pub use ndk;
 /// The CoreFoundation bindings owning the handle [`Surface::into_pixel_buffer`]
 /// returns, re-exported alongside [`objc2_core_video`] for the same reason.
 #[cfg(target_os = "macos")]

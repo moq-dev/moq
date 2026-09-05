@@ -20,11 +20,15 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # it links libpipewire at build time. Workspace consumers opt out at the root
 # manifest (`default-features = false`) and pick per crate, so the relay and the
 # language bindings never build the device or render stacks.
-default = ["capture", "nvidia", "vaapi", "v4l2", "render"]
+default = ["capture", "mediacodec", "nvidia", "vaapi", "v4l2", "render"]
 # Native camera and screen capture. Enabled by default for direct consumers,
 # but workspace consumers opt in so codec-only bindings avoid device build
 # dependencies such as V4L2 and libclang.
 capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
+# Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
+# behind a feature because these NDK entry points require API 26, while the
+# language-binding artifacts still support API 24 and disable default features.
+mediacodec = ["dep:ndk"]
 # The NVIDIA codecs on Linux: the NVENC encoder and the NVDEC decoder. One
 # feature because they are one dependency stack (cudarc + moq-nvenc, plus a
 # libloading probe for the driver libs) and one code path: NVDEC hands NVENC a
@@ -115,6 +119,15 @@ tracing = { workspace = true }
 wgpu = { version = "30", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
+
+[target.'cfg(target_os="android")'.dependencies]
+# MediaCodec (hardware H.264/H.265 encode and decode), ImageReader, and
+# AHardwareBuffer, all from the NDK that is already on the path of anything
+# targeting Android. `default-features = false` drops the raw-window-handle
+# integration, which nothing here uses; `api-level-26` is what unlocks
+# AMediaCodec_setParameters (live bitrate and keyframe requests) and the
+# hardware buffer behind a decoded frame.
+ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
 # xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
