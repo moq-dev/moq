@@ -2,8 +2,13 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QPointer>
 #include <QWidget>
 #include <obs.hpp>
+
+#include <memory>
+
+#include "moq-dock-stop.h"
 
 class QLineEdit;
 class QPushButton;
@@ -98,6 +103,15 @@ private:
 	QElapsedTimer liveClock;
 	// Filled when Go Live creates encoders; shown in Stream stats while publishing.
 	QString publishSummary;
+
+	// Shared with OnOutputStopped so a deferred OBS stop callback cannot race
+	// destruction. The signal user_data is this cookie, not the dock pointer.
+	struct StopCookie {
+		std::shared_ptr<MoQDockStopBridge> bridge = std::make_shared<MoQDockStopBridge>();
+		std::mutex dockMutex;
+		MoQDock *dock = nullptr;
+	};
+	std::shared_ptr<StopCookie> stopCookie = std::make_shared<StopCookie>();
 };
 
 void register_moq_dock();
