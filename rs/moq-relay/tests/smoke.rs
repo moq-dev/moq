@@ -310,10 +310,10 @@ async fn relay_web_serves_merged_routes() {
 
 /// The HTTPS listener has to terminate TLS and answer a real request.
 ///
-/// The plain-HTTP tests above go through `axum_server`'s default acceptor, so they
-/// say nothing about the TLS stack: `MtlsAcceptor` wraps `RustlsAcceptor`, hot
-/// reload swaps the config underneath it, and the listener the relay hands
-/// `axum_server` is its own. A compile is not evidence any of that still handshakes.
+/// The plain-HTTP tests above run no handshake at all, so they say nothing about
+/// the TLS stack: the HTTPS acceptor wraps `RustlsAcceptor`, hot reload swaps the
+/// config underneath it, and the listener the relay hands `axum_server` is its own.
+/// A compile is not evidence any of that still handshakes.
 #[tokio::test]
 async fn relay_https_terminates_tls() {
 	let port = free_tcp_port();
