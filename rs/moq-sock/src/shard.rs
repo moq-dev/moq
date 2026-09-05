@@ -131,8 +131,9 @@ pub enum Error {
 /// caller, because none of it is visible in a socket afterwards:
 ///
 /// - The port is locked before the first member binds and stays locked until the
-///   group is dropped, so a second same-UID group cannot interleave into this
-///   one. Hold the group for as long as its sockets are served.
+///   group and every member it handed out are gone, so a second same-UID group
+///   cannot interleave into this one. Hold the group for as long as its sockets
+///   are served.
 /// - The member count is checked once, against what the steering filter can
 ///   address, and never changes.
 /// - [`member`](Self::member) hands out slots in index order, and a [`Member`]
@@ -152,11 +153,6 @@ pub struct Group {
 	next: u16,
 
 	state: Arc<State>,
-
-	/// Held for the group's lifetime, and released by the kernel with the
-	/// process. `None` for an ephemeral port, which cannot be named in advance,
-	/// and on a host with no lock directory.
-	_lock: Option<Lock>,
 }
 
 impl Group {
@@ -184,8 +180,7 @@ impl Group {
 		Ok(Self {
 			count,
 			next: 0,
-			state: Arc::new(State::new(addr)),
-			_lock: lock,
+			state: Arc::new(State::new(addr, lock)),
 		})
 	}
 
@@ -197,7 +192,7 @@ impl Group {
 	/// The address the group holds: what was asked for until the first member
 	/// binds, and what it actually bound from there on.
 	pub fn addr(&self) -> SocketAddr {
-		self.state.lock().addr
+		self.state.progress().addr
 	}
 
 	/// The next slot to bind, or `None` once every slot has been handed out.
@@ -218,7 +213,9 @@ impl Group {
 ///
 /// Send it wherever the socket is served, a worker's own thread included. It
 /// carries the group's address, so every member holds one port whatever the
-/// caller thought it asked for.
+/// caller thought it asked for, and its share of the group's port lock, so a
+/// member still waiting to bind cannot be raced by a second group even if its
+/// group is dropped first.
 #[derive(Debug)]
 pub struct Member {
 	shard: Shard,
@@ -239,7 +236,7 @@ impl Member {
 	/// group by bind order, so a member joining out of turn would take another's
 	/// slot and steer its traffic, with no error to show for it.
 	pub fn bind(self) -> io::Result<UdpSocket> {
-		let mut progress = self.state.lock();
+		let mut progress = self.state.progress();
 		if progress.bound != self.shard.index() {
 			return Err(io::Error::other(format!(
 				"reuseport member {} cannot bind while {} of {} are in: the kernel numbers a group by bind order",
@@ -262,13 +259,23 @@ impl Member {
 	}
 }
 
-/// What the members of a forming group share: how far the group has been bound,
-/// and the address it holds.
+/// What the members of a forming group share: the port it holds, how far the
+/// group has been bound, and the address it holds.
 ///
 /// Shared rather than owned by the [`Group`] because a member is bound wherever
-/// its socket is served, which is usually not where the group lives.
+/// its socket is served, which is usually not where the group lives. The lock
+/// rides along for the same reason: a member outstanding after its group is
+/// dropped can still bind, so the port has to stay held until the last of them
+/// is gone.
 #[derive(Debug)]
-struct State(Mutex<Progress>);
+struct State {
+	progress: Mutex<Progress>,
+
+	/// Held until the group and its members are all dropped, and released by the
+	/// kernel with the process. `None` for an ephemeral port, which cannot be
+	/// named in advance, and on a host with no lock directory.
+	_lock: Option<Lock>,
+}
 
 /// How far a group has been bound, and the address its members hold.
 #[derive(Debug)]
@@ -280,15 +287,18 @@ struct Progress {
 }
 
 impl State {
-	fn new(addr: SocketAddr) -> Self {
-		Self(Mutex::new(Progress { bound: 0, addr }))
+	fn new(addr: SocketAddr, lock: Option<Lock>) -> Self {
+		Self {
+			progress: Mutex::new(Progress { bound: 0, addr }),
+			_lock: lock,
+		}
 	}
 
 	/// The progress, whatever a panicking member left behind: a failed bind is
 	/// reported by the count it did not advance, so there is no torn state a
 	/// poisoned lock would be protecting.
-	fn lock(&self) -> MutexGuard<'_, Progress> {
-		self.0.lock().unwrap_or_else(PoisonError::into_inner)
+	fn progress(&self) -> MutexGuard<'_, Progress> {
+		self.progress.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 }
 
@@ -850,6 +860,34 @@ mod tests {
 
 		// The lock dies with the group, so the port is takeable again.
 		drop(first);
+		drop(socket);
+		Group::acquire(addr, 1).expect("the released port must be takeable again");
+	}
+
+	/// A member outlives the group that handed it out and can still bind, so the
+	/// exclusion has to outlive the group too. Releasing the port at the group's
+	/// drop would let a second group probe and interleave into this one while its
+	/// first member had yet to join.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn an_outstanding_member_keeps_the_port() {
+		let addr = {
+			let probe = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+			probe.local_addr().unwrap()
+		};
+
+		let mut group = Group::acquire(addr, 1).unwrap();
+		let member = group.member().expect("the only slot");
+		drop(group);
+
+		assert!(
+			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
+			"a second group took a port an unbound member still holds"
+		);
+
+		let socket = member.bind().expect("bind the outstanding member");
+		assert_eq!(socket.local_addr().unwrap(), addr);
+
 		drop(socket);
 		Group::acquire(addr, 1).expect("the released port must be takeable again");
 	}
