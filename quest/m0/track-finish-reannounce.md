@@ -37,15 +37,25 @@ Reproduce first, at the model layer rather than through `moq-transcode`: the
 claim under test is that a second publication of a finished name is invisible
 to a new subscriber through a relay.
 
+Note that route replacement is only half the problem, and the smaller half.
+When the same upstream broadcast stays connected and later serves the name
+again, no replacement happens at all: `origin::serve_track` already returned on
+its `Step::Complete`, and `track_inner` keeps handing back the finished entry
+without queuing anything. So whatever lands has to re-arm serving on a later
+lookup or demand, not just splice a new route in.
+
 Then decide the shape before writing the fix. Two candidates:
 
-- Let a route replacement take over a finished spliced track the way
-  `resume::Producer::takeover` already retains the live edge for an aborted
-  one, so the cache stays readable while new groups land above it. No wire
-  change, no new public surface.
+- Re-arm the spliced track: keep the finished cache readable, but let a later
+  lookup queue the name again, the way an aborted one already does, and let a
+  source (the same one or a replacement) take over the way
+  `resume::Producer::takeover` retains the live edge. No wire change, no new
+  public surface. The work is in `serve_track` returning too early as much as
+  in `track_inner`.
 - Give the producer an explicit third ending and keep `finish` terminal. That
   is a public API addition across every binding, so it carries the Public API
-  Scrutiny cost and likely a draft update.
+  Scrutiny cost and likely a draft update. It also makes the re-arm
+  publisher-driven rather than something the relay infers.
 
 Prefer the first unless reproducing shows a case it cannot cover: a subscriber
 holding the finished track has to see the continuation, and a publisher that
