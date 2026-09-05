@@ -306,6 +306,29 @@ test("Reader stream with partial reads", async () => {
 	expect(await reader.done()).toBe(true);
 });
 
+test("Reader owns streamed chunks and preserves returned views across fills", async () => {
+	const first = new Uint8Array([99, 1, 2, 99]);
+	const second = new Uint8Array([99, 3, 4, 5, 99]);
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(first.subarray(1, 3));
+			controller.enqueue(second.subarray(1, 4));
+			controller.close();
+		},
+	});
+	const reader = new Reader(stream);
+	const head = await reader.read(1);
+	first.fill(0);
+	expect(head).toEqual(new Uint8Array([1]));
+	const joined = await reader.read(3);
+	second.fill(0);
+	expect(joined).toEqual(new Uint8Array([2, 3, 4]));
+	joined.fill(0);
+	expect(head).toEqual(new Uint8Array([1]));
+	expect(await reader.read(1)).toEqual(new Uint8Array([5]));
+	expect(await reader.done()).toBe(true);
+});
+
 test("Reader u53 decodes two-byte stream type prefixes", async () => {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream);

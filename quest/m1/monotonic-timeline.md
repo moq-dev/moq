@@ -4,8 +4,8 @@
 
 A track's timestamps never fall below the live edge its earlier groups
 reached. A publisher that has to reset (a flush, a seek, a source restart)
-declares an empty-group discontinuity and continues forward from where it
-was; it can no longer rewind. Inside a group timestamps still reorder freely,
+declares a discontinuity by leaving a gap in the group sequence and
+continues forward from where it was; it can no longer rewind. Inside a group timestamps still reorder freely,
 since B-frames present before the frames that precede them in decode order,
 and open-GOP leading pictures still qualify because they sit above the
 previous group's reach.
@@ -19,9 +19,10 @@ Today both container consumers (`Rewind` in
 `rs/moq-mux/src/container/consumer.rs` and in
 `js/hang/src/container/consumer.ts`) classify a newer group whose timestamps
 land before the live edge as a rewind, drop the reneged buffer, and bump the
-same counter a declared discontinuity bumps. The hang draft says an empty
-group declares a discontinuity "whether the resumed timestamps move backward
-or forward". That machinery is what goes.
+same counter a declared discontinuity bumps. The hang draft says a declared
+discontinuity applies "whether the resumed timestamps move backward or
+forward". That machinery is what goes; how a publisher declares one is
+[Gap discontinuity](/quest/m1/gap-discontinuity.md).
 
 - **Publisher side, in both container producers.** The track producer refuses
   a frame whose timestamp is below the live edge established by the groups
@@ -61,10 +62,12 @@ state.
 
 ## Required
 
+- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - settles how a publisher declares the discontinuity this rule continues from
 - [moq#3375](https://github.com/moq-dev/moq/pull/3375) has merged, so the TS export reset it adds is keyed on the discontinuity counter before this quest trims it
 
 ## Related
 
+- [Duration marker](/quest/m2/duration-marker.md) - the empty frame that closes a group, which is not a discontinuity
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - the watch decoder reset that keeps mattering for declared discontinuities
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink's generation model after EOS, the same publisher
 - [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - the TS export fix this trims once it lands

@@ -1,193 +1,81 @@
 ---
-title: TypeScript Libraries
-description: TypeScript/JavaScript implementation for browsers
+title: TypeScript
+description: The browser implementation, published as @moq/* on npm
 ---
 
-# TypeScript Libraries
+# TypeScript
 
-The TypeScript implementation brings MoQ to web browsers using modern APIs like WebTransport and WebCodecs.
+A from-scratch implementation for browsers, built on WebTransport, WebCodecs,
+and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 
-## Core Libraries
+## Packages
 
-### @moq/net
+| Package | Does |
+| --- | --- |
+| [@moq/net](/lib/js/net) | The pub/sub layer: connections, broadcasts, tracks, groups, frames, discovery. |
+| [@moq/hang](/lib/js/hang) | The media layer: catalog types and containers. |
+| [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
+| [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
+| [@moq/token](/lib/js/token) | Mint and verify relay JWTs. |
+| [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
+| [@moq/json](https://www.npmjs.com/package/@moq/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [@moq/flate](https://www.npmjs.com/package/@moq/flate) | Group-scoped DEFLATE for any track. |
+| [@moq/loc](https://www.npmjs.com/package/@moq/loc), [@moq/msf](https://www.npmjs.com/package/@moq/msf) | The IETF LOC container and MSF catalog. |
+| [@moq/boy](https://www.npmjs.com/package/@moq/boy) | The [MoQ Boy](/bin/demo) player element. |
 
-[![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
+## Web components
 
-Core pub/sub transport protocol for browsers. Implements the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
-
-**Features:**
-
-- WebTransport-based QUIC
-- Broadcasts, tracks, groups, frames
-- Browser and server-side support (with polyfill)
-
-[Learn more](/lib/js/@moq/net)
-
-### @moq/hang
-
-[![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
-
-High-level media library with Web Components for streaming audio and video.
-
-**Features:**
-
-- Web Components (easiest integration)
-- JavaScript API for advanced use
-- WebCodecs-based encoding/decoding
-- Reactive state management
-
-[Learn more](/lib/js/@moq/hang/)
-
-## Media Packages
-
-### @moq/watch
-
-[![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
-
-Subscribe to and render MoQ broadcasts. Includes both a JavaScript API and a `<moq-watch>` Web Component, plus an optional `<moq-watch-ui>` overlay.
-
-[Learn more](/lib/js/@moq/watch)
-
-### @moq/publish
-
-[![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
-
-Publish media to MoQ broadcasts. Includes both a JavaScript API and a `<moq-publish>` Web Component, plus an optional `<moq-publish-ui>` overlay.
-
-[Learn more](/lib/js/@moq/publish)
-
-## Utilities
-
-### @moq/signals
-
-Reactive signals library used by hang for state management.
-
-[Learn more](/lib/js/@moq/signals)
-
-### @moq/clock
-
-Clock utilities for timestamp synchronization.
-
-### @moq/token
-
-JWT token generation and verification for browsers.
-
-[Learn more](/lib/js/@moq/token)
-
-## Installation
-
-```bash
-bun add @moq/net
-bun add @moq/watch
-bun add @moq/publish
-
-# or with npm
-npm install @moq/net
-npm install @moq/watch
-npm install @moq/publish
-```
-
-Pick the channel that matches where your code runs:
-
-- **Browser with a bundler** (Vite, esbuild, webpack) - install the packages
-  above and import them. This is the standard path. See [Web Components](/lib/js/env/web).
-- **Browser, no build step** - load straight from a CDN, no install required:
-
-  ```html
-  <script type="module">
-      import "https://cdn.jsdelivr.net/npm/@moq/watch/element/+esm";
-      import "https://cdn.jsdelivr.net/npm/@moq/publish/element/+esm";
-  </script>
-  ```
-
-  [esm.sh](https://esm.sh) works the same way. Great for demos and embeds. See
-  [Loading from a CDN](/lib/js/env/web#loading-from-a-cdn-no-bundler).
-- **Server-side** (Node, Bun, Deno) - install `@moq/net` and set up a transport.
-  `@moq/hang` is browser-only. See [Server-side JS](/lib/js/env/native).
-
-## Quick Start
-
-### Using Web Components
-
-The easiest way to add MoQ to your web page:
+The fastest way in. No framework, no build step required:
 
 ```html
-<!DOCTYPE html>
-<html>
-<head>
-    <script type="module">
-        import "@moq/publish/element";
-        import "@moq/watch/element";
-    </script>
-</head>
-<body>
-    <!-- Publish camera/microphone -->
-    <moq-publish
-        url="https://relay.example.com/anon"
-        name="room/alice.hang"
-        audio video controls>
-        <video muted autoplay></video>
-    </moq-publish>
+<script type="module">
+    import "https://esm.sh/@moq/watch/element";
+    import "https://esm.sh/@moq/publish/element";
+</script>
 
-    <!-- Watch the stream -->
-    <moq-watch
-        url="https://relay.example.com/anon"
-        name="room/alice.hang"
-        controls>
-        <canvas></canvas>
-    </moq-watch>
-</body>
-</html>
+<moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
+    <video muted autoplay></video>
+</moq-publish>
+
+<moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
+    <canvas></canvas>
+</moq-watch>
 ```
 
-[Learn more about Web Components](/lib/js/env/web)
+With a bundler, `bun add @moq/watch @moq/publish` and import the same
+`/element` entrypoints (the suffix keeps tree-shaking from dropping the
+registration). Add `/ui` for the ready-made control overlays. Every attribute
+is also a typed, reactive JS property, and the elements expose their internal
+pipeline (`broadcast`, `video`, `audio`, `signals`) for apps that want more.
+They work in React, Vue, Solid, and plain HTML alike; `@moq/signals` ships
+React and Solid adapters for the reactive state.
 
-### Using JavaScript API
+## JavaScript API
 
-For more control, use the JavaScript API directly. See the [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples) directory for working examples of [connecting](https://github.com/moq-dev/moq/blob/main/js/net/examples/connection.ts), [publishing](https://github.com/moq-dev/moq/blob/main/js/net/examples/publish.ts), [subscribing](https://github.com/moq-dev/moq/blob/main/js/net/examples/subscribe.ts), and [discovery](https://github.com/moq-dev/moq/blob/main/js/net/examples/discovery.ts).
+Below the elements, `Watch.Broadcast` and `Publish.Broadcast` are the same
+pipelines without DOM, and `@moq/net` is the protocol itself. Examples:
+[`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples)
+covers connecting, publishing, subscribing, and discovery.
 
-[Learn more about @moq/net](/lib/js/@moq/net)
+## Browser support
 
-## Browser Compatibility
+| Browser | Transport |
+| --- | --- |
+| Chrome, Edge 97+ | WebTransport |
+| Firefox 153+ | WebTransport. Earlier Firefox ships it but allows too few incoming streams, so the client falls back to WebSocket there. |
+| Safari | WebSocket fallback. Safari 26.4 ships WebTransport, but WebKit bugs stall long sessions, so the client doesn't use it yet. |
+| Anything else | Automatic WebSocket fallback, with TCP's head-of-line blocking |
 
-Requires modern browser features:
+WebCodecs support varies per codec and browser; `<moq-watch-support>` and
+`<moq-publish-support>` render what the current browser can do. Outside
+localhost the relay needs a real certificate, or the page must pin its
+fingerprint.
 
-- **WebTransport** - Chromium-based browsers (Chrome, Edge, Brave)
-- **WebCodecs** - For media encoding/decoding
-- **WebAudio** - For audio playback
+## Server-side
 
-**Supported browsers:**
-
-- Chrome 97+
-- Edge 97+
-- Brave (recent versions)
-
-**Experimental support:**
-
-- Firefox (behind flag)
-- Safari (future support planned)
-
-## Framework Integration
-
-The reactive API works with popular frameworks:
-
-- **React** — See [`js/signals/src/react.ts`](https://github.com/moq-dev/moq/blob/main/js/signals/src/react.ts) for `useValue` and `useSignal` hooks
-- **SolidJS** — See [`js/signals/src/solid.ts`](https://github.com/moq-dev/moq/blob/main/js/signals/src/solid.ts) for `createAccessor` and `createPair` helpers
-
-Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made Web Component overlays.
-
-## Demo Application
-
-Check out the [demo](https://github.com/moq-dev/moq/tree/main/demo/web) for complete examples:
-
-- Video conferencing
-- Screen sharing
-- Text chat
-- Quality selection
-
-## Next Steps
-
-- Explore [@moq/net](/lib/js/@moq/net) - Core protocol
-- Explore [@moq/hang](/lib/js/@moq/hang/) - Media library
-- Learn about [Web Components](/lib/js/env/web)
-- View [code examples](https://github.com/moq-dev/moq/tree/main/js)
+`@moq/net` runs in Bun, Node 21+, and Deno over the WebSocket fallback with no
+changes (older Node needs the `ws` polyfill on `globalThis`). For real QUIC on
+the server, install the native
+[`@moq/web-transport`](https://www.npmjs.com/package/@moq/web-transport)
+polyfill. `@moq/hang`, `@moq/watch`, and `@moq/publish` are browser-only, so
+server-side media work means raw tracks plus your own encoder.
