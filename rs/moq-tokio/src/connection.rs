@@ -162,12 +162,19 @@ pub enum Status {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Redirect {
-	/// Follow any URI that neither downgrades the scheme nor widens what we can
-	/// reach (a public endpoint redirecting to loopback, a private range, or IPC).
-	#[default]
+	/// Follow any URI that does not downgrade the scheme, letting the peer name the
+	/// host as well as the port.
+	///
+	/// The host is dialed as written, so this hands the peer whatever this process
+	/// can reach: a name it controls can carry an A record for loopback, a private
+	/// range, or the metadata service, and nothing here resolves it to find out. A
+	/// *literal* loopback, private, link-local, or IPC target is still refused, but
+	/// that catches a misconfigured peer, not a hostile one. Use it only with an
+	/// upstream trusted with the local network.
 	Follow,
 	/// Follow only when the host matches the configured URL, so a peer can move us
-	/// between ports or schemes but not to another host.
+	/// between ports or schemes but not to another host. The default.
+	#[default]
 	SameHost,
 	/// Ignore the URI and redial the configured URL.
 	Ignore,
@@ -191,9 +198,10 @@ impl Redirect {
 			return current.clone();
 		}
 
-		// A peer must not be able to point us somewhere we could not already
-		// reach: an authenticated upstream redirecting to a loopback or IPC
-		// address turns a redirect into a probe of the local host.
+		// Only as far as the URL itself says: a name is dialed, never resolved here,
+		// so this refuses a peer that names a local address outright and says
+		// nothing about one that hides the same address behind a hostname. That gap
+		// is why [`Self::SameHost`] is the default; see [`is_local`].
 		if is_local(&target) && !is_local(current) {
 			tracing::warn!(uri, "GOAWAY redirect widens reachability; redialing the current URL");
 			return current.clone();
@@ -225,7 +233,14 @@ fn scheme_tier(scheme: &str) -> u8 {
 	}
 }
 
-/// Whether a URL names something only reachable from this host or network.
+/// Whether a URL *says* it names something only reachable from this host or
+/// network.
+///
+/// A judgement about the URL, not about where a dial would land. Literals and
+/// `localhost` are decided here; every other name is left alone, since the
+/// address behind it is chosen by whoever runs its DNS and can change between
+/// this call and the dial. So a `false` here means "not local on its face", never
+/// "verified remote".
 fn is_local(url: &Url) -> bool {
 	match url.host() {
 		Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
@@ -258,13 +273,14 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 #[non_exhaustive]
 pub struct GoawayConfig {
 	/// What to do with the URI a peer names in its GOAWAY. Defaults to
-	/// [`Redirect::Follow`].
+	/// [`Redirect::SameHost`], so a peer moves us between ports and schemes;
+	/// letting it name the host too is [`Redirect::Follow`], an opt-in.
 	#[usage(
 		name = "goaway-redirect",
 		long,
 		env = "MOQ_GOAWAY_REDIRECT",
 		value_enum,
-		default = "follow"
+		default = "same-host"
 	)]
 	pub redirect: Redirect,
 
@@ -279,7 +295,7 @@ pub struct GoawayConfig {
 impl Default for GoawayConfig {
 	fn default() -> Self {
 		Self {
-			redirect: Redirect::Follow,
+			redirect: Redirect::SameHost,
 			handover: DEFAULT_HANDOVER.into(),
 		}
 	}
@@ -1213,9 +1229,9 @@ mod tests {
 
 		// No flags passed: the typed defaults are present.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
-		assert_eq!(parsed.goaway.redirect, Redirect::Follow);
+		assert_eq!(parsed.goaway.redirect, Redirect::SameHost);
 		assert_eq!(parsed.goaway.handover, Duration::from_secs(10));
-		assert_eq!(parsed.goaway.redirect(), Redirect::Follow);
+		assert_eq!(parsed.goaway.redirect(), Redirect::SameHost);
 		assert_eq!(parsed.goaway.handover(None), Duration::from_secs(10));
 
 		// Flags passed: they land where the merge can see them.
@@ -1345,6 +1361,39 @@ mod tests {
 			Redirect::Ignore.resolve("https://other.example/", &current),
 			current,
 			"Ignore never leaves the configured URL"
+		);
+	}
+
+	/// The reachability guard reads the URL, so it cannot see a local address
+	/// hiding behind a hostname: any name the peer controls can carry an A record
+	/// for loopback or a private range, and a second lookup at dial time may answer
+	/// differently anyway. The default policy is what closes that, by refusing to
+	/// let a peer name a host at all.
+	#[test]
+	fn a_peer_named_host_is_refused_by_default() {
+		let public: Url = "https://relay.example/".parse().unwrap();
+
+		// The bypass: a name is not local on its face, so the reachability guard
+		// passes it through whatever it resolves to.
+		let rebindable: Url = "https://rebind.attacker.example/".parse().unwrap();
+		assert!(!is_local(&rebindable), "a hostname is never classified as local");
+		assert_eq!(
+			Redirect::Follow.resolve(rebindable.as_str(), &public),
+			rebindable,
+			"Follow is explicit trust: it dials the name the peer chose"
+		);
+
+		// So the default refuses the host change instead of trying to judge it.
+		assert_eq!(Redirect::default(), Redirect::SameHost);
+		assert_eq!(
+			Redirect::default().resolve(rebindable.as_str(), &public),
+			public,
+			"a peer-named host is refused without resolving it"
+		);
+		assert_eq!(
+			GoawayConfig::default().redirect(),
+			Redirect::SameHost,
+			"and the shipped config carries that default"
 		);
 	}
 
