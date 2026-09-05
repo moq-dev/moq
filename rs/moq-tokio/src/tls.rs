@@ -2978,6 +2978,15 @@ impl Reload {
 			}
 		};
 
+		// The certificates were loaded before the watch existed, so anything that
+		// landed in between produced no event and would sit unseen until the next
+		// unrelated change. Read once more now that nothing further can be missed.
+		if let Err(err) = certs.load_certs(&config) {
+			// The previously loaded set is still being served, so this is not fatal:
+			// a rotation caught mid-write reloads again on the event it will emit.
+			tracing::warn!(%err, "failed to re-read server certificates after watching");
+		}
+
 		Self(tokio::spawn(reload_certs(watcher, certs, config)))
 	}
 }
