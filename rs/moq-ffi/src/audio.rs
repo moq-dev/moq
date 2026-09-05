@@ -78,9 +78,11 @@ pub struct MoqAudioEncoderOutput {
 	pub channels: Option<u32>,
 	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
-	/// Encoded frame duration in milliseconds. Opus accepts
-	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
-	pub frame_duration_ms: u32,
+	/// Encoded frame duration in microseconds. Opus accepts exactly
+	/// 2500/5000/10000/20000/40000/60000 us, and the default 20 ms matches the
+	/// JS publish path.
+	#[uniffi(default = 20000)]
+	pub frame_duration_us: u32,
 }
 
 /// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
@@ -246,7 +248,7 @@ impl MoqBroadcastProducer {
 		options.sample_rate = output.sample_rate;
 		options.channels = output.channels;
 		options.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		options.frame_duration = Duration::from_millis(output.frame_duration_ms.into());
+		options.frame_duration = Duration::from_micros(output.frame_duration_us.into());
 
 		let producer = self.with_state(|state| {
 			moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)
@@ -395,5 +397,16 @@ mod tests {
 	fn audio_config_rejects_unknown_codec() {
 		let error = audio_config(catalog_audio("unknown")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	/// `#[uniffi(default = ...)]` only takes a literal, so `frame_duration_us` restates
+	/// moq-audio's default rather than reading it.
+	#[test]
+	fn default_frame_duration_matches_moq_audio() {
+		assert_eq!(
+			moq_audio::encode::Options::default().frame_duration,
+			Duration::from_micros(20_000),
+			"update #[uniffi(default)] on MoqAudioEncoderOutput::frame_duration_us"
+		);
 	}
 }
