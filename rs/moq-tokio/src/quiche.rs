@@ -76,6 +76,11 @@ pub enum Error {
 	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 
+	/// quiche has no local cap on unacknowledged send data, so `quic.send_window`
+	/// cannot be honored.
+	#[error("the quiche backend cannot cap the send window; drop --quic-send-window or use the quinn backend")]
+	SendWindowUnsupported,
+
 	/// The handshake completed without negotiating an ALPN, so there is no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
@@ -200,10 +205,27 @@ type Result<T> = std::result::Result<T, Error>;
 /// Keep-alive and GSO are socket-driver settings, so they are applied to the
 /// client/server builders instead.
 fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved) -> Result<()> {
+	refuse_unsupported(quic)?;
+
 	settings.initial_max_streams_bidi = quic.max_streams;
 	settings.initial_max_streams_uni = quic.max_streams;
 	settings.max_idle_timeout = Some(quic.idle_timeout);
 	settings.discover_path_mtu = quic.mtu_discovery;
+
+	// quiche autotunes each window from its initial value up to a maximum and clamps
+	// it there, so raising only the initial value would be silently capped at
+	// quiche's own 24MB/16MB ceilings. Pinning both makes the window exactly what was
+	// asked for, which is what the other backends give.
+	if let Some(window) = quic.receive_window {
+		settings.initial_max_data = window;
+		settings.max_connection_window = window;
+	}
+	if let Some(window) = quic.stream_receive_window {
+		settings.initial_max_stream_data_bidi_local = window;
+		settings.initial_max_stream_data_bidi_remote = window;
+		settings.initial_max_stream_data_uni = window;
+		settings.max_stream_window = window;
+	}
 
 	// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
 	// so default to BBR rather than quiche's own CUBIC.
@@ -217,6 +239,20 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved
 	}
 
 	Ok(())
+}
+
+/// Reject the knobs quiche has no setting for, rather than dropping them.
+///
+/// [`apply_settings`] calls this so no path can bypass it, and the client calls it
+/// when the endpoint is built: its settings are assembled per dial, which would
+/// otherwise put the error on the first connection instead of at startup.
+fn refuse_unsupported(quic: &Resolved) -> Result<()> {
+	// quiche sends as fast as the peer's flow control and congestion control allow,
+	// with no local ceiling to set.
+	match quic.send_window {
+		Some(_) => Err(Error::SendWindowUnsupported),
+		None => Ok(()),
+	}
 }
 
 /// The quiche controller name for a congestion control family. quiche's BBR is the
@@ -255,6 +291,8 @@ struct ClientIdentity {
 impl QuicheClient {
 	pub fn new(config: &crate::connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let quic = quic.resolve();
+		refuse_unsupported(&quic)?;
+
 		// Identity holds a rustls signer rather than exportable private-key DER, which
 		// quiche requires. Refuse it instead of silently dialing without mTLS.
 		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -834,6 +872,56 @@ mod tests {
 		quic.congestion_control = Some(CongestionControl::Loss);
 		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, "cubic");
+	}
+
+	/// quiche autotunes each flow-control window up to a maximum and clamps it there,
+	/// so writing only the initial value would leave a larger request silently capped.
+	/// Both halves have to land for the window to be what was asked for.
+	#[test]
+	fn apply_settings_pins_both_halves_of_each_window() {
+		let quic = crate::quic::Config {
+			receive_window: Some(64 << 20),
+			stream_receive_window: Some(8 << 20),
+			..Default::default()
+		};
+
+		let mut settings = web_transport_quiche::Settings::default();
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
+
+		assert_eq!(settings.initial_max_data, 64 << 20);
+		assert_eq!(settings.max_connection_window, 64 << 20);
+		assert_eq!(settings.initial_max_stream_data_bidi_local, 8 << 20);
+		assert_eq!(settings.initial_max_stream_data_bidi_remote, 8 << 20);
+		assert_eq!(settings.initial_max_stream_data_uni, 8 << 20);
+		assert_eq!(settings.max_stream_window, 8 << 20);
+	}
+
+	/// An unset window leaves quiche's own defaults alone rather than pinning ours.
+	#[test]
+	fn apply_settings_leaves_unset_windows_alone() {
+		let defaults = web_transport_quiche::Settings::default();
+		let mut settings = web_transport_quiche::Settings::default();
+		apply_settings(&mut settings, &crate::quic::Config::default().resolve()).unwrap();
+
+		assert_eq!(settings.initial_max_data, defaults.initial_max_data);
+		assert_eq!(settings.max_connection_window, defaults.max_connection_window);
+		assert_eq!(settings.max_stream_window, defaults.max_stream_window);
+	}
+
+	/// quiche has no local send cap, so a configured one is refused rather than
+	/// dropped: an operator must not believe a ceiling is in force that is not.
+	#[test]
+	fn send_window_is_refused() {
+		let quic = crate::quic::Config {
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+
+		let mut settings = web_transport_quiche::Settings::default();
+		assert!(matches!(
+			apply_settings(&mut settings, &quic.resolve()),
+			Err(Error::SendWindowUnsupported)
+		));
 	}
 
 	/// An in-memory identity must not disappear when the quiche backend is selected.

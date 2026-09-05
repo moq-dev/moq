@@ -179,8 +179,9 @@ impl EndpointConfig {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
-	/// discovery, congestion control); it has no keep-alive knob and cannot disable
-	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// discovery, congestion control, flow-control windows); it has no keep-alive
+	/// knob and cannot disable GSO, so `gso = false` fails with
+	/// [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -233,6 +234,19 @@ impl EndpointConfig {
 			.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
+		}
+		// Saturating rather than erroring: `Config::validate` already rejects a window
+		// past the varint, so this only bites a `Resolved` built without it.
+		if let Some(window) = quic.receive_window {
+			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+			transport = transport.receive_window(window);
+		}
+		if let Some(window) = quic.stream_receive_window {
+			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+			transport = transport.stream_receive_window(window);
+		}
+		if let Some(window) = quic.send_window {
+			transport = transport.send_window(window);
 		}
 		transport = transport.congestion_controller_factory(congestion_factory(congestion_control(&quic)));
 

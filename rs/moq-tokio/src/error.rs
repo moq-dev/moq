@@ -91,6 +91,11 @@ pub enum Error {
 	#[error("idle timeout must be under 2^62 milliseconds")]
 	IdleTimeoutRange,
 
+	/// A QUIC flow-control window is zero or too large to express. The payload names
+	/// which one.
+	#[error("quic {0} must be non-zero and fit a QUIC varint")]
+	WindowRange(&'static str),
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
