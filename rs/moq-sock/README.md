@@ -12,7 +12,9 @@ runtimes (`moq-tokio` and `moq-uring`).
   in index order; binding a member joins the group, and the last one attaches a
   classic-BPF filter that steers each packet by the first byte of its
   destination connection id. A `Shard` names the slot a member ended up in, and
-  `cid_prefix` is the byte its issued ids lead with.
+  `cid_prefix` is the byte its issued ids lead with. Keep every bound socket for
+  as long as the group is served: the kernel numbers the group by what is in it,
+  so closing one renumbers the members after it.
 - **`cpu`**: pinning worker threads to cores.
 
 This is infrastructure, not an entry point: build against `moq-tokio` or

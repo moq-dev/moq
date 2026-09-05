@@ -15,16 +15,20 @@
 //! [`Group`] is the whole entry point. It takes the port, fixes the member
 //! count, and hands out one [`Member`] per slot in index order; binding a member
 //! is the only way to join the group, and the last one to bind attaches the
-//! steering filter. Hold the group for as long as its sockets are served.
+//! steering filter. Hold the group for as long as its sockets are served, and
+//! the sockets with it: the kernel numbers the group by what is still in it, so
+//! closing one renumbers every member after it.
 //!
 //! ```no_run
 //! # fn example(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut group = moq_sock::shard::Group::acquire(addr, 4)?;
+//! let mut members = Vec::new();
 //! while let Some(member) = group.member() {
 //!     let shard = member.shard();
-//!     let socket = member.bind()?;
-//!     // Serve `socket`, issuing connection IDs led by `cid_prefix(shard)`.
+//!     // Kept, not dropped: a socket leaving the group renumbers the rest.
+//!     members.push((shard, member.bind()?));
 //! }
+//! // Serve each socket, issuing connection IDs led by `cid_prefix(shard)`.
 //! # Ok(())
 //! # }
 //! ```
@@ -141,6 +145,12 @@ pub enum Error {
 ///   group by bind order, so a member that binds out of turn is refused rather
 ///   than silently taking a sibling's slot.
 ///
+/// The one rule left to the caller is keeping every bound socket: the kernel
+/// numbers the group by what is *in* it, so closing one renumbers every member
+/// after it and the filter steers their traffic to the wrong sockets. Nothing
+/// here can enforce that while the caller owns the sockets, which is what
+/// handing them back from the group would fix.
+///
 /// Members may be bound wherever their sockets are served, a worker's own thread
 /// included, as long as each one binds before the next takes its turn.
 #[derive(Debug)]
@@ -235,6 +245,10 @@ impl Member {
 	/// Fails when a sibling has not bound yet: the kernel numbers a reuseport
 	/// group by bind order, so a member joining out of turn would take another's
 	/// slot and steer its traffic, with no error to show for it.
+	///
+	/// Keep the socket for as long as the group is served. Closing one takes it
+	/// out of the group, which renumbers every member that joined after it, and
+	/// the steering filter goes on pointing at the positions they used to hold.
 	pub fn bind(self) -> io::Result<UdpSocket> {
 		let mut progress = self.state.progress();
 		if progress.bound != self.shard.index() {
