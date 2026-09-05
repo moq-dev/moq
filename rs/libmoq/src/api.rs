@@ -1820,7 +1820,7 @@ pub unsafe extern "C" fn moq_publish_media_hint(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
-		let video = unsafe { parse_video_hint(hint)? };
+		let video = parse_video_hint(hint)?;
 
 		State::lock().publish.media(broadcast, format, init, video)
 	})
