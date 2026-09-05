@@ -71,9 +71,9 @@ pub struct Sink {
 impl Sink {
 	/// Write traces into `dir`, which must already exist and be writable.
 	///
-	/// Files are named `moq-<started>-<process>-<sink>-<id>-<side>.qlog`, where
-	/// `started` is the sink's creation time in milliseconds since the epoch
-	/// and `id` names the connection.
+	/// Files are named `moq-<started>-<process>-<sink>-<trace>-<id>-<side>.qlog`,
+	/// where `started` is the sink's creation time in milliseconds since the
+	/// epoch and `trace` keeps reused connection ids distinct.
 	pub fn directory(dir: impl Into<PathBuf>) -> Result<Self, Error> {
 		let dir = dir.into();
 		let process = std::process::id();
@@ -135,13 +135,16 @@ impl Sink {
 
 		let inner = self.inner.clone();
 		let file = inner.next.fetch_add(1, Ordering::Relaxed);
-		// An endpoint-wide trace has no connection id to name it, so the
-		// sink's own slot stands in and stays unique within the directory.
+		// The trace slot stays unique within the sink even when a peer reuses
+		// the same Initial destination connection id.
 		let id = match cid {
-			Some(cid) => cid.iter().fold(String::with_capacity(cid.len() * 2), |mut id, byte| {
-				let _ = write!(id, "{byte:02x}");
-				id
-			}),
+			Some(cid) => {
+				let cid = cid.iter().fold(String::with_capacity(cid.len() * 2), |mut id, byte| {
+					let _ = write!(id, "{byte:02x}");
+					id
+				});
+				format!("connection{file}-{cid}")
+			}
 			None => format!("endpoint{file}"),
 		};
 		let path = inner.dir.join(format!(
@@ -383,6 +386,27 @@ mod tests {
 		drop(second_trace);
 		drop(first);
 		drop(second);
+
+		let mut contents: Vec<_> = std::fs::read_dir(dir.path())
+			.expect("read qlog directory")
+			.map(|entry| std::fs::read(entry.expect("directory entry").path()).expect("read qlog file"))
+			.collect();
+		contents.sort();
+		assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
+	}
+
+	#[test]
+	fn reused_connection_ids_use_distinct_files() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let sink = Sink::directory(dir.path()).expect("sink");
+
+		let mut first = sink.trace(b"same", Side::Server);
+		first.write_all(b"first").expect("write first trace");
+		drop(first);
+		let mut second = sink.trace(b"same", Side::Server);
+		second.write_all(b"second").expect("write second trace");
+		drop(second);
+		drop(sink);
 
 		let mut contents: Vec<_> = std::fs::read_dir(dir.path())
 			.expect("read qlog directory")

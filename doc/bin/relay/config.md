@@ -125,8 +125,9 @@ configured, and this mode will not guess.
 `qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
 workers, and writes the same JSON-SEQ traces into the same directory, so one
 workflow reads both runtimes. Files are named
-`moq-<started>-<process>-<sink>-<connection id>-<side>.qlog`, where `started`
-is when the relay came up, so a second run does not overwrite the first. An
+`moq-<started>-<process>-<sink>-connection<N>-<connection id>-<side>.qlog`,
+where `started` is when the relay came up and `N` distinguishes traces whose
+peer-selected connection ids repeat. An
 `io-uring-quinn` build writes one file per worker instead of per connection,
 named `moq-<started>-<process>-<sink>-endpoint<N>-<side>.qlog`, because
 quinn-proto takes one trace sink per endpoint. A pinned worker never writes to
