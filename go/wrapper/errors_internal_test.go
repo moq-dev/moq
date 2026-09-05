@@ -129,3 +129,23 @@ func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	default:
 	}
 }
+
+// The generated bindings panic on any use of a destroyed object, and a token is
+// used from two goroutines: the caller cancels, the call releases. A cancel that
+// loses that race has to find the token gone rather than call into it.
+func TestTokenIgnoresACancelAfterRelease(t *testing.T) {
+	tok := newToken()
+	tok.release()
+
+	// Both of these would panic if they reached the native object.
+	tok.cancel()
+	tok.release()
+}
+
+// A cancel before the release still reaches the native object, which is the
+// whole point of the token.
+func TestTokenCancelsWhileLive(t *testing.T) {
+	tok := newToken()
+	tok.cancel()
+	tok.release()
+}

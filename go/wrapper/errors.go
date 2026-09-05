@@ -3,6 +3,7 @@ package moq
 import (
 	"context"
 	"errors"
+	"sync"
 
 	ffi "moq.dev/moq-ffi/moq"
 )
@@ -178,6 +179,48 @@ func runErr(ctx context.Context, cancel func(), call func() error) error {
 	return err
 }
 
+// token is the per-call cancellation object plus the synchronization its two
+// users need. `cancel` runs on the caller's goroutine and `release` on the one
+// running the call, and the generated bindings panic on any use of a destroyed
+// object, so the two are serialized and only one of them ever frees it.
+//
+// Releasing on the call's own goroutine is what makes the object outlive every
+// use of it: the call cannot start after its own deferred release, and a cancel
+// that arrives later finds the token already gone and does nothing.
+type token struct {
+	// Set once at construction and never reassigned, so the call can read it
+	// without the lock.
+	inner *ffi.MoqCancel
+
+	mu       sync.Mutex
+	released bool
+}
+
+func newToken() *token {
+	return &token{inner: ffi.NewMoqCancel()}
+}
+
+// cancel aborts the call this token was minted for, or does nothing once that
+// call has returned and released it.
+func (t *token) cancel() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.released {
+		t.inner.Cancel()
+	}
+}
+
+// release frees the native object, once. Without it a run of quick calls piles
+// tokens up until the Go finalizer notices them.
+func (t *token) release() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.released {
+		t.released = true
+		t.inner.Destroy()
+	}
+}
+
 // runOperation runs a blocking FFI call that takes a per-call cancellation token
 // and returns a native handle.
 //
@@ -186,19 +229,20 @@ func runErr(ctx context.Context, cancel func(), call func() error) error {
 // must not close the broadcast, and one on Accept must not close the server. The
 // native task unwinds with the token, so nothing outlives the caller that gave up.
 func runOperation[T handle](ctx context.Context, call func(*ffi.MoqCancel) (T, error)) (T, error) {
-	token := ffi.NewMoqCancel()
-	// The native call holds its own reference for as long as it runs, so dropping
-	// ours here is safe and keeps a run of quick calls from piling tokens up until
-	// the Go finalizer notices them.
-	defer token.Destroy()
-	return runHandle(ctx, token.Cancel, func() (T, error) { return call(token) })
+	tok := newToken()
+	return runHandle(ctx, tok.cancel, func() (T, error) {
+		defer tok.release()
+		return call(tok.inner)
+	})
 }
 
 // runOperationErr is runOperation for calls that return only an error.
 func runOperationErr(ctx context.Context, call func(*ffi.MoqCancel) error) error {
-	token := ffi.NewMoqCancel()
-	defer token.Destroy()
-	return runErr(ctx, token.Cancel, func() error { return call(token) })
+	tok := newToken()
+	return runErr(ctx, tok.cancel, func() error {
+		defer tok.release()
+		return call(tok.inner)
+	})
 }
 
 // releaseHandle drops a handle the caller never received. A successful call can
