@@ -96,9 +96,23 @@ the writer sees `GroupTooLarge`, which nothing covers today.
 Note `js/json/src/window/encoder.ts` keeps its own unrelated
 `MAX_GROUP_FRAMES = 256`; leave it.
 
+### The benchmark breaks
+
+`rs/moq-net/benches/group.rs` sweeps `COUNTS = [512, 8_192, 32_768]` and
+unwraps every write (`write_frames(..).unwrap()` and the prefill paths), so the
+32,768 case panics the moment a Rust count cap exists and `just bench` fails.
+Adjust the sweep, or benchmark the rejection deliberately, as part of this
+quest rather than discovering it afterwards.
+
+The middle case sits exactly on the proposed cap, so settle the boundary and
+say it in the doc comment: 8192 frames is the largest legal group, and the
+8193rd write is the one that returns `GroupTooLarge`. The bench's own comment
+already claims its top end "intentionally reaches the raised
+`MAX_GROUP_FRAMES`", which is stale: Rust has no such constant today.
+
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - also turns "open group hit a limit" into an abort, so the two must not collide on the error variant
-- [JS stream codes](/quest/m0/js-net-stream-error-codes.md) - without it a JS publisher sends this new code to the wire as Internal
+- [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - without it a JS publisher sends this new code to the wire as Internal
 - [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - the moq-transport half of the code mapping

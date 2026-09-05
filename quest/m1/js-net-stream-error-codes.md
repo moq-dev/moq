@@ -9,6 +9,12 @@ failure, so a routine event looks like a crash on our side.
 
 ## Plan
 
+Dev only, which is why this sits in m1 rather than m0. `main` has no
+`StreamCode`, no `StreamError`, and no `toTransport`: its `reset(reason)` just
+calls `#writer.abort(reason)`, so there is no code-preserving path to fix
+there. The structured code machinery this quest builds on exists only on dev,
+so branch from dev and reconcile against that tree.
+
 `Writer.reset` calls `withCode(reason)` in `js/net/src/stream.ts`, which
 preserves a code only when `reason instanceof StreamError`. A `Lagged` raised
 locally is a plain `Error`, so `js/net/src/ietf/publisher.ts` `stream.reset(error(err))`
