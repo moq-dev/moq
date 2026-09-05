@@ -776,6 +776,66 @@ fn synthesize_flac_trak() {
 	assert_eq!(stream_info, (96_000, 1));
 }
 
+/// A long GOP must not cost a stack frame per sample.
+///
+/// Appending a frame to a track's buffer restarts the search for work, and
+/// doing that by calling back into the poll leaves one stack frame behind per
+/// buffered sample. A track buffers a whole GOP, so ten seconds of 60 fps video
+/// overflows the stack rather than emitting a fragment.
+///
+/// The thread is given a small stack on purpose. The default is large enough to
+/// need thousands of frames before it fails, which is more video than a test
+/// should have to build; 1 MiB fails on the recursive version at this GOP
+/// length and is ample for the iterative one.
+#[test]
+fn a_long_gop_does_not_cost_a_stack_frame_per_sample() {
+	let run = std::thread::Builder::new()
+		.stack_size(1024 * 1024)
+		.spawn(|| {
+			let rt = tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.expect("runtime");
+
+			rt.block_on(async {
+				let mut live = Live::avc3();
+				// Ten seconds of 60 fps in one GOP, closed by the next keyframe.
+				for i in 0..600u64 {
+					live.track.write(video_frame(i * 16_666, i == 0)).unwrap();
+				}
+				live.track.write(video_frame(600 * 16_666, true)).unwrap();
+
+				let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+					.with_max_age(RECORDING_MAX_AGE);
+				assert!(
+					chunk_now(&mut exporter).await.init().is_some(),
+					"first chunk must be the init segment"
+				);
+
+				// The whole GOP in one fragment, which is also what says the
+				// loop kept appending rather than emitting early.
+				let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+				assert!(fragment.independent, "a GOP opens on a keyframe");
+				// All 600 frames, so an exporter that emitted a partial fragment
+				// early would fail here rather than pass on any positive duration.
+				// A lower bound rather than an exact figure: the trailing sample's
+				// duration is the exporter's to infer, and one frame either way is
+				// not what this test is about.
+				let gop = std::time::Duration::from_micros(600 * 16_666);
+				assert!(
+					fragment.duration >= gop && fragment.duration < gop + std::time::Duration::from_millis(50),
+					"the fragment holds {:?} of a {:?} GOP",
+					fragment.duration,
+					gop
+				);
+			});
+		})
+		.expect("spawn");
+
+	run.join().expect("a long GOP overflowed the stack");
+}
+
 /// The next chunk, required to be ready without another frame arriving.
 async fn chunk_now(
 	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,

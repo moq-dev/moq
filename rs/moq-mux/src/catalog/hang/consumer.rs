@@ -202,7 +202,7 @@ mod test {
 			.expect("catalog track should create");
 
 		let origin = crate::source::produce_origin();
-		let mut dynamic = origin.dynamic();
+		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();
 		tokio::spawn(async move {

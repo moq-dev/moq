@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 - Rename the crate to `moq-tokio`. This release intentionally produces a compile error with migration instructions.
 
+## [0.19.16](https://github.com/moq-dev/moq/compare/moq-native-v0.19.15...moq-native-v0.19.16) - 2026-09-02
+
+### Other
+
+- updated the following local packages: moq-net
+
 ## [0.19.15](https://github.com/moq-dev/moq/compare/moq-native-v0.19.14...moq-native-v0.19.15) - 2026-09-01
 
 ### Added

@@ -65,6 +65,8 @@ pub struct Client<S = TcpStream> {
 	session: ClientSession,
 	/// Session results queued during connect, drained by the first publish/pull.
 	work: VecDeque<ClientSessionResult>,
+	/// The `<app>` this client connected to, logged in place of the stream key.
+	app: String,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping. Defaults to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE).
 	export_max_age: Duration,
@@ -148,6 +150,7 @@ impl<S: Stream> Client<S> {
 			stream,
 			session,
 			work,
+			app: app.to_string(),
 			export_max_age: crate::DEFAULT_MAX_AGE,
 			import_max_age: None,
 		})
@@ -192,6 +195,7 @@ impl<S: Stream> Client<S> {
 		origin: origin::Consumer,
 		path: impl moq_net::AsPath,
 	) -> Result<()> {
+		let path = path.as_path();
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -199,7 +203,9 @@ impl<S: Stream> Client<S> {
 		self.work.push_back(request);
 		self.await_event(Direction::Publish).await?;
 
-		tracing::info!(%stream_key, "rtmp publish accepted by remote");
+		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
+		// app and broadcast path stand in for it.
+		tracing::info!(app = %self.app, %path, "rtmp publish accepted by remote");
 
 		// Flush anything queued alongside the publish-accepted event before streaming.
 		let queued = std::mem::take(&mut self.work);
@@ -268,7 +274,9 @@ impl<S: Stream> Client<S> {
 		self.work.push_back(request);
 		self.await_event(Direction::Play).await?;
 
-		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
+		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
+		// app and broadcast path stand in for it.
+		tracing::info!(app = %self.app, %path, "rtmp play accepted by remote");
 
 		let mut publisher = Publisher::new(origin, path.as_str(), self.import_max_age)?;
 
@@ -464,8 +472,6 @@ struct Publisher {
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
-	// The route advertising the path; dropping it retracts.
-	_announcement: moq_net::announce::Producer,
 }
 
 impl Publisher {
@@ -473,8 +479,8 @@ impl Publisher {
 		let mut broadcast = origin
 			.create_broadcast(path)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let announcement = origin
-			.announce(path, moq_net::origin::Route::default())
+		broadcast
+			.announce(moq_net::origin::Route::default())
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be announced: {err}"))?;
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
@@ -486,7 +492,6 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
-			_announcement: announcement,
 		})
 	}
 
@@ -543,7 +548,7 @@ mod tests {
 
 		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
-		let _announcement = server_origin.announce("live/cam0", Default::default()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();

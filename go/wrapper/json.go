@@ -159,12 +159,15 @@ func (b *BroadcastProducer) PublishJSONStream(name string, options JSONStreamOpt
 
 // SubscribeJSONSnapshot subscribes to a lossy latest-value JSON track.
 func (b *BroadcastConsumer) SubscribeJSONSnapshot(
+	ctx context.Context,
 	name string,
 	options JSONSubscribeOptions,
 ) (*JSONSnapshotConsumer, error) {
-	inner, err := b.inner.SubscribeJsonSnapshot(name, ffi.MoqJsonSnapshotConfig{
-		DeltaRatio:  0,
-		Compression: options.Compression,
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqJsonSnapshotConsumer, error) {
+		return b.inner.SubscribeJsonSnapshot(name, ffi.MoqJsonSnapshotConfig{
+			DeltaRatio:  0,
+			Compression: options.Compression,
+		}, &cancel)
 	})
 	if err != nil {
 		return nil, err
@@ -174,10 +177,13 @@ func (b *BroadcastConsumer) SubscribeJSONSnapshot(
 
 // SubscribeJSONStream subscribes to a lossless append-log JSON track.
 func (b *BroadcastConsumer) SubscribeJSONStream(
+	ctx context.Context,
 	name string,
 	options JSONSubscribeOptions,
 ) (*JSONStreamConsumer, error) {
-	inner, err := b.inner.SubscribeJsonStream(name, ffi.MoqJsonStreamConfig{Compression: options.Compression})
+	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqJsonStreamConsumer, error) {
+		return b.inner.SubscribeJsonStream(name, ffi.MoqJsonStreamConfig{Compression: options.Compression}, &cancel)
+	})
 	if err != nil {
 		return nil, err
 	}

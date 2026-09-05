@@ -231,13 +231,13 @@ async fn run(config: &Config) -> Result<()> {
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
 	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
 
-	// Create the broadcast on the publish origin; the live route announces it.
+	// Create the broadcast on the publish origin and announce its path.
 	let broadcast_path = format!("{game_prefix}/{name}");
 	let mut broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
-	let _announce_broadcast = publish_origin
-		.announce(&broadcast_path, Default::default())
+	broadcast
+		.announce(Default::default())
 		.context("failed to announce broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
@@ -249,7 +249,7 @@ async fn run(config: &Config) -> Result<()> {
 		.expect("viewer prefix should be valid")
 		.consume();
 
-	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publisher(&publish_origin)

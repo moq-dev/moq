@@ -8,6 +8,7 @@ use anyhow::Context;
 use axum::http::Method;
 use hang::moq_net;
 use hang::moq_net::AsPath;
+use moq_tokio::RedactedUrl;
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
@@ -92,12 +93,11 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 		.context("failed to create broadcast")?;
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
-	let _announcement = target
-		.origin
-		.announce(name, Default::default())
+	producer
+		.announce(Default::default())
 		.context("failed to announce broadcast")?;
 
-	tracing::info!(%url, %name, "WHEP client pulling");
+	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");
 	notify_ready();
 
 	let mut config = moq_rtc::client::Config::default();
@@ -115,7 +115,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 
-	tracing::info!(%url, %name, "WHIP client pushing");
+	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());

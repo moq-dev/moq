@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `encode::Producer` carries a rendition's `label` into the catalog. It copied the config into hints
   field by field and had no case for the new field.
 
+## [0.0.22](https://github.com/moq-dev/moq/compare/moq-video-v0.0.21...moq-video-v0.0.22) - 2026-09-02
+
+### Fixed
+
+- *(video)* compile the PipeWire render test ([#3341](https://github.com/moq-dev/moq/pull/3341))
+
 ## [0.0.21](https://github.com/moq-dev/moq/compare/moq-video-v0.0.20...moq-video-v0.0.21) - 2026-09-01
 
 ### Added

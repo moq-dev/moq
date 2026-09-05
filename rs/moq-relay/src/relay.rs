@@ -229,6 +229,14 @@ impl Relay {
 			.with_cluster(&cluster)
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health());
+		// Bound but not yet serving: registering here (rather than after the
+		// threads start) is what gives every worker a series from the first
+		// scrape, including one that is about to fail setup.
+		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		let internal = match uring.as_ref() {
+			Some(uring) => internal.with_uring(uring.metrics()),
+			None => internal,
+		};
 
 		match addr {
 			Some(addr) => tracing::info!(%addr, "listening"),

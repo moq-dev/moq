@@ -10,6 +10,9 @@ export function isWebTransportUserAgentSupported(userAgent: string): boolean {
 
 		// Safari's flow-control window never refills, which permanently stalls sessions:
 		// https://bugs.webkit.org/show_bug.cgi?id=319818
+		// It also stops delivering incoming unidirectional streams for good after
+		// roughly 7,600 of them or 16 MiB on one session, whichever comes first
+		// (moq-dev/moq#2388); one stream per group reaches that in about two minutes.
 		safari: "<0",
 	});
 

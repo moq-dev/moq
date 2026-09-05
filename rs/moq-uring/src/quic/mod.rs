@@ -33,6 +33,8 @@
 
 pub mod client;
 pub mod endpoint;
+#[cfg(feature = "qlog")]
+pub mod qlog;
 pub mod server;
 pub mod web;
 
@@ -128,6 +130,17 @@ pub struct Transport {
 	/// connection, or `None` (the default) to send none and let the idle
 	/// timeout decide.
 	pub keep_alive: Option<std::time::Duration>,
+	/// Where to write qlog traces, or `None` (the default) to write none.
+	///
+	/// The layout follows the backend, as it does on the tokio stack: noq and
+	/// quiche write one file per connection, while quinn-proto takes one sink
+	/// per configuration and so writes one file per endpoint, tagging each
+	/// event with the qlog `group_id` of the connection it belongs to.
+	///
+	/// Only compiled with the `qlog` feature, so a build without it cannot ask
+	/// for traces the backends would not produce.
+	#[cfg(feature = "qlog")]
+	pub qlog: Option<qlog::Sink>,
 }
 
 impl Default for Transport {
@@ -137,6 +150,8 @@ impl Default for Transport {
 			max_streams: 1024,
 			congestion: Congestion::default(),
 			keep_alive: None,
+			#[cfg(feature = "qlog")]
+			qlog: None,
 		}
 	}
 }
@@ -223,6 +238,10 @@ pub enum Error {
 		/// The UTF-8 lossy close reason, empty for a stream-level code.
 		reason: String,
 	},
+	/// qlog traces were asked for and cannot be captured: the directory is
+	/// missing or unwritable, or the writer thread could not be started.
+	#[error("qlog error: {0}")]
+	Qlog(String),
 }
 
 impl web_transport_trait::Error for Error {

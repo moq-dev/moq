@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.12"
+version = "0.5.13"
 edition = "2024"
 rust-version.workspace = true
 
@@ -20,13 +20,14 @@ crate-type = ["staticlib"]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 hang = { workspace = true }
-moq-audio = { workspace = true }
+# Codecs only: OBS and the other C consumers do their own device I/O.
+moq-audio = { workspace = true, features = ["aac"] }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"] }
 # Enable the NVIDIA hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvidia"] }
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true }

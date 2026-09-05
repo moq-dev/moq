@@ -301,7 +301,7 @@ class DecoderTrack {
 			broadcast: this.broadcast,
 			track: this.track,
 			priority: Catalog.PRIORITY.video,
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 
 		const decoder = new VideoDecoder({
@@ -377,7 +377,7 @@ class DecoderTrack {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -453,7 +453,7 @@ class DecoderTrack {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 		effect.cleanup(() => consumer.close());
 

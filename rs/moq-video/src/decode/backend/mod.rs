@@ -8,10 +8,10 @@
 //!
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
-//! / DXVA on Windows, NVDEC on Linux) before the openh264 software fallback,
-//! exactly like the encode side. Only backends that support the requested codec
-//! are considered: there is no software H.265 or AV1 decoder, so those tracks
-//! have no fallback below the hardware path.
+//! / DXVA on Windows, MediaCodec on Android, NVDEC then V4L2 on Linux) before
+//! the openh264 software fallback, exactly like the encode side. Only backends
+//! that support the requested codec are considered: there is no software H.265
+//! or AV1 decoder, so those tracks have no fallback below the hardware path.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -30,8 +30,14 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+mod mediacodec;
+
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvdec;
+
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+mod v4l2;
 
 /// The video codec a decoder handles. Derived from the catalog, not chosen by the
 /// caller.
@@ -59,10 +65,17 @@ pub(crate) trait Backend: Send {
 	/// Decode one access unit stamped with its presentation `timestamp`.
 	/// `keyframe` marks a random-access frame. Takes an owned [`Bytes`] so a
 	/// backend can split codec units without copying.
-	/// Backends that decode one-in one-out echo the input timestamp; NVDEC threads
-	/// timestamps through its parser, so they survive decoder delay and frame
-	/// reordering.
+	/// Backends that decode one-in one-out echo the input timestamp; NVDEC and
+	/// MediaCodec thread timestamps through the codec, so they survive decoder
+	/// delay and frame reordering.
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error>;
+
+	/// Return the pictures the codec still holds once the stream has ended.
+	///
+	/// Backends configured for zero delay return no frames. A backend that
+	/// reorders pictures overrides this so the end of a track does not drop its
+	/// buffered tail.
+	fn flush(&mut self) -> Result<Vec<Frame>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;
@@ -93,11 +106,26 @@ const HARDWARE: &[Candidate] = &[
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: mediafoundation::MediaFoundation::open,
 	},
+	#[cfg(all(target_os = "android", feature = "mediacodec"))]
+	Candidate {
+		name: mediacodec::NAME,
+		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),
+		open: mediacodec::MediaCodec::open,
+	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvdec::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),
 		open: nvdec::Nvdec::open,
+	},
+	// Last of the Linux hardware decoders, for the same reason as its encode
+	// counterpart: the SoC blocks it drives are the only hardware on a board that
+	// has no NVIDIA GPU.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	Candidate {
+		name: v4l2::NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: v4l2::V4l2::open,
 	},
 ];
 
@@ -111,11 +139,24 @@ const SOFTWARE: Candidate = Candidate {
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
 /// name.
 #[cfg(test)]
-const NAMED_ONLY: &[Candidate] = &[Candidate {
-	name: probe::NAME,
-	supports: |c| matches!(c, Codec::H264),
-	open: probe::Probe::open,
-}];
+const NAMED_ONLY: &[Candidate] = &[
+	Candidate {
+		name: probe::NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Probe::open,
+	},
+	Candidate {
+		name: probe::BUFFERED_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Buffered::open,
+	},
+	#[cfg(not(target_os = "macos"))]
+	Candidate {
+		name: probe::BLOCKING_FLUSH_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::BlockingFlush::open,
+	},
+];
 
 #[cfg(not(test))]
 const NAMED_ONLY: &[Candidate] = &[];
@@ -234,6 +275,10 @@ mod tests {
 
 	impl Backend for Stub {
 		fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 			Ok(Vec::new())
 		}
 

@@ -1,31 +1,28 @@
-# [L] Web SEI stitch
+# [S] Web SEI access
 
 ## Goal
 
-The web Hang stack discovers `sei` sidecars, exposes raw sidecar samples to
-applications, and can restore already-available SEI before feeding H.264/H.265
-to a browser decoder. Missing or late SEI never delays video playback.
+The web Hang stack discovers `sei` sidecars and exposes their samples to
+applications, so a browser can read timecode, ad markers, or telemetry without
+subscribing to the video track at all.
 
 ## Plan
 
-Add typed catalog bindings and a reusable joiner in the JavaScript packages.
-Keep the raw sidecar API independent of decoder support so captions,
-telemetry, HDR, and vendor payload consumers can opt in without remuxing video.
+Add typed catalog bindings for the section and a subscriber that yields raw SEI
+samples keyed by the video group sequence and frame ordinal they came from, the
+exact identity the section defines, with the frame timestamp carried as data
+for presentation-time sync. Keep it independent
+of the decode path: nothing here feeds a `VideoDecoder`, because stripped video
+decodes unchanged and WebCodecs does not surface SEI regardless.
 
-Join by video group sequence and frame ordinal using the proven nonblocking
-delivery contract, and bound unmatched state across skipped groups and
-reconnects. Test WebCodecs and MSE paths that consume codec samples, plus a
-direct sidecar subscriber.
+Applications parse the NAL payloads themselves with whatever vocabulary they
+need, so a new payload type requires no change here.
 
-The browser interoperability proof plays a separated-SEI stream under induced
-sidecar delay and loss, verifies uninterrupted frame delivery, and confirms
-that on-time NAL units retain byte order.
+Test a sidecar-only subscriber with the video track never requested, a
+subscriber that takes both, late join, and reconnect. Prove that a backgrounded
+tab consuming only the sidecar draws no video bandwidth.
 
 ## Required
 
-- [SEI section](/quest/m2/sei/sei.md) - defines the catalog and nonblocking
-  correlation contract
-- [Versioned SEI profile](/quest/m2/sei/sei-profile.md) - supplies the
-  resolver boundary and old-client failure contract
-- [Nonblocking SEI delivery](/quest/m3/sei-delivery.md) - proves the
-  cross-track mechanism the browser implementation must use
+- [SEI section](/quest/m2/sei/sei.md) - defines the catalog and correlation
+  contract

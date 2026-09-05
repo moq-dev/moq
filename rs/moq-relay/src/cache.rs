@@ -54,11 +54,12 @@ pub struct CacheConfig {
 	/// LRU window keeps its 30 second default and each track keeps its own
 	/// retention window.
 	///
-	/// Two caveats. The latest group of every track is always retained, since it
-	/// is the live edge. And expiry is evaluated when a track writes, so a
-	/// publisher that stops writing without disconnecting keeps whatever it had
-	/// cached until it resumes or the broadcast closes; under memory pressure the
-	/// `capacity` budget is repaid by the tracks that are still writing.
+	/// One caveat: the latest group of every track is always retained, since it is
+	/// the live edge. This window otherwise holds whether or not a publisher is
+	/// still writing, since the relay sweeps every cached track on a wall-clock
+	/// cadence. The `capacity` budget is the one that depends on writes: a
+	/// publisher that stops writing pays none of it down, so under memory pressure
+	/// it is repaid by the tracks that are still writing.
 	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION")]
 	pub duration: Option<moq_tokio::Duration>,
 }

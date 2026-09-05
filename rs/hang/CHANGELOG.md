@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Human-readable labels for audio and video renditions.
 
+## [0.20.10](https://github.com/moq-dev/moq/compare/hang-v0.20.9...hang-v0.20.10) - 2026-09-02
+
+### Other
+
+- updated the following local packages: moq-net
+
 ## [0.20.9](https://github.com/moq-dev/moq/compare/hang-v0.20.8...hang-v0.20.9) - 2026-09-01
 
 ### Other

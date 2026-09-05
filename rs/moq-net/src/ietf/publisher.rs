@@ -427,7 +427,7 @@ where
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
-		// an `origin::Dynamic` handler if one is registered.
+		// the route covering it (an `origin::Dynamic`), if any.
 		let broadcast = match self
 			.serving_origin()
 			.await
@@ -853,33 +853,38 @@ where
 		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
-		// Serialization Flags: the two low bits encode the subgroup (00 = subgroup
-		// zero), then per-field presence bits.
-		const OBJECT_ID: u64 = 0x04;
-		const GROUP_ID: u64 = 0x08;
-		const PRIORITY: u64 = 0x10;
-		const PROPERTIES: u64 = 0x20;
-		let properties = if timescale.is_some() { PROPERTIES } else { 0 };
+		// An unstamped object has no properties at all, so the field is omitted rather
+		// than written empty: the track declared no units to read a timestamp in.
+		let properties = match timescale {
+			Some(timescale) => {
+				let mut properties = bytes::BytesMut::new();
+				ietf::encode_object_time(&mut properties, timestamp, timescale, version)?;
+				Some(properties.to_vec())
+			}
+			None => None,
+		};
 
-		if first {
+		let header = match first {
 			// The first object must carry its absolute Group and Object IDs. Include the
 			// priority too: "same as the prior object" has no prior to refer to.
-			stream.encode(&(GROUP_ID | OBJECT_ID | PRIORITY | properties)).await?;
-			stream.encode(&sequence).await?;
-			stream.encode(&object).await?;
-			stream.encode(&0u8).await?;
-		} else {
+			true => ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: Some(sequence),
+				object: Some(object),
+				priority: Some(0),
+				properties,
+			},
 			// Same group and priority; the Object ID is the prior one plus one.
-			stream.encode(&properties).await?;
-		}
+			false => ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: None,
+				object: None,
+				priority: None,
+				properties,
+			},
+		};
 
-		if let Some(timescale) = timescale {
-			let mut ext = bytes::BytesMut::new();
-			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
-			stream.encode(&(ext.len() as u64)).await?;
-			let mut ext = ext.freeze();
-			stream.write_all(&mut ext).await?;
-		}
+		stream.encode(&header).await?;
 
 		Ok(())
 	}
@@ -2594,7 +2599,7 @@ mod tests {
 	) -> (
 		Publisher<SinkSession, TestRuntime>,
 		origin::Consumer,
-		Vec<crate::announce::Producer>,
+		Vec<crate::model::AnnounceProducer>,
 	) {
 		let other = crate::Hop::new(778).unwrap();
 		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();

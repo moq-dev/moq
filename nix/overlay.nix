@@ -224,7 +224,7 @@ let
     # inside nix. rs/moq-gst/scrub.sh handles tarball / homebrew
     # portability separately. The `[ -f ]` guard skips crane's
     # deps-only stage, whose $out has no plugin.
-    postFixup = final.lib.optionalString final.stdenv.isDarwin ''
+    postFixup = final.lib.optionalString final.stdenv.hostPlatform.isDarwin ''
       dylib="$out/lib/gstreamer-1.0/libgstmoq.dylib"
       if [ -f "$dylib" ]; then
         install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"

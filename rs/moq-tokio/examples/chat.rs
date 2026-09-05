@@ -44,8 +44,8 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	let mut broadcast = origin.create_broadcast("").context("failed to create broadcast")?;
-	let _announcement = origin
-		.announce("", Default::default())
+	broadcast
+		.announce(Default::default())
 		.context("failed to announce broadcast")?;
 
 	// Create a track that we'll insert into the broadcast.

@@ -71,6 +71,10 @@ default-members = [
 ]
 resolver = "2"
 
+[workspace.metadata.cargo-shear]
+# Feature-only dependency selecting the wasm_js backend for browser consumers.
+ignored = ["getrandom"]
+
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
 # what consumers of moq-net / hang / moq-tokio / etc. see. moq-relay overrides
@@ -99,7 +103,7 @@ dispatch2 = "0.3.1"
 flate2 = "1.1"
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
-hang = { version = "0.20.9", path = "rs/hang" }
+hang = { version = "0.20.10", path = "rs/hang" }
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
@@ -117,24 +121,24 @@ loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.20", features = ["async"] }
-moq-audio = { version = "0.0.21", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.22", path = "rs/moq-audio", default-features = false }
 moq-binary = { version = "0.1.0", path = "rs/moq-binary" }
 moq-flate = { version = "0.1.2", path = "rs/moq-flate" }
-moq-hls = { version = "0.4.12", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.3.8", path = "rs/moq-json" }
-moq-loc = { version = "0.2.4", path = "rs/moq-loc" }
+moq-hls = { version = "0.4.13", path = "rs/moq-hls", default-features = false }
+moq-json = { version = "0.3.9", path = "rs/moq-json" }
+moq-loc = { version = "0.2.5", path = "rs/moq-loc" }
 moq-msf = { version = "0.4.2", path = "rs/moq-msf" }
-moq-mux = { version = "0.9.12", path = "rs/moq-mux" }
-moq-net = { version = "0.2.17", path = "rs/moq-net" }
+moq-mux = { version = "0.9.13", path = "rs/moq-mux" }
+moq-net = { version = "0.2.18", path = "rs/moq-net" }
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.0.4", path = "rs/moq-nvenc" }
-moq-rtc = { version = "0.2.7", path = "rs/moq-rtc" }
-moq-rtmp = { version = "0.2.7", path = "rs/moq-rtmp" }
+moq-rtc = { version = "0.2.8", path = "rs/moq-rtc" }
+moq-rtmp = { version = "0.2.8", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.0.1", path = "rs/moq-sock" }
-moq-srt = { version = "0.2.7", path = "rs/moq-srt" }
-moq-stats = { version = "0.1.7", path = "rs/moq-stats" }
+moq-srt = { version = "0.2.8", path = "rs/moq-srt" }
+moq-stats = { version = "0.1.8", path = "rs/moq-stats" }
 moq-token = { version = "0.7.3", path = "rs/moq-token" }
 moq-token-cli = { version = "0.5.46", path = "rs/moq-token-cli" }
 moq-tokio = { version = "0.19.11", path = "rs/moq-tokio", default-features = false }
@@ -143,7 +147,7 @@ moq-tokio = { version = "0.19.11", path = "rs/moq-tokio", default-features = fal
 # can leave them off to drop the CUDA dependencies. Both crates still default
 # them on when depended on directly. VAAPI is opt-in everywhere, since that
 # backend has never been validated on real hardware.
-moq-transcode = { version = "0.0.15", path = "rs/moq-transcode", default-features = false }
+moq-transcode = { version = "0.0.16", path = "rs/moq-transcode", default-features = false }
 # default-features off (the noq backend) so the consumer picks which QUIC
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
@@ -156,7 +160,7 @@ moq-vaapi = "0.0.3"
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. The NVIDIA codecs are not part of
 # that argument, so moq-ffi and libmoq opt them back in by name.
-moq-video = { version = "0.0.21", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.0.22", path = "rs/moq-video", default-features = false }
 nix = { version = "0.30.1", features = ["net", "socket", "uio"] }
 noq-proto = { version = "1.2", default-features = false }
 noq-udp = "1.1.1"
@@ -201,7 +205,7 @@ web-transport-iroh = "0.7"
 # 0.3 for the `qlog` passthrough feature moq-tokio's `qlog` forwards to.
 web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
-web-transport-quiche = "0.6"
+web-transport-quiche = "0.7"
 web-transport-quinn = { version = "0.12", default-features = false }
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"

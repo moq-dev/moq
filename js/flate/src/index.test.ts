@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Deflate, Inflate } from "fflate";
-import { Decoder, Encoder } from "./index.ts";
+import { DEFAULT_MAX_FRAME_SIZE, Decoder, Encoder } from "./index.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -64,18 +64,21 @@ test("codec rejects garbage", () => {
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
 });
 
-test("codec rejects frames that inflate past the default cap", () => {
-	// A tiny slice can inflate enormously, so the decoder bounds the output as it is produced.
-	const encoder = new Encoder();
-	const decoder = new Decoder();
-	const slice = encoder.frame(enc.encode("a".repeat(64 * 1024 * 1024 + 1)));
-	expect(() => decoder.frame(slice)).toThrow(/exceeded/);
-});
-
-test("codec honors a custom maxFrameSize", () => {
+test("codec rejects a frame that inflates past the cap", () => {
+	// A tiny slice can inflate enormously, so the decoder bounds the output as it is produced. The
+	// cap's value doesn't change that path, so use a small one instead of paying for a real bomb.
 	const slice = new Encoder().frame(new Uint8Array(1024));
 	const decoder = new Decoder({ maxFrameSize: 512 });
 	expect(() => decoder.frame(slice)).toThrow(/exceeded 512/);
+});
+
+test("a decoder without options caps frames at 64 MiB", () => {
+	const decoder = new Decoder();
+	expect(DEFAULT_MAX_FRAME_SIZE).toBe(64 * 1024 * 1024);
+	expect(decoder.maxFrameSize).toBe(DEFAULT_MAX_FRAME_SIZE);
+	expect(() => {
+		(decoder as { maxFrameSize: number }).maxFrameSize = Infinity;
+	}).toThrow(TypeError);
 });
 
 test("a frame larger than pako's chunk size round-trips", () => {

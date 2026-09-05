@@ -23,7 +23,7 @@ Fold the standalone `moq-token` binary into `moq token`, so there is one binary 
 
 #### Why now
 
-If #3030 lands, Usage has the mechanism for exactly this: an **executable view**. A view is argv0 dispatch against a single binary's own spec, so one binary can present a different root depending on the name it was invoked under. `moq-token generate ...` and `moq token generate ...` become one spec with two surfaces, and help renders the right prefix for each (`page_view` / `render_failure_view` already exist for this).
+Now that #3030 has landed on `dev`, Usage has the mechanism for exactly this: an **executable view**. A view is argv0 dispatch against a single binary's own spec, so one binary can present a different root depending on the name it was invoked under. `moq-token generate ...` and `moq token generate ...` become one spec with two surfaces, and help renders the right prefix for each (`page_view` / `render_failure_view` already exist for this).
 
 The blocker today is not the CLI plumbing, it is that they are separate build artifacts. Views cannot span two binaries.
 
@@ -44,7 +44,7 @@ The second point may be the one that kills it. Worth measuring `moq` vs `moq-tok
 
 #### Depends on
 
-\#3030 (Usage migration). Without it there is no view mechanism, and the shared-`Args` arrangement we have is about as good as clap allows.
+\#3030 (Usage migration), merged to `dev` on 2026-08-26, which is why this branches from `dev`.
 
 ## Closes
 

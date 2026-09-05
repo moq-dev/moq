@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["moq", "gameboy", "streaming", "emulator", "live"]
 categories = ["multimedia::video", "emulators", "network-programming"]
 
-version = "0.4.12"
+version = "0.4.13"
 edition = "2024"
 rust-version.workspace = true
 
@@ -29,7 +29,7 @@ moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 # Enable the NVIDIA hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvidia"] }
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

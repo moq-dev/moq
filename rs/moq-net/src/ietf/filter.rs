@@ -488,7 +488,10 @@ enum Framing {
 /// (a Next Object subscription plus a `StartGroup=1` fill). A range spanning several
 /// groups is refused by resetting the fetch stream, the draft's fill-failure signal,
 /// because multi-group fetch serialization depends on a negotiated group order we do not
-/// implement. We never request a fill ourselves; see `subscriber::subscribe_filter`.
+/// implement.
+///
+/// We request one for the live join, which is exactly that current-group form; see
+/// `subscriber::subscribe_join`.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
 	/// The range to fill. `None` means the Location Filter was omitted, which inherits the

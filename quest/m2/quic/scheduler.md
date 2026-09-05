@@ -15,7 +15,7 @@ group backlog.
 
 ## Plan
 
-Add a generic send-group primitive to the selected QUIC core. A group owns its
+Add a generic send-group primitive to noq-proto. A group owns its
 strict priority and fair-share scheduler state; each stream owns only its
 order within that group. Prefer an owned group handle whose drop removes its
 scheduler state and whose priority can be updated without walking every open
@@ -44,8 +44,39 @@ subscription's `ordered` setting, never another subscription's sequence.
 Remove the session-wide `lite::PriorityQueue` once every enabled backend has
 an honest implementation or fallback.
 
-If moq#3320 lands first, fold its proposed
-`quest/m1/perf/stream-scheduler.md` into this quest and remove that index entry.
+### Prototype first, as a quinn patch
+
+Nothing available offers all three levels, but quinn already has two of them
+and the counter the third needs: `PendingStream` is ordered
+`(priority, recency, id)` in a max-heap, where `recency` is a monotonically
+decreasing counter that requeues a stream behind its equal-priority peers once
+it writes, and `TransportConfig::send_fairness` defaults to true. quiche's
+`urgency` plus `incremental` is the same pair, and W3C `sendGroup` is the other
+pair (fair between groups, strict `sendOrder` within one, no priority between
+groups). MoQ sees none of quinn's fairness today because it hands every stream
+a distinct priority, so no two streams are ever equal.
+
+The missing piece is one field: the ordering key becomes
+`(priority, bucket_recency, order, id)`, with `priority` strict for the track,
+buckets round-robin against each other on the existing recency counter, and
+`order` strict within a bucket for group sequence. That field lives in the
+QUIC stack, and moq-uring does not change that: its quinn path hands stream
+selection to `poll_transmit`, so what moq-uring owns is the UDP path, not the
+key. Carry it as a quinn patch rather than a fork (one field in one struct
+plus a `SendStream` setter), run it under moq-uring's quinn backend where the
+relay workload is, and treat a working prototype as the evidence for the noq
+proposal above. quiche stays out of scope: reproducing it there is a second
+fork's worth of work and its top two levels already match.
+
+Measure against the two configurations reachable without any of this, both
+real options: a scalar send order of `[track][group]`, which buys strict
+priority and newest-first while giving up fairness (see
+[Send order width](/quest/m1/perf/send-order-width.md)), and a scalar of
+`track` alone, which lets quinn's fairness through and gives up newest-first.
+A congested session carrying two equal-priority tracks of different group
+cadence, audio against video, must keep both progressing rather than draining
+one, while a higher-priority track still preempts both and newest-first still
+sheds backlog within a track. Compare all three on the same shape.
 It describes the same scheduler outcome, not a second implementation.
 
 Tests saturate the sender with differently sized audio and video groups and
@@ -56,8 +87,9 @@ the same scenarios through raw QUIC and qmux.
 
 ## Required
 
-- [Choose the parent and establish the fork](/quest/m2/quic/parent.md) - the
-  scheduler must land against the selected protocol core
+- [Send order width](/quest/m1/perf/send-order-width.md) - the scalar lands first; the prototype is measured against it
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - the scheduler
+  is proposed to noq first
 
 ## Closes
 

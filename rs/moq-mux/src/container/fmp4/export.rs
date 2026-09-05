@@ -216,155 +216,161 @@ impl<S: Stream> Export<S> {
 
 	/// Poll-based variant of [`Self::next_chunk`].
 	pub fn poll_next_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Chunk>>> {
-		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
-		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
-				Poll::Ready(None) => {
-					self.catalog = None;
-					break;
-				}
-				Poll::Pending => break,
-			}
-		}
-
-		// 2. Fill any empty pending slots by polling each source. ExportSource
-		// has already applied any codec-shape transform (Avc3 → avc1) and
-		// absorbed parameter-only frames.
-		//
-		// Pre-init: drop slices that arrived before this track's codec config
-		// is ready, so the source keeps polling for SPS/PPS-bearing frames
-		// instead of parking.
-		let waiting_for_init = !self.init_emitted;
-		for (name, track) in &mut self.tracks {
-			if track.pending.is_some() || track.finished {
-				continue;
-			}
-			loop {
-				match track.source.poll_read(waiter)? {
-					Poll::Ready(Some(frame)) => {
-						let geometry_ready = !track.is_video
-							|| self
-								.catalog_snapshot
-								.as_ref()
-								.and_then(|catalog| catalog.video.renditions.get(name))
-								.is_some_and(|config| {
-									matches!(config.container, Container::Cmaf { .. })
-										|| track.source.video_geometry_ready(config)
-								});
-						if waiting_for_init && (!track.source.header_ready() || !geometry_ready) {
-							continue;
-						}
-						track.pending = Some(frame);
-						break;
-					}
+		// Appending a frame to a track's buffer restarts the search for work by
+		// going around this loop again, never by re-entering the function: a
+		// track buffers a whole GOP, and stack use must stay flat however many
+		// samples that is.
+		loop {
+			// 1. Drain catalog updates and (un)subscribe tracks accordingly.
+			while let Some(catalog) = self.catalog.as_mut() {
+				match catalog.poll_next(waiter)? {
+					Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
 					Poll::Ready(None) => {
-						track.finished = true;
+						self.catalog = None;
 						break;
 					}
 					Poll::Pending => break,
 				}
 			}
-		}
 
-		// 3. Build and emit the init segment once every source has resolved
-		// its codec config (immediately for CMAF-passthrough sources;
-		// after the first keyframe for Avc3/Hev1 sources).
-		if !self.init_emitted {
-			if self.init_ready() {
-				let init = self.build_init()?;
-				self.init_emitted = true;
-				return Poll::Ready(Ok(Some(Chunk::Init(init))));
+			// 2. Fill any empty pending slots by polling each source. ExportSource
+			// has already applied any codec-shape transform (Avc3 → avc1) and
+			// absorbed parameter-only frames.
+			//
+			// Pre-init: drop slices that arrived before this track's codec config
+			// is ready, so the source keeps polling for SPS/PPS-bearing frames
+			// instead of parking.
+			let waiting_for_init = !self.init_emitted;
+			for (name, track) in &mut self.tracks {
+				if track.pending.is_some() || track.finished {
+					continue;
+				}
+				loop {
+					match track.source.poll_read(waiter)? {
+						Poll::Ready(Some(frame)) => {
+							let geometry_ready = !track.is_video
+								|| self
+									.catalog_snapshot
+									.as_ref()
+									.and_then(|catalog| catalog.video.renditions.get(name))
+									.is_some_and(|config| {
+										matches!(config.container, Container::Cmaf { .. })
+											|| track.source.video_geometry_ready(config)
+									});
+							if waiting_for_init && (!track.source.header_ready() || !geometry_ready) {
+								continue;
+							}
+							track.pending = Some(frame);
+							break;
+						}
+						Poll::Ready(None) => {
+							track.finished = true;
+							break;
+						}
+						Poll::Pending => break,
+					}
+				}
 			}
-			// Still waiting for codec configs. If every track is finished and
-			// the init still isn't buildable, the source ended before producing
-			// enough info.
-			if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
-				return Poll::Ready(Ok(None));
+
+			// 3. Build and emit the init segment once every source has resolved
+			// its codec config (immediately for CMAF-passthrough sources;
+			// after the first keyframe for Avc3/Hev1 sources).
+			if !self.init_emitted {
+				if self.init_ready() {
+					let init = self.build_init()?;
+					self.init_emitted = true;
+					return Poll::Ready(Ok(Some(Chunk::Init(init))));
+				}
+				// Still waiting for codec configs. If every track is finished and
+				// the init still isn't buildable, the source ended before producing
+				// enough info.
+				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+					return Poll::Ready(Ok(None));
+				}
+				return Poll::Pending;
 			}
-			return Poll::Pending;
-		}
 
-		// 4. Pick the track whose pending frame has the smallest timestamp and
-		// decide whether to flush its buffer before appending the new frame.
-		let chosen = self
-			.tracks
-			.iter()
-			.filter_map(|(name, t)| t.pending.as_ref().map(|f| (name.clone(), f.timestamp)))
-			.min_by_key(|(_, ts)| *ts)
-			.map(|(name, _)| name);
+			// 4. Pick the track whose pending frame has the smallest timestamp and
+			// decide whether to flush its buffer before appending the new frame.
+			let chosen = self
+				.tracks
+				.iter()
+				.filter_map(|(name, t)| t.pending.as_ref().map(|f| (name.clone(), f.timestamp)))
+				.min_by_key(|(_, ts)| *ts)
+				.map(|(name, _)| name);
 
-		if let Some(name) = chosen {
-			let frag = self.fragment_duration;
-			// One fragment per frame: a zero cap, or the audio-only default where
-			// no keyframe will ever roll the fragment. These never depend on the
-			// successor, so emit immediately instead of buffering the frame until
-			// the next one flushes it.
-			let has_video = self.tracks.values().any(|t| t.is_video);
-			let per_frame = frag == Some(Duration::ZERO) || (frag.is_none() && !has_video);
-			let track = self.tracks.get_mut(&name).unwrap();
-			let frame = track.pending.take().unwrap();
-			if per_frame {
-				// A catalog change can leave buffered frames behind. Drain them
-				// first and retry this frame on the next poll.
-				if !track.buffer.is_empty() {
-					let frames = std::mem::take(&mut track.buffer);
-					let fragment = emit_fragment(track, frames, Some(&frame))?;
-					track.pending = Some(frame);
+			if let Some(name) = chosen {
+				let frag = self.fragment_duration;
+				// One fragment per frame: a zero cap, or the audio-only default where
+				// no keyframe will ever roll the fragment. These never depend on the
+				// successor, so emit immediately instead of buffering the frame until
+				// the next one flushes it.
+				let has_video = self.tracks.values().any(|t| t.is_video);
+				let per_frame = frag == Some(Duration::ZERO) || (frag.is_none() && !has_video);
+				let track = self.tracks.get_mut(&name).unwrap();
+				let frame = track.pending.take().unwrap();
+				if per_frame {
+					// A catalog change can leave buffered frames behind. Drain them
+					// first and retry this frame on the next poll.
+					if !track.buffer.is_empty() {
+						let frames = std::mem::take(&mut track.buffer);
+						let fragment = emit_fragment(track, frames, Some(&frame))?;
+						track.pending = Some(frame);
+						return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
+					}
+					track.buffer_independent = frame.keyframe;
+					let fragment = emit_fragment(track, vec![frame], None)?;
 					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 				}
-				track.buffer_independent = frame.keyframe;
-				let fragment = emit_fragment(track, vec![frame], None)?;
-				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
-			}
-			if should_flush(track, &frame, frag) {
-				let frames = std::mem::take(&mut track.buffer);
-				let fragment = emit_fragment(track, frames, Some(&frame))?;
-				// The flushed run is done; the incoming frame opens the next buffer.
-				track.buffer_independent = frame.keyframe;
-				track.buffer.push(frame);
-				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
-			}
-			if track.buffer.is_empty() {
-				track.buffer_independent = frame.keyframe;
-			}
-			track.buffer.push(frame);
-			// Frame appended to buffer; loop again to look for more work or a flush.
-			return self.poll_next_chunk(waiter);
-		}
-
-		// 5. No pending frames. Flush any finished tracks' remaining buffers,
-		// in ascending first-frame-timestamp order.
-		let flushable = self
-			.tracks
-			.iter()
-			.filter_map(|(name, t)| {
-				if t.finished && !t.buffer.is_empty() {
-					Some((name.clone(), t.buffer.first().unwrap().timestamp))
-				} else {
-					None
+				if should_flush(track, &frame, frag) {
+					let frames = std::mem::take(&mut track.buffer);
+					let fragment = emit_fragment(track, frames, Some(&frame))?;
+					// The flushed run is done; the incoming frame opens the next buffer.
+					track.buffer_independent = frame.keyframe;
+					track.buffer.push(frame);
+					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 				}
-			})
-			.min_by_key(|(_, ts)| *ts)
-			.map(|(name, _)| name);
+				if track.buffer.is_empty() {
+					track.buffer_independent = frame.keyframe;
+				}
+				track.buffer.push(frame);
+				// Frame appended to buffer; go round again to look for more work or a flush.
+				continue;
+			}
 
-		if let Some(name) = flushable {
-			let track = self.tracks.get_mut(&name).unwrap();
-			let frames = std::mem::take(&mut track.buffer);
-			let fragment = emit_fragment(track, frames, None)?;
-			return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
+			// 5. No pending frames. Flush any finished tracks' remaining buffers,
+			// in ascending first-frame-timestamp order.
+			let flushable = self
+				.tracks
+				.iter()
+				.filter_map(|(name, t)| {
+					if t.finished && !t.buffer.is_empty() {
+						Some((name.clone(), t.buffer.first().unwrap().timestamp))
+					} else {
+						None
+					}
+				})
+				.min_by_key(|(_, ts)| *ts)
+				.map(|(name, _)| name);
+
+			if let Some(name) = flushable {
+				let track = self.tracks.get_mut(&name).unwrap();
+				let frames = std::mem::take(&mut track.buffer);
+				let fragment = emit_fragment(track, frames, None)?;
+				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
+			}
+
+			// 6. If catalog is closed and every track is finished and drained, we're done.
+			if self.catalog.is_none() && self.tracks.values().all(|t| t.finished && t.buffer.is_empty()) {
+				return Poll::Ready(Ok(None));
+			}
+
+			// 7. Drop finished tracks with empty buffers so the next catalog update can re-add a track of the same name.
+			self.tracks
+				.retain(|_, t| !(t.finished && t.pending.is_none() && t.buffer.is_empty()));
+
+			return Poll::Pending;
 		}
-
-		// 6. If catalog is closed and every track is finished and drained, we're done.
-		if self.catalog.is_none() && self.tracks.values().all(|t| t.finished && t.buffer.is_empty()) {
-			return Poll::Ready(Ok(None));
-		}
-
-		// 7. Drop finished tracks with empty buffers so the next catalog update can re-add a track of the same name.
-		self.tracks
-			.retain(|_, t| !(t.finished && t.pending.is_none() && t.buffer.is_empty()));
-
-		Poll::Pending
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {

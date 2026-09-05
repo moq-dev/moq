@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `moq_publish_media` rejects a label on a container format (fmp4, mkv, ts, flv) instead of
   silently dropping it.
 
+## [0.5.13](https://github.com/moq-dev/moq/compare/libmoq-v0.5.12...libmoq-v0.5.13) - 2026-09-02
+
+### Added
+
+- *(moq-audio)* expose Opus DTX classification ([#3238](https://github.com/moq-dev/moq/pull/3238))
+
 ## [0.5.12](https://github.com/moq-dev/moq/compare/libmoq-v0.5.11...libmoq-v0.5.12) - 2026-09-01
 
 ### Added

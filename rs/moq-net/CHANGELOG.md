@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18](https://github.com/moq-dev/moq/compare/moq-net-v0.2.17...moq-net-v0.2.18) - 2026-09-02
+
+### Added
+
+- *(moq-net)* expose broadcast demand on the read handle ([#3330](https://github.com/moq-dev/moq/pull/3330))
+
+### Fixed
+
+- *(moq-net)* serve the rest of a group whose front evicted ([#3323](https://github.com/moq-dev/moq/pull/3323))
+- *(moq-net)* drop an incoming group that starts after object 0 ([#3308](https://github.com/moq-dev/moq/pull/3308))
+- *(moq-net)* walk every spliced segment when resolving the live edge ([#3290](https://github.com/moq-dev/moq/pull/3290))
+- *(moq-net)* stop stamping objects with an undeclared timescale ([#3310](https://github.com/moq-dev/moq/pull/3310))
+
 ## [0.2.17](https://github.com/moq-dev/moq/compare/moq-net-v0.2.16...moq-net-v0.2.17) - 2026-09-01
 
 ### Other

@@ -20,7 +20,8 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
-    /// Serve broadcasts that consumers request without an announcement.
+    /// Serve broadcasts on request: paths nothing publishes, under the root or
+    /// under any prefix this origin announced.
     public func dynamic() -> OriginDynamic {
         OriginDynamic(ffi.dynamic())
     }

@@ -250,7 +250,7 @@ export class Renderer {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.text,
-			latency: this.sync.out.maxBuffer,
+			maxAge: this.sync.out.maxAge,
 		});
 		const store: CueStore = { cues: [], regions: new Map(), clears: [] };
 		const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });

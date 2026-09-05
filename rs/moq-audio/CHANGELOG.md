@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.21...moq-audio-v0.0.22) - 2026-09-02
+
+### Added
+
+- *(moq-audio)* [**breaking**] reach devices through PipeWire or PulseAudio ([#3328](https://github.com/moq-dev/moq/pull/3328))
+- *(moq-audio)* expose Opus DTX classification ([#3238](https://github.com/moq-dev/moq/pull/3238))
+- *(moq-audio)* control microphone publication ([#3235](https://github.com/moq-dev/moq/pull/3235))
+
+### Fixed
+
+- *(moq-audio)* let a capture publication outlive a missing input ([#3337](https://github.com/moq-dev/moq/pull/3337))
+- *(moq-audio)* negotiate a stereo output before a mono one ([#3327](https://github.com/moq-dev/moq/pull/3327))
+
 ### Added
 
 - [**breaking**] *(moq-audio)* report Opus discontinuous transmission as an `Activity` on the audio itself: `Frame` gains an `activity` field (build one with the new `Frame::new`), `Encoder::encode` returns `encode::Encoded`, `Decoder::decode` returns `decode::Decoded`, and `encode::Producer::activity` reports what was published most recently ([#2481](https://github.com/moq-dev/moq/issues/2481))

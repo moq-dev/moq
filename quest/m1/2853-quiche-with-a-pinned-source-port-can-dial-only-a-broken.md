@@ -35,6 +35,10 @@ For the `limit(1)` path specifically, wait for the authoritative answer rather t
 
 Found while reviewing #2852 (merging main into dev); the code is identical on `main`, so this is not a merge regression and was left out of that PR. Originally raised by the Codex connector bot as an inline comment there.
 
+## Required
+
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - decides whether quiche stays a supported backend; if it is retired this quest is abandoned with the verdict
+
 ## Closes
 
 - [#2853](https://github.com/moq-dev/moq/issues/2853) - close this issue when the quest finishes

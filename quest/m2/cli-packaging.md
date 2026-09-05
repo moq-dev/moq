@@ -27,7 +27,3 @@ dependencies present, and a Docker image without them fails at build rather
 than at run. Then verify the shipped artifact runs `moq devices` and
 `moq play` on each platform, since a feature that compiles into the binary and
 then fails to open a device is the same gap one layer down.
-
-## Closes
-
-- [#2272](https://github.com/moq-dev/moq/issues/2272) - close this issue when the quest finishes

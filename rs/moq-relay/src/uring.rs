@@ -90,6 +90,12 @@ pub struct Workers {
 	server: moq_uring::quic::server::Config,
 	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
 	certificates: moq_tokio::tls::Certificates,
+	/// One counter set per worker, in shard order. Created here rather than on
+	/// the worker thread so `/metrics` can publish every worker's series from
+	/// the first scrape, before the threads exist: a series that only appears
+	/// once a worker has done something reads as a healthy node until it is too
+	/// late to notice.
+	metrics: Vec<moq_uring::metrics::Metrics>,
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
@@ -253,6 +259,7 @@ impl Workers {
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
 		Ok(Self {
+			metrics: (0..count).map(|_| moq_uring::metrics::Metrics::default()).collect(),
 			members,
 			addr,
 			server,
@@ -272,6 +279,14 @@ impl Workers {
 	/// The address every worker is bound to.
 	pub fn local_addr(&self) -> SocketAddr {
 		self.addr
+	}
+
+	/// Every worker's counters, in shard order, for an ops surface to scrape.
+	///
+	/// Available from [`bind`](Self::bind), so a scrape covers a worker that has
+	/// not started (or has died) instead of dropping its series.
+	pub fn metrics(&self) -> Vec<moq_uring::metrics::Metrics> {
+		self.metrics.clone()
 	}
 
 	/// The certificate every worker presents, for publishing its SHA-256
@@ -313,6 +328,7 @@ impl Workers {
 			let spawn = Spawn {
 				member,
 				core,
+				metrics: self.metrics[index as usize].clone(),
 				server: self.server.clone(),
 				udp: self.udp.clone(),
 				serve: serve.clone(),
@@ -394,19 +410,33 @@ impl std::fmt::Debug for Workers {
 /// error here rather than a setting the operator believes is in force. GSO is
 /// the exception in the other direction: it belongs to the socket, so the
 /// caller applies it to the UDP config instead.
+///
+/// One qlog sink is built for the whole group and cloned into every worker, so
+/// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
-	anyhow::ensure!(
-		quic.qlog.is_none(),
-		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
-	);
 	// The datagram path fixes both payload ceilings at SEGMENT and hands
 	// `conn.send` slices of exactly that, so there is no larger size to find.
 	anyhow::ensure!(
 		!quic.mtu_discovery,
 		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
 	);
+	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
+	// which nothing builds here: this listener is the io_uring stack.
+	#[cfg(not(feature = "qlog"))]
+	anyhow::ensure!(
+		quic.qlog.is_none(),
+		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
+	);
 
 	let mut transport = moq_uring::quic::Transport::default();
+	#[cfg(feature = "qlog")]
+	if let Some(dir) = quic.qlog.as_deref() {
+		transport.qlog = Some(
+			moq_uring::quic::qlog::Sink::directory(dir)
+				.with_context(|| format!("failed to capture qlog into {}", dir.display()))?,
+		);
+		tracing::info!(dir = %dir.display(), "writing qlog");
+	}
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
@@ -436,6 +466,8 @@ struct Spawn {
 	member: Member,
 	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
+	/// This worker's counter set, shared with whoever scrapes `/metrics`.
+	metrics: moq_uring::metrics::Metrics,
 	server: moq_uring::quic::server::Config,
 	udp: moq_uring::udp::Config,
 	serve: Serve,
@@ -482,6 +514,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let Spawn {
 		member,
 		core,
+		metrics,
 		server,
 		udp,
 		serve,
@@ -499,7 +532,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 	}
 
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
-		let worker = moq_uring::Worker::new(Default::default()).context("io_uring setup failed")?;
+		let mut config = moq_uring::Config::default();
+		config.metrics = metrics;
+		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
 		let handle = worker.handle();
 		let socket = handle
 			.udp(member.socket, udp)

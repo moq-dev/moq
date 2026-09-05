@@ -725,10 +725,9 @@ where
 	}
 
 	match kind {
-		// We never request a fill, so a fetch stream answers a request we did not make. Its
-		// objects would duplicate a group the live subscription is already delivering, and
-		// two producers for one sequence is a `Duplicate` error, so refuse the stream.
-		FetchHeader::TYPE => Err(Error::Unsupported),
+		// A fill fetch stream carries the head of the group a draft-20 subscription joined
+		// part way through. One answering no fill of ours is refused inside.
+		FetchHeader::TYPE => subscriber.recv_fill(stream).await,
 		_ => Err(Error::UnexpectedStream),
 	}
 }

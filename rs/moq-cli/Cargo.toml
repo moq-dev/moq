@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.9.15"
+version = "0.10.0"
 edition = "2024"
 rust-version.workspace = true
 
@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia", "pipewire"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia", "vaapi", "v4l2", "pipewire"]
 iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -62,9 +62,16 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoding (Linux). Off by default because the backend is
-# unvalidated on hardware; enable it explicitly alongside `capture` or `transcode`.
+# Intel/AMD VAAPI hardware encoding (Linux), on by default like `nvidia` and
+# trimmable the same way: libva is dlopen'd at runtime, so it costs the build
+# nothing. Only bites when `capture` or `transcode` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
+# The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
+# on by default like `nvidia` and trimmable the same way. The `v4l` crate it
+# needs is the one `capture` already builds for the camera, so it costs nothing
+# a capture build does not pay already. Only bites when `capture`, `transcode`,
+# or `play` pulls in moq-video.
+v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
 # on by default like the hardware codecs above and trimmable the same way. Only
 # bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.
@@ -82,7 +89,7 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
-moq-audio = { workspace = true, optional = true }
+moq-audio = { workspace = true, optional = true, features = ["aac"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }

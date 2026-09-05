@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.14"
+version = "0.14.15"
 edition = "2024"
 # sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
 # workspace floor. moq-relay is lib+bin, so this applies to its library target
@@ -31,10 +31,11 @@ jemalloc = ["moq-tokio/jemalloc"]
 noq = ["moq-tokio/noq"]
 quinn = ["moq-tokio/quinn"]
 quiche = ["moq-tokio/quiche"]
-# qlog trace capture (`--server-quic-qlog <DIR>`). Off by default: it compiles the
+# qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
-# congestion-control testing.
-qlog = ["moq-tokio/qlog"]
+# congestion-control testing. Covers the io_uring workers too, so one feature
+# means one thing whichever runtime is serving.
+qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
 websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.

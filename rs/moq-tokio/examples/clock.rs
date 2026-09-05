@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 	let url = config.client.url.clone().context("--connect is required")?;
 	let client = config.client.init(Default::default())?;
 
-	tracing::info!(%url, "connecting to server");
+	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), "connecting to server");
 
 	let track = config.track;
 
@@ -67,8 +67,10 @@ async fn main() -> anyhow::Result<()> {
 				.create_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
-			let _announce_broadcast = origin
-				.announce(&config.broadcast, Default::default())
+			// Announced once the track exists, so a subscriber acting on the
+			// announcement finds it.
+			broadcast
+				.announce(Default::default())
 				.context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 

@@ -1,9 +1,9 @@
 //! Play decoded PCM out a speaker, via [`cpal`] (CoreAudio / WASAPI / ALSA).
 //!
 //! The playback counterpart to `capture`, and where a
-// `capture` is deliberately not a doc link: the module is behind the
-// off-by-default `capture` feature, so a link to it fails the `-D warnings`
-// rustdoc build of a playback-only build (what `moq-cli`'s `play` enables).
+// `capture` is deliberately not a doc link: the module is behind its own
+// feature, so a link to it fails the `-D warnings` rustdoc build of a
+// playback-only build (what `moq-cli`'s `play` enables).
 //! [`decode::Consumer`](crate::decode::Consumer) ends up:
 //!
 //! ```no_run
@@ -117,8 +117,8 @@ impl Engine {
 			shared: shared.clone(),
 		};
 
-		// cpal streams are `!Send`, so the device has to live on the thread that
-		// opens it.
+		// Everything slow or fallible about the device happens here, off the async
+		// runtime: opening it, switching it, and rebuilding it after an error.
 		std::thread::Builder::new()
 			.name("moq-audio-playback".into())
 			.spawn(move || driver::run(requests, commands, shared, config.device, opened))

@@ -304,6 +304,11 @@ impl Producer {
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
 	/// renditions are closed (so cursors over them end) before replacements become visible.
 	///
+	/// "Reconfigured" means the media itself changed (see [`Rendition::matches_video`]). A
+	/// rendition whose entry only carries a revised estimate is kept as-is and just takes the
+	/// new advertised bitrate, since the publisher republishes the catalog every time its
+	/// measured bitrate or jitter moves.
+	///
 	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
 	/// root `timeline` section): without one there is nothing to render playlists from, so the
 	/// whole catalog is skipped with a warning.
@@ -371,7 +376,10 @@ impl Producer {
 
 		for (name, video) in &catalog.video.renditions {
 			let key = (Kind::Video, name.clone());
-			if current.contains_key(&key) {
+			if let Some(rendition) = current.get(&key) {
+				// Survived the stale pass, so it decodes the same: keep its window, its cached
+				// init segment and its media sequence, and just take the new advertised bitrate.
+				rendition.refresh(video.bitrate);
 				continue;
 			}
 			let rendition = Arc::new(Rendition::video(name.clone(), video, upstream, section.clone()));
@@ -380,7 +388,8 @@ impl Producer {
 		}
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
-			if current.contains_key(&key) {
+			if let Some(rendition) = current.get(&key) {
+				rendition.refresh(audio.bitrate);
 				continue;
 			}
 			let rendition = Arc::new(Rendition::audio(name.clone(), audio, upstream, section.clone()));

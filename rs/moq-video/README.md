@@ -61,10 +61,10 @@ The codec is chosen via `encode::Codec`. Backends are tried in order (hardware
 first, then software) and the first that opens wins; `encode::Kind` narrows the
 choice (`Auto` / `Hardware` / `Software` / a named backend).
 
-| Codec | Software | macOS | Windows | Linux |
-|---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) |
-| H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) |
+| Codec | Software | macOS | Windows | Linux | Android |
+|---|---|---|---|---|---|
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 
 Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
 H.265), so the matching `moq_mux::codec` importer handles framing and catalog
@@ -91,10 +91,10 @@ Two public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The NVENC and VAAPI backends are Linux-only and gated behind their respective
-features. Both `dlopen` the vendor driver at runtime (and fall back to software
-where the driver is absent), so a feature-enabled binary still links on a
-GPU-less builder and still starts on a GPU-less machine.
+The NVENC and VAAPI backends are Linux-only, behind the default-on `nvidia` and
+`vaapi` features. Both `dlopen` the vendor driver at runtime (and fall back to
+software where the driver is absent), so the binary still links on a GPU-less
+builder and still starts on a GPU-less machine.
 
 ## Decode
 
@@ -105,8 +105,8 @@ same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
 downloads it through I420 for you. Every frame carries a `Surface`, a
 `#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
-`Texture` on Windows, `Cuda` on Linux, or CPU `I420`). Match it to take a
-zero-copy path for a representation you recognize, and fall back to
+`Texture` on Windows, `Cuda` on Linux, `HardwareBuffer` on Android, or CPU
+`I420`). Match it to take a zero-copy path for a representation you recognize, and fall back to
 `Surface::into_i420()`, which always works. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
 `Surface::into_rgba()` is the portable exit for CPU image and UI toolkits,
@@ -114,11 +114,11 @@ returning owned, tightly packed RGBA8 pixels with the surface's color metadata
 applied.
 Backends are tried hardware-first, like encode:
 
-| Codec | Software | macOS | Windows | Linux |
-|---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) |
-| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) |
-| AV1 | none | none | none | NVDEC (feature `nvidia`) |
+| Codec | Software | macOS | Windows | Linux | Android |
+|---|---|---|---|---|---|
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
+| AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 
 On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format

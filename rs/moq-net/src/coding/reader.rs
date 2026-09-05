@@ -117,6 +117,29 @@ impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
 		std::future::poll_fn(|cx| self.poll_decode_peek(cx)).await
 	}
 
+	/// Poll for the next message without consuming it unless the stream closes cleanly first.
+	pub fn poll_decode_peek_maybe<T: Decode<V> + Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<T>, Error>>
+	where
+		V: Clone,
+	{
+		if !ready!(self.poll_has_more(cx))? {
+			return Poll::Ready(Ok(None));
+		}
+
+		self.poll_decode_peek(cx).map_ok(Some)
+	}
+
+	/// Peek the next message unless the stream is closed.
+	pub async fn decode_peek_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	where
+		V: Clone,
+	{
+		std::future::poll_fn(|cx| self.poll_decode_peek_maybe(cx)).await
+	}
+
 	/// Poll for the next chunk, draining the reader's internal buffer first.
 	pub fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if !self.buffer.is_empty() {

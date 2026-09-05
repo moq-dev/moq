@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.21"
+version = "0.0.22"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,15 +13,22 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# The NVIDIA codecs are enabled by default. Disable them (e.g.
-# `--no-default-features`) for a slimmer self-compiled Linux build that drops the
-# CUDA dependencies. Openh264 stays as the always-compiled software fallback;
-# disable only `capture` to omit the device stack while retaining codecs.
-default = ["capture", "nvidia"]
+# Everything that costs no system library at build time is on by default; the
+# features exist so a consumer can drop what it does not want, not to hide code
+# from the default compile (`just check` lints default features only). Openh264
+# stays as the always-compiled software fallback. `pipewire` is the exception:
+# it links libpipewire at build time. Workspace consumers opt out at the root
+# manifest (`default-features = false`) and pick per crate, so the relay and the
+# language bindings never build the device or render stacks.
+default = ["capture", "mediacodec", "nvidia", "vaapi", "v4l2", "render"]
 # Native camera and screen capture. Enabled by default for direct consumers,
 # but workspace consumers opt in so codec-only bindings avoid device build
 # dependencies such as V4L2 and libclang.
 capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
+# Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
+# behind a feature because these NDK entry points require API 26, while the
+# language-binding artifacts still support API 24 and disable default features.
+mediacodec = ["dep:ndk"]
 # The NVIDIA codecs on Linux: the NVENC encoder and the NVDEC decoder. One
 # feature because they are one dependency stack (cudarc + moq-nvenc, plus a
 # libloading probe for the driver libs) and one code path: NVDEC hands NVENC a
@@ -35,21 +42,35 @@ nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoder (Linux). Off by default because the backend has
-# never been validated on real hardware, not because of anything it costs the
-# build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at
-# build time and still starts on a libva-less host, where automatic backend
-# selection falls back to the next encoder like the NVENC backend does.
+# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi dlopen's libva, so the
+# build needs no libva and still starts on a libva-less host, where automatic
+# backend selection falls back to the next encoder like the NVENC backend does.
+# The backend has not been validated on real hardware yet; `Kind::Named`
+# ("openh264") sidesteps it if it misbehaves.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
+# The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
+# and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
+# equivalent block on Rockchip / Amlogic / Allwinner / Exynos). One feature
+# because they are one dependency and one code path: both drive the same device
+# node through `src/v4l2.rs`, so splitting them would save no build. Both have
+# run on a Raspberry Pi 4 (bcm2835-codec, Raspberry Pi OS Bookworm): the encoder
+# on `/dev/video11` produced Constrained Baseline 640x360 that plays back
+# correctly, and the decoder played a 640x360 stream for a minute without a
+# failure and is what automatic selection picks on that board. On by default
+# because it costs the build nothing `capture` does not already: the `v4l` crate
+# and its bindgen are the same ones camera capture pulls in. A host with no M2M
+# codec node fails at open, so automatic backend selection falls through to the
+# next encoder or decoder; `Kind::Named("openh264")` sidesteps it on a board
+# whose driver misbehaves.
+v4l2 = ["dep:v4l", "dep:libc"]
 # Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
-# converts a frame to RGBA and hands back a texture the caller presents. Off by
-# default because wgpu pulls a graphics stack (and its backend drivers) that a
-# relay or a headless publisher has no use for; only an application that actually
-# draws video turns it on. `dmabuf` adds the Linux surface vocabulary; Vulkan
-# itself still comes from wgpu.
+# converts a frame to RGBA and hands back a texture the caller presents. wgpu
+# loads Vulkan / Metal / D3D at runtime, so this costs compile time and nothing
+# else; a relay or headless publisher drops it. `dmabuf` adds the Linux surface
+# vocabulary; Vulkan itself still comes from wgpu.
 render = [
     "dmabuf",
     "dep:bytemuck",
@@ -99,6 +120,15 @@ wgpu = { version = "30", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 
+[target.'cfg(target_os="android")'.dependencies]
+# MediaCodec (hardware H.264/H.265 encode and decode), ImageReader, and
+# AHardwareBuffer, all from the NDK that is already on the path of anything
+# targeting Android. `default-features = false` drops the raw-window-handle
+# integration, which nothing here uses; `api-level-26` is what unlocks
+# AMediaCodec_setParameters (live bitrate and keyframe requests) and the
+# hardware buffer behind a decoded frame.
+ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
+
 [target.'cfg(target_os="linux")'.dependencies]
 # xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,
 # zbus over DBus). The portal owns source selection: the user picks a monitor in a
@@ -114,9 +144,9 @@ ashpd = { version = "0.13", optional = true, default-features = false, features 
 # extra dependencies); libnvrtc itself is never loaded since we ship pre-built PTX
 # (see frame/nv12_resize.ptx) that the driver JIT-compiles.
 cudarc = { workspace = true, features = ["nvrtc"], optional = true }
-# Mapping a linear DMA-BUF for the universal CPU I420 fallback. Non-linear
-# modifiers stay GPU-only and return an honest error instead of treating tiled
-# memory as rows.
+# Mapping a linear DMA-BUF for the universal CPU I420 fallback, and the V4L2 M2M
+# codec node's poll / mmap flags. Non-linear modifiers stay GPU-only and return
+# an honest error instead of treating tiled memory as rows.
 libc = { workspace = true, optional = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
@@ -134,8 +164,12 @@ moq-vaapi = { workspace = true, optional = true }
 # PipeWire video stream for the portal's node, behind the `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
 pipewire = { version = "0.10", optional = true }
-# Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
-# MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
+# Native V4L2 webcam capture (replaces nokhwa) and, behind the `v4l2` feature,
+# the M2M hardware codecs. `v4l` streams MMAP buffers; MJPEG cameras are decoded
+# with the pure-Rust `zune-jpeg` (no libjpeg/IJG). The codec backends use its raw
+# layer (`v4l::v4l_sys` for the videodev2.h structs, `v4l::v4l2::vidioc` for the
+# request codes) rather than a second V4L2 crate, so no ioctl struct is
+# hand-rolled and the dependency is one the tree already carries.
 v4l = { version = "0.14", optional = true }
 # X11 display/window enumeration and capture. Pure Rust and used when no
 # Wayland session is active, so Linux screen capture still works without a
@@ -177,6 +211,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    # PrintWindow lives under Storage_Xps in the Win32 metadata; it is how a
+    # DirectComposition window renders into our capture DC.
+    "Win32_Storage_Xps",
     "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_System_Variant",

@@ -224,8 +224,6 @@ pub(crate) struct Session {
 	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
 	/// pad streaming threads stop feeding a dead session without consulting the element.
 	completion: CompletionHandle,
-	/// The route advertising the broadcast; dropping it retracts.
-	_announcement: moq_net::announce::Producer,
 }
 
 impl Session {
@@ -245,7 +243,7 @@ impl Session {
 
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast(&settings.broadcast)?;
-		let announcement = origin.announce(&settings.broadcast, moq_net::origin::Route::default())?;
+		broadcast.announce(moq_net::origin::Route::default())?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let status = Arc::new(Status::default());
@@ -286,7 +284,6 @@ impl Session {
 				send_bandwidth,
 				recv_bandwidth,
 				completion,
-				_announcement: announcement,
 			},
 			SessionRegistration { gate },
 			broadcast,

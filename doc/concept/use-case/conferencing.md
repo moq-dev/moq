@@ -1,40 +1,26 @@
 ---
 title: MoQ vs WebRTC
-description: How MoQ compares to conferencing protocols
+description: How MoQ compares with WebRTC for real-time conferencing
 ---
 
 # MoQ vs WebRTC
 
-This page compares MoQ with **WebRTC**, the dominant protocol for conferencing.
+WebRTC is the integrated real-time communications stack browsers ship, so it
+is what conferencing uses in a tab. It is less dominant than it looks: Zoom, Teams,
+and Discord run custom RTP stacks in their native apps and keep WebRTC for
+browser compatibility, and the one vendor that controls `libwebrtc` gets its
+features first.
 
-## Requirements
+## What MoQ offers
 
-Boring stuff first.
-Conferencing protocols need to:
+- **Publish and subscribe on one session.** Each participant is a broadcast; peers discover each other through announcements on a path prefix. No SDP offer/answer, no renegotiation when someone joins.
+- **Latency you choose.** WebRTC decides when to drop. A MoQ subscriber sets its own budget per track, so audio can be near-lossless at 500 ms while video stays at the live edge.
+- **Scale from the same relay.** A relay that serves a two-person call also serves a ten-thousand-viewer webinar. There is no SFU/CDN split.
+- **Full pipeline control in the browser.** WebCodecs frames and `AudioData` samples are yours: render to a texture, run a model, apply effects.
+- **No STUN/TURN.** Clients dial the relay over WebTransport like any HTTPS server. Native peers on a LAN can go [peer-to-peer over iroh](/concept/transport#iroh-peer-to-peer-experimental).
 
-- Support any number of participants (publish and subscribe)
-- Support <100ms latency
-- Support a wide range of devices
-- Support a wide range of networks
+## Interop
 
-Some optional features:
-
-- Support browsers (aka WebRTC)
-- End-to-end encryption.
-- Peer-to-peer connections.
-
-## Existing Protocols
-
-- **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - The dominant protocol for conferencing.
-- **RTP** ([Real-Time Transport Protocol](https://en.wikipedia.org/wiki/Real-time_Transport_Protocol)) - The core protocol within WebRTC.
-
-While this might make WebRTC seem super dominant, the reality is a little bit more nuanced.
-
-Almost every conferencing service tries to force their native app on you.
-Zoom, Teams, Discord, etc.
-WebRTC is mandatory on the browser, but it's *not* mandatory for native apps.
-A service like Discord uses a custom RTP stack between native apps and only uses WebRTC for browser compatibility.
-
-The only exception is Google Meet.
-Google maintains and controls `libwebrtc`, the core WebRTC implementation in browsers.
-If Google wants a feature, then they add it to WebRTC, while every other service has to find a workaround.
+WebRTC clients still fit. The [WebRTC gateway](/bin/rtc) accepts WHIP
+publishers and serves WHEP players, bridging them into the same broadcasts the
+MoQ clients use.

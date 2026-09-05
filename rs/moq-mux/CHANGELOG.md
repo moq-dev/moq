@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `catalog::VideoHint::label` is no longer public. `import::Init::label` is the single source of a
   rendition label, matching the hang draft, which classifies it as a common rendition field.
 
+## [0.9.13](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.12...moq-mux-v0.9.13) - 2026-09-02
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-json, moq-loc
+
 ## [0.9.12](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.11...moq-mux-v0.9.12) - 2026-09-01
 
 ### Other

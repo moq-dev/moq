@@ -422,18 +422,18 @@ fix-changed $FILES:
 # builds vendored C++ that needs an MSVC toolchain and openh264 is a
 # non-optional dependency.
 #
-# Nothing in CI runs this. Windows runners cost too much for a per-PR gate, so
-# the code compiles for the first time in a tag-triggered release build unless
-# someone runs this by hand on a Windows host.
+# Windows runners are throttled too hard for a per-PR gate, so nightly.yml runs
+# this once a day instead. A break there lands on main rather than being caught
+# in review, which is the same trade the other nightly gates make.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
 # backend don't build on MSVC, while moq-video's Linux-only `nvidia` default
 # are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
 #
-# `moq-cli/play` is named explicitly because it's off by default and is what
-# turns on moq-video's wgpu renderer and moq-audio's cpal output, neither of
-# which any default-feature build compiles.
+# `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
+# off by default, and they are the only thing that compiles the cli's own
+# device and render code.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
@@ -445,37 +445,63 @@ windows *args:
 # The remaining pairs run the same suite over the alternative QUIC backends.
 # moq-uring compiles exactly one, so each gets its own invocation: feature
 # unification would otherwise fold the builds back together.
+#
+# `qlog` is a fourth axis on top of that, and the traces are what a debugging
+# run depends on, so each backend also gets a pass with it on.
 uring *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
+    cargo nextest run --locked -p moq-uring --no-default-features --features quinn,qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-relay --features io-uring-quinn --all-targets {{ args }} -- -D warnings
     cargo clippy --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }}
+    cargo nextest run --locked -p moq-uring --no-default-features --features quiche,qlog --all-targets {{ args }}
     cargo clippy --locked -p moq-relay --features io-uring-quiche --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
 # plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
 #
-# Nothing in CI runs this either; Mac runners cost too much for a per-PR gate.
-# The moq-video half has a release-time backstop, since libmoq's `libmoq-v*` tag
-# build compiles it on Apple Silicon. The moq-audio half has none: its
-# capture backend is behind an off-by-default feature no release build enables,
-# so this recipe is the only thing that ever compiles it.
+# Same trade as `windows`: nightly.yml runs this once a day rather than gating a
+# merge on a Mac runner. The moq-video half also has a release-time backstop,
+# since libmoq's `libmoq-v*` tag build compiles it on Apple Silicon. The
+# moq-audio half has none: libmoq and moq-ffi take it codecs-only, so no release
+# build compiles its capture backend and this recipe is the only thing that does.
 #
 # Scoped to those two crates instead of the workspace, because they hold all
 # the Apple-gated code the Linux gate misses. moq-ffi (and through it the
 # Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
-# `--all-features` is required, not just tidy: moq-audio's capture backend sits
-# behind an off-by-default feature, so a plain check would skip the very code
-# this recipe exists for. moq-video's Linux-only nvidia/vaapi/pipewire
-# deps are no-ops here.
+# `--all-features` also compiles the off-by-default cpal hosts and PipeWire
+# capture, which are Linux-only and no-ops here, so it costs nothing extra.
 
 # Compile the Apple-only code paths. Must run ON macOS.
 macos *args:
     {{ cargo_compile }} check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+
+# Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
+# decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
+# are all `#[cfg(target_os = "android")]`, so a host-target check compiles none of
+# them and every error in them stays invisible.
+#
+# Unlike `windows` and `macos` this needs no special host: the Android targets
+# cross-compile from the Linux dev shell in about half a minute. It needs an NDK,
+# which `cargo-ndk` finds through `ANDROID_NDK_HOME` or the standard SDK layout,
+# so it is a manual gate rather than a CI one until the shell provides one.
+#
+# arm64-v8a alone: it is the only ABI anything here ships, and the code is not
+# ABI-specific, so the other two would compile the same source twice more.
+#
+# `check` rather than a `-D warnings` clippy, matching `windows` and `macos`:
+# the capture module's plumbing is dead on a target with no capture backend, so
+# a denying lint would fail on code this recipe is not here to police.
+
+# Compile the Android backends, which the host-target check skips.
+android *args:
+    cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets {{ args }}
 
 # Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
 # `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
@@ -523,12 +549,16 @@ audit:
 # part of the per-PR gate.
 #
 # `--all-features` is the only thing that compiles moq-cli's play/capture,
-# moq-audio's capture backend, quiche, and jemalloc. `--no-default-features` is
+# moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
+#
+# Both carry `--all-targets`. A `#[cfg(test)]` module leans on whatever the
+# default features happened to import, so a test that only compiles by accident
+# is invisible to a lib-only check.
 
 # Compile the workspace at the feature extremes.
 features:
-    {{ cargo_compile }} check --locked --workspace --no-default-features
+    {{ cargo_compile }} check --locked --workspace --all-targets --no-default-features
     {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
     {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features

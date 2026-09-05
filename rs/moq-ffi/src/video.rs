@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::producer::MoqBroadcastProducer;
@@ -49,20 +50,20 @@ impl From<MoqVideoCodec> for moq_video::encode::Codec {
 
 /// Which encoder implementation to use.
 ///
-/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows), and
-/// openh264 (software, everywhere). NVENC/NVDEC are a libmoq-only build option
-/// and VAAPI is opt-in everywhere, so Linux here is software-only.
+/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows),
+/// openh264 (software, everywhere), and on Linux NVENC and VAAPI, which dlopen
+/// their driver at runtime and drop out of `Auto` when it is absent.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqVideoEncoderKind {
-	/// Prefer a platform hardware encoder, falling back to software. On Linux
-	/// that fallback is the only option these bindings have.
+	/// Prefer a platform hardware encoder, falling back to software.
 	Auto,
-	/// Hardware only; fails if none is available, which on Linux is always.
+	/// Hardware only; fails if none is available.
 	Hardware,
 	/// Software only (openh264, H.264 only).
 	Software,
 	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS),
-	/// `"mediafoundation"` (Windows), or `"openh264"` (software, everywhere).
+	/// `"mediafoundation"` (Windows), `"nvenc"` / `"vaapi"` (Linux), or
+	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
 	Named { name: String },
@@ -233,15 +234,21 @@ impl MoqVideoProducer {
 	}
 
 	/// Wait until this video track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		crate::ffi::detached(async move { demand.used().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
 	}
 
 	/// Wait until this video track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		crate::ffi::detached(async move { demand.unused().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
 	}
 
 	/// Encode and publish one raw frame.
@@ -495,30 +502,37 @@ impl MoqBroadcastConsumer {
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
 	pub async fn decode_video(
 		&self,
 		name: String,
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
+		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
-		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
-		// dynamic handler and open an upstream subscription we would immediately drop.
-		let reference = catalog_video.broadcast.clone();
-		let cfg = video_config(catalog_video)?;
-		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		cancel::guard(cancel, async {
+			// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+			// dynamic handler and open an upstream subscription we would immediately drop.
+			let reference = catalog_video.broadcast.clone();
+			let cfg = video_config(catalog_video)?;
+			let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
-		let mut config = moq_video::decode::Config::default();
-		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		config.max_age = output
-			.max_age_ms
-			.map(std::time::Duration::from_millis)
-			.unwrap_or_default();
+			let mut config = moq_video::decode::Config::default();
+			config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
+			config.max_age = output
+				.max_age_ms
+				.map(std::time::Duration::from_millis)
+				.unwrap_or_default();
 
-		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+			let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
-		Ok(Arc::new(MoqVideoConsumer {
-			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
-		}))
+			Ok(Arc::new(MoqVideoConsumer {
+				task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
+			}))
+		})
+		.await
 	}
 }
 

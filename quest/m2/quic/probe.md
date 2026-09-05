@@ -10,8 +10,8 @@ and publisher rate adaptation.
 
 ## Plan
 
-Implement the opt-in mechanism in the selected fork's recovery and pacing
-layer. Enable it only while the application consumes bandwidth estimates, so
+Implement the opt-in mechanism in noq's recovery and pacing layer, proposed
+upstream first. Enable it only while the application consumes bandwidth estimates, so
 idle connections never probe. Exclude streams or packets that have already
 expired under MoQ's group lifetime.
 
@@ -29,8 +29,8 @@ option through the backend-neutral estimate.
 
 ## Required
 
-- [Drive raw QUIC from the selected core in moq-uring](/quest/m2/quic/uring-raw.md) -
-  provides the production recovery and pacing path
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - noq must be the only
+  default core before its recovery and pacing layer gains an opt-in probe
 
 ## Related
 

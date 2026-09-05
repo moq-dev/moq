@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use io_uring::{IoUring, opcode, squeue};
 
+use crate::metrics::Counters;
 use crate::park::Unpark;
 use crate::{timer, udp};
 
@@ -58,6 +59,9 @@ pub(crate) struct Shared {
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
 	pub spawns: RefCell<Vec<Task>>,
 	pub unpark: std::sync::Arc<Unpark>,
+	/// This worker's counters, also held by its sockets, timer heap, and park
+	/// word.
+	pub metrics: std::sync::Arc<Counters>,
 	/// The next provided-buffer group id; one per socket.
 	pub next_bgid: Cell<u16>,
 	/// Set by [`crate::Worker`]'s drop: handles outlive the loop that would
@@ -103,7 +107,12 @@ impl Shared {
 					return Ok(());
 				}
 			}
-			if let Err(err) = ring.submit() {
+			self.metrics.enters.add(1);
+			let submitted = ring.submit();
+			if let Ok(count) = &submitted {
+				self.metrics.submissions.add(*count as u64);
+			}
+			if let Err(err) = submitted {
 				// A deadline-bounded teardown can safely retry an interrupted
 				// enter; ordinary callers surface it to their worker.
 				if deadline.is_some() && err.raw_os_error() == Some(libc::EINTR) {
