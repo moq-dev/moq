@@ -33,7 +33,7 @@ private slots:
 	void UpdateStatus();
 	void OpenAdvanced();
 	void OnQualityToggled(bool enabled);
-	void RefreshQualityOptions();
+	void RefreshQualityOptions(bool applyProfileDefaults = false);
 	void OnRelayUrlEdited();
 
 private:
