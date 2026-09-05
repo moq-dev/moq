@@ -172,6 +172,17 @@ impl Source {
 		Ok(self.request(rel)?.await?)
 	}
 
+	/// Bind an optional cross-broadcast reference to the broadcast serving it right now.
+	///
+	/// The eager half of [`resolve`](Self::resolve), for a consumer that must fix *which*
+	/// publisher it reads before it needs the media itself. See [`Binding`] for why the two
+	/// moments differ.
+	///
+	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
+	pub fn bind(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<Binding> {
+		Ok(Binding(Bound::Requested(self.request(rel)?.into_inner())))
+	}
+
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
 	/// awaiting SUBSCRIBE_OK.
 	///
@@ -190,6 +201,39 @@ impl Source {
 	) -> crate::Result<moq_net::track::Subscriber> {
 		let broadcast = self.request(rel)?.await?;
 		Ok(broadcast.track(name)?.subscribe(None).await?)
+	}
+}
+
+/// A cross-broadcast reference bound to the one broadcast that serves it.
+///
+/// Resolving a path is not idempotent: a same-path republish is a takeover, so the origin
+/// answers the same path with a different broadcast afterwards. Binding once, up front, is what
+/// keeps a consumer serving media that belongs to the catalog it read, instead of a later
+/// publisher's restarted numbering. [`broadcast`](Self::broadcast) only collects the answer to a
+/// request already made, so awaiting it as late as the first media fetch is safe.
+///
+/// Build one with [`Source::bind`], or with [`Binding::new`] for a broadcast already in hand.
+pub struct Binding(Bound);
+
+enum Bound {
+	/// A broadcast the caller already holds.
+	Ready(moq_net::broadcast::Consumer),
+	/// A request issued when the binding was made.
+	Requested(moq_net::origin::Requesting),
+}
+
+impl Binding {
+	/// Bind to a broadcast already in hand, for a reference that named it.
+	pub fn new(broadcast: moq_net::broadcast::Consumer) -> Self {
+		Self(Bound::Ready(broadcast))
+	}
+
+	/// The bound broadcast, awaiting the origin's answer when it hasn't arrived yet.
+	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
+		match &self.0 {
+			Bound::Ready(broadcast) => Ok(broadcast.clone()),
+			Bound::Requested(request) => Ok(kio::wait(|waiter| request.poll_ok(waiter)).await?),
+		}
 	}
 }
 
