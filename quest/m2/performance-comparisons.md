@@ -7,10 +7,10 @@ estimate and preserved evidence, so a small reported speedup can be evaluated.
 
 ## Plan
 
-`bench/run.sh` runs each relay workload once as base then current. Its runtime
-matrix already rotates order and reports medians, but the revision comparison
-does neither. `cleanup` deletes the run directory, including Criterion estimates,
-load/host JSONL, relay logs, and summaries. Preserve the existing default command
+`rs/scripts/bench.sh` runs each relay workload once as base then current,
+without repeated rounds or alternating execution order. `cleanup` deletes the run
+directory, including Criterion estimates, load/host JSONL, relay logs, and
+summaries. Preserve the existing default command
 while extending this harness rather than creating another benchmark runner.
 
 - Add configurable repeated paired rounds, alternate base/current order, and
@@ -24,8 +24,8 @@ while extending this harness rather than creating another benchmark runner.
   hardware/kernel, allocator, affinity, workload, and execution order. Preserve
   partial evidence on failure while still cleaning up owned processes/worktrees.
 - Distinguish throughput-window counters from cumulative latency/loss. Today
-  `bench/relay.sh::summarize_load` differences bytes over the last five seconds but
-  reads final lifetime latency and group-loss counters. Label that explicitly;
+  `rs/scripts/bench.sh::summarize_load` differences bytes over the last five seconds
+  but reads final lifetime latency and group-loss counters. Label that explicitly;
   consume windowed data when the existing latency quest supplies it. Never
   subtract percentiles or call cumulative loss a steady-state sample.
 - Compare CPU per delivered byte/frame only at comparable offered load, delivery,

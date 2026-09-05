@@ -7,7 +7,7 @@ Criterion targets and native relay load generator do not exercise.
 
 ## Plan
 
-`bench/run.sh::criterion_targets` discovers Cargo targets only. Existing JS unit
+`rs/scripts/bench.sh::criterion_targets` discovers Cargo targets only. Existing JS unit
 tests validate behavior, and `test/wasm` validates browser interop, but neither
 provides a repeatable JS performance comparison. Reuse the existing relay/browser
 harness pieces and add a focused recipe with artifacts under the benchmark

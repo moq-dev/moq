@@ -40,5 +40,6 @@ Reference: [Linux cache-line contention analysis](https://www.kernel.org/doc/htm
 
 ## Related
 
+- [Session micro-costs](/quest/m1/perf/session-micro.md) - owns ingress stats batching; this quest measures cross-worker contention and egress fanout
 - [Cache shard](/quest/m1/perf/cache-shard.md) - separate shared recency-counter bottleneck
 - [Relay profiling](/quest/m2/performance-profiles.md) - reproducible CPU attribution
