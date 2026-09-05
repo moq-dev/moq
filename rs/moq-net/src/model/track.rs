@@ -48,10 +48,13 @@ const EVICT_SLACK: usize = 64;
 /// groups, small enough that a write never scans a long queue.
 const EVICT_SCAN: usize = 4;
 
-/// One bounded pass over the eviction order at a fixed cache time.
+/// One pass over the eviction order at a fixed cache time.
 #[derive(Clone, Copy)]
 pub(super) struct ExpiryScan {
 	start: usize,
+	// How many entries this pass examines. `EVICT_SCAN` from the write path, the
+	// whole queue from the pool's sweep.
+	width: usize,
 	now: u64,
 	max_ticks: u64,
 }
@@ -577,7 +580,8 @@ impl TrackState {
 	/// entries beyond one scan window can't be starved by fresh (recently read,
 	/// fetched, or written) entries in front of them: every position is revisited
 	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
-	/// byte budget reclaims the remainder under memory pressure.
+	/// byte budget reclaims the remainder under memory pressure, and the pool's sweep
+	/// ([`Self::expiry_scan_full`]) covers a track that stopped writing entirely.
 	pub(super) fn evict_expired(&mut self) {
 		let scan = self.expiry_scan();
 		self.evict_expired_scan(scan);
@@ -587,6 +591,25 @@ impl TrackState {
 	pub(super) fn expiry_scan(&self) -> ExpiryScan {
 		ExpiryScan {
 			start: self.cache.next_expiry_scan(EVICT_SCAN),
+			width: EVICT_SCAN,
+			now: self.cache.pool().now(),
+			max_ticks: self.cache.pool().expiry_ticks(),
+		}
+	}
+
+	/// Describe a scan covering the whole eviction order, for the pool's sweep.
+	///
+	/// A write's window is deliberately tiny so it stays off the hot path, which is
+	/// fine while writes keep coming. The sweep is the only thing running on a track
+	/// nobody writes, so a rotating window there would take a backlog's length in
+	/// sweeps to reach the oldest entry, missing the window's deadline by orders of
+	/// magnitude. It runs at most once per gate interval, off any write, so it covers
+	/// the queue in one pass instead. The cost is one pass over the track's cached
+	/// groups, which the pool's byte budget already bounds.
+	pub(super) fn expiry_scan_full(&self) -> ExpiryScan {
+		ExpiryScan {
+			start: 0,
+			width: self.evict.len(),
 			now: self.cache.pool().now(),
 			max_ticks: self.cache.pool().expiry_ticks(),
 		}
@@ -597,7 +620,7 @@ impl TrackState {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
-			for step in 0..len.min(EVICT_SCAN) {
+			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
 					continue;
@@ -629,7 +652,7 @@ impl TrackState {
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
-			for step in 0..len.min(EVICT_SCAN) {
+			for step in 0..len.min(scan.width) {
 				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
 					continue;
@@ -4538,6 +4561,30 @@ mod test {
 			!producer.state.read().lookup.contains_key(&0),
 			"the sweep reclaimed an idle open group with no write behind it"
 		);
+	}
+
+	/// One sweep drains a whole idle backlog, not a rotating window of it: a quiet
+	/// track has no writes left to revisit the rest of the queue with, so a bounded
+	/// pass would leave the oldest groups parked for a backlog's length in windows.
+	#[tokio::test]
+	async fn pool_sweep_drains_a_deep_backlog() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+
+		// Comfortably more than one write-driven scan window (EVICT_SCAN).
+		let backlog = 4 * EVICT_SCAN;
+		for _ in 0..backlog {
+			let mut group = producer.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		producer.append_group().unwrap(); // the live edge, always protected
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.sweep();
+
+		let state = producer.state.read();
+		let stale = (0..backlog as u64).filter(|seq| state.lookup.contains_key(seq)).count();
+		assert_eq!(stale, 0, "one sweep reclaimed the whole idle backlog");
 	}
 
 	#[tokio::test]

@@ -850,6 +850,32 @@ test("an abandoned open group ages out with no further write", async () => {
 	expect(await Promise.race([read, timeout])).toBeInstanceOf(Lagged);
 });
 
+test("the prune wakeup never exceeds the setTimeout limit", () => {
+	// A window past 2^31 ms truncates the delay to a signed 32-bit int, so the wakeup
+	// fires immediately and re-arms the same oversized delay: a millisecond timer loop
+	// instead of a wakeup. Capped, it just wakes early and finds nothing due.
+	const real = globalThis.setTimeout;
+	const delays: number[] = [];
+	// @ts-expect-error a stub, not a full setTimeout
+	globalThis.setTimeout = (_fn: () => void, delay: number) => {
+		delays.push(delay);
+		return { unref: () => {} };
+	};
+
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: 2 ** 31 + 10_000 });
+		const stalled = producer.appendGroup();
+		stalled.writeString("first");
+		producer.appendGroup(); // the live edge, so the stalled group is prunable
+		producer.close();
+	} finally {
+		globalThis.setTimeout = real;
+	}
+
+	expect(delays.length).toBeGreaterThan(0);
+	for (const delay of delays) expect(delay).toBeLessThanOrEqual(2 ** 31 - 1);
+});
+
 test("retention pruning preserves clean EOF for a drained mirror", async () => {
 	const clock = mockMonotonicTime(10_000);
 	try {

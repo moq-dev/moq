@@ -30,9 +30,11 @@
 //! publisher that stalls with a group still open stops writing, so nothing reclaims
 //! its buffer and a reader parked in that group waits forever. So a pool with an
 //! expiry window also keeps a registry of its live track accounts and sweeps them on
-//! a wall-clock cadence, driven by [`origin::Driver`](crate::origin::Driver). The byte
-//! budget deliberately has no such machinery: it is repaid by writes, and a track that
-//! never writes never grows the pool.
+//! a wall-clock cadence, driven by [`origin::Driver`](crate::origin::Driver). A pool
+//! whose origin driver is never run therefore keeps the write-driven half only, which
+//! is what a standalone [`broadcast`](crate::broadcast::Info) built without an origin
+//! gets. The byte budget deliberately has no such machinery: it is repaid by writes,
+//! and a track that never writes never grows the pool.
 //!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
 //! that never set a capacity or expiry pay only a couple of atomic counters, and
@@ -98,7 +100,10 @@ impl Config {
 	/// reclaimed, surfacing to any remaining reader as
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
-	/// window keeps idle content from pinning memory. The value is fixed when the
+	/// window keeps idle content from pinning memory. Reclaiming without a write behind
+	/// it needs the [`origin::Driver`](crate::origin::Driver) running, which every
+	/// session-backed origin has; a standalone broadcast keeps only the write-driven
+	/// half. The value is fixed when the
 	/// pool is created. Values are rounded up to the pool's 100 ms clock tick, with
 	/// 100 ms as the minimum effective window.
 	pub fn with_expiry(mut self, expiry: impl Into<Option<Duration>>) -> Self {
@@ -229,8 +234,11 @@ impl Pool {
 	/// How often [`Self::sweep`] should run, or `None` when idle reclamation is off.
 	///
 	/// Half the window, so a group is reclaimed within 1.5 windows of its last access
-	/// rather than 2. The sweep is otherwise rate-limited by the same per-track gate
-	/// the write path uses ([`EXPIRY_SCAN_TICKS`]), so a shorter cadence buys nothing.
+	/// rather than 2, and each track's pass covers its whole eviction order so that
+	/// bound holds however deep the backlog is. A shorter cadence buys nothing: the
+	/// same per-track gate the write path uses ([`EXPIRY_SCAN_TICKS`]) floors an
+	/// actual scan at one per second, which is also why a window under two seconds
+	/// reclaims within two windows instead of 1.5.
 	pub(crate) fn sweep_interval(&self) -> Option<Duration> {
 		self.expiry().map(|expiry| expiry / 2)
 	}
@@ -239,9 +247,10 @@ impl Pool {
 	///
 	/// This is the write-independent half of the LRU window: a track whose publisher
 	/// has stalled runs no write path, so nothing else would ever reclaim the group it
-	/// left open, and a reader parked inside that group would never be told. Each
-	/// track's scan is the same bounded, rate-limited one a write runs, so a sweep over
-	/// an idle pool costs a relaxed atomic per track.
+	/// left open, and a reader parked inside that group would never be told. Each track
+	/// covers its whole eviction order, since nothing else will, but behind the same
+	/// time gate a write uses: a sweep over a pool with nothing due costs a relaxed
+	/// atomic per track.
 	///
 	/// A no-op when idle reclamation is disabled: nothing registers.
 	pub(crate) fn sweep(&self) {
@@ -257,7 +266,7 @@ impl Pool {
 			.collect();
 
 		for track in tracks {
-			track.settle(None);
+			track.sweep();
 		}
 	}
 
@@ -454,6 +463,22 @@ impl Track {
 	/// [`Charge::add`]), reused so a frame write reads the clock once instead of
 	/// twice. `None` leaves the gate to sample it, and only if it needs it.
 	pub(crate) fn settle(&self, now: Option<u64>) {
+		self.settle_inner(now, false);
+	}
+
+	/// Settle from [`Pool::sweep`], covering the whole eviction order.
+	///
+	/// The write path's rotating window is bounded so it stays off the hot path, which
+	/// holds the deadline only because writes keep coming. Nothing else runs on a track
+	/// that stopped writing, so the sweep scans the queue in one pass instead: a
+	/// backlog otherwise needs its own length in windows before the sweep reaches its
+	/// oldest entry. Bounded by the track's cached groups, which the byte budget caps,
+	/// and gated to the same interval a write is.
+	pub(crate) fn sweep(&self) {
+		self.settle_inner(None, true);
+	}
+
+	fn settle_inner(&self, now: Option<u64>, full: bool) {
 		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
 		let scan_expiry = self.expiry_due(now);
 		if !settle_debt && !scan_expiry {
@@ -464,7 +489,11 @@ impl Track {
 		let Some(state) = self.state.upgrade() else { return };
 		let expiry = if scan_expiry {
 			let state = state.read();
-			let scan = state.expiry_scan();
+			let scan = if full {
+				state.expiry_scan_full()
+			} else {
+				state.expiry_scan()
+			};
 			state.expiry_mutation_due(scan).then_some(scan)
 		} else {
 			None

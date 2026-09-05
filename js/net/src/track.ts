@@ -11,6 +11,10 @@ import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
 
+// The largest delay setTimeout keeps: anything more truncates to a signed 32-bit int
+// and fires right away.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
 export const DEFAULT_MAX_AGE_MS = 5000;
 
@@ -597,13 +601,14 @@ export class Producer {
 		if (ages.length === 0) return;
 
 		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
-		const timer = setTimeout(
-			() => {
-				this.#pruneTimer = undefined;
-				this.#prune();
-			},
-			Math.max(0, Math.min(...ages) + maxAgeMs - performance.now()),
-		);
+		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
+		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
+		// retains anything still fresh, so the extra wakeups are the only cost.
+		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, Math.min(...ages) + maxAgeMs - performance.now()));
+		const timer = setTimeout(() => {
+			this.#pruneTimer = undefined;
+			this.#prune();
+		}, delay);
 		// A cache prune is never a reason to hold a Node/Bun process open.
 		(timer as unknown as { unref?: () => void }).unref?.();
 		this.#pruneTimer = timer;
