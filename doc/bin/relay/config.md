@@ -659,12 +659,14 @@ slack below physical memory (or just use `headroom`, which measures actual
 available memory). `duration` is the age counterpart: it stops idle history
 from pinning memory when the byte budget alone leaves room for it.
 
-All eviction happens as tracks write (there is no background reaper), so both
-`duration` and the byte budget cap how much history *active* publishers build
-up. A publisher that stops writing but stays connected keeps what it had cached
-until it resumes or the broadcast closes; under memory pressure the byte budget
-is repaid by the tracks that are still writing. A publisher that disconnects has
-its groups released as soon as the broadcast closes with it.
+The byte budget is repaid as tracks write, so it caps how much history *active*
+publishers build up: a publisher that stops writing pays none of it down, and
+under memory pressure the budget is repaid by the tracks that are still writing.
+`duration` does not depend on writes. The relay sweeps every cached track on a
+wall-clock cadence, so a publisher that stalls but stays connected still has its
+idle groups reclaimed, including one it left a group open in, and a subscriber
+parked inside that group is told rather than waiting forever. A publisher that
+disconnects has its groups released as soon as the broadcast closes with it.
 
 All three flags also accept CLI arguments (`--cache-capacity`,
 `--cache-headroom`, `--cache-duration`) and environment variables

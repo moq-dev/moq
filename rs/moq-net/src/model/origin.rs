@@ -1090,6 +1090,7 @@ impl Producer {
 		let nodes = OriginNodes::default();
 		let shared = kio::Shared::<OriginState>::default();
 		let timers = TimersSlot::default();
+		let pool = info.pool.clone();
 		let producer = Self {
 			info: info.id,
 			nodes: nodes.clone(),
@@ -1108,8 +1109,10 @@ impl Producer {
 				nodes,
 				shared,
 				done: false,
+				sweep: None,
 			},
 			timers,
+			pool,
 		};
 		(producer, driver)
 	}
@@ -1601,6 +1604,9 @@ pub struct Driver {
 	state: DriverState,
 	// The producer's slot, filled by `run` so lifecycle work can mint deadlines.
 	timers: TimersSlot,
+	// The cache pool this origin's groups charge into, swept on a wall-clock
+	// cadence so its idle window binds a track whose publisher stopped writing.
+	pool: cache::Pool,
 }
 
 /// Everything the driver polls and tears down, split from the park so the two
@@ -1615,6 +1621,9 @@ struct DriverState {
 	shared: kio::Shared<OriginState>,
 	/// Cached completion so a poll after `Ready` doesn't re-poll the drained set.
 	done: bool,
+	/// The cache pool's idle sweep, installed by [`Driver::run`] (which is where the
+	/// timers arrive) and absent when the pool never expires content.
+	sweep: Option<Sweep>,
 }
 
 impl Driver {
@@ -1627,10 +1636,50 @@ impl Driver {
 		T: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
 		T::Timer: MaybeSend + 'static,
 	{
-		self.timers.install(AnyTimers::new(timers));
+		let timers = AnyTimers::new(timers);
+		self.timers.install(timers.clone());
+		let mut state = self.state;
+		state.sweep = Sweep::new(&timers, self.pool);
 		Run {
-			state: self.state,
+			state,
 			park: kio::Park::default(),
+		}
+	}
+}
+
+/// The wall-clock half of the cache pool's idle window.
+///
+/// A track settles its own expiry as it writes, which covers every track that is
+/// still producing. A publisher that stalls with a group open stops writing, so this
+/// is what still reclaims that group (and unblocks whoever is parked inside it): a
+/// periodic [`cache::Pool::sweep`] on the origin's own timers.
+///
+/// Disarmed, and never allocated, when the pool has no expiry window.
+struct Sweep {
+	timers: AnyTimers,
+	pool: cache::Pool,
+	interval: Duration,
+	deadline: crate::runtime::Deadline<AnyTimers>,
+}
+
+impl Sweep {
+	fn new(timers: &AnyTimers, pool: cache::Pool) -> Option<Self> {
+		let interval = pool.sweep_interval()?;
+		Some(Self {
+			timers: timers.clone(),
+			pool,
+			interval,
+			deadline: crate::runtime::Deadline::after(timers, interval),
+		})
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		// A `Deadline` stays ready until it is re-armed, so re-arm before sweeping
+		// again; a clock that has not moved lands the next one in the future and
+		// this returns after one pass.
+		while self.deadline.poll(waiter).is_ready() {
+			self.deadline.set(self.timers.now().checked_add(self.interval));
+			self.pool.sweep();
 		}
 	}
 }
@@ -1667,6 +1716,12 @@ impl Run {
 
 impl DriverState {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Never gates completion: the pool outlives this origin (a relay shares one
+		// across every origin), so a sweep that is still due must not keep the driver
+		// alive after its lifecycle work has drained.
+		if let Some(sweep) = &mut self.sweep {
+			sweep.poll(waiter);
+		}
 		if !self.done {
 			ready!(self.set.poll(waiter));
 			self.done = true;
@@ -4763,6 +4818,68 @@ mod tests {
 		// An unknown cold path stays unknown however many links it crosses, so it
 		// can never accumulate its way into outranking a path we actually know.
 		assert_eq!(Cost::UNKNOWN.charged(3).cold, MAX_COST);
+	}
+
+	/// Mint an origin whose pool reclaims idle content after `expiry`.
+	fn expiring_origin(expiry: Duration) -> Producer {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
+		Info::default().with_pool(pool).produce()
+	}
+
+	/// A publisher that stalls with a group still open runs no write path, so the
+	/// track's own write-driven expiry never fires and a reader parked in that group
+	/// is never told. The driver's wall-clock sweep is the bound.
+	#[tokio::test(start_paused = true)]
+	async fn stalled_publisher_open_group_is_reclaimed() {
+		let expiry = Duration::from_secs(1);
+		let origin = expiring_origin(expiry);
+		let mut broadcast = origin.create_broadcast("test").unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+
+		let mut stalled = track.append_group().unwrap();
+		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		// A successor, so the stalled group is not the protected live edge. Its
+		// timestamp is inside the retention budget, so subscription expiry keeps the
+		// stalled group: only reclamation can bound it.
+		let _successor = track.append_group().unwrap();
+
+		let mut reading = stalled.consume();
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		// Production goes quiet: nothing writes to this track again.
+		crate::model::clock::advance(expiry * 2);
+
+		// Bounded so a regression fails rather than parking forever, which is the
+		// bug itself. Time is virtual, so the wait costs nothing.
+		let reclaimed = tokio::time::timeout(Duration::from_secs(60), reading.read_frame()).await;
+		assert!(
+			matches!(reclaimed, Ok(Err(Error::Old))),
+			"the sweep must reclaim an idle open group and surface the gap, got {reclaimed:?}"
+		);
+	}
+
+	/// Reclamation is the pool's policy, not the origin's: a pool with no expiry
+	/// window keeps idle content until byte pressure takes it, sweep or no sweep.
+	#[tokio::test(start_paused = true)]
+	async fn sweep_respects_a_disabled_expiry() {
+		let origin = Info::default().with_pool(cache::Pool::unbounded()).produce();
+		let mut broadcast = origin.create_broadcast("test").unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+
+		let mut stalled = track.append_group().unwrap();
+		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		let _successor = track.append_group().unwrap();
+
+		let mut reading = stalled.consume();
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		crate::model::clock::advance(Duration::from_secs(3600));
+		tokio::time::advance(Duration::from_secs(3600)).await;
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"a pool without an expiry window never reclaims"
+		);
 	}
 
 	/// A draining cost still has to fit the wire, since the route keeps being

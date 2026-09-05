@@ -34,9 +34,9 @@ evicted prefix.
 - **A new error variant**, `Error::GroupTooLarge`, mirroring the existing
   `FrameTooLarge` naming. `Lagged` is named from the consumer's side and would
   keep blaming the reader for the writer's overrun; `Evicted` already means the
-  pool dropped a whole group under external memory pressure, and
-  [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md)
-  will abort idle open groups, so these three need to stay distinguishable.
+  pool dropped a whole group under external memory pressure, and the cache
+  pool's idle sweep aborts an idle open group with `Old`, so these three need to
+  stay distinguishable.
 - **The writer learns synchronously.** The write that pushes the group past its
   budget returns `Err(Error::GroupTooLarge)` and aborts the group, which is the
   shape `FrameTooLarge` already has in `write_frame`. Today `evict()` returns
@@ -126,6 +126,5 @@ already claims its top end "intentionally reaches the raised
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
-- [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - also turns "open group hit a limit" into an abort, so the two must not collide on the error variant
 - [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - without it a JS publisher sends this new code to the wire as Internal
 - [#3001](/quest/m1/3001-ietf-stream-resets-send-moq-lite-error-codes-so-routine.md) - the moq-transport half of the code mapping

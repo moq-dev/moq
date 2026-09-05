@@ -34,4 +34,3 @@ consumer's `discontinuity()` bumps once. Fix on `dev`.
 ## Related
 
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - makes the declared marker the only reset signal
-- [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - the other open-group lifecycle rule in the same area
