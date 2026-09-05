@@ -243,6 +243,8 @@ There are two independent error code spaces, one for terminating the session and
 The same numeric value means different things in each, so an endpoint MUST select the code from the space matching what it is terminating.
 
 Both spaces reuse the codes moq-transport assigns, unchanged and with the same meaning, so an endpoint that speaks both protocols has one vocabulary and a relay can forward a peer's code without translating it.
+The assignments are those of moq-transport draft-18 and later; the earlier drafts differ, giving 0x4 to UNKNOWN_OBJECT_STATUS rather than GOING_AWAY and registering neither TOO_FAR_BEHIND (added in draft-17) nor MALFORMED_TRACK (added in draft-16).
+An endpoint bridging moq-lite to one of those MUST map the code for the version it negotiated rather than forwarding it.
 The codes moq-lite uses are listed in full below; an endpoint MUST NOT assign a moq-lite specific meaning to any code below 32.
 
 Codes 64 and above are the application's, opaque to moq-lite.
