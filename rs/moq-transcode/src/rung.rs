@@ -32,6 +32,32 @@ use crate::feed::{Feed, Item};
 /// nodes is the fleet's concern; this is the local backstop.
 const MAX_CONCURRENT_FETCHES: usize = 4;
 
+/// A rung's retirement signal: the receiving half of a flag the transcoder sets
+/// when the ladder no longer has room for this rung.
+///
+/// Retiring is a clean track end rather than a dropped task, so a subscriber
+/// sees the same thing it would on any other rendition going away and picks
+/// another one, instead of an abort it would read as a failure. The end waits
+/// on the fetches still in flight, since the track's final sequence has to sit
+/// above every group they are about to claim.
+#[derive(Clone)]
+pub(crate) struct Retire(tokio::sync::watch::Receiver<bool>);
+
+impl Retire {
+	/// The two halves of one rung's signal.
+	pub(crate) fn channel() -> (tokio::sync::watch::Sender<bool>, Self) {
+		let (sender, receiver) = tokio::sync::watch::channel(false);
+		(sender, Self(receiver))
+	}
+
+	/// Resolve once this rung is retired, immediately if it already was.
+	async fn fired(&mut self) {
+		// An error means the transcoder dropped the sending half, which only
+		// happens on its way out: retire rather than park here forever.
+		let _ = self.0.wait_for(|retired| *retired).await;
+	}
+}
+
 /// Everything a rung needs to build transcoding pipelines on demand.
 #[derive(Clone)]
 pub(crate) struct Rung {
@@ -52,6 +78,8 @@ pub(crate) struct Rung {
 	pub resize: moq_video::resize::Config,
 	/// Where to report that this rung is encoding.
 	pub active: crate::active::Producer,
+	/// Fires when the ladder resizes past this rung.
+	pub retire: Retire,
 }
 
 impl Rung {
@@ -89,6 +117,14 @@ impl Rung {
 	}
 }
 
+/// What the live path leaves the output track in.
+enum Ended {
+	/// Still open: finish it once nothing else can add a group.
+	Open,
+	/// Already terminal (aborted), or closed under us.
+	Closed,
+}
+
 /// Serve one requested rung track until it closes or the source ends.
 pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Result<(), Error> {
 	// Grab the group-request handle before accepting: a Request is dynamic from
@@ -96,10 +132,23 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	let dynamic = request.dynamic();
 	let info = hang::container::track_info();
 	let mut producer = request.accept(info);
+	let (finished, mut finishing) = tokio::sync::watch::channel(false);
 
-	let result = tokio::select! {
-		res = live(&rung, &mut producer) => res,
-		res = fetches(&rung, &dynamic) => res,
+	let live = async {
+		let result = live(&rung, &mut producer).await;
+		let _ = finished.send(true);
+		result
+	};
+	let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
+
+	// Finished here rather than in `live`, because the boundary is only known once
+	// every fetch has claimed its group. `finish` takes the live edge, which on a
+	// rung that only ever served fetches is sequence 0, and a group at or above
+	// the boundary is refused: finishing while a fetch was still opening its
+	// decoder would reject the very fetch retirement drained the loop to keep.
+	let result = match (live, fetches) {
+		(Ok(Ended::Open), Ok(())) => producer.finish().map_err(Into::into),
+		(live, fetches) => live.map(|_| ()).and(fetches),
 	};
 	if result.is_err() {
 		// End the track so subscribers see an error rather than a stall.
@@ -112,18 +161,37 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 /// resize + encode its frames group for group until demand goes away. The
 /// heavy lifting (subscription, decode) is shared with every other active rung
 /// of this source; only the per-rung resize and encode happen here.
-async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<(), Error> {
+///
+/// Reports whether the track is still open rather than finishing it: [`serve`]
+/// owns that, once the fetches in flight can no longer add a group.
+async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<Ended, Error> {
 	let demand = producer.demand();
+	let mut retire = rung.retire.clone();
+	// Set once the ladder retires this rung. The track is finished at the next
+	// group boundary rather than mid-group, so the last thing a subscriber gets
+	// is a complete group and then a clean end.
+	let mut retiring = false;
+
 	loop {
+		if retiring {
+			return Ok(Ended::Open);
+		}
+
 		tokio::select! {
 			used = demand.used() => if used.is_err() {
 				// The output track closed; nothing more to serve.
-				return Ok(());
+				return Ok(Ended::Closed);
 			},
 			err = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
 				producer.clone().abort(err)?;
-				return Ok(());
+				return Ok(Ended::Closed);
+			}
+			() = retire.fired() => {
+				// Retired while idle, which is the common case: the ladder is
+				// resized long before anyone asks for the rung it dropped.
+				retiring = true;
+				continue;
 			}
 		}
 
@@ -156,10 +224,27 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					}
 					break 'session;
 				}
+				() = retire.fired(), if !retiring => {
+					retiring = true;
+					// Mid-group: ride it out and end the track when it closes.
+					// Nothing new is opened, so this costs at most one group.
+					if current.is_none() {
+						break 'session;
+					}
+					continue;
+				}
 			};
 
 			match item {
 				Some(Item::Group(sequence)) => {
+					if retiring {
+						// The group we were riding out never ended, so it is
+						// incomplete however long we wait.
+						if let Some(output) = current.take() {
+							output.abort(moq_net::Error::Cancel)?;
+						}
+						break 'session;
+					}
 					// Empty the codec before opening the next group even though this one
 					// is being abandoned: a pipelined encoder still holding the previous
 					// group's tail would otherwise emit it into the new group, ahead of
@@ -231,6 +316,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						}
 						output.finish()?;
 					}
+					if retiring {
+						break 'session;
+					}
 				}
 				Some(Item::Lagged) => {
 					// Fell behind the feed: abandon the group and resume at the
@@ -238,14 +326,16 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
+					if retiring {
+						break 'session;
+					}
 				}
 				Some(Item::Finished) => {
 					// The source track ended: the derivative ends with it.
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
-					producer.finish()?;
-					return Ok(());
+					return Ok(Ended::Open);
 				}
 				None => {
 					// The feed died mid-stream (source or decode error).
@@ -253,7 +343,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						let _ = output.abort(moq_net::Error::Cancel);
 					}
 					producer.clone().abort(moq_net::Error::Cancel)?;
-					return Ok(());
+					return Ok(Ended::Closed);
 				}
 			}
 		}
@@ -265,40 +355,119 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 /// The fetch path: serve requests for specific (past) groups.
 ///
 /// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached: when `serve` cancels this future (the live path ended, or the
-/// output track closed), dropping the set aborts every in-flight fetch, so none
-/// keep a source subscription or an encoder session alive past teardown. A
-/// semaphore bounds how many run at once.
-async fn fetches(rung: &Rung, dynamic: &moq_net::track::Dynamic) -> Result<(), Error> {
+/// detached. Retirement takes whatever the handler already had queued, closes
+/// admission by dropping it, and drains every group below the track's final
+/// sequence. Other teardown aborts them, so no source subscription or encoder
+/// session survives a failed track. A semaphore bounds how many run at once.
+///
+/// Owns the handler rather than borrowing it, since closing admission is
+/// dropping it.
+async fn fetches(
+	rung: &Rung,
+	dynamic: moq_net::track::Dynamic,
+	finishing: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<(), Error> {
 	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
 	let mut tasks = tokio::task::JoinSet::new();
+	let mut retire = rung.retire.clone();
+	let mut retired = false;
 
 	loop {
 		// Reap finished fetches so the set doesn't grow without bound.
 		while tasks.try_join_next().is_some() {}
 
-		let Ok(request) = dynamic.requested_group().await else {
-			// The output track closed; nothing more to serve.
-			return Ok(());
+		// Take a slot before popping a request, so retirement never strands one in
+		// the handler while all slots are busy.
+		let permit = tokio::select! {
+			biased;
+			() = retire.fired() => {
+				retired = true;
+				break;
+			},
+			_ = finishing.wait_for(|finished| *finished) => break,
+			permit = limit.clone().acquire_owned() => permit.expect("the semaphore stays open"),
 		};
 
-		// Take a slot before spawning the transcode. Under a burst this blocks
-		// here, so further requests queue in the dynamic handler (backpressure)
-		// instead of spawning unbounded pipelines. The semaphore is never closed,
-		// so acquire only fails if we drop it first.
-		let Ok(permit) = limit.clone().acquire_owned().await else {
-			return Ok(());
+		let request = tokio::select! {
+			biased;
+			() = retire.fired() => {
+				retired = true;
+				break;
+			},
+			_ = finishing.wait_for(|finished| *finished) => break,
+			request = dynamic.requested_group() => match request {
+				Ok(request) => request,
+				// The output track closed; nothing more to serve.
+				Err(_) => break,
+			},
 		};
 
-		let rung = rung.clone();
-		tasks.spawn(async move {
-			let _permit = permit;
-			let sequence = request.sequence();
-			if let Err(err) = fetch(rung, request).await {
-				tracing::warn!(%err, sequence, "transcode fetch failed");
-			}
-		});
+		spawn_fetch(&mut tasks, rung.clone(), request, permit);
 	}
+
+	if retired {
+		// A consumer that asked for a group before retirement is already waiting on
+		// it, whether or not this loop had reached it yet: the request queues on the
+		// dynamic handler the moment the fetch is made. Take what is queued now, so
+		// dropping the handler below does not cancel a fetch that beat retirement.
+		//
+		// Taken in one pass, before waiting on anything, and then the handler is
+		// dropped. A consumer holding the retired track can keep fetching, and the
+		// handler admits a cache miss for as long as it is alive, so a drain that
+		// waited for a slot with it still open would keep taking those in too and
+		// the rung would never finish. Dropping it closes admission and releases
+		// whatever arrived after the pass; the requests already popped are held
+		// here, so they are unaffected.
+		let mut queued = Vec::new();
+		loop {
+			tokio::select! {
+				biased;
+				request = dynamic.requested_group() => match request {
+					Ok(request) => queued.push(request),
+					// The output track closed; nothing left to serve.
+					Err(_) => break,
+				},
+				// Nothing queued: everything that beat retirement is spoken for.
+				() = std::future::ready(()) => break,
+			}
+		}
+		drop(dynamic);
+
+		for request in queued {
+			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
+			spawn_fetch(&mut tasks, rung.clone(), request, permit);
+		}
+
+		// The track may already have declared its final sequence, but groups below
+		// that boundary remain writable. Finish every one the handler accepted, or
+		// its producer stays open and the fetch stalls forever.
+		while let Some(result) = tasks.join_next().await {
+			if let Err(err) = result {
+				tracing::warn!(%err, "transcode fetch task panicked");
+			}
+		}
+	} else {
+		// A closed or failed track has no result left to preserve.
+		tasks.shutdown().await;
+	}
+
+	Ok(())
+}
+
+/// Spawn one fetch, holding its concurrency slot for the life of the task.
+fn spawn_fetch(
+	tasks: &mut tokio::task::JoinSet<()>,
+	rung: Rung,
+	request: moq_net::track::GroupRequest,
+	permit: tokio::sync::OwnedSemaphorePermit,
+) {
+	tasks.spawn(async move {
+		let _permit = permit;
+		let sequence = request.sequence();
+		if let Err(err) = fetch(rung, request).await {
+			tracing::warn!(%err, sequence, "transcode fetch failed");
+		}
+	});
 }
 
 /// Transcode one specifically requested group, fetching it from the source.
@@ -555,6 +724,7 @@ mod tests {
 	fn write_banks_the_frames_that_reached_the_group() {
 		let rung = Resolved {
 			name: "video/120p".to_string(),
+			height: 120,
 			size: moq_video::Size::new(160, 120),
 			bitrate: 100_000,
 			framerate: 30,

@@ -64,7 +64,9 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang p
 Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
 the platform hardware decoder where available. `--video-name` and
 `--audio-name` pick a rendition; `--latency-max` (default 500 ms) bounds how
-far a stalled group may lag before it is skipped. Playback is behind the
+far a stalled group may lag before it is skipped. Each role follows the catalog
+for as long as it lasts, so a publisher that retires the rendition being played
+ends that track and the role picks a replacement. Playback is behind the
 `play` feature, since it pulls in windowing and audio-device dependencies:
 
 ```bash
@@ -99,6 +101,14 @@ Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
 watches them. On NVIDIA the whole pipeline stays on the GPU. Requires the
 `transcode` feature.
+
+The ladder is sized against the source picture and follows it, so a source that
+changes resolution mid-stream (a window capture renegotiated by a resize, a
+publisher reconnecting at a new size) resolves the rungs again. Rungs that still
+fit keep serving. A rung the new picture has no room for finishes its track, as
+does one whose own picture moved, and the latter comes back under a new name
+(`video/360p.2`), so a viewer on either reselects as it would on any other
+rendition change.
 
 ## Multiple stages
 

@@ -2,7 +2,8 @@
 
 ## Goal
 
-A PR changing media delivery or a language binding gets the applicable
+A PR changing media delivery or a binding covered by the existing smoke matrix
+(Rust, Python, browser/native JS, C, and GStreamer) gets the applicable
 end-to-end check before merge. Expensive gates remain scoped, but a source
 change cannot miss its only behavioral test because it did not edit the harness.
 
@@ -17,6 +18,10 @@ The live `main` and `dev` rulesets inspected on 2026-09-05 UTC require `Check`
 and `Test` only. A separate Smoke, WASM, or platform result is not a required
 context in either ruleset; inspect effective branch protection as well when
 wiring the aggregate gate.
+
+Adding Go, Swift, Kotlin, and Dart participants is outside this quest. Report
+those bindings as uncovered, and extend the impact map as participants land;
+a successful aggregate must not claim behavioral coverage for them.
 
 - Define an explicit impact map in reusable local recipes, extending the
   existing changed-package selection. List what each lane proves and which

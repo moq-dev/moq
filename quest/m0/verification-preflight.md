@@ -21,6 +21,11 @@ workflow file therefore fails the fallback check despite Bun being on PATH.
 Check required version/behavior, including this small parser fixture, rather
 than only the executable name.
 
+The fallback `just fix` also reproduced a system-awk failure in Rust package
+selection with multiple changed crates (`newline in string`). Include that
+selector fixture in fallback-tool compatibility checks; the Nix-shell selector
+accepted the same scope.
+
 - Add a bounded `just doctor` recipe with human-readable and structured output:
   selected base and scope, tool paths and versions, dev-shell identity, Cargo
   wrapper and target directory, writable scratch/cache locations, and disk

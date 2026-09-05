@@ -1,8 +1,8 @@
-# [M] Test packages from outside the workspace
+# [M] Test Rust and JS packages from outside the workspace
 
 ## Goal
 
-Changed packages install and work in an isolated consumer before publication.
+Changed Rust and JS packages install and work in an isolated consumer before publication.
 Workspace linking, path dependencies, generated files, or a shared node_modules
 directory cannot hide missing release contents or undeclared dependencies.
 
@@ -12,7 +12,7 @@ The repository already builds JS packages, tests release scripts, and runs
 source interop. `moq-dev/smoke` tests published releases. Add the missing bridge:
 consume candidate archives from this checkout without publishing them.
 
-- Start with Rust and JS, using their existing packaging commands and committed
+- Cover Rust and JS, using their existing packaging commands and committed
   lock data. Stage the changed packages and required unpublished siblings in
   dependency order. Inspect archive manifests and build isolated consumers
   against those archives; do not copy workspace build outputs into the consumer.
