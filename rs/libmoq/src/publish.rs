@@ -94,7 +94,17 @@ impl Publish {
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track on the way to being recognized.
 		let media = match import::Container::new(broadcast.clone(), catalog.reserve(), format, init) {
-			Ok(container) => Media::Container(container),
+			Ok(container) => {
+				// Container import has no VideoHint channel. Callers that need
+				// catalog hints must publish a codec bitstream via the track path.
+				if video.is_some() {
+					return Err(Error::InvalidConfig(
+						"video hint is only supported for codec (track) publish, not container formats"
+							.into(),
+					));
+				}
+				Media::Container(container)
+			}
 			Err(moq_mux::Error::UnknownFormat(_)) => {
 				let mut broadcast = broadcast.clone();
 				let name = broadcast.unique_name(&format!(".{format}"));

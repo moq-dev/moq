@@ -450,7 +450,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	advancedButton = new QPushButton("Advanced…", streamPage);
 	advancedButton->setCursor(Qt::PointingHandCursor);
-	advancedButton->setToolTip("Same knobs as the Advanced tab: protocol pin, TLS, reconnect, QUIC, WebSocket. "
+	advancedButton->setToolTip("Protocol pin, TLS, reconnect, QUIC and WebSocket settings. "
 				   "Opens them in a window. Changes apply on the next Go Live.");
 	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
 
@@ -459,6 +459,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	status = new QLabel(streamPage);
 	status->setWordWrap(true);
+	status->setTextFormat(Qt::PlainText);
 	status->setToolTip("Live session state: connecting, connected, reconnecting, or the last failure.");
 	QFont statusFont = status->font();
 	statusFont.setBold(true);
@@ -476,6 +477,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	statsBox = new QLabel(streamPage);
 	statsBox->setWordWrap(true);
+	statsBox->setTextFormat(Qt::PlainText);
 	statsBox->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	statsBox->setMinimumHeight(40);
 	statsBox->setAlignment(Qt::AlignTop | Qt::AlignLeft);
@@ -882,7 +884,7 @@ void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 	QString detected = haveHw ? QString("Detected: hardware available (%1)").arg(hwNames.join(", "))
 				  : QString("Detected: software encoders only");
 	if (profile == "auto")
-		detected += haveHw ? " · Auto → Quality" : " · Auto → Performance";
+		detected += preferHw ? " · Auto → Quality" : " · Auto → Performance";
 	else if (high)
 		detected += QStringLiteral(" · Quality · 8 Mbps");
 	else
