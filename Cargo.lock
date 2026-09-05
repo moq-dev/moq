@@ -4984,7 +4984,6 @@ dependencies = [
  "kio 0.5.7",
  "loom",
  "moq-net",
- "moq-path",
  "num_enum",
  "rand 0.10.2",
  "serde",
@@ -5005,14 +5004,6 @@ dependencies = [
  "cudarc",
  "lazy_static",
  "libloading 0.9.0",
-]
-
-[[package]]
-name = "moq-path"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -5160,7 +5151,6 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "jsonwebtoken",
- "moq-path",
  "p256",
  "p384",
  "reqwest",

@@ -20,7 +20,6 @@ The reference implementation. Every crate is on
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-token](/lib/rs/moq-token) | JWT keys, signing, verification, path authorization. |
-| [moq-path](https://docs.rs/moq-path) | Path patterns: the wildcard grammar tokens, origins, and announcements share. |
 | [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |

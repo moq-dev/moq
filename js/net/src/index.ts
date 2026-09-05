@@ -5,9 +5,6 @@
  * @module
  */
 
-export type { Segment as PatternSegment, Specificity } from "@moq/path";
-/** Re-export of {@link https://jsr.io/@moq/path | @moq/path}: the path patterns grants and advertisements are written in. */
-export { compareSpecificity, Pattern, PatternError, Patterns } from "@moq/path";
 /** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */

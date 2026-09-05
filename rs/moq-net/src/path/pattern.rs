@@ -2,35 +2,36 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::Patterns;
+use super::Patterns;
 
 /// Why a string or a segment list is not a valid [`Pattern`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Error {
+pub enum InvalidPattern {
 	/// A segment is empty: a leading, trailing, or doubled `/`.
 	EmptySegment,
-	/// A literal segment contains `*` or `/`. Wildcards are whole segments, and `*`
-	/// inside a literal is reserved rather than matched literally.
-	InvalidLiteral(String),
+	/// A segment is malformed: a literal, prefix, or suffix contains `/` or `*`, a
+	/// partial has neither prefix nor suffix (that is a wildcard), or a segment has
+	/// more than one `*`, which is reserved.
+	InvalidSegment(String),
 	/// More than one `**`.
 	MultipleGlobstars,
 	/// More than [`Pattern::MAX_SEGMENTS`] segments.
 	TooManySegments,
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for InvalidPattern {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::EmptySegment => write!(f, "empty path segment"),
-			Self::InvalidLiteral(segment) => write!(f, "invalid literal segment: {segment:?}"),
+			Self::InvalidSegment(segment) => write!(f, "invalid pattern segment: {segment:?}"),
 			Self::MultipleGlobstars => write!(f, "more than one ** segment"),
 			Self::TooManySegments => write!(f, "more than {} segments", Pattern::MAX_SEGMENTS),
 		}
 	}
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for InvalidPattern {}
 
 /// One segment of a [`Pattern`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,19 +41,35 @@ pub enum Segment {
 	Literal(String),
 	/// `*`: matches any one segment.
 	Wildcard,
+	/// `prefix*suffix`: matches any one segment that starts with `prefix` and ends
+	/// with `suffix`, without the two overlapping. Either may be empty, not both.
+	Partial {
+		/// What the segment must start with; may be empty.
+		prefix: String,
+		/// What the segment must end with; may be empty.
+		suffix: String,
+	},
 	/// `**`: matches any run of zero or more segments. At most one per pattern.
 	Globstar,
 }
 
 impl Segment {
 	/// Parse one segment of a pattern's text.
-	fn parse(text: &str) -> Result<Self, Error> {
+	fn parse(text: &str) -> Result<Self, InvalidPattern> {
 		match text {
-			"" => Err(Error::EmptySegment),
+			"" => Err(InvalidPattern::EmptySegment),
 			"*" => Ok(Self::Wildcard),
 			"**" => Ok(Self::Globstar),
-			_ if text.contains(['*', '/']) => Err(Error::InvalidLiteral(text.to_string())),
-			_ => Ok(Self::Literal(text.to_string())),
+			_ if text.contains('/') => Err(InvalidPattern::InvalidSegment(text.to_string())),
+			_ => match text.split_once('*') {
+				None => Ok(Self::Literal(text.to_string())),
+				Some((prefix, suffix)) if !suffix.contains('*') => Ok(Self::Partial {
+					prefix: prefix.to_string(),
+					suffix: suffix.to_string(),
+				}),
+				// More than one star in a segment is reserved.
+				Some(_) => Err(InvalidPattern::InvalidSegment(text.to_string())),
+			},
 		}
 	}
 
@@ -61,15 +78,39 @@ impl Segment {
 	/// `**` is excluded: it spans segments, so containment handles it structurally.
 	fn covers(&self, other: &Self) -> bool {
 		match (self, other) {
-			(Self::Wildcard, Self::Literal(_) | Self::Wildcard) => true,
+			(Self::Wildcard, Self::Literal(_) | Self::Partial { .. } | Self::Wildcard) => true,
 			(Self::Literal(a), Self::Literal(b)) => a == b,
+			(Self::Partial { .. }, Self::Literal(literal)) => self.matches(literal),
+			// `p*s` covers `p'*s'` exactly when `p` starts `p'` and `s` ends `s'`: the
+			// middle is free on both sides, so nothing else can constrain it.
+			(
+				Self::Partial { prefix, suffix },
+				Self::Partial {
+					prefix: other_prefix,
+					suffix: other_suffix,
+				},
+			) => other_prefix.starts_with(prefix.as_str()) && other_suffix.ends_with(suffix.as_str()),
 			_ => false,
 		}
 	}
 
 	/// Whether some path segment matches both. Same exclusion as [`covers`](Self::covers).
 	fn compatible(&self, other: &Self) -> bool {
-		self.covers(other) || other.covers(self)
+		match (self, other) {
+			// Two partials meet when one prefix starts the other and one suffix ends
+			// the other: the longer prefix followed by the longer suffix matches both.
+			(
+				Self::Partial { prefix, suffix },
+				Self::Partial {
+					prefix: other_prefix,
+					suffix: other_suffix,
+				},
+			) => {
+				(prefix.starts_with(other_prefix.as_str()) || other_prefix.starts_with(prefix.as_str()))
+					&& (suffix.ends_with(other_suffix.as_str()) || other_suffix.ends_with(suffix.as_str()))
+			}
+			_ => self.covers(other) || other.covers(self),
+		}
 	}
 
 	/// Whether this segment matches one path segment.
@@ -77,6 +118,11 @@ impl Segment {
 		match self {
 			Self::Literal(literal) => literal == part,
 			Self::Wildcard => true,
+			Self::Partial { prefix, suffix } => {
+				part.len() >= prefix.len() + suffix.len()
+					&& part.starts_with(prefix.as_str())
+					&& part.ends_with(suffix.as_str())
+			}
 			Self::Globstar => false,
 		}
 	}
@@ -87,6 +133,7 @@ impl fmt::Display for Segment {
 		match self {
 			Self::Literal(literal) => f.write_str(literal),
 			Self::Wildcard => f.write_str("*"),
+			Self::Partial { prefix, suffix } => write!(f, "{prefix}*{suffix}"),
 			Self::Globstar => f.write_str("**"),
 		}
 	}
@@ -99,18 +146,23 @@ impl fmt::Display for Segment {
 /// that compare equal without being equal (`*/a` and `*/b`) form one tier; what breaks
 /// that tie is the caller's business.
 ///
-/// Compared in order: literal segments (more wins), then no `**` beats `**`, then `*`
-/// segments (more wins), then the length of the literal head.
+/// Compared in order: literal segments (more wins), then no `**` beats `**`, then
+/// partial segments (more wins), then `*` segments (more wins), then the bytes the
+/// partials pin (more wins), then the length of the literal head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Specificity {
 	literals: usize,
 	exact: bool,
+	partials: usize,
 	wildcards: usize,
+	pinned: usize,
 	head: usize,
 }
 
-/// A pattern over broadcast paths: literal segments, `*` for one segment, and at most
-/// one `**` for any run of segments. See the [crate docs](crate) for the grammar.
+/// A pattern over broadcast paths: literal segments, `*` for one segment, `prefix*suffix`
+/// for one segment with a known start and end, and at most one `**` for any run of
+/// segments. Every segment kind matches whole segments, and a pattern is exact: `foo`
+/// matches only `foo`, and a subtree is `foo/**`.
 ///
 /// Build one with [`FromStr`] (`"a/*/**".parse()`), [`new`](Self::new) from segments,
 /// or [`literal`](Self::literal) and [`subtree`](Self::subtree) from a path. Equality and
@@ -131,20 +183,27 @@ impl Pattern {
 	pub const MAX_SEGMENTS: usize = 32;
 
 	/// A pattern from its segments, validating the grammar.
-	pub fn new(segments: impl IntoIterator<Item = Segment>) -> Result<Self, Error> {
+	pub fn new(segments: impl IntoIterator<Item = Segment>) -> Result<Self, InvalidPattern> {
 		let segments: Vec<Segment> = segments.into_iter().collect();
 		if segments.len() > Self::MAX_SEGMENTS {
-			return Err(Error::TooManySegments);
+			return Err(InvalidPattern::TooManySegments);
 		}
 
 		let mut globstar = None;
 		for (i, segment) in segments.iter().enumerate() {
 			match segment {
-				Segment::Literal(literal) if literal.is_empty() => return Err(Error::EmptySegment),
+				Segment::Literal(literal) if literal.is_empty() => return Err(InvalidPattern::EmptySegment),
 				Segment::Literal(literal) if literal.contains(['*', '/']) => {
-					return Err(Error::InvalidLiteral(literal.clone()));
+					return Err(InvalidPattern::InvalidSegment(literal.clone()));
 				}
-				Segment::Globstar if globstar.is_some() => return Err(Error::MultipleGlobstars),
+				Segment::Partial { prefix, suffix }
+					if (prefix.is_empty() && suffix.is_empty())
+						|| prefix.contains(['*', '/'])
+						|| suffix.contains(['*', '/']) =>
+				{
+					return Err(InvalidPattern::InvalidSegment(format!("{prefix}*{suffix}")));
+				}
+				Segment::Globstar if globstar.is_some() => return Err(InvalidPattern::MultipleGlobstars),
 				Segment::Globstar => globstar = Some(i),
 				_ => {}
 			}
@@ -187,7 +246,7 @@ impl Pattern {
 	/// The path is normalized like a broadcast path (slashes trimmed and collapsed), so
 	/// `/foo//bar/` is `foo/bar`. Fails when a segment is `*` or `**`, or contains `*`:
 	/// those are wildcards, and a path using them cannot be named by a pattern.
-	pub fn literal(path: &str) -> Result<Self, Error> {
+	pub fn literal(path: &str) -> Result<Self, InvalidPattern> {
 		Self::new(literal_segments(path))
 	}
 
@@ -195,7 +254,7 @@ impl Pattern {
 	///
 	/// Normalizes and validates `path` like [`literal`](Self::literal). The empty path
 	/// yields `**`.
-	pub fn subtree(path: &str) -> Result<Self, Error> {
+	pub fn subtree(path: &str) -> Result<Self, InvalidPattern> {
 		Self::new(literal_segments(path).chain([Segment::Globstar]))
 	}
 
@@ -331,7 +390,16 @@ impl Pattern {
 		Specificity {
 			literals: count(|s| matches!(s, Segment::Literal(_))),
 			exact: self.globstar.is_none(),
+			partials: count(|s| matches!(s, Segment::Partial { .. })),
 			wildcards: count(|s| matches!(s, Segment::Wildcard)),
+			pinned: self
+				.segments
+				.iter()
+				.map(|s| match s {
+					Segment::Partial { prefix, suffix } => prefix.len() + suffix.len(),
+					_ => 0,
+				})
+				.sum(),
 			head: self
 				.segments
 				.iter()
@@ -396,7 +464,7 @@ impl Pattern {
 	///
 	/// The root is normalized and validated like [`literal`](Self::literal), and the
 	/// result must fit [`MAX_SEGMENTS`](Self::MAX_SEGMENTS).
-	pub fn rooted(&self, root: &str) -> Result<Self, Error> {
+	pub fn rooted(&self, root: &str) -> Result<Self, InvalidPattern> {
 		Self::new(literal_segments(root).chain(self.segments.iter().cloned()))
 	}
 
@@ -423,11 +491,11 @@ fn literal_segments(path: &str) -> impl Iterator<Item = Segment> + '_ {
 }
 
 impl FromStr for Pattern {
-	type Err = Error;
+	type Err = InvalidPattern;
 
 	/// Parse a pattern's text. Unlike a path, the text is not normalized: a leading,
 	/// trailing, or doubled `/` is an error, so a typo cannot silently widen a grant.
-	fn from_str(text: &str) -> Result<Self, Error> {
+	fn from_str(text: &str) -> Result<Self, InvalidPattern> {
 		if text.is_empty() {
 			return Self::new([]);
 		}
@@ -439,17 +507,17 @@ impl FromStr for Pattern {
 }
 
 impl TryFrom<&str> for Pattern {
-	type Error = Error;
+	type Error = InvalidPattern;
 
-	fn try_from(text: &str) -> Result<Self, Error> {
+	fn try_from(text: &str) -> Result<Self, InvalidPattern> {
 		text.parse()
 	}
 }
 
 impl TryFrom<String> for Pattern {
-	type Error = Error;
+	type Error = InvalidPattern;
 
-	fn try_from(text: String) -> Result<Self, Error> {
+	fn try_from(text: String) -> Result<Self, InvalidPattern> {
 		text.parse()
 	}
 }
@@ -486,6 +554,20 @@ impl Ord for Pattern {
 	}
 }
 
+impl serde::Serialize for Pattern {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.as_str())
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for Pattern {
+	/// Reads the canonical text, so a persisted pattern is validated on the way in.
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
+	}
+}
+
 impl AsRef<str> for Pattern {
 	fn as_ref(&self) -> &str {
 		&self.text
@@ -512,6 +594,9 @@ mod tests {
 			"**/transcode.pro",
 			"a/**/b/*",
 			"*/**",
+			"**/*.hang",
+			"foo*",
+			"foo.*.hang",
 		] {
 			assert_eq!(pattern(text).to_string(), text);
 		}
@@ -528,27 +613,58 @@ mod tests {
 
 	#[test]
 	fn rejects_bad_syntax() {
-		assert_eq!("/a".parse::<Pattern>(), Err(Error::EmptySegment));
-		assert_eq!("a/".parse::<Pattern>(), Err(Error::EmptySegment));
-		assert_eq!("a//b".parse::<Pattern>(), Err(Error::EmptySegment));
-		assert_eq!("/".parse::<Pattern>(), Err(Error::EmptySegment));
-		assert_eq!("**/**".parse::<Pattern>(), Err(Error::MultipleGlobstars));
-		assert_eq!("*.hang".parse::<Pattern>(), Err(Error::InvalidLiteral("*.hang".into())));
-		assert_eq!("a*b".parse::<Pattern>(), Err(Error::InvalidLiteral("a*b".into())));
-		assert_eq!("***".parse::<Pattern>(), Err(Error::InvalidLiteral("***".into())));
+		assert_eq!("/a".parse::<Pattern>(), Err(InvalidPattern::EmptySegment));
+		assert_eq!("a/".parse::<Pattern>(), Err(InvalidPattern::EmptySegment));
+		assert_eq!("a//b".parse::<Pattern>(), Err(InvalidPattern::EmptySegment));
+		assert_eq!("/".parse::<Pattern>(), Err(InvalidPattern::EmptySegment));
+		assert_eq!("**/**".parse::<Pattern>(), Err(InvalidPattern::MultipleGlobstars));
+		assert_eq!(
+			"***".parse::<Pattern>(),
+			Err(InvalidPattern::InvalidSegment("***".into()))
+		);
+
+		assert_eq!(
+			"a*b*c".parse::<Pattern>(),
+			Err(InvalidPattern::InvalidSegment("a*b*c".into()))
+		);
+		assert_eq!(
+			"*a*".parse::<Pattern>(),
+			Err(InvalidPattern::InvalidSegment("*a*".into()))
+		);
+		assert_eq!(
+			"*.hang".parse::<Pattern>().unwrap().segments(),
+			&[Segment::Partial {
+				prefix: String::new(),
+				suffix: ".hang".into()
+			}]
+		);
+		assert_eq!(
+			Pattern::new([Segment::Partial {
+				prefix: String::new(),
+				suffix: String::new()
+			}]),
+			Err(InvalidPattern::InvalidSegment("*".into()))
+		);
+		assert_eq!(
+			Pattern::new([Segment::Partial {
+				prefix: "a/".into(),
+				suffix: String::new()
+			}]),
+			Err(InvalidPattern::InvalidSegment("a/*".into()))
+		);
 
 		let deep = ["a"; Pattern::MAX_SEGMENTS + 1].join("/");
-		assert_eq!(deep.parse::<Pattern>(), Err(Error::TooManySegments));
+		assert_eq!(deep.parse::<Pattern>(), Err(InvalidPattern::TooManySegments));
 		let max = ["a"; Pattern::MAX_SEGMENTS].join("/");
 		assert!(max.parse::<Pattern>().is_ok());
 
 		assert_eq!(
 			Pattern::new([Segment::Literal("a/b".into())]),
-			Err(Error::InvalidLiteral("a/b".into()))
+			Err(InvalidPattern::InvalidSegment("a/b".into()))
 		);
 		assert_eq!(
 			Pattern::new([Segment::Literal(String::new())]),
-			Err(Error::EmptySegment)
+			Err(InvalidPattern::EmptySegment)
 		);
 	}
 
@@ -558,8 +674,8 @@ mod tests {
 		assert_eq!(Pattern::literal("").unwrap(), Pattern::default());
 		assert_eq!(Pattern::subtree("foo").unwrap(), pattern("foo/**"));
 		assert_eq!(Pattern::subtree("/").unwrap(), Pattern::all());
-		assert_eq!(Pattern::literal("a/*"), Err(Error::InvalidLiteral("*".into())));
-		assert_eq!(Pattern::literal("**"), Err(Error::InvalidLiteral("**".into())));
+		assert_eq!(Pattern::literal("a/*"), Err(InvalidPattern::InvalidSegment("*".into())));
+		assert_eq!(Pattern::literal("**"), Err(InvalidPattern::InvalidSegment("**".into())));
 	}
 
 	#[test]
@@ -590,6 +706,17 @@ mod tests {
 			("a/*/**", "a/b", true),
 			("**/transcode.pro", "pid/foo.hang/transcode.pro", true),
 			("**/transcode.pro", "pid/foo.transcode.pro", false),
+			("**/*.hang", "pid/cam.hang", true),
+			("**/*.hang", ".hang", true),
+			("**/*.hang", "pid/cam.hang/x", false),
+			("foo*", "foo", true),
+			("foo*", "foobar", true),
+			("foo*", "fo", false),
+			("foo.*.hang", "foo..hang", true),
+			("foo.*.hang", "foo.1.hang", true),
+			("foo.*.hang", "foo.hang", false),
+			("a*a", "a", false),
+			("a*a", "aa", true),
 		];
 		for (text, path, expected) in cases {
 			assert_eq!(pattern(text).matches(path), expected, "{text} vs {path}");
@@ -624,6 +751,16 @@ mod tests {
 			("a/*/**/*", "a/**/b", false),
 			("a/*/c", "a/b/c", true),
 			("a/*/c", "a/**/c", false),
+			("*", "*.hang", true),
+			("*.hang", "*", false),
+			("*.hang", "cam.hang", true),
+			("*.hang", "cam.hang2", false),
+			("*.hang", "*.hang", true),
+			("*.hang", "cam*.hang", true),
+			("*.hang", "cam*hang", false),
+			("foo*", "foo.*.hang", true),
+			("foo.*", "foo*", false),
+			("**/*.hang", "pid/*/cam.hang", true),
 		];
 		for (outer, inner, expected) in cases {
 			assert_eq!(
@@ -651,6 +788,13 @@ mod tests {
 			("**", "", true),
 			("a/**/b", "**/c", false),
 			("a/**/b", "**/*", true),
+			("*.hang", "cam*", true),
+			("*.hang", "cam.msf", false),
+			("*.hang", "*.msf", false),
+			("foo*", "foo.bar*", true),
+			("foo*", "fob*", false),
+			("a*b", "ab", true),
+			("ab*", "*ab", true),
 			("a/**/b", "x/**", false),
 			("a/**/b", "**/x", false),
 		];
@@ -663,7 +807,7 @@ mod tests {
 	#[test]
 	fn specificity_ranks_by_what_is_pinned_down() {
 		// Strictly descending.
-		let ranked = ["a/b/c", "a/b", "a/*", "a/**", "*", "**"];
+		let ranked = ["a/b/c", "a/b", "a/*.hang", "a/*", "a/**", "*.hang", "*", "**"];
 		for pair in ranked.windows(2) {
 			assert!(
 				pattern(pair[0]).specificity() > pattern(pair[1]).specificity(),
@@ -674,6 +818,9 @@ mod tests {
 		}
 		// A longer literal head breaks otherwise equal ties.
 		assert!(pattern("a/**").specificity() > pattern("**/a").specificity());
+		// A partial pinning more bytes is more specific than one pinning fewer.
+		assert!(pattern("cam*.hang").specificity() > pattern("*.hang").specificity());
+		assert!(pattern("*.hang").specificity() > pattern("*").specificity());
 		// Equal structure is one tier.
 		assert_eq!(pattern("*/a").specificity(), pattern("*/b").specificity());
 		assert_eq!(pattern("*/a/**").specificity(), pattern("*/**/a").specificity());
@@ -698,6 +845,9 @@ mod tests {
 			("", "", &[""]),
 			("", "a", &[]),
 			("**", "", &["**"]),
+			("*.hang/**", "cam.hang", &["**"]),
+			("*.hang/**", "cam.msf", &[]),
+			("**/*.hang", "a.hang", &["", "**/*.hang"]),
 		];
 		for (text, root, expected) in cases {
 			let got = pattern(text).rebase(root);
@@ -711,10 +861,13 @@ mod tests {
 		assert_eq!(pattern("**").rooted("a/b").unwrap(), pattern("a/b/**"));
 		assert_eq!(pattern("").rooted("a").unwrap(), pattern("a"));
 		assert_eq!(pattern("*/c").rooted("").unwrap(), pattern("*/c"));
-		assert_eq!(pattern("a").rooted("*"), Err(Error::InvalidLiteral("*".into())));
+		assert_eq!(
+			pattern("a").rooted("*"),
+			Err(InvalidPattern::InvalidSegment("*".into()))
+		);
 
 		let deep = ["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert_eq!(pattern("b").rooted(&deep), Err(Error::TooManySegments));
+		assert_eq!(pattern("b").rooted(&deep), Err(InvalidPattern::TooManySegments));
 	}
 
 	#[test]
@@ -723,10 +876,21 @@ mod tests {
 		assert_eq!(pattern("**/a").head(), "");
 		assert_eq!(pattern("a/b").head(), "a/b");
 		assert_eq!(pattern("").head(), "");
+		assert_eq!(pattern("a/b*/c").head(), "a");
+		assert!(!pattern("a/b*").is_literal());
 		assert!(pattern("a/b").is_literal());
 		assert!(!pattern("a/*").is_literal());
 		assert!(pattern("a/**").has_globstar());
 		assert!(!pattern("a/*").has_globstar());
+	}
+
+	#[test]
+	fn serde_round_trips_as_text() {
+		let p = pattern("a/*/**");
+		let json = serde_json::to_string(&p).unwrap();
+		assert_eq!(json, "\"a/*/**\"");
+		assert_eq!(serde_json::from_str::<Pattern>(&json).unwrap(), p);
+		assert!(serde_json::from_str::<Pattern>("\"a//b\"").is_err());
 	}
 
 	#[test]

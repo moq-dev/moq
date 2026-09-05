@@ -20,20 +20,18 @@ A v1 pattern is canonical `/`-separated segments:
 
 - a literal;
 - `*`, matching one complete segment;
+- `lit*lit`, with one `*` matching bytes inside one segment (`*.hang`, `foo*`,
+  `foo.*.hang`);
 - `**`, matching zero or more complete segments, at most once per pattern.
-
-Wildcards are whole segments. `foo/**/elephant/*/transcode.pro` is legal;
-`foo/**/elephant*/transcode.pro` is not, and neither is `**/*.hang`: a `*`
-anywhere inside a literal segment is rejected rather than read literally, which
-keeps that syntax free for a later in-segment form and means only the exact
-segments `*` and `**` are reserved in literal paths.
 
 Patterns are exact by default. `foo` matches only `foo`, `foo/**` matches its
 subtree including `foo`, `**` matches every path, and the empty pattern matches
-only the current root. Reject leading, trailing, or repeated `/`, `*` inside a
-literal, and more than one `**`. New path construction and publication reject a
-`*` or `**` segment, while decoders tolerate it on legacy protocol versions
-during rollout.
+only the current root. Reject leading, trailing, or repeated `/`, more than one
+`*` in a segment, `**` mixed with literal bytes, and more than one `**`. A
+second star in a segment stays reserved: matching it is still linear, but
+containment stops being two string compares. Literal `*` needs no escape: new
+path construction and publication reject it, while decoders tolerate it on
+legacy protocol versions during rollout.
 
 A pattern list is an unordered union reduced by containment. The shared
 algebra supplies matching, overlap, containment, a literal head, and exact
@@ -43,17 +41,19 @@ containment is per member: a candidate covered only jointly by several members
 (`a/**` against `a`, `a/*`, `a/*/**`) is refused, so the check stays linear and
 a grant that means a subtree writes `a/**`. Pattern precedence uses one total
 structural specificity everywhere rules overlap, ordered by literal segments,
-then no `**`, then `*` segments, then literal head length, which agrees with
-containment (a strict superset always ranks lower); equal patterns form the
-same tier.
+then no `**`, then `lit*lit` segments, then `*` segments, then literal bytes
+pinned inside `lit*lit` segments, then literal head length. That order agrees
+with containment (a strict superset always ranks lower); equal patterns form
+the same tier.
 
 ### Ownership and compatibility
 
-The dependency-free `moq-path` crate and the `@moq/path` package own the
-grammar and algebra; `moq-net`, `moq-token`, `@moq/net`, and `@moq/token`
-re-export them. Golden cross-language vectors
-(`rs/moq-path/tests/vectors.json`), exhaustive small cases, and randomized
-round trips prevent semantic drift at the authorization boundary. Matching is
+`moq_net::path` and `@moq/net`'s `Path` module own the grammar and algebra
+beside the literal `Path`; `moq-token` and `@moq/token` take a dependency on
+them when [Claims](/quest/m2/path-patterns/claims.md) needs patterns. Golden
+cross-language vectors (`rs/moq-net/tests/pattern.json`), exhaustive small
+cases, randomized round trips, and the moq-net fuzz harness's `pattern` target
+prevent semantic drift at the authorization boundary. Matching is
 linear and inherits `Path::MAX_PARTS` (32), which also bounds residual
 expansion.
 
@@ -65,9 +65,9 @@ APIs default to v1 in a breaking major release; legacy minting is explicit.
 The moq.pro (downstream) token minting, public-access migration, scoped-key,
 and rule-editor work consume these versioned shapes downstream.
 
-The syntax follows Ant-style path patterns without `?`, classes, braces, or
-in-segment stars. NATS subjects motivate whole-segment wildcards and reserved
-wildcard segments; Vault ACLs motivate structural specificity. Common Access
+The syntax follows Ant-style path patterns without `?`, classes, or braces.
+NATS subjects motivate segment wildcards and reserved wildcard bytes; Vault
+ACLs motivate structural specificity. Common Access
 Token and `draft-ietf-moq-c4m-01` provide exact, prefix, and suffix matches per
 namespace field, including exact depth with a trailing `nil`. Document the
 exact common subset and keep the richer MoQ forms explicit rather than claiming
