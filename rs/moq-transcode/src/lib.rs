@@ -978,10 +978,9 @@ mod tests {
 	/// it is part way through after retirement, plus `serve` joining its two
 	/// halves rather than letting either cancel the other.
 	///
-	/// The other ordering, where the fetch handler serves group 0 and retirement
-	/// lands while it is still opening its decoder, is the one CI caught. It has
-	/// never come up on a developer machine, so treat that half as uncovered
-	/// here.
+	/// If the fetch handler produces group 0, the awaited fetch returns only
+	/// after it has opened its decoder and accepted the group. Retirement below
+	/// therefore cannot exercise a fetch that is still opening its decoder.
 	#[tokio::test]
 	async fn retirement_finishes_an_in_flight_fetch() {
 		let mut source = source_catalog(320, 240);

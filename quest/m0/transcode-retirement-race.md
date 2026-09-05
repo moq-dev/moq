@@ -3,15 +3,15 @@
 ## Goal
 
 A test that fails against a reverted fix on every run and on any machine for
-the case CI caught: a rung retired while the fetch handler is still opening its
-decoder for a group it has not yet claimed.
+a rung retired while the fetch handler is still opening its decoder for a
+group it has not yet claimed.
 
 ## Plan
 
-The mechanism is now known, and it is not the one the quest started from.
+The local coverage is now measured; the historical CI failure remains unexplained.
 `retirement_finishes_an_in_flight_fetch` in `rs/moq-transcode/src/lib.rs` does
-not reach the fetch handler at all on a developer machine, so it has never been
-a coin flip locally. It is a deterministic guard for a different property.
+not reach the fetch handler in the measured local runs. Those runs exercise
+a different property.
 
 Established by instrumenting `rung::serve` (probe prints on the retire branch,
 on `GroupRequest::accept`, and on the live session) and running the test 40
@@ -33,11 +33,14 @@ times:
   at retirement, `serve` no longer finishing) leaves the whole `moq-transcode`
   suite green, confirming the failed negative control recorded in #3381.
 
-So the race CI lost is upstream of anything the test asserts: whether the test
-task is polled between `Request::accept` and the live path creating group 0.
-Lose it and the fetch handler serves group 0 instead, which is the ordering
-where a retirement-time `finish` computes its boundary from a group that does
-not exist yet and rejects the fetch with `Closed`.
+The existing test cannot retire the rung while its fetch is opening a decoder:
+it awaits `rung.fetch_group(0, None)` before changing the source catalog.
+`fetch` opens `rung.pipeline()` before `GroupRequest::accept` inserts the output
+group, and `Fetching::poll` returns that group only once it is cached. If the
+live path inserts group 0 first, the fetch handler's later acceptance instead
+returns `Duplicate`. Neither ordering establishes the previously claimed CI
+mechanism. Recover the failing revision and trace before attributing that
+failure to a specific interleaving.
 
 Two comments that got this wrong on main were corrected without closing the
 quest: the test's doc comment (which claimed `fetch_group` resolves before
@@ -46,8 +49,9 @@ third, in the retirement drain in `fetches`, claimed the track may already have
 declared its final sequence; nothing can, since `serve` finishes only after
 `tokio::join!` returns.
 
-What is left is a test that reaches the fetch handler by construction. The
-obstacle is structural: holding the consumer needed to fetch is itself the
+What is left is a test that reaches the fetch handler by construction and
+triggers retirement before acceptance, without awaiting the output group first.
+The obstacle is structural: holding the consumer needed to fetch is itself the
 demand that starts the live path, and the live path serves the same group from
 the same source, so any construction has to give the fetch a group the live
 path cannot produce (a source group the shared feed does not deliver, served
