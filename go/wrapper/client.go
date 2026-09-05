@@ -228,7 +228,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.inner = inner
 
-	session, err := runCancellable(ctx, inner.Cancel, func() (*ffi.MoqSession, error) {
+	session, err := runHandle(ctx, inner.Cancel, func() (*ffi.MoqSession, error) {
 		return inner.Connect(url)
 	})
 	if err != nil {

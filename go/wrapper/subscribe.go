@@ -247,28 +247,34 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runCancellable(ctx, t.inner.Cancel, t.inner.RecvGroup)
-	if err != nil {
+	res, err := runHandle(ctx, t.inner.Cancel, func() (*ffi.MoqGroupConsumer, error) {
+		res, err := t.inner.RecvGroup()
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
 		return nil, err
 	}
-	if res == nil {
-		return nil, nil
-	}
-	return &GroupConsumer{inner: *res}, nil
+	return &GroupConsumer{inner: res}, nil
 }
 
 // NextGroup returns the next group in sequence order, skipping forward if
 // behind, or (nil, nil) when the track ends. Prefer this when order matters
 // more than latency.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runCancellable(ctx, t.inner.Cancel, t.inner.NextGroup)
-	if err != nil {
+	res, err := runHandle(ctx, t.inner.Cancel, func() (*ffi.MoqGroupConsumer, error) {
+		res, err := t.inner.NextGroup()
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
 		return nil, err
 	}
-	if res == nil {
-		return nil, nil
-	}
-	return &GroupConsumer{inner: *res}, nil
+	return &GroupConsumer{inner: res}, nil
 }
 
 // ReadFrame reads the first timestamped frame of the next group, or (nil, nil)

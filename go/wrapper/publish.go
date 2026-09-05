@@ -239,7 +239,7 @@ type BroadcastDynamic struct {
 
 // RequestedTrack waits for the next subscriber-requested track.
 func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +526,7 @@ type TrackDynamic struct {
 
 // RequestedGroup waits for the next uncached group request.
 func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
-	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+	inner, err := runHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
 	if err != nil {
 		return nil, err
 	}

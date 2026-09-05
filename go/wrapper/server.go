@@ -71,7 +71,7 @@ func (r *Request) SetConsume(o *OriginProducer) {
 // Accept completes the handshake and returns the established session. Hold the
 // session to keep the connection alive.
 func (r *Request) Accept(ctx context.Context) (*Session, error) {
-	inner, err := runCancellable(ctx, r.inner.Cancel, r.inner.Accept)
+	inner, err := runHandle(ctx, r.inner.Cancel, r.inner.Accept)
 	if err != nil {
 		return nil, err
 	}
@@ -213,16 +213,17 @@ func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
 // Cancelling ctx aborts this accept alone and leaves the server listening; use
 // Close to tear the listener down.
 func (s *Server) Accept(ctx context.Context) (*Request, error) {
-	res, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (**ffi.MoqRequest, error) {
-		return s.inner.Accept(&cancel)
+	res, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqRequest, error) {
+		res, err := s.inner.Accept(&cancel)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
 	})
-	if err != nil {
+	if err != nil || res == nil {
 		return nil, err
 	}
-	if res == nil {
-		return nil, nil
-	}
-	return &Request{inner: *res}, nil
+	return &Request{inner: res}, nil
 }
 
 // Requests ranges over incoming requests until the server stops or the loop
