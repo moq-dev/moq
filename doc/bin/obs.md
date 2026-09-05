@@ -16,14 +16,15 @@ OBS Studio install.
   Reconnect delay / cap / give up live under Advanced. **Quality** is the OBS
   source encode (off uses Settings > Output; on uses Auto / Quality /
   Performance plus hardware vs software and H.264 / HEVC / AV1, AAC or Opus).
-  **Transcode** is a relay ladder request for [`moq-transcode`](/bin/cli#transcode)
-  when moq.pro enables it: Default / Light / Mobile profiles, published beside
-  the source as `{broadcast}/transcode.hang`. OBS does not encode those rungs.
+  **Transcode** stores a local preference for the default
+  [`moq-transcode`](/bin/cli#transcode) ladder (`{broadcast}/transcode.hang`).
+  The plugin does not start the transcoder or send a ladder request; a relay
+  that runs moq-transcode publishes that catalog beside the source.
   The **Version** tab lists the plugin and libmoq versions.
   **Publish token** is optional (leave empty for public relays such as `/anon`).
   Paste a URL with `?jwt=` into Relay URL and the dock peels the token into that field.
   **Show stats** (on by default) lists the active Quality encode, Transcode
-  request, and negotiated MoQ draft and transport. **Show timeline** is five
+  preference, and negotiated MoQ draft and dial URL scheme. **Show timeline** is five
   compact sparklines (RTT, send, recv, loss, bytes sent) for the last minute,
   from `moq_session_stats`. The Stream tab keeps a libmoq version footer; the
   **Version** tab links plugin / libmoq docs plus [moq.dev](https://moq.dev) and

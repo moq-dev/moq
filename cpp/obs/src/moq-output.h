@@ -41,8 +41,8 @@ public:
 		double loss_pct = 0;
 		// Negotiated draft name (e.g. moq-lite-05), empty when unavailable.
 		std::string protocol;
-		// Transport label derived from the dial URL scheme (WebTransport, QUIC, …).
-		std::string transport;
+		// Dial URL scheme (https, wss, …). Not the negotiated carrier when https races.
+		std::string dial;
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
@@ -52,6 +52,10 @@ public:
 		const int epoch = session_epoch.load(std::memory_order_relaxed);
 		return epoch > 1 ? epoch - 1 : 0;
 	}
+
+	// True while the current Start() attempt has an open MoQ session.
+	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
+	bool IsLiveSession();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while reconnecting and on stop.
