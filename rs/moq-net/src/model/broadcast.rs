@@ -456,9 +456,9 @@ impl Producer {
 	/// producer clones are still alive, and existing tracks stay readable so
 	/// consumers can drain what they already have (an abort does not cascade into
 	/// the tracks), while a name nothing ever served resolves with `err` the same
-	/// way [`finish`](Self::finish) resolves it. Unlike a finish, consumers observe `err` from
-	/// [`Consumer::closed`], and an origin treats the source as lost rather than
-	/// ended.
+	/// way [`finish`](Self::finish) resolves it. Unlike a finish, consumers observe
+	/// `err` from [`Consumer::closed`], so the end reads as a failure rather than a
+	/// deliberate one.
 	///
 	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
 	/// already finished or aborted.

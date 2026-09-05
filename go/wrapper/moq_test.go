@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	}
 	requested := make(chan result, 1)
 	go func() {
-		broadcast, err := origin.Consume().RequestBroadcast("dynamic/broadcast")
+		broadcast, err := origin.Consume().RequestBroadcast(ctx, "dynamic/broadcast")
 		requested <- result{broadcast: broadcast, err: err}
 	}()
 
@@ -86,7 +87,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(res.err)
 	}
 
-	trackConsumer, err := res.broadcast.SubscribeTrack("status", nil)
+	trackConsumer, err := res.broadcast.SubscribeTrack(ctx, "status", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fetched, err := consumer.FetchGroup("events", 0, &moq.FetchGroupOptions{Priority: 3})
+	fetched, err := consumer.FetchGroup(ctx, "events", 0, &moq.FetchGroupOptions{Priority: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	}
 	result := make(chan fetchResult, 1)
 	go func() {
-		group, err := consumer.FetchGroup("events", 7, &moq.FetchGroupOptions{Priority: 11})
+		group, err := consumer.FetchGroup(ctx, "events", 7, &moq.FetchGroupOptions{Priority: 11})
 		result <- fetchResult{group: group, err: err}
 	}()
 
@@ -274,7 +275,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ann.Path())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +297,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := bc.SubscribeMedia(trackName, audio.Container, nil)
+	mediaConsumer, err := bc.SubscribeMedia(ctx, trackName, audio.Container, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +434,7 @@ func TestJSONTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot("status", moq.JSONSubscribeOptions{Compression: true})
+	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +458,7 @@ func TestJSONTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamConsumer, err := consumer.SubscribeJSONStream("events", moq.JSONSubscribeOptions{Compression: true})
+	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +509,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		track, err := consumer.SubscribeTrack("events", nil)
+		track, err := consumer.SubscribeTrack(ctx, "events", nil)
 		subscribe <- subscribeResult{track: track, err: err}
 	}()
 
@@ -584,7 +585,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := consumer.SubscribeMedia("requested-audio", moq.LegacyContainer(), nil)
+		media, err := consumer.SubscribeMedia(ctx, "requested-audio", moq.LegacyContainer(), nil)
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 
@@ -710,4 +711,258 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestRequestBroadcastCancelKeepsTheOrigin cancels a RequestBroadcast parked on a
+// dynamic handler, then proves the origin still resolves: the cancel has to abort
+// that one request rather than the consumer it was made on.
+func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
+	origin := moq.NewOriginProducer()
+	dynamic := origin.Dynamic()
+	defer dynamic.Cancel()
+	consumer := origin.Consume()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), testTimeout)
+	defer waitCancel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	requested := make(chan error, 1)
+	go func() {
+		_, err := consumer.RequestBroadcast(ctx, "never/served")
+		requested <- err
+	}()
+
+	// Take the request but never answer it, so the cancel lands on a call that is
+	// genuinely parked rather than one that has not started.
+	pending, err := dynamic.RequestedBroadcast(waitCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	select {
+	case err := <-requested:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-waitCtx.Done():
+		t.Fatal("RequestBroadcast did not return after its context was cancelled")
+	}
+	_ = pending.Abort(0)
+
+	// The same consumer resolves the next path, which it could not do if the
+	// cancel had torn the origin down.
+	served, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer served.Finish()
+
+	resolved := make(chan error, 1)
+	go func() {
+		_, err := consumer.RequestBroadcast(waitCtx, "later/served")
+		resolved <- err
+	}()
+
+	next, err := dynamic.RequestedBroadcast(waitCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Accept(served); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-resolved:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-waitCtx.Done():
+		t.Fatal(waitCtx.Err())
+	}
+}
+
+// TestSubscribeTrackCancelKeepsTheBroadcast cancels a SubscribeTrack parked on a
+// dynamic producer that has not accepted the track, then subscribes again on the
+// same broadcast consumer.
+func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	dynamic, err := broadcast.Dynamic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), testTimeout)
+	defer waitCancel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	subscribed := make(chan error, 1)
+	go func() {
+		_, err := consumer.SubscribeTrack(ctx, "never", nil)
+		subscribed <- err
+	}()
+
+	pending, err := dynamic.RequestedTrack(waitCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	select {
+	case err := <-subscribed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-waitCtx.Done():
+		t.Fatal("SubscribeTrack did not return after its context was cancelled")
+	}
+	_ = pending.Abort(0)
+
+	resolved := make(chan error, 1)
+	go func() {
+		_, err := consumer.SubscribeTrack(waitCtx, "later", nil)
+		resolved <- err
+	}()
+
+	next, err := dynamic.RequestedTrack(waitCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := next.Accept(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-resolved:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-waitCtx.Done():
+		t.Fatal(waitCtx.Err())
+	}
+}
+
+// TestUsedCancelKeepsTheTrack cancels a producer-side Used wait, which has no
+// object-wide cancel to fall back on, and confirms the track still publishes.
+func TestUsedCancelKeepsTheTrack(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	track, err := broadcast.PublishTrack("status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := track.Used(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Used error = %v, want context.DeadlineExceeded", err)
+	}
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), testTimeout)
+	defer readCancel()
+
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+	if err := track.Used(readCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("still publishing")
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := consumer.ReadFrame(readCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != string(payload) {
+		t.Fatalf("frame = %+v, want payload=%q", frame, payload)
+	}
+}
+
+// TestCancelDoesNotLeakGoroutines parks many subscribes on a dynamic producer
+// that never answers, cancels them all, and waits for the goroutine count to come
+// back. Each parked call holds a goroutine inside cgo, so a cancel that returned
+// ctx.Err() without aborting the native task would strand all of them.
+func TestCancelDoesNotLeakGoroutines(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	dynamic, err := broadcast.Dynamic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), testTimeout)
+	defer waitCancel()
+
+	const parked = 32
+	baseline := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for i := range parked {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := consumer.SubscribeTrack(ctx, fmt.Sprintf("never-%d", i), nil)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("SubscribeTrack error = %v, want context.Canceled", err)
+			}
+		}(i)
+	}
+
+	// Drain the requests so every subscribe is parked on one before we cancel.
+	pending := make([]*moq.TrackRequest, 0, parked)
+	for range parked {
+		request, err := dynamic.RequestedTrack(waitCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending = append(pending, request)
+	}
+
+	cancel()
+	wg.Wait()
+
+	// The requests stay pending on purpose: nothing but the cancel can unwind the
+	// native subscribes, so a count that comes back proves the cancel reached them.
+	// Allow the scheduler some slack rather than the 32 a leak would leave behind.
+	deadline := time.Now().Add(testTimeout)
+	for runtime.NumGoroutine() > baseline+parked/4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines = %d, want back near the baseline of %d", runtime.NumGoroutine(), baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	runtime.KeepAlive(pending)
+	for _, request := range pending {
+		_ = request.Abort(0)
+	}
 }

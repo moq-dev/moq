@@ -228,7 +228,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.inner = inner
 
-	session, err := runCancellable(ctx, inner.Cancel, func() (*ffi.MoqSession, error) {
+	session, err := runHandle(ctx, inner.Cancel, func() (*ffi.MoqSession, error) {
 		return inner.Connect(url)
 	})
 	if err != nil {
@@ -267,8 +267,8 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 // existing exact-path broadcast, a covering announced route, or a dynamic
 // fallback on the origin, or an error. Unlike AnnouncedBroadcast, it does not wait
 // for a future announcement.
-func (c *Client) RequestBroadcast(path string) (*BroadcastConsumer, error) {
-	return c.consumer.RequestBroadcast(path)
+func (c *Client) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
+	return c.consumer.RequestBroadcast(ctx, path)
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

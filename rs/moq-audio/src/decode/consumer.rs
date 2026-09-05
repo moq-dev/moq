@@ -743,10 +743,11 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
+			// These tests publish a whole track up front and read it back afterwards,
+			// so every packet but the last is already old by the time the consumer
+			// looks. The default budget is zero, which sheds all of them.
 			Config {
 				sample_rate: Some(out_rate),
-				// The packets are all written before the first read: a budget keeps that
-				// backlog, where the default sheds everything the newest group supersedes.
 				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
@@ -868,7 +869,6 @@ mod tests {
 			&catalog,
 			"audio",
 			Config {
-				// Written before the first read; see `pcm_gaps`.
 				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
@@ -964,7 +964,6 @@ mod tests {
 			&catalog,
 			"audio",
 			Config {
-				// Written before the first read; see `pcm_gaps`.
 				max_age: std::time::Duration::from_secs(1),
 				..Config::new()
 			},
@@ -1069,18 +1068,9 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 
-		let mut consumer = Consumer::new(
-			&subscriber,
-			&catalog,
-			"audio",
-			Config {
-				// Written before the first read; see `pcm_gaps`.
-				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
-			},
-		)
-		.await
-		.unwrap();
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
+			.await
+			.unwrap();
 
 		producer
 			.write(moq_mux::container::Frame {

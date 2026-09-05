@@ -109,10 +109,10 @@ listener: buffer-pool health, GRO/GSO batching, ring traffic, and scheduling.
 See [HTTP Endpoints](/bin/relay/http) for what to watch.
 
 The `[quic]` section applies to this listener too: `max_streams`,
-`idle_timeout`, `keep_alive`, `congestion_control` and `gso` are honored.
-`qlog` and `mtu_discovery` are not (the datagram path sends a fixed payload,
-so there is nothing to discover), and asking for either is a startup error
-rather than a setting that quietly does nothing.
+`idle_timeout`, `keep_alive`, `congestion_control`, `gso` and `qlog` are
+honored. `mtu_discovery` is not (the datagram path sends a fixed payload, so
+there is nothing to discover), and asking for it is a startup error rather than
+a setting that quietly does nothing.
 
 The same goes for the listener settings this mode cannot deliver: `lb_id`
 (QUIC-LB server ids, which cannot share the connection id with the shard
@@ -121,6 +121,20 @@ moq-lite 01/02, whose version is negotiated in the SETUP rather than by ALPN.
 Each is refused at startup. `listen.bind` must be named too, rather than
 defaulted: leaving it unset means stream-only when a tcp or unix listener is
 configured, and this mode will not guess.
+
+`qlog` needs the `qlog` cargo feature here exactly as it does on the tokio
+workers, and writes the same JSON-SEQ traces into the same directory, so one
+workflow reads both runtimes. Files are named
+`moq-<started>-<process>-<sink>-connection<N>-<connection id>-<side>.qlog`,
+where `started` is when the relay came up and `N` distinguishes traces whose
+peer-selected connection ids repeat. An
+`io-uring-quinn` build writes one file per worker instead of per connection,
+named `moq-<started>-<process>-<sink>-endpoint<N>-<side>.qlog`, because
+quinn-proto takes one trace sink per endpoint. A pinned worker never writes to
+the file itself: traces are staged in memory and handed to one background
+thread for the whole worker group. Staging buffers and queued output share a
+64 MiB memory budget, so a trace that outruns the disk is truncated instead of
+growing memory without bound (it says so in the log when it happens).
 
 `tls.root` works here as it does on the tokio listener: a client that presents
 a certificate chaining to one of those roots is authenticated by it, with full

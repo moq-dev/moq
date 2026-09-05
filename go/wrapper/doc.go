@@ -13,13 +13,22 @@
 //
 // # Cancellation
 //
-// Blocking calls take a context.Context. Most can be aborted: cancelling the
-// context returns ctx.Err() and tears down the in-flight native task. A few
-// calls have no native cancel, namely the producer-side Used/Unused waits and
-// Server.Accept. For those, cancelling the context still returns ctx.Err()
-// promptly, but the underlying wait keeps running on a background goroutine
-// until it completes on its own (a subscriber arrives, the track is dropped, or
-// the server is closed). So context cancellation is not a way to bound resource
-// use on those calls; close the owning Server, or finish/drop the producer, to
-// release them. Each such method documents this on itself.
+// Every call that can block takes a context.Context, and cancelling it (or
+// hitting its deadline) returns ctx.Err() promptly and tears the in-flight
+// native work down with it. Nothing is left running in the background, so a
+// per-call deadline is a real bound on resource use. When a call finishes at the
+// very moment its context expires, either may win: the caller gets the result or
+// it gets ctx.Err(). What is guaranteed is that the losing side costs nothing, so
+// a result the caller never sees is disposed of rather than left live with no
+// owner.
+//
+// What a cancel tears down depends on the call. A one-shot call (a subscribe, a
+// fetch, RequestBroadcast, Resolve, a producer's Used/Unused, Server.Accept)
+// aborts on its own and leaves the object it was made on usable, so the same
+// broadcast, producer, or server takes the next call. A stream read (any Next,
+// RecvGroup, ReadFrame, or the iterators over them) instead cancels the stream
+// it reads, which is what a range loop over a cancelled context wants: the
+// consumer is finished, not merely this read. Cancel a stream read only when you
+// are done with the stream; to bound one read, cancel the whole consumer's
+// context.
 package moq
