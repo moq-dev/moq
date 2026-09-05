@@ -505,7 +505,7 @@ Datagrams are delivered as `Datagram{Sequence, TimestampUs, Payload}`. Payloads 
 
 ## On-demand broadcasts
 
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+Use a dynamic origin to serve whole broadcasts on request: a path nothing publishes, under the root or under any prefix the origin announced:
 
 ```go
 capacity := uint64(256 * 1024 * 1024)
@@ -558,7 +558,7 @@ for request, err := range dynamic.Requests(ctx) {
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(ctx, path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
+The handler receives every request no local broadcast resolves, including those under prefixes announced with `announce`; the broadcast it serves is not itself announced, and only resolves consumers that call `RequestBroadcast(ctx, path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 
 ## Local development
 

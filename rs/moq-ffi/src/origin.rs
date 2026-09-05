@@ -78,7 +78,9 @@ pub struct MoqAnnounced {
 }
 
 #[derive(uniffi::Object)]
-/// A dynamic origin handler that serves broadcast requests not resolved by an existing route.
+/// A dynamic origin handler: receives every broadcast request no local broadcast
+/// resolves, under the root and under every prefix announced with
+/// `MoqOriginProducer::announce`, for the application to accept or reject.
 pub struct MoqOriginDynamic {
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
 	// This handle's share of the origin's root route, released by `cancel`
@@ -567,7 +569,8 @@ impl MoqOriginConsumer {
 
 #[uniffi::export]
 impl MoqOriginDynamic {
-	/// Wait for the next requested broadcast that is not announced.
+	/// Wait for the next requested broadcast no local broadcast resolves: a path
+	/// nothing publishes, under the root or under a prefix this origin announced.
 	///
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or abort
 	/// it with an application error code. The requesting consumer stays pending until then.

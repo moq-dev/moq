@@ -30,7 +30,7 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic serves broadcasts that consumers request without an announcement.
+// Dynamic serves broadcasts on request: paths nothing publishes, under the root or under any prefix this origin announced.
 func (o *OriginProducer) Dynamic() *OriginDynamic {
 	return &OriginDynamic{inner: o.inner.Dynamic()}
 }

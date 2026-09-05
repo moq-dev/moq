@@ -350,7 +350,7 @@ Missing track subscriptions are accepted while the `BroadcastDynamic` object is 
 
 ### On-demand broadcasts
 
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+Use a dynamic origin to serve whole broadcasts on request: a path nothing publishes, under the root or under any prefix the origin announced:
 
 ```python
 origin = moq.OriginProducer(cache_capacity_bytes=256 * 1024 * 1024)
@@ -368,7 +368,7 @@ async for request in dynamic:
         request.abort(404)
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
+The handler receives every request no local broadcast resolves, including those under prefixes announced with `announce`; the broadcast it serves is not itself announced, and only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
 
 ### Discovering broadcasts
 

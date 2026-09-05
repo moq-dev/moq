@@ -1873,7 +1873,7 @@ async fn announced_prefix_requests_reach_dynamic() {
 	// Without a handler the request waits, like any served route with a slow handler.
 	let request_broadcast = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
 	};
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(
@@ -1901,7 +1901,7 @@ async fn announced_prefix_requests_reach_dynamic() {
 	dynamic.cancel();
 	let request_broadcast = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live/other".into()).await })
+		tokio::spawn(async move { consumer.request_broadcast("live/other".into(), None).await })
 	};
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(
@@ -1937,7 +1937,7 @@ async fn announced_prefix_survives_a_cancelled_second_handler() {
 
 	let request_broadcast = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
 	};
 	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
 		.await
@@ -1964,7 +1964,7 @@ async fn cancelled_announce_leaves_no_phantom_request() {
 
 	let request_broadcast = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
 	};
 	// Let the request reach the forwarder, then retract under it.
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2002,7 +2002,7 @@ async fn two_handlers_share_root_requests() {
 
 	let request_broadcast = {
 		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.request_broadcast("anything/at/all".into()).await })
+		tokio::spawn(async move { consumer.request_broadcast("anything/at/all".into(), None).await })
 	};
 	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
 		.await

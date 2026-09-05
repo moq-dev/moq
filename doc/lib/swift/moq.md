@@ -305,7 +305,7 @@ for try await record in try await consumer.subscribeJsonStream(name: "events", a
 
 ### On-demand broadcasts
 
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
+Use a dynamic origin to serve whole broadcasts on request: a path nothing publishes, under the root or under any prefix the origin announced:
 
 ```swift
 let origin = OriginProducer(cacheCapacityBytes: 256 * 1024 * 1024)
@@ -325,7 +325,7 @@ for try await request in dynamic {
 }
 ```
 
-The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
+The handler receives every request no local broadcast resolves, including those under prefixes announced with `announce`; the broadcast it serves is not itself announced, and only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
 
 ### Raw media
 

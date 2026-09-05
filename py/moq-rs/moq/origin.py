@@ -232,7 +232,7 @@ class OriginProducer:
         return OriginConsumer(self._inner.consume())
 
     def dynamic(self) -> OriginDynamic:
-        """Serve broadcasts that consumers request without an announcement."""
+        """Serve broadcasts on request: paths nothing publishes, under the root or under any prefix this origin announced."""
         return OriginDynamic(self._inner.dynamic())
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
