@@ -90,21 +90,19 @@ impl Publish {
 	) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
+		// Container import has no VideoHint channel. Refuse before Container::new
+		// so init decode cannot publish tracks that we then throw away.
+		if video.is_some() && import::Container::<Extra>::known_format(format) {
+			return Err(Error::InvalidConfig(
+				"video hint is only supported for codec (track) publish, not container formats".into(),
+			));
+		}
+
 		// A container may publish several tracks; a single codec fills one reserved
 		// track. Try the container first so a codec format doesn't reserve a stray
 		// track on the way to being recognized.
 		let media = match import::Container::new(broadcast.clone(), catalog.reserve(), format, init) {
-			Ok(container) => {
-				// Container import has no VideoHint channel. Callers that need
-				// catalog hints must publish a codec bitstream via the track path.
-				if video.is_some() {
-					return Err(Error::InvalidConfig(
-						"video hint is only supported for codec (track) publish, not container formats"
-							.into(),
-					));
-				}
-				Media::Container(container)
-			}
+			Ok(container) => Media::Container(container),
 			Err(moq_mux::Error::UnknownFormat(_)) => {
 				let mut broadcast = broadcast.clone();
 				let name = broadcast.unique_name(&format!(".{format}"));

@@ -204,6 +204,38 @@ fn publish_media_lifecycle() {
 }
 
 #[test]
+fn publish_media_hint_rejects_container_format() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"hint-rejects-container");
+	let _guard = Guard(Some(|| {
+		moq_publish_finish(broadcast);
+	}));
+
+	let format = b"fmp4";
+	let init = b"";
+	let hint = moq_video_hint {
+		has_bitrate: true,
+		bitrate: 1_000_000,
+		..Default::default()
+	};
+	let ret = unsafe {
+		moq_publish_media_hint(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+			&hint,
+		)
+	};
+	assert_eq!(
+		ret,
+		Error::InvalidConfig(String::new()).code(),
+		"container + video hint must fail before init decode"
+	);
+}
+
+#[test]
 fn publish_catalog_config_invalid_broadcast() {
 	let name = "video";
 	let codec = "vp8";
