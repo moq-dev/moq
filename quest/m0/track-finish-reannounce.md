@@ -44,22 +44,30 @@ its `Step::Complete`, and `track_inner` keeps handing back the finished entry
 without queuing anything. So whatever lands has to re-arm serving on a later
 lookup or demand, not just splice a new route in.
 
-Then decide the shape before writing the fix. Two candidates:
+The question to settle is how a relay tells the two endings apart, and it has
+to be settled before any of this is implemented, because re-arming alone
+cannot answer it. `serve_track` calls `resume.finish()` on `Step::Complete`,
+and `takeover` refuses a finished producer with `Error::Closed`. So a relay
+that re-arms without a new signal has to pick one of two wrong things:
+not finishing, which leaves a subscriber of a genuinely ended track waiting
+forever, or replacing the map entry, which strands the subscribers holding the
+finished consumer. Both boundaries are real, and today one signal serves both.
 
-- Re-arm the spliced track: keep the finished cache readable, but let a later
-  lookup queue the name again, the way an aborted one already does, and let a
-  source (the same one or a replacement) take over the way
-  `resume::Producer::takeover` retains the live edge. No wire change, no new
-  public surface. The work is in `serve_track` returning too early as much as
-  in `track_inner`.
-- Give the producer an explicit third ending and keep `finish` terminal. That
-  is a public API addition across every binding, so it carries the Public API
-  Scrutiny cost and likely a draft update. It also makes the re-arm
-  publisher-driven rather than something the relay infers.
+Two directions, once that is settled:
 
-Prefer the first unless reproducing shows a case it cannot cover: a subscriber
-holding the finished track has to see the continuation, and a publisher that
-really is done forever must still be distinguishable.
+- Keep it inferred. The relay re-arms on a later lookup or demand, the way an
+  aborted track already does, and something else has to carry the distinction:
+  a linger, an announcement, or the route's own liveness. No wire change and no
+  new public surface, at the cost of the relay guessing what the publisher
+  meant.
+- Make it explicit. The producer gets a third ending and `finish` stays
+  terminal, so the publisher says which one it is. That is a public API
+  addition across every binding, so it carries the Public API Scrutiny cost and
+  likely a draft update, and it is the shape that makes the misuse
+  unrepresentable rather than documented.
+
+The reproduction comes first either way: it is what says whether the inferred
+version can carry both boundaries at all.
 
 Check `js/net` for the same asymmetry once the Rust behavior is settled.
 
