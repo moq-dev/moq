@@ -235,22 +235,29 @@ impl Media {
 				return Ok(());
 			}
 
-			tokio::select! {
-				result = tasks.join_next(), if !tasks.is_empty() => {
-					playback.ended(joined(result.expect("guarded by is_empty"))?);
-				}
-				// Followed for as long as it lasts, not just until something is
-				// playing: a publisher retires renditions (a transcode ladder
-				// resizing under a source that changed resolution) by naming the
-				// replacement in a snapshot and only then finishing the track it
-				// replaces, so the snapshot that matters lands while both halves
-				// are still running.
-				snapshot = catalogs.next(), if playback.following() => {
-					match snapshot.context("failed to read the catalog")? {
-						Some(snapshot) => playback.received(snapshot),
-						None => {
-							anyhow::ensure!(playback.played, "the catalog contains no playable audio or video renditions");
-							playback.catalog_ended = true;
+			// Only wait when there is nothing on hand to act on. The snapshot that
+			// retires a rendition arrives while that rendition is still playing, so
+			// the half it stops reads it after the fact, by which time the catalog
+			// may have ended and the task set emptied: both branches disarmed, with
+			// a replacement still on offer.
+			if playback.pending().is_none() {
+				tokio::select! {
+					result = tasks.join_next(), if !tasks.is_empty() => {
+						playback.ended(joined(result.expect("guarded by is_empty"))?);
+					}
+					// Followed for as long as it lasts, not just until something is
+					// playing: a publisher retires renditions (a transcode ladder
+					// resizing under a source that changed resolution) by naming the
+					// replacement in a snapshot and only then finishing the track it
+					// replaces, so the snapshot that matters lands while both halves
+					// are still running.
+					snapshot = catalogs.next(), if playback.following() => {
+						match snapshot.context("failed to read the catalog")? {
+							Some(snapshot) => playback.received(snapshot),
+							None => {
+								anyhow::ensure!(playback.played, "the catalog contains no playable audio or video renditions");
+								playback.catalog_ended = true;
+							}
 						}
 					}
 				}
@@ -458,8 +465,11 @@ impl Playback {
 	}
 
 	/// True once nothing is playing and nothing more can start.
+	///
+	/// A snapshot no half has read yet still can: the last thing a catalog says
+	/// before it ends may be the rendition that replaces the one just retired.
 	fn done(&self) -> bool {
-		self.catalog_ended && !self.video.playing && !self.audio.playing
+		self.catalog_ended && !self.video.playing && !self.audio.playing && self.pending().is_none()
 	}
 }
 
@@ -1255,6 +1265,32 @@ mod tests {
 		assert!(!playback.done(), "playback ended while video was still playing");
 
 		playback.ended(Some(Kind::Video));
+		assert!(playback.done());
+	}
+
+	/// The catalog's last word can be the replacement for the rendition it
+	/// retires, and the retired track outlives the catalog by the group it was
+	/// mid-way through. So a half that has not read the final snapshot yet is
+	/// still a half that can start something, however finished everything else
+	/// looks.
+	#[test]
+	fn a_final_snapshot_outlives_the_catalog() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.started(Kind::Video);
+		playback.read(Kind::Video);
+
+		// The last snapshot names the replacement, then the catalog ends, then the
+		// retired track does.
+		playback.received(Default::default());
+		playback.catalog_ended = true;
+		playback.ended(Some(Kind::Video));
+
+		assert!(playback.pending().is_some(), "the final snapshot was never offered");
+		assert!(!playback.done(), "playback ended with a replacement still unread");
+
+		// Read it, find nothing playable, and only then stop.
+		playback.read(Kind::Video);
 		assert!(playback.done());
 	}
 
