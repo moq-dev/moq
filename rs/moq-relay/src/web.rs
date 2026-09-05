@@ -419,8 +419,7 @@ pub struct MtlsPeer;
 /// Captures the socket, then hands the stream to `inner`: [`DefaultAcceptor`] for
 /// `http://`, or [`RustlsAcceptor`] for `https://`, which also gives the connection
 /// a peer certificate to report. Both listeners wrap this same acceptor, so the
-/// capture cannot reach one and miss the other. That asymmetry is exactly what left
-/// every `ws://` session without an RTT once, while any TLS deployment looked fine.
+/// capture cannot reach one and miss the other.
 #[derive(Clone)]
 struct WebAcceptor<A> {
 	inner: A,
@@ -1152,12 +1151,10 @@ mod tests {
 
 	/// [`Web::serve`] must install the capturing acceptor on every listener it opens.
 	///
-	/// The tests above cover the acceptor; this covers its installation, which is the
-	/// half that actually broke. Only the HTTPS listener had one, so every `ws://`
-	/// session reached qmux with no descriptor and stayed on the fallback jitter
-	/// buffer, while any TLS deployment looked correct. Both listeners run here, and
-	/// each is asked whether the capture reached the request, because the bug was the
-	/// two disagreeing.
+	/// The tests above cover the acceptor; this covers its installation. A listener
+	/// that skips it hands qmux a session with no descriptor, which stays on the
+	/// fallback jitter buffer while the other listener still looks correct, so both
+	/// run here and each is asked whether the capture reached the request.
 	#[cfg(all(unix, feature = "websocket"))]
 	#[tokio::test]
 	async fn serve_captures_the_socket_on_every_listener() {

@@ -57,9 +57,7 @@ impl Listener {
 ///
 /// The acceptor is a parameter rather than the builder step `axum_server` offers,
 /// so what a listener does at accept time is something each call site states rather
-/// than something it can leave out. Forgetting it on the public listener is how
-/// every `ws://` session once ended up without the socket qmux reports an RTT from,
-/// while HTTPS looked fine.
+/// than something it can leave out.
 ///
 /// The address type is spelled here rather than at each call site: `A::Listener`
 /// doesn't pin `A` down, so inference cannot get there from the listener alone.
