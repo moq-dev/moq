@@ -469,6 +469,16 @@ mod tests {
 			.flatten()
 	}
 
+	/// The average bitrate encoded in a synthesized AAC init segment.
+	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
+		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
+		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
+		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+			panic!("expected mp4a, got {codec:?}");
+		};
+		mp4a.esds.es_desc.dec_config.avg_bitrate
+	}
+
 	// A publisher's estimator republishes the catalog every time its measured bitrate or jitter
 	// moves, writing those two fields and nothing else. That must not churn the rendition:
 	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,
@@ -489,13 +499,9 @@ mod tests {
 		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
 		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
 		let audio_init = audio.init().await.unwrap().expect("AAC init segment");
-		let wire = moq_mux::container::fmp4::Wire::from_init(&audio_init).unwrap();
-		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
-		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
-			panic!("expected mp4a, got {codec:?}");
-		};
 		assert_eq!(
-			mp4a.esds.es_desc.dec_config.avg_bitrate, 96_000,
+			aac_avg_bitrate(&audio_init),
+			96_000,
 			"the muxer keeps the declared catalog bitrate"
 		);
 		assert_eq!(video.bandwidth(), 2_000_000, "the catalog carries no video bitrate yet");
@@ -541,6 +547,36 @@ mod tests {
 		catalog.video.renditions.get_mut("video0").unwrap().bitrate = None;
 		renditions.sync(&upstream, &catalog);
 		assert_eq!(video.bandwidth(), 2_000_000);
+	}
+
+	#[tokio::test]
+	async fn estimate_before_first_init_reaches_aac_descriptor() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let _announce = origin.announce("live", Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = None;
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &catalog);
+		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
+
+		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
+		renditions.sync(&upstream, &catalog);
+		assert!(
+			Arc::ptr_eq(&audio, &renditions.get(Kind::Audio, "audio0").unwrap()),
+			"the estimate updates the existing rendition"
+		);
+		let init = audio.init().await.unwrap().expect("AAC init segment");
+
+		assert_eq!(audio.bandwidth(), 110_000);
+		assert_eq!(
+			aac_avg_bitrate(&init),
+			110_000,
+			"the latest estimate reaches an init that was not cached yet"
+		);
 	}
 
 	// The other half: a change that alters how the rendition decodes still rebuilds it, so the

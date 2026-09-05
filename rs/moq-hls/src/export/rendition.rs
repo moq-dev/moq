@@ -1,8 +1,7 @@
 //! One rendition: playlists from its view of the broadcast timeline, segments fetched on
 //! demand.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -107,7 +106,7 @@ pub struct Rendition {
 	pub kind: Kind,
 	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute; read through
 	/// [`bandwidth`](Self::bandwidth), refreshed in place by [`refresh`](Self::refresh).
-	bandwidth: AtomicU64,
+	bitrate: RwLock<Option<u64>>,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -152,7 +151,7 @@ impl Rendition {
 	/// The advertised bitrate in bits per second, for the master playlist `BANDWIDTH` attribute
 	/// and the DASH `bandwidth`. Falls back to a per-kind default when the catalog carries none.
 	pub fn bandwidth(&self) -> u64 {
-		self.bandwidth.load(Ordering::Relaxed)
+		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
 	/// Take the advertised bitrate from a catalog update that
@@ -162,8 +161,12 @@ impl Rendition {
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
 	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute.
 	pub(crate) fn refresh(&self, bitrate: Option<u64>) {
-		self.bandwidth
-			.store(bitrate.unwrap_or(default_bandwidth(self.kind)), Ordering::Relaxed);
+		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
+	}
+
+	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
+	fn bitrate(&self) -> Option<u64> {
+		*self.bitrate.read().expect("bitrate lock poisoned")
 	}
 
 	/// Build a video rendition over the broadcast's timeline `section`.
@@ -171,7 +174,7 @@ impl Rendition {
 		Self {
 			name,
 			kind: Kind::Video,
-			bandwidth: AtomicU64::new(config.bitrate.unwrap_or(DEFAULT_VIDEO_BITRATE)),
+			bitrate: RwLock::new(config.bitrate),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
@@ -189,7 +192,7 @@ impl Rendition {
 		Self {
 			name,
 			kind: Kind::Audio,
-			bandwidth: AtomicU64::new(config.bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE)),
+			bitrate: RwLock::new(config.bitrate),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
@@ -399,9 +402,18 @@ impl Rendition {
 	}
 
 	fn muxer(&self) -> Result<Muxer> {
+		let bitrate = self.bitrate();
 		Ok(match &self.config {
-			Config::Video(config) => Muxer::video(config)?,
-			Config::Audio(config) => Muxer::audio(config)?,
+			Config::Video(config) => {
+				let mut config = config.clone();
+				config.bitrate = bitrate;
+				Muxer::video(&config)?
+			}
+			Config::Audio(config) => {
+				let mut config = config.clone();
+				config.bitrate = bitrate;
+				Muxer::audio(&config)?
+			}
 		})
 	}
 
