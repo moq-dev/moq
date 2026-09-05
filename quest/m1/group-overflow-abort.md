@@ -72,8 +72,14 @@ Less than the original sketch claimed, so budget for it:
 - JS: `state.evicted` and the eviction loop in `appendFrame`. `state.start`
   **stays**: `#readBufferedFrame` increments it on every read, so it is the
   running sequence counter, not an eviction floor.
-- `group::Consumer::skip_to` and `Group.ReadOptions.from` lose their reason to
-  exist, along with `Consumer.skipped` in JS and the `js/binary` guard on it.
+- `group::Consumer::skip_to` and `Group.ReadOptions.from` **stay**. They are
+  doing range work, not eviction work: a draft-20 filter still has to begin at
+  `slice.skip` even when nothing was evicted. Only their eviction tolerance
+  goes, which is the clamping difference against `start_at`. Deleting the
+  shared cursor would push a drain loop into every publisher instead, and that
+  duplication is exactly what `write_fill_group` already drifted into once, as
+  the next section documents. `Consumer.skipped` in JS and the `js/binary`
+  guard on it do go, since those report eviction and nothing else.
 
 ### Fold in: the reverted skip_to
 
