@@ -16,10 +16,11 @@
 // Every call that can block takes a context.Context, and cancelling it (or
 // hitting its deadline) returns ctx.Err() promptly and tears the in-flight
 // native work down with it. Nothing is left running in the background, so a
-// per-call deadline is a real bound on resource use. That holds for the moment
-// where the two coincide too: a call that completes just as its context expires
-// still reports ctx.Err(), and whatever it produced is disposed of rather than
-// left live with no owner.
+// per-call deadline is a real bound on resource use. When a call finishes at the
+// very moment its context expires, either may win: the caller gets the result or
+// it gets ctx.Err(). What is guaranteed is that the losing side costs nothing, so
+// a result the caller never sees is disposed of rather than left live with no
+// owner.
 //
 // What a cancel tears down depends on the call. A one-shot call (a subscribe, a
 // fetch, RequestBroadcast, Resolve, a producer's Used/Unused, Server.Accept)

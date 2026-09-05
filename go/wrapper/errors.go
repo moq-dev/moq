@@ -187,12 +187,17 @@ func runErr(ctx context.Context, cancel func(), call func() error) error {
 // native task unwinds with the token, so nothing outlives the caller that gave up.
 func runOperation[T handle](ctx context.Context, call func(*ffi.MoqCancel) (T, error)) (T, error) {
 	token := ffi.NewMoqCancel()
+	// The native call holds its own reference for as long as it runs, so dropping
+	// ours here is safe and keeps a run of quick calls from piling tokens up until
+	// the Go finalizer notices them.
+	defer token.Destroy()
 	return runHandle(ctx, token.Cancel, func() (T, error) { return call(token) })
 }
 
 // runOperationErr is runOperation for calls that return only an error.
 func runOperationErr(ctx context.Context, call func(*ffi.MoqCancel) error) error {
 	token := ffi.NewMoqCancel()
+	defer token.Destroy()
 	return runErr(ctx, token.Cancel, func() error { return call(token) })
 }
 
