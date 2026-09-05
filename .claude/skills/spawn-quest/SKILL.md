@@ -43,9 +43,15 @@ conflating the two strands a quest forever:
   would drop the remote-only commits while the lease passes.
 
   The agent resets to that SHA with `git checkout -B <branch> <sha>` before
-  rebasing onto the base, and only when `git merge-base --is-ancestor <local> <sha>` holds. When it does not, the local ref carries commits the remote does
-  not, and resetting would trade the remote-loss bug for a local one, so leave
-  the ref alone and treat the quest as claimed.
+  rebasing onto the base. Check for a local `refs/heads/<branch>` first. When
+  there is none, which is the ordinary case for a branch that only ever existed
+  on the remote, the reset creates it at the inspected tip and there is nothing
+  to lose. When one does exist, gate the reset on
+  `git merge-base --is-ancestor <local> <sha>`: a failure means the local ref
+  carries commits the remote does not, and resetting would trade the
+  remote-loss bug for a local one, so leave the ref alone and treat the quest
+  as claimed. Test for the ref rather than inferring it from the ancestry
+  check, which exits 128 against a missing ref instead of answering.
 
   It still claims, pushing a fresh UUID placeholder as `git push --force-with-lease=<branch>:<sha> origin HEAD:refs/heads/<branch>`. Spell the
   lease out: a bare `--force-with-lease` takes its expected value from the
