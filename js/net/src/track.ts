@@ -365,10 +365,15 @@ export class Producer {
 	#sequence: TrackSequence = { next: 0 };
 
 	// Recently written source groups, retained for replay to late subscribers and
-	// pruned once closed and older than the cache window. Each entry tracks the mirror
+	// pruned once idle for longer than the cache window. Each entry tracks the mirror
 	// it handed to every sink so eviction can drop them too: otherwise a slow consumer
 	// that never reads would pin old groups (and their frame bytes) forever.
 	#cache: CachedGroup[] = [];
+
+	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
+	// publisher that stalls stops writing, so without this an abandoned group (and any
+	// reader parked in it) would wait for a write that never comes.
+	#pruneTimer?: ReturnType<typeof setTimeout>;
 
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
@@ -533,6 +538,11 @@ export class Producer {
 
 	// Drop a cached group's mirror from every sink so no consumer can pin it.
 	#evict(entry: CachedGroup): void {
+		// Reclaiming a group the publisher never closed ends it as the gap it is, before
+		// the mirrors below would otherwise report a clean finish to a reader that had
+		// drained it. The usual case, an already-closed group aging out, keeps its own
+		// terminal state.
+		if (!entry.group.isClosed) entry.group.close(new Lagged());
 		for (const [sink, mirror] of entry.mirrors) {
 			hooks.evictGroup(mirror);
 			sink.groups.mutate((groups) => {
@@ -545,20 +555,58 @@ export class Producer {
 		entry.mirrors.clear();
 	}
 
-	// Evict cached groups that are closed and older than the cache window.
+	// The one group retention never takes: the newest, while it is still open. That is
+	// the live edge a publisher is appending to, and a track may legitimately keep it
+	// open across a long quiet stretch (a catalog snapshot, a JSON stream). Every other
+	// open group is an abandoned one, and ages out like a closed one.
+	#liveEdge(): GroupProducer | undefined {
+		const latest = this.#cache.at(-1)?.group;
+		return latest?.closed.peek() === undefined ? latest : undefined;
+	}
+
+	// Evict cached groups idle for longer than the cache window. Idle means nothing
+	// written, so an abandoned open group ages out instead of pinning its buffer (and
+	// any reader parked in it) forever.
 	#prune(): void {
 		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
 		const cutoff = performance.now() - maxAgeMs;
+		const live = this.#liveEdge();
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
-			if (entry.time >= cutoff || entry.group.closed.peek() === undefined) {
+			if (entry.group === live || entry.group.activity >= cutoff) {
 				retained.push(entry);
 				continue;
 			}
 			this.#evict(entry);
 		}
 		this.#cache = retained;
+		this.#schedulePrune();
+	}
+
+	// Arm the wakeup for the next entry due to age out, replacing any pending one.
+	// Writes settle retention inline, so this only has to cover the case no write
+	// follows. Cheap to over-arm: an entry written since is retained and re-armed.
+	#schedulePrune(): void {
+		clearTimeout(this.#pruneTimer);
+		this.#pruneTimer = undefined;
+		if (this.#state.closed.peek() !== undefined) return;
+
+		const live = this.#liveEdge();
+		const ages = this.#cache.filter((entry) => entry.group !== live).map((entry) => entry.group.activity);
+		if (ages.length === 0) return;
+
+		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
+		const timer = setTimeout(
+			() => {
+				this.#pruneTimer = undefined;
+				this.#prune();
+			},
+			Math.max(0, Math.min(...ages) + maxAgeMs - performance.now()),
+		);
+		// A cache prune is never a reason to hold a Node/Bun process open.
+		(timer as unknown as { unref?: () => void }).unref?.();
+		this.#pruneTimer = timer;
 	}
 
 	// Retain a source group and fan it out to every live sink.
@@ -675,6 +723,8 @@ export class Producer {
 			for (const sink of this.#sinks) sink.final = this.#state.final;
 		}
 		closeTrackState(this.#state, abort);
+		clearTimeout(this.#pruneTimer);
+		this.#pruneTimer = undefined;
 		for (const { group } of this.#cache) group.close(abort);
 		for (const sink of this.#sinks) {
 			for (const group of sink.groups.peek()) group.close(abort);

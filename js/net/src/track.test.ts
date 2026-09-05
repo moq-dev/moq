@@ -804,6 +804,52 @@ test("retention pruning aborts a held mirror without a new live edge", async () 
 	}
 });
 
+test("retention reclaims a group the publisher abandoned open", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: 100 });
+		const track = producer.subscribe({ maxAge: 100 });
+		const stalled = producer.appendGroup();
+		stalled.writeString("first");
+		// A successor, so the stalled group is not the live edge the publisher is
+		// still filling. It is never closed: the publisher simply walked away.
+		producer.appendGroup();
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("first");
+
+		clock.set(10_200);
+		producer.subscribe({ maxAge: 100 });
+
+		// A gap, not a clean finish: the publisher never ended this group.
+		await expect(group.readFrame()).rejects.toBeInstanceOf(Lagged);
+	} finally {
+		clock.restore();
+	}
+});
+
+test("an abandoned open group ages out with no further write", async () => {
+	// Real time, since this is about the wakeup: nothing writes to the track again, so
+	// without a timer the read below parks forever.
+	const producer = new TrackProducer("test").accept({ maxAge: 30 });
+	const track = producer.subscribe({ maxAge: 30 });
+	const stalled = producer.appendGroup();
+	stalled.writeString("first");
+	producer.appendGroup();
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	expect(await group.readString()).toBe("first");
+
+	const read = group.readFrame().then(
+		() => "clean end",
+		(err: unknown) => err,
+	);
+	const timeout = new Promise((resolve) => setTimeout(() => resolve("still parked"), 1000));
+	expect(await Promise.race([read, timeout])).toBeInstanceOf(Lagged);
+});
+
 test("retention pruning preserves clean EOF for a drained mirror", async () => {
 	const clock = mockMonotonicTime(10_000);
 	try {

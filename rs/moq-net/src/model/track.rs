@@ -4504,7 +4504,11 @@ mod test {
 
 	/// Mint a track under an origin whose pool has the given wall-clock LRU window.
 	fn track_producer_expiring(name: impl Into<Arc<str>>, expiry: impl Into<Option<Duration>>) -> Producer {
-		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
+		track_producer_pooled(name, cache::Pool::new(cache::Config::default().with_expiry(expiry)))
+	}
+
+	/// Mint a track under an origin caching into `pool`.
+	fn track_producer_pooled(name: impl Into<Arc<str>>, pool: cache::Pool) -> Producer {
 		let origin = crate::origin::Info::default().with_pool(pool);
 		Producer::new(
 			Arc::new(broadcast::Info {
@@ -4514,6 +4518,26 @@ mod test {
 			name,
 			None,
 		)
+	}
+
+	/// The write path is not the only thing that runs expiry: a pool sweep reclaims a
+	/// track's idle groups even when the track never writes again, which is the only
+	/// bound on a publisher that stalls with a group still open.
+	#[tokio::test]
+	async fn pool_sweep_expires_without_a_write() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let mut stalled = producer.append_group().unwrap(); // seq 0, left open
+		stalled.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		producer.append_group().unwrap(); // seq 1, the live edge
+
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.sweep();
+
+		assert!(
+			!producer.state.read().lookup.contains_key(&0),
+			"the sweep reclaimed an idle open group with no write behind it"
+		);
 	}
 
 	#[tokio::test]

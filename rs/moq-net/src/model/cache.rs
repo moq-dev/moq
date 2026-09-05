@@ -19,20 +19,29 @@
 //! frontier moves with cache turnover on its own.
 //!
 //! The pool also owns the wall-clock LRU window ([`Pool::expiry`]): a non-latest
-//! group that nobody has read or written for that long is reclaimed by its track's
-//! next write, no matter what retention its track advertises. Track retention
+//! group that nobody has read or written for that long is reclaimed, no matter what
+//! retention its track advertises. Track retention
 //! ([`max_age`](crate::track::Info::max_age)) is measured in media timestamps, so a
 //! congestion stall can't age content out; the pool's expiry is the orthogonal
 //! wall-clock bound that keeps unwatched content from pinning RAM.
 //!
+//! Expiry runs from two places. A track's own writes settle it inline, which keeps a
+//! busy track's backlog draining without any wakeup. That alone is not a bound: a
+//! publisher that stalls with a group still open stops writing, so nothing reclaims
+//! its buffer and a reader parked in that group waits forever. So a pool with an
+//! expiry window also keeps a registry of its live track accounts and sweeps them on
+//! a wall-clock cadence, driven by [`origin::Driver`](crate::origin::Driver). The byte
+//! budget deliberately has no such machinery: it is repaid by writes, and a track that
+//! never writes never grows the pool.
+//!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
-//! that never set a capacity or expiry pay only a couple of atomic counters. A
-//! standalone [`origin`](crate::origin::Info) enables [`DEFAULT_EXPIRY`], while a
-//! relay creates one configured pool and shares it across every origin so the whole
-//! process caches into a single policy.
+//! that never set a capacity or expiry pay only a couple of atomic counters, and
+//! register nothing. A standalone [`origin`](crate::origin::Info) enables
+//! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
+//! every origin so the whole process caches into a single policy.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use super::track::TrackState;
@@ -86,7 +95,7 @@ impl Config {
 	/// Set the wall-clock LRU window. `None` disables idle reclamation.
 	///
 	/// A non-latest cached group that nobody reads or writes for this long is
-	/// reclaimed by its track's next write, surfacing to any remaining reader as
+	/// reclaimed, surfacing to any remaining reader as
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
 	/// window keeps idle content from pinning memory. The value is fixed when the
@@ -131,6 +140,11 @@ struct Inner {
 	// from the live edge, or inserted behind it) and remove it when it leaves.
 	access_sum: AtomicU64,
 	access_count: AtomicU64,
+	// Live track accounts, so [`Pool::sweep`] can expire idle groups in a track that
+	// has stopped writing. Empty and never touched when expiry is disabled: the byte
+	// budget needs no registry, since a track that never writes never grows the pool.
+	// Weak, because a track owns its account and the account must not outlive it.
+	tracks: kio::Lock<slab::Slab<Weak<Track>>>,
 }
 
 impl Pool {
@@ -156,6 +170,7 @@ impl Pool {
 				epoch: crate::model::clock::now(),
 				access_sum: AtomicU64::new(0),
 				access_count: AtomicU64::new(0),
+				tracks: kio::Lock::new(slab::Slab::new()),
 			}),
 		}
 	}
@@ -209,6 +224,53 @@ impl Pool {
 	/// also protects the group from byte-budget eviction.
 	pub(crate) fn refresh_interval(&self) -> Duration {
 		self.expiry().unwrap_or(DEFAULT_EXPIRY) / 2
+	}
+
+	/// How often [`Self::sweep`] should run, or `None` when idle reclamation is off.
+	///
+	/// Half the window, so a group is reclaimed within 1.5 windows of its last access
+	/// rather than 2. The sweep is otherwise rate-limited by the same per-track gate
+	/// the write path uses ([`EXPIRY_SCAN_TICKS`]), so a shorter cadence buys nothing.
+	pub(crate) fn sweep_interval(&self) -> Option<Duration> {
+		self.expiry().map(|expiry| expiry / 2)
+	}
+
+	/// Expire idle groups in every track holding an account against this pool.
+	///
+	/// This is the write-independent half of the LRU window: a track whose publisher
+	/// has stalled runs no write path, so nothing else would ever reclaim the group it
+	/// left open, and a reader parked inside that group would never be told. Each
+	/// track's scan is the same bounded, rate-limited one a write runs, so a sweep over
+	/// an idle pool costs a relaxed atomic per track.
+	///
+	/// A no-op when idle reclamation is disabled: nothing registers.
+	pub(crate) fn sweep(&self) {
+		// Upgraded under the lock but settled outside it: settling takes the track's
+		// own state lock, and dropping the last handle to a dead account would
+		// re-enter this lock through `Track::drop`.
+		let tracks: Vec<Arc<Track>> = self
+			.inner
+			.tracks
+			.lock()
+			.iter()
+			.filter_map(|(_, track)| track.upgrade())
+			.collect();
+
+		for track in tracks {
+			track.settle(None);
+		}
+	}
+
+	/// Enter a track account into the sweep registry, returning its key. `None` when
+	/// idle reclamation is off, which is what keeps a bare pool free of bookkeeping.
+	fn register(&self, track: &Arc<Track>) -> Option<usize> {
+		self.expiry()?;
+		Some(self.inner.tracks.lock().insert(Arc::downgrade(track)))
+	}
+
+	/// Drop a track account from the sweep registry.
+	fn unregister(&self, key: usize) {
+		self.inner.tracks.lock().remove(key);
 	}
 
 	/// Returns true if both handles share the same underlying pool.
@@ -335,18 +397,27 @@ pub(crate) struct Track {
 
 	// The track that pays this account off, holding the groups being charged.
 	state: kio::Weak<TrackState>,
+
+	// This account's slot in the pool's sweep registry, absent when the pool has no
+	// expiry window (nothing is registered) or for the detached default account.
+	sweep: OnceLock<usize>,
 }
 
 impl Track {
 	/// Open an account against `pool` for the track behind `state`.
 	pub(crate) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
-		Arc::new(Self {
+		let track = Arc::new(Self {
 			pool,
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
 			expiry_cursor: AtomicUsize::new(0),
 			state,
-		})
+			sweep: OnceLock::new(),
+		});
+		if let Some(key) = track.pool.register(&track) {
+			let _ = track.sweep.set(key);
+		}
+		track
 	}
 
 	/// The pool this track caches into.
@@ -436,6 +507,14 @@ impl Track {
 		self.next_expiry
 			.compare_exchange(next, deadline, Ordering::Relaxed, Ordering::Relaxed)
 			.is_ok()
+	}
+}
+
+impl Drop for Track {
+	fn drop(&mut self) {
+		if let Some(key) = self.sweep.get() {
+			self.pool.unregister(*key);
+		}
 	}
 }
 
@@ -809,6 +888,38 @@ mod test {
 		// Without one the gate samples the pool clock, frozen here at tick 0, so it
 		// stays closed rather than inheriting the caller's tick 10.
 		assert!(!track.expiry_due(None));
+	}
+
+	#[test]
+	fn sweep_interval_is_half_the_window() {
+		assert_eq!(Pool::unbounded().sweep_interval(), None);
+		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(4)));
+		assert_eq!(pool.sweep_interval(), Some(Duration::from_secs(2)));
+	}
+
+	#[test]
+	fn the_sweep_registry_follows_account_lifetime() {
+		let pool = bounded(1000);
+		assert!(pool.inner.tracks.lock().is_empty());
+
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		assert_eq!(pool.inner.tracks.lock().len(), 1);
+
+		// A registered account whose track is already gone is swept harmlessly.
+		pool.sweep();
+
+		drop(track);
+		assert!(pool.inner.tracks.lock().is_empty(), "a dropped account leaves no entry");
+	}
+
+	#[test]
+	fn an_inert_pool_registers_nothing() {
+		// No window means no sweep, so a bare pool pays no registry cost.
+		let pool = Pool::unbounded();
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		assert!(pool.inner.tracks.lock().is_empty());
+		pool.sweep();
+		drop(track);
 	}
 
 	#[test]

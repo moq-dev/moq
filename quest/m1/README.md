@@ -25,7 +25,6 @@ with the current dev tree before starting.
 - [#2979](/quest/m1/2979-moq-tokio-does-not-compile-with-no-default-features-and.md) - moq-tokio compiles with any subset of transport features, and nightly checks it per crate
 - [#2853](/quest/m1/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
 - [#2624](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - moq-native: GOAWAY redirect guard classifies hosts by name, not by resolved address
-- [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - Retention should reclaim idle open groups now that expiry is timestamp-only
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
