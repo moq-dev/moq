@@ -784,9 +784,8 @@ QString MoQDock::ConnectUrl() const
 
 	QUrl url(text);
 	if (!url.isValid() || url.scheme().isEmpty()) {
-		// Fall back to string append when Qt can't parse (unusual schemes).
-		const QChar sep = text.contains('?') ? '&' : '?';
-		return text + sep + "jwt=" + QUrl::toPercentEncoding(token);
+		// Cannot confirm the transport is encrypted, so do not attach the token.
+		return text;
 	}
 
 	// Never put a JWT on cleartext dial URLs (ws:// / http://).
@@ -823,7 +822,7 @@ void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 
 	const QString profile = profileCombo->currentData().toString();
 	const MoQQualityDefaults recommended = RecommendQualityDefaults(profile.toStdString(), caps);
-	const bool haveHw = recommended.path == "hardware";
+	const bool haveHw = !hwNames.isEmpty();
 	const bool high = recommended.high;
 
 	// Only reset path when the profile itself changed. Auto must not wipe a
