@@ -74,7 +74,7 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
+	readonly delay = new Moq.Signals.Signal<Watch.Delay>("auto");
 	readonly userMuted = new Moq.Signals.Signal(false);
 	readonly volume = new Moq.Signals.Signal(0.25);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
@@ -140,7 +140,7 @@ export class Game {
 		// local signal so Sync can be constructed first.
 		const videoJitter = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
 		this.sync = new Watch.Sync({
-			latency: this.latency,
+			delay: this.delay,
 			probe: connection.probe,
 			video: videoJitter,
 			audio: this.audioSource.out.jitter,

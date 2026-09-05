@@ -61,6 +61,9 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
 	inner: moq_net::origin::Producer,
+	// Requests from the routes this origin's `announce` handles advertise, drained
+	// by its live `MoqOriginDynamic`.
+	requests: Arc<Requests>,
 }
 
 #[derive(uniffi::Object)]
@@ -89,13 +92,81 @@ struct Announced {
 	inner: moq_net::announce::Consumer,
 }
 
+/// Requests from every prefix this origin advertises through `announce`,
+/// funneled to its live `MoqOriginDynamic`.
+///
+/// With no handler alive a request is rejected on the spot, so an announced
+/// prefix nobody serves behaves as advertise-only instead of parking requesters.
+#[derive(Default)]
+struct Requests {
+	sink: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<moq_net::origin::Request>>>,
+}
+
+impl Requests {
+	fn push(&self, request: moq_net::origin::Request) {
+		let sink = self.sink.lock().unwrap().clone();
+		let rejected = match sink {
+			Some(sink) => match sink.send(request) {
+				Ok(()) => return,
+				// The handler was cancelled: nobody will serve this.
+				Err(err) => err.0,
+			},
+			None => request,
+		};
+		rejected.reject(moq_net::Error::Unroutable);
+	}
+}
+
+/// A served route whose requests flow into the origin's [`Requests`] from a
+/// background task. Dropping this stops the task, which retracts the route.
+struct Forwarder {
+	dynamic: Arc<moq_net::origin::Dynamic>,
+	stop: tokio::sync::watch::Sender<bool>,
+}
+
+impl Forwarder {
+	fn new(dynamic: moq_net::origin::Dynamic, requests: Arc<Requests>) -> Self {
+		let dynamic = Arc::new(dynamic);
+		let stop = tokio::sync::watch::Sender::new(false);
+		let mut stopped = stop.subscribe();
+		let served = dynamic.clone();
+		crate::ffi::spawn(async move {
+			loop {
+				let request = tokio::select! {
+					biased;
+					_ = stopped.wait_for(|&stop| stop) => break,
+					request = served.requested_broadcast() => match request {
+						Ok(request) => request,
+						// The origin was torn down.
+						Err(_) => break,
+					},
+				};
+				requests.push(request);
+			}
+		});
+		Self { dynamic, stop }
+	}
+}
+
+impl Drop for Forwarder {
+	fn drop(&mut self) {
+		let _ = self.stop.send_replace(true);
+	}
+}
+
 struct OriginDynamic {
-	inner: moq_net::origin::Dynamic,
+	/// The root route: every path no local broadcast resolves reaches the handler.
+	root: moq_net::origin::Dynamic,
+	/// Requests under the prefixes announced through `MoqOriginProducer::announce`.
+	requests: tokio::sync::mpsc::UnboundedReceiver<moq_net::origin::Request>,
 }
 
 impl OriginDynamic {
 	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		let request = self.inner.requested_broadcast().await?;
+		let request = tokio::select! {
+			request = self.root.requested_broadcast() => request?,
+			request = self.requests.recv() => request.ok_or(MoqError::Closed)?,
+		};
 		Ok(Arc::new(MoqBroadcastRequest::new(request)))
 	}
 }
@@ -146,9 +217,9 @@ pub struct MoqAnnouncement {
 /// The route stays advertised until `cancel` is called or the handle drops.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounce {
-	// A served route nobody polls: requests beneath the prefix wait until the
-	// advertisement is cancelled, which rejects them.
-	inner: std::sync::Mutex<Option<moq_net::origin::Dynamic>>,
+	// A served route whose requests reach the origin's `MoqOriginDynamic`, or
+	// are rejected while there is none.
+	inner: std::sync::Mutex<Option<Forwarder>>,
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -165,7 +236,10 @@ impl MoqOriginProducer {
 	/// Wrap an existing `moq_net::origin::Producer` (e.g. one auto-created
 	/// during `MoqClient::connect`) so it can cross the FFI boundary.
 	pub(crate) fn from_inner(inner: moq_net::origin::Producer) -> Self {
-		Self { inner }
+		Self {
+			inner,
+			requests: Default::default(),
+		}
 	}
 
 	fn from_options(options: MoqOriginOptions) -> Self {
@@ -177,7 +251,10 @@ impl MoqOriginProducer {
 			info = info.with_pool(moq_net::cache::Pool::new(config));
 		}
 
-		Self { inner: spawn(info) }
+		Self {
+			inner: spawn(info),
+			requests: Default::default(),
+		}
 	}
 }
 
@@ -245,13 +322,17 @@ impl MoqOriginProducer {
 	/// broadcasts fail.
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
+		// Requests under announced prefixes flow to this handler from now on,
+		// replacing any earlier one.
+		let (sink, requests) = tokio::sync::mpsc::unbounded_channel();
+		*self.requests.sink.lock().unwrap() = Some(sink);
 		// The origin's driver is gone if this fails: `requested_broadcast` then
 		// reports `Closed`, the same end a handler observes once it is torn down.
 		let task = self
 			.inner
 			.dynamic("", Default::default())
 			.ok()
-			.map(|inner| Arc::new(Task::new(OriginDynamic { inner })));
+			.map(|root| Arc::new(Task::new(OriginDynamic { root, requests })));
 		Arc::new(MoqOriginDynamic {
 			task: std::sync::Mutex::new(task),
 		})
@@ -284,9 +365,10 @@ impl MoqOriginProducer {
 	pub fn announce(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqAnnounce>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
-		let announcement = self.inner.dynamic(prefix.as_str(), route)?;
+		let dynamic = self.inner.dynamic(prefix.as_str(), route)?;
+		let forwarder = Forwarder::new(dynamic, self.requests.clone());
 		Ok(Arc::new(MoqAnnounce {
-			inner: std::sync::Mutex::new(Some(announcement)),
+			inner: std::sync::Mutex::new(Some(forwarder)),
 		}))
 	}
 }
@@ -300,7 +382,7 @@ impl MoqAnnounce {
 		let route: moq_net::origin::Route = route.try_into()?;
 		let guard = self.inner.lock().unwrap();
 		let announcement = guard.as_ref().ok_or(MoqError::Closed)?;
-		announcement.update(route)?;
+		announcement.dynamic.update(route)?;
 		Ok(())
 	}
 

@@ -37,9 +37,9 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// Maximum age before skipping a stalled group. RTMP is unpaced, so this
+	/// How stale a group may get before it is skipped. RTMP is unpaced, so this
 	/// bounds buffering, not the wire rate.
-	#[usage(long = "latency-max", default = "500ms")]
+	#[usage(long, alias = "latency-max", default = "500ms")]
 	pub max_age: moq_tokio::Duration,
 }
 

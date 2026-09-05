@@ -169,7 +169,7 @@ mod tests {
 	}
 
 	/// Regression: the lead comparison must not construct `now + lead`, which
-	/// panics on a large but valid `Duration` (`--latency-max` is unbounded).
+	/// panics on a large but valid `Duration` (`--max-age` is unbounded).
 	#[test]
 	fn huge_lead_does_not_overflow() {
 		let start = Instant::now();

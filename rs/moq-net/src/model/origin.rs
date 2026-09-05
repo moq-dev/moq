@@ -2641,7 +2641,11 @@ async fn run_remote_front(task: RemoteFrontTask) {
 					// The route retracted before serving: the table already
 					// reflects it, so the next pass retries the survivor. Each
 					// such retry consumed a real retraction, so this cannot spin.
-					Err(Error::Unroutable) => {
+					// A retraction and a handler's rejection resolve alike, so the
+					// table tells them apart: an `Unroutable` from a route that
+					// still stands is the handler's answer, and re-asking it
+					// would spin forever.
+					Err(Error::Unroutable) if !shared.lock().routes.iter().any(|entry| entry.id == route) => {
 						last_err = Some(Error::Unroutable);
 					}
 					// An authoritative refusal of the path. It ends a front with
@@ -2964,7 +2968,7 @@ impl Dynamic {
 	///
 	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
 	/// no request will ever arrive again, so handler loops should end.
-	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
+	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.closed || state.requests.has_queued() {
 				Poll::Ready(())
@@ -2994,7 +2998,10 @@ impl Dynamic {
 
 	/// Block until a consumer requests a path under this route, returning a
 	/// [`Request`] to serve.
-	pub async fn requested_broadcast(&mut self) -> Result<Request, Error> {
+	///
+	/// Takes `&self` so a handler can serve from one task while another re-prices
+	/// the route; concurrent callers each receive distinct requests.
+	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
 		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
 	}
 
@@ -3899,7 +3906,7 @@ mod tests {
 	}
 
 	/// Yield to the driver until the server's front watcher delivers a request.
-	async fn queued(server: &mut Dynamic) -> Request {
+	async fn queued(server: &Dynamic) -> Request {
 		let mut request = None;
 		settle(|| match server.poll_requested_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(popped)) => {
@@ -4219,10 +4226,10 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let mut server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut server).await;
+		let request = queued(&server).await;
 		assert_eq!(request.path().as_str(), "room/alice");
 
 		let source = broadcast::Info::new().produce();
@@ -4245,12 +4252,12 @@ mod tests {
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let mut server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
 
-		let request = queued(&mut server).await;
+		let request = queued(&server).await;
 		// Only one request reaches the server.
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 
@@ -4291,7 +4298,7 @@ mod tests {
 
 		// Three identical routes, oldest first: the newest identical route wins
 		// requests, and swapping between them emits no announce update.
-		let mut standby_server = producer.dynamic("room", Route::default()).unwrap();
+		let standby_server = producer.dynamic("room", Route::default()).unwrap();
 		let second_server = producer.dynamic("room", Route::default()).unwrap();
 		let incumbent_server = producer.dynamic("room", Route::default()).unwrap();
 
@@ -4308,7 +4315,7 @@ mod tests {
 		drop(second_server);
 		assert!((&mut resolving).now_or_never().is_none());
 
-		let request = queued(&mut standby_server).await;
+		let request = queued(&standby_server).await;
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
 
@@ -4339,12 +4346,39 @@ mod tests {
 		assert!(pending.now_or_never().is_none());
 	}
 
+	/// A handler that rejects a path with `Unroutable` while its route stands
+	/// gives the requester that answer; the front must not re-ask the same route
+	/// forever, which would spin the origin driver.
+	#[tokio::test]
+	async fn handler_rejection_is_final() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		request.reject(Error::Unroutable);
+		let err = tokio::time::timeout(Duration::from_secs(5), pending)
+			.await
+			.expect("the front must give up, not spin")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
+
+		// The route still stands and serves the next path.
+		let pending = consumer.request_broadcast("room/bob");
+		let request = queued(&server).await;
+		assert_eq!(request.path().as_str(), "room/bob");
+		request.accept(&broadcast::Info::new().produce());
+		pending.await.expect("resolves");
+	}
+
 	#[tokio::test]
 	async fn most_specific_prefix_shadows() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let mut broad_server = producer.dynamic("", Route::default()).unwrap();
+		let broad_server = producer.dynamic("", Route::default()).unwrap();
 		// A narrow advertise-only claim: requests under it must NOT route to the
 		// broad server; they fall through to the (absent) fallback handler.
 		let _narrow = producer.announce(".dash", Route::default()).unwrap();
@@ -4359,7 +4393,7 @@ mod tests {
 
 		// Everything else still routes to the broad server.
 		let _pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut broad_server).await;
+		let request = queued(&broad_server).await;
 		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
@@ -4368,12 +4402,12 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let mut dynamic = producer.dynamic("", Route::default()).unwrap();
+		let dynamic = producer.dynamic("", Route::default()).unwrap();
 		// The root claim is advertised like any other prefix.
 		announced.assert_next_active("");
 
 		let pending = consumer.request_broadcast("anything/at/all");
-		let request = queued(&mut dynamic).await;
+		let request = queued(&dynamic).await;
 		assert_eq!(request.path().as_str(), "anything/at/all");
 
 		let source = broadcast::Info::new().produce();
@@ -4480,12 +4514,12 @@ mod tests {
 			let producer = origin(1).produce();
 			let consumer = producer.consume();
 
-			let mut server = producer
+			let server = producer
 				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap();
 
 			let pending = consumer.request_broadcast("room/alice");
-			let request = queued(&mut server).await;
+			let request = queued(&server).await;
 			let mut source = broadcast::Info::new().produce();
 			let mut track = source.create_track("video", None).unwrap();
 			let mut group = track.append_group().unwrap();
@@ -4533,7 +4567,7 @@ mod tests {
 	/// content stream (the delivered group plus its successor) and prove the
 	/// rig's subscription resumes onto it: the successor group is delivered on
 	/// the same subscription, at the group boundary.
-	async fn assert_resumes(rig: &mut ResumeRig, server: &mut Dynamic) {
+	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
 		let mut replacement = broadcast::Info::new().produce();
 		let mut track = replacement.create_track("video", None).unwrap();
@@ -4575,21 +4609,21 @@ mod tests {
 	#[tokio::test]
 	async fn remote_source_resumes_through_same_first_hop() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
-		let mut standby_server = rig.standby(&[10, 20]);
+		let standby_server = rig.standby(&[10, 20]);
 
 		// The serving route dies: retraction plus source abort, like a session.
 		drop(incumbent);
 		drop(source);
 
 		// The standby shares the first hop, so the subscription resumes there.
-		assert_resumes(&mut rig, &mut standby_server).await;
+		assert_resumes(&mut rig, &standby_server).await;
 	}
 
 	#[tokio::test]
 	async fn different_first_hop_ends_the_subscription() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		// Another publisher entirely: same path, different first hop.
-		let mut rival_server = rig.standby(&[11]);
+		let rival_server = rig.standby(&[11]);
 
 		drop(incumbent);
 		drop(source);
@@ -4601,7 +4635,7 @@ mod tests {
 		// A fresh request resolves through the rival.
 		let consumer = rig.producer.consume();
 		let pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut rival_server).await;
+		let request = queued(&rival_server).await;
 		let replacement = broadcast::Info::new().produce();
 		request.accept(&replacement);
 		pending.await.expect("re-request resolves through the rival");
@@ -4655,7 +4689,7 @@ mod tests {
 	#[tokio::test]
 	async fn drain_reprice_migrates_before_the_session_dies() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
-		let mut standby_server = rig.standby(&[10, 20]);
+		let standby_server = rig.standby(&[10, 20]);
 
 		// The serving route drains: repriced to the ceiling while its session
 		// keeps serving. The front migrates to the standby without waiting for
@@ -4664,7 +4698,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(DRAIN_COST))
 			.unwrap();
 
-		assert_resumes(&mut rig, &mut standby_server).await;
+		assert_resumes(&mut rig, &standby_server).await;
 
 		// The drained source outlived the migration.
 		drop(incumbent);

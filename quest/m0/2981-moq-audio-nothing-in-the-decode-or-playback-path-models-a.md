@@ -9,7 +9,7 @@ timestamps say where its samples actually belong.
 
 ## Plan
 
-Gaps are routine: `latency_max` skipping a stalled group, `moq play` dropping
+Gaps are routine: `max_age` skipping a stalled group, `moq play` dropping
 an undecodable packet, an ingest that resyncs. Below the catalog they are all
 treated as contiguous audio.
 
@@ -44,7 +44,7 @@ reads as discontinuous under a strict rule.
   belong before the hole) or drop them, reset it, and stamp the next output
   from the new packet rather than by rewinding.
 - `play_audio` writes silence for the missing duration, which also covers
-  `latency_max` skips.
+  `max_age` skips.
 - Tests: frames at 0 and 2048 samples across a gap produce a hole; a 2.5 ms
   Opus packet lost after a 20 ms one is a gap; millisecond-stamped 1024-sample
   AAC packets detect no gap; the encoder's first PTS matches its first input.

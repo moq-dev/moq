@@ -48,8 +48,8 @@ The codebase actively fights wall-clock interpretation of frame timestamps. `Tim
 **Latency is relative (buffer depth), never absolute.** `js/watch/src/sync.ts`:
 
 ```ts
-export type Bound = "real-time" | Time.Milli;
-export type Latency = Bound | { min?: Bound; max?: Bound };
+export type Delay = "instant" | "auto" | Time.Milli;
+// plus a separate `buffer: Getter<Time.Milli>` input on Sync
 ```
 
 `Sync.received(timestamp)` computes `ref = Time.Milli.now() - timestamp`, and `Time.Milli.now()` is `performance.now()` (`js/net/src/time.ts:68`)  -  monotonic since page load, explicitly "not wall-clock time". So `reference` is an arbitrary local-clock↔PTS offset anchored by whichever frame happened to arrive first. Two viewers who tune in 3 seconds apart are 3 seconds apart forever, and nothing in the model can tell.
@@ -59,7 +59,7 @@ export type Latency = Bound | { min?: Bound; max?: Bound };
 #### Proposed shape
 
 1. **A JS `Timeline.Consumer`** in `js/hang` (needed by the DVR work too).
-2. **A third `Bound` variant, or a new absolute mode**: something like `latency: { absolute: Time.Milli }` meaning "render pts P at wall time `wall + P + absolute`". `Sync` then anchors on `Timeline.wall` instead of first-frame arrival, and `now()` becomes a wall-clock computation rather than an offset.
+2. **A third mode alongside `delay` and `buffer`**: something like `delay: { absolute: Time.Milli }` meaning "render pts P at wall time `wall + P + absolute`". `Sync` then anchors on `Timeline.wall` instead of first-frame arrival, and `now()` becomes a wall-clock computation rather than an offset.
 3. **Client clock sync.** This is the real work. `Timeline.wall` is the *publisher's* wall clock; the viewer's `Date.now()` can be off by seconds. Options, roughly in order of cost:
    - trust `Date.now()` (fine for a watch party, useless for betting)
    - estimate offset from the session RTT (we already track min RTT via PROBE in `#runJitter` for exactly this kind of anchoring)
@@ -71,13 +71,13 @@ export type Latency = Bound | { min?: Bound; max?: Bound };
 
 #### Open questions
 
-- Absolute latency and the existing `min`/`max` bounds interact awkwardly: an absolute target is a *point*, the bounds are a *range*. Does absolute override the range, or clamp within it?
+- An absolute target is a *point* while `delay` and `buffer` are two spans either side of the live edge. Does absolute replace `delay`, or sit alongside it with `buffer` still capping the lookahead?
 - `Timeline.wall` is per-rendition. Are audio and video guaranteed consistent? A rendition switch must not re-anchor.
 - Does this need anything on the publisher, or is `set_wall` sufficient? Today nothing in `moq-video`/`js/publish` calls `set_wall` as far as I can tell  -  so step 0 might be "actually populate `wall`".
 
 #### Naming note
 
-`Latency` is already doubly overloaded: the `Bound | {min,max}` type (`js/watch/src/sync.ts:16`) and `class Latency` (`js/hang/src/util/latency.ts:21`, jitter+buffer). Different packages, both exported. Worth resolving before adding a third meaning.
+Mostly resolved: `js/watch`'s `Latency` / `Bound` types are gone, replaced by `Delay` plus a separate `buffer`, leaving `class Latency` (`js/hang/src/util/latency.ts`, jitter+buffer) as the only remaining use. Pick a name for the absolute mode that does not reintroduce the collision.
 
 #### Branch
 
@@ -90,3 +90,7 @@ export type Latency = Bound | { min?: Bound; max?: Bound };
 ## Closes
 
 - [#2278](https://github.com/moq-dev/moq/issues/2278) - close this issue when the quest finishes
+
+## Related
+
+- [Playout clock](/quest/m0/playout-clock.md) - ports the same anchoring model to Rust as `moq_mux::Clock`

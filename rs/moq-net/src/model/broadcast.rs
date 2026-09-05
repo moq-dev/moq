@@ -419,7 +419,7 @@ impl Producer {
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
 		let _ = self.alive.token.close();
-		self.alive.unannounce();
+		self.alive.retire();
 	}
 
 	/// Abort the broadcast, ending it for consumers with `err`.
@@ -443,7 +443,7 @@ impl Producer {
 			state.abort = Some(err);
 		}
 		let _ = self.alive.token.close();
-		self.alive.unannounce();
+		self.alive.retire();
 		Ok(())
 	}
 
@@ -483,6 +483,14 @@ impl Alive {
 		// announce cursors under the origin's own lock.
 		drop(announcement);
 	}
+
+	/// End the broadcast's advertising for good: retract the standing advertisement
+	/// and drop the announcer, so a later `announce` fails with `Closed`.
+	fn retire(&self) {
+		let announcer = self.announcer.lock().take();
+		// Dropped outside the announcer lock, like `unannounce`.
+		drop(announcer);
+	}
 }
 
 impl Drop for Alive {
@@ -495,7 +503,7 @@ impl Drop for Alive {
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
 			);
 		}
-		self.unannounce();
+		self.retire();
 	}
 }
 

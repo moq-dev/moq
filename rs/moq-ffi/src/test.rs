@@ -1851,6 +1851,61 @@ async fn dynamic_broadcast_request() {
 	served.finish().unwrap();
 }
 
+/// An announced prefix serves through the origin's dynamic handler: a request
+/// beneath it reaches `requested_broadcast()` rather than parking on the route.
+#[tokio::test]
+async fn announced_prefix_requests_reach_dynamic() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	// Without a handler the prefix is advertise-only: nothing serves beneath it.
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+	let err = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live/cam".into()))
+		.await
+		.expect("timed out requesting under an unserved prefix")
+		.err()
+		.expect("nothing serves the prefix yet");
+	assert!(
+		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
+		"unexpected error: {err:?}"
+	);
+
+	let dynamic = origin.dynamic();
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into()).await })
+	};
+
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("timed out waiting for the announced prefix's request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "live/cam");
+
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the handler served the path");
+
+	// Cancelling the handler turns the prefix advertise-only again.
+	dynamic.cancel();
+	let err = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live/other".into()))
+		.await
+		.expect("timed out requesting after the handler was cancelled")
+		.err()
+		.expect("nothing serves the prefix any more");
+	assert!(
+		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
+		"unexpected error: {err:?}"
+	);
+
+	route.cancel();
+	served.finish().unwrap();
+}
+
 /// The sequence cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.

@@ -600,7 +600,6 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("server task failed");
 }
 
-/// Wait for the next announce event, failing the test on a timeout or a closed origin.
 /// Draft-20's current-group join (section 5.1.6), which splits one group across two
 /// streams: the subscriber asks for the next Object plus a fill of the current group, and
 /// the publisher serves the head on a fill fetch stream and the rest on the subscription's
@@ -614,7 +613,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 async fn broadcast_moq_transport_20_current_group_join() {
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
+	broadcast.announce(Default::default()).expect("announce");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	// The group is left open, so the subscriber joins part way through it: the two head
@@ -644,26 +643,28 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	let client = client_config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
-	let server_origin = pub_origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&server_origin).ok().await?;
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
 	let announced = next_announce(&mut announcements).await;
+	assert_eq!(announced.prefix.as_path().as_str(), "test");
 	assert!(announced.active, "expected an announce");
 	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
-		.expect("request failed");
+		.expect("announced broadcast resolves");
 
 	let mut subscriber = tokio::time::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
 		.await
@@ -698,10 +699,11 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	assert_eq!(read(&mut joined).await.as_deref(), Some(b"tail-2".as_ref()));
 	assert_eq!(read(&mut joined).await, None, "the stitched group ends once");
 
-	drop(session);
+	drop(connection);
 	server_handle.await.expect("server panicked").expect("server failed");
 }
 
+/// Wait for the next announce event, failing the test on a timeout or a closed origin.
 async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_net::announce::Update {
 	tokio::time::timeout(TIMEOUT, announcements.next())
 		.await

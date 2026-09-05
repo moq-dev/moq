@@ -20,10 +20,10 @@ No binding announces on the caller's behalf any more.
 Today `rs/moq-ffi`'s `create_broadcast` calls `broadcast.announce(..)`
 internally, so Python, Swift, Kotlin, Go, and C all inherit an auto-announce
 that Rust does not have. `MoqOriginProducer::announce(prefix, route)` and
-`MoqOriginProducer::dynamic()` both wrap the same `origin::Dynamic`, but only
-the latter exposes its request queue and the former parks whatever is requested
-beneath it. Two surfaces share a type and differ; that is what the rename must
-not paper over.
+`MoqOriginProducer::dynamic()` both wrap an `origin::Dynamic`, but only the
+latter exposes a request queue: the former forwards its requests into it, and
+rejects them while no handler is alive. Two handles share one queue that one of
+them owns; that is what the rename must not paper over.
 
 - moq-ffi: `MoqOriginProducer::create_broadcast(path)` stops announcing.
   `MoqBroadcastProducer::set_announce(bool)` becomes `announce(route: MoqRoute)`
