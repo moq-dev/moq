@@ -29,6 +29,7 @@ arrayvec = "0.7"
 bytes = { workspace = true }
 futures = { workspace = true }
 kio = { workspace = true }
+moq-path = { workspace = true }
 num_enum = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }

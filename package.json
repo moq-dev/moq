@@ -30,6 +30,7 @@
 		"js/net",
 		"js/clock",
 		"js/token",
+		"js/path",
 		"js/flate",
 		"js/binary",
 		"js/json",

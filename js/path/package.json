@@ -1,34 +1,22 @@
 {
-	"name": "@moq/token",
+	"name": "@moq/path",
 	"type": "module",
-	"version": "0.3.2",
-	"description": "Media over QUIC - Token Generation and Validation",
+	"version": "0.1.0",
+	"description": "Path patterns for Media over QUIC: the wildcard grammar and algebra shared by tokens, origins, and announcements.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts"
 	},
-	"bin": {
-		"moq-token": "./src/cli.ts"
-	},
 	"scripts": {
 		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
+		"check": "tsc --noEmit",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
-	"dependencies": {
-		"@hexagon/base64": "^2.0.4",
-		"@moq/path": "workspace:*",
-		"@zod/mini": "^4.5.4",
-		"commander": "^15.0.0",
-		"jose": "^6.2.10",
-		"zod": "^4.5.4"
-	},
 	"devDependencies": {
 		"@types/bun": "^1.4.0",
-		"@types/node": "^26.2.0",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

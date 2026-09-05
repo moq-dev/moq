@@ -4,8 +4,8 @@
 
 Every predicate over a MoQ broadcast path uses one versioned matcher. Tokens,
 origin scopes, announce interests, public access rules, and wildcard
-advertisements can express `pid/*/chat` and `**/*.hang` without maintaining
-competing glob dialects.
+advertisements can express `pid/*/chat` and `**/transcode.pro` without
+maintaining competing glob dialects.
 
 Literal paths remain coordinates, not sets. Roots, joins, exact broadcast
 names, URL paths, filesystem paths, and object-store keys keep their own
@@ -20,30 +20,42 @@ A v1 pattern is canonical `/`-separated segments:
 
 - a literal;
 - `*`, matching one complete segment;
-- `lit*lit`, with one `*` matching bytes inside one segment;
 - `**`, matching zero or more complete segments, at most once per pattern.
+
+Wildcards are whole segments. `foo/**/elephant/*/transcode.pro` is legal;
+`foo/**/elephant*/transcode.pro` is not, and neither is `**/*.hang`: a `*`
+anywhere inside a literal segment is rejected rather than read literally, which
+keeps that syntax free for a later in-segment form and means only the exact
+segments `*` and `**` are reserved in literal paths.
 
 Patterns are exact by default. `foo` matches only `foo`, `foo/**` matches its
 subtree including `foo`, `**` matches every path, and the empty pattern matches
-only the current root. Reject leading, trailing, or repeated `/`, more than one
-star in a segment, `**` mixed with literal bytes, and more than one `**`.
-Literal `*` needs no escape: new path construction and publication reject it,
-while decoders tolerate it on legacy protocol versions during rollout.
+only the current root. Reject leading, trailing, or repeated `/`, `*` inside a
+literal, and more than one `**`. New path construction and publication reject a
+`*` or `**` segment, while decoders tolerate it on legacy protocol versions
+during rollout.
 
-A pattern list is an unordered union reduced by exact containment. The shared
-algebra supplies matching, overlap, exact containment, a literal head, and
-exact set-valued rebasing. The set-valued result is load-bearing: rebasing
-`**/a` at `a` must preserve both the root match and deeper paths ending in
-`a`. Pattern precedence uses one total, Vault-style structural specificity
-tuple everywhere rules overlap; equal patterns form the same tier.
+A pattern list is an unordered union reduced by containment. The shared
+algebra supplies matching, overlap, containment, a literal head, and exact
+set-valued rebasing. The set-valued result is load-bearing: rebasing `**/a` at
+`a` must preserve both the root match and deeper paths ending in `a`. Union
+containment is per member: a candidate covered only jointly by several members
+(`a/**` against `a`, `a/*`, `a/*/**`) is refused, so the check stays linear and
+a grant that means a subtree writes `a/**`. Pattern precedence uses one total
+structural specificity everywhere rules overlap, ordered by literal segments,
+then no `**`, then `*` segments, then literal head length, which agrees with
+containment (a strict superset always ranks lower); equal patterns form the
+same tier.
 
 ### Ownership and compatibility
 
-One dependency-free Rust crate and one TypeScript package own the grammar and
-algebra; `moq-net`, `moq-token`, and their JS consumers re-export them. Golden
-cross-language vectors, exhaustive small cases, and fuzzing prevent semantic
-drift at the authorization boundary. Matching stays linear and inherits
-`Path::MAX_PARTS` (32), which also bounds residual expansion.
+The dependency-free `moq-path` crate and the `@moq/path` package own the
+grammar and algebra; `moq-net`, `moq-token`, `@moq/net`, and `@moq/token`
+re-export them. Golden cross-language vectors
+(`rs/moq-path/tests/vectors.json`), exhaustive small cases, and randomized
+round trips prevent semantic drift at the authorization boundary. Matching is
+linear and inherits `Path::MAX_PARTS` (32), which also bounds residual
+expansion.
 
 Every persisted or wire policy carries a version. Missing `v` is v0 prefix
 semantics forever. V1 uses exact patterns and rejects legacy and v1 grant
@@ -53,18 +65,16 @@ APIs default to v1 in a breaking major release; legacy minting is explicit.
 The moq.pro (downstream) token minting, public-access migration, scoped-key,
 and rule-editor work consume these versioned shapes downstream.
 
-The syntax follows Ant-style path patterns without `?`, classes, or braces.
-NATS subjects motivate segment wildcards and reserved wildcard bytes; Vault
-ACLs motivate structural specificity. Common Access Token and
-`draft-ietf-moq-c4m-01` provide exact, prefix, and suffix matches per namespace
-field, including exact depth with a trailing `nil`. Document the exact common
-subset and keep the richer MoQ forms explicit rather than claiming CAT cannot
-represent `pid/*/chat`.
+The syntax follows Ant-style path patterns without `?`, classes, braces, or
+in-segment stars. NATS subjects motivate whole-segment wildcards and reserved
+wildcard segments; Vault ACLs motivate structural specificity. Common Access
+Token and `draft-ietf-moq-c4m-01` provide exact, prefix, and suffix matches per
+namespace field, including exact depth with a trailing `nil`. Document the
+exact common subset and keep the richer MoQ forms explicit rather than claiming
+CAT cannot represent `pid/*/chat`.
 
 ## Quests
 
-- [Matcher](/quest/m2/path-patterns/matcher.md) - one Rust and TypeScript owner
-  implements the grammar and exact algebra
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
 - [Claims](/quest/m2/path-patterns/claims.md) - versioned token and JWK scopes

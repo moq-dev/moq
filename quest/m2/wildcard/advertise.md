@@ -35,8 +35,8 @@ The state has a home already. Since
 extension point a pattern type slots into: matching is segment-wise
 intersection in one place, so a pattern extends `Prefix` internally without
 touching `Route` or any signature. Teach `Prefix` the dialect the shared
-[Matcher](/quest/m2/path-patterns/matcher.md) provides rather than adding a
-parallel table beside it. The set stays small either way (one entry per
+matcher (`moq_path::Pattern`, re-exported by `moq-net`) provides rather than
+adding a parallel table beside it. The set stays small either way (one entry per
 advertiser per service, not per broadcast).
 
 A wildcard forwards like an announcement: accumulate the sending peer's declared
@@ -74,5 +74,3 @@ and that a literal-only deployment behaves exactly as it does today.
 ## Required
 
 - [Draft](/quest/m2/wildcard/draft.md)
-- [Matcher](/quest/m2/path-patterns/matcher.md) - the shared pattern
-  matching, containment, and rebasing this authorizes with

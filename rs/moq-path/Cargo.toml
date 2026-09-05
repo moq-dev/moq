@@ -1,0 +1,23 @@
+[package]
+name = "moq-path"
+description = "Path patterns for Media over QUIC: the wildcard grammar and algebra shared by tokens, origins, and announcements."
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["moq", "path", "pattern", "glob", "authorization"]
+categories = ["parsing", "network-programming"]
+
+[features]
+# Serialize a pattern as its text and a union as a list of them.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

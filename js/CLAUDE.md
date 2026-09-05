@@ -10,6 +10,8 @@ Bun workspaces; members listed in the repo-root `package.json` (not in `js/`). D
 
 - `@moq/signals` (`signals/`): reactive core. `Signal`, `Computed`, `Effect`, plus framework adapters at subpaths `./solid`, `./react`, `./dom`. No deps on other workspace packages. Everything below uses it.
 
+- `@moq/path` (`path/`): path patterns. `Pattern` (literal, `*`, and one `**` segments; exact, so a subtree is `foo/**`) and `Patterns` (a union reduced by containment), with `matches`/`contains`/`overlaps`/`specificity`/`rebase`. No deps. Mirror of `rs/moq-path`, held to the same golden vectors (`rs/moq-path/tests/vectors.json`); re-exported by `@moq/net` and `@moq/token`.
+
 **Transport / protocol**
 
 - `@moq/net` (`net/`): browser networking. Connect to a relay, then publish/consume broadcasts/tracks/groups/frames over WebTransport (WebSocket fallback). Negotiates `moq-lite` (`lite/`) or IETF `moq-transport` (`ietf/`). Mirror of `rs/moq-net`. Optional `zod` + `@zod/mini` peer deps for `./zod` JSON-frame helpers.
