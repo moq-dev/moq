@@ -40,3 +40,7 @@ backend docs and feature matrix in the same PR.
   parity cannot be claimed without it
 - [Release the fork stack](/quest/m2/quic/release.md) - the relay must pin
   released noq sources before quiche goes
+
+## Closes
+
+- [#3124](https://github.com/moq-dev/moq/issues/3124) - the parity report is the matched runtime-versus-QUIC-stack measurement the issue asked for
