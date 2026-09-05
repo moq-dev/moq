@@ -16,8 +16,9 @@ A conventional player downloads whole segments sequentially over TCP (the
 low-latency variants split them into parts, which helps but keeps the shape). When the network degrades,
 the current segment queues, the next one can't start, and the player can't
 switch renditions until the boundary. Bufferbloat sets in, playback freezes,
-and the player grows its buffer to avoid a repeat. Segments also sit on disk
-until complete, which is why smaller segments only help so much.
+and the player grows its buffer to avoid a repeat. Conventional segments are
+also published only once complete, which is why smaller segments only help so
+much.
 
 ## What MoQ does instead
 

@@ -83,9 +83,10 @@ moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3
 Video goes through the platform hardware encoder (VideoToolbox, Media
 Foundation, NVENC, VAAPI, V4L2 M2M) with a built-in H.264 software fallback;
 audio is Opus. The camera is opened only while someone is watching, and
-`--bitrate` is a ceiling the encoder lowers to fit the connection's bandwidth
-estimate. `moq devices` prints every source id. Requires the `capture`
-feature; on Linux that needs libclang, V4L2, and ALSA headers.
+`--bitrate` is the opening ceiling. Backends with live bitrate control lower it
+to fit the connection's bandwidth estimate. `moq devices` prints every source
+id. Requires the `capture` feature; on Linux that needs libclang, V4L2, and
+ALSA headers.
 
 ## Transcode
 

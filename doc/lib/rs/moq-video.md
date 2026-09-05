@@ -20,10 +20,10 @@ ffmpeg, no GStreamer, no system codec to install.
 
 Highlights:
 
-- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC.
+- **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder is compile-verified but not yet validated on hardware.
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
-- **Zero-copy where the platform allows.** Frames stay as `CVPixelBuffer`, D3D11 textures, CUDA memory, Android `AHardwareBuffer`s, or DMA-BUFs through resize, transcode, and render; `Surface::into_i420()` and `into_rgba()` are the universal exits.
-- **Bitrate control** that retunes a live encoder without a keyframe, so a congestion controller can drive it.
+- **Zero-copy where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats; other combinations use the universal `Surface::into_i420()` and `into_rgba()` CPU exits.
+- **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
 ```rust
