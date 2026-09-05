@@ -22,12 +22,24 @@ import "github.com/moq-dev/moq-go/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
+if err != nil {
+    log.Fatal(err)
+}
 defer client.Close()
 
-announced, _ := client.Announced("live/")
+announced, err := client.Announced("live/")
+if err != nil {
+    log.Fatal(err)
+}
 for ann, err := range announced.All(ctx) {
-    if moq.IsShutdown(err) { break }
-    catalog, _ := ann.Broadcast().Catalog(ctx)
+    if err != nil {
+        if moq.IsShutdown(err) { break }
+        log.Fatal(err)
+    }
+    catalog, err := ann.Broadcast().Catalog(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
     fmt.Printf("%+v\n", catalog)
 }
 ```
