@@ -2146,6 +2146,58 @@ mod tests {
 		assert_eq!(before, after);
 	}
 
+	/// Dropping the listener has to stop its reload watcher. The watcher parks in
+	/// `FileWatcher::changed` and never returns on its own, so without the abort it
+	/// keeps its task, an OS directory watch, and the certificate keys alive for the
+	/// rest of the process. The `Arc` is the observable half: while the task lives it
+	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[tokio::test]
+	async fn dropping_the_reload_guard_stops_the_watcher() {
+		use std::io::Write;
+
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let cert = params.self_signed(&key).unwrap();
+
+		let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+		cert_file.write_all(cert.pem().as_bytes()).unwrap();
+		let mut key_file = tempfile::NamedTempFile::new().unwrap();
+		key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+
+		// File-backed, so the watcher actually parks rather than returning early.
+		let config = Listen {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let certs = Arc::new(ServeCerts::new(crypto::provider()));
+		certs.load_certs(&config).unwrap();
+		let weak = Arc::downgrade(&certs);
+
+		let reload = Reload::spawn(certs.clone(), config);
+		// Let the task run far enough to be parked on the watcher, holding its Arc.
+		tokio::task::yield_now().await;
+
+		drop(certs);
+		assert!(
+			weak.upgrade().is_some(),
+			"the watcher should still hold the certificates"
+		);
+
+		drop(reload);
+
+		// The abort lands when the runtime next gets to the task, not on the drop.
+		for _ in 0..100 {
+			if weak.upgrade().is_none() {
+				return;
+			}
+			tokio::task::yield_now().await;
+		}
+		panic!("the watcher outlived the listener that spawned it");
+	}
+
 	/// Only one client certificate can go on the wire, so asking for two is a
 	/// configuration error rather than a silent preference for either.
 	#[test]
