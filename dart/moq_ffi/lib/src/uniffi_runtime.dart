@@ -8,7 +8,6 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
 
 class UniffiInternalError implements Exception {
@@ -234,7 +233,6 @@ mixin FfiConverterPrimitive<T> on FfiConverter<T, T> {
   @override
   T lower(T value) => value;
 }
-
 Uint8List createUint8ListFromInt(int value) {
   int length = value.bitLength ~/ 8 + 1;
   if (length != 4 && length != 8) {
