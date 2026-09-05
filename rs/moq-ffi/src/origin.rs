@@ -137,11 +137,22 @@ impl Requests {
 	/// were rejected by the retraction, and dropping it here is all that is left.
 	/// Checked after the queue lock is released: the push side holds the slot
 	/// while it takes the queue, so nesting them the other way would deadlock.
-	fn pop(&self) -> Option<moq_net::origin::Request> {
+	fn pop(&self) -> Result<Option<moq_net::origin::Request>, MoqError> {
 		loop {
-			let (route, request) = self.parked.lock().unwrap().pop_front()?;
+			let popped = {
+				let mut parked = self.parked.lock().unwrap();
+				// Read under the queue lock, where `close` sets it: a pop can't
+				// slip between the flag and the drain.
+				if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+					return Err(MoqError::Closed);
+				}
+				parked.pop_front()
+			};
+			let Some((route, request)) = popped else {
+				return Ok(None);
+			};
 			if route.lock().unwrap().is_some() {
-				return Some(request);
+				return Ok(Some(request));
 			}
 			drop(request);
 		}
@@ -151,14 +162,13 @@ impl Requests {
 	/// requesters were already rejected), so drop it all and wake every handler
 	/// to report `Closed`.
 	fn close(&self) {
-		self.closed.store(true, std::sync::atomic::Ordering::Release);
-		let stale: Vec<_> = self.parked.lock().unwrap().drain(..).collect();
+		let stale: Vec<_> = {
+			let mut parked = self.parked.lock().unwrap();
+			self.closed.store(true, std::sync::atomic::Ordering::Release);
+			parked.drain(..).collect()
+		};
 		drop(stale);
 		self.notify.notify_waiters();
-	}
-
-	fn is_closed(&self) -> bool {
-		self.closed.load(std::sync::atomic::Ordering::Acquire)
 	}
 }
 
@@ -257,12 +267,9 @@ impl OriginDynamic {
 			let notified = self.requests.notify.notified();
 			tokio::pin!(notified);
 			notified.as_mut().enable();
-			// Closure first: a teardown drains the queue, and a pop that raced it
-			// would hand out a request whose requesters are already gone.
-			if self.requests.is_closed() {
-				return Err(MoqError::Closed);
-			}
-			if let Some(request) = self.requests.pop() {
+			// A teardown drains the queue and closes it in one step, so a pop
+			// never hands out a request whose requesters are already gone.
+			if let Some(request) = self.requests.pop()? {
 				return Ok(Arc::new(MoqBroadcastRequest::new(request)));
 			}
 			notified.await;
