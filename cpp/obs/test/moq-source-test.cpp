@@ -605,8 +605,8 @@ int32_t moq_origin_close(uint32_t)
 	return 0;
 }
 
-int32_t moq_session_connect(const char *, uintptr_t, uint32_t, uint32_t, void (*on_status)(void *, int32_t),
-			    void *user_data)
+int32_t moq_session_connect(const char *, uintptr_t, const moq_client_config *, uint32_t, uint32_t,
+			    void (*on_status)(void *, int32_t), void *user_data)
 {
 	if (g_session_result < 0)
 		return g_session_result;
@@ -693,8 +693,8 @@ int32_t moq_consume_video_config(uint32_t catalog, uint32_t, struct moq_video_co
 	dst->codec_len = sizeof(g_codec) - 1;
 	dst->description = g_describe ? g_description : nullptr;
 	dst->description_len = g_describe ? sizeof(g_description) : 0;
-	dst->coded_width = &g_coded_width;
-	dst->coded_height = &g_coded_height;
+	dst->coded_width = g_coded_width;
+	dst->coded_height = g_coded_height;
 	dst->container.kind = MOQ_CONTAINER_KIND_LEGACY;
 	dst->container.init = nullptr;
 	dst->container.init_len = 0;
