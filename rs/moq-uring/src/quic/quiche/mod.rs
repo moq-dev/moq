@@ -50,8 +50,13 @@ pub(crate) type RawConnection = quiche::Connection<BytesFactory>;
 /// trace is per connection and has to be attached before the first packet is
 /// fed in: earlier events are simply not recorded.
 #[cfg(feature = "qlog")]
-pub(crate) fn with_qlog(mut conn: RawConnection, transport: &Transport, cid: &[u8], side: qlog::Side) -> RawConnection {
-	if let Some(sink) = &transport.qlog {
+pub(crate) fn with_qlog(
+	mut conn: RawConnection,
+	sink: Option<&qlog::Sink>,
+	cid: &[u8],
+	side: qlog::Side,
+) -> RawConnection {
+	if let Some(sink) = sink {
 		conn.set_qlog(sink.trace(cid, side), "moq-uring".to_string(), String::new());
 	}
 	conn

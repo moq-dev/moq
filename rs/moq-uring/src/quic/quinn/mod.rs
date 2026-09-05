@@ -225,6 +225,8 @@ fn with_qlog(
 
 	#[cfg(feature = "noq")]
 	{
+		// The factory is told each connection's own side, so the config's is
+		// not needed here.
 		let _ = side;
 		transport.qlog_factory(Arc::new(Traces { sink }));
 	}

@@ -226,7 +226,12 @@ impl Endpoint {
 			&mut quiche_config,
 		)?;
 		#[cfg(feature = "qlog")]
-		let conn = super::with_qlog(conn, &config.transport, &scid, crate::quic::qlog::Side::Client);
+		let conn = super::with_qlog(
+			conn,
+			config.transport.qlog.as_ref(),
+			&scid,
+			crate::quic::qlog::Side::Client,
+		);
 		let (shared, _key) = self
 			.inner
 			.launch(conn, ConnectionIds::issued(scid), config.transport.keep_alive);
@@ -397,8 +402,18 @@ impl Inner {
 		// quiche records nothing that happened before the writer was attached.
 		#[cfg(feature = "qlog")]
 		{
-			let transport = self.accepting.borrow().as_ref().expect("checked above").transport.clone();
-			conn = super::with_qlog(conn, &transport, &hdr.dcid, crate::quic::qlog::Side::Server);
+			conn = super::with_qlog(
+				conn,
+				self.accepting
+					.borrow()
+					.as_ref()
+					.expect("checked above")
+					.transport
+					.qlog
+					.as_ref(),
+				&hdr.dcid,
+				crate::quic::qlog::Side::Server,
+			);
 		}
 		if let Err(err) = conn.recv(segment, info) {
 			// Without a valid first flight there is no handshake to continue.
