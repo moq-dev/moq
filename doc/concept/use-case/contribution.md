@@ -36,7 +36,8 @@ sources that relays fail over between at a group boundary; see
 Contribution and distribution are the same problem with the arrows flipped:
 client to server versus server to client, 1:1 versus 1:N. One protocol for
 both means one implementation to optimize, one relay to deploy, and QUIC's
-congestion control (BBR out of the box) instead of a bespoke UDP stack.
+congestion control (this project's relay defaults to BBR) instead of a bespoke
+UDP stack.
 
 Existing encoders still work: the [OBS plugin](/bin/obs) publishes MoQ
 directly, and [moq-cli](/bin/cli) accepts RTMP, SRT, and WHIP pushes.

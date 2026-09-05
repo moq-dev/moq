@@ -20,18 +20,21 @@ go get github.com/moq-dev/moq-go@latest
 ```go
 import "github.com/moq-dev/moq-go/moq"
 
+// Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
 defer client.Close()
 
-// Subscribe
 announced, _ := client.Announced("live/")
 for ann, err := range announced.All(ctx) {
     if moq.IsShutdown(err) { break }
     catalog, _ := ann.Broadcast().Catalog(ctx)
     fmt.Printf("%+v\n", catalog)
 }
+```
 
-// Publish encoded frames, or raw pixels with the codec inside the binding
+```go
+// Publish encoded frames, or raw pixels with the codec inside the binding.
+// opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
 audio, _ := broadcast.PublishMedia("opus", opusInit)
 _ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: 20_000})

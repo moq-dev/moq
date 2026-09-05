@@ -16,7 +16,7 @@ The reference implementation. Every crate is on
 | [moq-native](https://docs.rs/moq-native) | Stands up QUIC (quinn, quiche, or noq), TLS, WebSocket fallback, and iroh, from config or CLI flags. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
-| [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode, and GPU rendering. |
+| [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-token](/lib/rs/moq-token) | JWT keys, signing, verification, path authorization. |
@@ -34,37 +34,42 @@ The reference implementation. Every crate is on
 `moq-native` configures the endpoint; `moq-net` does the protocol.
 
 ```rust
+// The Origin is the local hub: the session fills it with remote broadcasts
+// and serves your local broadcasts out of it.
+let origin = moq_net::Origin::random().produce();
+
 let client = moq_native::ClientConfig::default().init()?;
-let session = client.connect(url::Url::parse("https://cdn.moq.dev/anon")?).await?;
+let url = url::Url::parse("https://cdn.moq.dev/anon")?;
+let session = client.with_subscriber(origin.clone()).with_publisher(&origin).connect(url).await?;
 
-// Discover and subscribe
-let mut announced = session.consumer().announced();
-while let Some((path, broadcast)) = announced.next().await {
-    let Some(broadcast) = broadcast else { continue };
-
+// Subscribe: wait for a broadcast, read its catalog, then its tracks.
+let mut announced = origin.consume().announced();
+while let Some(update) = announced.next().await {
+    let Some(broadcast) = update.broadcast else { continue };
     let catalog = broadcast
-        .consume_track(hang::Catalog::DEFAULT_NAME)
+        .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
         .await?;
-    let mut catalog = hang::CatalogConsumer::new(catalog);
-    let info = catalog.next().await?;
-    // pick a rendition, then decode it with moq-video / moq-audio,
-    // or read raw frames with hang::container::OrderedConsumer
+    // moq-mux decodes the catalog; moq-video / moq-audio decode the media.
 }
-
-// Publish
-let route = moq_net::broadcast::Route::new().with_announce(true);
-let broadcast = session.publisher().create_broadcast("my-stream.hang", route)?;
-// add a catalog and tracks; moq-mux and moq-video/moq-audio do this for you
 ```
 
-Runnable examples:
+```rust
+// Publish: create a broadcast on the origin and add tracks to it.
+let route = moq_net::broadcast::Route::new().with_announce(true);
+let mut broadcast = origin.create_broadcast("my-stream.hang", route)?;
+// moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
+```
+
+The examples run the session and the origin work concurrently (`tokio::select!` or
+`spawn`), since the announcement loop is live. Runnable examples:
 [`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
 (publish) and
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 URLs may be `https://` (WebTransport, with raw QUIC preferred for native),
-`http://` (dev relay, fingerprint fetched automatically), `moql://`/`moqt://`
-(raw QUIC), or `iroh://`. A `?jwt=` query carries the token. Connections race
+`moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
+token. `http://` is for a relay on localhost only: it fetches the certificate
+fingerprint unauthenticated before upgrading, so never send a token over it. Connections race
 QUIC against WebSocket and remember which won.
 
 ## WebAssembly

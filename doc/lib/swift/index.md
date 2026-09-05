@@ -24,18 +24,20 @@ targets: [
 ```swift
 import Moq
 
+// Subscribe. The sequence is live, so run it in its own Task.
 let client = Client()
-client.setTlsVerify(false)          // development relay only
 let session = try await client.connect(to: "https://relay.example.com")
 
-// Subscribe
 for try await announcement in try session.consumer.announced(prefix: "live/") {
     for try await catalog in try announcement.broadcast.subscribeCatalog() {
         print(catalog)
     }
 }
+```
 
-// Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox)
+```swift
+// Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
+// opusInit, packet, pts, and rgba come from your encoder or capture source.
 let broadcast = try session.publisher.createBroadcast(path: "my-stream.hang")
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInit)
 try audio.writeFrame(packet, timestampUs: 20_000)
@@ -48,6 +50,9 @@ try video.write(VideoFrame(timestampUs: pts, data: rgba))
 
 session.shutdown()
 ```
+
+For a self-signed relay on your own test network, `client.setTlsVerify(false)`
+accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
 
 `Server` binds, generates or loads TLS, and hands you each request to
 `accept()` or `reject(code:)`. JSON tracks take `Codable` types

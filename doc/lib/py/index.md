@@ -33,25 +33,31 @@ asyncio.run(main())
 ```
 
 ```python
-async with moq.Client("https://cdn.moq.dev/anon") as client:
-    broadcast = client.create_broadcast("my-stream.hang")
+import asyncio, moq
 
-    # Already-encoded frames: the catalog is filled from the bitstream
-    audio = broadcast.publish_media("opus", opus_init_bytes)
-    audio.write_frame(payload, timestamp_us=0)
+async def main():
+    # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
+    async with moq.Client("https://cdn.moq.dev/anon") as client:
+        broadcast = client.create_broadcast("my-stream.hang")
 
-    # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
-    video = broadcast.publish_video(
-        moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
-        moq.VideoEncoderOutput(codec=moq.VideoCodec.H264, track="camera", kind=moq.VideoEncoderKind.AUTO()),
-    )
-    video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+        # Already-encoded frames: the catalog is filled from the bitstream
+        audio = broadcast.publish_media("opus", opus_init_bytes)
+        audio.write_frame(payload, timestamp_us=0)
 
-    # Raw bytes and JSON
-    events = broadcast.publish_track("events")
-    events.write_frame(b'{"cmd": "ready"}', 0)
-    status = broadcast.publish_json_snapshot("status", compression=True)
-    status.update({"state": "live", "viewers": 42})
+        # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
+        video = broadcast.publish_video(
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
+            moq.VideoEncoderOutput(codec=moq.VideoCodec.H264, track="camera", kind=moq.VideoEncoderKind.AUTO()),
+        )
+        video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+
+        # Raw bytes and JSON
+        events = broadcast.publish_track("events")
+        events.write_frame(b'{"cmd": "ready"}', 0)
+        status = broadcast.publish_json_snapshot("status", compression=True)
+        status.update({"state": "live", "viewers": 42})
+
+asyncio.run(main())
 ```
 
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is

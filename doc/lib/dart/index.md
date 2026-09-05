@@ -20,14 +20,16 @@ dart pub add moq        # or: flutter pub add moq
 ```dart
 import 'package:moq/moq.dart';
 
-final moq = await Moq.connect('https://relay.example.com', tlsVerify: true);
+final moq = await Moq.connect('https://relay.example.com');
 
-// Subscribe
-await for (final announcement in moq.announcements(prefix: 'live/')) {
+// Subscribe. The stream is live, so listen to it rather than awaiting its end.
+moq.announcements(prefix: 'live/').listen((announcement) {
   print(announcement.path());
-}
+});
 final broadcast = await moq.requestBroadcast('live/camera');
+```
 
+```dart
 // Publish
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);

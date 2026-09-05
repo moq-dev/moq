@@ -26,7 +26,7 @@ Generate a key, sign a token, hand it to the client. `moq token` inside
 moq token generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Let the bearer publish rooms/123/alice and subscribe to anything in rooms/123.
-moq token sign --key private.jwk --root rooms/123 --publish alice --subscribe "" --expires 1735689600 > alice.jwt
+moq token sign --key private.jwk --root rooms/123 --publish alice --subscribe "" --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
 
 moq token verify --key public.jwk --in alice.jwt
 ```

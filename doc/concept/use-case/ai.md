@@ -10,8 +10,9 @@ Real-time AI has needs WebRTC wasn't designed for, and MoQ lines up with them.
 ## Reliability you can tune
 
 Inference is slow and expensive. If you spend 300 ms and real money on a
-response, losing a packet of the answer to a protocol that never retransmits
-audio is a bad trade. MoQ lets the application pick: audio near-lossless with a
+response, you want a say in how the answer survives packet loss. WebRTC favors
+low playout latency and leaves recovery to the implementation; MoQ lets the
+application pick: audio near-lossless with a
 latency budget, video skippable, prompts fully reliable, all on one connection.
 
 ## Faster than real time
@@ -25,7 +26,9 @@ a MoQ transport built on this.
 
 ## Inference on demand
 
-Nothing is transmitted, or encoded, until someone subscribes. A `captions`
+Announcements and the catalog are cheap and always flow, but media is only
+transmitted once someone subscribes to a track, and a publisher can defer
+encoding until then too. A `captions`
 track backed by Whisper runs only while a viewer has captions on. Object
 detection can consume a 360p 10 fps rendition while the full-resolution track
 stays idle until a human asks for it.

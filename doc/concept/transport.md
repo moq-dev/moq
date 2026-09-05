@@ -15,7 +15,8 @@ HTTP/1 serialized requests; HTTP/2 multiplexed them but kept one TCP byte
 stream, so one lost packet stalled everything. RTMP, HLS, and SRT have the same
 head-of-line problem: old frames block new ones during congestion, and latency
 climbs. QUIC ([RFC 9000](https://datatracker.ietf.org/doc/html/rfc9000)) gives
-each stream its own retransmission and flow control, plus:
+each stream its own ordering and flow control, so a lost packet only holds
+back the stream it carried, plus:
 
 - **Partial reliability.** A stream can be reset mid-flight. MoQ resets a group once it is too old to matter.
 - **Prioritization.** The sender decides which stream's packet goes next, so new groups and audio starve old video rather than the other way around.
@@ -27,8 +28,10 @@ of that. MoQ spends its effort on media instead.
 ## WebTransport (browsers)
 
 [WebTransport](https://www.w3.org/TR/webtransport/) exposes QUIC streams to a
-web page over an HTTP/3 `CONNECT`. Chrome and Edge (97+), Firefox (114+), and
-Safari (26.4+) support it. Native clients can use it too, but usually skip it.
+web page over an HTTP/3 `CONNECT`. Chrome and Edge (97+) and Firefox (114+)
+support it. Safari ships it from 26.4, but WebKit bugs stall long sessions, so
+the TypeScript client keeps Safari on the WebSocket fallback for now. Native
+clients can use WebTransport too, but usually skip it.
 
 ## WebSocket fallback
 

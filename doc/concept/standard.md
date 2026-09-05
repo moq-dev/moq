@@ -60,7 +60,8 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=
 moq --client-connect https://relay.example.com --broadcast test.hang export fmp4 | ffplay -
 ```
 
-Add `--client-tls-disable-verify` for a self-signed relay and
+Add `--client-tls-disable-verify` for a self-signed relay on your own test
+network (it accepts any certificate, so never point it at a remote relay) and
 `RUST_LOG=info,moq_net=debug` to see the negotiated version. Behavior worth
 knowing when pointing another implementation at ours: we announce every
 namespace we can offer unsolicited *and* ask for every prefix we may discover;

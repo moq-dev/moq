@@ -17,23 +17,24 @@ import * as Moq from "@moq/net";
 const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon?jwt=..."));
 
 // Publish
-const broadcast = new Moq.Broadcast();
-connection.publish("chat.room", broadcast);
+const broadcast = new Moq.Broadcast.Producer();
+connection.publish(Moq.Path.from("chat.room"), broadcast);
 const track = broadcast.createTrack("messages");
-track.appendGroup().writeFrame(new TextEncoder().encode("hello"));
+const group = track.appendGroup();
+group.writeString("hello");           // or writeFrame({ payload, timestamp })
+group.close();
 
 // Subscribe
-const announced = connection.announced("chat.");
+const consumer = connection.consume(Moq.Path.from("chat.room")).track("messages").subscribe({ priority: 0 });
 for (;;) {
-    const entry = await announced.next();
-    if (!entry) break;
-    const consumer = connection.consume(entry.path).subscribe("messages");
-    const group = await consumer.nextGroup();
+    const group = await consumer.recvGroup();
+    if (!group) break;
+    console.log(await group.readString());
 }
 ```
 
 - **Connections** race WebTransport against WebSocket and expose a `closed` promise. `Connection.Reload` reconnects with backoff and re-publishes, which the elements use.
-- **Discovery** by prefix, and on-demand serving when a requested track or broadcast doesn't exist yet.
+- **Discovery** by prefix (`connection.announced(prefix)`), and on-demand serving when a requested track or broadcast doesn't exist yet.
 - **Subscriptions** carry a priority and latency budget; groups arrive out of order and are read frame by frame, with `Lagged` when frames were evicted before you read them.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
 - **Remote errors** carry the peer's reset code (`RemoteError`), the same on either transport.

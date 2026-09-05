@@ -28,6 +28,9 @@ Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
 ([Install](/setup/install)), or build with `cargo build -p moq-gst` and point
 `GST_PLUGIN_PATH_1_0` at the output. `http://` URLs pin the relay's
 certificate fingerprint automatically, so local development needs no TLS setup.
+That scheme is for localhost only: the fingerprint is fetched unauthenticated
+and the WebSocket fallback runs as cleartext `ws://`, so use `https://` for
+anything else.
 
 ## moqsink
 

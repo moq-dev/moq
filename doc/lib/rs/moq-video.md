@@ -14,15 +14,15 @@ ffmpeg, no GStreamer, no system codec to install.
 | Module | Does | Backends |
 | --- | --- | --- |
 | `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI (Windows) |
-| `encode` | Frames to H.264/H.265, published as a hang track | VideoToolbox, Media Foundation, NVENC, VAAPI, V4L2 M2M, openh264 |
-| `decode` | A subscribed track back to frames | VideoToolbox, Media Foundation/DXVA, NVDEC, V4L2 M2M, openh264 |
+| `encode` | Frames to H.264/H.265, published as a hang track | VideoToolbox, Media Foundation, NVENC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264 |
+| `decode` | A subscribed track back to frames | VideoToolbox, Media Foundation/DXVA, NVDEC, V4L2 M2M, MediaCodec (Android), openh264 |
 | `render` | A frame as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
 
 Highlights:
 
 - **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC.
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
-- **Zero-copy where the platform allows.** Frames stay as `CVPixelBuffer`, D3D11 textures, CUDA memory, or DMA-BUFs through resize, transcode, and render; `Surface::into_i420()` and `into_rgba()` are the universal exits.
+- **Zero-copy where the platform allows.** Frames stay as `CVPixelBuffer`, D3D11 textures, CUDA memory, Android `AHardwareBuffer`s, or DMA-BUFs through resize, transcode, and render; `Surface::into_i420()` and `into_rgba()` are the universal exits.
 - **Bitrate control** that retunes a live encoder without a keyframe, so a congestion controller can drive it.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
@@ -35,10 +35,13 @@ while let Some(frame) = video.read().await? {
 ```
 
 ```bash
-cargo add moq-video                      # capture, nvidia, vaapi, v4l2, render on by default
+cargo add moq-video                      # capture, nvidia, vaapi, v4l2, mediacodec, render on by default
 cargo add moq-video --features pipewire  # Wayland screen capture (links libpipewire)
 cargo add moq-video --no-default-features  # codec-only: still encodes/decodes H.264
 ```
+
+The language bindings use the codec-only shape, which is what keeps their
+Android floor at API 24 instead of MediaCodec's API 26 entry points.
 
 API: [docs.rs/moq-video](https://docs.rs/moq-video). Pair with
 [`moq-audio`](/lib/rs/moq-audio).

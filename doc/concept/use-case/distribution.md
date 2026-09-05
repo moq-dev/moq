@@ -6,12 +6,14 @@ description: Why MoQ beats segmented HTTP delivery on latency without giving up 
 # MoQ vs HLS/DASH
 
 HLS and DASH won distribution because HTTP is stateless and cacheable, so
-ordinary CDNs fan it out. Their weakness is latency: even LL-HLS and LL-DASH
-bottom out around 2 to 3 seconds on a good network.
+ordinary CDNs fan it out. Their weakness is latency: a few seconds for LL-HLS and LL-DASH on a good
+network, and much more for conventional segments, with the exact figure set by
+the encoder, CDN, and player.
 
 ## The problem
 
-A player downloads segments sequentially over TCP. When the network degrades,
+A conventional player downloads whole segments sequentially over TCP (the
+low-latency variants split them into parts, which helps but keeps the shape). When the network degrades,
 the current segment queues, the next one can't start, and the player can't
 switch renditions until the boundary. Bufferbloat sets in, playback freezes,
 and the player grows its buffer to avoid a repeat. Segments also sit on disk
@@ -34,7 +36,7 @@ Same protocol, same relay, same broadcast.
 
 HTTP prioritization only works reliably on HTTP/2+ and only the client can
 open a request, which makes publishing awkward. MoQ uses WebTransport to get
-QUIC streams without HTTP semantics, but keeps HTTP's economics: every HTTP/3
+QUIC streams without HTTP semantics, but keeps HTTP's economics: an HTTP/3
 CDN already runs a production QUIC stack, so adding MoQ is a small step. For
 the devices that will never speak QUIC, hang carries CMAF and the
 [HLS gateway](/bin/hls) serves any broadcast as HLS from the relay's cache.

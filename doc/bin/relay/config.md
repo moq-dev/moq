@@ -57,9 +57,10 @@ See [HTTP endpoints](/bin/relay/http).
 
 ```toml
 [auth]
-key = "public.jwk"                   # One verification key, or:
-key_dir = "/etc/moq/keys/"           # a directory of {kid}.jwk files, or:
-auth_api = "https://api.example.com/auth"   # one call that returns key, public access, alias, and tier.
+# Pick one key source:
+key = "public.jwk"                   # one verification key
+# key_dir = "/etc/moq/keys/"         # or a directory of {kid}.jwk files
+# auth_api = "https://api.example.com/auth"   # or one call returning key, public access, alias, and tier
 
 public = "anon"                      # Anonymous publish and subscribe under this prefix.
 # [auth.public]                      # Or split them:

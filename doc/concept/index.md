@@ -20,7 +20,7 @@ what lets it forward media it can't parse.
 A **broadcast** is a named, discoverable collection of **tracks** from one
 publisher. A **track** is a live sequence of **groups**, and each group is a
 sequence of **frames** delivered reliably and in order over its own QUIC
-stream. Groups are independent: they can arrive out of order, be prioritized
+stream (or, for a tiny single frame, as one unreliable datagram). Groups are independent: they can arrive out of order, be prioritized
 against each other, and be dropped under congestion without corrupting the
 rest. For video a group is a GoP starting at a keyframe; for audio it's a
 second or so of samples; for data it's whatever unit can be skipped as a whole.

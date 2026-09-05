@@ -23,14 +23,19 @@ dependencies {
 ```kotlin
 import dev.moq.*
 
+// Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    // Subscribe
     moq.announcements("live/").collect { announcement ->
         val catalog = announcement.broadcast().catalog()
         println(catalog)
     }
+}
+```
 
-    // Publish encoded frames, or raw pixels with the codec inside the binding
+```kotlin
+// Publish encoded frames, or raw pixels with the codec inside the binding.
+// opusInit, packet, pts, and rgba come from your encoder or capture source.
+Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream.hang")
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInit, video = null))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))

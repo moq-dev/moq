@@ -19,9 +19,10 @@ moq --client-connect https://relay.example.com/anon --broadcast event.hang expor
 ffplay srt://localhost:9000
 
 # Pull from a remote encoder
-moq --client-connect https://relay.example.com/anon --broadcast event.hang import srt --connect srt://encoder.example.com:9000
+moq --client-connect https://relay.example.com/anon --broadcast event.hang import srt --connect 'srt://encoder.example.com:9000?streamid=live/cam'
 ```
 
 `--latency` sets the SRT receive buffer and doubles as the skip threshold on
-export. A listener bridges one `--broadcast` and ignores the stream id. The
+export. A `--connect` URL needs a `streamid` query or a path; a listener
+bridges one `--broadcast` and ignores the stream id it is offered. The
 library is [`moq-srt`](https://docs.rs/moq-srt).

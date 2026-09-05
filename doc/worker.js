@@ -47,11 +47,17 @@ const FLATTENED = [
 ];
 
 // Directories that became single pages, so the trailing-slash form has no index.
-const COLLAPSED = ["/concept/standard/"];
+const COLLAPSED = ["/concept/standard"];
+
+const MOVED_PERMANENTLY = 301;
 
 function redirect(pathname) {
-	if (COLLAPSED.includes(pathname)) return pathname.replace(/\/$/, "");
-	const key = pathname.replace(/\.html$/, "").replace(/\/$/, "") || "/";
+	const key =
+		pathname
+			.replace(/\/index(?:\.html)?$/, "")
+			.replace(/\.html$/, "")
+			.replace(/\/$/, "") || "/";
+	if (COLLAPSED.includes(key) && key !== pathname) return key;
 	if (key in MOVED) return MOVED[key];
 	for (const [pattern, target] of FLATTENED) {
 		if (pattern.test(key)) return key.replace(pattern, target);
@@ -65,7 +71,7 @@ export default {
 		const target = redirect(url.pathname);
 		if (target && target !== url.pathname) {
 			url.pathname = target;
-			return Response.redirect(url.toString(), 301);
+			return Response.redirect(url.toString(), MOVED_PERMANENTLY);
 		}
 		return env.ASSETS.fetch(request);
 	},

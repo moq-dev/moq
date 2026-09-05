@@ -93,5 +93,5 @@ The OBS plugin ships as a zip for Windows x64 and macOS arm64 on the
 ## Other
 
 - **Arch Linux**: a community-maintained `moq-relay-bin` PKGBUILD lives in the AUR.
-- **Alpine, air-gapped hosts**: use the static release binaries. The relay only needs glibc.
+- **Air-gapped hosts**: use the release binaries. They link glibc 2.34+, so Alpine and other musl distributions should use the Docker image or build from source.
 - **From source**: `cargo build --release -p moq-relay` (or `-p moq-cli`) in a checkout.

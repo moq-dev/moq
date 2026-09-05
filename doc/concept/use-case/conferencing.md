@@ -5,8 +5,8 @@ description: How MoQ compares with WebRTC for real-time conferencing
 
 # MoQ vs WebRTC
 
-WebRTC is the only real-time media stack browsers ship, so it is what
-conferencing uses in a tab. It is less dominant than it looks: Zoom, Teams,
+WebRTC is the integrated real-time communications stack browsers ship, so it
+is what conferencing uses in a tab. It is less dominant than it looks: Zoom, Teams,
 and Discord run custom RTP stacks in their native apps and keep WebRTC for
 browser compatibility, and the one vendor that controls `libwebrtc` gets its
 features first.

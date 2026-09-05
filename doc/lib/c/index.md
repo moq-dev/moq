@@ -5,7 +5,7 @@ description: libmoq, the stable C ABI over the Rust core
 
 # C
 
-[![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=libmoq-v*&label=libmoq)](https://github.com/moq-dev/moq/releases?q=libmoq)
+[![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=libmoq-v*\&label=libmoq)](https://github.com/moq-dev/moq/releases?q=libmoq)
 
 `libmoq` exposes MoQ to C, C++, and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
@@ -37,7 +37,8 @@ under `target/release/`.
 ```c
 int client = moq_client_create();
 struct moq_string fp = { hex_sha256, strlen(hex_sha256) };
-moq_client_set_tls_fingerprints(client, &fp, 1);
+if (moq_client_set_tls_fingerprints(client, &fp, 1) < 0)
+    return fail(moq_error());   // never dial without the pin you asked for
 int session = moq_client_connect(url, url_len, client, origin, 0, on_status, user_data);
 moq_client_close(client);   // the config was copied into the session
 ```
