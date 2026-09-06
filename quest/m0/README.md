@@ -31,7 +31,6 @@ regression test per Root Cause First.
 - [Echo-delay test runtime](/quest/m0/aec-test-runtime.md) - keep the audio regression within the normal workspace test budget
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
 - [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: retirement has no coverage for a fetch that is still opening its decoder
-- [Quest ready gate](/quest/m0/quest-ready-gate.md) - quest: nothing reports whether a quest is blocked, so the start flow reconstructs it by grepping
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
 - [Merge evidence](/quest/m0/merge-verification-evidence.md) - bind local, CI, and device results to the current source and merge candidate
 - [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
