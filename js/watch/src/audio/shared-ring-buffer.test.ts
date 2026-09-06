@@ -52,7 +52,7 @@ describe("initialization", () => {
 		expect(init.capacity).toBe(128);
 		expect(init.rate).toBe(1000);
 		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
-		expect(init.control.byteLength).toBe(3 * 4); // 3 control slots * Int32
+		expect(init.control.byteLength).toBe(4 * 4); // 4 control slots * Int32
 		expect(init.state.byteLength).toBe(8); // packed epoch + read cursor
 	});
 
@@ -865,6 +865,71 @@ describe("packed state", () => {
 		const replacement = new SharedRingBuffer(dst.init, src);
 		expect(replacement.length).toBe(48);
 	});
+
+	it("carries the consumed cursor across a replacement truncate", () => {
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		src.insert(0 as Time.Micro, [Float32Array.from({ length: 64 }, (_, i) => i + 1)]);
+		const dst = src.resize(256);
+		expect(read(src, 16, 1)[0]).toEqual(Float32Array.from({ length: 16 }, (_, i) => i + 1));
+		dst.truncate(Time.Micro.fromMilli(48 as Time.Milli));
+
+		const replacement = new SharedRingBuffer(dst.init, src);
+		expect(replacement.length).toBe(32);
+		expect(read(replacement, 64, 1)[0]).toEqual(Float32Array.from({ length: 32 }, (_, i) => i + 17));
+		expect(read(replacement, 64, 1)[0].length).toBe(0);
+	});
+
+	for (const operation of ["truncate", "re-anchor"] as const) {
+		for (const point of ["state", "timeline", "exchange"] as const) {
+			it(`preserves the timeline when ${operation} races handoff at ${point}`, () => {
+				const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+				insert(src, 0, 64, { channels: 1, value: 1 });
+				const dst = src.resize(256);
+				read(src, 16, 1);
+				let fired = false;
+				const mutate = () => {
+					fired = true;
+					if (operation === "truncate") {
+						dst.truncate(Time.Micro.fromMilli(48 as Time.Milli));
+					} else {
+						dst.reset();
+						insert(dst, 1000, 64, { channels: 1, value: 2 });
+					}
+				};
+				const realLoad = Atomics.load;
+				const realExchange = Atomics.compareExchange;
+				const atomics = Atomics as { load: unknown; compareExchange: unknown };
+				atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
+					const value = realLoad(arr as Int32Array, idx);
+					if (
+						!fired &&
+						((point === "state" && arr.buffer === dst.init.state) ||
+							(point === "timeline" && arr.buffer === dst.init.control && idx === 3))
+					)
+						mutate();
+					return value;
+				};
+				atomics.compareExchange = (arr: BigInt64Array, idx: number, expected: bigint, next: bigint) => {
+					if (!fired && point === "exchange" && arr.buffer === dst.init.state) mutate();
+					return realExchange(arr, idx, expected, next);
+				};
+				let replacement: SharedRingBuffer;
+				try {
+					replacement = new SharedRingBuffer(dst.init, src);
+				} finally {
+					atomics.load = realLoad;
+					atomics.compareExchange = realExchange;
+				}
+				expect(fired).toBe(true);
+				const count = operation === "truncate" ? 32 : 64;
+				expect(replacement.length).toBe(count);
+				expect(read(replacement, 64, 1)[0]).toEqual(
+					new Float32Array(count).fill(operation === "truncate" ? 1 : 2),
+				);
+				expect(read(replacement, 64, 1)[0].length).toBe(0);
+			});
+		}
+	}
 
 	it("drops the carried cursor when the replacement re-anchored first", () => {
 		// A different timeline: the cursor describes audio the replacement has never played.

@@ -4,10 +4,12 @@ import { Time } from "@moq/net";
 const WRITE = 0;
 const LATENCY = 1;
 const STALLED = 2;
-const CONTROL_SLOTS = 3;
+// Timeline identity changes only on re-anchor, independently of the packed mutation epoch.
+const TIMELINE = 3;
+const CONTROL_SLOTS = 4;
 
 /**
- * The playhead and the timeline it belongs to, packed into one 64-bit word: epoch in the high
+ * The playhead and its mutation epoch, packed into one 64-bit word: epoch in the high
  * half, read cursor in the low half.
  *
  * They have to move together. The reader samples the ring, copies, and only then publishes, and
@@ -24,7 +26,7 @@ function pack(epoch: number, read: number): bigint {
 }
 
 /**
- * The timeline half. Even while the timeline is settled, odd while `truncate` retreats WRITE.
+ * The mutation epoch. Even while settled, odd while `truncate` retreats WRITE.
  *
  * WRITE lives in a different word, so a retreat cannot move it and the epoch together. Marking
  * the epoch on either side of the retreat is what covers the gap: a reader that snapshotted
@@ -165,19 +167,20 @@ export class SharedRingBuffer {
 	/**
 	 * Carry `source`'s playhead across, if the replacement is still the timeline it belongs to.
 	 *
-	 * `resize` copies the epoch, so a destination that re-anchored since has a different one and
-	 * the cursor is dropped rather than applied to audio the reader has never played. The check
-	 * and the write are the same exchange, so a re-anchor landing mid-handoff makes it fail
-	 * instead of slipping through the gap that separate operations would leave.
+	 * Truncation changes the mutation epoch but preserves timeline identity. Sample state before
+	 * identity: a re-anchor publishes identity first, then replaces state. Either the identity
+	 * check rejects the old cursor, the exchange fails, or the re-anchor overwrites the carried
+	 * cursor. A truncate only forces a retry, preserving audio consumed since the resize.
 	 */
 	#handoff(source: SharedRingBuffer): void {
 		if (source.channels !== this.channels || source.rate !== this.rate) return;
 
+		const timeline = Atomics.load(source.#control, TIMELINE);
 		const from = Atomics.load(source.#state, 0);
 
 		for (;;) {
 			const state = Atomics.load(this.#state, 0);
-			if (epochOf(state) !== epochOf(from)) return;
+			if (Atomics.load(this.#control, TIMELINE) !== timeline) return;
 			if (((readOf(from) - readOf(state)) | 0) <= 0) return;
 
 			const next = pack(epochOf(state), readOf(from));
@@ -205,7 +208,7 @@ export class SharedRingBuffer {
 	/**
 	 * Step the epoch by one, leaving the playhead wherever the reader has taken it.
 	 *
-	 * Retries while the word changes under it: only the timeline half is the writer's to move.
+	 * Retries while the word changes under it: only the epoch half is the writer's to move.
 	 */
 	#step(): void {
 		for (;;) {
@@ -233,6 +236,8 @@ export class SharedRingBuffer {
 			// One store rebases both halves, so a reader's compare-exchange against the old word
 			// cannot land afterwards. Two, because odd epochs belong to `truncate`.
 			const epoch = epochOf(Atomics.load(this.#state, 0));
+			// Publish identity first so a handoff cannot apply an old cursor to the new state.
+			Atomics.add(this.#control, TIMELINE, 1);
 			Atomics.store(this.#state, 0, pack((epoch + 2) | 0, 0));
 			Atomics.store(this.#control, WRITE, 0);
 			this.#anchored = true;
@@ -448,6 +453,7 @@ export class SharedRingBuffer {
 			}
 		}
 
+		Atomics.store(dst.#control, TIMELINE, Atomics.load(this.#control, TIMELINE));
 		Atomics.store(dst.#state, 0, pack(epochOf(state), copyStart));
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
