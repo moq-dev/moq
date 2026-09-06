@@ -575,9 +575,9 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> Response {
 	// The first certificate in configuration order, deliberately. The endpoint
 	// exists so an `http://` client can pin a self-signed development
 	// certificate, where there is exactly one. With several configured there is
-	// no single answer: quinn and noq select by SNI at handshake, while quiche
-	// serves the first pair to everyone. Those clients pin explicitly or use
-	// `https://`.
+	// no single answer: quinn and noq select by SNI at handshake, so those
+	// clients use `https://`, while quiche serves the first pair to everyone and
+	// the rest need an explicit `--client-tls-fingerprint` pin.
 	match state.certificates.fingerprints().into_iter().next() {
 		Some(fingerprint) => fingerprint.into_response(),
 		// A stream-only relay has no certificate to pin.

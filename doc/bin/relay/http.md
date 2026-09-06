@@ -23,10 +23,11 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 ```
 
 A relay configured with more than one certificate has no single fingerprint to
-publish, and this endpoint answers for the first. The quinn and noq backends
-select by SNI at handshake, so which one a client is offered depends on the name
-it dials; the quiche backend serves the first pair to everyone. Either way, pin
-explicitly with `--client-tls-fingerprint`, or use `https://`.
+publish, and this endpoint answers for the first. On the quinn and noq backends
+the others are reachable over `https://`, which selects by SNI at handshake. The
+quiche backend serves the first pair to every handshake, so a name covered only
+by a later certificate needs an explicit `--client-tls-fingerprint`, which checks
+the fingerprint in place of the hostname.
 
 Tokens sent over plain HTTP are visible on the wire, so use HTTPS in
 production.
