@@ -761,3 +761,14 @@ fn ready_listing_follows_nested_priority_and_terminates_cycles() {
 	tree.write("quest/m0/line/README.md", "# Line\n\n## Quests\n\n- [Two](/quest/m0/line/two.md)\n- [Self](/quest/m0/line/README.md)\n- [One](/quest/m0/line/one.md)\n");
 	assert_eq!(tree.ready(), ["quest/m0/line/two.md", "quest/m0/line/one.md"]);
 }
+
+#[test]
+fn ready_listing_appends_unindexed_quests() {
+	let tree = Tree::new();
+	tree.write("quest/m0/aaa.md", "# [S] Unindexed\n\n## Goal\n\nDiscover me.\n");
+	tree.write(
+		"quest/m0/blocked.md",
+		"# [S] Blocked\n\n## Goal\n\nWait.\n\n## Required\n\n- External condition\n",
+	);
+	assert_eq!(tree.ready(), ["quest/m0/line/one.md", "quest/m0/aaa.md"]);
+}

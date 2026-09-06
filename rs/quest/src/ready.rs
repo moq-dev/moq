@@ -90,6 +90,12 @@ pub fn quests(root: &Path) -> Result<Vec<PathBuf>> {
 			ready.push(path);
 		}
 	}
+	ready.extend(
+		remaining
+			.into_iter()
+			.filter(|(_, doc)| !doc.is_questline() && !doc.has("Required"))
+			.map(|(path, _)| path),
+	);
 	Ok(ready)
 }
 
