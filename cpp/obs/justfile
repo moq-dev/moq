@@ -80,10 +80,10 @@ run:
 # set here to match.
 #
 # test/ is in scope because each test file defines the libmoq entry points the
-# plugin calls, so a signature there that has drifted from the generated moq.h
-# is a conflicting C declaration. Only `just obs ci` and `just obs test` ever
-# compiled those, and neither runs on every PR, so a libmoq ABI change could
-# leave a stub stale and stay green until the next OBS build.
+# plugin calls, so a signature that drifts from the generated moq.h is a
+# conflicting C declaration. Catching that needs only headers, which is why it
+# belongs here: `just obs ci` finds the same drift, but only where obs.yml's
+# path filter reaches, and `just obs test` is manual.
 compile:
     #!/usr/bin/env bash
     set -euo pipefail
