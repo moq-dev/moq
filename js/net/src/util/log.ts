@@ -1,19 +1,14 @@
-/**
- * Renders a URL for logging as its origin plus path, dropping the query and fragment.
- *
- * A relay URL carries its auth token in `?jwt=`, so this is the only safe way to log one.
- */
+/** Renders a relay URL without user credentials, query parameters, or fragment. */
 export function redact(url: URL): string {
 	return `${url.origin}${url.pathname}`;
 }
 
-/**
- * Whether to emit diagnostics, matching the `DEV` check in `@moq/signals`.
- *
- * Read per call instead of cached in a module constant so the value tracks the
- * environment the consumer's bundler defines, not whenever this module loaded.
- */
+/** Whether the consumer environment enables development diagnostics. */
 export function dev(): boolean {
+	// Bundlers expose a boolean DEV; Bun exposes environment variables as strings.
 	// @ts-ignore - Some environments don't recognize import.meta.env
-	return typeof import.meta.env !== "undefined" && import.meta.env?.MODE !== "production";
+	const env = import.meta.env;
+	if (typeof env === "undefined") return false;
+	if (typeof env.DEV === "boolean") return env.DEV;
+	return env.NODE_ENV !== "production" && env.MODE !== "production";
 }
