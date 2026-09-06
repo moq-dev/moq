@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::Config;
-use crate::{Error, Result, Server, listen::Member};
+use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Member};
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -297,7 +297,7 @@ impl Spawner<'_> {
 			// The factory runs inside the task, not as the argument to the spawn:
 			// panicking while building the future is then the task's panic, not the
 			// worker thread's.
-			let task = AbortOnDrop(tokio::task::spawn_local(async move { make().await }));
+			let task = AbortOnDrop::new(tokio::task::spawn_local(async move { make().await }));
 			// The guard travels with the handle, so every way of losing it from here
 			// on (a failed send, a caller that aborts while it is still in flight,
 			// the forwarding task below being cancelled) cancels the task instead of
@@ -308,7 +308,7 @@ impl Spawner<'_> {
 
 		self.handle.spawn(async move {
 			let mut task = task_rx.await.expect("worker stopped before spawning task");
-			match (&mut task.0).await {
+			match (&mut *task).await {
 				Ok(output) => output,
 				Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
 				Err(err) => panic!("worker-local task cancelled: {err}"),
@@ -425,19 +425,6 @@ struct Ready {
 
 /// A future factory that is sent to and invoked by its worker thread.
 type Spawn = Box<dyn FnOnce() + Send + 'static>;
-
-/// Owns a worker-local task from the moment it is spawned, cancelling it if the
-/// handle standing for it is lost.
-///
-/// A bare [`tokio::task::JoinHandle`] detaches on drop, which would leave the
-/// task running unreachable on its worker until the whole group stopped.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-	fn drop(&mut self) {
-		self.0.abort();
-	}
-}
 
 /// One worker thread: pin, bind, report, then park until it is stopped.
 ///

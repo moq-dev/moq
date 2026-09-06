@@ -9,6 +9,7 @@ use moq_net::kio;
 use rand::RngExt;
 use url::Url;
 
+use crate::abort::AbortOnDrop;
 use crate::connect::Endpoint;
 use crate::{Addrs, Client, Error};
 
@@ -515,7 +516,7 @@ impl ConnectionStatsReader {
 #[derive(Clone)]
 #[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]
 pub struct Connection {
-	task: std::sync::Arc<AbortOnDrop>,
+	task: std::sync::Arc<Task>,
 	state: kio::Consumer<State>,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
@@ -526,16 +527,11 @@ pub struct Connection {
 	last_reported: Option<Status>,
 }
 
-/// Aborts the connection loop when the last [`Connection`] clone drops.
-struct AbortOnDrop {
-	handle: tokio::task::AbortHandle,
+/// The connection loop, shared by every [`Connection`] clone and aborted when the
+/// last one drops.
+struct Task {
+	handle: AbortOnDrop,
 	closed: CloseGuard,
-}
-
-impl Drop for AbortOnDrop {
-	fn drop(&mut self) {
-		self.handle.abort();
-	}
 }
 
 /// Serializes [`Connection::abort`] against the loop publishing a fresh session.
@@ -583,8 +579,8 @@ impl Connection {
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
 		Self {
-			task: std::sync::Arc::new(AbortOnDrop {
-				handle: task.abort_handle(),
+			task: std::sync::Arc::new(Task {
+				handle: AbortOnDrop::new(task),
 				closed,
 			}),
 			state,

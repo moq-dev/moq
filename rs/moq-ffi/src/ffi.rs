@@ -57,6 +57,20 @@ pub(crate) fn spawn<F: Future<Output = ()> + 'static>(future: F) {
 	web_async::spawn(future);
 }
 
+/// Aborts a spawned task when the future awaiting it is dropped.
+///
+/// Aborting one that already finished is a no-op, so this is inert on the happy path.
+/// Native only: wasm32 has no runtime to spawn onto, so its callers await in place.
+#[cfg(not(target_arch = "wasm32"))]
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// Run a future to completion off the caller's thread, mapping its error into [`MoqError`].
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
@@ -65,14 +79,6 @@ where
 	T: Send + 'static,
 	E: Into<MoqError> + Send + 'static,
 {
-	struct AbortOnDrop(tokio::task::AbortHandle);
-
-	impl Drop for AbortOnDrop {
-		fn drop(&mut self) {
-			self.0.abort();
-		}
-	}
-
 	let task = RUNTIME.spawn(future);
 	let _abort = AbortOnDrop(task.abort_handle());
 	match task.await {
@@ -236,20 +242,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
 	fn drop(&mut self) {
 		self.cancel();
-	}
-}
-
-/// Aborts a spawned task when the future awaiting it is dropped.
-///
-/// Aborting one that already finished is a no-op, so this is inert on the happy path.
-/// Native only: wasm32 has no runtime to spawn onto, so `run` awaits in place there.
-#[cfg(not(target_arch = "wasm32"))]
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for AbortOnDrop {
-	fn drop(&mut self) {
-		self.0.abort();
 	}
 }
 
