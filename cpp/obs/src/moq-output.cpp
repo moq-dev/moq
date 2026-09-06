@@ -129,8 +129,8 @@ bool MoQOutput::Start()
 	}
 
 	const char *server_value = obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL);
-	server_url = server_value ? server_value : "";
-	if (server_url.empty()) {
+	const std::string url = server_value ? server_value : "";
+	if (url.empty()) {
 		LOG_ERROR("Server URL is empty");
 		SignalStop(OBS_OUTPUT_BAD_PATH);
 		return false;
@@ -166,7 +166,7 @@ bool MoQOutput::Start()
 		return false;
 	}
 
-	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(server_url).c_str());
+	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(url).c_str());
 
 	// Held from the connect through obs_output_begin_data_capture. The status
 	// callback takes the same lock before reporting anything, so this attempt's
@@ -179,6 +179,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
 		attempt = session_attempt;
+		server_url = url;
 
 		// Pre-account for the session subscription before handing the reference to
 		// libmoq: the connection can fail and fire its terminal callback before
@@ -189,12 +190,12 @@ bool MoQOutput::Start()
 	// Everything the callbacks need about this attempt, copied so they never read
 	// a member the next Start() may be rewriting. Freed by the terminal callback,
 	// so it outlives this scope.
-	auto ref = new SessionRef{this, attempt, server_url, std::chrono::steady_clock::now()};
+	auto ref = new SessionRef{this, attempt, url, std::chrono::steady_clock::now()};
 
 	// Start establishing a session with the MoQ server
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
-	int handle = moq_client_connect(server_url.data(), server_url.size(), (uint32_t)client, origin, 0,
-					MoQOutput::SessionStatus, ref);
+	int handle =
+		moq_client_connect(url.data(), url.size(), (uint32_t)client, origin, 0, MoQOutput::SessionStatus, ref);
 
 	// The connect copied the config, so the handle has done its job either way.
 	if (client > 0)
@@ -203,6 +204,7 @@ bool MoQOutput::Start()
 	if (handle < 0) {
 		const char *reason = moq_error();
 		LOG_ERROR("Failed to initialize MoQ server: %d: %s", handle, reason ? reason : "unknown error");
+		obs_output_set_last_error(output, reason ? reason : "Failed to initialize MoQ connection");
 		delete ref;
 		// No subscription was created, so no terminal will fire; undo the ref.
 		std::lock_guard<std::mutex> lock(session_mutex);
@@ -227,7 +229,7 @@ bool MoQOutput::Start()
 		// The session died during connect without going through the callback's
 		// signal path. Refuse the start rather than capturing into a dead session;
 		// OBS surfaces the last error we recorded when info.start returns false.
-		LOG_ERROR("MoQ session failed before the output started: %s", MoQRedactUrl(server_url).c_str());
+		LOG_ERROR("MoQ session failed before the output started: %s", MoQRedactUrl(url).c_str());
 		return false;
 	}
 
@@ -283,6 +285,7 @@ void MoQOutput::Reset()
 		session_connected = false;
 		connect_time_ms = 0;
 		session_epoch = 0;
+		server_url.clear();
 		last_failure_code = 0;
 		last_failure_reason.clear();
 		stale = session;
@@ -348,30 +351,32 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		return false;
 	}
 
-	*out = {};
-	out->reconnects = GetReconnectCount();
-	out->rtt_valid = raw.rtt_valid;
-	out->rtt_ms = raw.rtt_valid ? static_cast<double>(raw.rtt_us) / 1000.0 : 0;
-	out->send_rate_valid = raw.send_rate_valid;
-	out->send_rate_bps = raw.send_rate_valid ? static_cast<double>(raw.send_rate_bps) : 0;
-	out->recv_rate_valid = raw.recv_rate_valid;
-	out->recv_rate_bps = raw.recv_rate_valid ? static_cast<double>(raw.recv_rate_bps) : 0;
-	out->bytes_sent_valid = raw.bytes_sent_valid;
-	out->bytes_sent = raw.bytes_sent_valid ? raw.bytes_sent : 0;
+	ConnectionStats snapshot;
+	snapshot.reconnects = GetReconnectCount();
+	snapshot.rtt_valid = raw.rtt_valid;
+	snapshot.rtt_ms = raw.rtt_valid ? static_cast<double>(raw.rtt_us) / 1000.0 : 0;
+	snapshot.send_rate_valid = raw.send_rate_valid;
+	snapshot.send_rate_bps = raw.send_rate_valid ? static_cast<double>(raw.send_rate_bps) : 0;
+	snapshot.recv_rate_valid = raw.recv_rate_valid;
+	snapshot.recv_rate_bps = raw.recv_rate_valid ? static_cast<double>(raw.recv_rate_bps) : 0;
+	snapshot.bytes_sent_valid = raw.bytes_sent_valid;
+	snapshot.bytes_sent = raw.bytes_sent_valid ? raw.bytes_sent : 0;
 	if (raw.packets_sent_valid && raw.packets_lost_valid && raw.packets_sent > 0) {
-		out->loss_valid = true;
-		out->loss_pct = 100.0 * static_cast<double>(raw.packets_lost) / static_cast<double>(raw.packets_sent);
+		snapshot.loss_valid = true;
+		snapshot.loss_pct =
+			100.0 * static_cast<double>(raw.packets_lost) / static_cast<double>(raw.packets_sent);
 	}
-	out->dial = DialSchemeLabel(dialUrl);
+	snapshot.dial = DialSchemeLabel(dialUrl);
 
 	moq_string version{};
 	if (moq_session_version(handle, &version) == 0 && version.data && version.len > 0)
-		out->protocol.assign(version.data, version.len);
+		snapshot.protocol.assign(version.data, version.len);
 
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
 		if (session_attempt != attempt || static_cast<uint32_t>(session) != handle)
 			return false;
+		*out = std::move(snapshot);
 	}
 
 	return true;

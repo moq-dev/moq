@@ -27,6 +27,7 @@ public:
 
 	// Point-in-time QUIC/WebTransport health for the live session. False when
 	// there is no session or libmoq is between reconnects (no live connection).
+	// A failed read leaves the caller's snapshot unchanged.
 	struct ConnectionStats {
 		int reconnects = 0;
 		bool rtt_valid = false;

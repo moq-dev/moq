@@ -2,6 +2,7 @@
 #include "moq-dock.h"
 #include "moq-advanced-dialog.h"
 #include "moq-output.h"
+#include "moq-error.h"
 #include "moq-quality-defaults.h"
 #include "moq-settings.h"
 #include "logger.h"
@@ -164,34 +165,33 @@ static QString ExtractTimeout(const QString &raw)
 // over the reconnect wrapper so the publisher knows what to fix.
 QString ExplainFailure(int code, const std::string &reason)
 {
-	const QString raw = QString::fromUtf8(reason.c_str());
-	const QString lower = raw.toLower();
-	const QString timeout = ExtractTimeout(lower);
-
-	if (lower.contains(QStringLiteral("unauthorized")) || code == -34) {
+	const QString timeout = ExtractTimeout(QString::fromStdString(reason).toLower());
+	switch (MoQError::Classify(code, reason)) {
+	case MoQError::Kind::Unauthorized: {
 		QString text = QStringLiteral("Unauthorized · relay rejected this URL or token");
 		if (!timeout.isEmpty())
 			text += QStringLiteral(" · gave up after ") + timeout;
 		return text;
 	}
-	if (lower.contains(QStringLiteral("forbidden")) || code == -35)
+	case MoQError::Kind::Forbidden:
 		return QStringLiteral("Forbidden · this broadcast path is not allowed");
-	if (lower.contains(QStringLiteral("fingerprint")) || lower.contains(QStringLiteral("certificate")))
+	case MoQError::Kind::Certificate:
 		return QStringLiteral("Could not trust the relay certificate");
-	if (lower.contains(QStringLiteral("timed out")) || lower.contains(QStringLiteral("timeout"))) {
+	case MoQError::Kind::Timeout: {
 		QString text = QStringLiteral("Timed out reaching the relay");
 		if (!timeout.isEmpty())
 			text += QStringLiteral(" · gave up after ") + timeout;
 		return text;
 	}
-	if (lower.contains(QStringLiteral("failed to connect")) || lower.contains(QStringLiteral("dns")))
+	case MoQError::Kind::Network:
 		return QStringLiteral("Could not reach the relay · check the URL and network");
-	if (code == -5 || lower.contains(QStringLiteral("connect error")))
+	case MoQError::Kind::Connect:
 		return QStringLiteral("Connect failed · the relay did not accept the session");
-	if (code == -17 || lower == QStringLiteral("offline"))
+	case MoQError::Kind::Offline:
 		return {};
-	if (!raw.isEmpty())
-		return raw;
+	case MoQError::Kind::Other:
+		return QString::fromStdString(reason);
+	}
 	return {};
 }
 
@@ -670,8 +670,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 MoQDock::~MoQDock()
 {
-	// Mark closing first so a deferred OBS stop callback refuses begin(), then
-	// disconnect and clear the dock pointer before waiting for in-flight work.
+	// OBS disconnect takes the dispatch mutex, so StopStream waits for active
+	// stop callbacks before the cookie can be freed. Queued work uses QPointer.
 	stopCookie->bridge->markClosing();
 	StopStream();
 	{
@@ -1141,9 +1141,11 @@ void MoQDock::StartStream()
 
 	if (!obs_output_start(output)) {
 		const char *err = obs_output_get_last_error(output);
-		status->setText(err ? QString("Failed to start: %1").arg(err) : "Failed to start");
+		const QString failure = err && *err ? ExplainFailure(0, err) : QString("Failed to start");
 		LOG_ERROR("Failed to start MoQ dock output: %s", err ? err : "(no error)");
 		StopStream();
+		status->setText(failure);
+		status->setStyleSheet("color: #c0392b;");
 		return;
 	}
 

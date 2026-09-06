@@ -165,6 +165,7 @@ pub struct moq_video_properties {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct moq_video_hint {
 	/// Encoded width in pixels when `has_coded` is true.
 	pub coded_width: u32,
@@ -1802,7 +1803,8 @@ pub unsafe extern "C" fn moq_publish_media(
 /// Same as [moq_publish_media], plus `hint`: pass NULL for none, or a
 /// zeroed [moq_video_hint] with the `has_*` flags set for fields to seed
 /// (notably bitrate, so a downstream transcoder can size same-height rungs
-/// before measured rates arrive).
+/// before measured rates arrive). A non-NULL hint is supported only for codec
+/// formats; container formats return an invalid-config error before parsing init.
 ///
 /// # Safety
 /// - Same pointer rules as [moq_publish_media].

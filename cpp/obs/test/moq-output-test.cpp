@@ -187,6 +187,8 @@ std::atomic<bool> g_connect_fires_terminal_threaded{false};
 std::atomic<bool> g_stats_offline{false};
 // When true, only RTT is marked valid (dock must omit the rest).
 std::atomic<bool> g_stats_partial{false};
+std::function<void()> g_during_version;
+std::atomic<bool> g_connect_rejected{false};
 std::thread g_connect_terminal_thread;
 const char *g_error = "unauthorized";
 } // namespace
@@ -241,6 +243,8 @@ int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
 int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_status)(void *, int32_t),
 			    void *user_data)
 {
+	if (g_connect_rejected)
+		return -34;
 	g_on_status = on_status;
 	g_user_data = user_data;
 	int handle = g_next_handle++;
@@ -306,6 +310,8 @@ int32_t moq_session_stats(uint32_t session, moq_connection_stats *dst)
 
 int32_t moq_session_version(uint32_t, moq_string *)
 {
+	if (g_during_version)
+		g_during_version();
 	return -1;
 }
 
@@ -384,6 +390,8 @@ void reset()
 	g_connect_fires_terminal_threaded = false;
 	g_stats_offline = false;
 	g_stats_partial = false;
+	g_during_version = nullptr;
+	g_connect_rejected = false;
 	g_stall_last_error = false;
 	g_in_report_window = false;
 }
@@ -413,6 +421,18 @@ int main()
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 	}
 	printf("invalid advanced settings: ok\n");
+
+	// A synchronous connect rejection creates no callback to supply the error later.
+	{
+		reset();
+		g_connect_rejected = true;
+		MoQOutput o(nullptr, out);
+		CHECK(!o.Start());
+		CHECK(g_on_status == nullptr);
+		CHECK(g_begin_capture == 0);
+		CHECK(g_last_error == "unauthorized");
+	}
+	printf("synchronous connect error preserved: ok\n");
 
 	// Reconnection gave up after the session had been up: OBS must be told, with
 	// the libmoq reason attached, so it stops reporting a live stream.
@@ -717,6 +737,31 @@ int main()
 		CHECK(!o.TryGetConnectionStats(&stats));
 	}
 	printf("reconnect count cleared on fatal: ok\n");
+
+	// Restart between reading metrics and committing the snapshot. Reject it
+	// without overwriting the caller's last accepted sample.
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		CHECK(o.Start());
+		MoQOutput::ConnectionStats stats;
+		stats.rtt_ms = 99;
+		stats.dial = "previous";
+		g_during_version = [&] {
+			o.Stop(false);
+			fire(0);
+			CHECK(o.Start());
+		};
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_ms == 99);
+		CHECK(stats.dial == "previous");
+		g_during_version = nullptr;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_ms == 12.5);
+		o.Stop(false);
+		fire(0);
+	}
+	printf("restart rejects uncommitted stats: ok\n");
 
 	// The terminal callback racing a user-initiated stop, repeatedly. Whichever
 	// wins, the failure signal fires at most once per Start().

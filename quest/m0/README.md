@@ -15,6 +15,7 @@ regression test per Root Cause First.
 
 ## Quests
 
+- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - keep output state alive through delayed terminal callbacks
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
 - [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: a framework binding the element reads `broadcast` before the custom element is upgraded
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks

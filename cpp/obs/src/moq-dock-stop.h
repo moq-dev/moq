@@ -5,10 +5,8 @@
 #include <condition_variable>
 #include <mutex>
 
-// Lifetime bridge for MoQDock::OnOutputStopped. OBS may defer
-// signal_handler_disconnect while a stop signal is still dispatching, so a
-// queued Qt lambda can outlive the dock unless we track in-flight work and
-// refuse new work once destruction starts.
+// Tracks OBS-thread work in MoQDock::OnOutputStopped. Queued Qt work must
+// not hold an activity reference: dock destruction runs on that event loop.
 struct MoQDockStopBridge {
 	std::mutex mutex;
 	std::condition_variable cv;
