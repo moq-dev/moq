@@ -426,7 +426,7 @@ export class Encoder {
  * {@link frameDuration} keeps the exact value the encoder is configured with, which is what lets
  * Opus run at 2.5 ms.
  */
-export type Resolved = {
+type Resolved = {
 	/** The rendition config published in the catalog. */
 	catalog: Catalog.AudioConfig;
 
@@ -437,6 +437,7 @@ export type Resolved = {
 /**
  * Resolve a {@link Codec} against the captured PCM format, giving what the encoder will run with
  * and the catalog rendition published alongside it.
+ * @internal
  */
 export function resolve(captured: Format, selected: Codec): Resolved {
 	const codec = normalizeCodec(selected);

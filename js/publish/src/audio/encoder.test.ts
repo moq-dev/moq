@@ -1,20 +1,29 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import type { Format } from "./capture";
 import { resolve } from "./encoder";
 
+// Bun does not load Vite's worklet URL imports from the public audio entrypoint.
+mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+
+const Audio = await import("./index");
+
 const captured: Format = { sampleRate: 48_000, channelCount: 2 };
 
 describe("resolve", () => {
+	test("keeps resolution out of the public audio namespace", () => {
+		// @ts-expect-error Resolution is internal to the encoder.
+		expect(Audio.resolve).toBeUndefined();
+	});
+
 	test("defaults Opus to 20ms", () => {
 		const resolved = resolve(captured, "opus");
 		expect(resolved.frameDuration).toBe(Time.Micro(20_000));
 		expect(resolved.catalog.jitter).toBe(Catalog.u53(20));
 	});
 
-	// The catalog jitter is a whole-millisecond hint, so it used to be the only place the frame
-	// duration lived and 2.5ms could not be published at all.
+	// The exact frame duration is independent of the catalog's whole-millisecond jitter hint.
 	test("keeps a 2.5ms Opus frame exact and rounds the catalog hint up", () => {
 		const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(2.5) });
 		expect(resolved.frameDuration).toBe(Time.Micro(2_500));
