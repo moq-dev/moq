@@ -25,7 +25,6 @@ impl Upstream {
 	///
 	/// Fails when the reference escapes above the origin root and so names no broadcast at all.
 	pub fn bind(&self, rel: Option<&moq_net::PathRelativeOwned>) -> moq_mux::Result<moq_mux::Binding> {
-		let rel = rel.map(|rel| &**rel);
 		if self.source.resolve_reference(rel) == self.source.resolve_reference(None) {
 			Ok(moq_mux::Binding::new(self.broadcast.clone()))
 		} else {
