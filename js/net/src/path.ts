@@ -384,6 +384,7 @@ export function compareSpecificity(a: Specificity, b: Specificity): number {
 const WILDCARD: Segment = { kind: "wildcard" };
 const GLOBSTAR: Segment = { kind: "globstar" };
 const UTF8 = new TextEncoder();
+const MAX_PATTERN_SEGMENTS = 32;
 
 /** The non-empty segments of a path, normalized like a broadcast path. */
 function splitPath(path: string): string[] {
@@ -523,7 +524,9 @@ function reversed<T>(list: readonly T[]): T[] {
  */
 export class Pattern {
 	/** The most segments a pattern may have, matching the path limit on the wire. */
-	static readonly MAX_SEGMENTS = 32;
+	static get MAX_SEGMENTS(): number {
+		return MAX_PATTERN_SEGMENTS;
+	}
 
 	/** The canonical text: segments joined by `/`, wildcards as `*` and `**`. */
 	readonly text: string;
@@ -536,8 +539,8 @@ export class Pattern {
 	readonly #head: number;
 
 	private constructor(segments: readonly Segment[]) {
-		if (segments.length > Pattern.MAX_SEGMENTS) {
-			throw new PatternError("too-many-segments", `more than ${Pattern.MAX_SEGMENTS} segments`);
+		if (segments.length > MAX_PATTERN_SEGMENTS) {
+			throw new PatternError("too-many-segments", `more than ${MAX_PATTERN_SEGMENTS} segments`);
 		}
 		const owned = segments.map(freezeSegment);
 		segments = owned;
