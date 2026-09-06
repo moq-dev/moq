@@ -500,8 +500,10 @@ fn terminal(state: &State) -> Error {
 mod tests {
 	#[tokio::test]
 	async fn snapshot_uses_one_live_session() {
-		let mut config = crate::ServerConfig::default();
-		config.bind = Some("[::]:0".into());
+		let mut config = crate::ServerConfig {
+			bind: Some("[::]:0".into()),
+			..Default::default()
+		};
 		config.tls.generate = vec!["localhost".into()];
 		let mut server = config.init().unwrap();
 		let url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
