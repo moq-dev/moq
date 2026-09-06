@@ -1,6 +1,8 @@
 # The libFuzzer harness for moq-net's wire codecs. Its own workspace (and lockfile):
 # libFuzzer needs a nightly toolchain and sanitizer flags, so this must not be part
 # of the build `just check` and `just test` run. `just rs fuzz <target>` drives it.
+# `just rs check` still re-resolves the lockfile below (metadata only, nothing is
+# compiled) so it cannot drift from the path dependencies it shares.
 #
 # The target bodies live in `moq-net`'s hidden `fuzz` module, not here: `lite` and
 # `ietf` are private modules, so this crate cannot reach a single decoder, and sharing
