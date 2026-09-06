@@ -22,9 +22,11 @@ curl http://localhost:4443/announced/demo
 curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 ```
 
-Certificates are selected by SNI at handshake, so a relay configured with more
-than one has no single fingerprint to publish and this endpoint answers for the
-first. Pin those explicitly with `--client-tls-fingerprint`, or use `https://`.
+A relay configured with more than one certificate has no single fingerprint to
+publish, and this endpoint answers for the first. The quinn and noq backends
+select by SNI at handshake, so which one a client is offered depends on the name
+it dials; the quiche backend serves the first pair to everyone. Either way, pin
+explicitly with `--client-tls-fingerprint`, or use `https://`.
 
 Tokens sent over plain HTTP are visible on the wire, so use HTTPS in
 production.

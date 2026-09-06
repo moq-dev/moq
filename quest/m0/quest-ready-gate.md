@@ -8,10 +8,11 @@ start and spawn flows stop reconstructing that answer by grepping.
 ## Plan
 
 [quest/AGENTS.md](/quest/AGENTS.md) says only ready quests are executed and that
-a missing `Required` section is what makes one ready, but the only thing that
-reads `Required` is `quest check`, which proves the section is well-formed and
-acyclic. Those are properties of the tree; neither says whether a given quest can
-be started now.
+a missing `Required` section is what makes one ready. The only `rs/quest` command
+that reads `Required` is `quest check`, which proves the section is well-formed
+and acyclic: properties of the tree, neither of which says whether a given quest
+can be started now. The start and spawn flows answer that themselves, by grepping
+for the heading.
 
 The gap has been paid.
 [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md)
@@ -26,10 +27,13 @@ Add a `ready` subcommand to `rs/quest`:
   blocker, since nothing in the tree can clear it;
 - with no path, list every ready quest in tree order, which is the query the
   start flow reproduces by grepping today;
-- exit 0 either way. This is advice, not a gate: a caller under `set -e` would
-  otherwise turn a blocked quest into a hard stop, and starting a blocked quest
-  deliberately is sometimes right. Reserve a non-zero exit for the command
-  failing, the way any other tool does.
+- exit 0 either way, with the blocker list itself as the machine-readable
+  result: no output means ready, so a caller tests that rather than parsing
+  prose. Reserve a non-zero exit for the command failing, the way any other tool
+  does. Exiting non-zero on a blocked quest would hand every `set -e` caller a
+  gate it did not ask for, and starting a blocked quest deliberately, to land a
+  piece that turns out to be independent, is sometimes right. The decision stays
+  with the caller, which is the half that knows which case it is in.
 
 Liveness stays out. A quest can be ready, coherent, and already done:
 [#2979](/quest/m1/2979-moq-tokio-does-not-compile-with-no-default-features-and.md)
