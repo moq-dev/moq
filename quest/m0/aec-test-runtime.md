@@ -30,6 +30,23 @@ Keep the normal timeout and full convergence assertion. Validate the fix in
 the full suite and under representative concurrent development load, and
 confirm that the upstream adaptive-filter shrink regression remains covered.
 
+Facts already established, so the measurement starts from them. The input is
+fixed run to run: `Room` is driven by the xorshift `Noise`, so whatever varies
+is the host or the profile, never the workload. That workload is 1500 calls to
+`Room::round`: 400 to grow the filter past its starting size, five 200-round
+moves that grow and shrink it again, and 100 more to measure re-convergence.
+Those counts are round numbers rather than measured minimums, so if a profile
+override does not close the gap, the next thing to measure is the shortest
+schedule that still reaches the shrink, before anything touches the assertions.
+`aec` is a default feature, so this runs on the PR path for every change to
+`moq-audio`, and it was hit again during PR #3466's session from two worktrees
+building concurrently on the same host.
+
+What the test protects is why weakening it is the last resort: the shrink path
+panicked in sonora 0.1.0, which is why the crate pins `sonora = "0.2"`, and the
+workspace's `panic = "abort"` makes that fatal in a real binary rather than a
+caught unwind.
+
 ## Related
 
 - [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - make concurrent validation resources explicit

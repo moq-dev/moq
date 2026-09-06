@@ -14,13 +14,17 @@ operational ones that must stay private.
 | --- | --- |
 | `GET /announced/<prefix>` | Broadcasts announced under the prefix. |
 | `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default. Useful for catch-up and debugging. |
-| `GET /certificate.sha256` | The TLS fingerprint, for pinning a self-signed dev certificate. |
+| `GET /certificate.sha256` | The fingerprint of the first configured TLS certificate, for pinning a self-signed dev certificate. |
 | `GET /health` | `200 ok`, unauthenticated, for load balancers. |
 
 ```bash
 curl http://localhost:4443/announced/demo
 curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 ```
+
+Certificates are selected by SNI at handshake, so a relay configured with more
+than one has no single fingerprint to publish and this endpoint answers for the
+first. Pin those explicitly with `--client-tls-fingerprint`, or use `https://`.
 
 Tokens sent over plain HTTP are visible on the wire, so use HTTPS in
 production.
