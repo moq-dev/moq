@@ -9,7 +9,6 @@ mod args;
 mod devices;
 mod hls;
 mod moq;
-#[cfg(feature = "play")]
 mod play;
 mod publish;
 mod rtc;

@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use rand::RngExt;
 
+use moq_mux::catalog::hang::CatalogExt;
+
 use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
@@ -182,29 +184,30 @@ impl Publication {
 	/// Register one stable audio track and return its control handle and driver.
 	///
 	/// The initial source is enabled, but opens only while the track has a
-	/// subscriber. Await [`Driver::run`] on a local task because native capture
-	/// streams are not `Send`; [`Publication`] itself is `Send + Sync`, so the
-	/// controls can live anywhere.
+	/// subscriber. On macOS the driver's future is `!Send`, because the permission
+	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so await
+	/// [`Driver::run`] on a local task there; elsewhere it can be spawned.
+	/// [`Publication`] itself is `Send + Sync`, so the controls can live anywhere.
 	///
 	/// The track is registered here, but its catalog rendition describes the
 	/// source's PCM layout, so the driver probes for that first and registers the
 	/// rendition on the first success. Until then the broadcast advertises no
 	/// audio, which [`Status::Starting`] reports. A source that never appears is
 	/// retried with capped backoff rather than blocking the controls.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
 		options: PublicationOptions,
-	) -> Result<(Self, Driver), Error> {
+	) -> Result<(Self, Driver<E>), Error> {
 		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
 
-	fn build(
+	fn build<E: CatalogExt>(
 		mut broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
 		options: PublicationOptions,
 		supervisor: Supervisor,
-	) -> Result<(Self, Driver), Error> {
+	) -> Result<(Self, Driver<E>), Error> {
 		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
 		let track_name: Arc<str> = reserved.name().into();
 		let desired = Desired {
@@ -330,9 +333,9 @@ impl Publication {
 /// The driver owns the broadcast producer so its identity remains alive through
 /// stop, failure, replacement, and restart. Dropping the final [`Publication`]
 /// ends the driver and releases that identity.
-pub struct Driver {
+pub struct Driver<E: CatalogExt = ()> {
 	_broadcast: moq_net::broadcast::Producer,
-	track: Option<Track>,
+	track: Option<Track<E>>,
 	/// The codec settings the rendition is built from once the layout is known.
 	encode: Options,
 	clock: moq_mux::Clock,
@@ -346,13 +349,13 @@ pub struct Driver {
 	park_on_failure: bool,
 }
 
-impl fmt::Debug for Driver {
+impl<E: CatalogExt> fmt::Debug for Driver<E> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Driver").finish_non_exhaustive()
 	}
 }
 
-impl Driver {
+impl<E: CatalogExt> Driver<E> {
 	/// Run capture until the final control handle drops or the MoQ track ends.
 	pub async fn run(self) -> Result<(), Error> {
 		self.run_with(DeviceSource).await
@@ -562,7 +565,7 @@ impl Driver {
 		}
 	}
 
-	fn producer_mut(&mut self) -> &mut Producer {
+	fn producer_mut(&mut self) -> &mut Producer<E> {
 		self.track
 			.as_mut()
 			.and_then(Track::producer)
@@ -602,15 +605,15 @@ enum DriveEvent {
 /// One per publication, moved twice in its life, so the size difference between
 /// the variants never costs a copy worth an allocation to avoid.
 #[allow(clippy::large_enum_variant)]
-enum Track {
+enum Track<E: CatalogExt = ()> {
 	/// Registered in the broadcast but not the catalog, because the rendition
 	/// describes a PCM layout no probe has returned yet.
-	Reserved(Reserved),
+	Reserved(Reserved<E>),
 	/// Probed, so the rendition is registered and samples can be encoded.
-	Encoding(Producer),
+	Encoding(Producer<E>),
 }
 
-impl Track {
+impl<E: CatalogExt> Track<E> {
 	fn track(&self) -> &moq_net::track::Producer {
 		match self {
 			Self::Reserved(reserved) => reserved.track(),
@@ -618,7 +621,7 @@ impl Track {
 		}
 	}
 
-	fn producer(&mut self) -> Option<&mut Producer> {
+	fn producer(&mut self) -> Option<&mut Producer<E>> {
 		match self {
 			Self::Reserved(_) => None,
 			Self::Encoding(producer) => Some(producer),
@@ -692,9 +695,9 @@ fn publish_state(
 ///
 /// This convenience function runs a controllable [`Publication`] with its
 /// initial source. Use [`Publication::new`] directly to retain controls.
-pub async fn publish_capture(
+pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
-	catalog: moq_mux::catalog::Producer,
+	catalog: moq_mux::catalog::Producer<E>,
 	capture: capture::Config,
 	encode: Options,
 	clock: moq_mux::Clock,
@@ -708,6 +711,23 @@ pub async fn publish_capture(
 	}
 	.run()
 	.await
+}
+
+/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// `tokio::spawn` it. This is never called; it exists only to fail compilation
+/// if the future ever regains a `!Send` component. macOS is exempt: the TCC
+/// prompt and ScreenCaptureKit both hold ObjC handles across an await.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn assert_publish_capture_send(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	capture: capture::Config,
+	encode: Options,
+	clock: moq_mux::Clock,
+) {
+	fn is_send<T: Send>(_: &T) {}
+	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
 }
 
 /// A capture backend as the supervisor sees it. Kept separate from cpal so the
@@ -793,8 +813,8 @@ trait Output {
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
 }
 
-struct EncoderOutput<'a> {
-	producer: &'a mut Producer,
+struct EncoderOutput<'a, E: CatalogExt> {
+	producer: &'a mut Producer<E>,
 	clock: &'a moq_mux::Clock,
 	/// The source the supervisor was started with, so a published state can
 	/// never name an input this stream isn't actually reading.
@@ -804,7 +824,7 @@ struct EncoderOutput<'a> {
 	device: Option<capture::Device>,
 }
 
-impl Output for EncoderOutput<'_> {
+impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 	fn waiting(&mut self) {
 		self.device = None;
 		self.silence();
@@ -847,7 +867,7 @@ impl Output for EncoderOutput<'_> {
 	}
 }
 
-impl EncoderOutput<'_> {
+impl<E: CatalogExt> EncoderOutput<'_, E> {
 	/// Levels ride their own channel: they change every buffer, so folding them
 	/// into [`State`] would wake every [`Publication::changed`] waiter at the
 	/// capture rate and rebuild the whole snapshot to do it.
@@ -1735,7 +1755,7 @@ mod tests {
 		task.await.unwrap().unwrap();
 	}
 
-	/// The controls are meant to live away from the `!Send` capture driver.
+	/// The controls are meant to live away from the capture driver.
 	#[test]
 	fn publication_controls_cross_threads() {
 		fn assert_send_sync<T: Send + Sync>() {}

@@ -40,7 +40,7 @@ Everything below builds on these layers.
 
 **Global delivery, hosted or self-hosted**. Don't want to run infrastructure? https://moq.pro offers most of these libraries behind an API and a global CDN, with more CDN providers to come; moq-lite is also forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). To self-host: `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-token`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Native apps can also connect P2P via Iroh.
 
-**Web playback/capture on any site**. `<moq-watch>` and `<moq-publish>` are plain web components with optional UI overlays; embeddable with no build step. Docs: https://doc.moq.dev/lib/js/@moq/watch and https://doc.moq.dev/lib/js/@moq/publish
+**Web playback/capture on any site**. `<moq-watch>` and `<moq-publish>` are plain web components with optional UI overlays; embeddable with no build step. Docs: https://doc.moq.dev/lib/js/watch and https://doc.moq.dev/lib/js/publish
 
 ## Repo map
 

@@ -65,6 +65,8 @@ pub struct Client<S = TcpStream> {
 	session: ClientSession,
 	/// Session results queued during connect, drained by the first publish/pull.
 	work: VecDeque<ClientSessionResult>,
+	/// The `<app>` this client connected to, logged in place of the stream key.
+	app: String,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY).
 	latency: Duration,
@@ -145,6 +147,7 @@ impl<S: Stream> Client<S> {
 			stream,
 			session,
 			work,
+			app: app.to_string(),
 			latency: crate::DEFAULT_LATENCY,
 		})
 	}
@@ -172,6 +175,7 @@ impl<S: Stream> Client<S> {
 		origin: origin::Consumer,
 		path: impl moq_net::AsPath,
 	) -> Result<()> {
+		let path = path.as_path();
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -179,7 +183,9 @@ impl<S: Stream> Client<S> {
 		self.work.push_back(request);
 		self.await_event(Direction::Publish).await?;
 
-		tracing::info!(%stream_key, "rtmp publish accepted by remote");
+		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
+		// app and broadcast path stand in for it.
+		tracing::info!(app = %self.app, %path, "rtmp publish accepted by remote");
 
 		// Flush anything queued alongside the publish-accepted event before streaming.
 		let queued = std::mem::take(&mut self.work);
@@ -248,7 +254,9 @@ impl<S: Stream> Client<S> {
 		self.work.push_back(request);
 		self.await_event(Direction::Play).await?;
 
-		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
+		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
+		// app and broadcast path stand in for it.
+		tracing::info!(app = %self.app, %path, "rtmp play accepted by remote");
 
 		let mut publisher = Publisher::new(origin, path.as_str())?;
 

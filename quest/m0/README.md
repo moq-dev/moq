@@ -15,32 +15,27 @@ regression test per Root Cause First.
 
 ## Quests
 
-- [#3087](/quest/m0/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
+- [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md) - preserve source-signalled clock changes through import and export
+
 - [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
-- [Rust log redaction](/quest/m0/rust-log-redaction.md) - moq-native logs relay URLs with their query and moq-rtmp logs stream keys
-- [Dart leaks](/quest/m0/dart-leak.md) - the generated Dart bindings leak native memory on every call
-- [#2849](/quest/m0/2849-moq-import-ts-a-truncated-or-spliced-opus-pes-ends-the.md) - moq import ts: a truncated or spliced Opus PES ends the session
-- [#3139](/quest/m0/3139-moqsrc-a-rendition-nobody-answers-keeps-the-session-alive.md) - moqsrc: a rendition nobody answers keeps the session alive after the catalog closes
-- [#2981](/quest/m0/2981-moq-audio-nothing-in-the-decode-or-playback-path-models-a.md) - moq-audio: a media gap is a hole in the output, not a splice
+- [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: a framework binding the element reads `broadcast` before the custom element is upgraded
+- [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
+- [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
+- [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
-- [#2806](/quest/m0/2806-js-net-the-draft-14-15-adapter-keeps-one-request-per.md) - js/net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request
-- [Windows window capture](/quest/m0/windows-window-capture-blank.md) - Windows window capture returns black pixels for GPU-composited windows
-- [Capture device loss](/quest/m0/capture-device-loss.md) - an AVFoundation camera that disappears parks the reader forever
-- [X11 window identity](/quest/m0/x11-window-identity.md) - a reused X11 window id can publish an unrelated window
-- [Window capture lifecycle](/quest/m0/capture-window-lifecycle.md) - a minimized or resizing window ends capture instead of riding it out
-- [#2799](/quest/m0/2799-moq-video-capture-negotiates-twice-so-a-window-resize.md) - moq-transcode: the ladder follows a source resolution change instead of keeping the one it started with
-- [Bandwidth estimate release](/quest/m0/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
-- [#2847](/quest/m0/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
+- [#3363](/quest/m0/3363-js-watch-a-broadcast-republished-on-one-session-keeps-resuming.md) - js/watch: a broadcast republished under its name on one session keeps resuming
+- [#3361](/quest/m0/3361-js-every-moq-package-a-package-imports-is-declared.md) - js: every @moq package a package imports is a declared dependency
+- [#3326](/quest/m0/3326-moq-audio-held-resampler-frames-keep-their-source-timestamp.md) - moq-audio: held resampler frames keep their source timestamp
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
-- [H.265 suffix SEI ownership](/quest/m0/h265-suffix.md) - suffix SEI stays with the access unit it follows, including at EOF
-- [#2676](/quest/m0/2676-libmoq-process-exit-can-abort-in-glibcs-pthread-tpp.md) - libmoq: process exit can abort in glibc's __pthread_tpp_change_priority
-- [#2850](/quest/m0/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue (dev)
-- [#3123](/quest/m0/3123-moq-bench-a-lagged-group-permanently-ends-the.md) - moq-bench: a lagged group ends the subscription, so offered load silently decays mid-run
-- [#2838](/quest/m0/2838-js-flate-codec-rejects-frames-that-inflate-past-the.md) - js/flate: the inflate-cap test times out under parallel load
-- [#3115](/quest/m0/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
-- [#2798](/quest/m0/2798-moq-import-ts-an-audio-resync-is-silent-no-log-no-counter.md) - moq import ts: an audio resync leaves no trace, no log, no counter
-- [#2860](/quest/m0/2860-cpp-obs-moq-source-cpp-has-no-test-coverage.md) - cpp/obs: moq-source.cpp has no test coverage
-- [#2868](/quest/m0/2868-obs-the-plugin-targets-obs-31-1-1-while-linux-ci-links.md) - obs: the plugin targets OBS 31.1.1 while Linux CI links against 32
-- [#2067](/quest/m0/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Open-GOP H.264: a regression fixture and a measured cold tune-in
-- [Open-GOP leading pictures](/quest/m0/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
-- [Gradual recovery](/quest/m0/open-gop-gradual-recovery.md) - tune-in at a recovery point with `recovery_frame_cnt > 0` trims through the recovery picture
+- [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - stop the headroom task after setup failure or the last owner drops
+- [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
+- [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
+- [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: retirement has no coverage for a fetch that is still opening its decoder
+- [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
+- [Merge evidence](/quest/m0/merge-verification-evidence.md) - bind local, CI, and device results to the current source and merge candidate
+- [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
+- [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - give concurrent worktrees explicit bases, endpoints, and process ownership
+- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - retain inspectable traces, logs, and rerun commands when QA fails
+- [Browser media QA](/quest/m0/browser-media-qa.md) - measure actual playback output and lifecycle recovery beyond successful delivery
+- [Transport failure drills](/quest/m0/transport-failure-drills.md) - exercise disruption, cancellation, and races with non-vacuous regressions
+- [Packaged consumer QA](/quest/m0/packaged-consumer-qa.md) - install Rust and JS candidate archives outside the workspace before publication

@@ -87,7 +87,6 @@ function rewriteWorkspaceDependency(dependencies?: Record<string, string>) {
 
 // Convert workspace dependencies to published versions
 rewriteWorkspaceDependency(pkg.dependencies);
-rewriteWorkspaceDependency(pkg.devDependencies);
 rewriteWorkspaceDependency(pkg.peerDependencies);
 
 pkg.devDependencies = undefined;

@@ -20,8 +20,9 @@ Separately, `Capture::read` calls `randr_get_monitors` plus a `get_atom_name`
 per monitor on every frame purely to notice a layout change, and allocates a
 `String` per monitor each time. RandR's `SCREEN_CHANGE_NOTIFY` is the intended
 mechanism: select for it once, then drain pending events between frames. Window
-capture does the same thing with a per-frame `get_geometry`, where
-`ConfigureNotify` on the window is the event equivalent.
+capture does the same thing with a per-frame `get_geometry`; it already selects
+`StructureNotify` and drains that queue between frames, so `ConfigureNotify` is
+there to be consumed and the round trip dropped.
 
 Both changes are contained to the one backend and are verifiable on a Linux
 host with a real X session; CI compiles the file but cannot run it.

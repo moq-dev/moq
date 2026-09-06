@@ -138,9 +138,16 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
-			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
+			// Access-unit openers: each precedes the next picture's VCL data, so any
+			// unit still open belongs to the previous picture and is emitted here.
+			NALUnitType::AudNut | NALUnitType::PrefixSeiNut => {
 				self.maybe_start_frame(pts)?;
 			}
+			// Suffix SEI trails the picture it describes, so it stays on the open
+			// access unit. Closing here would hand it to the next picture, and at end
+			// of stream would drop it: `flush` closes the unit it was moved out of,
+			// then finds no slice in the one holding it.
+			NALUnitType::SuffixSeiNut => {}
 			// Keyframe containing slices.
 			nal_type if super::is_irap(nal_type) => {
 				// first_slice_segment_in_pic_flag (bit 7 of the third byte, after the
@@ -256,6 +263,12 @@ mod tests {
 	const SPS: &[u8] = &[0x42, 0x01, 0x01]; // type 33
 	const PPS: &[u8] = &[0x44, 0x01, 0xc0]; // type 34
 	const IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // type 19 (IdrWRadl)
+	// TrailR (type 1) with first_slice_segment_in_pic_flag set (byte 2 high bit).
+	const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33];
+	const AUD: &[u8] = &[0x46, 0x01, 0x50]; // type 35
+	const PREFIX_SEI: &[u8] = &[0x4e, 0x01, 0x01, 0x04, 0x80]; // type 39
+	const SUFFIX_SEI: &[u8] = &[0x50, 0x01, 0x84, 0x02, 0x80]; // type 40
+	const SUFFIX_SEI2: &[u8] = &[0x50, 0x01, 0x05, 0x03, 0x80]; // a second type 40
 
 	fn annexb(nals: &[&[u8]]) -> BytesMut {
 		let mut buf = BytesMut::new();
@@ -280,6 +293,110 @@ mod tests {
 		let mut frames = split.decode(buf, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		frames
+	}
+
+	/// Length-prefix each NAL with a 4-byte big-endian length: the hvc1 wire shape.
+	fn length_prefixed(nals: &[&[u8]]) -> Bytes {
+		let mut buf = BytesMut::new();
+		for nal in nals {
+			buf.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			buf.extend_from_slice(nal);
+		}
+		buf.freeze()
+	}
+
+	/// True for the NAL types [`Hvc1`](crate::codec::h265::Hvc1) lifts out of the
+	/// sample and into the hvcC.
+	fn is_param_set(nal: &[u8]) -> bool {
+		matches!(
+			nal_unit_type(nal[0]),
+			NALUnitType::VpsNut | NALUnitType::SpsNut | NALUnitType::PpsNut
+		)
+	}
+
+	/// One suffix-SEI case: name, the NALs fed to the splitter, and the access
+	/// units it must emit.
+	type SeiCase = (&'static str, Vec<&'static [u8]>, Vec<Vec<&'static [u8]>>);
+
+	/// The access-unit shapes suffix SEI ownership has to get right.
+	///
+	/// Real x265 parameter sets, because the length-prefixed half of these cases
+	/// runs the same access units through [`Hvc1`](crate::codec::h265::Hvc1),
+	/// which parses the SPS to build the hvcC.
+	fn suffix_sei_cases() -> Vec<SeiCase> {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+
+		vec![
+			(
+				"consecutive pictures",
+				vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, AUD, TRAIL, SUFFIX_SEI],
+				vec![vec![VPS, SPS, PPS, IDR, SUFFIX_SEI], vec![AUD, TRAIL, SUFFIX_SEI]],
+			),
+			(
+				"multiple suffix units",
+				vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, SUFFIX_SEI2, AUD, TRAIL],
+				vec![vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, SUFFIX_SEI2], vec![AUD, TRAIL]],
+			),
+			(
+				"suffix at EOF",
+				vec![VPS, SPS, PPS, IDR, AUD, TRAIL, SUFFIX_SEI],
+				vec![vec![VPS, SPS, PPS, IDR], vec![AUD, TRAIL, SUFFIX_SEI]],
+			),
+			(
+				"prefix immediately after suffix",
+				vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, PREFIX_SEI, TRAIL],
+				vec![vec![VPS, SPS, PPS, IDR, SUFFIX_SEI], vec![PREFIX_SEI, TRAIL]],
+			),
+		]
+	}
+
+	/// Annex-B: a suffix SEI opens nothing, so it stays on the picture it follows
+	/// rather than moving to the next one. The EOF case is the sharp one: the
+	/// stream's last NAL is a suffix SEI, and closing the access unit on it would
+	/// leave `flush` with nothing to emit it in.
+	#[tokio::test(start_paused = true)]
+	async fn annexb_suffix_sei_stays_with_its_picture() {
+		for (name, stream, expected) in suffix_sei_cases() {
+			let mut split = Split::new();
+			let frames = decode_one(&mut split, &mut annexb(&stream), ts());
+
+			assert_eq!(frames.len(), expected.len(), "{name}: access unit count");
+			for (i, (frame, nals)) in frames.iter().zip(&expected).enumerate() {
+				assert_eq!(
+					frame.payload.as_ref(),
+					annexb(nals).freeze().as_ref(),
+					"{name}: access unit {i}"
+				);
+			}
+			assert!(frames[0].keyframe, "{name}: the first access unit is the keyframe");
+			assert!(!frames[1].keyframe, "{name}: the second is a delta picture");
+		}
+	}
+
+	/// hvc1: the same ownership survives the length-prefixed wire shape.
+	/// [`Hvc1`](crate::codec::h265::Hvc1) lifts VPS/SPS/PPS into the hvcC, so each
+	/// sample is the picture's own NALs, suffix SEI included and in order.
+	#[tokio::test(start_paused = true)]
+	async fn length_prefixed_suffix_sei_stays_with_its_picture() {
+		for (name, stream, expected) in suffix_sei_cases() {
+			let mut split = Split::new();
+			let frames = decode_one(&mut split, &mut annexb(&stream), ts());
+			let mut hvc1 = crate::codec::h265::Hvc1::new();
+
+			assert_eq!(frames.len(), expected.len(), "{name}: access unit count");
+			for (i, (frame, nals)) in frames.iter().zip(&expected).enumerate() {
+				let sample = hvc1
+					.transform(frame.payload.clone())
+					.unwrap()
+					.expect("an access unit with slice data");
+				let want: Vec<&[u8]> = nals.iter().copied().filter(|nal| !is_param_set(nal)).collect();
+				assert_eq!(sample.as_ref(), length_prefixed(&want).as_ref(), "{name}: sample {i}");
+			}
+			assert!(
+				hvc1.hvcc().is_some(),
+				"{name}: the keyframe's parameter sets build an hvcC"
+			);
+		}
 	}
 
 	/// A keyframe access unit fed as one buffer emits one self-contained frame:
@@ -342,10 +459,6 @@ mod tests {
 	/// mis-flagged as a keyframe.
 	#[tokio::test(start_paused = true)]
 	async fn bare_idr_after_delta_splits() {
-		// TrailR (type 1) with first_slice_segment_in_pic_flag set (byte 2 high bit).
-		const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33];
-		const AUD: &[u8] = &[0x46, 0x01, 0x50]; // AudNut (type 35)
-
 		let mut split = Split::new();
 		// One chunk: keyframe, a delta picture, then a bare IDR (no inline params).
 		let frames = split

@@ -12,8 +12,11 @@ on, which drops every AMF data message an encoder sends. `onMetaData` is the
 one every RTMP publisher emits, and applications routinely push their own cues
 through the same channel.
 
-Carry the tag payload byte-faithfully with its timestamp rather than decoding
-AMF into a fixed vocabulary, so a custom message type needs no further work.
+Carry the tag payload byte-faithfully rather than decoding AMF into a fixed
+vocabulary, so a custom message type needs no further work, on a sidecar of
+the video rendition following the rule in [SEI section](/quest/m2/sei/sei.md):
+the rendition's group sequence and the tag's timestamp on the wire, with a
+tag before the first media tag taking that rule's pre-media placement.
 Where `onMetaData` duplicates something the catalog already models (dimensions,
 framerate, bitrate), prefer the value the bitstream actually carries and treat
 the script tag as opaque data, not a second source of truth for configuration.

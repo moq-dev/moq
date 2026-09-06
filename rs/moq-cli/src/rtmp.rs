@@ -109,7 +109,8 @@ pub async fn listen_export(
 /// Dial a remote RTMP server and pull its play into the Origin under `name` (import).
 pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
-	tracing::info!(%url, %name, "RTMP client pulling");
+	// The stream key is the ingest credential, so log the dial target and app instead.
+	tracing::info!(%addr, %app, %name, "RTMP client pulling");
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?;
@@ -131,7 +132,8 @@ pub async fn connect_export(
 		.await
 		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
 
-	tracing::info!(%url, %name, "RTMP client pushing");
+	// The stream key is the ingest credential, so log the dial target and app instead.
+	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
 	let client = Client::connect(addr, &app).await?.with_latency(latency);

@@ -78,6 +78,21 @@ Nothing in this spike ran in a browser. Generated and type-checking is not worki
 - \#2816, no browser test harness. Blocks step 4 and is the root cause of #2814 needing four hand-verified review rounds.
 - \#2822 and #2835 are `moq-wasm` gaps that this approach would close by construction, since `moq-ffi` already binds datagrams and `track::Dynamic`.
 
+### Verification this quest owns
+
+The two remaining `moq-wasm` gaps close by construction, because `moq-ffi`
+already binds them: datagrams (`append_datagram` / `recv_datagram`, dropped on
+IETF moq-transport, pre-05 moq-lite, and stream-only transports, which the
+binding must make visible rather than a silent no-op) and `track::Dynamic`
+(`requestedGroup()` plus a `GroupRequest` with accept and reject, so a browser
+publisher can serve a cache-miss fetch). Each needs its own browser round trip
+in the harness from step 4: a datagram published and received, and the
+documented drop on a version that cannot carry it; a group evicted or never
+cached, then fetched and served. No hand-written wasm surface is added for
+either.
+
 ## Closes
 
 - [#2907](https://github.com/moq-dev/moq/issues/2907) - close this issue when the quest finishes
+- [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
+- [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes

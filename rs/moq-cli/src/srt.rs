@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
+use moq_native::RedactedUrl;
 use moq_srt::{Request, Server};
 use url::Url;
 
@@ -105,7 +106,7 @@ pub async fn connect_import(
 	latency: Duration,
 ) -> anyhow::Result<()> {
 	let (addr, resource) = parse_url(&url).await?;
-	tracing::info!(%url, %name, "SRT client pulling");
+	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pulling");
 	notify_ready();
 
 	Ok(moq_srt::dial::pull(addr, &resource, latency, &origin, &name).await?)
@@ -119,7 +120,7 @@ pub async fn connect_export(
 	latency: Duration,
 ) -> anyhow::Result<()> {
 	let (addr, resource) = parse_url(&url).await?;
-	tracing::info!(%url, %name, "SRT client pushing");
+	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pushing");
 	notify_ready();
 
 	Ok(moq_srt::dial::publish(addr, &resource, latency, &origin, &name).await?)

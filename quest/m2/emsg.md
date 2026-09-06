@@ -17,9 +17,13 @@ time, duration, id, and the opaque message payload, for both version 0 and
 version 1 timing. Do not parse the payload into a vocabulary; an application
 decodes it with its own library, and a new scheme stays forward-compatible.
 
-Anchor each event on the media timeline so a consumer can correlate it without
-reproducing fMP4's timescale arithmetic. Export rebuilds the box in the fragment
-whose media time contains it.
+Carry them on a sidecar of the video rendition (the audio rendition when there
+is none) following the rule in [SEI section](/quest/m2/sei/sei.md): the
+rendition's group sequence, each box stamped with the wire timestamp of its
+presentation time, raw bytes; a box before the first `moof` takes the
+pre-media placement that rule defines. Export rebuilds the box in the
+fragment whose media time contains it, and the pre-media ones before the first
+fragment.
 
 Test version 0 and version 1 boxes, an emsg before the first moof, several on
 one fragment, an unknown scheme, a zero duration, and a round trip that is

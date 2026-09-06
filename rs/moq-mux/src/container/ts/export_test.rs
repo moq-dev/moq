@@ -16,6 +16,7 @@ use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::ts::{Export, catalog as tscat};
 use crate::container::{Frame, Producer};
 use moq_net::Timestamp;
@@ -482,6 +483,89 @@ async fn export_avc1_out_of_band_reassembles() {
 	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
 }
 
+/// H.265 suffix SEI must survive the container seam in both directions: the exporter
+/// puts each access unit on the wire whole, and the importer's splitter gives it back
+/// unchanged. A splitter that closed the access unit on a suffix SEI would hand it to
+/// the next picture, and drop the last one entirely when the stream ends, which a unit
+/// test on the splitter alone cannot see once the bytes cross a PES boundary.
+#[tokio::test(start_paused = true)]
+async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
+	use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+
+	// HEVC NAL headers: byte 0 = nal_unit_type << 1. Slices set
+	// first_slice_segment_in_pic_flag (byte 2 high bit).
+	const IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+	const TRAIL: &[u8] = &[0x02, 0x01, 0x80, 0x33]; // TrailR (1)
+	const AUD: &[u8] = &[0x46, 0x01, 0x50]; // AudNut (35)
+	const PREFIX_SEI: &[u8] = &[0x4e, 0x01, 0x01, 0x04, 0x80]; // PrefixSeiNut (39)
+	const SUFFIX_SEI: &[u8] = &[0x50, 0x01, 0x84, 0x02, 0x80]; // SuffixSeiNut (40)
+	const SUFFIX_SEI2: &[u8] = &[0x50, 0x01, 0x05, 0x03, 0x80]; // a second SuffixSeiNut
+
+	// Three access units covering every shape: multiple suffix units, a prefix SEI
+	// immediately after a suffix, consecutive pictures, and a suffix at end of stream.
+	let units: [Vec<&[u8]>; 3] = [
+		vec![VPS, SPS, PPS, IDR, SUFFIX_SEI, SUFFIX_SEI2],
+		vec![PREFIX_SEI, TRAIL, SUFFIX_SEI],
+		vec![AUD, TRAIL, SUFFIX_SEI],
+	];
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(broadcast.unique_name(".hev1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		// hev1: the config comes from the SPS the keyframe carries inline.
+		let mut cfg = crate::codec::h265::config(&annexb(&units[0])).unwrap();
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	for (i, nals) in units.iter().enumerate() {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_millis(i as u64 * 40).unwrap(),
+				duration: None,
+				payload: annexb(nals),
+				keyframe: i == 0,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	// Keep the producers alive (see `export_aac_roundtrip`).
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// Export: the elementary stream is the three access units back to back, every SEI
+	// still trailing the picture it was written with.
+	let all: Vec<&[u8]> = units.iter().flatten().copied().collect();
+	let reassembled = reassemble_video(&ts, StreamType::H265);
+	assert_eq!(reassembled.as_slice(), annexb(&all).as_ref());
+
+	// Import: the same TS back through the demuxer must rebuild the same access units.
+	let mut imported = moq_net::broadcast::Info::new().produce();
+	let imported_consumer = imported.consume();
+	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
+	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
+	import.decode(&ts).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = import_catalog.snapshot();
+	let (imported_name, video) = snapshot.video.renditions.iter().next().expect("an H.265 rendition");
+	assert!(video.codec.to_string().starts_with("hev1"), "codec was {}", video.codec);
+
+	let recovered = read_frames(&imported_consumer, imported_name).await;
+	assert_eq!(recovered.len(), units.len(), "access unit count");
+	for (i, (got, nals)) in recovered.iter().zip(&units).enumerate() {
+		assert_eq!(got.as_slice(), annexb(nals).as_ref(), "access unit {i}");
+	}
+}
+
 /// A real broadcast contribution feed (Ateme Kyrion, H.264 1080i with ~86 B-frames)
 /// must come out of the exporter with an authored decode timeline. The importer publishes
 /// the reorder depth as the catalog `jitter`, and the exporter sizes its decode-clock reserve
@@ -645,35 +729,40 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 	let frames = drain_frames(&mut exporter).await;
 
-	// Each PCR is its own single-packet frame, stamped at its slot boundary so the
-	// caller's pacer delivers the clock at the time it asserts.
+	// A slot's clock packets lead the frame carrying that slot's bytes, and the
+	// frame is stamped at the slot boundary so the caller's pacer delivers the
+	// clock at the time it asserts.
 	let mut pcrs: Vec<u64> = Vec::new();
 	for (i, frame) in frames.iter().enumerate() {
 		assert_packet_aligned(&frame.payload);
-		let packet = &frame.payload[..188];
-		// adaptation-field-only packets (adaptation_field_control == 0b10) are the clock.
-		if packet[3] & 0x30 != 0x20 {
-			continue;
+		let mut head = None;
+		for packet in frame.payload.chunks(188) {
+			// adaptation-field-only packets (adaptation_field_control == 0b10) are the clock.
+			if packet[3] & 0x30 != 0x20 {
+				break;
+			}
+			assert_eq!(packet[5], 0x10, "PCR_flag alone, at {i}");
+			// The six reserved bits between base and extension are ones (ISO 13818-1);
+			// the crate's serializer writes zeros here, which is why the packet is
+			// laid out by hand.
+			assert_eq!(packet[10] & 0x7e, 0x7e, "reserved bits must be ones, at {i}");
+			let base = (u64::from(packet[6]) << 25)
+				| (u64::from(packet[7]) << 17)
+				| (u64::from(packet[8]) << 9)
+				| (u64::from(packet[9]) << 1)
+				| u64::from(packet[10] >> 7);
+			pcrs.push(base);
+			head = Some(base);
 		}
-		assert_eq!(frame.payload.len(), 188, "a PCR frame is one packet, at {i}");
-		assert_eq!(packet[5], 0x10, "PCR_flag alone, at {i}");
-		// The six reserved bits between base and extension are ones (ISO 13818-1);
-		// the crate's serializer writes zeros here, which is why the packet is
-		// laid out by hand.
-		assert_eq!(packet[10] & 0x7e, 0x7e, "reserved bits must be ones, at {i}");
-		let base = (u64::from(packet[6]) << 25)
-			| (u64::from(packet[7]) << 17)
-			| (u64::from(packet[8]) << 9)
-			| (u64::from(packet[9]) << 1)
-			| u64::from(packet[10] >> 7);
-		// The frame is paced at the slot the value asserts (plus the reserve).
-		let slot_ticks = frame.timestamp.as_micros() * 90_000 / 1_000_000;
+		// The frame is paced at the slot its last leading clock asserts (plus the
+		// reserve), which is the newest slot that has begun by then.
+		let Some(base) = head else { continue };
+		let slot_ticks = frame.timestamp.as_micros() / 25_000 * 25_000 * 90 / 1_000;
 		assert_eq!(
 			base,
 			(slot_ticks as u64).wrapping_sub(16) & WIRE,
 			"pacing off value, at {i}"
 		);
-		pcrs.push(base);
 	}
 
 	const WIRE: u64 = (1 << 33) - 1;
@@ -1829,11 +1918,6 @@ fn count_discontinuity(frames: &[Frame]) -> usize {
 		.count()
 }
 
-/// The timestamps of the PCR-only frames, in emission order.
-fn pcr_timestamps(frames: &[Frame]) -> Vec<Timestamp> {
-	frames.iter().filter(|f| is_pcr_frame(f)).map(|f| f.timestamp).collect()
-}
-
 /// A `mpegts`-extension exporter over an announced broadcast.
 async fn export_of(consumer: &moq_net::broadcast::Consumer) -> Export<tscat::Ext> {
 	Export::with_ts(crate::source::announced(consumer), crate::catalog::CatalogFormat::Hang)
@@ -1909,14 +1993,18 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 
 	// The clock leads the new timeline: its first frame is the PCR for slot 0, and the
 	// grid ramps from there instead of waiting to recross 4.9s.
-	assert!(is_pcr_frame(&after[0]), "the new timeline leads with its clock");
 	assert_eq!(
-		pcr_timestamps(&after),
-		(0..=76)
-			.map(|i| Timestamp::from_micros(i * 25_000).unwrap())
-			.collect::<Vec<_>>(),
-		"the PCR grid resumes at the rewound slot and stays uniform"
+		after[0].payload[3] & 0x30,
+		0x20,
+		"the new timeline leads with its clock"
 	);
+	let pcrs = collect_pcrs(&after);
+	assert!(pcrs.len() > 60, "clock resumed promptly");
+	assert_eq!(after[0].timestamp.as_micros(), 0);
+	for pair in pcrs.windows(2) {
+		assert_eq!(pair[1].1.wrapping_sub(pair[0].1) & ((1 << 33) - 1), 2250);
+	}
+	assert!(after.iter().all(|f| f.timestamp.as_micros() < 2_000_000));
 
 	// And the tables come back on cadence rather than going quiet for 4.9s.
 	assert_eq!(count_pid(&after, 0x0000), 4, "PAT at 0, 0.5, 1 and 1.5s");
@@ -2005,8 +2093,8 @@ async fn reordered_video_keeps_the_table_cadence() {
 
 /// A program with more than one track marks the break once, not once per track. Each
 /// rendition carries its own discontinuity counter, and the rewound frame sorts ahead of
-/// any old-epoch straggler still buffered on the other track, so the exporter adopts the
-/// new timeline only when a counter climbs past the one it is already emitting.
+/// any old-epoch straggler still buffered on the other track. Each track joins the
+/// new program epoch on its own boundary, without comparing unrelated counter values.
 #[tokio::test(start_paused = true)]
 async fn rewind_flags_the_break_once_across_tracks() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2076,18 +2164,122 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	assert_eq!(export.discontinuity(), 0);
 	assert_eq!(count_discontinuity(&before), 0);
 
+	// Independent counters can differ before the shared rewind. Forward markers
+	// affect only video; audio must not be fenced out of a continuous timeline.
+	for _ in 0..3 {
+		video.discontinuity().unwrap();
+	}
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(4_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	let marked = drain_frames(&mut export).await;
+	assert!(export.tracks.values().map(|t| t.discontinuity).max().unwrap() > 1);
+	let epoch = export.epoch;
+
 	// Both tracks rewind to zero.
 	write(&mut video, &mut audio, 2);
 	let after = drain_frames(&mut export).await;
 
-	assert_eq!(export.discontinuity(), 1, "one rewind, however many tracks saw it");
-	assert!(is_pcr_frame(&after[0]), "the new timeline leads with its clock");
+	assert_eq!(
+		export.discontinuity(),
+		epoch + 1,
+		"one rewind, however many tracks saw it"
+	);
+	assert_eq!(
+		after[0].payload[3] & 0x30,
+		0x20,
+		"the new timeline leads with its clock"
+	);
 	assert_eq!(after[0].timestamp, Timestamp::from_micros(0).unwrap());
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
 	// Both renditions carry the rewound span; audio is not held back by a tune-in
 	// anchor that belongs to the old timeline.
 	assert!(count_pid(&after, 0x1001) > 0, "video resumed");
 	assert!(count_pid(&after, 0x1002) > 0, "audio resumed");
+	let bytes: Vec<_> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut video_frames = 0;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if packet.header.pid.as_u16() == 0x1001
+			&& let Some(TsPayload::PesStart(pes)) = packet.payload
+		{
+			let pts = pes.header.pts.unwrap().as_u64();
+			assert!(
+				pes.header.dts.is_none_or(|dts| dts.as_u64() <= pts),
+				"DTS retained the old epoch"
+			);
+			video_frames += 1;
+		}
+	}
+	assert!(video_frames > 0);
+
+	// Keep old video queued while the lower-count audio source rewinds again.
+	// It must start a new program epoch despite having the smaller counter.
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(8_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	for i in 0..20 {
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 100_000).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0xaa; 180]),
+				keyframe: i == 0,
+			})
+			.unwrap();
+	}
+	audio.cut(None).unwrap();
+	let again = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), epoch + 2);
+	assert_eq!(count_discontinuity(&again), 1);
+	assert!(again.len() > 20, "rewound audio kept emitting without its stale peer");
+	assert!(
+		again.iter().all(|f| f.timestamp.as_micros() < 2_000_000),
+		"stale video advanced the clock"
+	);
+	assert_eq!(count_pid(&again, 0x1001), 0, "old video was discarded");
+
+	// A delayed peer joins on its own boundary without resetting the clock again.
+	for i in 0..4 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[idr.as_slice()]),
+				keyframe: true,
+			})
+			.unwrap();
+		video.cut(None).unwrap();
+	}
+	let joined = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), epoch + 2);
+	assert_eq!(count_discontinuity(&joined), 0);
+	assert!(count_pid(&joined, 0x1001) > 0, "video rejoined");
+	// A discarded span already had counters assigned. They must roll back to
+	// the last emitted bytes, so dropping the span introduces no packet loss.
+	let mut counters = std::collections::HashMap::new();
+	for frame in before.iter().chain(&marked).chain(&after).chain(&again).chain(&joined) {
+		for packet in frame.payload.chunks_exact(188) {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			let cc = packet[3] & 15;
+			if let Some(prev) = counters.insert(pid, cc) {
+				let expected = (prev + u8::from(packet[3] & 0x10 != 0)) & 15;
+				assert_eq!(cc, expected, "counter gap on PID {pid}");
+			}
+		}
+	}
 }
 
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
@@ -2472,4 +2664,206 @@ async fn late_join_matches_a_running_exporter_without_video() {
 	let tune_in = b.iter().find(|f| !is_pcr_frame(f)).expect("a tune-in frame").timestamp;
 	let from = b.iter().map(|f| f.timestamp).filter(|&t| t > tune_in).min().unwrap();
 	assert_only_continuity_differs(&a, &b, from);
+}
+
+/// Every PCR packet in transport order: its packet index in the stream, its value
+/// (90 kHz), and the media timestamp of the frame carrying it.
+fn collect_pcrs(frames: &[Frame]) -> Vec<(usize, u64, u128)> {
+	let mut at = 0;
+	let mut pcrs = Vec::new();
+	for frame in frames {
+		for packet in frame.payload.chunks(188) {
+			// adaptation-field-only packets (adaptation_field_control == 0b10) are the clock.
+			if packet[3] & 0x30 == 0x20 && packet[5] & 0x10 != 0 {
+				let base = (u64::from(packet[6]) << 25)
+					| (u64::from(packet[7]) << 17)
+					| (u64::from(packet[8]) << 9)
+					| (u64::from(packet[9]) << 1)
+					| u64::from(packet[10] >> 7);
+				pcrs.push((at, base, frame.timestamp.as_micros()));
+			}
+			at += 1;
+		}
+	}
+	pcrs
+}
+
+/// A 4 s CBR-ish single-rendition H.264 feed at 25 fps, one second per group: the
+/// shape of a broadcast contribution capture, and the one #3334 measured.
+async fn export_cbr_video() -> Vec<Frame> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(broadcast.unique_name(".h264"), hang::container::track_info())
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(track, HangContainer::Legacy);
+	for i in 0..100u64 {
+		let keyframe = i % 25 == 0;
+		let mut nal = vec![if keyframe { 0x65u8 } else { 0x41 }];
+		nal.extend(std::iter::repeat_n(0xAB, 7_000));
+		if keyframe && i > 0 {
+			video.cut(None).unwrap();
+		}
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 40_000).unwrap(),
+				duration: None,
+				payload: if keyframe {
+					annexb(&[SPS, PPS, &nal])
+				} else {
+					annexb(&[&nal])
+				},
+				keyframe,
+			})
+			.unwrap();
+	}
+	video.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	drain_frames(&mut exporter).await
+}
+
+/// #3334: the clock a receiver recovers from *byte position* has to agree with the
+/// values, because a byte stream carries no other timing. Emitting each media frame
+/// whole put every PCR between two frames instead of among the bytes it labels, so
+/// the grid #2967 made exact could not be read off the wire: consecutive clock
+/// packets sat one packet apart with the media they described heaped between the
+/// clusters, and a downstream stage re-deriving PCR from position regenerated the
+/// original clustered distribution.
+#[tokio::test(start_paused = true)]
+async fn pcr_rides_the_bytes_it_labels() {
+	let frames = export_cbr_video().await;
+	let pcrs = collect_pcrs(&frames);
+	assert!(pcrs.len() > 100, "expected the full feed, got {} PCRs", pcrs.len());
+
+	// Every step is one grid slot, so every gap should carry the same span of media
+	// and therefore a comparable number of packets.
+	let step = PCR_INTERVAL.as_micros() as u64 * 90 / 1_000;
+	for (i, w) in pcrs.windows(2).enumerate() {
+		assert_eq!(w[1].1.wrapping_sub(w[0].1) & ((1 << 33) - 1), step, "value step at {i}");
+	}
+
+	let gaps: Vec<usize> = pcrs.windows(2).map(|w| w[1].0 - w[0].0).collect();
+	assert_eq!(
+		gaps.iter().filter(|&&gap| gap == 1).count(),
+		0,
+		"no clock packet may sit adjacent to the previous one: {gaps:?}"
+	);
+	let mut sorted = gaps.clone();
+	sorted.sort_unstable();
+	let median = sorted[sorted.len() / 2];
+	// The leading group carries the parameter sets and program tables on top of its
+	// media, so allow generous headroom; what this rules out is the bimodal
+	// distribution (one packet, then hundreds) that made the clock unrecoverable.
+	assert!(
+		sorted[0] * 3 >= median && sorted[sorted.len() - 1] <= median * 3,
+		"packet gaps must track the interval the values assert, got {sorted:?}"
+	);
+}
+
+/// The other half of #3334: a PCR's *release* has to track the interval its own
+/// value asserts. The exporter only stamps; the caller paces on the stamps (see
+/// [`moq_mux::Pacer`]), so the property here is that consecutive clock packets are
+/// stamped exactly one grid interval apart. Frames are emitted whole and a slot's
+/// bytes are only all in hand once media past it has arrived, so a stamp that
+/// tracked frame arrival was already in the past and its sleep was a no-op.
+#[tokio::test(start_paused = true)]
+async fn pcr_stamps_step_by_the_grid() {
+	let frames = export_cbr_video().await;
+	let pcrs = collect_pcrs(&frames);
+
+	let steps: Vec<i128> = pcrs.windows(2).map(|w| w[1].2 as i128 - w[0].2 as i128).collect();
+	let interval = PCR_INTERVAL.as_micros() as i128;
+	assert!(
+		steps.iter().all(|&step| step == interval),
+		"every clock packet must be stamped one grid interval past the last: {steps:?}"
+	);
+}
+
+/// The same positional property on a real reordered (B-frame) capture with a second
+/// rendition, where the exporter has no uniform cadence to lean on: frames arrive in
+/// decode order, and the two tracks advance the media clock at different rates. The
+/// clock still lands among the bytes it labels rather than clustering, though the
+/// gaps are no longer uniform: a span is however long it took the next timestamp to
+/// arrive, which for interleaved tracks is nothing like the media a frame's bytes
+/// represent. Evening that out needs the muxer to hold a byte buffer and drain it at
+/// a measured rate, which this does not do.
+#[tokio::test(start_paused = true)]
+async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let frames = drain_frames(&mut exporter).await;
+	let pcrs = collect_pcrs(&frames);
+	assert!(pcrs.len() > 50, "expected the full feed, got {} PCRs", pcrs.len());
+
+	let gaps: Vec<usize> = pcrs.windows(2).map(|w| w[1].0 - w[0].0).collect();
+	assert_eq!(
+		gaps.iter().filter(|&&gap| gap == 1).count(),
+		0,
+		"no clock packet may sit adjacent to the previous one: {gaps:?}"
+	);
+
+	// Stamps still step by exactly one slot, apart from the first interval, which
+	// covers the leading span rather than a whole slot.
+	let interval = PCR_INTERVAL.as_micros() as i128;
+	let off = pcrs
+		.windows(2)
+		.filter(|w| w[1].2 as i128 - w[0].2 as i128 != interval)
+		.count();
+	assert!(off <= 1, "{off} clock packets are stamped off the grid");
+}
+
+/// A clock packet carries no payload, so ISO 13818-1 2.4.3.3 says it must repeat
+/// the continuity counter of whatever preceded it on its PID rather than advance
+/// it. The clock rides a PID that also carries media, and slicing on the grid puts
+/// clock packets *inside* a frame's packet run, whose counters were assigned when
+/// the frame was muxed rather than when the bytes go out. Numbering the clock
+/// packet from the counter's current value there lands it a whole frame ahead, and
+/// an analyzer reports a discontinuity on it and another on the payload packet
+/// after it.
+#[tokio::test(start_paused = true)]
+async fn payload_less_clock_packets_repeat_the_counter() {
+	let frames = export_cbr_video().await;
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	assert_packet_aligned(&ts);
+
+	let mut last: std::collections::HashMap<u16, u8> = std::collections::HashMap::new();
+	let mut advanced = 0;
+	let mut discontinuities = 0;
+	for (i, packet) in ts.chunks(188).enumerate() {
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		let cc = packet[3] & 0x0f;
+		let payload = packet[3] & 0x10 != 0;
+		if let Some(&prev) = last.get(&pid) {
+			if payload && cc != (prev + 1) & 0x0f {
+				discontinuities += 1;
+				eprintln!("discontinuity at packet {i} on pid {pid}: {prev} -> {cc}");
+			} else if !payload && cc != prev {
+				advanced += 1;
+				eprintln!("payload-less packet {i} on pid {pid} advanced: {prev} -> {cc}");
+			}
+		}
+		last.insert(pid, cc);
+	}
+	assert_eq!(advanced, 0, "payload-less packets must repeat the counter");
+	assert_eq!(discontinuities, 0, "the counter must be continuous on every PID");
 }

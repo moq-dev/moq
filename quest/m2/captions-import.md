@@ -30,10 +30,6 @@ for a cue that may be minutes away.
 Cover a file with subtitles and no supported text format, a file with several
 subtitle languages, and a file whose subtitle track is empty.
 
-## Closes
-
-- [#2280](https://github.com/moq-dev/moq/issues/2280) - close this issue when the quest finishes
-
 ## Related
 
 - [MSF caption roles](/quest/m2/captions-msf.md) - the catalog half of the same

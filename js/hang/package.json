@@ -20,7 +20,7 @@
 	},
 	"dependencies": {
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
-		"@libav.js/variant-opus-af": "^6.9.8",
+		"@libav.js/variant-opus-af": "^6.10.9",
 		"@moq/json": "workspace:^",
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
@@ -32,7 +32,7 @@
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
-		"@types/bun": "^1.3.14",
+		"@types/bun": "^1.4.0",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.1.3",

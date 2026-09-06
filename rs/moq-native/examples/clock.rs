@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 	let url = config.client.connect.clone().context("--client-connect is required")?;
 	let client = config.client.init()?;
 
-	tracing::info!(%url, "connecting to server");
+	tracing::info!(url = %moq_native::RedactedUrl::new(&url), "connecting to server");
 
 	let track = config.track;
 

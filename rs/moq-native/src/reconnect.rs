@@ -7,7 +7,7 @@ use moq_net::kio;
 use rand::RngExt;
 use url::Url;
 
-use crate::{Client, Error};
+use crate::{Client, Error, RedactedUrl};
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
@@ -233,12 +233,16 @@ impl Reconnect {
 		let mut deadline = deadline_from(&backoff);
 		let mut last_error: Option<Error> = None;
 
+		// The dial target usually carries an auth token in its query, so every line
+		// below logs the redacted form.
+		let url_log = RedactedUrl::new(&url);
+
 		loop {
-			tracing::info!(%url, "connecting");
+			tracing::info!(url = %url_log, "connecting");
 
 			match client.connect(url.clone()).await {
 				Ok(session) => {
-					tracing::info!(%url, "connected");
+					tracing::info!(url = %url_log, "connected");
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
 						state.version = Some(session.version());
@@ -261,7 +265,7 @@ impl Reconnect {
 					if connected.elapsed() >= backoff.initial {
 						// Stayed up past the initial backoff: a healthy session. Reset the backoff
 						// window so a one-off drop reconnects promptly.
-						tracing::warn!(%url, "session closed, reconnecting");
+						tracing::warn!(url = %url_log, "session closed, reconnecting");
 						delay = backoff.initial;
 						deadline = deadline_from(&backoff);
 						last_error = None;
@@ -272,10 +276,10 @@ impl Reconnect {
 						// sleep below so repeated flaps escalate instead of spinning the CPU.
 						if let Err(err) = closed {
 							let err = Error::from(err);
-							tracing::warn!(%url, %err, "session severed immediately, retrying");
+							tracing::warn!(url = %url_log, %err, "session severed immediately, retrying");
 							last_error = Some(err);
 						} else {
-							tracing::warn!(%url, "session severed immediately, retrying");
+							tracing::warn!(url = %url_log, "session severed immediately, retrying");
 						}
 					}
 				}
@@ -314,7 +318,7 @@ impl Reconnect {
 			}
 			delay = backoff.next_delay(delay);
 
-			tracing::warn!(%url, ?wait, "reconnecting after backoff");
+			tracing::warn!(url = %url_log, ?wait, "reconnecting after backoff");
 			tokio::time::sleep(wait).await;
 		}
 	}

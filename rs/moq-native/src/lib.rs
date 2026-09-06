@@ -51,7 +51,7 @@ pub mod websocket;
 pub use client::{Client, ClientConfig};
 pub use connect::ConnectError;
 pub use error::{Error, Result};
-pub use log::Log;
+pub use log::{Log, RedactedUrl};
 pub use reconnect::{Backoff, ConnectionStatsReader, Reconnect, Status};
 pub use server::{Request, Server, ServerConfig, Transport};
 
