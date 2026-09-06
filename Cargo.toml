@@ -212,6 +212,35 @@ opt-level = 3
 [profile.dev.package.rsa]
 opt-level = 3
 
+# Same for the sonora echo canceller. Its hot loops are `core::arch` NEON/SSE
+# intrinsics, which at opt-level 0 compile to out-of-line calls carrying the
+# debug UB preconditions of `read_unaligned` and `copy_nonoverlapping`: a
+# profile of `aec::tests::survives_a_moving_echo_delay` spends 65% of its
+# samples in those checks and intrinsic shims and only 20% in sonora's own
+# arithmetic. Unoptimized, cancelling 15 seconds of audio costs 12 seconds of
+# CPU, which is slower than the realtime callback this runs in and leaves the
+# test no headroom under the nextest timeout.
+[profile.dev.package.sonora]
+opt-level = 3
+
+[profile.dev.package.sonora-aec3]
+opt-level = 3
+
+[profile.dev.package.sonora-agc2]
+opt-level = 3
+
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+
+[profile.dev.package.sonora-fft]
+opt-level = 3
+
+[profile.dev.package.sonora-ns]
+opt-level = 3
+
+[profile.dev.package.sonora-simd]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 
