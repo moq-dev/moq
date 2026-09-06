@@ -28,7 +28,6 @@ regression test per Root Cause First.
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - stop the headroom task after setup failure or the last owner drops
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
-- [play tests](/quest/m0/play-feature-tests.md) - moq-cli: the `play` module is off by default, so nothing in the merge gate compiles its tests
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
 - [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: retirement has no coverage for a fetch that is still opening its decoder
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
