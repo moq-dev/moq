@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8](https://github.com/moq-dev/moq/compare/kio-v0.5.7...kio-v0.5.8) - 2026-09-06
+
+### Other
+
+- *(kio)* pin the waiter-list footprint, and retire the waiter-slots quest ([#3376](https://github.com/moq-dev/moq/pull/3376))
+
 ## [0.5.7](https://github.com/moq-dev/moq/compare/kio-v0.5.6...kio-v0.5.7) - 2026-09-01
 
 ### Added
