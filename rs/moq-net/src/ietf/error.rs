@@ -67,13 +67,9 @@ fn has_malformed_track(version: Version) -> bool {
 
 /// The code to reset a stream, or send STOP_SENDING, with on the negotiated draft.
 ///
-/// Only values the draft registers go out. Everything else is INTERNAL_ERROR, which is not
-/// a loss: draft-20 section 14 makes a receiver treat any unregistered code as equivalent
-/// to INTERNAL_ERROR, so an unregistered value would say the same thing less clearly. That
-/// covers the conditions moq-lite carries in its provisional 32-63 range (a group dropped
-/// as old or evicted, a malformed frame size) and application codes, which this registry
-/// has no range for at all: 64 and above is ordinary registry space here, and part of it is
-/// reserved for greasing.
+/// Conditions without a matching reset code use INTERNAL_ERROR. Request rejection has
+/// its own registry: a missing track belongs in a request error response, not a reset.
+/// moq-lite's provisional and application ranges have no corresponding ranges here.
 pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 	match err {
 		StreamError::Internal => INTERNAL_ERROR,

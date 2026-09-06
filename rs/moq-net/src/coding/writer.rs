@@ -81,7 +81,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			.as_mut()
 			.unwrap()
 			.poll_write_buf(cx, buf)
-			.map_err(Error::from_transport)
+			.map_err(|err| self.version.transport_error(err))
 	}
 
 	/// Poll until the entire `Buf` has been written to the stream.
@@ -213,6 +213,59 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSend};
 	use std::task::Waker;
+
+	#[derive(Debug, Clone, thiserror::Error)]
+	#[error("stream stopped with {0}")]
+	struct Stopped(u32);
+
+	impl web_transport_trait::Error for Stopped {
+		fn session_error(&self) -> Option<(u32, String)> {
+			None
+		}
+
+		fn stream_error(&self) -> Option<u32> {
+			Some(self.0)
+		}
+	}
+
+	impl web_transport_trait::poll::SendStream for Stopped {
+		type Error = Self;
+
+		fn poll_write(&mut self, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			Poll::Ready(Err(self.clone()))
+		}
+
+		fn set_priority(&mut self, _: u8) {}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Err(self.clone())
+		}
+
+		fn reset(&mut self, _: u32) {}
+
+		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Err(self.clone()))
+		}
+	}
+
+	#[tokio::test]
+	async fn raw_payload_stop_uses_the_negotiated_registry() {
+		for (version, expected) in [
+			(crate::Version::Ietf(crate::ietf::Version::Draft17), Error::Remote(0x4)),
+			(crate::Version::Ietf(crate::ietf::Version::Draft20), Error::GoingAway),
+			(crate::Version::Lite(crate::lite::Version::Lite05), Error::GoingAway),
+		] {
+			let mut writer = Writer::new(Stopped(0x4), version);
+			let err = writer.write_all(&mut b"payload".as_slice()).await.unwrap_err();
+			assert!(
+				matches!(
+					(err, expected),
+					(Error::Remote(4), Error::Remote(4)) | (Error::GoingAway, Error::GoingAway)
+				),
+				"{version} decoded the STOP_SENDING with the wrong registry"
+			);
+		}
+	}
 
 	#[test]
 	fn set_priority_forwards_send_order() {

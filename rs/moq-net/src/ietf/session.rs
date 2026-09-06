@@ -694,10 +694,6 @@ where
 			let mut reader = reader.with_version(version);
 			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
 				tracing::debug!(%err, "uni stream error");
-				// The reader carries the negotiated draft, so this is a moq-transport code. A
-				// group arriving for an alias we retired is the expected tail of our own
-				// cancellation, and moq-lite's own cancel encodes to 0, which on this wire
-				// says the stream died of an internal failure on our side.
 				reader.abort(&err);
 			}
 		});
@@ -1202,18 +1198,8 @@ mod tests {
 		writes.clone()
 	}
 
-	/// A group for an alias we retired is answered with STOP_SENDING carrying the
-	/// moq-transport CANCELLED code.
-	///
-	/// Such a group is the expected tail of our own cancellation, still in flight when we
-	/// unsubscribed. moq-lite's cancel encodes to 0, which on this wire says the stream
-	/// died of an internal fault on our side, so sending that for a routine unsubscribe
-	/// distorts the publisher's error handling.
-	///
-	/// Driven over a real receive stream through the loop that sends it, which is what
-	/// makes this the test that fails if the loop stops mapping the error or stops calling
-	/// `stop` at all. `subscriber::a_retired_alias_maps_to_the_cancelled_code` owns the
-	/// mapping itself and would pass either way.
+	/// A late group for a retired alias must reach the dispatch loop and stop with
+	/// CANCELLED. Testing only the alias lookup would miss a broken dispatch path.
 	#[tokio::test(start_paused = true)]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
 		const VERSION: Version = Version::Draft19;
