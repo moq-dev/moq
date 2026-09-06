@@ -10,11 +10,10 @@ Entrypoints re-export deps under namespaces (`Net`, `Signals`, `Hang`). Only re-
 
 The spine of the JS code; read `signals/src/index.ts` before touching reactive code.
 
-- `Signal<T>`: `set`/`update`/`mutate` write, `peek` reads without subscribing. Writes coalesce per microtask and notify only on change. Equality is deep for plain data but identity for class instances. `set(v, true)` forces a notify.
+- `Signal<T>` writes coalesce per microtask and notify only on change. Equality is deep for plain data but identity for class instances; `set(v, true)` forces a notify. `peek` reads without subscribing.
 - `Computed<T>`: derived, `undefined` until first run and after `close()`. Standalone ones must be closed; `effect.computed()` closes with its parent.
 - `Effect`: reruns when a signal read via `effect.get(signal)` changes. Register teardown with `effect.cleanup(fn)`; it runs before the next run and on `close()`. A rerun waits for every `effect.spawn` task from the previous run to settle, so register teardown unconditionally.
 - Use the scoped helpers (`effect.interval`, `timer`, `timeout`, `animate`, `event`, `subscribe`, `set`, `proxy`, `run`) instead of raw timers or listeners, so cleanup is automatic. Prefer nested `effect.run` over one giant effect.
-- DEV warnings flag leaks: ~100 subscribers, an effect that tracked nothing, an `Effect` GC'd without `close()`.
 
 # Producer / consumer
 
@@ -22,7 +21,7 @@ Networking objects split a plain `XxxState` of `Signal` fields from the public `
 
 # Components
 
-Every reactive component in `watch`/`publish` follows one shape (see `publish/src/video/encoder.ts`):
+Every reactive component in `watch`/`publish` follows one shape:
 
 - `readonly in`: wired dependencies, read-only to consumers.
 - `readonly out = readonlys(...)`: derived state; never hand out a writable `Signal`.
@@ -36,8 +35,8 @@ Plain custom elements on `@moq/signals`, no framework. Attributes are the public
 
 # Conventions
 
-- ESM only. Relative imports include the `.ts` extension in `net`, `signals`, `hang`; match the file you're editing elsewhere.
+- ESM only. Match the import style of the file you're editing.
 - Document every export and add a `@module` block to each entrypoint; JSR builds docs from them. Deprecated exports are marked `@internal` or dropped from the entrypoint, never annotated "use X".
-- `bun` for everything. Biome formats and lints (repo-root `biome.jsonc`). Tests are `*.test.ts` under `bun test`; `tsconfig.build.json` only drops them from the emit.
+- `bun` for everything. Biome formats and lints (repo-root `biome.jsonc`). Tests are `*.test.ts` under `bun test`.
 - `just js check` type-checks, lints, and builds; the build is part of `check` because declaration emit catches errors `--noEmit` misses.
 - For UI or playback changes, run `just dev` and exercise it in a real browser; WebTransport and WebCodecs only fail at runtime. `<moq-watch>` renders black in a background tab: set `visible="always"` or bring the window frontmost.

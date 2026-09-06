@@ -6,10 +6,9 @@ One crate per component from the root list, named `moq-<component>` (`hang` and 
 
 - `kio`: "easy async" primitives everything else polls through.
 - `moq-native`: configures the QUIC backends (Quinn/Quiche/Noq/Iroh) and the fallback transports for native binaries.
-- `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. `moq-token-cli` builds `moq-token`. Binaries never carry a `-cli` suffix.
-- `quest` validates the plans under `/quest`.
+- `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
-`moq-net`, `moq-mux`, `moq-relay`, and `moq-ffi` have their own `CLAUDE.md`.
+`moq-net`, `moq-mux`, `moq-relay` (including the config conventions every binary shares), and `moq-ffi` have their own `CLAUDE.md`.
 
 # Producer / Consumer
 
@@ -38,13 +37,11 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 - `if let` / `let else` over a `match` whose only job is to bind. Keep `match` when both arms do work.
 - Public modules with short names: `broadcast::Consumer`, not `BroadcastConsumer`. Keep `mod encoder` private and re-export flat as `encode::Encoder`.
 - Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`.
-- Binaries: `#[tokio::main]`, install the rustls crypto provider first, then `Config::load()` which sets up tracing. Config conventions live in `moq-relay/CLAUDE.md`.
 
 # Semver
 
 - Don't add `#[non_exhaustive]` by default. It earns its keep on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields plus a `Default`/constructor. Builders with private fields don't need it.
 - Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
-- Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors.
 - A deprecated item gets `#[doc(hidden)]` and `#[deprecated(note)]`; a deprecated flag becomes a hidden clap alias. Never advertise the dead name in docs or `--help`.
 
 # Testing

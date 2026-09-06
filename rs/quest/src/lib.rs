@@ -16,9 +16,9 @@ use anyhow::{Context, Result, bail};
 pub use doc::Doc;
 pub use rules::Finding;
 
-/// CLAUDE.md is the contract rather than a quest, and AGENTS.md is a symlink to
-/// it; neither is executable work, so neither is indexed or validated.
-const NOT_QUESTS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+/// CLAUDE.md is the contract rather than a quest: not executable work, so
+/// neither indexed nor validated.
+const NOT_QUESTS: [&str; 1] = ["CLAUDE.md"];
 
 /// Every quest document under `<root>/quest`, sorted, repository-relative.
 pub fn collect(root: &Path) -> Result<Vec<PathBuf>> {

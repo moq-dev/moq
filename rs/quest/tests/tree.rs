@@ -149,7 +149,7 @@ fn dangling_absolute_link() {
 	tree.rejects("link does not resolve: /quest/m0/line/gone.md");
 }
 
-/// Relative links escape the tree (AGENTS.md points at ../CONTRIBUTING.md), so
+/// Relative links escape the tree (CLAUDE.md points at ../CONTRIBUTING.md), so
 /// they resolve against the LINKING FILE's directory. The pair of cases pins the
 /// direction: resolving against the wrong base would flip both verdicts.
 #[test]
@@ -185,7 +185,7 @@ fn relative_link_to_a_quest() {
 	tree.rejects("link to a quest must be root-absolute: two.md (write /quest/m0/line/two.md)");
 }
 
-/// Templates inside fenced blocks are illustrations. Flagging AGENTS.md's own
+/// Templates inside fenced blocks are illustrations. Flagging CLAUDE.md's own
 /// example would make this a check everyone learns to skip.
 #[test]
 fn fenced_templates_are_not_links() {
@@ -432,7 +432,7 @@ fn required_link_on_a_wrapped_bullet() {
 }
 
 /// The other half of that rule: an external condition with no link at all is the
-/// shape AGENTS.md prescribes, and must stay legal.
+/// shape CLAUDE.md prescribes, and must stay legal.
 #[test]
 fn required_external_condition() {
 	let tree = Tree::new();

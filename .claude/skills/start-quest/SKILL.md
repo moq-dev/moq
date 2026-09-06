@@ -10,7 +10,7 @@ Resolve an optional argument to a base questline directory under `quest/`, defau
 Find every ready quest: one with no `Required` section. Questline `README.md`s are never executed, so exclude them:
 
 ```bash
-rg --files-without-match '^## Required$' <base> --glob '*.md' --glob '!README.md' --glob '!AGENTS.md' --glob '!CLAUDE.md'
+rg --files-without-match '^## Required$' <base> --glob '*.md' --glob '!README.md' --glob '!CLAUDE.md'
 ```
 
 No output (rg exits 1) means the questline has no ready work; say so.

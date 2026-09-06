@@ -7,7 +7,7 @@ start and spawn flows stop reconstructing that answer by grepping.
 
 ## Plan
 
-[quest/AGENTS.md](/quest/AGENTS.md) says only ready quests are executed and that
+[quest/CLAUDE.md](/quest/CLAUDE.md) says only ready quests are executed and that
 a missing `Required` section is what makes one ready. The only `rs/quest` command
 that reads `Required` is `quest check`, which proves the section is well-formed
 and acyclic: properties of the tree, neither of which says whether a given quest
@@ -44,4 +44,4 @@ deterministic.
 
 Note in the failure text that a blocked quest with an independently landable
 piece is split into its own quest, per the Creation rule, rather than started as
-it stands. Document the subcommand in `quest/AGENTS.md` beside `quest check`.
+it stands. Document the subcommand in `quest/CLAUDE.md` beside `quest check`.

@@ -95,6 +95,6 @@ just test         # Test what the branch changed, same scope
 just fix          # Auto-fix lint/formatting, same scope
 ```
 
-These diff the branch against its base and only run the affected packages; pass a base positionally to override. Run `just fix` before committing. CI runs the same `check` and `test`.
+These diff the branch against its base and only run the affected packages. Run `just fix` before committing. CI runs the same `check` and `test`.
 
 See `CONTRIBUTING.md` before making a PR.

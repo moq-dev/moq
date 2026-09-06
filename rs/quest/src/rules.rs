@@ -334,7 +334,7 @@ fn index<'a>(found: &mut Findings, known: &BTreeSet<&Path>, docs: &'a [Doc]) -> 
 
 /// `Required` must be acyclic. A cycle is a set of quests none of which can
 /// ever start, and walking the links to rule one out is exactly the manual step
-/// AGENTS.md asks of an author before adding a blocker.
+/// CLAUDE.md asks of an author before adding a blocker.
 fn cycles(found: &mut Findings, docs: &[Doc], listed: &BTreeMap<PathBuf, &Path>) {
 	let mut blockers: BTreeMap<&Path, Vec<PathBuf>> = BTreeMap::new();
 

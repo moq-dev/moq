@@ -22,4 +22,4 @@ just drafts publish <name> <version> <email>  # submit to the datatracker
 
 # Documentation site
 
-`doc/.vitepress/drafts.ts` translates each draft into a page under `/draft/` on doc.moq.dev. The sources stay canonical. kramdown-rfc is not CommonMark, so the translator has a case for each construct we use (`--- abstract/middle/back`, `{{ref}}`, `{::boilerplate}`, IALs, kramdown tables). A new construct needs a translator case in the same PR; `bun run --cwd doc check` renders every page and catches a table degrading into a paragraph.
+`doc/.vitepress/drafts.ts` translates each draft into a page under `/draft/` on doc.moq.dev. The sources stay canonical. kramdown-rfc is not CommonMark, so the translator has a case for each construct we use. A new construct needs a translator case in the same PR; `bun run --cwd doc check` renders every page and catches a table degrading into a paragraph.

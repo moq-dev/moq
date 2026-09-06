@@ -16,4 +16,3 @@ Keep the wrappers thin and their names aligned with the Rust API. Swift and Pyth
 - UniFFI ignores `#[cfg]` inside an export impl; gate at the module.
 - Default argument values don't reach Go; resolve defaults in Rust.
 - Go handles must be released from the goroutine that ran the call; using a destroyed object panics.
-- `just check` never compiles `moq-ffi` or `libmoq`. Run `just rs check -p moq-ffi` and the language `just <lang> check` yourself.
