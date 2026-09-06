@@ -16,7 +16,7 @@
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
 //! WebRTC, or this crate's own encoders emit. The decoder rejects an interlaced or
 //! high-bit-depth sequence at its first SPS, which surfaces here as a decode
-//! error rather than wrong pixels.
+//! error rather than wrong pixels. Left and top cropping are also rejected.
 //!
 //! Unlike NVDEC, which cuvid lets us pin to zero display delay, output trails the
 //! input even without B-frames: H.264's DPB releases a picture only once a later
@@ -33,7 +33,7 @@
 //! target exports at modifier `0x100000000000009`, and the renderer imports that
 //! a memory plane at a time, so the pixels reach a texture untouched
 //! (`decoded_frames_reach_the_gpu_without_a_download` in
-//! [`render`](crate::render) draws them).
+//! the render module draws them).
 //!
 //! Opt-in rather than the default because it is not free to a consumer that does
 //! not draw. Exporting a surface retires it from the decoder's recycling pool,
@@ -169,9 +169,7 @@ impl Backend for Vaapi {
 		convert(decoded)
 	}
 
-	/// The tail of the stream, which is why this backend overrides the trait's
-	/// no-op: the DPB is holding as many pictures as the sequence's reference and
-	/// reorder limits allow, and nothing else will ever ask for them.
+	/// Return the tail held by the DPB at the end of the stream.
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		if let Some(frames) = self.flush_shared() {
 			return frames;

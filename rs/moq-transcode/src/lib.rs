@@ -612,7 +612,7 @@ mod tests {
 	async fn vaapi_fetch_keeps_the_buffered_tail() {
 		let source = source_broadcast(1, 5);
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
 			source: None,
@@ -653,7 +653,7 @@ mod tests {
 
 		let (source, producer_task) = source_broadcast_live(1, 5);
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
 			source: None,
