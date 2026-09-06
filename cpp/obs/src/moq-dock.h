@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include <QElapsedTimer>
 #include <QPointer>
 #include <QWidget>
 #include <obs.hpp>
@@ -13,7 +12,6 @@
 class QLineEdit;
 class QPushButton;
 class QLabel;
-class QCheckBox;
 class QComboBox;
 class QGroupBox;
 class QTimer;
@@ -24,8 +22,7 @@ class MoQSpark;
 // core Settings -> Stream UI (which does not surface third-party services on
 // stable OBS yet). The dock owns its own service/output/encoder objects and
 // reuses the encoder settings configured in OBS's Output settings, unless the
-// Quality tab custom source-quality toggle is on (then it uses the dock's
-// source profile / codec picks).
+// Encoding tab selects custom settings for this MoQ stream.
 class MoQDock : public QWidget {
 	Q_OBJECT
 
@@ -37,8 +34,8 @@ private slots:
 	void ToggleStream();
 	void UpdateStatus();
 	void OpenAdvanced();
-	void OnQualityToggled(bool enabled);
-	void RefreshQualityOptions(bool applyProfileDefaults = false);
+	void OnEncodingChanged(int mode);
+	void RefreshEncodingOptions(bool applyProfileDefaults = false);
 	void OnRelayUrlEdited();
 
 private:
@@ -46,10 +43,9 @@ private:
 	void StopStream();
 	void SetRunning(bool running);
 	bool CreateConfiguredEncoders();
-	bool CreateTranscodeEncoders();
+	bool CreateCustomEncoders();
 	QString ConnectUrl() const;
 	void PeelJwtFromRelayUrl();
-	void ApplyView();
 	void ClearLiveStats();
 
 	void LoadSettings();
@@ -67,9 +63,7 @@ private:
 	QPushButton *advancedButton;
 	QLabel *status;
 
-	QCheckBox *showStats;
 	QLabel *statsBox;
-	QCheckBox *showTimeline;
 	QWidget *sparkBox;
 	MoQSpark *rttSpark;
 	MoQSpark *sendSpark;
@@ -77,8 +71,8 @@ private:
 	MoQSpark *lossSpark;
 	MoQSpark *sentSpark;
 
-	QCheckBox *qualityToggle;
-	QGroupBox *qualityBox;
+	QComboBox *encodingMode;
+	QGroupBox *encodingBox;
 	QComboBox *profileCombo;
 	QLabel *detectedLabel;
 	QComboBox *pathCombo;
@@ -100,8 +94,7 @@ private:
 	OBSEncoderAutoRelease audioEncoder;
 
 	bool running = false;
-	QElapsedTimer liveClock;
-	// Filled when Go Live creates encoders; shown in Stream stats while publishing.
+	// Filled when Go Live creates encoders; shown in Stats while publishing.
 	QString publishSummary;
 
 	// Shared with OnOutputStopped so a deferred OBS stop callback cannot race

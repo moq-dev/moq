@@ -11,7 +11,6 @@
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QFormLayout>
@@ -36,12 +35,10 @@
 #include <QPen>
 #include <QColor>
 #include <QPaintEvent>
-#include <QElapsedTimer>
 
 #include <algorithm>
 #include <cstring>
 #include <deque>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -105,22 +102,6 @@ std::string SettingsPath()
 	char *p = obs_module_config_path("dock.json");
 	std::string s = p ? p : "";
 	bfree(p);
-	return s;
-}
-
-// Default broadcast name "obs-<rand>" so distinct setups don't collide on a
-// shared relay out of the box. Only used until the user edits/saves their own.
-std::string RandomBroadcastName()
-{
-	static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789";
-	std::random_device rd;
-	std::mt19937 gen(rd());
-	std::uniform_int_distribution<int> dist(0, (int)sizeof(charset) - 2);
-	std::string s = "obs-";
-	for (int i = 0; i < 6; i++)
-		s += charset[dist(gen)];
-	// Hang convention: a .hang suffix marks a media broadcast.
-	s += ".hang";
 	return s;
 }
 
@@ -429,10 +410,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	tokenEdit->setToolTip(tokenHelp);
 
 	pathEdit = new QLineEdit(streamPage);
-	pathEdit->setText(QString::fromStdString(RandomBroadcastName()));
 	pathEdit->setPlaceholderText("(optional) broadcast name");
 	const QString pathHelp = "Broadcast path on the relay. Viewers subscribe to this name. "
-				 "A .hang suffix is the usual hang catalog convention.";
+				 "Leave empty to publish at the relay URL path.";
 	pathEdit->setToolTip(pathHelp);
 
 	auto *form = new QFormLayout();
@@ -441,7 +421,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	form->setContentsMargins(0, 0, 0, 0);
 	form->addRow(MoQHintLabel("Relay URL", urlHelp, streamPage), urlEdit);
 	form->addRow(MoQHintLabel("Publish token", tokenHelp, streamPage), tokenEdit);
-	form->addRow(MoQHintLabel("Broadcast name", pathHelp, streamPage), pathEdit);
+	form->addRow(MoQHintLabel("Broadcast name (optional)", pathHelp, streamPage), pathEdit);
 
 	button = new QPushButton("Go Live", streamPage);
 	button->setCursor(Qt::PointingHandCursor);
@@ -465,17 +445,8 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	statusFont.setBold(true);
 	status->setFont(statusFont);
 
-	const QString statsHelp = "While live: Quality encode, negotiated MoQ draft and dial URL scheme. "
-				  "RTT / bitrate / loss live in the timeline panels.";
-	showStats = new QCheckBox("Show stats", streamPage);
-	showStats->setChecked(true);
-	showStats->setToolTip(statsHelp);
-	connect(showStats, &QCheckBox::toggled, this, [this](bool) {
-		SaveSettings();
-		ApplyView();
-	});
-
-	statsBox = new QLabel(streamPage);
+	auto *statsPage = new QWidget(tabs);
+	statsBox = new QLabel(statsPage);
 	statsBox->setWordWrap(true);
 	statsBox->setTextFormat(Qt::PlainText);
 	statsBox->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -485,19 +456,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 				"border: 1px solid #464646; border-radius: 4px; padding: 6px; }");
 	statsBox->setText("Waiting for the first connect.");
 
-	statsBox->setToolTip(statsHelp);
-
-	const QString timelineHelp =
-		"One sparkline per live metric for the last minute: RTT, send, recv, loss, and bytes sent.";
-	showTimeline = new QCheckBox("Show timeline", streamPage);
-	showTimeline->setChecked(true);
-	showTimeline->setToolTip(timelineHelp);
-	connect(showTimeline, &QCheckBox::toggled, this, [this](bool) {
-		SaveSettings();
-		ApplyView();
-	});
-
-	sparkBox = new QWidget(streamPage);
+	sparkBox = new QWidget(statsPage);
 	auto *sparkLayout = new QVBoxLayout(sparkBox);
 	sparkLayout->setContentsMargins(0, 0, 0, 0);
 	sparkLayout->setSpacing(3);
@@ -517,15 +476,6 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	sparkLayout->addWidget(lossSpark);
 	sparkLayout->addWidget(sentSpark);
 
-	auto *streamLibmoq = new QLabel(streamPage);
-	streamLibmoq->setAlignment(Qt::AlignRight | Qt::AlignBottom);
-	streamLibmoq->setStyleSheet("color: #888888; font-size: 10px;");
-	streamLibmoq->setOpenExternalLinks(true);
-	streamLibmoq->setText(
-		QString("<a href=\"https://doc.moq.dev/lib/c/\" style=\"color:#888888; text-decoration:none;\">libmoq %1</a>")
-			.arg(MOQ_VERSION_STRING));
-	streamLibmoq->setToolTip("Open libmoq docs on doc.moq.dev");
-
 	auto *streamLayout = new QVBoxLayout(streamPage);
 	streamLayout->setContentsMargins(0, 8, 0, 0);
 	streamLayout->setSpacing(10);
@@ -533,100 +483,103 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	streamLayout->addWidget(button);
 	streamLayout->addWidget(advancedButton);
 	streamLayout->addWidget(status);
-	streamLayout->addWidget(showStats);
-	streamLayout->addWidget(statsBox);
-	streamLayout->addWidget(showTimeline);
-	streamLayout->addWidget(sparkBox);
 	streamLayout->addStretch();
-	streamLayout->addWidget(streamLibmoq);
 
-	auto *qualityPage = new QWidget(tabs);
-	qualityToggle = new QCheckBox("Custom source quality", qualityPage);
-	qualityToggle->setToolTip("What OBS encodes and publishes. Off uses Settings → Output. On uses "
-				  "the Quality / Performance profile and codec picks below.");
+	auto *statsLayout = new QVBoxLayout(statsPage);
+	statsLayout->setContentsMargins(0, 8, 0, 0);
+	statsLayout->setSpacing(10);
+	statsLayout->addWidget(statsBox);
+	statsLayout->addWidget(sparkBox);
+	statsLayout->addStretch();
 
-	qualityBox = new QGroupBox("Source encode", qualityPage);
-	auto *qForm = new QFormLayout(qualityBox);
+	auto *encodingPage = new QWidget(tabs);
+	encodingMode = new QComboBox(encodingPage);
+	encodingMode->addItem("Use OBS Output settings");
+	encodingMode->addItem("Custom settings for MoQ");
+
+	encodingBox = new QGroupBox("Custom encoding settings", encodingPage);
+	auto *qForm = new QFormLayout(encodingBox);
 	qForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
 	qForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
-	profileCombo = new QComboBox(qualityBox);
-	profileCombo->addItem("Auto (detected)", "auto");
+	profileCombo = new QComboBox(encodingBox);
+	profileCombo->addItem("Auto", "auto");
 	profileCombo->addItem("Quality", "high");
 	profileCombo->addItem("Performance", "low");
 
-	detectedLabel = new QLabel(qualityBox);
-	detectedLabel->setWordWrap(true);
-	detectedLabel->setStyleSheet("color: #888888;");
-
-	pathCombo = new QComboBox(qualityBox);
+	pathCombo = new QComboBox(encodingBox);
 	pathCombo->addItem("Hardware preferred", "hardware");
 	pathCombo->addItem("Software preferred", "software");
 
-	videoCodecCombo = new QComboBox(qualityBox);
-	videoEncoderCombo = new QComboBox(qualityBox);
-	audioCodecCombo = new QComboBox(qualityBox);
+	videoCodecCombo = new QComboBox(encodingBox);
+	videoEncoderCombo = new QComboBox(encodingBox);
+	audioCodecCombo = new QComboBox(encodingBox);
 
 	qForm->addRow("Profile", profileCombo);
-	qForm->addRow(detectedLabel);
 	qForm->addRow("Encoder path", pathCombo);
 	qForm->addRow("Video codec", videoCodecCombo);
 	qForm->addRow("Video encoder", videoEncoderCombo);
 	qForm->addRow("Audio codec", audioCodecCombo);
 
-	auto *qualityNote = new QLabel(qualityPage);
-	qualityNote->setWordWrap(true);
-	qualityNote->setStyleSheet("color: #888888;");
-	qualityNote->setText("While publishing, Stream → Show stats lists this encode, "
-			     "plus protocol and dial URL scheme.");
+	auto *encodingNote = new QLabel(encodingPage);
+	encodingNote->setWordWrap(true);
+	encodingNote->setStyleSheet("color: #888888;");
+	encodingNote->setText("Both options use OBS encoders. Use your OBS Settings → Output configuration, "
+			      "or choose separate settings for this MoQ stream.");
 
-	auto *qualityLayout = new QVBoxLayout(qualityPage);
-	qualityLayout->setContentsMargins(0, 8, 0, 0);
-	qualityLayout->setSpacing(10);
-	qualityLayout->addWidget(qualityToggle);
-	qualityLayout->addWidget(qualityBox);
-	qualityLayout->addWidget(qualityNote);
-	qualityLayout->addStretch();
-	qualityBox->setEnabled(false);
+	auto *encodingLayout = new QVBoxLayout(encodingPage);
+	encodingLayout->setContentsMargins(0, 8, 0, 0);
+	encodingLayout->setSpacing(10);
+	encodingLayout->addWidget(encodingMode);
+	encodingLayout->addWidget(encodingNote);
+	encodingLayout->addWidget(encodingBox);
+	encodingLayout->addStretch();
+	encodingBox->setEnabled(false);
 
-	auto *versionPage = new QWidget(tabs);
-	auto *verForm = new QFormLayout(versionPage);
+	auto *aboutPage = new QWidget(tabs);
+	auto *verForm = new QFormLayout(aboutPage);
 	verForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
 	verForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 	verForm->setContentsMargins(0, 8, 0, 0);
 
-	auto *pluginVer = new QLabel(versionPage);
+	auto *pluginVer = new QLabel(aboutPage);
 	pluginVer->setOpenExternalLinks(true);
 	pluginVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	pluginVer->setText(
 		QString("<a href=\"https://doc.moq.dev/bin/obs\">%1</a>").arg(QString::fromUtf8(PLUGIN_VERSION_STRING)));
 	pluginVer->setToolTip("OBS plugin docs on doc.moq.dev");
 
-	auto *libmoqVer = new QLabel(versionPage);
+	auto *libmoqVer = new QLabel(aboutPage);
 	libmoqVer->setOpenExternalLinks(true);
 	libmoqVer->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	libmoqVer->setText(
 		QString("<a href=\"https://doc.moq.dev/lib/c/\">%1</a>").arg(QString::fromUtf8(MOQ_VERSION_STRING)));
 	libmoqVer->setToolTip("libmoq C API docs on doc.moq.dev");
 
-	auto *moqDevLink = new QLabel(versionPage);
+	auto *moqDevLink = new QLabel(aboutPage);
 	moqDevLink->setOpenExternalLinks(true);
 	moqDevLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	moqDevLink->setText("<a href=\"https://moq.dev\">moq.dev</a>");
 
-	auto *moqProLink = new QLabel(versionPage);
+	auto *moqProLink = new QLabel(aboutPage);
 	moqProLink->setOpenExternalLinks(true);
 	moqProLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	moqProLink->setText("<a href=\"https://moq.pro\">moq.pro</a>");
+
+	detectedLabel = new QLabel(aboutPage);
+	detectedLabel->setWordWrap(true);
+	detectedLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
 	verForm->addRow("Plugin", pluginVer);
 	verForm->addRow("libmoq", libmoqVer);
 	verForm->addRow("moq.dev", moqDevLink);
 	verForm->addRow("moq.pro", moqProLink);
+	verForm->addRow("Available video encoders", detectedLabel);
 
 	tabs->addTab(streamPage, "Stream");
-	tabs->addTab(qualityPage, "Quality");
-	tabs->addTab(versionPage, "Version");
+	tabs->addTab(encodingPage, "Encoding");
+	tabs->addTab(statsPage, "Stats");
+	tabs->addTab(aboutPage, "About");
 
 	auto *layout = new QVBoxLayout(this);
 	layout->setContentsMargins(8, 8, 8, 8);
@@ -639,27 +592,26 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::OnRelayUrlEdited);
 	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
-	connect(qualityToggle, &QCheckBox::toggled, this, &MoQDock::OnQualityToggled);
+	connect(encodingMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::OnEncodingChanged);
 	connect(profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
 		// Profile owns the recommended path / codec / encoder / audio. Path and
 		// codec edits only rebuild the dependent lists without wiping those picks.
-		RefreshQualityOptions(true);
+		RefreshEncodingOptions(true);
 		SaveSettings();
 	});
 	connect(pathCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-		RefreshQualityOptions();
+		RefreshEncodingOptions();
 		SaveSettings();
 	});
 	connect(videoCodecCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-		RefreshQualityOptions();
+		RefreshEncodingOptions();
 		SaveSettings();
 	});
 	connect(videoEncoderCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
 	connect(audioCodecCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
 
-	RefreshQualityOptions(true);
+	RefreshEncodingOptions(true);
 	LoadSettings();
-	ApplyView();
 	SetRunning(false);
 
 	{
@@ -755,31 +707,30 @@ QString MoQDock::ConnectUrl() const
 	return url.toString();
 }
 
-void MoQDock::OnQualityToggled(bool enabled)
+void MoQDock::OnEncodingChanged(int mode)
 {
-	qualityBox->setEnabled(enabled);
+	const bool enabled = mode == 1;
+	encodingBox->setEnabled(enabled);
 	if (enabled)
-		RefreshQualityOptions();
+		RefreshEncodingOptions();
 	SaveSettings();
 }
 
-void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
+void MoQDock::RefreshEncodingOptions(bool applyProfileDefaults)
 {
 	const auto offers = EnumerateEncoders();
 
 	std::vector<MoQEncoderCapability> caps;
 	caps.reserve(offers.size());
-	QStringList hwNames;
+	QStringList encoderNames;
 	for (const auto &o : offers) {
 		caps.push_back({o.codec.toStdString(), o.hardware, o.video});
-		if (o.video && o.hardware && !hwNames.contains(o.display))
-			hwNames.append(o.display);
+		if (o.video && !encoderNames.contains(o.display))
+			encoderNames.append(o.display);
 	}
 
 	const QString profile = profileCombo->currentData().toString();
 	const MoQQualityDefaults recommended = RecommendQualityDefaults(profile.toStdString(), caps);
-	const bool haveHw = !hwNames.isEmpty();
-	const bool high = recommended.high;
 
 	// Only reset path when the profile itself changed. Auto must not wipe a
 	// manual Software/Hardware pick on every dependent refresh.
@@ -880,21 +831,13 @@ void MoQDock::RefreshQualityOptions(bool applyProfileDefaults)
 	else
 		audioCodecCombo->setCurrentIndex(0);
 
-	QString detected = haveHw ? QString("Detected: hardware available (%1)").arg(hwNames.join(", "))
-				  : QString("Detected: software encoders only");
-	if (profile == "auto")
-		detected += preferHw ? " · Auto → Quality" : " · Auto → Performance";
-	else if (high)
-		detected += QStringLiteral(" · Quality · 8 Mbps");
-	else
-		detected += QStringLiteral(" · Performance · 2.5 Mbps");
-	detectedLabel->setText(detected);
+	detectedLabel->setText(encoderNames.isEmpty() ? QString("None available") : encoderNames.join("\n"));
 }
 
 bool MoQDock::CreateConfiguredEncoders()
 {
-	if (qualityToggle->isChecked())
-		return CreateTranscodeEncoders();
+	if ((encodingMode->currentIndex() == 1))
+		return CreateCustomEncoders();
 
 	config_t *config = obs_frontend_get_profile_config();
 	if (!config) {
@@ -988,7 +931,7 @@ bool MoQDock::CreateConfiguredEncoders()
 	return true;
 }
 
-bool MoQDock::CreateTranscodeEncoders()
+bool MoQDock::CreateCustomEncoders()
 {
 	const auto offers = EnumerateEncoders();
 	const QString profile = profileCombo->currentData().toString();
@@ -1191,20 +1134,14 @@ void MoQDock::SetRunning(bool isRunning)
 	// The settings are read once at connect, so editing them mid-stream would look
 	// like it applied when it hadn't.
 	advancedButton->setEnabled(!isRunning);
-	qualityToggle->setEnabled(!isRunning);
-	qualityBox->setEnabled(!isRunning && qualityToggle->isChecked());
+	encodingMode->setEnabled(!isRunning);
+	encodingBox->setEnabled(!isRunning && (encodingMode->currentIndex() == 1));
 
 	if (!isRunning) {
 		status->setText("● Disconnected");
 		status->setStyleSheet("color: #888888;");
 		ClearLiveStats();
 	}
-}
-
-void MoQDock::ApplyView()
-{
-	statsBox->setVisible(showStats->isChecked());
-	sparkBox->setVisible(showTimeline->isChecked());
 }
 
 void MoQDock::ClearLiveStats()
@@ -1215,7 +1152,6 @@ void MoQDock::ClearLiveStats()
 	recvSpark->Clear();
 	lossSpark->Clear();
 	sentSpark->Clear();
-	liveClock.invalidate();
 	publishSummary.clear();
 }
 
@@ -1238,20 +1174,17 @@ void MoQDock::UpdateStatus()
 		if (!failText.isEmpty()) {
 			status->setText(QString("● %1").arg(failText));
 			status->setStyleSheet("color: #c0392b;");
-			if (showStats->isChecked())
-				statsBox->setText(failText);
+			statsBox->setText(failText);
 		} else {
 			status->setText("● Connecting…");
 			status->setStyleSheet("color: #d08b1d;");
-			if (showStats->isChecked() && !publishSummary.isEmpty())
+			if (!publishSummary.isEmpty())
 				statsBox->setText(publishSummary + QStringLiteral("\nConnecting…"));
 		}
 		return;
 	}
 
 	auto pushGap = [this]() {
-		if (!showTimeline->isChecked())
-			return;
 		rttSpark->Push(false, 0);
 		sendSpark->Push(false, 0);
 		recvSpark->Push(false, 0);
@@ -1273,8 +1206,7 @@ void MoQDock::UpdateStatus()
 				text += QString(" · reconnects %1").arg(reconnects);
 			status->setText(text);
 			status->setStyleSheet("color: #c0392b;");
-			if (showStats->isChecked())
-				statsBox->setText(latest);
+			statsBox->setText(latest);
 			pushGap();
 			return;
 		}
@@ -1286,7 +1218,7 @@ void MoQDock::UpdateStatus()
 			text += QString(" · ") + latest;
 		status->setText(text);
 		status->setStyleSheet("color: #d08b1d;");
-		if (showStats->isChecked()) {
+		{
 			QStringList lines;
 			if (!publishSummary.isEmpty())
 				lines << publishSummary;
@@ -1301,7 +1233,7 @@ void MoQDock::UpdateStatus()
 					     : QString("● Connected"));
 	status->setStyleSheet("color: #36a45e;");
 
-	if (showStats->isChecked()) {
+	{
 		QStringList lines;
 		if (!publishSummary.isEmpty())
 			lines << publishSummary;
@@ -1312,9 +1244,7 @@ void MoQDock::UpdateStatus()
 		statsBox->setText(lines.isEmpty() ? QString("Connected.") : lines.join('\n'));
 	}
 
-	if (showTimeline->isChecked()) {
-		if (!liveClock.isValid())
-			liveClock.start();
+	{
 		rttSpark->Push(stats.rtt_valid, stats.rtt_ms);
 		sendSpark->Push(stats.send_rate_valid, stats.send_rate_bps);
 		recvSpark->Push(stats.recv_rate_valid, stats.recv_rate_bps);
@@ -1352,35 +1282,26 @@ void MoQDock::LoadSettings()
 	if (saved)
 		obs_data_apply(advanced, saved);
 
-	{
-		QSignalBlocker bStats(showStats);
-		QSignalBlocker bTimeline(showTimeline);
-		if (obs_data_has_user_value(data, "show_stats"))
-			showStats->setChecked(obs_data_get_bool(data, "show_stats"));
-		if (obs_data_has_user_value(data, "show_timeline"))
-			showTimeline->setChecked(obs_data_get_bool(data, "show_timeline"));
-	}
-
 	obs_data_t *qualityRaw = obs_data_get_obj(data, "quality");
 	if (!qualityRaw)
 		qualityRaw = obs_data_get_obj(data, "transcode");
 	if (qualityRaw) {
 		OBSDataAutoRelease quality(qualityRaw);
-		QSignalBlocker bToggle(qualityToggle);
+		QSignalBlocker bToggle(encodingMode);
 		QSignalBlocker bProfile(profileCombo);
 		QSignalBlocker bPath(pathCombo);
 		QSignalBlocker bCodec(videoCodecCombo);
 		QSignalBlocker bEnc(videoEncoderCombo);
 		QSignalBlocker bAud(audioCodecCombo);
 		const bool enabled = obs_data_get_bool(quality, "enabled");
-		qualityToggle->setChecked(enabled);
-		qualityBox->setEnabled(enabled);
+		encodingMode->setCurrentIndex(enabled ? 1 : 0);
+		encodingBox->setEnabled(enabled);
 
 		SelectComboData(profileCombo, QString::fromUtf8(obs_data_get_string(quality, "profile")));
 		SelectComboData(pathCombo, QString::fromUtf8(obs_data_get_string(quality, "path")));
-		RefreshQualityOptions();
+		RefreshEncodingOptions();
 		SelectComboData(videoCodecCombo, QString::fromUtf8(obs_data_get_string(quality, "video_codec")));
-		RefreshQualityOptions();
+		RefreshEncodingOptions();
 		SelectComboData(videoEncoderCombo, QString::fromUtf8(obs_data_get_string(quality, "video_encoder")));
 		SelectComboData(audioCodecCombo, QString::fromUtf8(obs_data_get_string(quality, "audio_codec")));
 	}
@@ -1398,12 +1319,10 @@ void MoQDock::SaveSettings()
 	obs_data_set_string(data, "url", urlEdit->text().toUtf8().constData());
 	obs_data_set_string(data, "token", tokenEdit->text().toUtf8().constData());
 	obs_data_set_string(data, "path", pathEdit->text().toUtf8().constData());
-	obs_data_set_bool(data, "show_stats", showStats->isChecked());
-	obs_data_set_bool(data, "show_timeline", showTimeline->isChecked());
 	obs_data_set_obj(data, "advanced", advanced);
 
 	OBSDataAutoRelease quality = obs_data_create();
-	obs_data_set_bool(quality, "enabled", qualityToggle->isChecked());
+	obs_data_set_bool(quality, "enabled", (encodingMode->currentIndex() == 1));
 	obs_data_set_string(quality, "profile", profileCombo->currentData().toString().toUtf8().constData());
 	obs_data_set_string(quality, "path", pathCombo->currentData().toString().toUtf8().constData());
 	obs_data_set_string(quality, "video_codec", videoCodecCombo->currentData().toString().toUtf8().constData());
@@ -1476,8 +1395,7 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 			if (!failText.isEmpty()) {
 				dock->status->setText(QString("● %1").arg(failText));
 				dock->status->setStyleSheet("color: #c0392b;");
-				if (dock->showStats->isChecked())
-					dock->statsBox->setText(failText);
+				dock->statsBox->setText(failText);
 			} else {
 				dock->status->setText(QString("● Stopped (code %1)").arg(code));
 				dock->status->setStyleSheet("color: #c0392b;");

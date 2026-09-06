@@ -10,20 +10,18 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a MoQ dock shows connection state and opens the advanced settings.
-  **Stream** is Go Live, token, stats, and timeline. Status is Connecting,
-  Connected, Reconnecting (libmoq is between connections), or Disconnected.
-  Reconnect delay / cap / give up live under Advanced. **Quality** is the OBS
-  source encode (off uses Settings > Output; on uses Auto / Quality /
-  Performance plus hardware vs software and H.264 / HEVC / AV1, AAC or Opus).
-  The **Version** tab lists the plugin and libmoq versions.
-  **Publish token** is optional (leave empty for public relays such as `/anon`).
-  Paste a URL with `?jwt=` into Relay URL and the dock peels the token into that field.
-  **Show stats** (on by default) lists the active Quality encode and negotiated
-  MoQ draft and dial URL scheme. **Show timeline** is five compact sparklines (RTT,
-  send, recv, loss, bytes sent) for the last minute, from `moq_session_stats`.
-  The Stream tab keeps a libmoq version footer; the **Version** tab links plugin
-  / libmoq docs plus [moq.dev](https://moq.dev) and [moq.pro](https://moq.pro).
+- **Dock**: **Stream** contains the relay URL, optional publish token and
+  broadcast name, Go Live, and connection state. Leave the broadcast name empty
+  to publish at the relay URL path. Paste a URL with `?jwt=` to fill the token
+  field automatically. Reconnect settings live under **Advanced**.
+  **Encoding** chooses between **Use OBS Output settings** and **Custom settings
+  for MoQ**. Both use OBS encoders; custom settings apply only to this MoQ stream.
+  Custom profiles offer Auto, Quality, or Performance, with hardware/software,
+  video codec, encoder, and audio codec choices.
+  **Stats** shows the active encoding, negotiated draft, dial scheme, and one
+  minute of RTT, estimated send/receive bandwidth, packet loss, and bytes sent.
+  **About** lists plugin and libmoq versions, documentation links, and available
+  video encoders.
 
 ## Source quality and moq-transcode
 
