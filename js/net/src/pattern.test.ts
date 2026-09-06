@@ -390,3 +390,15 @@ test("ordering keeps distinct JS strings distinct", () => {
 	expect(Pattern.compare(a, b)).not.toBe(0);
 	expect(new Patterns([a, b]).equals(new Patterns([b, a]))).toBe(true);
 });
+
+test("pattern instances cannot replace their validated representation", () => {
+	const pattern = Pattern.parse("safe");
+	const union = new Patterns([pattern]);
+	expect(Reflect.set(pattern, "segments", [{ kind: "wildcard" }])).toBe(false);
+	expect(Reflect.set(pattern, "text", "evil")).toBe(false);
+	expect(pattern.text).toBe("safe");
+	expect(pattern.matches("evil")).toBe(false);
+	expect(pattern.contains(Pattern.literal("evil"))).toBe(false);
+	expect(union.matches("evil")).toBe(false);
+	expect(union.toJSON()).toEqual(["safe"]);
+});

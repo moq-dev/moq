@@ -564,6 +564,7 @@ export class Pattern {
 		this.text = text;
 		this.#globstar = globstar;
 		this.#head = head;
+		Object.freeze(this);
 	}
 
 	/**
