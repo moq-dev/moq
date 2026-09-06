@@ -547,6 +547,10 @@ wasm-fix *args:
 audit:
     cargo deny check --show-stats
 
+# Verify relay startup validation without a QUIC backend.
+relay-minimal:
+    {{ cargo_compile }} nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
+
 # The feature permutations `check` leaves out. Each is a full workspace compile
 # at a feature set that shares almost no artifacts with the default one (~6min
 # for the all-features clippy alone), which is why this is nightly rather than
@@ -570,7 +574,7 @@ features:
     {{ cargo_compile }} check --locked --workspace --all-targets --no-default-features
     {{ cargo_compile }} hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
     {{ cargo_compile }} check --locked -p moq-relay --no-default-features
-    {{ cargo_compile }} nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
+    just rs relay-minimal
     {{ cargo_compile }} check --locked -p moq-cli --no-default-features
     {{ cargo_compile }} check --locked -p moq-bench --no-default-features
     {{ cargo_compile }} check --locked -p moq-boy --no-default-features
@@ -629,6 +633,10 @@ test-changed $FILES:
     	ALL)   just rs test --workspace ;;
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
+
+    if [[ "$packages" == "ALL" ]] || just rs _names "$packages" | grep -qw moq-relay; then
+        just rs relay-minimal
+    fi
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:

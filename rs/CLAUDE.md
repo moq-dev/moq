@@ -176,6 +176,8 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
   test builds too, and took the moq-token RSA keygen tests from 16s to 0.8s while
   still generating production-size 2048-bit keys.
 
+- When the test selection includes `moq-relay`, `just test` also runs `just rs relay-minimal`, an isolated build without default features that verifies unsupported worker settings are rejected. Nightly uses the same recipe.
+
 - Rust tests are `#[cfg(test)] mod tests` inline in the source file.
 
 - Async tests that depend on time call `tokio::time::pause()` first so timers fire instantly and deterministically (e.g. the tests in `moq-net/src/model/origin.rs`).
