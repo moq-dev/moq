@@ -4,7 +4,7 @@
 use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
-use crate::{Error, Rung};
+use crate::{Error, Ladder};
 
 /// A rung resolved against the source: concrete geometry and encoder settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,7 +141,7 @@ fn is_supported_av1(av1: &AV1) -> bool {
 ///
 /// The names are placeholders: [`Names`] decides whether a rung keeps the name
 /// its predecessor was serving or takes a fresh one.
-pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
+pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
 	let Some((source_width, source_height)) = dimensions(source) else {
 		return Err(Error::SourceDimensions(source_name.to_string()));
 	};
@@ -152,9 +152,9 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 		.unwrap_or(30);
 
 	let mut resolved: Vec<Resolved> = Vec::new();
-	for rung in rungs {
-		let height = (rung.height & !1) as u64;
-		if height == 0 || height > source_height {
+	for rung in ladder.rungs() {
+		let height = rung.height as u64;
+		if height > source_height {
 			// Never upscale.
 			continue;
 		}
@@ -173,10 +173,6 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 		}
 
 		let height = height as u32;
-		// Duplicate heights in the config would collide on the track name.
-		if resolved.iter().any(|other: &Resolved| other.height == height) {
-			continue;
-		}
 		resolved.push(Resolved {
 			name: format!("video/{height}p"),
 			height,
@@ -267,6 +263,7 @@ mod tests {
 	use hang::catalog::H264;
 
 	use super::*;
+	use crate::Rung;
 
 	fn source(width: u32, height: u32, bitrate: Option<u64>) -> VideoConfig {
 		let mut config = VideoConfig::new(H264 {
@@ -284,17 +281,38 @@ mod tests {
 
 	#[test]
 	fn rungs_never_upscale() {
-		let rungs = crate::Config::default().rungs;
+		let rungs = crate::Config::default().ladder;
 		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(2_000_000))).unwrap();
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
 		// admitted only because its bitrate (1.2M) undercuts the source (2M).
-		assert_eq!(names, ["video/480p", "video/360p", "video/240p"]);
+		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
+	}
+
+	#[test]
+	fn filtering_preserves_order_across_source_changes() {
+		let ladder = Ladder::new([
+			Rung::new(720, 2_500_000),
+			Rung::new(241, 350_000),
+			Rung::new(480, 1_200_000),
+			Rung::new(360, 600_000),
+		])
+		.unwrap();
+		for (picture, expected) in [
+			(source(1920, 1080, None), vec![240, 360, 480, 720]),
+			(source(1280, 720, Some(1_000_000)), vec![240, 360]),
+			(source(320, 180, None), vec![]),
+			(source(1920, 1080, Some(6_000_000)), vec![240, 360, 480, 720]),
+		] {
+			let resolved = resolve_rungs(&ladder, "video", &picture).unwrap();
+			assert_eq!(resolved.iter().map(|rung| rung.height).collect::<Vec<_>>(), expected);
+			assert!(resolved.windows(2).all(|pair| pair[0].bitrate < pair[1].bitrate));
+		}
 	}
 
 	#[test]
 	fn same_height_needs_lower_bitrate() {
-		let rungs = vec![Rung::new(480, 1_200_000)];
+		let rungs = Ladder::new([Rung::new(480, 1_200_000)]).unwrap();
 		// Unknown source bitrate: a same-height rung can't prove it's below.
 		assert!(
 			resolve_rungs(&rungs, "video", &source(854, 480, None))
@@ -312,7 +330,7 @@ mod tests {
 	#[test]
 	fn rung_geometry_follows_source_aspect() {
 		let resolved = resolve_rungs(
-			&[Rung::new(360, 600_000)],
+			&Ladder::new([Rung::new(360, 600_000)]).unwrap(),
 			"video",
 			&source(1920, 1080, Some(6_000_000)),
 		)
@@ -322,7 +340,7 @@ mod tests {
 
 		// Vertical video: aspect preserved, width rounded to even.
 		let resolved = resolve_rungs(
-			&[Rung::new(360, 600_000)],
+			&Ladder::new([Rung::new(360, 600_000)]).unwrap(),
 			"video",
 			&source(1080, 1920, Some(6_000_000)),
 		)
@@ -357,7 +375,7 @@ mod tests {
 		config.coded_width = None;
 		config.coded_height = None;
 		assert!(matches!(
-			resolve_rungs(&[Rung::new(360, 600_000)], "video", &config),
+			resolve_rungs(&Ladder::new([Rung::new(360, 600_000)]).unwrap(), "video", &config),
 			Err(Error::SourceDimensions(_))
 		));
 	}

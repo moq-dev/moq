@@ -15,7 +15,10 @@ is what keeps this additive.
 
 The controller subdivides that estimate across the ladder and applies the
 band boundary from the [questline](/quest/m1/ladder/README.md), including the
-lowest rung's `max / 3` case. Assign descending `track::Info::priority` down
+lowest rung's `max / 3` case. `moq_transcode::Ladder` already ranks the rungs
+by configured maximum, lowest first, so the next lower rendition the formula
+reads is the preceding entry, and the lowest rung is the one with none.
+Assign descending `track::Info::priority` down
 the ladder: the allocator already fills a tier before the next sees a bit, so
 that alone protects lower rungs' allocation without touching the scheduler.
 
@@ -42,8 +45,3 @@ advertised maximum moving; the 5 Mbps over 2.5 Mbps boundary landing near
 3.33 Mbps; the default 350 kbps lowest rung stalling near 117 kbps; an
 unsupported encoder holding its maximum and not recovering early; and no
 bandwidth input preserving existing behavior exactly.
-
-## Required
-
-- [Rung order](/quest/m1/ladder/order.md) - the band formula reads the next
-  lower rendition's configured maximum
