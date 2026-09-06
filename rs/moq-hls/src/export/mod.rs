@@ -1165,7 +1165,7 @@ mod tests {
 			recorder: Option<moq_mux::timeline::Recorder>,
 		) -> Box<dyn std::any::Any> {
 			let mut broadcast = origin.create_broadcast("media").expect("publish allowed");
-			let announce = origin.announce("media", Default::default()).expect("publish allowed");
+			broadcast.announce(Default::default()).expect("publish allowed");
 			let track = broadcast.create_track("video0", None).unwrap();
 
 			let mut media = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
@@ -1176,14 +1176,14 @@ mod tests {
 			media.write(payload_frame(2_000_000, true, payload)).unwrap();
 			media.write(payload_frame(4_000_000, true, payload)).unwrap();
 
-			Box::new((broadcast, announce, media))
+			Box::new((broadcast, media))
 		}
 
 		let origin = produce_origin();
 
 		// The catalog broadcast carries the catalog and the timeline; the media lives next door.
 		let mut live = origin.create_broadcast("live").expect("publish allowed");
-		let _announce_live = origin.announce("live", Default::default()).expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
 		let mut catalog = moq_mux::catalog::Producer::new(&mut live).unwrap();
 		let recorder = catalog.enroll("video0").unwrap();
 

@@ -324,7 +324,7 @@ mod tests {
 	#[tokio::test]
 	async fn binding_retains_a_pending_request_across_cancelled_and_repeated_reads() {
 		let origin = produce_origin();
-		let mut dynamic = origin.dynamic();
+		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let source = Source::new(origin.consume(), "live");
 		let binding = source.bind(None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
@@ -335,14 +335,16 @@ mod tests {
 			_ = std::future::ready(()) => {}
 		}
 
-		let producer = moq_net::broadcast::Producer::default();
+		let producer = moq_net::broadcast::Info::default().produce();
 		let (first, second, ()) = tokio::join!(binding.broadcast(), binding.broadcast(), async {
 			request.accept(producer.consume());
 		});
-		assert!(!first.unwrap().is_closed());
-		assert!(!second.unwrap().is_closed());
-		drop(producer);
-		assert!(binding.broadcast().await.unwrap().is_closed());
+		let first = first.unwrap();
+		assert!(!first.is_closed());
+		assert!(first.is_clone(&second.unwrap()));
+		drop((producer, dynamic));
+		first.closed().await;
+		assert!(first.is_clone(&binding.broadcast().await.unwrap()));
 	}
 
 	#[tokio::test]
