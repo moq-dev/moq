@@ -661,11 +661,35 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
+/// The host this request was addressed to, which `AuthApiMode::Proxy` forwards so
+/// the endpoint can do its own routing. These handlers build their params from a
+/// path rather than a URL, so it has to come off the request headers.
+fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
+	// HTTP/2 carries the host in `:authority`, which hyper surfaces on the URI and
+	// usually WITHOUT a `Host` header. The HTTPS listener advertises h2, so reading
+	// the header alone loses the tenant for ordinary clients.
+	uri.authority()
+		.map(|authority| authority.host().to_string())
+		.or_else(|| {
+			headers
+				.get(http::header::HOST)
+				.and_then(|host| host.to_str().ok())
+				// Parsed rather than split on the last colon, which would truncate a
+				// bracketed IPv6 literal (`[2001:db8::1]`) at its own separator.
+				.and_then(|host| host.parse::<http::uri::Authority>().ok())
+				.map(|authority| authority.host().to_string())
+		})
+		.map(|host| host.to_ascii_lowercase())
+		.filter(|host| !host.is_empty())
+}
+
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
+	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -675,6 +699,7 @@ async fn serve_announced(
 
 	let params = AuthParams {
 		path: prefix,
+		host: request_host(&uri, &headers),
 		jwt: query.jwt,
 		..Default::default()
 	};
@@ -709,6 +734,8 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
+	uri: http::Uri,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -722,6 +749,7 @@ async fn serve_fetch(
 
 	let auth = AuthParams {
 		path: path.join("/"),
+		host: request_host(&uri, &headers),
 		jwt: params.auth.jwt,
 		..Default::default()
 	};
@@ -899,6 +927,42 @@ mod tests {
 			vec![b"h2".to_vec(), b"http/1.1".to_vec()],
 			"ALPN must advertise h2 and http/1.1",
 		);
+	}
+
+	/// HTTP/2 puts the host in `:authority` and usually sends no `Host` header, and
+	/// the HTTPS listener advertises h2 - so a header-only read loses the tenant.
+	#[test]
+	fn request_host_prefers_the_uri_authority() {
+		let uri: http::Uri = "https://customer.example.com/announced".parse().unwrap();
+		assert_eq!(
+			request_host(&uri, &http::HeaderMap::new()),
+			Some("customer.example.com".to_string())
+		);
+	}
+
+	/// HTTP/1.1 leaves no authority on the URI, so the header is the only source. A
+	/// port is stripped either way, so both paths agree on the host.
+	#[test]
+	fn request_host_falls_back_to_the_header() {
+		let uri: http::Uri = "/announced".parse().unwrap();
+		let mut headers = http::HeaderMap::new();
+		headers.insert(http::header::HOST, "Customer.Example.com:4443".parse().unwrap());
+		assert_eq!(request_host(&uri, &headers), Some("customer.example.com".to_string()));
+		assert_eq!(request_host(&uri, &http::HeaderMap::new()), None);
+	}
+
+	/// A bracketed IPv6 literal carries its own colons, so splitting on the last
+	/// one truncates the address instead of stripping a port.
+	#[test]
+	fn request_host_keeps_ipv6_literals_intact() {
+		let uri: http::Uri = "/announced".parse().unwrap();
+		let host = |value: &str| {
+			let mut headers = http::HeaderMap::new();
+			headers.insert(http::header::HOST, value.parse().unwrap());
+			request_host(&uri, &headers)
+		};
+		assert_eq!(host("[2001:db8::1]"), Some("[2001:db8::1]".to_string()));
+		assert_eq!(host("[2001:db8::1]:4443"), Some("[2001:db8::1]".to_string()));
 	}
 
 	#[test]

@@ -1198,7 +1198,7 @@ impl Cluster {
 					.client_tls
 					.as_ref()
 					.expect("http(s) connect_api source requires client TLS");
-				let http = match crate::http_client::build(tls) {
+				let http = match crate::http_client::build(tls, crate::http_client::CacheScope::Shared) {
 					Ok(http) => http,
 					Err(err) => {
 						tracing::error!(%err, "cluster.connect_api: failed to build HTTP client");

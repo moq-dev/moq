@@ -121,6 +121,59 @@ tenant takes effect on live sessions rather than only new ones.
 `stale-if-error` says how long to keep serving through an outage (default one
 hour).
 
+### Proxy mode
+
+Set `api_mode = "proxy"` in `[auth]` (or `--auth-api-mode proxy`) to let the
+endpoint authorize an opaque credential instead of returning a verifying key.
+The default mode is `token`.
+
+```http
+GET <url>?root=demo&host=live.example.com&transport=quic
+Authorization: Bearer <credential>
+```
+
+```json
+{
+  "alias": "x7k2qp",
+  "tier": "region/sjc",
+  "grant": { "subscribe": ["room"], "publish": ["room/alice"], "exp": 1893456000 }
+}
+```
+
+The host comes from the URL authority or HTTP/1.1 `Host` header. The credential
+arrives in the client's `?jwt=` parameter but need not be a JWT. The endpoint
+owns verification and policy; the relay enforces the returned grant. `key` and
+`public` fields do not authorize proxy connections. An absent or empty grant
+refuses access.
+
+Grant prefixes are relative to `grant.root`, which defaults to the connection
+path. The alias may reshape that path: `/` can become `x7k2qp`, or `/room` can
+become `x7k2qp/room`, with the granted prefixes following the mapping. Token
+mode aliases must preserve path depth. Proxy mode cannot be combined with
+`--auth-domain`; either mode requires `--auth-api` when explicitly configured.
+
+`exp` is Unix seconds and bounds the whole session, including in-flight
+rechecks. Each successful proxy recheck replaces it, allowing renewal or a
+shorter lifetime. Token mode cannot extend a signed JWT's expiry. A response
+without a usable positive `max-age` does not enable rechecks, so an omitted
+`exp` then leaves the session without an expiry timer.
+
+A `404` or withdrawn grant closes a revalidated session. `401`/`403` also revoke
+it when the proxy request carried a credential. For anonymous proxy requests
+and token-mode requests, those statuses remain outages subject to
+`stale-if-error`, because they cannot identify a rejected viewer credential.
+
+Proxy responses cache per credential, using a SHA-256 cache key even if the
+endpoint omits `Vary: Authorization`. Send that header for any intermediate
+caches. The proxy client uses private HTTP caching, so plain `max-age` works
+with credentials. Token, JWK, and cluster clients retain shared caching and
+honor `s-maxage`. In token mode viewers sharing a key share requests; proxy
+mode's auth traffic scales with distinct credentials. Anonymous requests
+share entries for the same URL.
+
+mTLS peers still use the alias and tier lookup; proxy grants do not restrict
+or revalidate them.
+
 ## Stream listeners
 
 The plaintext TCP and Unix-socket listeners authenticate exactly like QUIC:
