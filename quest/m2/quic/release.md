@@ -2,7 +2,7 @@
 
 ## Goal
 
-Immutable releases of the selected protocol core, async adapter, WebTransport
+Immutable releases of the protocol core, async adapter, WebTransport
 adapter, and qmux implementation are available to every published MoQ crate.
 The workspace lockfile identifies exact released sources, with no root-only
 Cargo patch or mutable git branch.
@@ -28,8 +28,8 @@ tell whether an advisory against the parent applies.
 
 ## Required
 
-- [Choose the parent and establish the fork](/quest/m2/quic/parent.md) - owns
-  repository and package identity
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - decides which
+  changes noq releases itself and which need a moq-dev package
 - [Land the Quinn maintenance backlog](/quest/m2/quic/quinn-maintenance.md) -
   avoid carrying already-reviewed fixes as unexplained private patches
 - [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - provides the

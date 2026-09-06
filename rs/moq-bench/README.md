@@ -40,8 +40,9 @@ staggered over a `--startup` ramp window instead of all firing at once.
 Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
-- `recv_groups`: cumulative groups received across all subscriptions.
-- `lost_groups`: cumulative groups that never arrived.
+- `recv_groups`: cumulative groups read end to end across all subscriptions.
+- `lost_groups`: cumulative groups that never arrived, or that the relay gave up
+  on part-way.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -51,7 +52,10 @@ subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
 loss (which the transport already repairs). The newest group is the live frontier
 and is excluded from the count: groups just behind it may still be in flight, so a
-gap is only blamed once a higher group confirms it was truly skipped. The JSON
+gap is only blamed once a higher group confirms it was truly skipped. A group the
+relay fails part-way (it gives up on a subscriber that fell behind) ends that
+group alone and lands in the same accounting; the subscription stays for the next
+one, so the offered load holds at the configured count. The JSON
 keyframe at the start of each group is parsed back to recover the publisher's
 shape, so a subscriber works against peers it didn't publish itself.
 

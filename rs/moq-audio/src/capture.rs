@@ -284,8 +284,8 @@ pub(crate) async fn open(config: &Config) -> Result<Stream, Failure> {
 
 /// An open microphone.
 ///
-/// Holds the live `cpal` stream, which is `!Send`, so build and use it on a
-/// single task. Buffers arrive from the realtime callback over an async channel.
+/// Holds the live `cpal` stream, which keeps capturing until it is dropped.
+/// Buffers arrive from the realtime callback over an async channel.
 pub(crate) struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
@@ -346,10 +346,9 @@ async fn failure(errors: &kio::Consumer<Option<cpal::Error>>) -> Option<Failure>
 impl Microphone {
 	/// Open (and start) the requested microphone.
 	///
-	/// The cpal calls block inline rather than going through [`blocking`]: a
-	/// `cpal::Stream` is `!Send` and so can't be built on another thread and
-	/// moved here. They return as soon as the device starts; the await is the
-	/// first-buffer wait below.
+	/// The cpal calls run inline rather than going through [`blocking`]: they
+	/// return as soon as the device starts, so the only real wait is the
+	/// first-buffer await below.
 	async fn open(selector: Option<&str>, config: &Config) -> Result<Self, Failure> {
 		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
 		// stream that silently delivers nothing. A no-op on other platforms.

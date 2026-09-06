@@ -52,7 +52,9 @@ The section's honest summary today, `Declaring 0 therefore trades loop detection
 
 Every `== Origin::UNKNOWN` / `!= Origin::UNKNOWN` test that exists to ask "does this chain entry name anybody" is gone, across `lite/subscriber.rs`, `ietf/{subscriber,publisher,cluster}.rs`, and `model/{origin,broadcast}.rs`. The marker survives only where it means "this field is absent". Any survivor in the first category means 0 is still special somewhere and the change is incomplete.
 
-Targets `dev`: it changes published `moq-net` API alongside moq-dev/moq#3049, and lands on top of it.
+Targets `dev`: it changes published `moq-net` API. The outbound validation it
+builds on landed in #3066, where `Hops::push` enforces the duplicate rule
+wherever a chain is built.
 
 ## Closes
 

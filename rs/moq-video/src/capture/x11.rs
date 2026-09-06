@@ -9,15 +9,18 @@
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xfixes::{ConnectionExt as _, GetCursorImageReply};
 use x11rb::protocol::xproto::{
-	AtomEnum, ConnectionExt as _, Drawable, ImageFormat, ImageOrder, MapState, VisualClass, Window as XWindow,
+	AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, Drawable, EventMask, ImageFormat, ImageOrder, MapState,
+	VisualClass, Window as XWindow,
 };
 use x11rb::rust_connection::RustConnection;
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
+use super::settle::{Settle, Settled};
 use super::{Config, Display, Stream, Window};
 use crate::Error;
 use crate::frame::{I420, Surface};
@@ -176,6 +179,19 @@ struct Capture {
 	root: XWindow,
 	cursor: bool,
 	display: Option<DisplayTarget>,
+	settle: Settle<Observed>,
+	/// Whether the window was unmapped on the previous read, so the hold is
+	/// logged when it starts and ends rather than once per frame.
+	unmapped: bool,
+}
+
+/// What the backend watches for a change: window size or destruction, or
+/// whether the selected monitor is still the one the stream opened with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Observed {
+	Size(u32, u32),
+	Monitor(bool),
+	Destroyed,
 }
 
 impl Capture {
@@ -214,6 +230,22 @@ impl Capture {
 			Target::Window(id) => {
 				let drawable =
 					u32::try_from(id).map_err(|_| Error::SourceUnavailable(format!("invalid X11 window id {id}")))?;
+				// An id is not an identity: X clients allocate window ids out of their
+				// own range and reuse freed ones, so a destroyed window can be replaced
+				// by one wearing the same id, which then answers `get_geometry` as if
+				// nothing happened. StructureNotify is what pins capture to the window
+				// the user picked, since DestroyNotify arrives whatever becomes of the
+				// id afterwards. Event masks are per-client, so the window's owner sees
+				// nothing. Subscribe before reading the window back, so everything
+				// below describes a window we are already watching.
+				connection
+					.change_window_attributes(
+						drawable,
+						&ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+					)
+					.map_err(source)?
+					.check()
+					.map_err(source)?;
 				let attributes = connection
 					.get_window_attributes(drawable)
 					.map_err(source)?
@@ -251,6 +283,11 @@ impl Capture {
 				.ok()
 				.and_then(|cookie| cookie.reply().ok())
 				.is_some();
+		let opened = if display.is_some() {
+			Observed::Monitor(true)
+		} else {
+			Observed::Size(width, height)
+		};
 		Ok(Self {
 			connection,
 			drawable,
@@ -266,26 +303,31 @@ impl Capture {
 			root,
 			cursor,
 			display,
+			settle: Settle::new(opened),
+			unmapped: false,
 		})
 	}
 
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let now = Instant::now();
 		if self.next > now {
 			std::thread::sleep(self.next - now);
 		}
 		self.next = Instant::now() + self.interval;
-		// The encoder's geometry is fixed at open, so a change ends the stream and
-		// the caller reopens against the new size.
-		if let Some(reason) = self.changed()? {
-			tracing::info!(source = %self.name, %reason, "X11 source changed; ending capture");
-			return Ok(None);
+		// The encoder's geometry is fixed at open, so a settled change ends the
+		// stream and the caller reopens against the new size.
+		match self.settled()? {
+			Settled::Open => {}
+			Settled::Waiting => return Ok(pump::Read::Idle),
+			Settled::Changed => return Ok(pump::Read::Done),
 		}
 
 		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
 			u16::try_from(self.height).map_err(|_| Error::Codec(anyhow::anyhow!("X11 height is too large")))?;
-		let image = match self
+		// Bound to a local so the cookie, which borrows the connection, is dropped
+		// before the error arm asks the source what it is doing now.
+		let reply = self
 			.connection
 			.get_image(
 				ImageFormat::Z_PIXMAP,
@@ -297,20 +339,18 @@ impl Capture {
 				u32::MAX,
 			)
 			.map_err(source)?
-			.reply()
-		{
+			.reply();
+		let image = match reply {
 			Ok(image) => image,
-			// The check above and this request are separate round trips, so an
-			// interactive resize lands between them often enough to matter. Only a
-			// geometry change that we can still confirm is recoverable: anything
-			// else stays terminal, so a persistent failure surfaces instead of
-			// spinning the caller's reopen loop.
+			// The check above and this request are separate round trips, so a
+			// resize or a minimize lands between them often enough to matter. Only
+			// a change we can still confirm is recoverable: anything else stays
+			// terminal, so a persistent failure surfaces instead of spinning the
+			// caller's reopen loop.
 			Err(error) => {
-				return match self.changed() {
-					Ok(Some(reason)) => {
-						tracing::info!(source = %self.name, %reason, "X11 source changed mid-frame; ending capture");
-						Ok(None)
-					}
+				return match self.settled() {
+					Ok(Settled::Waiting) => Ok(pump::Read::Idle),
+					Ok(Settled::Changed) => Ok(pump::Read::Done),
 					_ => Err(Error::SourceUnavailable(format!("X11 source: {error}"))),
 				};
 			}
@@ -326,16 +366,73 @@ impl Capture {
 			let (x, y) = self.origin()?;
 			blend_cursor(&mut rgb, self.width, self.height, x, y, &cursor);
 		}
-		Ok(Some(Surface::I420(I420::from_rgb(&rgb, self.width, self.height)?)))
+		Ok(pump::Read::Frame(Surface::I420(I420::from_rgb(
+			&rgb,
+			self.width,
+			self.height,
+		)?)))
 	}
 
-	/// How the source's geometry moved out from under the open stream, if it
-	/// did. Checked before each frame and again when a read fails.
-	fn changed(&self) -> Result<Option<String>, Error> {
+	/// Whether the frame that is due now can be captured, and if not, whether the
+	/// source is coming back. Checked before each frame, and again when a read
+	/// fails, so a resize or a minimize landing between those two round trips is
+	/// absorbed rather than reported as a dead source.
+	fn settled(&mut self) -> Result<Settled, Error> {
+		// An unmapped window (minimized, or on a workspace that isn't showing) has
+		// nothing to copy and GetImage on it fails outright. Hold the capture
+		// rather than ending it, so the broadcast resumes when the window returns.
+		if self.hidden()? {
+			if !self.unmapped {
+				self.unmapped = true;
+				tracing::info!(source = %self.name, "X11 window unmapped; holding capture");
+			}
+			return Ok(Settled::Waiting);
+		}
+		if self.unmapped {
+			self.unmapped = false;
+			tracing::info!(source = %self.name, "X11 window mapped; resuming capture");
+		}
+
+		let current = self.observe()?;
+		if current == Observed::Destroyed {
+			tracing::info!(source = %self.name, reason = "window destroyed", "X11 source changed; ending capture");
+			return Ok(Settled::Changed);
+		}
+		let settled = self.settle.observe(&current, Instant::now());
+		if settled == Settled::Changed {
+			let reason = match current {
+				Observed::Size(width, height) => {
+					format!("resized from {}x{} to {width}x{height}", self.width, self.height)
+				}
+				Observed::Monitor(_) => "monitor layout changed".to_string(),
+				Observed::Destroyed => unreachable!("handled above"),
+			};
+			tracing::info!(source = %self.name, %reason, "X11 source changed; ending capture");
+		}
+		Ok(settled)
+	}
+
+	/// Whether a captured window is currently unmapped. A display target draws
+	/// from the root window, which is always mapped.
+	fn hidden(&self) -> Result<bool, Error> {
+		if self.display.is_some() {
+			return Ok(false);
+		}
+		let attributes = self
+			.connection
+			.get_window_attributes(self.drawable)
+			.map_err(source)?
+			.reply()
+			.map_err(source)?;
+		Ok(attributes.map_state != MapState::VIEWABLE)
+	}
+
+	/// The source's geometry right now: a round trip per call.
+	fn observe(&self) -> Result<Observed, Error> {
 		match &self.display {
 			Some(display) => {
 				let monitors = monitors(&self.connection, self.root)?;
-				Ok((!display.matches(&monitors)).then(|| "monitor layout changed".to_string()))
+				Ok(Observed::Monitor(display.matches(&monitors)))
 			}
 			None => {
 				let geometry = self
@@ -344,12 +441,37 @@ impl Capture {
 					.map_err(source)?
 					.reply()
 					.map_err(source)?;
-				let width = u32::from(geometry.width) & !1;
-				let height = u32::from(geometry.height) & !1;
-				Ok(((width, height) != (self.width, self.height))
-					.then(|| format!("resized from {}x{} to {width}x{height}", self.width, self.height)))
+				// Drained after that round trip, not before: the server writes events
+				// and replies down one ordered stream, so a DestroyNotify it generated
+				// before this reply is already queued here. A destroyed window whose id
+				// nobody took makes the request above fail instead, which is equally
+				// terminal.
+				if self.destroyed()? {
+					return Ok(Observed::Destroyed);
+				}
+				Ok(Observed::Size(
+					u32::from(geometry.width) & !1,
+					u32::from(geometry.height) & !1,
+				))
 			}
 		}
+	}
+
+	/// Whether the captured window has been destroyed, draining the events the
+	/// StructureNotify subscription queues up. Draining every frame is also what
+	/// keeps that queue from growing for the life of the stream.
+	///
+	/// `ConfigureNotify` rides the same subscription and could stand in for the
+	/// per-frame `get_geometry` round trip.
+	fn destroyed(&self) -> Result<bool, Error> {
+		let mut destroyed = false;
+		while let Some(event) = self.connection.poll_for_event().map_err(source)? {
+			// Nothing else on the queue is ours to act on: x11rb routes an error to
+			// the cookie waiting for it, so an `Event::Error` reaching here belongs
+			// to a request we already gave up on.
+			destroyed |= destroys(&event, self.drawable);
+		}
+		Ok(destroyed)
 	}
 
 	fn origin(&self) -> Result<(i32, i32), Error> {
@@ -448,6 +570,13 @@ fn select_monitor(monitors: &[Monitor], selector: Option<usize>) -> Option<usize
 				.flatten()
 		})
 		.or_else(|| selector.is_none().then_some(0).filter(|_| !monitors.is_empty()))
+}
+
+/// Whether an event says the captured window is gone. StructureNotify reports
+/// only the window it was selected on, but a recycled id is exactly what this
+/// guards against, so match the id rather than assume it.
+fn destroys(event: &Event, window: XWindow) -> bool {
+	matches!(event, Event::DestroyNotify(destroy) if destroy.window == window)
 }
 
 fn client_windows(connection: &RustConnection, root: XWindow) -> Result<Vec<XWindow>, Error> {
@@ -657,6 +786,8 @@ fn source(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
+	use x11rb::protocol::xproto::DestroyNotifyEvent;
+
 	use super::*;
 
 	fn monitor(primary: bool) -> Monitor {
@@ -695,6 +826,20 @@ mod tests {
 		primary_changed[0].primary = false;
 		primary_changed[1].primary = true;
 		assert!(!target.matches(&primary_changed));
+	}
+
+	#[test]
+	fn a_destroyed_window_ends_capture_even_when_its_id_lives_on() {
+		let destroy = |window| {
+			Event::DestroyNotify(DestroyNotifyEvent {
+				event: window,
+				window,
+				..Default::default()
+			})
+		};
+		assert!(destroys(&destroy(0x40_0001), 0x40_0001));
+		assert!(!destroys(&destroy(0x40_0002), 0x40_0001));
+		assert!(!destroys(&Event::Unknown(Vec::new()), 0x40_0001));
 	}
 
 	#[test]

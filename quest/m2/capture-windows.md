@@ -27,15 +27,16 @@ What remains:
   `config.cursor` controls nothing there. Window capture and both other
   platforms honor it, which makes this the odd one out.
 
-Note that the window capture that landed is GDI, which is why
-[the black-frame quest](/quest/m0/windows-window-capture-blank.md) exists: it
-reaches nothing rendered through DirectComposition. If that quest moves to
-Windows.Graphics.Capture, WGC also answers app capture and the cursor, so weigh
+Note that the window capture that landed is GDI. It now reaches
+DirectComposition content through `PrintWindow(PW_RENDERFULLCONTENT)`, but that
+call runs on the target window's UI thread, so the backend probes the window for
+responsiveness every frame and skips one that is hung, and it still round-trips
+BGRA through the CPU on its way to I420. Windows.Graphics.Capture has neither
+coupling and delivers `IDirect3DSurface` frames the existing D3D11 path could
+take zero-copy. WGC would also answer app capture and the cursor, so weigh
 these three against doing that once.
 
 ## Related
 
 - [Linux capture parity](/quest/m2/capture-linux.md) - the same gaps, through
   the portal and PipeWire
-- [Windows window capture](/quest/m0/windows-window-capture-blank.md) - the GDI
-  backend's blank output, and the WGC decision that would subsume much of this

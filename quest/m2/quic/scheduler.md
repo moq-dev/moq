@@ -15,7 +15,7 @@ group backlog.
 
 ## Plan
 
-Add a generic send-group primitive to the selected QUIC core. A group owns its
+Add a generic send-group primitive to noq-proto. A group owns its
 strict priority and fair-share scheduler state; each stream owns only its
 order within that group. Prefer an owned group handle whose drop removes its
 scheduler state and whose priority can be updated without walking every open
@@ -56,8 +56,8 @@ the same scenarios through raw QUIC and qmux.
 
 ## Required
 
-- [Choose the parent and establish the fork](/quest/m2/quic/parent.md) - the
-  scheduler must land against the selected protocol core
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - the scheduler
+  is proposed to noq first
 
 ## Closes
 

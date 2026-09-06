@@ -1,6 +1,7 @@
 //! QUIC backend built on [`web_transport_quiche`], speaking WebTransport over HTTP/3
 //! (`https://`) or raw QUIC (`moqt://` / `moql://`).
 
+use crate::RedactedUrl;
 use crate::client::ClientConfig;
 use crate::crypto;
 use crate::quic::CongestionControl;
@@ -341,7 +342,7 @@ impl QuicheClient {
 			candidates = candidates.with_limit(1);
 		}
 
-		tracing::debug!(%url, "connecting via quiche");
+		tracing::debug!(url = %RedactedUrl::new(&url), "connecting via quiche");
 
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many
@@ -457,7 +458,7 @@ async fn fetch_fingerprint(url: &Url) -> Result<[u8; 32]> {
 	fp.set_query(None);
 	fp.set_fragment(None);
 
-	tracing::warn!(url = %fp, "performing insecure HTTP request for certificate fingerprint");
+	tracing::warn!(url = %RedactedUrl::new(&fp), "performing insecure HTTP request for certificate fingerprint");
 
 	let resp = reqwest::get(fp.as_str())
 		.await

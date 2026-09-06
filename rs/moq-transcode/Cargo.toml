@@ -17,7 +17,7 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # the whole point of a GPU transcode fleet, and it is the zero-copy GPU pipeline
 # (NVDEC decodes and scales in hardware, NVENC encodes the CUDA frame in place).
 # Both dlopen their driver at runtime, so disabling them only slims the compile.
-default = ["nvidia", "vaapi"]
+default = ["nvidia", "vaapi", "v4l2"]
 # NVENC + NVDEC (Linux, dlopen'd at runtime; a no-op elsewhere).
 nvidia = ["moq-video/nvidia"]
 # Compatibility aliases for the pre-consolidation names, kept so a manifest that
@@ -27,6 +27,9 @@ nvenc = ["nvidia"]
 nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoder (Linux; libva dlopen'd at runtime).
 vaapi = ["moq-video/vaapi"]
+# The V4L2 M2M codecs of an ARM SoC (Linux; the `v4l` crate's bindgen needs
+# libclang at build time).
+v4l2 = ["moq-video/v4l2"]
 
 [dependencies]
 bytes = { workspace = true }

@@ -65,6 +65,12 @@ mod window;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod pump;
 
+// Geometry debounce shared by the X11 and Windows window backends. The state
+// machine is platform independent, so it is also built under `cfg(test)` to
+// keep its tests running on every host.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod settle;
+
 /// What to capture. Each variant carries the identifier that selects it, so a
 /// window can't be captured without saying which one, and a camera id can't
 /// reach the display backend.

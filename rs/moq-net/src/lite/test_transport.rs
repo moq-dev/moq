@@ -302,6 +302,9 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
+	/// every session that only ever opens its own streams expects.
+	accept_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_uni`]. `None` writes immediately.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
@@ -318,6 +321,7 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: None,
 			protocol: None,
 			stats: Arc::new(Mutex::new(SinkStats::default())),
@@ -350,6 +354,23 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			accept_gate: None,
+			uni_gate: None,
+			protocol: None,
+			stats: Arc::new(Mutex::new(SinkStats::default())),
+		}
+	}
+
+	/// Accept bidi streams from the peer, holding every write until `gate` flips to true.
+	///
+	/// The accepted half of a control stream carries the answers (track info,
+	/// subscribe responses), so a test of what must be true before the first byte of
+	/// a reply reaches the wire needs a session that hands out accepted streams.
+	pub fn accepted_bi(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			accept_gate: Some(gate),
 			uni_gate: None,
 			protocol: None,
 			stats: Arc::new(Mutex::new(SinkStats::default())),
@@ -365,6 +386,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: Some(gate),
 			protocol: None,
 			stats: Arc::new(Mutex::new(SinkStats::default())),
@@ -382,7 +404,16 @@ impl web_transport_trait::Session for SinkSession {
 	}
 
 	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		std::future::pending().await
+		let Some(gate) = self.accept_gate.clone() else {
+			return std::future::pending().await;
+		};
+
+		let send = SinkSend {
+			log: self.log.clone(),
+			gate: Some(gate),
+			finished: false,
+		};
+		Ok((send, PendingRecv))
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {

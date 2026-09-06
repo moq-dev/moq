@@ -33,9 +33,9 @@ quests don't re-litigate them:
 [Worker metrics](/quest/m1/uring-metrics.md) is a soft dependency: it adds
 the ring-level counters (enters, park/wake, batch effectiveness) several
 quests want as evidence. Use bench CPU/RSS until it lands. The
-[raw QUIC adoption](/quest/m2/quic/uring-raw.md) benchmarks the selected
-Quinn-family core against the quiche backend; the zero-copy quests here stay
-independently measured on the backend we ship today.
+[noq parity gate](/quest/m2/quic/noq-parity.md) benchmarks noq against the
+quiche backend; the zero-copy quests here stay independently measured on the
+backend we ship today.
 
 ## Quests
 
@@ -61,5 +61,5 @@ independently measured on the backend we ship today.
 ## Related
 
 - [Worker metrics](/quest/m1/uring-metrics.md) - the counters these quests are judged by
-- [Raw QUIC adoption](/quest/m2/quic/uring-raw.md) - carries these optimized
-  worker primitives into the selected protocol core
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - the benchmark that
+  decides whether quiche can go, run on these worker primitives

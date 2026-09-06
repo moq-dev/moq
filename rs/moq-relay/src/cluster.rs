@@ -1093,9 +1093,10 @@ impl Cluster {
 	}
 
 	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> Attempt {
-		let mut log_url = url.clone();
-		log_url.set_query(None);
-		tracing::info!(url = %log_url, "dialing cluster peer");
+		// The peer URL carries the cluster JWT in its query, so neither the log line
+		// nor the node label below may show the raw URL.
+		let redacted = moq_native::RedactedUrl::new(url);
+		tracing::info!(url = %redacted, "dialing cluster peer");
 
 		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
 		let client = match self
@@ -1126,7 +1127,7 @@ impl Cluster {
 		};
 
 		let connected = tokio::time::Instant::now();
-		let _connection = self.nodes.connect_outbound(id, log_url.to_string());
+		let _connection = self.nodes.connect_outbound(id, redacted.to_string());
 
 		Attempt {
 			connected: Some(connected),
