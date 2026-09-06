@@ -251,7 +251,9 @@ const std::vector<Field> &Fields()
 		// default and so never listed, can still be typed in.
 		f.push_back(Choose(VERSION, "Protocol version", VersionOptions(), true,
 				   "Pin the handshake to one draft instead of offering every supported version."));
-		f.push_back(Choose(BACKEND, "QUIC backend", BackendOptions()));
+		f.push_back(Choose(BACKEND, "QUIC backend", BackendOptions(), false,
+				   "Which QUIC implementation this session uses. Automatic picks the "
+				   "default compiled into this libmoq."));
 		f.push_back(Text(BIND, "Bind address",
 				 "Local UDP address to send from, e.g. 192.0.2.7:0 to pin the outgoing "
 				 "interface. Leave empty for any."));
@@ -301,7 +303,9 @@ const std::vector<Field> &Fields()
 		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
 				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
 				   "NICs and middleboxes mangle segmented packets."));
-		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff()));
+		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff(), false,
+				   "Probe the path so packets use the largest size it allows. Turn it "
+				   "off if discovery itself causes drops."));
 		// Only when this build can capture: setting a directory without support
 		// fails the dial, so offering it would be a control that only breaks things.
 		if (moq_qlog_supported()) {

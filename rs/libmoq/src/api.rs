@@ -157,6 +157,39 @@ pub struct moq_video_properties {
 	pub has_flip: bool,
 }
 
+/// Optional catalog fields for [moq_publish_media_hint].
+///
+/// Zero the struct and set only the `has_*` flags you want. Hints fill gaps the
+/// bitstream leaves (especially bitrate); a value the stream detects later wins
+/// for dimensions. Pass a NULL hint pointer to [moq_publish_media_hint] for none.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct moq_video_hint {
+	/// Encoded width in pixels when `has_coded` is true.
+	pub coded_width: u32,
+	/// Encoded height in pixels when `has_coded` is true.
+	pub coded_height: u32,
+	/// Whether `coded_width` and `coded_height` are present.
+	pub has_coded: bool,
+
+	/// Maximum bitrate in bits per second when `has_bitrate` is true.
+	pub bitrate: u64,
+	/// Whether `bitrate` is present.
+	pub has_bitrate: bool,
+
+	/// Frame rate when `has_framerate` is true.
+	pub framerate: f64,
+	/// Whether `framerate` is present.
+	pub has_framerate: bool,
+
+	/// Latency-optimized decode when `has_optimize_for_latency` is true.
+	pub optimize_for_latency: bool,
+	/// Whether `optimize_for_latency` is present.
+	pub has_optimize_for_latency: bool,
+}
+
 /// Information about an audio rendition in the catalog.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -384,6 +417,16 @@ pub struct moq_announced {
 	/// Whether the broadcast is active or has ended
 	/// This MUST toggle between true and false over the lifetime of the broadcast
 	pub active: bool,
+}
+
+/// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_connection_snapshot {
+	/// Transport statistics, with per-metric availability flags.
+	pub stats: moq_connection_stats,
+	/// Negotiated draft name, backed by static storage valid for the process lifetime.
+	pub protocol: moq_string,
 }
 
 /// A snapshot of connection statistics, filled in by [moq_session_stats].
@@ -1467,6 +1510,32 @@ pub unsafe extern "C" fn moq_session_stats(session: u32, dst: *mut moq_connectio
 	})
 }
 
+/// Snapshot statistics and the negotiated protocol from the same live connection.
+///
+/// Returns zero on success, or a negative code when the handle is unknown or offline
+/// between reconnects. On failure, `dst` is untouched. The protocol string points at
+/// static storage valid for the process lifetime and must not be freed.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_connection_snapshot] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connection_snapshot) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let snapshot = State::lock().session.snapshot(session)?;
+		let name = snapshot.version.as_str();
+		*dst = moq_connection_snapshot {
+			stats: moq_connection_stats::from(&snapshot.stats),
+			protocol: moq_string {
+				data: name.as_ptr().cast::<c_char>(),
+				len: name.len(),
+			},
+		};
+		Ok(())
+	})
+}
+
 /// Create an origin for publishing broadcasts.
 ///
 /// Origins contain any number of broadcasts addressed by path.
@@ -1740,13 +1809,59 @@ pub unsafe extern "C" fn moq_publish_media(
 	init: *const u8,
 	init_size: usize,
 ) -> i32 {
+	unsafe { moq_publish_media_hint(broadcast, format, format_len, init, init_size, std::ptr::null()) }
+}
+
+/// Create a media track with optional video catalog hints.
+///
+/// Same as [moq_publish_media], plus `hint`: pass NULL for none, or a
+/// zeroed [moq_video_hint] with the `has_*` flags set for fields to seed
+/// (notably bitrate, so a downstream transcoder can size same-height rungs
+/// before measured rates arrive). A non-NULL hint is supported only for video codec
+/// formats; audio and container formats return an invalid-config error before parsing init.
+///
+/// # Safety
+/// - Same pointer rules as [moq_publish_media].
+/// - When `hint` is non-NULL it must point at a valid [moq_video_hint].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_media_hint(
+	broadcast: u32,
+	format: *const c_char,
+	format_len: usize,
+	init: *const u8,
+	init_size: usize,
+	hint: *const moq_video_hint,
+) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
+		let video = parse_video_hint(hint)?;
 
-		State::lock().publish.media(broadcast, format, init)
+		State::lock().publish.media(broadcast, format, init, video)
 	})
+}
+
+fn parse_video_hint(hint: *const moq_video_hint) -> Result<Option<moq_mux::catalog::VideoHint>, Error> {
+	let Some(hint) = (unsafe { hint.as_ref() }) else {
+		return Ok(None);
+	};
+
+	let mut out = moq_mux::catalog::VideoHint::default();
+	if hint.has_coded {
+		out.coded_width = Some(hint.coded_width);
+		out.coded_height = Some(hint.coded_height);
+	}
+	if hint.has_bitrate {
+		out.bitrate = Some(hint.bitrate);
+	}
+	if hint.has_framerate {
+		out.framerate = Some(hint.framerate);
+	}
+	if hint.has_optimize_for_latency {
+		out.optimize_for_latency = Some(hint.optimize_for_latency);
+	}
+	Ok(Some(out))
 }
 
 /// Finish a media track, flushing any buffered frames. No more frames can be written.

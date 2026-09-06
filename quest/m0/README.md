@@ -16,6 +16,7 @@ regression test per Root Cause First.
 ## Quests
 
 - [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: a framework binding the element reads `broadcast` before the custom element is upgraded
+- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - keep output state alive through delayed terminal callbacks
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
@@ -35,6 +36,7 @@ regression test per Root Cause First.
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
 - [Merge evidence](/quest/m0/merge-verification-evidence.md) - bind local, CI, and device results to the current source and merge candidate
 - [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
+- [RSA test timing](/quest/m0/token-rsa-test-timing.md) - separate token assertions from random RSA key-generation time
 - [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - give concurrent worktrees explicit bases, endpoints, and process ownership
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - retain inspectable traces, logs, and rerun commands when QA fails
 - [Browser media QA](/quest/m0/browser-media-qa.md) - measure actual playback output and lifecycle recovery beyond successful delivery

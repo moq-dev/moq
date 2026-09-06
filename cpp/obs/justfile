@@ -296,13 +296,19 @@ _unit mode="plain":
     trap 'rm -rf "$out"' EXIT
 
     # One binary per source under test: each test file defines its own libobs and
-    # libmoq stubs, so two of them can't share a link.
+    # libmoq stubs, so two of them can't share a link. Header-only helpers
+    # (quality defaults) build as a third binary with no plugin source.
     for name in moq-output moq-source; do
         # shellcheck disable=SC2086
         # $ffmpeg stays unquoted on purpose: pkg-config hands back one
         # space-separated string, and splitting it is the intended reading.
         "$cxx" "${flags[@]}" "${includes[@]}" $ffmpeg \
             -o "$out/$name-test" "test/$name-test.cpp" "src/$name.cpp"
+        TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
+    done
+    for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
+        "$cxx" "${flags[@]}" "${includes[@]}" \
+            -o "$out/$name-test" "test/$name-test.cpp"
         TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
     done
 

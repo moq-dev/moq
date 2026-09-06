@@ -78,10 +78,11 @@ pub enum Version {
 impl Version {
 	/// Iterate the names accepted by [`FromStr`].
 	pub fn names() -> impl Iterator<Item = &'static str> {
-		ALL.iter().map(Self::name)
+		ALL.iter().map(Self::as_str)
 	}
 
-	fn name(&self) -> &'static str {
+	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-20`.
+	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::Lite(lite::Version::Lite01) => "moq-lite-01",
 			Self::Lite(lite::Version::Lite02) => "moq-lite-02",
@@ -206,7 +207,7 @@ impl Version {
 
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(self.name())
+		f.write_str(self.as_str())
 	}
 }
 
@@ -215,7 +216,7 @@ impl FromStr for Version {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		ALL.iter()
-			.find(|version| version.name() == s)
+			.find(|version| version.as_str() == s)
 			.copied()
 			.ok_or_else(|| format!("unknown version: {s}"))
 	}

@@ -44,6 +44,8 @@ std::vector<RecordedSignal> g_signals;
 std::string g_last_error;
 std::atomic<int> g_begin_capture{0};
 std::atomic<int> g_client_result{0};
+std::string g_rate_control = "CBR";
+moq_video_hint g_video_hint{};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -139,6 +141,33 @@ const char *obs_encoder_get_codec(const obs_encoder_t *)
 	return "h264";
 }
 
+// VideoInit reads coded size and CBR from the encoder. Any new libobs call in
+// src/moq-output.cpp needs a stub here or `just obs ci` fails at link.
+obs_data_t *obs_encoder_get_settings(const obs_encoder_t *)
+{
+	return reinterpret_cast<obs_data_t *>(0x4);
+}
+
+uint32_t obs_encoder_get_width(const obs_encoder_t *)
+{
+	return 1920;
+}
+
+uint32_t obs_encoder_get_height(const obs_encoder_t *)
+{
+	return 1080;
+}
+
+const char *obs_data_get_string(obs_data_t *, const char *)
+{
+	return g_rate_control.c_str();
+}
+
+long long obs_data_get_int(obs_data_t *, const char *)
+{
+	return 8000;
+}
+
 } // extern "C"
 
 namespace MoQSettings {
@@ -161,6 +190,12 @@ std::atomic<int> g_closed_handle{0};
 // its runtime thread, which is the ordering signal_mutex has to handle.
 std::atomic<bool> g_connect_fires_terminal{false};
 std::atomic<bool> g_connect_fires_terminal_threaded{false};
+// When true, moq_session_stats fails even for the live handle (reconnect gap).
+std::atomic<bool> g_stats_offline{false};
+// When true, only RTT is marked valid (dock must omit the rest).
+std::atomic<bool> g_stats_partial{false};
+std::function<void()> g_during_snapshot;
+std::atomic<bool> g_connect_rejected{false};
 std::thread g_connect_terminal_thread;
 const char *g_error = "unauthorized";
 } // namespace
@@ -197,6 +232,12 @@ int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_
 	return 7;
 }
 
+int32_t moq_publish_media_hint(uint32_t, const char *, size_t, const uint8_t *, size_t, const moq_video_hint *hint)
+{
+	g_video_hint = *hint;
+	return 7;
+}
+
 int32_t moq_publish_media_finish(uint32_t)
 {
 	return 0;
@@ -210,6 +251,8 @@ int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
 int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_status)(void *, int32_t),
 			    void *user_data)
 {
+	if (g_connect_rejected)
+		return -34;
 	g_on_status = on_status;
 	g_user_data = user_data;
 	int handle = g_next_handle++;
@@ -244,6 +287,44 @@ int32_t moq_client_close(uint32_t)
 int32_t moq_session_close(uint32_t session)
 {
 	g_closed_handle = static_cast<int>(session);
+	return 0;
+}
+
+int32_t moq_session_stats(uint32_t session, moq_connection_stats *dst)
+{
+	if (!dst || static_cast<int>(session) != g_last_handle.load())
+		return -1;
+	if (g_stats_offline.load())
+		return -2;
+
+	*dst = {};
+	dst->rtt_us = 12500;
+	dst->rtt_valid = true;
+	if (g_stats_partial.load())
+		return 0;
+
+	dst->send_rate_bps = 2'500'000;
+	dst->send_rate_valid = true;
+	dst->recv_rate_bps = 120'000;
+	dst->recv_rate_valid = true;
+	dst->bytes_sent = 4'000'000;
+	dst->bytes_sent_valid = true;
+	dst->packets_sent = 100;
+	dst->packets_sent_valid = true;
+	dst->packets_lost = 1;
+	dst->packets_lost_valid = true;
+	return 0;
+}
+
+int32_t moq_session_snapshot(uint32_t session, moq_connection_snapshot *dst)
+{
+	const int32_t rc = moq_session_stats(session, &dst->stats);
+	if (rc != 0)
+		return rc;
+	static const char protocol[] = "moq-lite-04";
+	dst->protocol = {protocol, sizeof(protocol) - 1};
+	if (g_during_snapshot)
+		g_during_snapshot();
 	return 0;
 }
 
@@ -317,9 +398,15 @@ void reset()
 	g_closed_handle = 0;
 	g_begin_capture = 0;
 	g_client_result = 0;
+	g_rate_control = "CBR";
+	g_video_hint = {};
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
+	g_stats_offline = false;
+	g_stats_partial = false;
+	g_during_snapshot = nullptr;
+	g_connect_rejected = false;
 	g_stall_last_error = false;
 	g_in_report_window = false;
 }
@@ -336,6 +423,26 @@ void reset()
 int main()
 {
 	auto out = reinterpret_cast<obs_output_t *>(0x9);
+	for (const char *mode : {"CBR", "CRF", "CQP", "VBR", ""}) {
+		reset();
+		g_rate_control = mode;
+		MoQOutput o(nullptr, out);
+		CHECK(o.Start());
+		fire(1);
+		encoder_packet packet{};
+		packet.type = OBS_ENCODER_VIDEO;
+		packet.encoder = reinterpret_cast<obs_encoder_t *>(0x2);
+		packet.timebase_num = 1;
+		packet.timebase_den = 30;
+		o.Data(&packet);
+		CHECK(g_video_hint.has_coded);
+		CHECK(g_video_hint.has_bitrate == (g_rate_control == "CBR"));
+		if (g_video_hint.has_bitrate)
+			CHECK(g_video_hint.bitrate == 8'000'000);
+		o.Stop();
+		fire(0);
+	}
+	printf("only CBR publishes configured bitrate hints: ok\n");
 
 	// Invalid advanced settings stop before a session or capture is created.
 	{
@@ -349,6 +456,18 @@ int main()
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 	}
 	printf("invalid advanced settings: ok\n");
+
+	// A synchronous connect rejection creates no callback to supply the error later.
+	{
+		reset();
+		g_connect_rejected = true;
+		MoQOutput o(nullptr, out);
+		CHECK(!o.Start());
+		CHECK(g_on_status == nullptr);
+		CHECK(g_begin_capture == 0);
+		CHECK(g_last_error == "unauthorized");
+	}
+	printf("synchronous connect error preserved: ok\n");
 
 	// Reconnection gave up after the session had been up: OBS must be told, with
 	// the libmoq reason attached, so it stops reporting a live stream.
@@ -577,6 +696,108 @@ int main()
 		fire(0);
 	}
 	printf("connect time cleared on teardown: ok\n");
+
+	// Dock polls TryGetConnectionStats once a second. Cover reconnect epochs,
+	// exact field mapping, partial validity, and the offline gap mid-reconnect.
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		MoQOutput::ConnectionStats stats;
+
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(o.GetReconnectCount() == 0);
+
+		CHECK(o.Start());
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_valid);
+		CHECK(stats.rtt_ms > 12.4 && stats.rtt_ms < 12.6);
+		CHECK(stats.send_rate_valid);
+		CHECK(stats.send_rate_bps == 2'500'000.0);
+		CHECK(stats.recv_rate_valid);
+		CHECK(stats.recv_rate_bps == 120'000.0);
+		CHECK(stats.bytes_sent_valid);
+		CHECK(stats.bytes_sent == 4'000'000ULL);
+		CHECK(stats.loss_valid);
+		CHECK(stats.loss_pct > 0.9 && stats.loss_pct < 1.1);
+		CHECK(stats.reconnects == 0);
+		CHECK(stats.protocol == "moq-lite-04");
+		CHECK(o.GetReconnectCount() == 0);
+
+		fire(1);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 0);
+
+		fire(2);
+		CHECK(o.GetReconnectCount() == 1);
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 1);
+
+		fire(5);
+		CHECK(o.GetReconnectCount() == 4);
+
+		g_stats_offline = true;
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(o.GetReconnectCount() == 4);
+		g_stats_offline = false;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.reconnects == 4);
+
+		g_stats_partial = true;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_valid);
+		CHECK(!stats.send_rate_valid);
+		CHECK(!stats.recv_rate_valid);
+		CHECK(!stats.bytes_sent_valid);
+		CHECK(!stats.loss_valid);
+		CHECK(stats.reconnects == 4);
+		g_stats_partial = false;
+
+		o.Stop(false);
+		fire(0);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(!o.TryGetConnectionStats(&stats));
+	}
+	printf("connection stats snapshot: ok\n");
+
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		MoQOutput::ConnectionStats stats;
+		CHECK(o.Start());
+		fire(1);
+		fire(3);
+		CHECK(o.GetReconnectCount() == 2);
+		fire(-34);
+		CHECK(o.GetReconnectCount() == 0);
+		CHECK(!o.TryGetConnectionStats(&stats));
+	}
+	printf("reconnect count cleared on fatal: ok\n");
+
+	// Restart between reading metrics and committing the snapshot. Reject it
+	// without overwriting the caller's last accepted sample.
+	{
+		reset();
+		MoQOutput o(nullptr, out);
+		CHECK(o.Start());
+		MoQOutput::ConnectionStats stats;
+		stats.rtt_ms = 99;
+		stats.dial = "previous";
+		g_during_snapshot = [&] {
+			o.Stop(false);
+			fire(0);
+			CHECK(o.Start());
+		};
+		CHECK(!o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_ms == 99);
+		CHECK(stats.dial == "previous");
+		g_during_snapshot = nullptr;
+		CHECK(o.TryGetConnectionStats(&stats));
+		CHECK(stats.rtt_ms == 12.5);
+		o.Stop(false);
+		fire(0);
+	}
+	printf("restart rejects uncommitted stats: ok\n");
 
 	// The terminal callback racing a user-initiated stop, repeatedly. Whichever
 	// wins, the failure signal fires at most once per Start().
