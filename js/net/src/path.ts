@@ -342,6 +342,7 @@ export class PatternError extends Error {
 	/** Which rule was broken. */
 	readonly code: ErrorCode;
 
+	/** Create an error with the violated grammar rule in `code` and a human-readable `message`. */
 	constructor(code: ErrorCode, message: string) {
 		super(message);
 		this.name = "PatternError";
