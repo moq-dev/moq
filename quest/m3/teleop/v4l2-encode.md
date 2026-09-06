@@ -7,17 +7,18 @@ Pi needs no GStreamer detour, and the hardware worth buying is written down.
 
 ## Plan
 
-The backend exists: `moq-video`'s default-on `v4l2` feature drives the stateful
+The backend exists: `moq-video`'s opt-in `v4l2` feature drives the stateful
 V4L2 M2M encoder and decoder through `rs/moq-video/src/v4l2.rs`, and both have
 run on a Pi 4 (`bcm2835-codec`). What is left is getting it into people's
 hands.
 
-Released `moq-cli` binaries are built with default features, so `capture` is
-not compiled in and the backend reaches nobody who installs a release. A
-hardware encoder nobody can install is not a fix; the feature flip is
-[CLI packaging](/quest/m2/cli-packaging.md)'s, and this quest finishes once a
-released binary on a Pi 4 publishes from `moq import capture` through the
-hardware encoder.
+Released `moq-cli` binaries are built with default features, so neither
+`capture` nor `v4l2` is compiled in and the backend reaches nobody who installs
+a release. A hardware encoder nobody can install is not a fix. [CLI
+packaging](/quest/m2/cli-packaging.md) makes capture available; this quest must
+also enable `v4l2` in the Linux ARM release build. It finishes once a released
+binary on a Pi 4 publishes from `moq import capture` through the hardware
+encoder.
 
 Write the hardware note down, in `doc/bin/cli.md` next to the capture build
 instructions. Two landmines make it part of the deliverable: Raspberry Pi 5 has

@@ -12,9 +12,10 @@ swapping or bumping a backend crate is not a breaking change.
 
 ## Capture
 
-The default-on `capture` feature exposes the device APIs and their per-platform
-backends. Disable it for a codec-only build that accepts frames supplied by the
-caller without pulling Linux V4L2 and libclang build dependencies.
+The opt-in `capture` feature exposes the device APIs and their per-platform
+backends. Enable it with `cargo add moq-video --features capture`; the default
+codec-only build accepts frames supplied by the caller without pulling Linux
+V4L2 and libclang build dependencies.
 
 Per-platform, picked at compile time:
 

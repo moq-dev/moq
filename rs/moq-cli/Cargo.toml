@@ -63,8 +63,8 @@ nvenc = ["nvidia"]
 nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
 # it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
-# libclang on the build host. Only bites when `capture` or `transcode` pulls in
-# moq-video.
+# libclang on the build host. Only bites when `capture`, `transcode`, or `play`
+# pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
 # opt-in like the moq-video feature it turns on: the `v4l` crate's bindgen needs
