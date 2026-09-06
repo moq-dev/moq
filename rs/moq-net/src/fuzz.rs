@@ -337,11 +337,6 @@ pub struct Seed {
 	pub data: Vec<u8>,
 }
 
-/// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
-/// bodied with byte patterns that decode as small valid fields.
-///
-/// Generated rather than committed so the corpus follows the dispatch instead of
-/// rotting next to it. `just rs fuzz` writes these out before each run; the tests
 /// A pattern's text, a newline, and a path: the pattern algebra's invariants.
 ///
 /// Parsing is the fixed point Display prints; a pattern contains and overlaps itself;
@@ -377,10 +372,13 @@ pub fn pattern(data: &[u8]) -> bool {
 		"rebase disagrees with matches at the root"
 	);
 	for member in rebased.iter() {
-		assert!(
-			pattern.contains(&member.rooted(path).expect("a rebased pattern roots back")),
-			"rebase produced a pattern outside the original"
-		);
+		// Arbitrary roots may contain wildcard bytes or exceed the segment limit.
+		if let Ok(rooted) = member.rooted(path) {
+			assert!(
+				pattern.contains(&rooted),
+				"rebase produced a pattern outside the original"
+			);
+		}
 	}
 	if let Ok(rooted) = pattern.rooted(path) {
 		assert!(rooted.rebase(path).contains(&pattern), "rooted did not invert rebase");
@@ -388,6 +386,11 @@ pub fn pattern(data: &[u8]) -> bool {
 	true
 }
 
+/// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
+/// bodied with byte patterns that decode as small valid fields.
+///
+/// Generated rather than committed so the corpus follows the dispatch instead of
+/// rotting next to it. `just rs fuzz` writes these out before each run; the tests
 /// below replay them.
 pub fn seeds() -> Vec<Seed> {
 	// Each is a small valid varint (and an empty or short string): 0x10 additionally

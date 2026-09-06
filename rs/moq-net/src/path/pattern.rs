@@ -167,7 +167,7 @@ pub struct Specificity {
 /// Build one with [`FromStr`] (`"a/*/**".parse()`), [`new`](Self::new) from segments,
 /// or [`literal`](Self::literal) and [`subtree`](Self::subtree) from a path. Equality and
 /// ordering are by text, which is canonical: two patterns match the same paths when
-/// they are equal, and only then.
+/// they are equal, and only then. Construction moves `**` before adjacent `*` segments.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Pattern {
 	text: String,
@@ -182,9 +182,9 @@ impl Pattern {
 	/// The most segments a pattern may have, matching the path limit on the wire.
 	pub const MAX_SEGMENTS: usize = 32;
 
-	/// A pattern from its segments, validating the grammar.
+	/// A pattern from its segments, validating the grammar and moving `**` before adjacent `*` segments.
 	pub fn new(segments: impl IntoIterator<Item = Segment>) -> Result<Self, InvalidPattern> {
-		let segments: Vec<Segment> = segments.into_iter().collect();
+		let mut segments: Vec<Segment> = segments.into_iter().collect();
 		if segments.len() > Self::MAX_SEGMENTS {
 			return Err(InvalidPattern::TooManySegments);
 		}
@@ -207,6 +207,15 @@ impl Pattern {
 				Segment::Globstar => globstar = Some(i),
 				_ => {}
 			}
+		}
+
+		// Adjacent `*` and `**` commute; keep `**` first for one language identity.
+		if let Some(mut index) = globstar {
+			while index > 0 && segments[index - 1] == Segment::Wildcard {
+				segments.swap(index - 1, index);
+				index -= 1;
+			}
+			globstar = Some(index);
 		}
 
 		let mut text = String::new();
@@ -493,7 +502,7 @@ fn literal_segments(path: &str) -> impl Iterator<Item = Segment> + '_ {
 impl FromStr for Pattern {
 	type Err = InvalidPattern;
 
-	/// Parse a pattern's text. Unlike a path, the text is not normalized: a leading,
+	/// Parse a pattern's text. Unlike a path, slashes are not normalized: a leading,
 	/// trailing, or doubled `/` is an error, so a typo cannot silently widen a grant.
 	fn from_str(text: &str) -> Result<Self, InvalidPattern> {
 		if text.is_empty() {
@@ -593,7 +602,7 @@ mod tests {
 			"a/*/b",
 			"**/transcode.pro",
 			"a/**/b/*",
-			"*/**",
+			"**/*",
 			"**/*.hang",
 			"foo*",
 			"foo.*.hang",
@@ -604,8 +613,8 @@ mod tests {
 			pattern("a/*/**/b").segments(),
 			&[
 				Segment::Literal("a".into()),
-				Segment::Wildcard,
 				Segment::Globstar,
+				Segment::Wildcard,
 				Segment::Literal("b".into()),
 			]
 		);
@@ -888,7 +897,7 @@ mod tests {
 	fn serde_round_trips_as_text() {
 		let p = pattern("a/*/**");
 		let json = serde_json::to_string(&p).unwrap();
-		assert_eq!(json, "\"a/*/**\"");
+		assert_eq!(json, "\"a/**/*\"");
 		assert_eq!(serde_json::from_str::<Pattern>(&json).unwrap(), p);
 		assert!(serde_json::from_str::<Pattern>("\"a//b\"").is_err());
 	}

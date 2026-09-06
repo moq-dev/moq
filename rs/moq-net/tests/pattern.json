@@ -51,16 +51,17 @@
 					"value": "a"
 				},
 				{
-					"kind": "wildcard"
+					"kind": "globstar"
 				},
 				{
-					"kind": "globstar"
+					"kind": "wildcard"
 				},
 				{
 					"kind": "literal",
 					"value": "b"
 				}
-			]
+			],
+			"canonical": "a/**/*/b"
 		},
 		{
 			"text": "**/transcode.pro",
@@ -763,6 +764,18 @@
 				"cam*.hang",
 				"*.hang",
 				"*"
+			],
+			[
+				"😀*",
+				"abc*"
+			],
+			[
+				"*😀",
+				"*abc"
+			],
+			[
+				"é*é",
+				"abc*"
 			]
 		],
 		"equal": [
@@ -777,6 +790,14 @@
 			[
 				"*.hang",
 				"*.dash"
+			],
+			[
+				"😀*",
+				"abcd*"
+			],
+			[
+				"é*é",
+				"abcd*"
 			]
 		]
 	},
@@ -1009,6 +1030,34 @@
 			],
 			"reduced": [
 				"*.hang"
+			]
+		},
+		{
+			"input": [
+				"𐀀",
+				""
+			],
+			"reduced": [
+				"",
+				"𐀀"
+			]
+		},
+		{
+			"input": [
+				"*/**",
+				"**/*"
+			],
+			"reduced": [
+				"**/*"
+			]
+		},
+		{
+			"input": [
+				"**/*",
+				"*/**"
+			],
+			"reduced": [
+				"**/*"
 			]
 		}
 	],

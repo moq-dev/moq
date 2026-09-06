@@ -383,6 +383,7 @@ export function compareSpecificity(a: Specificity, b: Specificity): number {
 
 const WILDCARD: Segment = { kind: "wildcard" };
 const GLOBSTAR: Segment = { kind: "globstar" };
+const UTF8 = new TextEncoder();
 
 /** The non-empty segments of a path, normalized like a broadcast path. */
 function splitPath(path: string): string[] {
@@ -499,7 +500,8 @@ function reversed<T>(list: readonly T[]): T[] {
  * Build one with {@link Pattern.parse}, {@link Pattern.from} (segments), or
  * {@link Pattern.literal} and {@link Pattern.subtree} (from a path). Two patterns are
  * {@link Pattern.equals | equal} when their text is, and the text is canonical: equal
- * patterns match the same paths, and only they do.
+ * patterns match the same paths, and only they do. Construction moves `**` before
+ * adjacent `*` segments, so `* /**` prints as `** /*`.
  *
  * @public
  */
@@ -518,6 +520,8 @@ export class Pattern {
 	readonly #head: number;
 
 	private constructor(segments: readonly Segment[]) {
+		const owned = segments.map((segment) => Object.freeze({ ...segment }));
+		segments = owned;
 		if (segments.length > Pattern.MAX_SEGMENTS) {
 			throw new PatternError("too-many-segments", `more than ${Pattern.MAX_SEGMENTS} segments`);
 		}
@@ -535,6 +539,14 @@ export class Pattern {
 			} else if (segment.kind === "globstar") {
 				if (globstar !== undefined) throw new PatternError("multiple-globstars", "more than one ** segment");
 				globstar = i;
+			}
+		}
+
+		// Adjacent `*` and `**` commute; keep `**` first for one language identity.
+		if (globstar !== undefined) {
+			while (globstar > 0 && owned[globstar - 1].kind === "wildcard") {
+				[owned[globstar - 1], owned[globstar]] = [owned[globstar], owned[globstar - 1]];
+				globstar--;
 			}
 		}
 
@@ -557,7 +569,7 @@ export class Pattern {
 	/**
 	 * Parse a pattern's text. Throws {@link PatternError} on invalid syntax.
 	 *
-	 * Unlike a path, the text is not normalized: a leading, trailing, or doubled `/` is
+	 * Unlike a path, slashes are not normalized: a leading, trailing, or doubled `/` is
 	 * an error, so a typo cannot silently widen a grant.
 	 */
 	static parse(text: string): Pattern {
@@ -598,7 +610,13 @@ export class Pattern {
 
 	/** Order two patterns by text, so a sorted list is deterministic. */
 	static compare(a: Pattern, b: Pattern): number {
-		return a.text < b.text ? -1 : a.text > b.text ? 1 : 0;
+		// Scalar order agrees with UTF-8 and keeps unpaired JS surrogates distinct.
+		const left = Array.from(a.text, (char) => char.codePointAt(0) ?? 0);
+		const right = Array.from(b.text, (char) => char.codePointAt(0) ?? 0);
+		for (let i = 0; i < Math.min(left.length, right.length); i++) {
+			if (left[i] !== right[i]) return left[i] - right[i];
+		}
+		return left.length - right.length;
 	}
 
 	/** The canonical text. */
@@ -708,7 +726,9 @@ export class Pattern {
 		let head = 0;
 		while (head < this.segments.length && this.segments[head].kind === "literal") head++;
 		let pinned = 0;
-		for (const s of this.segments) if (s.kind === "partial") pinned += s.prefix.length + s.suffix.length;
+		for (const s of this.segments) {
+			if (s.kind === "partial") pinned += UTF8.encode(s.prefix).length + UTF8.encode(s.suffix).length;
+		}
 		return {
 			literals: this.segments.filter((s) => s.kind === "literal").length,
 			exact: this.#globstar === undefined,
@@ -870,7 +890,7 @@ export class Patterns implements Iterable<Pattern> {
 		return this.#members.map((member) => member.text);
 	}
 
-	/** Whether the two unions describe the same set. */
+	/** Whether the two unions have the same reduced pattern members. */
 	equals(other: Patterns): boolean {
 		return this.size === other.size && this.#members.every((member, i) => member.equals(other.#members[i]));
 	}

@@ -249,9 +249,24 @@ fn random_text_round_trips() {
 			.map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
 			.collect();
 		if let Ok(pattern) = text.parse::<Pattern>() {
-			assert_eq!(pattern.to_string(), text, "parse accepted a non-canonical text");
+			assert_eq!(pattern.to_string().parse::<Pattern>().unwrap(), pattern);
 			assert_eq!(text.parse::<Pattern>().unwrap(), pattern);
 			assert!(pattern.contains(&pattern) && pattern.overlaps(&pattern));
+		}
+	}
+}
+
+#[test]
+fn equivalent_patterns_have_one_identity() {
+	for alphabet in alphabets() {
+		let all = alphabet.patterns();
+		for a in &all {
+			for b in &all {
+				assert_eq!(a == b, a.contains(b) && b.contains(a), "{a} and {b}");
+				let forward: Patterns = [a.clone(), b.clone()].into_iter().collect();
+				let reverse: Patterns = [b.clone(), a.clone()].into_iter().collect();
+				assert_eq!(forward, reverse);
+			}
 		}
 	}
 }

@@ -33,6 +33,9 @@ containment stops being two string compares. Literal `*` needs no escape: new
 path construction and publication reject it, while decoders tolerate it on
 legacy protocol versions during rollout.
 
+Construction moves `**` before adjacent `*` segments: `*/**` becomes
+`**/*`. Equivalent wildcard placements therefore share one text and identity.
+
 A pattern list is an unordered union reduced by containment. The shared
 algebra supplies matching, overlap, containment, a literal head, and exact
 set-valued rebasing. The set-valued result is load-bearing: rebasing `**/a` at

@@ -49,7 +49,7 @@ fn parse() {
 		match text.parse::<Pattern>() {
 			Ok(got) => {
 				assert!(case["error"].is_null(), "{text:?} should fail with {}", case["error"]);
-				assert_eq!(got.to_string(), text, "{text:?} does not print canonically");
+				assert_eq!(got.as_str(), case["canonical"].as_str().unwrap_or(text), "{text:?}");
 				if let Some(segments) = case["segments"].as_array() {
 					let expected: Vec<Segment> = segments.iter().map(segment).collect();
 					assert_eq!(got.segments(), expected, "{text:?}");

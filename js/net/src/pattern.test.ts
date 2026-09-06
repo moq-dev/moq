@@ -4,7 +4,7 @@ import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, ty
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
-	parse: { text: string; segments?: Segment[] | null; error?: ErrorCode }[];
+	parse: { text: string; canonical?: string; segments?: Segment[] | null; error?: ErrorCode }[];
 	literal: ({ path: string; pattern: string } | { path: string; error: ErrorCode })[];
 	subtree: { path: string; pattern: string }[];
 	head: { pattern: string; head: string; literal: boolean; globstar: boolean }[];
@@ -46,7 +46,7 @@ describe("vectors", () => {
 				continue;
 			}
 			const got = Pattern.parse(c.text);
-			expect(got.text, c.text).toBe(c.text);
+			expect(got.text, c.text).toBe(c.canonical ?? c.text);
 			if (c.segments) {
 				expect(got.segments, c.text).toEqual(c.segments);
 				expect(Pattern.from(c.segments).equals(got), c.text).toBe(true);
@@ -248,6 +248,8 @@ describe("exhaustive", () => {
 					}
 					expect(a.contains(b), `${a} contains ${b}`).toBe(contains);
 					expect(a.overlaps(b), `${a} overlaps ${b}`).toBe(overlaps);
+					expect(a.equals(b), `${a} equals ${b}`).toBe(contains && b.contains(a));
+					expect(new Patterns([a, b]).equals(new Patterns([b, a]))).toBe(true);
 					if (contains && !b.contains(a)) {
 						expect(
 							compareSpecificity(a.specificity(), b.specificity()),
@@ -303,7 +305,7 @@ describe("exhaustive", () => {
 });
 
 describe("random text", () => {
-	test("parse accepts only canonical text", () => {
+	test("canonical text is a parse fixed point", () => {
 		// Deterministic xorshift so a failure reproduces.
 		let state = 0x9e3779b9;
 		const next = () => {
@@ -324,7 +326,7 @@ describe("random text", () => {
 				if (err instanceof PatternError) continue;
 				throw err;
 			}
-			expect(pattern.text, "parse accepted non-canonical text").toBe(text);
+			expect(Pattern.parse(pattern.text).equals(pattern)).toBe(true);
 			expect(pattern.contains(pattern) && pattern.overlaps(pattern)).toBe(true);
 		}
 	});
@@ -351,4 +353,40 @@ describe("Patterns", () => {
 		expect(a.covers(new Patterns())).toBe(true);
 		expect(JSON.stringify(a)).toBe('["a","b"]');
 	});
+});
+
+test("patterns own immutable segment records", () => {
+	const literal = { kind: "literal" as const, value: "a" };
+	const partial = { kind: "partial" as const, prefix: "b", suffix: "c" };
+	const pattern = Pattern.from([literal, partial]);
+	literal.value = "x";
+	partial.prefix = "y";
+	partial.suffix = "z";
+	expect(pattern.text).toBe("a/b*c");
+	expect(pattern.matches("a/bc")).toBe(true);
+	expect(pattern.matches("x/yz")).toBe(false);
+	expect(pattern.contains(Pattern.parse("a/b*c"))).toBe(true);
+	expect(pattern.equals(Pattern.parse("a/b*c"))).toBe(true);
+	for (const source of [pattern, Pattern.parse("a/*/**"), Pattern.literal("a"), Pattern.subtree("a")]) {
+		for (const segment of source.segments) expect(Object.isFrozen(segment)).toBe(true);
+	}
+});
+
+test("equivalent wildcard placements have one identity", () => {
+	for (const [a, b] of [
+		["*/**", "**/*"],
+		["a/*/**/*/b", "a/**/*/*/b"],
+	]) {
+		const left = Pattern.parse(a);
+		const right = Pattern.parse(b);
+		expect(left.equals(right)).toBe(true);
+		expect(new Patterns([left, right]).equals(new Patterns([right, left]))).toBe(true);
+	}
+});
+
+test("ordering keeps distinct JS strings distinct", () => {
+	const a = Pattern.literal("\ud800");
+	const b = Pattern.literal("\ufffd");
+	expect(Pattern.compare(a, b)).not.toBe(0);
+	expect(new Patterns([a, b]).equals(new Patterns([b, a]))).toBe(true);
 });
