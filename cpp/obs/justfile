@@ -65,7 +65,8 @@ run:
     cp -a build_macos/RelWithDebInfo/obs-moq.plugin "$dest/"
     RUST_LOG=debug RUST_BACKTRACE=1 OBS_LOG_LEVEL=debug /Applications/OBS.app/Contents/MacOS/OBS
 
-# Type-check every plugin source, without linking or an obs-deps download.
+# Type-check every plugin source and unit test, without linking or an obs-deps
+# download.
 #
 # This is the gate to run in a worktree. `just obs build` needs the
 # multi-hundred-MB obs-deps bundle (macOS/Windows) and a full cargo build, per
@@ -77,6 +78,12 @@ run:
 # It compiles the Qt sources too, which the CMake build only does when
 # ENABLE_QT and ENABLE_FRONTEND_API are on, so the definitions they gate on are
 # set here to match.
+#
+# test/ is in scope because each test file defines the libmoq entry points the
+# plugin calls, so a signature that drifts from the generated moq.h is a
+# conflicting C declaration. Catching that needs only headers, which is why it
+# belongs here: `just obs ci` finds the same drift, but only where obs.yml's
+# path filter reaches, and `just obs test` is manual.
 compile:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -109,7 +116,7 @@ compile:
     # MOQ_VERSION_STRING only reaches a label in the dock, so any value
     # type-checks the same; CMake stamps the real libmoq version.
     status=0
-    for source in src/*.cpp; do
+    for source in src/*.cpp test/*.cpp; do
         # shellcheck disable=SC2086
         # -Wno-unused-command-line-argument: the nix compiler wrapper injects
         # link flags, which a syntax-only run reports as unused, once per file.
