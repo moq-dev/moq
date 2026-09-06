@@ -37,7 +37,7 @@ mod mediacodec;
 mod nvdec;
 
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
-mod vaapi;
+pub(crate) mod vaapi;
 
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 mod v4l2;
