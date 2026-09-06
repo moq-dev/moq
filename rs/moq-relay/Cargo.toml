@@ -62,6 +62,7 @@ axum-server = { workspace = true }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
+hex = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 jsonwebtoken = { workspace = true }
@@ -77,6 +78,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false 
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
+sha2 = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

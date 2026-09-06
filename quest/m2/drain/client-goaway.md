@@ -26,8 +26,9 @@ class and its pool.
 ### Rust is done except the proof
 
 On `dev`, `moq_tokio::Connection` already handles GOAWAY: the session loop returns the
-message, `Redirect::resolve` guards the URI (scheme tier never drops, no
-widening to a local host, optional same-host mode), the loop redials while a
+message, `Redirect::resolve` guards the URI (scheme tier never drops, the host
+is pinned to the configured one by default, and `follow` is the opt-in that
+lets a peer name another), the loop redials while a
 `Draining` handle keeps the old session serving until it closes or overstays
 the handover cap, and `Status::Migrating` is visible to callers. Every dial
 resolves DNS again, since `Addrs` holds URLs and each backend resolves at dial
@@ -37,8 +38,7 @@ end-to-end coverage is the cluster sibling test with a redirect.
 Add the fleet-drain regression test: a relay GOAWAYs with an empty URI and a
 timeout, the client redials the configured URL through a fresh resolve (a
 resolver the test can repoint), live tracks hand over at a group boundary,
-and the old session closes within the handover cap. The name-based redirect
-guard stays [its own quest](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md).
+and the old session closes within the handover cap.
 
 ### JavaScript is greenfield
 
@@ -62,9 +62,10 @@ down in its effect cleanup, and `Connection.Shared`
   timeout, and the IETF decoder reads an absent one as zero, so absence means
   the cap and never a zero-length handover. Groups in flight finish. A GOAWAY does not go through the backoff delay; a failed
   replacement dial does.
-- Port the guard: follow by default, refuse a scheme-tier drop or a widening
-  to a local host, and offer the same-host mode. An empty URI redials the
-  current URL. A redirect with a certificate pin (`serverCertificateHashes`)
+- Port the guard: same-host by default, refuse a scheme-tier drop or a
+  widening to a local host, and offer the follow mode. Empty, ignored, malformed, or refused URIs preserve the
+  current address list, including caller-selected fallbacks. Only an accepted
+  redirect replaces the list. A redirect with a certificate pin (`serverCertificateHashes`)
   is refused unless the host is unchanged, since the pin cannot verify another
   relay; the pool already refuses to share pinned connections.
 - `Connection.Shared` re-keys its entry to the redirect target, so a later
@@ -88,4 +89,3 @@ down in its effect cleanup, and `Connection.Shared`
 ## Required
 
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one Connection class first, so GOAWAY is built into it rather than into two
-- [Redirect guard by name](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - pin validated DNS results before enabling cross-host redirects by default

@@ -4,7 +4,7 @@ import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation } from "../error.ts";
+import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -320,7 +320,7 @@ export class Connection implements Established {
 
 			this.#runUni(stream)
 				.then(() => {
-					stream.stop(new Error("cancel"));
+					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 				})
 				.catch((err: unknown) => {
 					console.error("error processing object stream", err);

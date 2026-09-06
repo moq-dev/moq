@@ -13,8 +13,8 @@ const WORKERS: u16 = 4;
 
 /// A UDP port nothing is bound to.
 ///
-/// Every worker binds the same port, so this cannot be `:0`: each would pick an
-/// ephemeral port of its own and they would not form a group.
+/// Named rather than ephemeral because these tests rebind the port, or probe it
+/// while the group holds it, which needs a port known before the group starts.
 fn free_udp_port() -> u16 {
 	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
@@ -218,22 +218,28 @@ async fn dropping_unserved_workers_releases_the_port() {
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
 }
 
-/// An ephemeral bind gives every worker a port of its own instead of a shared
-/// one, leaving all but the first unreachable behind an address that reads as
-/// bound. That has to fail at startup rather than come up looking healthy.
+/// The group holds one port, so an ephemeral bind is the port its first member
+/// drew and the rest join it. A member picking a port of its own would sit
+/// unreachable behind an address that reads as bound.
 #[tokio::test]
-async fn an_ephemeral_port_is_refused() {
+async fn an_ephemeral_port_is_shared_by_the_group() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 
-	let err = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(WORKERS))
-		.expect_err("an ephemeral port cannot be shared");
-	assert!(
-		matches!(err, moq_tokio::Error::WorkerPortMismatch { .. }),
-		"unexpected error: {err}"
-	);
+	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(WORKERS))
+		.expect("a group may take an ephemeral port");
+	assert_eq!(workers.len(), usize::from(WORKERS));
+
+	let addr = workers.local_addr();
+	assert_ne!(addr.port(), 0, "the group reports the port it bound");
+
+	// A plain bind refuses a port any socket holds, so this fails while the
+	// group is alive and succeeds once every member has let go.
+	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect_err("the group must hold its port");
+	workers.shutdown().await;
+	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("the group must release its port");
 }
 
 /// `SO_REUSEPORT` groups by address and UID, so a second group on a served
@@ -345,43 +351,6 @@ async fn a_foreign_reuseport_group_is_refused() {
 
 	Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
 		.expect_err("a group must not join a foreign reuseport member");
-}
-
-/// A bind that fails midway drops the members it already spawned, and the error
-/// must not return before their sockets are closed: an owner that immediately
-/// rebinds the address would otherwise join the half-dead reuseport group and be
-/// renumbered when it finished dying.
-#[tokio::test]
-async fn a_failed_bind_releases_its_port_first() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-
-	// Ephemeral, so the first member binds a port of its own and the second
-	// fails the group: a real partial construction, deterministically.
-	let err = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(2))
-		.expect_err("an ephemeral port cannot be shared");
-	let moq_tokio::Error::WorkerPortMismatch { first, .. } = err else {
-		panic!("unexpected error: {err}");
-	};
-
-	// A plain bind refuses a port any socket still holds, so this succeeds only
-	// if the first member was joined before `bind` returned its error.
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(first)).expect("a failed bind left its port held");
-}
-
-/// One worker has no group to disagree with, so an ephemeral port is fine there.
-#[tokio::test]
-async fn a_single_worker_may_use_an_ephemeral_port() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1))
-		.expect("a lone worker may take any port");
-	assert_ne!(workers.local_addr().port(), 0);
 }
 
 /// The steering filter picks a member with one byte of the connection ID, so a

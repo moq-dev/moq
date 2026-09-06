@@ -1,3 +1,17 @@
+//! Broadcast paths and the patterns that match them.
+//!
+//! [`Path`] is a literal coordinate: `/`-separated segments, normalized, with
+//! segment-aware prefix operations. [`Pattern`] describes a set of paths with
+//! wildcards, and [`Patterns`] is a union of them reduced by containment. Grants,
+//! origin scopes, announce interests, and wildcard advertisements all use the
+//! one pattern grammar, so nothing resembles a second glob dialect.
+
+mod pattern;
+mod patterns;
+
+pub use pattern::{InvalidPattern, Pattern, Segment, Specificity};
+pub use patterns::Patterns;
+
 use std::borrow::Cow;
 use std::fmt::{self, Display};
 use std::sync::Arc;

@@ -23,9 +23,6 @@ use anyhow::Context as _;
 
 use crate::{Auth, AuthParams, Cluster, Shutdown};
 
-/// How many workers the steering filter can address.
-const MAX_WORKERS: u16 = moq_sock::shard::MAX_SHARDS;
-
 /// One member's bound socket and its slot in the steered group.
 struct Member {
 	shard: moq_sock::shard::Shard,
@@ -107,9 +104,10 @@ pub struct Workers {
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 
-	/// Holds the listen port against a second group for as long as this one
-	/// lives.
-	_lock: Option<moq_sock::shard::Lock>,
+	/// The reuseport group the workers bound into. Held for the group's
+	/// lifetime, because it is what holds the listen port against a second
+	/// group.
+	_group: moq_sock::shard::Group,
 }
 
 impl Workers {
@@ -162,11 +160,6 @@ impl Workers {
 			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
 		};
 
-		let count = config.count.max(1);
-		if count > MAX_WORKERS {
-			anyhow::bail!("at most {MAX_WORKERS} io_uring workers, got {count}");
-		}
-
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -185,30 +178,26 @@ impl Workers {
 				.with_context(|| format!("{bind} resolved to no address"))?
 		};
 
-		// Excludes a concurrently-constructing same-UID group; the bind probe
-		// inside `shard::bind` excludes one that already holds the port.
-		let lock = match requested.port() {
-			0 => None,
-			port => moq_sock::shard::Lock::acquire(port)
-				.map_err(|_| anyhow::anyhow!("another QUIC worker group already owns {requested}"))?,
-		};
+		// The group owns the reuseport invariants: it locks the port against a
+		// concurrently-constructing same-UID group (the bind probe covers one
+		// that already holds it), refuses a size the steering filter could not
+		// address, and hands out members in the order the kernel numbers them
+		// by.
+		let mut group = moq_sock::shard::Group::acquire(requested, config.count)
+			.with_context(|| format!("failed to take the reuseport group on {requested}"))?;
+		let count = group.count();
 
 		let mut members = Vec::with_capacity(count as usize);
-		let mut addr = requested;
-		for index in 0..count {
-			let shard = moq_sock::shard::Shard::new(index, count).expect("index is below count");
-			let socket = moq_sock::shard::bind(addr, Some(shard))
-				.with_context(|| format!("failed to bind worker {index} on {addr}"))?;
-			let bound = socket.local_addr().context("bound socket has no address")?;
-			// An ephemeral request gives each worker a port of its own; the
-			// group only balances a port every member actually holds.
-			if index == 0 {
-				addr = bound;
-			} else if bound != addr {
-				anyhow::bail!("worker {index} bound {bound}, the group holds {addr}; use a fixed port");
-			}
+		while let Some(member) = group.member() {
+			let shard = member.shard();
+			let socket = member
+				.bind()
+				.with_context(|| format!("failed to bind worker {} on {}", shard.index(), group.addr()))?;
 			members.push(Member { shard, socket });
 		}
+		// Whatever the first member bound, which is the requested address unless
+		// it asked for an ephemeral port.
+		let addr = group.addr();
 
 		// The moq-lite ALPNs this listener speaks: the operator's version
 		// restriction when one is set, minus anything that is not lite (the
@@ -272,7 +261,7 @@ impl Workers {
 			stops: Vec::new(),
 			failures,
 			failures_tx,
-			_lock: lock,
+			_group: group,
 		})
 	}
 
@@ -427,6 +416,16 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		quic.qlog.is_none(),
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
+	for (name, window) in [
+		("quic.receive_window", quic.receive_window),
+		("quic.stream_receive_window", quic.stream_receive_window),
+		("quic.send_window", quic.send_window),
+	] {
+		anyhow::ensure!(
+			window.is_none(),
+			"io_uring workers run fixed flow-control windows; drop {name} or use the tokio workers"
+		);
+	}
 
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
@@ -741,4 +740,37 @@ async fn serve_connection(
 	});
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The worker's transport settings have no window knobs, so a configured one is
+	/// refused at startup rather than left as a setting the operator believes is in
+	/// force. Each is named separately so the message points at the right line.
+	#[test]
+	fn windows_are_refused() {
+		let cases: [(&str, fn(&mut moq_tokio::quic::Config)); 3] = [
+			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
+			("quic.stream_receive_window", |quic| {
+				quic.stream_receive_window = Some(8 << 20)
+			}),
+			("quic.send_window", |quic| quic.send_window = Some(32 << 20)),
+		];
+
+		for (name, set) in cases {
+			let mut quic = moq_tokio::quic::Config::default();
+			set(&mut quic);
+
+			let err = transport(&quic.resolve()).expect_err("a window must be refused");
+			assert!(err.to_string().contains(name), "{err}");
+		}
+	}
+
+	/// Leaving the windows unset is the ordinary case and must still build.
+	#[test]
+	fn defaults_are_accepted() {
+		transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+	}
 }

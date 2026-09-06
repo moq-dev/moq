@@ -17,6 +17,7 @@ core_affinity = "0.8"
 libc = { workspace = true }
 rand = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]

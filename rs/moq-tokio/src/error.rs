@@ -91,6 +91,11 @@ pub enum Error {
 	#[error("idle timeout must be under 2^62 milliseconds")]
 	IdleTimeoutRange,
 
+	/// A QUIC flow-control window is zero or too large to express. The payload names
+	/// which one.
+	#[error("quic {0} must be non-zero and fit a QUIC varint")]
+	WindowRange(&'static str),
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
@@ -146,18 +151,6 @@ pub enum Error {
 	/// every member a different one.
 	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]
 	WorkerTlsGenerate,
-
-	/// A worker group was pointed at an ephemeral port, so each member bound a
-	/// port of its own instead of sharing one.
-	#[error("QUIC workers need an explicit non-zero listen port; worker {index} bound {addr} instead of {first}")]
-	WorkerPortMismatch {
-		/// The member that disagreed.
-		index: u16,
-		/// What it bound.
-		addr: std::net::SocketAddr,
-		/// What the first member bound, which the rest must match.
-		first: std::net::SocketAddr,
-	},
 
 	/// Another worker group already holds this listen port.
 	///

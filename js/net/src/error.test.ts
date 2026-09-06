@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError as QmuxStreamError } from "@moq/qmux";
 import {
+	FrameTooLarge,
 	fromClose,
 	fromTransport,
+	Lagged,
+	NotFound,
+	ProtocolViolation,
 	reason,
 	SessionCode,
 	SessionError,
 	StreamCode,
 	StreamError,
+	toStreamCode,
 	toTransport,
 } from "./error.ts";
+import { TimeoutError } from "./util/timeout.ts";
 
 // Stand-in for the current WebTransportError constructor, which the test runtime may not define.
 class FakeWebTransportError extends Error {
@@ -204,11 +210,33 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
 	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
 
-	// The tables carry only what the draft assigns. 32-63 is reserved, so a code there is
-	// something an implementation happens to send, not a meaning to publish.
-	for (const code of [...Object.values(SessionCode), ...Object.values(StreamCode)]) {
+	// The session table carries only what the draft assigns.
+	for (const code of Object.values(SessionCode)) {
 		expect(code).toBeLessThan(32);
 	}
+
+	// The stream table adds the reserved-range placeholders this implementation sends, and
+	// nothing else lands there: 32-63 carries no meaning the draft publishes, so a code we
+	// put in it is an agreement with our own Rust implementation rather than a spec value.
+	const placeholders: StreamCode[] = [
+		StreamCode.NotFound,
+		StreamCode.Old,
+		StreamCode.Evicted,
+		StreamCode.FrameTooLarge,
+	];
+	for (const code of Object.values(StreamCode)) {
+		if (placeholders.includes(code)) {
+			expect(code).toBeGreaterThanOrEqual(32);
+			expect(code).toBeLessThan(64);
+		} else {
+			expect(code).toBeLessThan(32);
+		}
+	}
+	// The values the Rust `StreamError` sends for the same conditions.
+	expect(Number(StreamCode.NotFound)).toBe(0x20);
+	expect(Number(StreamCode.Old)).toBe(0x22);
+	expect(Number(StreamCode.Evicted)).toBe(0x23);
+	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
@@ -259,4 +287,46 @@ test("toTransport: works with no WebTransportError global", () => {
 	globals.WebTransportError = undefined;
 	const decoded = fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"));
 	expect((decoded as StreamError).code).toBe(StreamCode.TooFarBehind);
+});
+
+// The whole point of the pair: a condition raised here goes out as its own code, and comes back
+// at the peer as the same condition. Without it every local error is 0 (INTERNAL_ERROR), so a
+// lagging reader or an unknown broadcast reads as a crash on the sender's side.
+test("toStreamCode: a local condition maps to the code the peer can act on", () => {
+	expect(toStreamCode(new Lagged())).toBe(StreamCode.TooFarBehind);
+	expect(toStreamCode(new FrameTooLarge())).toBe(StreamCode.FrameTooLarge);
+	expect(toStreamCode(new NotFound("broadcast x"))).toBe(StreamCode.NotFound);
+	expect(toStreamCode(new TimeoutError("too slow"))).toBe(StreamCode.DeliveryTimeout);
+	// Session-scoped: the peer learns which rule it broke from the session close.
+	expect(toStreamCode(new ProtocolViolation("bad hop"))).toBe(StreamCode.SessionClosed);
+
+	// A peer's code is forwarded verbatim, which is what keeps a relay from flattening it.
+	expect(toStreamCode(new StreamError(StreamCode.GoingAway))).toBe(StreamCode.GoingAway);
+	expect(toStreamCode(new StreamError(StreamCode(70)))).toBe(StreamCode(70));
+
+	// Anything else already means 0, and so does a session code: the registries are disjoint, so
+	// forwarding one onto a stream would mistranslate it (session 0x4 is a stream GOING_AWAY).
+	expect(toStreamCode(new Error("boom"))).toBe(StreamCode.Internal);
+	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Internal);
+});
+
+test("toStreamCode and fromTransport agree on what a code means", () => {
+	// Every registered code survives the round trip, so a relay decoding and re-encoding one
+	// cannot change what the next hop reads.
+	for (const code of [
+		StreamCode.Internal,
+		StreamCode.Cancel,
+		StreamCode.DeliveryTimeout,
+		StreamCode.SessionClosed,
+		StreamCode.GoingAway,
+		StreamCode.TooFarBehind,
+		StreamCode.MalformedTrack,
+		StreamCode(70),
+	]) {
+		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
+	}
+
+	// A gap is one class whichever side it happened on, so a `catch` needs only one check.
+	expect(fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"))).toBeInstanceOf(Lagged);
+	expect(new Lagged()).toBeInstanceOf(StreamError);
 });

@@ -25,8 +25,10 @@ struct ConnectTest<'a> {
 	/// The request path the server must observe, when the test cares.
 	expect_path: Option<&'a str>,
 	backend: moq_tokio::QuicBackend,
-	/// Capture qlog traces from both ends into this directory.
-	qlog: Option<&'a std::path::Path>,
+	/// The transport knobs both ends are built with.
+	quic: moq_tokio::quic::Config,
+	/// The single frame the publisher writes, which the subscriber must read back.
+	payload: &'a [u8],
 }
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
@@ -44,7 +46,8 @@ async fn backend_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "",
 		expect_path: Some(""),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -64,7 +67,8 @@ async fn path_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "/room?jwt=abc",
 		expect_path: Some("/room"),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -83,7 +87,8 @@ async fn no_sni_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "",
 		expect_path: Some(""),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -100,7 +105,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 		path,
 		expect_path,
 		backend,
-		qlog,
+		quic,
+		payload,
 	} = config;
 
 	// ── publisher (server) ──────────────────────────────────────────
@@ -113,7 +119,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -121,9 +127,6 @@ async fn connect_test(config: ConnectTest<'_>) {
 	server_config.bind = Some(bind.to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.qlog = qlog.map(Into::into);
-
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
@@ -136,8 +139,6 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backend = Some(backend);
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.qlog = qlog.map(Into::into);
 	// Bind the client to the same address family as the server so an IPv4 dial
 	// doesn't try to egress from an IPv6 socket (and vice versa).
 	client_config.bind = Some(client_bind.unwrap_or(bind).parse().expect("invalid bind address"));
@@ -203,13 +204,184 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&frame.payload[..], b"hello");
+	assert_eq!(&frame.payload[..], payload);
 
 	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+}
+
+/// Write a self-signed PEM cert + key for `name` to `dir`, prefixed by `stem`.
+///
+/// Returns the two paths, in the order the `cert` and `key` lists want them.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+	use std::io::Write;
+
+	let key = rcgen::KeyPair::generate().expect("key");
+	let params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("params");
+	let cert = params.self_signed(&key).expect("cert");
+
+	let write = |name: String, contents: String| {
+		let path = dir.join(name);
+		let mut file = std::fs::File::create(&path).expect("create pem file");
+		file.write_all(contents.as_bytes()).expect("write pem file");
+		path
+	};
+
+	(
+		write(format!("{stem}.pem"), cert.pem()),
+		write(format!("{stem}.key"), key.serialize_pem()),
+	)
+}
+
+/// Serve two certificates for different names and assert the one matching the
+/// client's SNI is the one presented, by pinning its fingerprint.
+///
+/// Pinning skips CA and hostname verification, so the handshake succeeds exactly
+/// when the server picked the certificate the SNI asked for. Without SNI
+/// selection every client would get the first configured certificate, so the
+/// `alt.localhost` pin below would never match.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn sni_test(backend: moq_tokio::QuicBackend) {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (first_cert, first_key) = write_self_signed(dir.path(), "first", "localhost");
+	let (second_cert, second_key) = write_self_signed(dir.path(), "second", "alt.localhost");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.tls.cert = vec![first_cert, second_cert];
+	server_config.tls.key = vec![first_key, second_key];
+	server_config.backend = Some(backend.clone());
+
+	let server = server_config
+		.init(moq_tokio::quic::Config::default())
+		.expect("failed to init server");
+	let server = server.listen().await.expect("failed to listen");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	// Both pairs are loaded, not just the first: index 0 alone would report one.
+	let fingerprints = server.certificates().fingerprints();
+	assert_eq!(fingerprints.len(), 2, "expected both certificates to be served");
+
+	// Keep accepting so the client handshakes complete, then drop the server.
+	let server_handle = tokio::spawn(async move {
+		let mut server = server;
+		while server.accept().await.is_some() {}
+	});
+
+	let dial = |host_name: &str, fingerprint: &str| {
+		let mut client_config = moq_tokio::connect::Config::default();
+		client_config.tls.fingerprint = vec![fingerprint.to_string()];
+		client_config.tls.host_name = Some(host_name.to_string());
+		client_config.backend = Some(backend.clone());
+		client_config.bind = Some("0.0.0.0:0".parse().unwrap());
+		let client = client_config
+			.init(moq_tokio::quic::Config::default())
+			.expect("failed to init client");
+		let url: url::Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+		connect_once(client, url)
+	};
+
+	// The SNI names the second certificate, so that is the one to pin. Hold the
+	// connection: dropping it would tear the session down mid-assertion.
+	let _matched = tokio::time::timeout(TIMEOUT, dial("alt.localhost", &fingerprints[1]))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// The same pin with the other SNI must fail: the server serves the first
+	// certificate there, whose fingerprint the client does not accept.
+	let wrong = tokio::time::timeout(TIMEOUT, dial("localhost", &fingerprints[1]))
+		.await
+		.expect("client connect timed out");
+	assert!(wrong.is_err(), "pinning the wrong certificate must fail the handshake");
+
+	server_handle.abort();
+}
+
+/// A generated certificate joins the file-backed ones rather than replacing them.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn cert_sources_test(backend: moq_tokio::QuicBackend) {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.tls.cert = vec![cert];
+	server_config.tls.key = vec![key];
+	server_config.tls.generate = vec!["generated.localhost".into()];
+	server_config.backend = Some(backend);
+
+	let server = server_config
+		.init(moq_tokio::quic::Config::default())
+		.expect("failed to init server");
+	let server = server.listen().await.expect("failed to listen");
+
+	assert_eq!(
+		server.certificates().fingerprints().len(),
+		2,
+		"expected the file-backed and generated certificates to both be served"
+	);
+}
+
+/// Rotate the certificate files under a running listener and assert the served
+/// set follows, without the listener being rebuilt.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn reload_test(backend: moq_tokio::QuicBackend) {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.tls.cert = vec![cert.clone()];
+	server_config.tls.key = vec![key.clone()];
+	server_config.backend = Some(backend);
+
+	let server = server_config
+		.init(moq_tokio::quic::Config::default())
+		.expect("failed to init server");
+	let server = server.listen().await.expect("failed to listen");
+	let certificates = server.certificates();
+	let before = certificates.fingerprints();
+	assert_eq!(before.len(), 1);
+
+	// The reload task is spawned while the listener is built and registers its
+	// watcher the first time the runtime polls it, which may be after this point.
+	// Rotating before then would replace the files with nothing watching them.
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// Rotate in place, the way cert-manager or a secret mount would.
+	let (new_cert, new_key) = write_self_signed(dir.path(), "rotated", "localhost");
+	std::fs::rename(&new_cert, &cert).expect("rotate cert");
+	std::fs::rename(&new_key, &key).expect("rotate key");
+
+	tokio::time::sleep(Duration::from_secs(2)).await;
+	assert!(
+		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
+		"no reload log"
+	);
+	assert!(
+		!tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled"),
+		"watcher failed"
+	);
+
+	let reloaded = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let now = certificates.fingerprints();
+			if now != before {
+				return now;
+			}
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("certificate reload timed out");
+
+	assert_eq!(reloaded.len(), 1);
+	drop(server);
 }
 
 /// Generate a CA, a server cert + key, and a client cert + key (all PEM, the
@@ -392,6 +564,29 @@ async fn quinn_webtransport_path() {
 	path_test("https", moq_tokio::QuicBackend::Quinn).await;
 }
 
+/// The same certificate semantics the quiche backend now shares, checked here so
+/// the two can't drift apart.
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_sni_certificate() {
+	sni_test(moq_tokio::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_cert_sources() {
+	cert_sources_test(moq_tokio::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_cert_reload() {
+	reload_test(moq_tokio::QuicBackend::Quinn).await;
+}
+
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
@@ -434,9 +629,31 @@ async fn quiche_dual_stack_ipv4() {
 		path: "",
 		expect_path: None,
 		backend: moq_tokio::QuicBackend::Quiche,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quiche_sni_certificate() {
+	sni_test(moq_tokio::QuicBackend::Quiche).await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quiche_cert_sources() {
+	cert_sources_test(moq_tokio::QuicBackend::Quiche).await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quiche_cert_reload() {
+	reload_test(moq_tokio::QuicBackend::Quiche).await;
 }
 
 #[cfg(feature = "quiche")]
@@ -650,6 +867,9 @@ async fn noq_mtls() {
 async fn qlog_test(scheme: &str, backend: moq_tokio::QuicBackend) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.qlog = Some(dir.path().to_path_buf());
+
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
@@ -658,7 +878,8 @@ async fn qlog_test(scheme: &str, backend: moq_tokio::QuicBackend) -> Vec<std::pa
 		path: "",
 		expect_path: None,
 		backend,
-		qlog: Some(dir.path()),
+		quic,
+		payload: b"hello",
 	})
 	.await;
 
@@ -736,4 +957,74 @@ async fn connect_once(
 ) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
+}
+
+// ── flow control ────────────────────────────────────────────────────
+
+/// Run a connect with every flow-control window pinned well under the payload, so
+/// the frame only arrives if the receiver keeps issuing credit as it drains.
+///
+/// The size is the point: a frame that fits inside one window would pass whether or
+/// not the setting ever reached the backend.
+///
+/// `send_window` is a parameter because quiche has no local send cap and refuses one
+/// (see `quiche_refuses_send_window`), so only the backends that have it pass a size.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn window_test(scheme: &str, backend: moq_tokio::QuicBackend, send_window: Option<u64>) {
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.receive_window = Some(64 * 1024);
+	quic.stream_receive_window = Some(16 * 1024);
+	quic.send_window = send_window;
+
+	let payload: Vec<u8> = (0..256 * 1024).map(|i| i as u8).collect();
+
+	connect_test(ConnectTest {
+		scheme,
+		bind: "[::]:0",
+		client_bind: None,
+		authority: "localhost",
+		path: "",
+		expect_path: Some(""),
+		backend,
+		quic,
+		payload: &payload,
+	})
+	.await;
+}
+
+#[cfg(feature = "quinn")]
+#[tokio::test]
+async fn quinn_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Quinn, Some(32 * 1024)).await;
+}
+
+#[cfg(feature = "noq")]
+#[tokio::test]
+async fn noq_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Noq, Some(32 * 1024)).await;
+}
+
+/// quiche takes the receive windows, so cover them over raw QUIC the same way.
+#[cfg(feature = "quiche")]
+#[tokio::test]
+async fn quiche_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Quiche, None).await;
+}
+
+/// The quiche backend refuses a send window rather than pretending to apply one, and
+/// it says so when the endpoint is built rather than at the first connection.
+#[cfg(feature = "quiche")]
+#[tokio::test]
+async fn quiche_refuses_send_window() {
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.send_window = Some(32 * 1024);
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.backend = Some(moq_tokio::QuicBackend::Quiche);
+
+	// `Client` is not `Debug`, so unwrap the error by pattern rather than `expect_err`.
+	let Err(err) = config.init(quic) else {
+		panic!("a send window must be refused");
+	};
+	assert!(err.to_string().contains("send window"), "{err}");
 }

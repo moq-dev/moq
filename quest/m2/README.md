@@ -80,7 +80,6 @@ can act on. Each still carries its own plan and regression test.
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
 - [Room SDK](/quest/m2/room-sdk.md) - a headless room package: a room is a path prefix, no service, no storage
 - [LiveKit shim](/quest/m2/livekit-shim.md) - a drop-in livekit-client-compatible package running rooms over MoQ
-- [Auth verdict](/quest/m2/auth-verdict.md) - the relay hands an opaque credential to its auth API and is told the grant; lands as the proxy mode in #3044
 - [#3087](/quest/m2/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
 - [#1310](/quest/m2/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
@@ -88,4 +87,5 @@ can act on. Each still carries its own plan and regression test.
 - [Linux capture parity](/quest/m2/capture-linux.md) - window capture, system audio, and a chosen display through the portal
 - [Capture ergonomics](/quest/m2/capture-ergonomics.md) - region capture, audio mixing, and validating format overrides
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
+- [io_uring flow control](/quest/m2/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends

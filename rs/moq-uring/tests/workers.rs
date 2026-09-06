@@ -14,12 +14,12 @@
 #[path = "support/quiche.rs"]
 mod support;
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use moq_sock::shard::Shard;
+use moq_sock::shard::Group;
 use moq_uring::{Config, Error, Worker, quic, udp};
 
 fn worker() -> Option<Worker> {
@@ -77,15 +77,15 @@ fn a_steered_group_serves_a_shared_port() {
 
 	// Bind the group up front, in index order: that order is the identity the
 	// kernel steers by, and binding before any thread spawns is what
-	// guarantees it.
+	// guarantees it. The group is held for as long as the sockets are served,
+	// since it is what holds the port.
+	let mut group = Group::acquire("127.0.0.1:0".parse().expect("addr"), WORKERS).expect("group");
 	let mut members = Vec::new();
-	let mut addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-	for index in 0..WORKERS {
-		let shard = Shard::new(index, WORKERS).expect("shard");
-		let socket = moq_sock::shard::bind(addr, Some(shard)).expect("bind group member");
-		addr = socket.local_addr().expect("addr");
-		members.push((shard, socket));
+	while let Some(member) = group.member() {
+		let shard = member.shard();
+		members.push((shard, member.bind().expect("bind group member")));
 	}
+	let addr = group.addr();
 
 	let accepted: Arc<Vec<AtomicUsize>> = Arc::new((0..WORKERS).map(|_| AtomicUsize::new(0)).collect());
 	// One stop each: the wakers are per-thread, so a shared slot would let one

@@ -20,6 +20,7 @@ cert = "cert.pem"                    # Certificate chain and key. Reloaded on ch
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
 root = ["peer-ca.pem"]               # Optional: CAs whose client certs get full access (mTLS).
+                                     # The quiche backend fixes these at startup; restart to rotate them.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
@@ -31,18 +32,39 @@ allow.uid = [1001]
 
 ## \[quic]
 
-Transport tuning shared by the accept and dial sides; `[listen.quic]` and
-`[connect.quic]` override it for one direction.
+Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
 congestion_control = "delay"         # "delay" (BBR) or "loss" (CUBIC, the default on noq and iroh).
+max_streams = 1024                   # Concurrent streams per connection, bidi and uni. Default.
+idle_timeout = "30s"                 # Drop a connection after this long with nothing on it.
+keep_alive = "5s"                    # Ping interval; "0s" disables it. Ignored by iroh.
+gso = true                           # UDP segmentation offload. iroh cannot turn it off.
+mtu_discovery = false                # Path MTU discovery. Default.
+receive_window = 67108864            # Flow-control windows, in bytes. Omit for the backend default.
+stream_receive_window = 8388608
+send_window = 33554432
+qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
 The `noq` (default), `quinn`, and `quiche` QUIC backends are compile-time
 features selected with `listen.backend` / `connect.backend`. Each ships a
 different BBR generation (BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and
 iroh), which is why the knob names a family rather than an algorithm.
+
+Raise the receive windows when a fat, long path idles below the link rate: a
+window under the bandwidth-delay product stalls the sender waiting for credit.
+Keep `stream_receive_window` well under `receive_window` so one slow group
+cannot starve the connection. `send_window` caps unacknowledged outgoing data
+whatever the peer allows, bounding the transport send buffer. A zero window is refused, and the receive windows must fit a QUIC
+varint since they ride on the wire as transport parameters.
+
+quiche has no local send cap, so it refuses `send_window` rather than quietly
+dropping it: use the `quinn` or `noq` backend, or leave it unset. It also
+autotunes each receive window up to a ceiling, so the relay pins that ceiling to
+the configured value and the window is exactly what was asked for, as on the
+other backends.
 
 ## \[runtime]
 
@@ -59,14 +81,17 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` (default) or `quinn` backend, an explicit
-non-zero `listen.bind` port, and real certificate files rather than
+worker. The group shares one port, including an ephemeral (zero) port: the
+first worker binds it and the rest join that port. Use an explicit port unless
+something reads the bound address at startup. `workers` needs the `noq`
+(default) or `quinn` backend and real certificate files rather than
 `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,
 and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
-except that `mtu_discovery` is refused under `io_uring` (its datagram path
-sends a fixed payload) rather than quietly ignored. Each worker reports its own
-counters at [`/metrics`](/bin/relay/http#get-metrics).
+except that `mtu_discovery` (its datagram path sends a fixed payload) and the
+three flow-control windows (these workers run fixed ones) are refused under
+`io_uring` rather than quietly ignored. Each worker reports its own counters at
+[`/metrics`](/bin/relay/http#get-metrics).
 
 ## \[web]
 
@@ -130,8 +155,18 @@ timeout = "30s"                      # Dial plus handshake. "0" waits forever.
 tls.root = ["ca.pem"]                # Trust these CAs (replaces system roots unless system_roots = true).
 tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API).
 tls.key = "relay.key"
-
+goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
+goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 ```
+
+A draining upstream may name a replacement URI. `same-host` follows it only
+onto the host we already dialed, so a peer moves us between ports and schemes;
+`follow` also lets it choose the host, which means trusting it not to point us
+into the local network, since a name it controls resolves wherever it likes;
+`ignore` keeps the current address list. Empty, malformed, or refused redirects
+also preserve caller-configured fallbacks; only an accepted redirect replaces
+the list with the peer's URI. `handover` is a cap: a shorter deadline on
+the received GOAWAY wins, a longer one does not extend it.
 
 ## \[cache]
 

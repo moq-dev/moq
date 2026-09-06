@@ -6,11 +6,12 @@ use crate::crypto;
 use crate::listen;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
+use crate::tls::{Certified, ServeCerts};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use url::Url;
 
 /// Re-exported because this module's public API exposes its types. A major
@@ -76,6 +77,11 @@ pub enum Error {
 	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 
+	/// quiche has no local cap on unacknowledged send data, so `quic.send_window`
+	/// cannot be honored.
+	#[error("the quiche backend cannot cap the send window; drop --quic-send-window or use the quinn backend")]
+	SendWindowUnsupported,
+
 	/// The handshake completed without negotiating an ALPN, so there is no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
@@ -101,11 +107,13 @@ pub enum Error {
 	#[error("the quiche backend cannot serve per-core workers; use the quinn backend")]
 	ShardUnsupported,
 
-	/// The server was given neither a certificate pair nor hostnames to generate one from.
+	#[doc(hidden)]
+	#[deprecated(note = "the shared tls::Error::NoCertSource is returned instead")]
 	#[error("--tls-cert and --tls-key are required with the quiche backend")]
 	CertRequired,
 
-	/// The server was given a different number of certificates than keys.
+	#[doc(hidden)]
+	#[deprecated(note = "the shared tls::Error::CertKeyCountMismatch is returned instead")]
 	#[error("must provide matching --tls-cert and --tls-key pairs")]
 	CertPairMismatch,
 
@@ -200,10 +208,27 @@ type Result<T> = std::result::Result<T, Error>;
 /// Keep-alive and GSO are socket-driver settings, so they are applied to the
 /// client/server builders instead.
 fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved) -> Result<()> {
+	refuse_unsupported(quic)?;
+
 	settings.initial_max_streams_bidi = quic.max_streams;
 	settings.initial_max_streams_uni = quic.max_streams;
 	settings.max_idle_timeout = Some(quic.idle_timeout);
 	settings.discover_path_mtu = quic.mtu_discovery;
+
+	// quiche autotunes each window from its initial value up to a maximum and clamps
+	// it there, so raising only the initial value would be silently capped at
+	// quiche's own 24MB/16MB ceilings. Pinning both makes the window exactly what was
+	// asked for, which is what the other backends give.
+	if let Some(window) = quic.receive_window {
+		settings.initial_max_data = window;
+		settings.max_connection_window = window;
+	}
+	if let Some(window) = quic.stream_receive_window {
+		settings.initial_max_stream_data_bidi_local = window;
+		settings.initial_max_stream_data_bidi_remote = window;
+		settings.initial_max_stream_data_uni = window;
+		settings.max_stream_window = window;
+	}
 
 	// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
 	// so default to BBR rather than quiche's own CUBIC.
@@ -217,6 +242,20 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved
 	}
 
 	Ok(())
+}
+
+/// Reject the knobs quiche has no setting for, rather than dropping them.
+///
+/// [`apply_settings`] calls this so no path can bypass it, and the client calls it
+/// when the endpoint is built: its settings are assembled per dial, which would
+/// otherwise put the error on the first connection instead of at startup.
+fn refuse_unsupported(quic: &Resolved) -> Result<()> {
+	// quiche sends as fast as the peer's flow control and congestion control allow,
+	// with no local ceiling to set.
+	match quic.send_window {
+		Some(_) => Err(Error::SendWindowUnsupported),
+		None => Ok(()),
+	}
 }
 
 /// The quiche controller name for a congestion control family. quiche's BBR is the
@@ -244,30 +283,28 @@ pub(crate) struct QuicheClient {
 	/// How long the first candidate waits for the full DNS answer, RFC 8305's
 	/// Resolution Delay (see [`crate::connect::Config::resolution_delay`]).
 	pub resolution_delay: std::time::Duration,
-	identity: Option<Arc<ClientIdentity>>,
-}
-
-struct ClientIdentity {
-	chain: Vec<CertificateDer<'static>>,
-	key: PrivateKeyDer<'static>,
+	/// The mTLS client certificate to present, from files or an in-memory identity.
+	identity: Option<Arc<Certified>>,
 }
 
 impl QuicheClient {
 	pub fn new(config: &crate::connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let quic = quic.resolve();
-		// Identity holds a rustls signer rather than exportable private-key DER, which
-		// quiche requires. Refuse it instead of silently dialing without mTLS.
+		refuse_unsupported(&quic)?;
+
 		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-		if config.tls.identity.is_some() {
-			return Err(crate::tls::Error::MemoryUnsupported.into());
-		}
-		let identity = match (&config.tls.cert, &config.tls.key) {
-			(Some(cert), Some(key)) => {
-				let (chain, key) = load_quiche_cert(cert, key)?;
-				Some(Arc::new(ClientIdentity { chain, key }))
+		let in_memory = config.tls.identity.as_ref().map(crate::tls::Identity::certified);
+		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		let in_memory: Option<Arc<Certified>> = None;
+
+		let identity = match (in_memory, &config.tls.cert, &config.tls.key) {
+			(Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+				return Err(crate::tls::Error::ConflictingClientAuth.into());
 			}
-			(None, None) => None,
-			_ => return Err(crate::tls::Error::IncompleteClientAuth.into()),
+			(Some(identity), None, None) => Some(identity),
+			(None, Some(cert), Some(key)) => Some(Arc::new(load_certified(cert, key)?)),
+			(None, None, None) => None,
+			(None, _, _) => return Err(crate::tls::Error::IncompleteClientAuth.into()),
 		};
 
 		// Warn once here rather than on every dial: the constraint is a property of
@@ -461,7 +498,7 @@ impl QuicheClient {
 		builder = builder.with_server_name(self.host_name.as_deref().unwrap_or(host));
 
 		if let Some(identity) = &self.identity {
-			builder = builder.with_single_cert(identity.chain.clone(), identity.key.clone_key());
+			builder = builder.with_single_cert(identity.chain().to_vec(), identity.key.clone_key());
 		}
 
 		match verification {
@@ -585,11 +622,26 @@ fn proto_status(err: &web_transport_quiche::proto::ConnectError) -> Option<u16> 
 
 pub(crate) struct QuicheServer {
 	pub server: web_transport_quiche::ez::Server,
-	pub certs: crate::tls::Certificates,
+	certs: Arc<ServeCerts>,
+	_reload: crate::tls::Reload,
+}
+
+/// Serve the certificate whose subject names cover the client's SNI.
+///
+/// boringssl asks per handshake, so this reads the live set and picks up a hot
+/// reload without rebuilding the listener.
+impl web_transport_quiche::ez::CertResolver for ServeCerts {
+	fn resolve(&self, server_name: Option<&str>) -> Option<web_transport_quiche::ez::CertifiedKey> {
+		let certified = self.select(server_name)?;
+		Some(web_transport_quiche::ez::CertifiedKey {
+			chain: certified.chain().to_vec(),
+			key: certified.key.clone_key(),
+		})
+	}
 }
 
 impl QuicheServer {
-	pub fn new(config: listen::Config, quic: &crate::quic::Config, shard: Option<listen::Shard>) -> Result<Self> {
+	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Member>) -> Result<Self> {
 		if config.lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
@@ -598,7 +650,7 @@ impl QuicheServer {
 		// falls back to hashing addresses, and a client that changes address lands
 		// on a worker that has never seen its connection. `web-transport-quiche`
 		// exposes no connection ID hook to encode the owner with.
-		if shard.is_some() {
+		if member.is_some() {
 			return Err(Error::ShardUnsupported);
 		}
 
@@ -608,45 +660,18 @@ impl QuicheServer {
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 		let socket = crate::bind::udp(crate::bind::Udp::new(listen))?;
 
-		// quiche fixes its certificate and client-auth roots when the listener is
-		// built, and takes them as raw DER rather than a rustls resolver or verifier,
-		// so neither in-memory mode can be honored here. Refuse rather than come up
-		// serving a different identity than the caller asked for, or accepting peers
-		// it meant to pin.
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-		if config.tls.identity.is_some() {
-			return Err(crate::tls::Error::MemoryUnsupported.into());
-		}
+		// Pinning client fingerprints needs a verifier that runs per handshake, which
+		// boringssl's client-auth path can't express: it validates the chain against a
+		// fixed root store. Refuse rather than accept peers the caller meant to pin out.
 		if config.tls.peers.is_some() {
-			return Err(crate::tls::Error::MemoryUnsupported.into());
+			return Err(crate::tls::Error::PeersUnsupported.into());
 		}
 
-		let (chain, key) = if !config.tls.generate.is_empty() {
-			generate_quiche_cert(&config.tls.generate)?
-		} else {
-			if config.tls.cert.is_empty() || config.tls.key.is_empty() {
-				return Err(Error::CertRequired);
-			}
-			if config.tls.cert.len() != config.tls.key.len() {
-				return Err(Error::CertPairMismatch);
-			}
-
-			// Load certs in PEM format and convert to DER for quiche
-			load_quiche_cert(&config.tls.cert[0], &config.tls.key[0])?
-		};
-
-		// Compute fingerprints using rustls crypto (always available)
-		let provider = crypto::provider();
-		let fingerprints: Vec<String> = chain
-			.iter()
-			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
-			.collect();
-
-		let certs = crate::tls::Certificates::new(Arc::new(RwLock::new(crate::tls::Info {
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-			certs: Vec::new(),
-			fingerprints,
-		})));
+		// The same certificate loader the other backends use: every cert/key pair,
+		// generated hostnames, and an in-memory identity, all selected by SNI and hot
+		// reloaded from disk below.
+		let certs = Arc::new(ServeCerts::new(crypto::provider()));
+		certs.load_certs(&config.tls)?;
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -670,7 +695,7 @@ impl QuicheServer {
 		}
 
 		if !config.tls.root.is_empty() {
-			tracing::warn!("the quiche backend snapshots server mTLS roots; restart after rotating --server-tls-root");
+			tracing::warn!("the quiche backend snapshots server mTLS roots; restart after rotating --listen-tls-root");
 			let roots = config
 				.tls
 				.root
@@ -685,10 +710,13 @@ impl QuicheServer {
 
 		let server = builder
 			.with_socket(socket)?
-			.with_single_cert(chain, key)
+			.with_cert_resolver(certs.clone())
 			.map_err(Error::ServerBuild)?;
 
-		Ok(Self { server, certs })
+		// Spawned only once the listener exists, so a failed bind leaves no watcher behind.
+		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
+
+		Ok(Self { server, certs, _reload })
 	}
 
 	pub fn accept(&mut self) -> impl std::future::Future<Output = Option<web_transport_quiche::ez::Incoming>> + '_ {
@@ -696,7 +724,7 @@ impl QuicheServer {
 	}
 
 	pub fn certificates(&self) -> crate::tls::Certificates {
-		self.certs.clone()
+		crate::tls::Certificates::new(self.certs.info.clone())
 	}
 
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {
@@ -708,10 +736,11 @@ impl QuicheServer {
 	}
 }
 
-fn load_quiche_cert(
-	cert_path: &Path,
-	key_path: &Path,
-) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+/// Load a PEM certificate chain and its key, checking that they actually pair up.
+///
+/// The client side only ever presents one certificate, so it loads directly rather
+/// than through [`ServeCerts`], which owns the SNI-selected set a listener serves.
+fn load_certified(cert_path: &Path, key_path: &Path) -> crate::tls::Result<Certified> {
 	let chain = crate::tls::read_certs(cert_path)?;
 	if chain.is_empty() {
 		return Err(crate::tls::Error::Empty);
@@ -719,35 +748,7 @@ fn load_quiche_cert(
 
 	let key = PrivateKeyDer::from_pem_file(key_path).map_err(crate::tls::Error::Key)?;
 
-	Ok((chain, key))
-}
-
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-fn generate_quiche_cert(
-	hostnames: &[String],
-) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-	let key_pair = rcgen::KeyPair::generate()?;
-
-	let mut params = rcgen::CertificateParams::new(hostnames)?;
-
-	// Make the certificate valid for two weeks, starting yesterday (in case of clock drift).
-	// WebTransport certificates MUST be valid for two weeks at most.
-	params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
-	params.not_after = params.not_before + ::time::Duration::days(14);
-
-	let cert = params.self_signed(&key_pair)?;
-
-	let key_der = key_pair.serialized_der().to_vec();
-	let key = PrivateKeyDer::Pkcs8(key_der.into());
-
-	Ok((vec![cert.into()], key))
-}
-
-#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-fn generate_quiche_cert(
-	hostnames: &[String],
-) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-	Err(crate::tls::Error::NoCryptoProvider)
+	Certified::new(&crypto::provider(), chain, key)
 }
 
 // ── QuicheQuicRequest ───────────────────────────────────────────────
@@ -836,12 +837,88 @@ mod tests {
 		assert_eq!(settings.cc_algorithm, "cubic");
 	}
 
-	/// An in-memory identity must not disappear when the quiche backend is selected.
+	/// quiche autotunes each flow-control window up to a maximum and clamps it there,
+	/// so writing only the initial value would leave a larger request silently capped.
+	/// Both halves have to land for the window to be what was asked for.
+	#[test]
+	fn apply_settings_pins_both_halves_of_each_window() {
+		let quic = crate::quic::Config {
+			receive_window: Some(64 << 20),
+			stream_receive_window: Some(8 << 20),
+			..Default::default()
+		};
+
+		let mut settings = web_transport_quiche::Settings::default();
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
+
+		assert_eq!(settings.initial_max_data, 64 << 20);
+		assert_eq!(settings.max_connection_window, 64 << 20);
+		assert_eq!(settings.initial_max_stream_data_bidi_local, 8 << 20);
+		assert_eq!(settings.initial_max_stream_data_bidi_remote, 8 << 20);
+		assert_eq!(settings.initial_max_stream_data_uni, 8 << 20);
+		assert_eq!(settings.max_stream_window, 8 << 20);
+	}
+
+	/// An unset window leaves quiche's own defaults alone rather than pinning ours.
+	#[test]
+	fn apply_settings_leaves_unset_windows_alone() {
+		let defaults = web_transport_quiche::Settings::default();
+		let mut settings = web_transport_quiche::Settings::default();
+		apply_settings(&mut settings, &crate::quic::Config::default().resolve()).unwrap();
+
+		assert_eq!(settings.initial_max_data, defaults.initial_max_data);
+		assert_eq!(settings.max_connection_window, defaults.max_connection_window);
+		assert_eq!(settings.max_stream_window, defaults.max_stream_window);
+	}
+
+	/// quiche has no local send cap, so a configured one is refused rather than
+	/// dropped: an operator must not believe a ceiling is in force that is not.
+	#[test]
+	fn send_window_is_refused() {
+		let quic = crate::quic::Config {
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+
+		let mut settings = web_transport_quiche::Settings::default();
+		assert!(matches!(
+			apply_settings(&mut settings, &quic.resolve()),
+			Err(Error::SendWindowUnsupported)
+		));
+	}
+
+	/// An in-memory identity is a client certificate like any other here: the DER is
+	/// kept alongside the rustls signer, so boringssl can present it.
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	#[test]
-	fn rejects_in_memory_client_identity() {
+	fn accepts_an_in_memory_client_identity() {
+		let identity = crate::tls::Identity::generate(["client.invalid"]).unwrap();
+		let fingerprint = identity.fingerprint().to_string();
+
+		let mut tls = crate::tls::Connect::default();
+		tls.identity = Some(identity);
+		let config = crate::connect::Config {
+			tls,
+			..Default::default()
+		};
+
+		let client = QuicheClient::new(&config, &crate::quic::Config::default()).unwrap();
+		let presented = client.identity.expect("no client certificate");
+		assert_eq!(
+			hex::encode(crypto::sha256(&crypto::provider(), presented.leaf().as_ref())),
+			fingerprint
+		);
+	}
+
+	/// Only one client certificate can be presented, so the two sources are exclusive
+	/// rather than one silently winning.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[test]
+	fn rejects_an_identity_beside_a_certificate_file() {
 		let mut tls = crate::tls::Connect::default();
 		tls.identity = Some(crate::tls::Identity::generate(["client.invalid"]).unwrap());
+		tls.cert = Some("/tmp/client.pem".into());
+		tls.key = Some("/tmp/client.key".into());
 		let config = crate::connect::Config {
 			tls,
 			..Default::default()
@@ -849,7 +926,7 @@ mod tests {
 
 		assert!(matches!(
 			QuicheClient::new(&config, &crate::quic::Config::default()),
-			Err(Error::Tls(crate::tls::Error::MemoryUnsupported))
+			Err(Error::Tls(crate::tls::Error::ConflictingClientAuth))
 		));
 	}
 }
