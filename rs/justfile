@@ -492,8 +492,9 @@ audit:
 # for the all-features clippy alone), which is why this is nightly rather than
 # part of the per-PR gate.
 #
-# `--all-features` is the only thing that compiles moq-cli's play/capture,
-# moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
+# `--all-features` is the only thing that compiles moq-cli's play/capture, the
+# moq-video and moq-audio device features, the Linux bindgen codecs (vaapi,
+# v4l2), PipeWire, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
 #
 # Both carry `--all-targets`. A `#[cfg(test)]` module leans on whatever the
