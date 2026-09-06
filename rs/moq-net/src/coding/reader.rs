@@ -247,12 +247,11 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	}
 
 	/// Abort the stream with the given error.
-	pub fn abort(&mut self, err: &Error) {
+	pub fn abort(&mut self, err: impl Into<StreamError>) {
 		// STOP_SENDING is a stream operation, so it carries a stream code from the
 		// negotiated protocol's registry. A session code, or the other protocol's, would be
 		// read against the wrong table and mean something else.
-		self.stream
-			.stop(self.version.encode_stream_code(&StreamError::from(err)));
+		self.stream.stop(self.version.encode_stream_code(&err.into()));
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.

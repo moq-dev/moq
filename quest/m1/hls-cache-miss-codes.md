@@ -2,10 +2,11 @@
 
 ## Goal
 
-`moq-hls` answers 404 for a segment the relay no longer has, and 500 only for a
-real failure, whichever shape the error arrives in. The classification is driven
-by the registry the code actually came off the wire in, so it cannot drift from
-`moq-net` again.
+`moq-hls` answers 404 when the decoded error identifies a cache miss, and 500
+for genuine failures or an IETF stream reset that cannot distinguish a miss.
+Returning 404 over IETF depends on the request-error path preserving that
+classification. Decode using the negotiated registry so classification cannot
+drift from `moq-net` again.
 
 ## Plan
 
