@@ -74,11 +74,23 @@ pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 /// Questlines are never executed, so they are not listed; the absence of a
 /// `## Required` heading is what quest/AGENTS.md defines as ready.
 pub fn quests(root: &Path) -> Result<Vec<PathBuf>> {
-	Ok(crate::load(root)?
-		.into_iter()
-		.filter(|doc| !doc.is_questline() && !doc.has("Required"))
-		.map(|doc| doc.path)
-		.collect())
+	let docs = crate::load(root)?;
+	let mut remaining: BTreeMap<PathBuf, &Doc> = docs.iter().map(|doc| (doc.path.clone(), doc)).collect();
+	let mut pending = vec![PathBuf::from("quest/README.md")];
+	let mut ready = Vec::new();
+	while let Some(path) = pending.pop() {
+		let Some(doc) = remaining.remove(&path) else { continue };
+		if doc.is_questline() {
+			let children: Vec<_> = doc
+				.entries("Quests")
+				.filter_map(|entry| entry.target.as_deref().and_then(rules::rooted))
+				.collect();
+			pending.extend(children.into_iter().rev());
+		} else if !doc.has("Required") {
+			ready.push(path);
+		}
+	}
+	Ok(ready)
 }
 
 /// The blockers of one document: a quest waits on its `Required` entries, and a

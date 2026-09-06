@@ -753,3 +753,11 @@ fn cycle_terminates() {
 		]
 	);
 }
+
+#[test]
+fn ready_listing_follows_nested_priority_and_terminates_cycles() {
+	let tree = Tree::new();
+	tree.write("quest/m0/line/two.md", "# [S] Two\n\n## Goal\n\nReady.\n");
+	tree.write("quest/m0/line/README.md", "# Line\n\n## Quests\n\n- [Two](/quest/m0/line/two.md)\n- [Self](/quest/m0/line/README.md)\n- [One](/quest/m0/line/one.md)\n");
+	assert_eq!(tree.ready(), ["quest/m0/line/two.md", "quest/m0/line/one.md"]);
+}

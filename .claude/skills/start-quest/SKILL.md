@@ -12,7 +12,8 @@ sections the same way `quest check` validates them and excludes questline
 `README.md`s, which are never executed:
 
 ```bash
-cargo run --quiet --locked --package quest -- ready | grep "^<base>"
+set -o pipefail
+cargo run --quiet --locked --package quest -- ready | awk -v base="<base>" 'BEGIN { sub(/\/$/, "", base); base = base "/" } index($0, base) == 1'
 ```
 
 No output means the questline has no ready work; say so. To explain one quest,
