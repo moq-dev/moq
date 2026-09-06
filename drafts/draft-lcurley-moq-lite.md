@@ -251,7 +251,9 @@ However, it is ultimately the other peer's responsibility to close their send di
 There are two independent error code spaces, one for terminating the session and one for resetting a stream.
 The same numeric value means different things in each, so an endpoint MUST select the code from the space matching what it is terminating.
 
-Both spaces reuse the codes moq-transport assigns, unchanged and with the same meaning, so an endpoint that speaks both protocols has one vocabulary and a relay can forward a peer's code without translating it.
+The shared codes match moq-transport draft-18 and later.
+Earlier drafts differ: 0x4 denotes UNKNOWN_OBJECT_STATUS in draft-16/17 and is unassigned in draft-14/15; TOO_FAR_BEHIND was added in draft-17 and MALFORMED_TRACK in draft-16.
+An endpoint bridging protocols MUST translate codes according to the negotiated version and error-code space; moq-lite's provisional and application ranges have no corresponding moq-transport ranges.
 The codes moq-lite uses are listed in full below; an endpoint MUST NOT assign a moq-lite specific meaning to any code below 32.
 
 Codes 64 and above are the application's, opaque to moq-lite.
@@ -1384,6 +1386,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+
+- Require error-code translation when bridging protocols and draft versions.
 - Made a repeated non-zero Hop ID in one announcement's Hop ID list a PROTOCOL_VIOLATION, matching draft-lcurley-moq-cluster. Repeated 0 entries stay legal.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.

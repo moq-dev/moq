@@ -32,7 +32,7 @@ pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
-impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
+impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
 			stream,
@@ -146,7 +146,9 @@ impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
 			let n = cmp::min(self.buffer.len(), max);
 			return Poll::Ready(Ok(Some(self.buffer.split_to(n).freeze())));
 		}
-		self.stream.poll_read_chunk(cx, max).map_err(Error::from_transport)
+		self.stream
+			.poll_read_chunk(cx, max)
+			.map_err(|err| self.version.transport_error(err))
 	}
 
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
@@ -240,24 +242,16 @@ impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
 		match ready!(self.stream.poll_read_buf(cx, &mut self.buffer)) {
 			Ok(Some(_)) => Poll::Ready(Ok(true)),
 			Ok(None) => Poll::Ready(Ok(false)),
-			Err(e) => Poll::Ready(Err(Error::from_transport(e))),
+			Err(e) => Poll::Ready(Err(self.version.transport_error(e))),
 		}
 	}
 
 	/// Abort the stream with the given error.
-	pub fn abort(&mut self, err: &Error) {
-		// STOP_SENDING is a stream operation, so it carries a stream code. Sending the
-		// session code here would have the peer read it against the wrong registry.
-		self.stream.stop(StreamError::from(err).to_code());
-	}
-
-	/// Abort the stream with a raw application code.
-	///
-	/// [`Self::abort`] encodes the moq-lite error space. A protocol with its own registry
-	/// of stream reset codes has to name one directly, since the two spaces do not agree
-	/// on what a given number means.
-	pub fn stop(&mut self, code: u32) {
-		self.stream.stop(code);
+	pub fn abort(&mut self, err: impl Into<StreamError>) {
+		// STOP_SENDING is a stream operation, so it carries a stream code from the
+		// negotiated protocol's registry. A session code, or the other protocol's, would be
+		// read against the wrong table and mean something else.
+		self.stream.stop(self.version.encode_stream_code(&err.into()));
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.
@@ -310,6 +304,8 @@ mod tests {
 	/// arrive as INTERNAL_ERROR, and `Unauthorized` as KEY_VALUE_FORMATTING_ERROR.
 	#[test]
 	fn abort_stops_with_a_stream_code() {
+		const VERSION: crate::lite::Version = crate::lite::Version::Lite05;
+
 		for (err, expected) in [
 			(Error::Cancel, StreamError::Cancel.to_code()),
 			(Error::Lagged, StreamError::TooFarBehind.to_code()),
@@ -318,13 +314,29 @@ mod tests {
 				StreamError::Session(crate::SessionError::Unauthorized).to_code(),
 			),
 		] {
-			let mut reader = Reader::new(StopLog::default(), ());
+			let mut reader = Reader::new(StopLog::default(), VERSION);
 			reader.abort(&err);
 			assert_eq!(reader.stream.stops, vec![expected], "{err:?} used the wrong registry");
 		}
 
 		// The two registries disagree about 0 and 1, which is what makes the mix-up silent.
 		assert_ne!(StreamError::Cancel.to_code(), crate::SessionError::Cancel.to_code());
+	}
+
+	/// And the registry follows the negotiated protocol, not just the stream direction. A
+	/// group dropped for being old is a moq-lite placeholder with no moq-transport value, so
+	/// the same abort has to leave a different number on each wire.
+	#[test]
+	fn abort_stops_with_the_negotiated_protocols_code() {
+		let mut lite = Reader::new(StopLog::default(), crate::lite::Version::Lite05);
+		lite.abort(&Error::Old);
+
+		let mut ietf = Reader::new(StopLog::default(), crate::ietf::Version::Draft20);
+		ietf.abort(&Error::Old);
+
+		assert_eq!(lite.stream.stops, vec![StreamError::Old.to_code()]);
+		assert_eq!(ietf.stream.stops, vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert_ne!(lite.stream.stops, ietf.stream.stops);
 	}
 
 	/// Counts wakes delivered to a parked consumer.
@@ -406,7 +418,7 @@ mod tests {
 		let (mut frame, mut payload, waiter, wakes) = parked_frame(9);
 		assert!(payload.poll_read_chunk(&waiter).is_pending());
 
-		let mut reader = Reader::new(Chunks([b"foo".as_slice(), b"bar"].into()), ());
+		let mut reader = Reader::new(Chunks([b"foo".as_slice(), b"bar"].into()), crate::lite::Version::Lite05);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 
 		assert!(reader.poll_read_frame(&mut cx, &mut frame).is_pending());
@@ -477,7 +489,7 @@ mod tests {
 				payload,
 				waiter,
 			},
-			(),
+			crate::lite::Version::Lite05,
 		);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		assert!(reader.poll_read_frame(&mut cx, &mut frame).is_pending());

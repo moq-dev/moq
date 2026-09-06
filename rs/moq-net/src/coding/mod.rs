@@ -1,5 +1,6 @@
 //! Contains encoding and decoding helpers.
 
+mod codes;
 mod decode;
 mod encode;
 mod reader;
@@ -9,6 +10,7 @@ mod varint;
 mod version;
 mod writer;
 
+pub use codes::*;
 pub use decode::*;
 pub use encode::*;
 pub use reader::*;

@@ -18,7 +18,7 @@ pub struct Writer<S: crate::transport::poll::SendStream, V> {
 	version: V,
 }
 
-impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
+impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
@@ -53,7 +53,7 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		while !self.buffer.is_empty() {
 			ready!(self.stream.as_mut().unwrap().poll_write_buf(cx, &mut self.buffer))
-				.map_err(Error::from_transport)?;
+				.map_err(|err| self.version.transport_error(err))?;
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -81,7 +81,7 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 			.as_mut()
 			.unwrap()
 			.poll_write_buf(cx, buf)
-			.map_err(Error::from_transport)
+			.map_err(|err| self.version.transport_error(err))
 	}
 
 	/// Poll until the entire `Buf` has been written to the stream.
@@ -107,7 +107,11 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	/// immediately after an `encode` are safe because `encode` flushes fully.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		debug_assert!(self.buffer.is_empty(), "finish with unflushed bytes");
-		self.stream.as_mut().unwrap().finish().map_err(Error::from_transport)
+		self.stream
+			.as_mut()
+			.unwrap()
+			.finish()
+			.map_err(|err| self.version.transport_error(err))
 	}
 
 	/// Abort the stream with the given error.
@@ -116,7 +120,9 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	/// reset a second time and overwrite the reason with a plain [`Error::Cancel`].
 	pub fn abort(mut self, err: &Error) {
 		if let Some(mut stream) = self.stream.take() {
-			stream.reset(StreamError::from(err).to_code());
+			// The code comes from the negotiated protocol's registry: the same number means
+			// different things on the two wires, so the version is what picks the table.
+			stream.reset(self.version.encode_stream_code(&StreamError::from(err)));
 		}
 	}
 
@@ -132,17 +138,19 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 			return Ok(());
 		};
 
-		stream.finish().map_err(Error::from_transport)?;
-		std::future::poll_fn(|cx| stream.poll_closed(cx).map_err(Error::from_transport)).await
+		stream.finish().map_err(|err| self.version.transport_error(err))?;
+		let version = &self.version;
+		std::future::poll_fn(|cx| stream.poll_closed(cx).map_err(|err| version.transport_error(err))).await
 	}
 
 	/// Poll until the stream is closed, or the [Self::finish] is acknowledged by the peer.
 	pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+		let version = &self.version;
 		self.stream
 			.as_mut()
 			.unwrap()
 			.poll_closed(cx)
-			.map_err(Error::from_transport)
+			.map_err(|err| version.transport_error(err))
 	}
 
 	/// Poll-friendly [`Self::close`] for a finished writer: once the peer acknowledges
@@ -192,6 +200,10 @@ impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.
+			//
+			// A `Drop` impl cannot add the bound that would reach the version's registry, and
+			// it does not need one: CANCELLED is 0x1 in moq-lite and in every moq-transport
+			// draft we negotiate, which `both_registries_agree_about_a_cancellation` pins.
 			stream.reset(StreamError::Cancel.to_code());
 		}
 	}
@@ -201,6 +213,59 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSend};
 	use std::task::Waker;
+
+	#[derive(Debug, Clone, thiserror::Error)]
+	#[error("stream stopped with {0}")]
+	struct Stopped(u32);
+
+	impl web_transport_trait::Error for Stopped {
+		fn session_error(&self) -> Option<(u32, String)> {
+			None
+		}
+
+		fn stream_error(&self) -> Option<u32> {
+			Some(self.0)
+		}
+	}
+
+	impl web_transport_trait::poll::SendStream for Stopped {
+		type Error = Self;
+
+		fn poll_write(&mut self, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			Poll::Ready(Err(self.clone()))
+		}
+
+		fn set_priority(&mut self, _: u8) {}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Err(self.clone())
+		}
+
+		fn reset(&mut self, _: u32) {}
+
+		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Err(self.clone()))
+		}
+	}
+
+	#[tokio::test]
+	async fn raw_payload_stop_uses_the_negotiated_registry() {
+		for (version, expected) in [
+			(crate::Version::Ietf(crate::ietf::Version::Draft17), Error::Remote(0x4)),
+			(crate::Version::Ietf(crate::ietf::Version::Draft20), Error::GoingAway),
+			(crate::Version::Lite(crate::lite::Version::Lite05), Error::GoingAway),
+		] {
+			let mut writer = Writer::new(Stopped(0x4), version);
+			let err = writer.write_all(&mut b"payload".as_slice()).await.unwrap_err();
+			assert!(
+				matches!(
+					(err, expected),
+					(Error::Remote(4), Error::Remote(4)) | (Error::GoingAway, Error::GoingAway)
+				),
+				"{version} decoded the STOP_SENDING with the wrong registry"
+			);
+		}
+	}
 
 	#[test]
 	fn set_priority_forwards_send_order() {
@@ -218,8 +283,8 @@ mod tests {
 	#[derive(Debug)]
 	struct Poison;
 
-	impl Encode<()> for Poison {
-		fn encode<W: bytes::BufMut>(&self, w: &mut W, _: ()) -> Result<(), EncodeError> {
+	impl Encode<crate::lite::Version> for Poison {
+		fn encode<W: bytes::BufMut>(&self, w: &mut W, _: crate::lite::Version) -> Result<(), EncodeError> {
 			w.put_slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
 		}
@@ -229,7 +294,7 @@ mod tests {
 	/// partial bytes would desynchronize the stream for every later message.
 	#[test]
 	fn a_failed_encode_leaves_no_partial_bytes() {
-		let mut writer = Writer::new(SinkSend::new(Log::default()), ());
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::lite::Version::Lite05);
 
 		writer.buffer(&5u8).unwrap();
 		writer.buffer(&Poison).unwrap_err();
@@ -246,7 +311,10 @@ mod tests {
 	#[test]
 	fn flush_resumes_after_pending() {
 		let gate = kio::Producer::new(false);
-		let mut writer = Writer::new(SinkSend::gated(Log::default(), gate.consume()), ());
+		let mut writer = Writer::new(
+			SinkSend::gated(Log::default(), gate.consume()),
+			crate::lite::Version::Lite05,
+		);
 		let log = writer.stream.as_ref().unwrap().log.clone();
 
 		writer.buffer(&5u8).unwrap();
