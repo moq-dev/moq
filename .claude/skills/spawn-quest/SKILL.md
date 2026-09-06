@@ -3,7 +3,7 @@ name: spawn-quest
 description: Triage every quest in a scope interactively, then spawn background agents to open a PR for each one worth starting now. Use when the user invokes /spawn-quest, optionally with a scope such as /spawn-quest m0, or asks whether a milestone's quests should be worked on now.
 ---
 
-Before you begin, read `quest/AGENTS.md` completely.
+Before you begin, read `quest/CLAUDE.md` completely.
 
 Resolve the first argument to a questline directory under `quest/`, defaulting
 to `quest/` itself: `m0` means `quest/m0`.
@@ -68,7 +68,7 @@ Batch the questions; do not spend a round per quest. The choices are **start**,
 **plan** (use `$plan-quest` when a material decision is unmade), **move**,
 **delete**, and **leave**.
 
-Offer **start** only for a ready quest: `quest/AGENTS.md` executes one only when
+Offer **start** only for a ready quest: `quest/CLAUDE.md` executes one only when
 it has no `Required` section, which `quest ready` lists and, given a path,
 explains. For work an agent cannot do - a decision that is a conversation, a
 credential only the user can mint, or verification this machine cannot run,
@@ -90,7 +90,7 @@ ship unverified. Never edit a running agent's worktree; message it instead.
 Give each agent the base branch, the quest path, and nothing it could read for
 itself. Instruct it to:
 
-- Read `quest/AGENTS.md`, the quest, `CONTRIBUTING.md`, and the guides for the
+- Read `quest/CLAUDE.md`, the quest, `CONTRIBUTING.md`, and the guides for the
   areas it touches.
 - Cut the quest branch (the quest path without `.md`) from that base and claim
   it with an empty placeholder commit whose message contains a freshly

@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors = ["Luke Curley"]
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Validator and readiness gate for the quest tree: the interlinked Markdown plans under quest/, whose contract is quest/AGENTS.md. Enforces link resolution, the questline index, the heading vocabulary, and an acyclic Required graph, so a structural mistake fails the PR instead of the next reader, and reports what blocks a quest so a flow does not reconstruct that by grepping."
+description = "Validator and readiness gate for the quest tree: the interlinked Markdown plans under quest/, whose contract is quest/CLAUDE.md. Enforces link resolution, the questline index, the heading vocabulary, and an acyclic Required graph, so a structural mistake fails the PR instead of the next reader, and reports what blocks a quest so a flow does not reconstruct that by grepping."
 
 [[bin]]
 name = "quest"

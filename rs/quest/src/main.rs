@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 /// The quest tree, the interlinked Markdown plans under quest/ whose contract is
-/// quest/AGENTS.md: validate its structure, or report what blocks a quest.
+/// quest/CLAUDE.md: validate its structure, or report what blocks a quest.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -57,7 +57,7 @@ fn main() -> Result<ExitCode> {
 				// Blocked is not a verdict on the whole plan: the piece of it
 				// that does not need the blocker is split into its own quest.
 				eprintln!(
-					"quest: {} is blocked; split any independently landable piece into its own quest (quest/AGENTS.md, Creation) rather than starting this one as it stands",
+					"quest: {} is blocked; split any independently landable piece into its own quest (quest/CLAUDE.md, Creation) rather than starting this one as it stands",
 					path.display()
 				);
 			}

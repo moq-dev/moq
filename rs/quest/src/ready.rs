@@ -72,7 +72,7 @@ pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 /// Every quest that can be started now, in tree order.
 ///
 /// Questlines are never executed, so they are not listed; the absence of a
-/// `## Required` heading is what quest/AGENTS.md defines as ready.
+/// `## Required` heading is what quest/CLAUDE.md defines as ready.
 pub fn quests(root: &Path) -> Result<Vec<PathBuf>> {
 	let docs = crate::load(root)?;
 	let mut remaining: BTreeMap<PathBuf, &Doc> = docs.iter().map(|doc| (doc.path.clone(), doc)).collect();

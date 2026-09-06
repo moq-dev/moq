@@ -1,4 +1,4 @@
-//! The quest tree, whose contract is quest/AGENTS.md: structural validation of
+//! The quest tree, whose contract is quest/CLAUDE.md: structural validation of
 //! it, and whether a given quest can be started.
 //!
 //! The whole tree is validated on every run, never just the changed files: the
@@ -19,9 +19,9 @@ pub use doc::Doc;
 pub use ready::Blocker;
 pub use rules::Finding;
 
-/// AGENTS.md is the contract rather than a quest, and CLAUDE.md is a symlink to
-/// it; neither is executable work, so neither is indexed or validated.
-const NOT_QUESTS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+/// CLAUDE.md is the contract rather than a quest: not executable work, so
+/// neither indexed nor validated.
+const NOT_QUESTS: [&str; 1] = ["CLAUDE.md"];
 
 /// Every quest document under `<root>/quest`, sorted, repository-relative.
 pub fn collect(root: &Path) -> Result<Vec<PathBuf>> {

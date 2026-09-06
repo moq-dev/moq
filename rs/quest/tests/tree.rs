@@ -167,7 +167,7 @@ fn dangling_absolute_link() {
 	tree.rejects("link does not resolve: /quest/m0/line/gone.md");
 }
 
-/// Relative links escape the tree (AGENTS.md points at ../CONTRIBUTING.md), so
+/// Relative links escape the tree (CLAUDE.md points at ../CONTRIBUTING.md), so
 /// they resolve against the LINKING FILE's directory. The pair of cases pins the
 /// direction: resolving against the wrong base would flip both verdicts.
 #[test]
@@ -203,7 +203,7 @@ fn relative_link_to_a_quest() {
 	tree.rejects("link to a quest must be root-absolute: two.md (write /quest/m0/line/two.md)");
 }
 
-/// Templates inside fenced blocks are illustrations. Flagging AGENTS.md's own
+/// Templates inside fenced blocks are illustrations. Flagging CLAUDE.md's own
 /// example would make this a check everyone learns to skip.
 #[test]
 fn fenced_templates_are_not_links() {
@@ -350,13 +350,13 @@ fn relative_index_entry() {
 }
 
 /// The index points readers at work to pick up, so a target that merely exists
-/// is not enough: quest/AGENTS.md is a file under quest/ that is not a quest.
+/// is not enough: quest/CLAUDE.md is a file under quest/ that is not a quest.
 #[test]
 fn index_entry_that_is_not_a_quest() {
 	let tree = Tree::new();
-	tree.write("quest/AGENTS.md", "# Contract\n");
-	tree.append("quest/README.md", "- [Contract](/quest/AGENTS.md)\n");
-	tree.rejects("lists /quest/AGENTS.md, which is not a quest document");
+	tree.write("quest/CLAUDE.md", "# Contract\n");
+	tree.append("quest/README.md", "- [Contract](/quest/CLAUDE.md)\n");
+	tree.rejects("lists /quest/CLAUDE.md, which is not a quest document");
 }
 
 /// The index is a list of entries, not prose that happens to link.
@@ -450,7 +450,7 @@ fn required_link_on_a_wrapped_bullet() {
 }
 
 /// The other half of that rule: an external condition with no link at all is the
-/// shape AGENTS.md prescribes, and must stay legal.
+/// shape CLAUDE.md prescribes, and must stay legal.
 #[test]
 fn required_external_condition() {
 	let tree = Tree::new();
