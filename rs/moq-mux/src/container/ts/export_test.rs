@@ -1959,11 +1959,11 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 	}
 
 	// 100ms frames in one-second groups.
-	let write = |producer: &mut Producer<HangContainer>, count: u64| {
+	let write = |producer: &mut Producer<HangContainer>, count: u64, offset: u64| {
 		for i in 0..count {
 			producer
 				.write(Frame {
-					timestamp: Timestamp::from_micros(i * 100_000).unwrap(),
+					timestamp: Timestamp::from_micros(offset + i * 100_000).unwrap(),
 					duration: None,
 					payload: Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
 					keyframe: i % 10 == 0,
@@ -1978,21 +1978,39 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 	let mut producer = Producer::new(track, HangContainer::Legacy);
 	let mut export = export_of(&consumer).await;
 
-	// Five seconds, drained before the rewind lands: every cadence is anchored at 4.9s
-	// when the publisher starts over.
-	write(&mut producer, 50);
+	// A ten-minute offset exercises the long rewind from the controlled stimulus
+	// campaign. Drain five seconds before restarting at zero.
+	write(&mut producer, 50, 600_000_000);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
 	assert_eq!(count_pid(&before, 0x0000), 10, "PAT on its 500ms cadence");
 	assert_eq!(count_pid(&before, 0x0011), 3, "SDT at 0, 2 and 4s");
 
+	// A forward marker must flush the last old frame instead of discarding it.
+	producer.discontinuity().unwrap();
+	write(&mut producer, 2, 605_000_000);
+	let marked = drain_frames(&mut export).await;
+	let tail: Vec<_> = marked.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (_, audio_pts) = collect_pes_pts(&tail);
+	// The carried tail may precede the refreshed PMT, so inspect all PES starts.
+	let mut reader = TsPacketReader::new(Cursor::new(tail));
+	let mut preserved = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::PesStart(pes)) = packet.payload {
+			preserved |= pes.header.pts.unwrap().as_u64() == 604_900_000 * 90 / 1000;
+		}
+	}
+	assert!(preserved, "forward marker discarded the pre-boundary tail");
+	assert!(!audio_pts.is_empty());
+	let epoch = export.discontinuity();
+
 	// The publisher rewinds and replays the first two seconds.
-	write(&mut producer, 20);
+	write(&mut producer, 20, 0);
 	let after = drain_frames(&mut export).await;
-	assert_eq!(export.discontinuity(), 1, "the rewind was observed");
+	assert_eq!(export.discontinuity(), epoch + 1, "the rewind was observed");
 
 	// The clock leads the new timeline: its first frame is the PCR for slot 0, and the
-	// grid ramps from there instead of waiting to recross 4.9s.
+	// grid ramps from there instead of waiting to recross the old timeline.
 	assert_eq!(
 		after[0].payload[3] & 0x30,
 		0x20,
@@ -2006,7 +2024,7 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 	}
 	assert!(after.iter().all(|f| f.timestamp.as_micros() < 2_000_000));
 
-	// And the tables come back on cadence rather than going quiet for 4.9s.
+	// And the tables come back on cadence rather than waiting ten minutes.
 	assert_eq!(count_pid(&after, 0x0000), 4, "PAT at 0, 0.5, 1 and 1.5s");
 	assert_eq!(count_pid(&after, 0x0011), 1, "SDT at 0s");
 
@@ -2178,9 +2196,18 @@ async fn rewind_flags_the_break_once_across_tracks() {
 		})
 		.unwrap();
 	video.cut(None).unwrap();
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(4_100_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
 	let marked = drain_frames(&mut export).await;
-	assert!(export.tracks.values().map(|t| t.discontinuity).max().unwrap() > 1);
-	let epoch = export.epoch;
+	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
+	let epoch = export.discontinuity();
 
 	// Both tracks rewind to zero.
 	write(&mut video, &mut audio, 2);
@@ -2221,6 +2248,7 @@ async fn rewind_flags_the_break_once_across_tracks() {
 
 	// Keep old video queued while the lower-count audio source rewinds again.
 	// It must start a new program epoch despite having the smaller counter.
+	video.discontinuity().unwrap();
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(8_000_000).unwrap(),
@@ -2250,6 +2278,19 @@ async fn rewind_flags_the_break_once_across_tracks() {
 		"stale video advanced the clock"
 	);
 	assert_eq!(count_pid(&again, 0x1001), 0, "old video was discarded");
+
+	// An unrelated old-timeline marker cannot admit the peer's stale clock.
+	video.discontinuity().unwrap();
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(9_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	assert!(drain_frames(&mut export).await.is_empty());
 
 	// A delayed peer joins on its own boundary without resetting the clock again.
 	for i in 0..4 {

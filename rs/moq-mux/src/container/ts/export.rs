@@ -161,6 +161,21 @@ struct Track {
 	dts_reserve: u64,
 }
 
+impl Track {
+	/// A fenced rendition must rewind its own clock before joining the program.
+	/// Forward markers on its old timeline cannot admit stale media.
+	fn admit(&mut self, pending: Pending, epoch: u64) -> Option<Pending> {
+		if self.epoch == epoch
+			|| (pending.discontinuity != self.discontinuity
+				&& self.timeline.is_none_or(|last| pending.frame.timestamp < last))
+		{
+			return Some(pending);
+		}
+		self.discontinuity = pending.discontinuity;
+		None
+	}
+}
+
 #[derive(Clone)]
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
@@ -370,6 +385,13 @@ impl<E: catalog::Catalog> Export<E> {
 					let backwards = self.tracks[&name]
 						.timeline
 						.is_some_and(|last| pending.frame.timestamp < last);
+					if !backwards && !self.pending.is_empty() {
+						// A forward boundary ends valid media rather than reneging it.
+						// Return that tail under the old generation before adopting the new one.
+						self.emit(None)?;
+						self.tracks.get_mut(&name).unwrap().pending = Some(pending);
+						continue;
+					}
 					self.rewind(backwards);
 				}
 				let track = self.tracks.get_mut(&name).unwrap();
@@ -431,21 +453,18 @@ impl<E: catalog::Catalog> Export<E> {
 							continue;
 						}
 						let discontinuity = track.source.discontinuity();
-						let changed = discontinuity != track.discontinuity;
-						// A peer has rewound the program. This rendition must cross its own
-						// boundary before its old timeline can enter the mux again.
-						if track.epoch != self.epoch && !changed {
+						let Some(pending) = track.admit(Pending { frame, discontinuity }, self.epoch) else {
 							continue;
-						}
-						// Tune-in alignment: drop non-video frames before the first video
-						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
+						};
+						let changed = pending.discontinuity != track.discontinuity;
+						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
 							&& !is_video && !changed
-							&& frame.timestamp < start
+							&& pending.frame.timestamp < start
 						{
 							continue;
 						}
-						track.pending = Some(Pending { frame, discontinuity });
+						track.pending = Some(pending);
 						break;
 					}
 					Poll::Ready(None) => {
@@ -654,14 +673,11 @@ impl<E: catalog::Catalog> Export<E> {
 		self.pcr_discontinuity = true;
 		for track in self.tracks.values_mut() {
 			track.last_dts = None;
-			if !backwards {
+			if !backwards || track.timeline.is_none() {
 				track.epoch = self.epoch;
-			} else if track
-				.pending
-				.as_ref()
-				.is_some_and(|p| p.discontinuity == track.discontinuity)
-			{
-				track.pending = None;
+			}
+			if let Some(pending) = track.pending.take() {
+				track.pending = track.admit(pending, self.epoch);
 			}
 		}
 	}
@@ -854,7 +870,8 @@ impl<E: catalog::Catalog> Export<E> {
 			.min_by_key(|(timestamp, pid, name)| {
 				let track = &self.tracks[*name];
 				let changed = track.pending.as_ref().unwrap().discontinuity != track.discontinuity;
-				(!changed, *timestamp, *pid, *name)
+				let backwards = changed && track.timeline.is_some_and(|last| *timestamp < last);
+				(!backwards, *timestamp, *pid, *name)
 			})
 			.map(|(_, _, name)| name.clone())
 	}
