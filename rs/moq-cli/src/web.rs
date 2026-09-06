@@ -72,8 +72,8 @@ pub async fn run_web(bind: &str, certificates: moq_native::tls::Certificates) ->
 	}
 
 	let fingerprint_handler = move || async move {
-		// Get the first certificate's fingerprint.
-		// TODO serve all of them so we can support multiple signature algorithms.
+		// The first certificate in configuration order, deliberately: this exists
+		// to pin one generated self-signed certificate. See the relay's copy.
 		match certificates.fingerprints().into_iter().next() {
 			Some(fingerprint) => fingerprint.into_response(),
 			// A stream-only server has no certificate to pin.
