@@ -1,19 +1,23 @@
-# [L] Back an OBS video encoder with moq-video
+# [L] Back an internal OBS video encoder with moq-video
 
 ## Goal
 
-An opt-in MoQ video encoder publishes OBS's composited scene with working audio, timestamps, keyframes, bitrate control, and an explicit latency policy. A tested ownership contract supports later native GPU frames.
+One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-video/moq-audio. OBS keeps composition, mixing, A/V timing, and the encoded output lifecycle. Existing OBS encoders remain selectable.
 
 ## Plan
 
-- Prototype the OBS encoder adapter versus raw output. Prefer the adapter to preserve OBS audio encoding, `MoQOutput::EncodedPacket`, and existing catalog handling. Document the packet format, decoder configuration, DTS/PTS and drain requirements that make the choice work.
-- Trace `rs/moq-video/src/encode` and `rs/libmoq/src/video.rs`. Reuse the existing encoder and surface types. If C needs a codec-only interface, return owned handles and poll/drain packets; do not expose Rust backend internals or caller cleanup callbacks. Keep the existing publishing API intact. Public ABI additions need C docs and consumer coverage.
-- Specify submission ownership on success and rejection, packet release, bounded in-flight frames, cancellation, late completion, device loss, resize, color range/primaries, and audio/video timestamp conversion. Never block OBS's graphics thread on network backpressure. A full queue must have an explicit frame-drop policy, preserving decoder dependencies.
-- Build a CPU I420/RGBA baseline for correctness and measurement. Preserve the OBS encoder path as an explicit fallback, and expose the actual encoder and input path in Stats. Do not present CPU upload as GPU zero-copy.
-- Measure scene timestamp to encoded packet p50/p95 latency and queue depth, CPU/GPU utilization, throughput, and dropped frames against the current OBS encoder at matched codec, resolution, rate, and bitrate. Separate codec buffering from keyframe join delay, network delivery, and viewer playout.
-- Add deterministic tests for rejection, saturation, drain, stop during encode, delayed completion, and repeated start/stop. Run a real subscriber and verify decoded pixels, audio continuity, and timestamps, rather than accepting packet production alone.
-- Keep codec/latency compatibility explicit. An unavailable requested backend must not silently become a high-latency encoder. Validate `cargo package` for any new library dependency, feature combinations, and plugin linking on the supported platforms.
+- Register an internal OBS video encoder, backed by `moq_video::encode::Sink`. Retain `MoQOutput::EncodedPacket` and existing catalog handling. Do not replace the output with raw publication: OBS's encoded-output flag is output-wide, and bypassing it would duplicate A/V integration.
+- Add a clean codec-only C boundary with owned handles and packet draining, extending shared primitives from the audio adapter where appropriate. Avoid backend internals and caller cleanup callbacks. The existing raw-video publishing API couples encoding to publication and is not the packet adapter.
+- Start with H.264 by default and HEVC where supported. Keep reordering disabled; resolve OBS keyframe flags, Annex-B headers/decoder configuration, DTS/PTS and drain semantics explicitly, since Rust encoded output currently contains only timestamp and payload. Do not advertise unsupported AV1 encoding.
+- Use the shared Low latency, Balanced, and Quality presets with bitrate separate. Expose a single Use MoQ encoders option only once audio and video adapters both work. Retain the existing OBS encoder selection as an explicit alternative; do not silently switch back to OBS codecs after a MoQ codec failure.
+- Establish bounded submission/packet queues, explicit raw-frame drop behavior, thread confinement, cancellation, late completion, device loss, resize and color metadata. Never block OBS's graphics thread on network backpressure. The CPU path is a correctness/fallback baseline; platform quests establish accelerated input.
+- Test rejection, saturation, drain, stop during encode, delayed completion, and repeated start/stop. Validate real decoded pixels and audio continuity, matched timestamps, preset reporting, and frame-to-packet latency. Validate new public C docs, feature combinations, package dependencies and native plugin linking.
+
+## Required
+
+- [Encoder presets](/quest/m2/obs-moq-video/presets.md) - common policy
+- [Audio publishing](/quest/m2/obs-moq-video/audio-publish.md) - both adapters are needed for the combined opt-in UI
 
 ## Related
 
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - coordinate terminal ownership without depending on a two-second timeout
+- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - preserve output ownership through delayed completion

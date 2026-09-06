@@ -1,30 +1,37 @@
-# OBS encoding with moq-video
+# OBS native codecs
 
 ## Goal
 
-OBS can encode its composited video with moq-video, with explicit low-latency configuration and a GPU path that avoids downloading every frame to the CPU. Keep OBS audio encoding and the current publication lifecycle working during rollout.
+Remove the MoQ OBS plugin's dependency on OBS/system FFmpeg ABI versions by decoding subscribed video with moq-video. Add audio playback and publishing with moq-audio, and opt-in video publishing with moq-video. OBS retains scene composition, audio mixing, and output timing. This integration serves MoQ publishing and playback, not general OBS recording or other streaming outputs.
 
 ## Plan
 
-The current dock creates OBS video encoders in `cpp/obs/src/moq-dock.cpp`; `MoQOutput::EncodedPacket` publishes their encoded packets. Registering a thin OBS video encoder backed by moq-video is the preferred starting point: OBS still supplies its composited frames, while moq-video owns codec policy. Compare this with a raw-output implementation before committing to the interface. OBS's encoded-output flag applies to the output, so bypassing its encoder interface must explain how encoded audio remains supported.
+Portability and FFmpeg removal lead. The current MoQ source uses libavcodec, libavutil, and libswscale for video; it has no audio playback. Its swresample linkage is unused. Video replacement can therefore remove direct FFmpeg dependencies without waiting for audio. Build libmoq statically with only the codec features needed here; OS frameworks and runtime GPU drivers remain valid dependencies. Verify plugin imports instead of promising a completely static OBS plugin.
 
-`rs/libmoq/src/video.rs` already publishes CPU I420/RGBA through moq-video, but its frame call copies before returning and couples encoding to publication. It is a baseline, not a GPU import API or an encoded-packet adapter. `rs/moq-video/src/frame.rs` already models PixelBuffer, D3D11 Texture, and DMA-BUF surfaces. Reuse these representations where possible; audit which backends actually accept the OBS format and device.
+Attempt GPU delivery immediately, starting on macOS. Windows and Linux can ship independently. Prefer direct surface reuse, allow GPU conversion/blits, and automatically fall back to CPU delivery when import is unavailable or fails. Stats must show the actual decoder/encoder, delivery path, and fallback reason. Retaining a texture handle is insufficient unless pool ownership and synchronization also prevent reuse while work is in flight.
 
-Define zero-copy precisely in results: direct surface reuse, GPU conversion/blit without CPU readback, and CPU staging are different paths. A bounded GPU blit is an acceptable first accelerated path when OBS recycles its texture before the encoder finishes. Report the copy and its cost; do not call that direct surface reuse.
+Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an available backend. Unsupported codecs produce an actionable error; do not retain an FFmpeg fallback. VP8/VP9 return through their own follow-up quest. Audio playback covers Opus, AAC-LC, and PCM.
 
-The pinned OBS 32.2.2 interfaces to investigate are `obs_encoder_info::encode_texture2`, `encoder_texture`, `gs_texture_get_obj`, and the platform encoder implementations. A native texture pointer alone does not transfer pool ownership, device affinity, or synchronization.
+Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency** (default), **Balanced**, and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
 
-- [OBS encoder interface](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/obs-encoder.h)
-- [OBS graphics interface](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/graphics/graphics.h)
+The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU C decoder is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the C boundary without that conversion.
 
 ## Quests
 
-- [Encoder adapter](/quest/m2/obs-moq-video/adapter.md) - establish the OBS integration and owned frame/packet contract with a working CPU baseline
-- [macOS GPU input](/quest/m2/obs-moq-video/macos.md) - feed VideoToolbox without CPU readback from the OBS compositor
-- [Windows GPU input](/quest/m2/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit device and keyed-mutex ownership
-- [Linux GPU input](/quest/m2/obs-moq-video/linux.md) - establish an exportable OBS allocation and import it into a supported hardware encoder
+- [Video source replacement](/quest/m2/obs-moq-video/source.md) - remove FFmpeg and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
+- [Audio playback](/quest/m2/obs-moq-video/audio-playback.md) - add synchronized subscribed audio through moq-audio
+- [Windows decoded frames](/quest/m2/obs-moq-video/decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
+- [Linux decoded frames](/quest/m2/obs-moq-video/decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
+- [Encoder presets](/quest/m2/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
+- [Audio publishing](/quest/m2/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
+- [Video publishing](/quest/m2/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
+- [macOS GPU input](/quest/m2/obs-moq-video/macos.md) - feed the encoder from the OBS compositor without CPU readback
+- [Windows GPU input](/quest/m2/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit synchronization
+- [Linux GPU input](/quest/m2/obs-moq-video/linux.md) - export OBS allocations and connect a real hardware encoder import path
+- [VP8/VP9 decoding](/quest/m2/obs-moq-video/vpx.md) - restore those playback codecs without an FFmpeg ABI dependency
 
 ## Related
 
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - shared session teardown must remain safe under a delayed terminal
-- [Video hardware validation](/quest/m3/video-hardware.md) - validate native paths on actual hardware
+- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - preserve state through delayed terminal callbacks
+- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
+- [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
