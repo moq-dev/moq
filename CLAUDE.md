@@ -1,9 +1,9 @@
-MoQ (Media over QUIC) is a next-generation live media delivery protocol providing real-time latency at massive scale. 
+MoQ (Media over QUIC) is a live media delivery protocol providing real-time latency at massive scale.
 This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) implementations.
 
 # Layers
 
-1. **quic** - Does all the networking. 
+1. **quic** - Does all the networking.
 2. **web-transport** - (optional) A small layer on top of QUIC/HTTP3 for browser support. Provided by the browser or the `web-transport` crates.
 3. **moq-net** - The networking layer on top of WebTransport/QUIC, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol or the full IETF `moq-transport` protocol. Content splits into:
    - broadcast: a collection of tracks produced by a publisher
@@ -18,73 +18,76 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq-net` layer should be generic, using rules on the wire on how to deliver content.
 
-Note that we support WebSocket, TLS, UDS, etc as fallback transports using qmux.
-These reliable transports won't be able to shed load as effectively during congestion.
+WebSocket, TLS, UDS, etc are fallback transports via qmux. Reliable transports can't shed load during congestion.
 
-# Project Structure
-Top-level layout only. 
-If working with specific languages, see `AGENTS.md` in their respective directories.
+# Structure
 
-- `/rs/` - Rust crates for anything native, published as `moq-*`. See `rs/CLAUDE.md`.
+Top-level only. Each area has its own `CLAUDE.md`; read it before working there.
+
+- `/rs/` - Rust crates, published as `moq-*`. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
-- `/py/` - Python wrappers over `moq-ffi`. See `py/CLAUDE.md`.
-- `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi` 
-- `/cpp/` - C/C++ consumers of `libmoq`. 
-- `/demo/` - demos and test media
-- `/test/` - test harnesses that span more than one language or need a server
-- `/doc/` - documentation site, make sure this stays up-to-date.
-- `/drafts/` - Our MoQ protocols/extensions. See `drafts/CLAUDE.md`. See `https://datatracker.ietf.org/wg/moq/documents/` for upstream IETF drafts.
-- `/quest/` - replacement for GitHub issues. See `quest/AGENTS.md`. Create new quests instead of GitHub issues.
+- `/py/`, `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi`. See `rs/moq-ffi/CLAUDE.md` and `py/CLAUDE.md`.
+- `/cpp/` - C/C++ consumers of `libmoq`, including the OBS plugin.
+- `/demo/` - demos and test media. `just dev` runs a local relay, publisher, and web UI.
+- `/test/` - harnesses that span languages or need a server (`just test smoke`).
+- `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
+- `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
+- `/quest/` - replacement for GitHub issues. See `quest/CLAUDE.md`. Prefer a quest over an issue.
 
-Try to make cross-language changes at the same time.
-For example, when you modify moq-ffi, also update the corresponding wrappers and documentation.
+Changes ripple across languages. A `moq-ffi` change touches every wrapper and its docs. A wire change touches `drafts/`, `rs/moq-net`, and `js/net` in the same PR.
 
-See `CONTRIBUTING.md` before making a PR.
+# Libraries
+
+The same components exist in each language with matching names and semantics; only the package prefix changes (`moq-*`, `@moq/*`, the `moq` bindings).
+
+- **net**: the pub/sub wire layer above. Everything else rides on it.
+- **json**: JSON over a track. `snapshot` is lossy latest-value with merge-patch deltas; `stream` is a lossless append-log in a single group.
+- **flate**: group-scoped DEFLATE, frames share one window. **token**: path-scoped JWTs. **stats**: relay traffic published as JSON tracks.
+- **hang**: the media catalog and container. **loc** and **msf** are the IETF alternatives.
+- **mux**: containers (fmp4, ts, flv, mkv) and codec parsers <-> hang broadcasts. Native capture/encode/decode/render live in **video** and **audio**; **transcode** re-encodes rendition ladders. In the browser, **publish** and **watch** cover capture through render with optional UI.
+- **relay**, the **cli** (`moq`), and the gateways (**rtmp**, **srt**, **rtc**, **hls**) are Rust only. The bindings (**ffi**, **libmoq**, **gst**, **wasm**) wrap one Rust core.
+
+# Public API
+
+The API is the most important thing to get right. A bad shape costs a breaking change in every language, and the surface is huge.
+
+- Report the public API and wire impact of every change, in the PR description and whenever asked.
+- Keep things private until a consumer needs them. Scrutinize every new exported item.
+- Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` on `dev` instead. Additive changes stay on `main`.
+- Let the type system make misuse unrepresentable: enums over strings, `Duration` over seconds, terminal operations consume `self`, cleanup in `Drop` rather than a `close()` the caller can forget.
+- Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
+- Take slices in, return owned values. Avoid 4+ args; use a struct.
+- Name by role, not today's implementation. Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
+- When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 
 # Required
-- Focus on code maintainability. Refactor aggressively.
-- Always dig into the root cause. Fix issues at the source when possible, avoiding workarounds.
-- Reproduce bugs when possible so you can verify the fix.
-- Never add random retries or sleeps, unless the root cause is unavoidable.
-- Fix any recommended follow-ups, or create new quests if they're out of scope.
-- Focus on the public API. It's the most important thing to get right to avoid breaking changes.
-- If `foo` needs a new argument, never do `foo_with_x`. Make a breaking change to `foo` instead.
-- Scrutinize any new APIs. Keep stuff private when possible.
-- Avoid callback parameters. Prefer async handles instead.
-- Let the type system do the heavy lifting; make misuse unrepresentable rather than merely documented.
-- CLAUDE.md or AGENTS.md files should be minimal and split into scoped files based on language/library.
+
+- Dig into the root cause and fix it at the source. Never work around it in the caller.
+- Never add retries, sleeps, lingers, or arbitrary timeouts to paper over a race. Fail fast with the real error.
+- Error on unsupported or malformed input rather than warn and continue. Warn-then-ignore is banned: supported or refused.
+- Reproduce bugs before fixing them. Add a regression test when one is easy.
+- Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
+- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn. Propose a course change, or abandon the PR, rather than finish a half-solution. File a quest for the larger vision.
+- When taking over someone's PR, build on their commits so they keep credit.
+- When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 
 # Guidelines
-- When adding new dependencies, use the newest stable version available.
-- Prefer a maintained third-party crate over hand-rolling non-core functionality.
-- Do not bump package versions unless the user explicitly asks for a version bump or release.
-- No em dashes (—)
-- Keep things concise. Avoid verbose comments unless they explain something non-obvious.
-- Document every exported symbol. 
-- Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough.
-- Comments must reflect the current state of the code, not its history.
-- Maintain conventions, patterns, and naming.
-- If you run into a workflow issue that also likely impacts other agents, fix it.
-- Suggest simple improvements to CLAUDE.md/AGENTS.md if it could have avoided excess cycles.
-- Avoid excessive repetition and verbosity.
-- Inline helper functions if they are simple and self-explanatory.
-- Retry loops should be avoided (fail fast) but if needed, use capped backoff with jitter.
-- Don't include links to files in CLAUDE.md.
-- Prioritize adding tests, unless they are flaky or obvious.
-- Avoid functions with 4+ args. Prefer structs or tuples to pass multiple values.
-- Focus on keeping naming simple and consistent.
-- Scrutinize if any functionality is really needed, or if we could simplify/remove it.
+
+- New dependencies use the newest stable version. Prefer a maintained crate over hand-rolling non-core functionality.
+- Do not bump package versions unless asked. Releases are cut separately.
+- No em dashes.
+- Document every exported symbol in one plain line, the way you'd say it out loud. Comments inside code only explain the non-obvious why, and describe the current state, never history.
+- Inline simple helpers. Question whether functionality is needed at all before adding it.
+- Match the existing conventions, patterns, and naming.
+- These `CLAUDE.md` files (the root `AGENTS.md` is a symlink) are stateless instructions: minimal, situational, no history, no file links. If a missing line here would have saved you cycles, suggest it.
 
 # Development
-PRs target `main` by default. 
-`dev` is reserved for semver-breaking changes, except for `0.0.x` packages.
 
-Before you start working on a PR, `git fetch origin` and set your upstream.
-If you later realize a breaking change is needed, rebase on dev.
+PRs target `main`. `dev` is reserved for semver-breaking API changes, except for `0.0.x` packages. Wire changes alone do not need `dev`.
 
-Use the Nix dev shell for project commands so (pinned) local tooling matches CI tooling. 
-It should be used automatically via direnv.
-`nix develop --command just ...`
+Before starting, `git fetch origin` and set the upstream to the base branch. Rebase onto `dev` if a breaking change turns out to be needed.
+
+Use the Nix dev shell so tooling matches CI. direnv loads it automatically, or `nix develop --command just ...`.
 
 ```bash
 just check        # Lint and compile what the branch changed
@@ -92,5 +95,6 @@ just test         # Test what the branch changed, same scope
 just fix          # Auto-fix lint/formatting, same scope
 ```
 
-These commands diff the branch against the base and only runs affected directories.
-You can force a different base by passing it positionally.
+These diff the branch against its base and only run the affected packages; pass a base positionally to override. Run `just fix` before committing. CI runs the same `check` and `test`.
+
+See `CONTRIBUTING.md` before making a PR.

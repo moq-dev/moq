@@ -1,78 +1,55 @@
-Reference for the `/rs` Cargo workspace extending the root `/CLAUDE.md` and `/CONTRIBUTING.md`.
+The `/rs` Cargo workspace. Extends the root `CLAUDE.md`.
 
 # Crates
-We want the library to be modular, so it's split into a bunch of crates.
 
-**Core**
-- `moq-net` (lib): the core wire layer. Negotiates `moq-lite` or IETF `moq-transport`. The public API uses the Broadcast/Track/Group/Frame model and the Producer/Consumer split (see below). Generic over `web_transport_trait::Session`.
-- `moq-native` (lib): native connection helpers. Configures multiple QUIC backends (Quinn/Quiche/Noq/Iroh), WebTransport, WebSocket, TCP/TLS, Unix sockets, etc. 
-- `kio` (lib): "easy async". Use `poll_*` methods to drive async I/O, with `async` helpers for `Future`-based async.
+One crate per component from the root list, named `moq-<component>` (`hang` and `libmoq` are the exceptions). Keep them modular; a crate does one thing. Beyond that list:
 
-**Generic**
-- `moq-json` (lib): generic JSON publishing over a track, in two modules. `snapshot` is lossy latest-value. `stream` is a lossless append-log (every record preserved in order).
-- `moq-flate` (lib): group-scoped DEFLATE primitive. `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window (RFC 7692 marker trick), so similar frames compress against the earlier ones.
-- `moq-stats` (lib): stats publishing and consumption over `moq-net` + `moq-json`. 
+- `kio`: "easy async" primitives everything else polls through.
+- `moq-native`: configures the QUIC backends (Quinn/Quiche/Noq/Iroh) and the fallback transports for native binaries.
+- `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. `moq-token-cli` builds `moq-token`. Binaries never carry a `-cli` suffix.
+- `quest` validates the plans under `/quest`.
 
-**Media**
-- `hang` (lib): media layer on `moq-net`. `catalog/` is the JSON manifest; `container/` is the frame format (timestamp + codec payload).
-- `moq-loc` (lib): LOC (Low Overhead Container) wire frame codec. Alternative to hang's container.
-- `moq-msf` (lib): IETF MSF/CMSF catalog types. Alternative to hang's catalog.
-- `moq-mux` (lib): the transmuxer. File/stream formats (`container/`: fmp4, flv, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts.
-- `moq-audio` (lib): native audio capture/encoding/decoding/rendering.
-- `moq-video` (lib): native video capture/encoding/decoding/rendering, replacing ffmpeg. Focuses on hardware acceleration and zero-copy.
-- `moq-transcode` (lib): just-in-time live transcoding of media broadcasts. 
+`moq-net`, `moq-mux`, `moq-relay`, and `moq-ffi` have their own `CLAUDE.md`.
 
-**Apps / Gateways**
-- `moq-relay` (lib+bin): clusterable, media-agnostic relay. 
-- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`.
-- `moq-rtc` (lib): WebRTC (WHIP/WHEP) gateway. Bridges browser WebRTC ingest/playback to MoQ broadcasts.
-- `moq-rtmp` (lib): RTMP / enhanced-RTMP gateway 
-- `moq-srt` (lib): bidirectional SRT gateway.
-- `moq-hls` (lib): HLS / LL-HLS gateway.
-- `moq-bench` (bin): load generator.
-- `moq-boy` (bin): crowd-controlled Game Boy emulator publisher.
-- `moq-token` (lib+bin): JWT auth token generation and validation.
+# Producer / Consumer
 
-**Bindings**
-- `moq-ffi` (cdylib+staticlib): UniFFI bindings (Python/Swift/Kotlin/Go/Dart).
-- `libmoq` (staticlib): C bindings.
-- `moq-gst` (cdylib): GStreamer plugin.
-- `moq-wasm` (cdylib+rlib): browser/WASM bindings.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder.
 
-When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrappers.
+# Async / poll
 
-## Producer / Consumer Model
-
-Many crates are built on a split-handle pattern: a `Producer` writes, one or more `Consumer`s read, state is shared via `kio`. 
-This split handle naturally fans out to any number of consumers.
-
-## Async / poll plumbing
 Two ways to drive things, both backed by `kio`:
+- `poll_*` functions take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously. Like `Future`, but wakers are cleaned up on drop.
+- `async fn` wrappers, usually `kio::wait(|waiter| self.poll_x(waiter))`.
 
-- `poll_*` functions that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously. Very similar to `Future` but cleans up Wakers on Drop
-- `async fn` runs on any executor, although some methods currently require a tokio runtime.
+Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way around. `pin!` then polling inside `kio::wait` is a code smell, as is `tokio::spawn` / `select!` inside a library; use `kio` primitives. Don't color APIs with `Send` bounds that native needs and wasm can't satisfy.
 
-Follow the root `poll_*` conventions:
-
-# Guidelines
-- Prefer `Ok(x?)` over `.map_err(Into::into)`.
 - Use `ready!(...)` instead of `Poll::Pending => return Poll::Pending`.
-- `Poll<Result<T, E>>` supports `?`; use `ready!(poll())?` or `match poll()?`.
-- Prefer `kio` over tokio sync primitives.
-- `thiserror` with `#[from]` for libraries, always `#[non_exhaustive]` on public error enums. 
-- `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries..
-- Make terminal operations consume `self` (e.g. `fn close(self)`) so use-after-close can't even be written.
-- Rely on `Drop` instead of letting the user forget a `close` call.
-- Take in references to data that the callee only reads, and return owned values.
-- Prefer `if let Some(v) = x { ... }` / `let Some(v) = x else { ... };` over a `match` whose only job is to bind the inner value. Keep `match` when both arms do real work.
-- Async tests that depend on time call `tokio::time::pause()` first so timers fire instantly and deterministically.
-- Workspace members live in the root `Cargo.toml` (`[workspace]`).
-- Shared versions/paths are pinned under `[workspace.dependencies]`; new crates should add their dep there and reference it via `{ workspace = true }`.
-- Prefer public modules with short names. ex. `broadcast::Consumer` instead of `BroadcastConsumer`
+- `Poll<Result<T, E>>` supports `?`: `ready!(poll())?` or `match poll()?`.
+- Prefer `Ok(x?)` over `.map_err(Into::into)`.
+- Prefer `kio` over `tokio::sync`. A `watch` or channel carrying a single value is a smell.
+
+# Conventions
+
+- `thiserror` with `#[from]` for libraries; `anyhow` with `.context("...")` for binaries.
+- Public error enums are always `#[non_exhaustive]`. Don't re-export a third-party error type unless the crate is a thin wrapper that re-exports the dependency.
+- Make terminal operations consume `self` (`fn close(self)`). Rely on `Drop` instead of a `close` the user can forget.
+- Take `&[T]` / `&str` for data the callee only reads; return owned values. Take `Vec<T>` only when storing it.
+- Typed units only: `std::time::Duration`, `moq_net::Timestamp`, never `f64` seconds or bare `u64` millis. `serde_as` converts at the edge.
+- `if let` / `let else` over a `match` whose only job is to bind. Keep `match` when both arms do work.
+- Public modules with short names: `broadcast::Consumer`, not `BroadcastConsumer`. Keep `mod encoder` private and re-export flat as `encode::Encoder`.
+- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`.
+- Binaries: `#[tokio::main]`, install the rustls crypto provider first, then `Config::load()` which sets up tracing. Config conventions live in `moq-relay/CLAUDE.md`.
 
 # Semver
-Tips to avoid unintentional semver bumps:
 
+- Don't add `#[non_exhaustive]` by default. It earns its keep on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields plus a `Default`/constructor. Builders with private fields don't need it.
+- Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
 - Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors.
-- `#[non_exhaustive]` for structs that will realistically gain fields. Provide a builder.
-- Append new variants to the end of a public fieldless enum that uses implicit discriminants.
+- A deprecated item gets `#[doc(hidden)]` and `#[deprecated(note)]`; a deprecated flag becomes a hidden clap alias. Never advertise the dead name in docs or `--help`.
+
+# Testing
+
+- Tests are inline `#[cfg(test)] mod tests`. Time-dependent async tests call `tokio::time::pause()` first.
+- Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
+- `just check` compiles default features only, like CI. `just rs features` (nightly) covers `--all-features` / `--no-default-features`. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
+- Local checks compile only the host platform; `just rs windows` / `macos` must run on that OS and `just rs wasm` covers `moq-wasm`. Say plainly in the PR when platform code is uncompiled.

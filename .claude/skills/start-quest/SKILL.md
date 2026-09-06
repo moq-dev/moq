@@ -3,7 +3,7 @@ name: start-quest
 description: Find unblocked repository quests and start the user's choice. Use when the user invokes /start-quest, optionally with a base questline such as /start-quest vod, or asks what quest to work on next.
 ---
 
-Before you begin, read `quest/AGENTS.md` completely.
+Before you begin, read `quest/CLAUDE.md` completely.
 
 Resolve an optional argument to a base questline directory under `quest/`, defaulting to `quest/` itself.
 

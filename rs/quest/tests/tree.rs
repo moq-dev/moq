@@ -332,13 +332,13 @@ fn relative_index_entry() {
 }
 
 /// The index points readers at work to pick up, so a target that merely exists
-/// is not enough: quest/AGENTS.md is a file under quest/ that is not a quest.
+/// is not enough: quest/CLAUDE.md is a file under quest/ that is not a quest.
 #[test]
 fn index_entry_that_is_not_a_quest() {
 	let tree = Tree::new();
-	tree.write("quest/AGENTS.md", "# Contract\n");
-	tree.append("quest/README.md", "- [Contract](/quest/AGENTS.md)\n");
-	tree.rejects("lists /quest/AGENTS.md, which is not a quest document");
+	tree.write("quest/CLAUDE.md", "# Contract\n");
+	tree.append("quest/README.md", "- [Contract](/quest/CLAUDE.md)\n");
+	tree.rejects("lists /quest/CLAUDE.md, which is not a quest document");
 }
 
 /// The index is a list of entries, not prose that happens to link.

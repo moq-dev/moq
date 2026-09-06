@@ -1,6 +1,6 @@
 //! The rules, and the findings they produce.
 //!
-//! The contract is quest/AGENTS.md. Every rule here is one that has already
+//! The contract is quest/CLAUDE.md. Every rule here is one that has already
 //! been broken by hand, and the expensive failure is a rule that stops firing:
 //! a validator that quietly enforces nothing looks exactly like a clean tree.
 
@@ -279,7 +279,7 @@ fn index<'a>(found: &mut Findings, known: &BTreeSet<&Path>, docs: &'a [Doc]) -> 
 				continue;
 			};
 			// Existence is not enough: the index points readers at work to pick
-			// up, and quest/AGENTS.md is a file under quest/ that is not a quest.
+			// up, and quest/CLAUDE.md is a file under quest/ that is not a quest.
 			if !known.contains(child.as_path()) {
 				found.at(
 					&doc.path,

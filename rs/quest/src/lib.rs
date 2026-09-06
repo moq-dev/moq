@@ -1,4 +1,4 @@
-//! Structural validation of the quest tree, whose contract is quest/AGENTS.md.
+//! Structural validation of the quest tree, whose contract is quest/CLAUDE.md.
 //!
 //! The whole tree is validated on every run, never just the changed files: the
 //! link graph and the questline index are global, so completing one quest
@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 pub use doc::Doc;
 pub use rules::Finding;
 
-/// AGENTS.md is the contract rather than a quest, and CLAUDE.md is a symlink to
+/// CLAUDE.md is the contract rather than a quest, and AGENTS.md is a symlink to
 /// it; neither is executable work, so neither is indexed or validated.
 const NOT_QUESTS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 

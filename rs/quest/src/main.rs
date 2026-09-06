@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 /// Validate the quest tree: the interlinked Markdown plans under quest/, whose
-/// contract is quest/AGENTS.md.
+/// contract is quest/CLAUDE.md.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
