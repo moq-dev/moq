@@ -322,6 +322,7 @@ impl Subscribe {
 			.await?;
 
 			let Some(frame) = frame else { break };
+			delivery.update(&frame, ts.discontinuity());
 			delivery.deliver(&frame, waited, &mut stdout).await?;
 		}
 
@@ -390,6 +391,7 @@ impl Subscribe {
 /// ([`Pacer::slack`](moq_mux::Pacer::slack)), which is a distance it is holding on
 /// purpose rather than lag to shed.
 struct Delivery {
+	discontinuity: u64,
 	pacer: moq_mux::Pacer,
 	/// The delivery-lag bound, and the pacer's lead: both are the export's
 	/// latency budget.
@@ -403,11 +405,21 @@ impl Delivery {
 	fn new(lead: Duration) -> Self {
 		Self {
 			pacer: moq_mux::Pacer::default().with_lead(lead),
+			discontinuity: 0,
 			lead,
 			// tokio's clock rather than the bare std one so tests can pause it; in
 			// production they are identical.
 			arrived: tokio::time::Instant::now(),
 		}
+	}
+
+	fn update(&mut self, frame: &moq_mux::container::Frame, discontinuity: u64) {
+		if discontinuity == self.discontinuity {
+			return;
+		}
+		self.discontinuity = discontinuity;
+		self.arrived = tokio::time::Instant::now();
+		self.pacer.hurry(frame.timestamp, self.arrived.into_std());
 	}
 
 	/// Write one export frame to `out` at its paced instant. `waited` is whether
@@ -638,5 +650,23 @@ mod tests {
 				"slot {slot} must be paced, not shed"
 			);
 		}
+	}
+	#[tokio::test(start_paused = true)]
+	async fn a_rewind_re_anchors_the_pacer() {
+		let mut delivery = Delivery::new(Duration::from_millis(500));
+		let mut out = tokio::io::sink();
+		delivery
+			.deliver(&frame(10_000_000, Timescale::MICRO), true, &mut out)
+			.await
+			.unwrap();
+		let first = frame(0, Timescale::MICRO);
+		let now = tokio::time::Instant::now();
+		delivery.update(&first, 1);
+		delivery.deliver(&first, false, &mut out).await.unwrap();
+		assert_eq!(now.elapsed(), Duration::ZERO);
+		let next = frame(40_000, Timescale::MICRO);
+		delivery.update(&next, 1);
+		delivery.deliver(&next, false, &mut out).await.unwrap();
+		assert_eq!(now.elapsed(), Duration::from_millis(40));
 	}
 }

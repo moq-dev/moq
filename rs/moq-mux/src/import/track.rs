@@ -147,6 +147,43 @@ enum TrackKind<E: CatalogExt = ()> {
 	Flac(crate::codec::flac::Import<E>),
 }
 
+enum Format {
+	Avc1,
+	Avc3,
+	Hvc1,
+	Hev1,
+	Av01,
+	Vp8,
+	Vp9,
+	Aac,
+	Opus,
+	Flac,
+	Mp3,
+}
+
+impl Format {
+	fn parse(format: &str) -> Result<Self> {
+		match format {
+			"avc1" | "avcc" => Ok(Self::Avc1),
+			"avc3" | "h264" => Ok(Self::Avc3),
+			"hvc1" | "hvcc" => Ok(Self::Hvc1),
+			"hev1" => Ok(Self::Hev1),
+			"av01" | "av1" | "av1c" | "av1C" => Ok(Self::Av01),
+			"vp8" | "vp08" => Ok(Self::Vp8),
+			"vp9" | "vp09" => Ok(Self::Vp9),
+			"aac" => Ok(Self::Aac),
+			"opus" => Ok(Self::Opus),
+			"flac" => Ok(Self::Flac),
+			"mp3" => Ok(Self::Mp3),
+			_ => Err(crate::Error::UnknownFormat(format.to_string())),
+		}
+	}
+
+	fn is_audio(&self) -> bool {
+		matches!(self, Self::Aac | Self::Opus | Self::Flac | Self::Mp3)
+	}
+}
+
 /// A single-codec importer for whole frames.
 ///
 /// Use this when the caller already has whole frames (the typical case for files
@@ -173,67 +210,71 @@ impl<E: CatalogExt> Track<E> {
 	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
 		use hang::catalog::VideoCodec;
 
+		let format = Format::parse(&init.format)?;
+		if format.is_audio() && init.video.is_some() {
+			return Err(crate::Error::UnexpectedVideoHint);
+		}
+
 		// Accept at the legacy microsecond timescale, matching the frame timestamps
 		// the container stamps. A codec-specific timescale (e.g. the opus sample
 		// rate) would be chosen here instead.
 		let track = request.accept(reserved.track_info());
 		let data = init.data.as_ref();
-		let kind = match init.format.as_str() {
-			"avc1" | "avcc" => {
+		let kind = match format {
+			Format::Avc1 => {
 				let (length_size, import) = build_h264_avc1(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Avc1 { length_size, import }
 			}
-			"avc3" | "h264" => {
+			Format::Avc3 => {
 				let (split, import) = build_h264_avc3(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Avc3 { split, import }
 			}
-			"hvc1" | "hvcc" => {
+			Format::Hvc1 => {
 				let (length_size, import) = build_h265_hvc1(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Hvc1 { length_size, import }
 			}
-			"hev1" => {
+			Format::Hev1 => {
 				let (split, import) = build_h265(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Hev1 { split, import }
 			}
-			"av01" | "av1" | "av1c" | "av1C" => {
+			Format::Av01 => {
 				let (split, import) = build_av1(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Av01 { split, import }
 			}
-			"vp8" | "vp08" => {
+			Format::Vp8 => {
 				let mut import =
 					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)))?;
 				import.initialize(data)?;
 				TrackKind::Vp8(import)
 			}
-			"vp9" | "vp09" => {
+			Format::Vp9 => {
 				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None))?;
 				import.initialize(data)?;
 				TrackKind::Vp9(import)
 			}
 			// Audio can't resolve its config from frames, so it needs the init bytes up front (an
 			// OpusHead, AudioSpecificConfig, ...); `codec::config` errors when they're missing or bad.
-			"aac" => {
+			Format::Aac => {
 				let mut config = crate::codec::aac::config(data)?;
 				config.container = init.container.clone();
 				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config)?)
 			}
-			"opus" => {
+			Format::Opus => {
 				let mut config = crate::codec::opus::config(data)?;
 				config.container = init.container.clone();
 				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config)?)
 			}
-			"flac" => {
+			Format::Flac => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
 				let mut config = crate::codec::flac::config(data)?;
 				config.container = init.container.clone();
 				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config)?)
 			}
-			"mp3" => {
+			Format::Mp3 => {
 				let mut config = crate::codec::mp3::config(data)?;
 				config.container = init.container.clone();
 				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config)?)
 			}
-			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
 
 		Ok(Self { kind })
@@ -673,6 +714,20 @@ mod tests {
 
 	use super::*;
 	use moq_net::Timestamp;
+
+	#[tokio::test]
+	async fn audio_rejects_video_hint_before_accepting_track() {
+		for format in ["opus", "aac", "flac", "mp3"] {
+			let (mut broadcast, catalog) = new_broadcast();
+			let request = broadcast.reserve_track("audio").unwrap();
+			let init = Init::new(format, Vec::new()).with_video(VideoHint::default());
+			assert!(matches!(
+				Track::new(request, catalog.reserve(), init),
+				Err(crate::Error::UnexpectedVideoHint)
+			));
+			assert!(catalog.snapshot().audio.renditions.is_empty());
+		}
+	}
 
 	fn opus_head() -> Vec<u8> {
 		let mut head = Vec::with_capacity(19);

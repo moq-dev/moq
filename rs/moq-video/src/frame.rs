@@ -95,8 +95,10 @@ pub struct DrmFormat(u32);
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DrmFormat {
-	/// Semi-planar 8-bit 4:2:0 YUV.
+	/// Semi-planar 8-bit 4:2:0 YUV: one luma plane, one interleaved Cb/Cr plane.
 	pub const NV12: Self = Self::from_bytes(*b"NV12");
+	/// Fully planar 8-bit 4:2:0 YUV as named by DRM (`YU12`): luma, then Cb, then Cr.
+	pub const YUV420: Self = Self::from_bytes(*b"YU12");
 	/// Packed BGRx8888 as named by DRM (`XR24`).
 	pub const XRGB8888: Self = Self::from_bytes(*b"XR24");
 	/// Packed BGRA8888 as named by DRM (`AR24`).
@@ -127,7 +129,11 @@ pub struct DmaBufPlane {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufPlane {
-	#[cfg(feature = "pipewire")]
+	// The producers that build a real one: PipeWire capture and, since it can
+	// hand its decode surfaces out, the VA-API decoder. Plus the importer's own
+	// tests, which build them without a producer to check how a layout is split
+	// up, and so need `render`.
+	#[cfg(any(feature = "pipewire", feature = "vaapi", all(feature = "render", test)))]
 	pub(crate) const fn new(offset: u32, stride: u32) -> Self {
 		Self { offset, stride }
 	}
@@ -272,7 +278,9 @@ impl std::fmt::Debug for DmaBuf {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBuf {
-	#[cfg(feature = "pipewire")]
+	// The two producers: PipeWire capture, and the VA-API decoder describing a
+	// picture it is handing out rather than downloading.
+	#[cfg(any(feature = "pipewire", feature = "vaapi"))]
 	pub(crate) fn new(
 		format: DrmFormat,
 		modifier: u64,
@@ -317,12 +325,17 @@ impl DmaBuf {
 		self.modifier
 	}
 
-	/// Width of the coded allocation in pixels.
+	/// Visible width in pixels.
+	///
+	/// Not the extent the producer allocated, which is padded: the padding is in
+	/// each plane's [`stride`](DmaBufPlane::stride) and in where the next plane
+	/// [`starts`](DmaBufPlane::offset), and neither follows from this.
 	pub const fn width(&self) -> u32 {
 		self.width
 	}
 
-	/// Height of the coded allocation in pixels.
+	/// Visible height in pixels. As [`width`](Self::width), this is not the
+	/// allocated extent.
 	pub const fn height(&self) -> u32 {
 		self.height
 	}
@@ -330,6 +343,15 @@ impl DmaBuf {
 	/// Plane offsets and row strides, in format order.
 	pub fn planes(&self) -> &[DmaBufPlane] {
 		&self.planes
+	}
+
+	/// The color space of these samples where the producer named one.
+	///
+	/// `None` for the usual case of a producer that says nothing, which for YUV
+	/// pixels means the consumer falls back to [`Color::infer`]. Packed RGB
+	/// needs no answer at all.
+	pub const fn color(&self) -> Option<Color> {
+		self.color
 	}
 }
 
@@ -796,8 +818,11 @@ impl I420 {
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
 	/// `width/2 * height/2` pairs) into planar I420. A chroma deinterleave, no
 	/// color-space conversion. Used by the Windows Media Foundation and Linux
-	/// PipeWire capture paths.
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	/// PipeWire capture paths, and by the VAAPI decoder.
+	#[cfg(any(
+		target_os = "windows",
+		all(target_os = "linux", any(feature = "pipewire", feature = "vaapi"))
+	))]
 	pub(crate) fn from_nv12(nv12: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let (w, h) = (width as usize, height as usize);
 		let luma = w * h;
@@ -937,7 +962,10 @@ pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 
 /// Split a packed NV12 chroma plane into separate U and V planes, the inverse of
 /// [`interleave_uv`].
-#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+#[cfg(any(
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "pipewire", feature = "vaapi"))
+))]
 pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 	for (pair, (u, v)) in uv.chunks_exact(2).zip(u.iter_mut().zip(v)) {
 		*u = pair[0];

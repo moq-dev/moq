@@ -5,7 +5,7 @@
 //! Without it a Pi either republishes what `rpicam-vid` already encoded or
 //! spends its CPU on openh264.
 //!
-//! Behind the default-on `v4l2` feature. It costs no runtime dependency (the
+//! Behind the opt-in `v4l2` feature. It costs no runtime dependency (the
 //! interface is ioctls on a device node), only the `v4l` crate's build-time
 //! bindgen, and a host with no M2M node fails at open so automatic selection
 //! falls through to the next encoder.

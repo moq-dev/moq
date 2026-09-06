@@ -81,8 +81,22 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
+	pub fn media(
+		&mut self,
+		broadcast: Id,
+		format: &str,
+		init: &[u8],
+		video: Option<moq_mux::catalog::VideoHint>,
+	) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+
+		// Container import has no VideoHint channel. Refuse before Container::new
+		// so init decode cannot publish tracks that we then throw away.
+		if video.is_some() && import::Container::<Extra>::known_format(format) {
+			return Err(Error::InvalidConfig(
+				"video hint is only supported for codec (track) publish, not container formats".into(),
+			));
+		}
 
 		// A container may publish several tracks; a single codec fills one reserved
 		// track. Try the container first so a codec format doesn't reserve a stray
@@ -93,9 +107,18 @@ impl Publish {
 				let mut broadcast = broadcast.clone();
 				let name = broadcast.unique_name(&format!(".{format}"));
 				let request = broadcast.reserve_track(name)?;
-				match import::Track::new(request, catalog.reserve(), import::Init::new(format, init.to_vec())) {
+				let mut import_init = import::Init::new(format, init.to_vec());
+				if let Some(hint) = video {
+					import_init = import_init.with_video(hint);
+				}
+				match import::Track::new(request, catalog.reserve(), import_init) {
 					Ok(track) => Media::Track(Box::new(track)),
 					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
+					Err(moq_mux::Error::UnexpectedVideoHint) => {
+						return Err(Error::InvalidConfig(
+							"video hint is only supported for video tracks".into(),
+						));
+					}
 					Err(err) => return Err(err.into()),
 				}
 			}

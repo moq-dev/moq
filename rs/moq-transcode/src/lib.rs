@@ -22,15 +22,17 @@
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
 pub mod active;
+pub mod ladder;
 
 mod catalog;
 mod config;
 mod error;
 mod feed;
-mod ladder;
+mod pipeline;
 mod rung;
 
-pub use config::{Config, Rung};
+pub use config::Config;
+pub use ladder::{Ladder, Rung};
 
 #[allow(deprecated)]
 pub use config::source_reference;
@@ -134,7 +136,7 @@ impl Transcoder {
 		// Resolved again on every source catalog snapshot, so a source that resizes
 		// mid-stream takes the ladder with it.
 		let mut ladder =
-			ladder::Ladder::new(source.clone(), config.clone(), active, source_name, source_config).await?;
+			pipeline::Pipeline::new(source.clone(), config.clone(), active, source_name, source_config).await?;
 
 		// Publish the derivative catalog before any encoder exists, so subscribers
 		// can pick a rung immediately.
@@ -463,7 +465,7 @@ mod tests {
 		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000), Rung::new(60, 50_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000), Rung::new(60, 50_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -529,7 +531,7 @@ mod tests {
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
 		let mut config = Config {
-			rungs: vec![Rung::new(180, 200_000), Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(180, 200_000), Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -590,6 +592,94 @@ mod tests {
 		moq_video::decode::Decoder::new(&video, &decode).is_ok()
 	}
 
+	#[cfg(feature = "vaapi")]
+	fn vaapi_decoder_available() -> bool {
+		let video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut decode = moq_video::decode::Config::new();
+		decode.kind = moq_video::decode::Kind::Named("vaapi".to_string());
+		moq_video::decode::Decoder::new(&video, &decode).is_ok()
+	}
+
+	/// A fetched group drains VAAPI before finishing, so its buffered tail is
+	/// encoded into that group rather than dropped with the decoder.
+	#[cfg(feature = "vaapi")]
+	#[tokio::test]
+	async fn vaapi_fetch_keeps_the_buffered_tail() {
+		let source = source_broadcast(1, 5);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
+			source: None,
+			..Default::default()
+		};
+
+		if !vaapi_decoder_available() {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		}
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut fetched = track.fetch_group(0, None).await.unwrap();
+		let total = fetched.finished().await.unwrap();
+		assert_eq!(total, 5, "VAAPI dropped the fetched group's buffered tail");
+
+		transcoder.abort();
+	}
+
+	/// A live group drains VAAPI before its end marker, so its buffered tail does
+	/// not move past the boundary into the next group.
+	#[cfg(feature = "vaapi")]
+	#[tokio::test]
+	async fn vaapi_live_keeps_the_buffered_tail_in_its_group() {
+		if !vaapi_decoder_available() {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		}
+
+		let (source, producer_task) = source_broadcast_live(1, 5);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Named("vaapi".to_string()),
+			source: None,
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let track = loop {
+			match consumer.track("video/120p") {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("rung track: {err}"),
+			}
+		};
+		let mut subscriber = track.subscribe(None).await.unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
+		let total = group.finished().await.unwrap();
+		assert_eq!(total, 5, "VAAPI moved the live group's buffered tail past its end");
+
+		producer_task.abort();
+		transcoder.abort();
+	}
+
 	/// The GPU pipeline end to end: hardware decode (NVDEC, scaling in the
 	/// decoder) into hardware encode (NVENC, consuming the CUDA frame in place).
 	/// Skips on machines without both; on a Linux + NVIDIA box this is the
@@ -607,7 +697,7 @@ mod tests {
 
 		let source = source_broadcast(2, 5);
 		let mut config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -646,7 +736,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -746,7 +836,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -808,7 +898,7 @@ mod tests {
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -879,11 +969,12 @@ mod tests {
 		let config = Config {
 			// 360p is admitted at 640x360 only because its bitrate undercuts the
 			// source's; 240p and 120p fit outright.
-			rungs: vec![
+			ladder: Ladder::new([
 				Rung::new(360, 900_000),
 				Rung::new(240, 300_000),
 				Rung::new(120, 100_000),
-			],
+			])
+			.unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -988,7 +1079,7 @@ mod tests {
 		write_keyframe(&mut group);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1052,7 +1143,7 @@ mod tests {
 		let mut source = source_catalog(320, 240);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1116,7 +1207,7 @@ mod tests {
 		let source = source_broadcast(1, 3);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,

@@ -7,6 +7,25 @@
 
 use crate::Result;
 
+enum Format {
+	Fmp4,
+	Mkv,
+	Ts,
+	Flv,
+}
+
+impl Format {
+	fn parse(format: &str) -> Result<Self> {
+		match format {
+			"fmp4" | "cmaf" => Ok(Self::Fmp4),
+			"mkv" | "webm" | "matroska" => Ok(Self::Mkv),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(Self::Ts),
+			"flv" => Ok(Self::Flv),
+			_ => Err(crate::Error::UnknownFormat(format.to_string())),
+		}
+	}
+}
+
 /// The concrete container importers, shared by [`Container`] and
 /// [`ContainerStream`]. Containers parse their own internal framing, so a whole
 /// chunk and a stream chunk decode identically.
@@ -19,6 +38,15 @@ enum ContainerImpl<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
+	fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>, format: Format) -> Self {
+		match format {
+			Format::Fmp4 => Self::fmp4(broadcast, reserved),
+			Format::Mkv => Self::mkv(broadcast, reserved),
+			Format::Ts => Self::ts(broadcast, reserved),
+			Format::Flv => Self::flv(broadcast, reserved),
+		}
+	}
+
 	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, reserved)))
 	}
@@ -81,6 +109,11 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Container<E> {
+	/// True when `format` is a container name this importer recognizes.
+	pub fn known_format(format: &str) -> bool {
+		Format::parse(format).is_ok()
+	}
+
 	/// Create a new container importer, decoding the initial chunk.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
@@ -88,13 +121,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
-		let mut inner = match format {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
-		};
+		let mut inner = ContainerImpl::new(broadcast, reserved, Format::parse(format)?);
 		inner.decode(init)?;
 		Ok(Self { inner })
 	}
@@ -136,17 +163,7 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 		reserved: crate::catalog::Reserved<E>,
 		format: &str,
 	) -> Result<Self> {
-		// A separate list from [`Container::new`]: only containers that can be
-		// recovered from a raw byte stream belong here. Today that's all of them,
-		// but a non-streamable container (e.g. RTP) would be added to `Container`
-		// alone.
-		let inner = match format {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
-		};
+		let inner = ContainerImpl::new(broadcast, reserved, Format::parse(format)?);
 		Ok(Self { inner })
 	}
 

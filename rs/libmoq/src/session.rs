@@ -127,6 +127,20 @@ impl Session {
 			.ok_or(Error::Offline)
 	}
 
+	/// Statistics and protocol from the same live connection.
+	///
+	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
+	/// if the session is currently between connections (reconnecting).
+	pub fn snapshot(&self, id: Id) -> Result<moq_native::ConnectionSnapshot, Error> {
+		self.task
+			.get(id)
+			.and_then(|entry| entry.as_ref())
+			.ok_or(Error::SessionNotFound)?
+			.stats
+			.snapshot()
+			.ok_or(Error::Offline)
+	}
+
 	/// Forward connection epochs to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a

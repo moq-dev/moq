@@ -62,8 +62,6 @@ encoders on every target change.
 
 ## Quests
 
-- [Rung order](/quest/m1/ladder/order.md) - resolve a ladder into strictly
-  ascending configured maximums and reject the ambiguous ones
 - [Controller](/quest/m1/ladder/controller.md) - one controller owns every
   rung's share, target, and stalled state
 - [Fetch and catalog](/quest/m1/ladder/fetch.md) - uncached FETCH encodes at

@@ -10,7 +10,49 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a MoQ dock shows connection state and opens the advanced settings.
+- **Dock**: **Stream** contains the relay URL, optional publish token and
+  broadcast name, Go Live, and connection state. Leave the broadcast name empty
+  to publish at the relay URL path. Paste a URL with `?jwt=` to fill the token
+  field automatically. Enter a relay URL explicitly; on the shared anonymous
+  relay, use a unique path such as `https://cdn.moq.dev/anon/your-stream`.
+  Reconnect settings live under **Advanced**.
+  **Encoding** chooses between **Use OBS Output settings** and **Custom settings
+  for MoQ**. Both use OBS encoders; custom settings apply only to this MoQ stream.
+  **Encoder latency** defaults to **Low latency** in both modes. It overrides
+  buffering settings only for this MoQ stream; **Keep encoder settings** preserves
+  them. x264 uses its zero-latency tune, VideoToolbox disables B-frames, NVENC
+  uses ultra-low tuning without B-frames/lookahead, and Quick Sync uses ultra-low
+  mode without B-frames. Other encoders retain their settings. **Stats** reports
+  the applied policy. This trades compression efficiency for less buffering,
+  not a guaranteed end-to-end delay: OBS VideoToolbox and NVENC can still queue
+  frames internally. Keyframe join delay and viewer buffering are separate.
+  Custom profiles offer Auto, Quality, or Performance, with hardware/software,
+  video codec, encoder, and audio codec choices.
+  **Stats** shows the active encoding, negotiated draft, dial scheme, and one
+  minute of RTT, estimated send/receive bandwidth, packet loss, and bytes sent.
+  **About** lists plugin and libmoq versions, documentation links, and available
+  video encoders.
+
+## Source quality and moq-transcode
+
+OBS publishes **one** hang mezzanine. It does not encode a viewer ladder inside
+the plugin. When a relay or moq.pro enables [`moq-transcode`](/bin/cli#transcode),
+the ladder catalog appears beside that source as `{broadcast}/transcode.hang`
+(the same path the `moq … transcode` CLI uses). Prefer a broadcast name ending
+in `.hang`, a canvas at least as tall as the top rung you want (1080p for the
+default ladder), and a source bitrate above the top rung ceiling (Quality
+targets 8 Mbps CBR so the default 5 Mbps 1080p rung can undercut it). The catalog
+carries coded size and configured CBR bitrate so the transcoder can size rungs
+before measured rates arrive.
+
+Local check before moq.pro (requires a CLI built with the `transcode` feature):
+
+```bash
+cargo install --locked moq-cli --features transcode
+# OBS Go Live to e.g. my-obs.hang on a local relay, then:
+moq --client-connect https://localhost:4443/anon --broadcast my-obs.hang transcode
+# Watch my-obs.hang/transcode.hang
+```
 
 ## Install
 

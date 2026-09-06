@@ -12,9 +12,10 @@ swapping or bumping a backend crate is not a breaking change.
 
 ## Capture
 
-The default-on `capture` feature exposes the device APIs and their per-platform
-backends. Disable it for a codec-only build that accepts frames supplied by the
-caller without pulling Linux V4L2 and libclang build dependencies.
+The opt-in `capture` feature exposes the device APIs and their per-platform
+backends. Enable it with `cargo add moq-video --features capture`; the default
+codec-only build accepts frames supplied by the caller without pulling Linux
+V4L2 and libclang build dependencies.
 
 Per-platform, picked at compile time:
 
@@ -91,10 +92,12 @@ Two public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The NVENC and VAAPI backends are Linux-only, behind the default-on `nvidia` and
-`vaapi` features. Both `dlopen` the vendor driver at runtime (and fall back to
-software where the driver is absent), so the binary still links on a GPU-less
-builder and still starts on a GPU-less machine.
+The NVENC, VAAPI, and V4L2 M2M backends are Linux-only. `nvidia` is on by
+default: it `dlopen`s the driver at runtime and needs nothing at build time.
+`vaapi` and `v4l2` are opt-in because their bindgen needs libclang on the build
+host (plus the kernel headers for `v4l2`). None of them link a vendor library,
+so a binary carrying them still links on a GPU-less builder and still starts on
+a machine without the hardware, falling back to software.
 
 ## Decode
 
@@ -116,7 +119,7 @@ Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 
@@ -128,5 +131,7 @@ Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
 no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
-for AV1 source to H.264/H.265 transcode rungs. A non-H.264/H.265/AV1 rendition
-yields `Error::UnsupportedCodec`.
+for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to CPU I420 by
+default; set `decode::Config::gpu_frames` to receive DMA-BUF surfaces that the
+renderer can import without a download. A non-H.264/H.265/AV1 rendition yields
+`Error::UnsupportedCodec`.

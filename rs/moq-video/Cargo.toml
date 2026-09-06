@@ -13,17 +13,24 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# Everything that costs no system library at build time is on by default; the
-# features exist so a consumer can drop what it does not want, not to hide code
-# from the default compile (`just check` lints default features only). Openh264
-# stays as the always-compiled software fallback. `pipewire` is the exception:
-# it links libpipewire at build time. Workspace consumers opt out at the root
-# manifest (`default-features = false`) and pick per crate, so the relay and the
-# language bindings never build the device or render stacks.
-default = ["capture", "mediacodec", "nvidia", "vaapi", "v4l2", "render"]
-# Native camera and screen capture. Enabled by default for direct consumers,
-# but workspace consumers opt in so codec-only bindings avoid device build
-# dependencies such as V4L2 and libclang.
+# On by default: everything that costs the build nothing beyond cargo. Off by
+# default: every feature that needs libclang or a system library on the build
+# host, however cheap it is on other platforms, since a default is one setting
+# for every host. `capture` and `v4l2` run bindgen over the kernel's videodev2.h
+# (the `v4l` crate), `vaapi` runs it over its vendored libva headers, and
+# `pipewire` links libpipewire; a consumer whose build host has those turns them
+# on. The features exist so a consumer can pick what it wants, not to hide code
+# from the default compile (`just check` lints default features only, so the
+# opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
+# Openh264 stays as the always-compiled software fallback. Workspace consumers
+# opt out at the root manifest (`default-features = false`) and pick per crate,
+# so the relay and the language bindings never build the device or render
+# stacks.
+default = ["mediacodec", "nvidia", "render"]
+# Native camera and screen capture. Off by default because the Linux camera path
+# (the `v4l` crate) runs bindgen over the kernel's videodev2.h, so the build host
+# needs libclang and the Linux headers; macOS and Windows use OS frameworks and
+# would pay nothing. moq-cli's `capture` turns it on.
 capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
@@ -42,11 +49,12 @@ nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi dlopen's libva, so the
-# build needs no libva and still starts on a libva-less host, where automatic
-# backend selection falls back to the next encoder like the NVENC backend does.
-# The backend has not been validated on real hardware yet; `Kind::Named`
-# ("openh264") sidesteps it if it misbehaves.
+# Intel/AMD VAAPI hardware codecs (Linux): the H.264 encoder and decoder. Off by
+# default because moq-vaapi's build script runs bindgen over its vendored libva
+# headers, so the build host needs libclang. At runtime libva is dlopen'd: the
+# binary carries no NEEDED libva and still starts on a libva-less host, where
+# automatic backend selection falls back to the next candidate. The decoder is
+# hardware-validated, while the encoder is not yet.
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
 # and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
@@ -56,9 +64,10 @@ vaapi = ["dmabuf", "dep:moq-vaapi"]
 # run on a Raspberry Pi 4 (bcm2835-codec, Raspberry Pi OS Bookworm): the encoder
 # on `/dev/video11` produced Constrained Baseline 640x360 that plays back
 # correctly, and the decoder played a 640x360 stream for a minute without a
-# failure and is what automatic selection picks on that board. On by default
-# because it costs the build nothing `capture` does not already: the `v4l` crate
-# and its bindgen are the same ones camera capture pulls in. A host with no M2M
+# failure and is what automatic selection picks on that board. Off by default
+# because the `v4l` crate runs bindgen over the kernel's videodev2.h, so the
+# build host needs libclang and the Linux headers (the same cost `capture` pays
+# for the camera on Linux, so a build with both pays it once). A host with no M2M
 # codec node fails at open, so automatic backend selection falls through to the
 # next encoder or decoder; `Kind::Named("openh264")` sidesteps it on a board
 # whose driver misbehaves.
@@ -83,7 +92,8 @@ render = [
 # Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
 # at build time (and its bindgen needs libclang), so it only belongs in builds
-# that actually capture displays. Camera capture (V4L2) needs nothing extra.
+# that actually capture displays. Camera capture (V4L2) needs only what
+# `capture` already does.
 pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
@@ -155,11 +165,12 @@ libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
-# Intel/AMD VAAPI hardware encoder, behind the opt-in `vaapi` feature. As of
-# moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED
-# libva: the build needs no libva-dev, and a libva-less host still loads. Automatic
-# backend selection then falls back to the next encoder instead of failing at load,
-# matching the NVENC backend.
+# Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
+# feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
+# no NEEDED libva: the build needs no libva-dev (its build script's bindgen still
+# needs libclang), and a libva-less host still loads. Automatic backend selection
+# then falls back to the next candidate instead of failing at load, matching the
+# NVENC and NVDEC backends.
 moq-vaapi = { workspace = true, optional = true }
 # PipeWire video stream for the portal's node, behind the `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.

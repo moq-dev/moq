@@ -55,6 +55,11 @@ MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. FLV
 covers H.264 + AAC.
 
+MPEG-TS export restarts its clock and table cadence after a publisher rewind,
+discarding the old mux buffer. The first new clock packet signals the break and
+stdout pacing re-anchors. Other renditions resume at their own discontinuity
+boundary, so old-timeline frames cannot advance the new clock.
+
 ## Play
 
 ```bash
@@ -83,12 +88,14 @@ moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3
 ```
 
 Video goes through the platform hardware encoder (VideoToolbox, Media
-Foundation, NVENC, VAAPI, V4L2 M2M) with a built-in H.264 software fallback;
+Foundation, NVENC, and with the opt-in `vaapi` / `v4l2` features VAAPI and V4L2
+M2M) with a built-in H.264 software fallback;
 audio is Opus. The camera is opened only while someone is watching, and
 `--bitrate` is the opening ceiling. Backends with live bitrate control lower it
 to fit the connection's bandwidth estimate. `moq devices` prints every source
 id. Requires the `capture` feature; on Linux that needs libclang, V4L2, and
-ALSA headers.
+ALSA headers, and `--display` also needs the `pipewire` feature (links
+libpipewire).
 
 ## Transcode
 
@@ -109,6 +116,11 @@ fit keep serving. A rung the new picture has no room for finishes its track, as
 does one whose own picture moved, and the latter comes back under a new name
 (`video/360p.2`), so a viewer on either reselects as it would on any other
 rendition change.
+
+Custom `--rung` values may be supplied in any order. Heights round down to even;
+heights and bitrates must then increase strictly together. Duplicate heights or
+bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
+before connecting.
 
 ## Multiple stages
 

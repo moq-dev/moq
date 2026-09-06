@@ -21,6 +21,7 @@ can act on. Each still carries its own plan and regression test.
 - [Generation](/quest/m2/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
 - [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
+- [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m2/qos/README.md) - broadcast health from the relay: viewer starvation and publisher timeliness histograms, publisher stats, viewer feedback
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
@@ -63,7 +64,7 @@ can act on. Each still carries its own plan and regression test.
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [iOS capture](/quest/m2/video-ios.md) - moq-video captures the camera and screen on iOS, reusing the VideoToolbox backend
 - [Android capture](/quest/m2/video-android.md) - Camera2, MediaProjection and MediaCodec, a whole NDK/JNI backend family
-- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, a decoder we do not have, and dlopen loading, all gated on a moq-dev/vaapi release
+- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, H.265 decode, and pre-generated bindings that remove the libclang build dependency, all gated on a moq-dev/vaapi release
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Dart leaks](/quest/m2/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [Dart publish](/quest/m2/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from

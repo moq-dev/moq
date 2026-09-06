@@ -240,7 +240,7 @@ impl<F: Container> Consumer<F> {
 		self.pending
 			.retain_mut(|group| group.sequence <= current || !group.buffered.is_empty() || !group.poll_aborted(waiter));
 
-		loop {
+		'read: loop {
 			// A newer group whose timestamps jumped backwards means the publisher reneged
 			// the buffered tail. Record the boundary and resume from the new epoch, then restart.
 			if self.poll_reset(waiter)? {
@@ -290,6 +290,7 @@ impl<F: Container> Consumer<F> {
 						tracing::warn!(error = ?e, "current group evicted; skipping to next buffered group");
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
+						continue 'read;
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
@@ -299,6 +300,7 @@ impl<F: Container> Consumer<F> {
 						if empty {
 							self.mark_discontinuities(1);
 						}
+						continue 'read;
 					}
 				}
 			}
@@ -494,8 +496,9 @@ impl<F: Container> Consumer<F> {
 		let reset = {
 			let mut found = None;
 			for group in self.pending.iter_mut().rev() {
-				// Once we reach the playback cursor, older groups can't rewind the timeline.
-				if group.group.sequence <= self.current {
+				// The cursor may already point at an unread group. Only groups that
+				// supplied the old live edge (or preceded it) are ruled out.
+				if group.group.sequence <= prev_max {
 					break;
 				}
 
@@ -1133,6 +1136,30 @@ mod tests {
 		assert!(!reset.is_stale(59, ts(92)));
 		// At or before the old peak: old epoch. Drop.
 		assert!(reset.is_stale(55, ts(100)));
+	}
+
+	#[tokio::test]
+	async fn rewind_at_the_cursor_signals_the_first_frame() {
+		tokio::time::pause();
+		for drained in [false, true] {
+			let mut track = track_producer("cursor-rewind", hang::container::track_info());
+			let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy);
+			write_group(&mut track, 0, &[ts(600_000_000)]);
+			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(600_000_000));
+			if drained {
+				assert!(
+					tokio::time::timeout(Duration::from_millis(1), consumer.read())
+						.await
+						.is_err()
+				);
+			}
+			// One new group, so no higher-sequence successor can reveal the reset.
+			write_group(&mut track, 1, &[ts(0), ts(100_000)]);
+			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+			assert_eq!(consumer.discontinuity(), 1, "first rewound frame, drained={drained}");
+			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+			assert_eq!(consumer.discontinuity(), 1, "no duplicate reset within a group");
+		}
 	}
 
 	/// A new-epoch group that arrives out of order *below* the resume point is kept and

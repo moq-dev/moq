@@ -95,6 +95,10 @@ pub enum Error {
 	#[error("url: {0}")]
 	Url(#[from] url::ParseError),
 
+	/// Video metadata was supplied for an audio track.
+	#[error("video hint is not supported for audio tracks")]
+	UnexpectedVideoHint,
+
 	/// Unknown media format.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
