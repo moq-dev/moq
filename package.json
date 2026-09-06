@@ -2,7 +2,7 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.10",
+		"@biomejs/biome": "^2.5.11",
 		"concurrently": "^10.0.5",
 		"markdown-extensions": "^2.0.0",
 		"publint": "^0.3.24",
