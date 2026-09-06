@@ -48,6 +48,54 @@ requested beneath it. Each route carries the chain of relay identities it
 passed through, which is how forwarding loops are caught, and a cost, which is
 how a subscriber picks the cheapest of several routes to the same broadcast.
 
+## Path patterns
+
+Rust's `moq_net::path::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
+describe sets of literal paths. These APIs provide matching and scope algebra;
+using one does not enable wildcard announcements or change token permissions.
+
+Patterns match the whole path. `room` matches only `room`, while `room/**`
+matches `room` and every descendant. Segments are separated by `/`:
+
+| Segment | Matches |
+| --- | --- |
+| `room` | That literal segment. |
+| `*` | Exactly one nonempty segment. |
+| `camera-*` | One segment starting with `camera-`. |
+| `pre*suf` | One segment with that prefix and suffix, without overlapping them. |
+| `**` | Zero or more segments. |
+
+A pattern may contain at most 32 segments and one `**`. Leading, trailing,
+or repeated separators are invalid pattern syntax. The empty pattern matches
+the empty path. There is no escape syntax for a literal `*`.
+Construction normalizes adjacent `*` and `**`: `*/**` prints as `**/*`,
+so equivalent wildcard placements have the same identity.
+
+```typescript
+import { Path } from "@moq/net";
+
+const scope = Path.Pattern.parse("room/**");
+scope.matches("room/alice"); // true
+scope.contains(Path.Pattern.parse("room/camera-*")); // true
+scope.overlaps(Path.Pattern.parse("*/alice")); // true
+scope.rebase("room").toJSON(); // ["**"]
+Path.Pattern.parse("camera-*").rooted("room").text; // "room/camera-*"
+```
+
+`contains` asks whether every path matched by the other pattern is allowed by
+this one. `overlaps` asks whether they share any matching path. `rebase` returns
+the matching paths relative to a literal root; `rooted` places a pattern beneath
+that root and rejects results exceeding the segment limit. Rebasing can require
+several patterns: `**/a` rebased at `a` yields both `""` (the root itself) and
+`**/a` (deeper paths ending in `a`).
+
+`Patterns` is a union that removes members contained by another member and
+orders the remaining members canonically. Its containment check requires one
+member to cover the entire requested pattern; it does not combine several
+members to prove joint coverage. Equality compares those reduced members.
+Use `specificity` to rank structural constraints when selecting rules, and
+`contains` to check whether a rule stays within a scope.
+
 ## Subscriptions
 
 A subscriber names a broadcast and track. Delivery starts at the oldest group

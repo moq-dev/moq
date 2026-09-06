@@ -89,7 +89,7 @@ pub mod fuzz;
 mod ietf;
 mod lite;
 mod model;
-mod path;
+pub mod path;
 mod server;
 mod session;
 mod setup;
@@ -106,7 +106,9 @@ pub use error::*;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;
-pub use path::*;
+pub use path::{
+	AsPath, InvalidPattern, Path, PathOwned, PathPrefixes, PathRelative, PathRelativeOwned, Pattern, Patterns,
+};
 pub use runtime::{Runtime, Timers};
 pub use server::*;
 pub use session::*;
