@@ -5,9 +5,108 @@ import { connect } from "./connect.ts";
 
 const url = new URL("https://example.com/test");
 
+// A relay URL as the token flow hands it to us.
+const SECRET = "super-secret-jwt";
+const authUrl = new URL(`https://example.com/test?jwt=${SECRET}#frag`);
+
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+const CONSOLE_METHODS = ["debug", "info", "log", "warn", "error"] as const;
+
+// Collect everything connect writes to the console, joined per call.
+function captureConsole(): { lines: string[]; restore: () => void } {
+	const lines: string[] = [];
+	const original = CONSOLE_METHODS.map((method) => [method, console[method]] as const);
+
+	for (const method of CONSOLE_METHODS) {
+		console[method] = (...args: unknown[]) => {
+			lines.push(args.map((arg) => String(arg)).join(" "));
+		};
+	}
+
+	return {
+		lines,
+		restore: () => {
+			for (const [method, fn] of original) console[method] = fn;
+		},
+	};
+}
+
+// Hand connect() a mock transport through the normal `new WebTransport(...)` path, so
+// the connect diagnostics run instead of being skipped by the `transport` option.
+function stubWebTransport(transport: WebTransport): () => void {
+	const original = globalThis.WebTransport;
+
+	// Biome forbids returning a value from a class constructor.
+	function StubWebTransport(this: unknown) {
+		return transport;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	return () => {
+		globalThis.WebTransport = original;
+	};
+}
+
+test("connect logs the relay URL without its credentials", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const restoreTransport = stubWebTransport(pair.client);
+	const captured = captureConsole();
+
+	const mode = process.env.MODE;
+	const nodeEnv = process.env.NODE_ENV;
+	process.env.MODE = "development";
+	process.env.NODE_ENV = "development";
+
+	try {
+		const connection = await connect(authUrl, { websocket: { enabled: false } });
+		connection.close();
+	} finally {
+		captured.restore();
+		restoreTransport();
+		if (mode === undefined) delete process.env.MODE;
+		else process.env.MODE = mode;
+		if (nodeEnv === undefined) delete process.env.NODE_ENV;
+		else process.env.NODE_ENV = nodeEnv;
+	}
+
+	// The diagnostics must still identify the relay, just without the query.
+	expect(captured.lines.length).toBeGreaterThan(0);
+	expect(captured.lines.every((line) => line.includes("https://example.com/test"))).toBe(true);
+
+	for (const line of captured.lines) {
+		expect(line).not.toContain(SECRET);
+		expect(line).not.toContain("jwt");
+	}
+});
+
+test("connect emits no diagnostics in a production build", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const restoreTransport = stubWebTransport(pair.client);
+
+	// Bun aliases `import.meta.env` to `process.env`, which is what the DEV check reads.
+	const mode = process.env.MODE;
+	process.env.MODE = "production";
+
+	const captured = captureConsole();
+
+	try {
+		const connection = await connect(authUrl, { websocket: { enabled: false } });
+		connection.close();
+	} finally {
+		captured.restore();
+		restoreTransport();
+		if (mode === undefined) {
+			delete process.env.MODE;
+		} else {
+			process.env.MODE = mode;
+		}
+	}
+
+	expect(captured.lines).toEqual([]);
+});
 
 test("already-aborted signal rejects without connecting", async () => {
 	const original = globalThis.WebTransport;

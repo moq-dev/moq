@@ -15,9 +15,6 @@ regression test per Root Cause First.
 
 ## Quests
 
-- [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md) - preserve source-signalled clock changes through import and export
-
-- [#2405](/quest/m0/2405-js-net-connect-logs-on-every-connection-at-the-wrong.md) - js/net: connect logs print the JWT in the relay URL
 - [#3360](/quest/m0/3360-js-watch-broadcast-is-undefined-at-initialization.md) - js/watch: a framework binding the element reads `broadcast` before the custom element is upgraded
 - [Adapter namespace map](/quest/m0/rs-adapter-namespace-map.md) - moq-net: a duplicate PUBLISH_NAMESPACE on draft-14/15 strands the first request, and the map never shrinks
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
@@ -25,6 +22,7 @@ regression test per Root Cause First.
 - [#3080](/quest/m0/3080-fix-watch-audio-ring-truncate-can-race-the-worklet-reader.md) - watch: an audio ring truncate can race the worklet reader for one quantum
 - [#3363](/quest/m0/3363-js-watch-a-broadcast-republished-on-one-session-keeps-resuming.md) - js/watch: a broadcast republished under its name on one session keeps resuming
 - [#3361](/quest/m0/3361-js-every-moq-package-a-package-imports-is-declared.md) - js: every @moq package a package imports is a declared dependency
+- [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md) - preserve source-signalled clock changes through import and export
 - [#3326](/quest/m0/3326-moq-audio-held-resampler-frames-keep-their-source-timestamp.md) - moq-audio: held resampler frames keep their source timestamp
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - stop the headroom task after setup failure or the last owner drops
