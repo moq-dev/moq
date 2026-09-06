@@ -150,6 +150,41 @@ pub struct Config {
 	)]
 	pub congestion_control: Option<CongestionControl>,
 
+	/// Connection-wide receive window, in bytes: how much data the peer may have
+	/// in flight across every stream at once. Unset leaves the backend default.
+	///
+	/// Raise it when a fat, long path is idling below the link rate: the window
+	/// has to cover the bandwidth-delay product or the peer stalls waiting for
+	/// credit.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[usage(
+		name = "quic-receive-window",
+		long = "quic-receive-window",
+		env = "MOQ_QUIC_RECEIVE_WINDOW"
+	)]
+	pub receive_window: Option<u64>,
+
+	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	///
+	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
+	/// can't starve the rest of the connection.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[usage(
+		name = "quic-stream-receive-window",
+		long = "quic-stream-receive-window",
+		env = "MOQ_QUIC_STREAM_RECEIVE_WINDOW"
+	)]
+	pub stream_receive_window: Option<u64>,
+
+	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
+	/// allows. Unset leaves the backend default.
+	///
+	/// This bounds the transport send buffer. The quiche backend has no local send
+	/// cap and refuses this rather than dropping it.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[usage(name = "quic-send-window", long = "quic-send-window", env = "MOQ_QUIC_SEND_WINDOW")]
+	pub send_window: Option<u64>,
+
 	/// Write qlog traces into this directory, which must already exist.
 	///
 	/// The layout is backend-specific: quiche and noq write one file per connection,
@@ -180,6 +215,9 @@ impl Default for Config {
 			keep_alive: DEFAULT_KEEP_ALIVE.into(),
 			mtu_discovery: None,
 			congestion_control: None,
+			receive_window: None,
+			stream_receive_window: None,
+			send_window: None,
 			qlog: None,
 			legacy: Default::default(),
 		}
@@ -416,7 +454,8 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		validate_idle_timeout(Some(self.idle_timeout.into_std()))
+		validate_idle_timeout(Some(self.idle_timeout.into_std()))?;
+		validate_windows(self)
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
@@ -436,6 +475,9 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
+			receive_window: self.receive_window,
+			stream_receive_window: self.stream_receive_window,
+			send_window: self.send_window,
 			qlog: self.qlog.clone(),
 		}
 	}
@@ -454,6 +496,31 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
 		_ => Ok(()),
 	}
+}
+
+/// The largest value a QUIC varint can carry, which bounds every flow-control
+/// limit that goes on the wire as a transport parameter.
+const MAX_VARINT: u64 = (1 << 62) - 1;
+
+/// Reject a flow-control window no connection can honor.
+///
+/// Zero is rejected everywhere: a window of zero credits nothing, so it would wedge
+/// the connection rather than tighten it. The receive windows additionally have to
+/// fit a varint, since they are sent as transport parameters; the send window is
+/// local bookkeeping and only has to be non-zero.
+fn validate_windows(quic: &Config) -> crate::Result<()> {
+	for (name, window, wire) in [
+		("receive_window", quic.receive_window, true),
+		("stream_receive_window", quic.stream_receive_window, true),
+		("send_window", quic.send_window, false),
+	] {
+		match window {
+			Some(0) => return Err(crate::Error::WindowRange(name)),
+			Some(window) if wire && window > MAX_VARINT => return Err(crate::Error::WindowRange(name)),
+			_ => {}
+		}
+	}
+	Ok(())
 }
 
 /// Every knob at its default, which is what an untouched [`Config`] resolves to.
@@ -488,6 +555,12 @@ pub struct Resolved {
 	/// Congestion control override, or `None` for the backend's own default. Each
 	/// backend picks that default itself, since they don't all agree.
 	pub congestion_control: Option<CongestionControl>,
+	/// Connection-wide receive window in bytes, or `None` for the backend default.
+	pub receive_window: Option<u64>,
+	/// Per-stream receive window in bytes, or `None` for the backend default.
+	pub stream_receive_window: Option<u64>,
+	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
+	pub send_window: Option<u64>,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
 }
@@ -709,18 +782,123 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
+	/// Each window reaches `Resolved` untouched, and stays `None` when unset so the
+	/// backend keeps its own default rather than being pinned to ours.
+	#[test]
+	fn windows_resolve_per_field() {
+		let unset = Config::default().resolve();
+		assert_eq!(unset.receive_window, None);
+		assert_eq!(unset.stream_receive_window, None);
+		assert_eq!(unset.send_window, None);
+
+		let set = Config {
+			receive_window: Some(64 << 20),
+			stream_receive_window: Some(8 << 20),
+			send_window: Some(32 << 20),
+			..Default::default()
+		}
+		.resolve();
+		assert_eq!(set.receive_window, Some(64 << 20));
+		assert_eq!(set.stream_receive_window, Some(8 << 20));
+		assert_eq!(set.send_window, Some(32 << 20));
+	}
+
+	/// A zero window credits nothing, so it would wedge the connection rather than
+	/// tighten it. Reject it here, where the message can name the knob.
+	#[test]
+	fn zero_windows_are_rejected() {
+		for (name, config) in [
+			(
+				"receive_window",
+				Config {
+					receive_window: Some(0),
+					..Default::default()
+				},
+			),
+			(
+				"stream_receive_window",
+				Config {
+					stream_receive_window: Some(0),
+					..Default::default()
+				},
+			),
+			(
+				"send_window",
+				Config {
+					send_window: Some(0),
+					..Default::default()
+				},
+			),
+		] {
+			let err = config.validate().expect_err("a zero window must be refused");
+			assert!(matches!(err, crate::Error::WindowRange(knob) if knob == name), "{err}");
+		}
+	}
+
+	/// The receive windows go on the wire as transport parameters, so they have to fit
+	/// a varint. The send window is local bookkeeping and does not.
+	#[test]
+	fn receive_windows_must_fit_a_varint() {
+		let over = Config {
+			receive_window: Some(MAX_VARINT + 1),
+			..Default::default()
+		};
+		assert!(matches!(
+			over.validate(),
+			Err(crate::Error::WindowRange("receive_window"))
+		));
+
+		let over = Config {
+			stream_receive_window: Some(u64::MAX),
+			..Default::default()
+		};
+		assert!(matches!(
+			over.validate(),
+			Err(crate::Error::WindowRange("stream_receive_window"))
+		));
+
+		let at_limit = Config {
+			receive_window: Some(MAX_VARINT),
+			stream_receive_window: Some(MAX_VARINT),
+			send_window: Some(u64::MAX),
+			..Default::default()
+		};
+		assert!(at_limit.validate().is_ok());
+	}
+
+	#[test]
+	fn window_flags_parse() {
+		let quic = parse(&[
+			"--quic-receive-window",
+			"67108864",
+			"--quic-stream-receive-window",
+			"8388608",
+			"--quic-send-window",
+			"33554432",
+		]);
+		assert_eq!(quic.receive_window, Some(67108864));
+		assert_eq!(quic.stream_receive_window, Some(8388608));
+		assert_eq!(quic.send_window, Some(33554432));
+	}
+
 	#[test]
 	fn toml_round_trips() {
 		let toml = r#"
 			max_streams = 7000
 			gso = false
 			congestion_control = "delay"
+			receive_window = 67108864
+			stream_receive_window = 8388608
+			send_window = 33554432
 			qlog = "/tmp/qlog"
 		"#;
 		let quic: Config = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
+		assert_eq!(quic.receive_window, Some(67108864));
+		assert_eq!(quic.stream_receive_window, Some(8388608));
+		assert_eq!(quic.send_window, Some(33554432));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
 }

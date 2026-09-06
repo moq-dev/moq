@@ -57,7 +57,24 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
+	apply_windows(transport, quic);
+
 	transport.congestion_controller_factory(congestion_factory(congestion_control(quic)));
+}
+
+/// Apply the flow-control windows, leaving each at the backend default when unset.
+fn apply_windows(transport: &mut noq::TransportConfig, quic: &Resolved) {
+	// Saturating rather than erroring: `Config::validate` already rejects a window
+	// past the varint, so this only bites a `Resolved` built without it.
+	if let Some(window) = quic.receive_window {
+		transport.receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
+	}
+	if let Some(window) = quic.stream_receive_window {
+		transport.stream_receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
+	}
+	if let Some(window) = quic.send_window {
+		transport.send_window(window);
+	}
 }
 
 /// The congestion control family to install, defaulting to loss-based.
@@ -772,6 +789,37 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// noq exposes no getters for the flow-control windows, but its `Debug` prints
+	/// them, which is enough to prove each one reached the transport config and that
+	/// an unset knob leaves noq's own default in place.
+	#[test]
+	fn apply_windows_writes_each_field() {
+		let defaults = format!("{:?}", noq::TransportConfig::default());
+
+		let quic = crate::quic::Config {
+			receive_window: Some(64 << 20),
+			stream_receive_window: Some(8 << 20),
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+
+		let mut transport = noq::TransportConfig::default();
+		apply_windows(&mut transport, &quic.resolve());
+		let applied = format!("{:?}", transport);
+
+		for field in [
+			format!("receive_window: {}", 64 << 20),
+			format!("stream_receive_window: {}", 8 << 20),
+			format!("send_window: {}", 32 << 20),
+		] {
+			assert!(applied.contains(&field), "{field} missing from {applied}");
+		}
+
+		let mut untouched = noq::TransportConfig::default();
+		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
+		assert_eq!(format!("{:?}", untouched), defaults);
+	}
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete noq implementation it must map to.

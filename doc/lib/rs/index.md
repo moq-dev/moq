@@ -78,6 +78,25 @@ token. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated before upgrading, so never send a token over it. Connections race
 QUIC against WebSocket and remember which won.
 
+The `Default::default()` above is the QUIC transport section, and the same value
+serves a dial and a listener:
+
+```rust
+let mut quic = moq_tokio::quic::Config::default();
+quic.congestion_control = Some(moq_tokio::quic::CongestionControl::Delay);
+quic.receive_window = Some(64 << 20);       // whole connection, in bytes
+quic.stream_receive_window = Some(8 << 20); // per stream
+quic.send_window = Some(32 << 20);          // unacknowledged data we may hold
+
+let client = moq_tokio::connect::Config::default().init(quic)?;
+```
+
+Unset flow-control windows keep the selected backend defaults, and `init` errors on
+a knob that backend cannot honor rather than dropping it: quiche has no local
+send cap, and iroh cannot disable GSO. `quic::Resolved::default()` is what an
+untouched config resolves to, so read the defaults from there. The
+[relay reference](/bin/relay/config#quic) documents each field.
+
 ## WebAssembly
 
 `moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own
