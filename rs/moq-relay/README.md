@@ -48,7 +48,7 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 Primarily for debugging, you can also connect to the relay via HTTP.
 
-- `GET /certificate.sha256`: Returns the fingerprint of the TLS certificate.
+- `GET /certificate.sha256`: Returns the fingerprint of the first configured TLS certificate.
 - `GET /announced/*prefix`: Returns all of the announced tracks with the given (optional) prefix.
 - `GET /fetch/*path`: Returns the latest group of the given track.
 

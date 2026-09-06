@@ -81,6 +81,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
 	counters: HashMap<u16, ContinuityCounter>,
+	/// Counter state before the uncommitted span, restored if a rewind discards it.
+	span_counters: Option<HashMap<u16, ContinuityCounter>>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
@@ -102,6 +104,11 @@ pub struct Export<E: catalog::Catalog = ()> {
 	last_psi: Option<Timestamp>,
 	/// Grid slot of the last PCR emission ([`Self::emit`]).
 	last_pcr: Option<u128>,
+	/// Program generation being muxed; source counters are local to each rendition.
+	epoch: u64,
+	/// Generation of the last returned frame, updated only at the output boundary.
+	emitted_epoch: u64,
+	pcr_discontinuity: bool,
 	/// TS packets muxed into the span that is still open.
 	pending: Vec<u8>,
 	/// Offsets into [`pending`](Self::pending) where a keyframe's packets begin, so
@@ -136,9 +143,18 @@ pub struct Export<E: catalog::Catalog = ()> {
 	video_start: Option<Timestamp>,
 }
 
+struct Pending {
+	frame: Frame,
+	discontinuity: u64,
+}
+
 struct Track {
 	source: ExportSource,
-	pending: Option<Frame>,
+	pending: Option<Pending>,
+	/// Last consumed boundary count from this source. Never compared with peers.
+	discontinuity: u64,
+	/// Program generation this rendition has joined. Older generations are discarded.
+	epoch: u64,
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -148,10 +164,27 @@ struct Track {
 	/// Last decode timestamp (continuous 90 kHz ticks) authored for this track, keeping the
 	/// decode clock monotonic across reordered (B-frame) video. Only video uses it.
 	last_dts: Option<u64>,
+	/// High-water mark within this rendition, independent of cross-track skew.
+	timeline: Option<Timestamp>,
 	/// Decode-clock reserve (90 kHz ticks): how far ahead of its PTS each frame decodes. Taken
 	/// from the catalog `jitter` (the reorder depth) so it is large enough for `DTS <= PTS`,
 	/// or [`DEFAULT_DTS_RESERVE`] when the catalog declares none. Only video uses it.
 	dts_reserve: u64,
+}
+
+impl Track {
+	/// A fenced rendition must rewind its own clock before joining the program.
+	/// Forward markers on its old timeline cannot admit stale media.
+	fn admit(&mut self, pending: Pending, epoch: u64) -> Option<Pending> {
+		if self.epoch == epoch
+			|| (pending.discontinuity != self.discontinuity
+				&& self.timeline.is_none_or(|last| pending.frame.timestamp < last))
+		{
+			return Some(pending);
+		}
+		self.discontinuity = pending.discontinuity;
+		None
+	}
 }
 
 #[derive(Clone)]
@@ -413,6 +446,7 @@ impl<E: catalog::Catalog> Export<E> {
 			max_age: Duration::ZERO,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
+			span_counters: None,
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
@@ -421,6 +455,9 @@ impl<E: catalog::Catalog> Export<E> {
 			psi: None,
 			last_psi: None,
 			last_pcr: None,
+			epoch: 0,
+			emitted_epoch: 0,
+			pcr_discontinuity: false,
 			pending: Vec::new(),
 			keyframes: Vec::new(),
 			queue: VecDeque::new(),
@@ -516,7 +553,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(start) = self.video_start {
 				for track in self.tracks.values_mut() {
 					if !matches!(track.kind, Kind::Video(_))
-						&& track.pending.as_ref().is_some_and(|f| f.timestamp < start)
+						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
 					}
@@ -532,10 +569,36 @@ impl<E: catalog::Catalog> Export<E> {
 		// it asserts. See [`Self::advance`].
 		loop {
 			if let Some(out) = self.queue.pop_front() {
+				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
 			}
 			let Some(name) = self.pick_next_track() else { break };
-			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
+			let pending = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
+			let changed = pending.discontinuity != self.tracks[&name].discontinuity;
+			if changed {
+				let joined = self.tracks[&name].epoch == self.epoch;
+				if joined {
+					let backwards = self.tracks[&name]
+						.timeline
+						.is_some_and(|last| pending.frame.timestamp < last);
+					if !backwards && !self.pending.is_empty() {
+						// A forward boundary ends valid media rather than reneging it.
+						// Return that tail under the old generation before adopting the new one.
+						self.emit(None)?;
+						self.tracks.get_mut(&name).unwrap().pending = Some(pending);
+						continue;
+					}
+					self.rewind(backwards);
+				}
+				let track = self.tracks.get_mut(&name).unwrap();
+				track.discontinuity = pending.discontinuity;
+				track.epoch = self.epoch;
+				track.last_dts = None;
+				track.timeline = None;
+			}
+			let frame = pending.frame;
+			let track = self.tracks.get_mut(&name).unwrap();
+			track.timeline = Some(track.timeline.map_or(frame.timestamp, |last| last.max(frame.timestamp)));
 			self.last_timestamp = Some(frame.timestamp);
 			self.advance(frame.timestamp)?;
 			self.mux(&name, frame)?;
@@ -552,6 +615,7 @@ impl<E: catalog::Catalog> Export<E> {
 		if drained {
 			self.emit(None)?;
 			if let Some(out) = self.queue.pop_front() {
+				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
@@ -624,14 +688,19 @@ impl<E: catalog::Catalog> Export<E> {
 						if waiting_for_header && !track.source.header_ready() {
 							continue;
 						}
-						// Tune-in alignment: drop non-video frames before the first video
-						// keyframe (see `video_start`) so the in-band SPS/PPS leads the stream.
+						let discontinuity = track.source.discontinuity();
+						let Some(pending) = track.admit(Pending { frame, discontinuity }, self.epoch) else {
+							continue;
+						};
+						let changed = pending.discontinuity != track.discontinuity;
+						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
-							&& !is_video && frame.timestamp < start
+							&& !is_video && !changed
+							&& pending.frame.timestamp < start
 						{
 							continue;
 						}
-						track.pending = Some(frame);
+						track.pending = Some(pending);
 						break;
 					}
 					Poll::Ready(None) => {
@@ -829,14 +898,55 @@ impl<E: catalog::Catalog> Export<E> {
 			Track {
 				source,
 				pending: None,
+				discontinuity: 0,
+				epoch: self.epoch,
 				finished: false,
 				pid,
 				kind,
 				descriptors,
 				last_dts: None,
+				timeline: None,
 				dts_reserve,
 			},
 		);
+	}
+
+	/// The discontinuity counter of the most recently returned output frame.
+	/// Compare across reads and re-anchor pacing when it changes. Renditions have
+	/// independent source counters; this counter describes the emitted program.
+	pub fn discontinuity(&self) -> u64 {
+		self.emitted_epoch
+	}
+
+	/// Discard uncommitted bytes and restart the program clock. On a backwards
+	/// boundary, peers must cross their own boundary before joining this generation.
+	fn rewind(&mut self, backwards: bool) {
+		self.epoch += 1;
+		if let Some(counters) = self.span_counters.take() {
+			self.counters = counters;
+		}
+		self.pending.clear();
+		self.keyframes.clear();
+		self.queue.clear();
+		self.watermark = None;
+		self.clock = None;
+		self.low = None;
+		self.last_pcr = None;
+		self.last_psi = None;
+		for si in self.si.values_mut() {
+			si.last_emit = None;
+		}
+		self.video_start = None;
+		self.pcr_discontinuity = true;
+		for track in self.tracks.values_mut() {
+			track.last_dts = None;
+			if !backwards || track.timeline.is_none() {
+				track.epoch = self.epoch;
+			}
+			if let Some(pending) = track.pending.take() {
+				track.pending = track.admit(pending, self.epoch);
+			}
+		}
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
@@ -863,7 +973,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.tracks
 			.values()
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
-			.filter_map(|t| t.pending.as_ref().map(|f| f.timestamp))
+			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
 			.min()
 	}
 
@@ -1019,12 +1129,17 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Name of the track whose pending frame has the smallest timestamp.
+	/// A boundary takes precedence over stale peer data; otherwise use timestamp order.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|f| (f.timestamp, t.pid, n)))
-			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
+			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n)))
+			.min_by_key(|(timestamp, pid, name)| {
+				let track = &self.tracks[*name];
+				let changed = track.pending.as_ref().unwrap().discontinuity != track.discontinuity;
+				let backwards = changed && track.timeline.is_some_and(|last| *timestamp < last);
+				(!backwards, *timestamp, *pid, *name)
+			})
 			.map(|(_, _, name)| name.clone())
 	}
 
@@ -1035,6 +1150,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// to isn't known until a later timestamp measures the span (see
 	/// [`Self::advance`]).
 	fn mux(&mut self, name: &str, frame: Frame) -> anyhow::Result<()> {
+		if self.span_counters.is_none() {
+			self.span_counters = Some(self.counters.clone());
+		}
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
@@ -1226,6 +1344,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// decode-clock reserve of any track so every PES unit, whichever rendition it
 	/// belongs to, decodes at or after the clock that precedes it.
 	fn emit(&mut self, span: Option<u128>) -> anyhow::Result<()> {
+		self.span_counters = None;
 		let bytes = std::mem::take(&mut self.pending);
 		let keyframes = std::mem::take(&mut self.keyframes);
 		let Some(to) = self.low.take() else { return Ok(()) };
@@ -1343,7 +1462,11 @@ impl<E: catalog::Catalog> Export<E> {
 			None => self.counters.entry(pcr_pid).or_default().as_u8().wrapping_sub(1),
 		};
 		self.last_pcr = Some(index);
-		pcr_packet(pcr_pid, ticks, cc)
+		let mut packet = pcr_packet(pcr_pid, ticks, cc)?;
+		if std::mem::take(&mut self.pcr_discontinuity) {
+			packet[5] |= 0x80;
+		}
+		Ok(packet)
 	}
 
 	/// Packetize a PES payload into 188-byte TS packets.

@@ -2,6 +2,8 @@
 
 use moq_net::{AsPath, PathRelativeOwned};
 
+use crate::Ladder;
+
 #[doc(hidden)]
 #[deprecated(note = "use moq_net::Path::relative")]
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
@@ -14,41 +16,23 @@ pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<Path
 	source.relative(&output)
 }
 
-/// One candidate output rendition: a target resolution (by height) and bitrate.
-///
-/// The width is derived from the source aspect ratio at runtime, and a rung is
-/// only offered when it is strictly below the source (see [`Config::rungs`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Rung {
-	/// Output height in pixels. Rounded down to even (I420 chroma is 2x2).
-	pub height: u32,
-
-	/// Target bitrate: the CBR target and the bitrate advertised in the derivative
-	/// catalog.
-	pub bitrate: moq_net::bandwidth::Rate,
-}
-
-impl Rung {
-	/// A rung at `height` pixels and `bitrate`.
-	pub fn new(height: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
-		Self { height, bitrate }
-	}
-}
-
 /// Transcoder configuration for [`run`](crate::run).
 ///
 /// `#[non_exhaustive]`: build via `Config::default()` and set fields, so future
 /// knobs don't break callers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Candidate output renditions. Only rungs strictly below the source
-	/// survive: a rung is dropped when its height exceeds the source, when its
-	/// bitrate is not below the source bitrate (when known), or when it matches
-	/// the source height without a known source bitrate to undercut. A 480p
-	/// source is never transcoded up to 720p.
-	pub rungs: Vec<Rung>,
+	/// Candidate output renditions, lowest first. Only rungs strictly below the
+	/// source survive: a rung is dropped when its height exceeds the source, when
+	/// its bitrate is not below the source bitrate (when known), or when it
+	/// matches the source height without a known source bitrate to undercut. A
+	/// 480p source is never transcoded up to 720p.
+	///
+	/// Filtering drops rungs but never reorders them, so the surviving ladder is
+	/// still ascending. Build it with [`Ladder::new`](crate::Ladder::new), which
+	/// takes the rungs in any order and refuses an ambiguous ladder.
+	pub ladder: Ladder,
 
 	/// Where the source broadcast lives relative to the output broadcast, e.g.
 	/// `"."` when the output is published at `<source>/transcode.hang`. When
@@ -70,26 +54,6 @@ pub struct Config {
 
 	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
 	pub resize: moq_video::resize::Config,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			// The default ladder, top rung first, filtered against the source at
-			// runtime so only strictly-lower renditions are offered.
-			rungs: vec![
-				Rung::new(1080, moq_net::bandwidth::Rate::from_bps(5_000_000)),
-				Rung::new(720, moq_net::bandwidth::Rate::from_bps(2_500_000)),
-				Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000)),
-				Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000)),
-				Rung::new(240, moq_net::bandwidth::Rate::from_bps(350_000)),
-			],
-			source: None,
-			encoder: moq_video::encode::Kind::default(),
-			decoder: moq_video::decode::Kind::default(),
-			resize: moq_video::resize::Config::default(),
-		}
-	}
 }
 
 #[cfg(test)]

@@ -37,8 +37,8 @@ while let Some(frame) = audio.read().await? {
 ```
 
 ```bash
-cargo add moq-audio                                    # aac, capture, playback, aec on by default
-cargo add moq-audio --no-default-features --features aac   # a service that only relays or decodes
+cargo add moq-audio --features playback                # decode and play the example above
+cargo add moq-audio --features capture,playback,aec    # microphone, speaker, echo cancellation (Linux: cpal links libasound)
 ```
 
 API: [docs.rs/moq-audio](https://docs.rs/moq-audio). Pair with

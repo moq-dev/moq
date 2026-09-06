@@ -54,13 +54,14 @@ url = { workspace = true }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-tokio = { workspace = true, default-features = true }
-# `nvidia` back on, matching rs/libmoq: the workspace turns moq-video's defaults
-# off for `capture` (V4L2, libclang), and the codecs are collateral rather than
-# the goal. Nothing is paid for it off Linux, since cudarc / moq-nvenc /
-# libloading sit behind `cfg(target_os = "linux")` and Android is
-# `target_os = "android"`, and nothing is paid at build time on Linux either:
-# all three are pure Rust and dlopen the driver, so the wrappers still link
-# GPU-less and start driverless.
+# `nvidia` and `vaapi` back on, matching rs/libmoq: the workspace turns
+# moq-video's defaults off for `capture` (V4L2, libclang), and the codecs are
+# collateral rather than the goal. Nothing is paid for them off Linux, since
+# cudarc / moq-nvenc / libloading / moq-vaapi sit behind
+# `cfg(target_os = "linux")` and Android is `target_os = "android"`. On Linux
+# both dlopen the driver, so the wrappers still link GPU-less and start
+# driverless; `vaapi` alone costs the build something, since moq-vaapi's bindgen
+# needs libclang (the dev shell carries it).
 moq-video = { workspace = true, optional = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.

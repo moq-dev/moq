@@ -2073,6 +2073,463 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
 }
 
+/// Count payload-bearing TS packets on `pid`, excluding its standalone clock packets.
+fn count_pid(frames: &[Frame], pid: u16) -> usize {
+	frames
+		.iter()
+		.flat_map(|f| f.payload.chunks_exact(188))
+		.filter(|p| p[3] & 0x10 != 0 && ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+		.count()
+}
+
+/// Count the TS packets whose adaptation field sets `discontinuity_indicator`.
+fn count_discontinuity(frames: &[Frame]) -> usize {
+	frames
+		.iter()
+		.flat_map(|f| f.payload.chunks_exact(188))
+		.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
+		.count()
+}
+
+/// A `mpegts`-extension exporter over an announced broadcast.
+async fn export_of(consumer: &moq_net::broadcast::Consumer) -> Export<tscat::Ext> {
+	Export::with_ts(crate::source::announced(consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE)
+}
+
+fn publish_sdt(
+	broadcast: &mut moq_net::broadcast::Producer,
+	catalog: &mut crate::catalog::Producer<tscat::Ext>,
+) -> moq_net::track::Producer {
+	let mut track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	track
+		.write_frame(
+			Timestamp::ZERO,
+			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
+		)
+		.unwrap();
+	catalog.lock().mpegts.si.entry(0x0011).or_default().insert(
+		0x42,
+		tscat::SiEntry {
+			track: track.name().to_string(),
+			interval: Some(Duration::from_secs(2)),
+			..Default::default()
+		},
+	);
+	track
+}
+
+/// Regression for #2833: every cadence in the exporter is anchored on a media timestamp
+/// that only moves forward, so a publisher rewind froze each one for the length of the
+/// rewound span. An audio-only program is the worst case: the PSI has no keyframe to
+/// recover at, and the PCR-only packet is the only adaptation field it ever writes.
+#[tokio::test(start_paused = true)]
+async fn rewind_re_emits_tables_and_resumes_the_clock() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		guard.audio.renditions.insert(name, cfg);
+	}
+	let _sdt = publish_sdt(&mut broadcast, &mut catalog);
+
+	// 100ms frames in one-second groups.
+	let write = |producer: &mut Producer<HangContainer>, count: u64, offset: u64| {
+		for i in 0..count {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(offset + i * 100_000).unwrap(),
+					duration: None,
+					payload: Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
+					keyframe: i % 10 == 0,
+				})
+				.unwrap();
+			if i % 10 == 9 {
+				producer.cut(None).unwrap();
+			}
+		}
+	};
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut export = export_of(&consumer).await;
+
+	// A ten-minute offset exercises the long rewind from the controlled stimulus
+	// campaign. Drain five seconds before restarting at zero.
+	write(&mut producer, 50, 600_000_000);
+	let before = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), 0, "no rewind yet");
+	assert_eq!(count_pid(&before, 0x0000), 10, "PAT on its 500ms cadence");
+	assert_eq!(count_pid(&before, 0x0011), 3, "SDT at 0, 2 and 4s");
+
+	// A forward marker must flush the last old frame instead of discarding it.
+	producer.discontinuity().unwrap();
+	write(&mut producer, 2, 605_000_000);
+	let marked = drain_frames(&mut export).await;
+	let tail: Vec<_> = before
+		.iter()
+		.chain(&marked)
+		.flat_map(|f| f.payload.iter().copied())
+		.collect();
+	let (_, audio_pts) = collect_pes_pts(&tail);
+	// The carried tail may precede the refreshed PMT, so inspect all PES starts.
+	let mut reader = TsPacketReader::new(Cursor::new(tail));
+	let mut preserved = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::PesStart(pes)) = packet.payload {
+			preserved |= pes.header.pts.unwrap().as_u64() == 604_900_000 * 90 / 1000;
+		}
+	}
+	assert!(preserved, "forward marker discarded the pre-boundary tail");
+	assert!(!audio_pts.is_empty());
+	let epoch = export.discontinuity();
+
+	// The publisher rewinds and replays the first two seconds.
+	write(&mut producer, 20, 0);
+	let after = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), epoch + 1, "the rewind was observed");
+
+	// The clock leads the new timeline: its first frame is the PCR for slot 0, and the
+	// grid ramps from there instead of waiting to recross the old timeline.
+	assert_eq!(
+		after[0].payload[3] & 0x30,
+		0x20,
+		"the new timeline leads with its clock"
+	);
+	let pcrs = collect_pcrs(&after);
+	assert!(pcrs.len() > 60, "clock resumed promptly");
+	assert_eq!(after[0].timestamp.as_micros(), 0);
+	for pair in pcrs.windows(2) {
+		assert_eq!(pair[1].1.wrapping_sub(pair[0].1) & ((1 << 33) - 1), 2250);
+	}
+	assert!(after.iter().all(|f| f.timestamp.as_micros() < 2_000_000));
+
+	// And the tables come back on cadence rather than waiting ten minutes.
+	assert_eq!(count_pid(&after, 0x0000), 4, "PAT at 0, 0.5, 1 and 1.5s");
+	assert_eq!(count_pid(&after, 0x0011), 1, "SDT at 0s");
+
+	// Exactly one packet marks the break, and it is the leading PCR.
+	assert_eq!(count_discontinuity(&before), 0);
+	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
+	assert_eq!(count_discontinuity(&after[..1]), 1, "flagged on the leading PCR packet");
+}
+
+/// The counter-case, and why the fix keys on the discontinuity counter rather than on a
+/// backwards slot: video is emitted in decode order, so a reordered (B-frame) PTS steps
+/// backwards constantly. Re-emitting on every backwards step was measured at 25x the
+/// intended PSI rate, and none of those steps is a rewind.
+#[tokio::test(start_paused = true)]
+async fn reordered_video_keeps_the_table_cadence() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name, cfg);
+	}
+	let _sdt = publish_sdt(&mut broadcast, &mut catalog);
+
+	// One group, one keyframe: the PSI has no keyframe boundary to hide behind, so what
+	// is counted below is the interval cadence alone. 125 frames at 40ms displayed,
+	// emitted in decode order as IPBB quads, so every fourth timestamp jumps 120ms ahead
+	// and the next two step back behind it.
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	let mut slice = vec![0x41u8];
+	slice.extend(std::iter::repeat_n(0xCD, 200));
+	for quad in 0..32u64 {
+		for offset in [0, 3, 1, 2] {
+			let index = quad * 4 + offset;
+			if index >= 125 {
+				continue;
+			}
+			let keyframe = index == 0;
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(index * 40_000).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[if keyframe { idr.as_slice() } else { slice.as_slice() }]),
+					keyframe,
+				})
+				.unwrap();
+		}
+	}
+
+	let mut export = export_of(&consumer).await;
+	let out = drain_frames(&mut export).await;
+
+	// 125 frames span 0..4.96s: ten 500ms slots and three 2s slots, one emission each.
+	assert_eq!(export.discontinuity(), 0, "a reorder is not a rewind");
+	assert_eq!(count_pid(&out, 0x0000), 10, "PAT once per 500ms slot, not per reorder");
+	assert_eq!(count_pid(&out, 0x0011), 3, "SDT once per 2s slot, not per reorder");
+	assert_eq!(count_discontinuity(&out), 0, "a reorder is not a discontinuity");
+}
+
+/// A program with more than one track marks the break once, not once per track. Each
+/// rendition carries its own discontinuity counter, and the rewound frame sorts ahead of
+/// any old-epoch straggler still buffered on the other track. Each track joins the
+/// new program epoch on its own boundary, without comparing unrelated counter values.
+#[tokio::test(start_paused = true)]
+async fn rewind_flags_the_break_once_across_tracks() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let video_track = broadcast
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	let audio_track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	{
+		let mut guard = catalog.lock();
+		let mut video = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		video.container = Container::Legacy;
+		video.description = Some(avcc);
+		guard.video.renditions.insert(video_track.name().to_string(), video);
+
+		let mut audio = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		audio.container = Container::Legacy;
+		guard.audio.renditions.insert(audio_track.name().to_string(), audio);
+	}
+
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	let mut video = Producer::new(video_track, HangContainer::Legacy);
+	let mut audio = Producer::new(audio_track, HangContainer::Legacy);
+
+	// One keyframe-led second per group on video, 100ms audio frames alongside it.
+	let write = |video: &mut Producer<HangContainer>, audio: &mut Producer<HangContainer>, seconds: u64| {
+		for sec in 0..seconds {
+			video
+				.write(Frame {
+					timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[idr.as_slice()]),
+					keyframe: true,
+				})
+				.unwrap();
+			video.cut(None).unwrap();
+			for tenth in 0..10u64 {
+				audio
+					.write(Frame {
+						timestamp: Timestamp::from_micros(sec * 1_000_000 + tenth * 100_000).unwrap(),
+						duration: None,
+						payload: Bytes::from_iter((0..180u16).map(|b| (b ^ tenth as u16) as u8)),
+						keyframe: tenth == 0,
+					})
+					.unwrap();
+			}
+			audio.cut(None).unwrap();
+		}
+	};
+
+	let mut export = export_of(&consumer).await;
+	write(&mut video, &mut audio, 4);
+	let before = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), 0);
+	assert_eq!(count_discontinuity(&before), 0);
+
+	// Independent counters can differ before the shared rewind. Forward markers
+	// affect only video; audio must not be fenced out of a continuous timeline.
+	for _ in 0..3 {
+		video.discontinuity().unwrap();
+	}
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(4_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(4_100_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	let marked = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
+	let epoch = export.discontinuity();
+
+	// Both tracks rewind to zero.
+	write(&mut video, &mut audio, 2);
+	let after = drain_frames(&mut export).await;
+
+	assert_eq!(
+		export.discontinuity(),
+		epoch + 1,
+		"one rewind, however many tracks saw it"
+	);
+	assert_eq!(
+		after[0].payload[3] & 0x30,
+		0x20,
+		"the new timeline leads with its clock"
+	);
+	assert_eq!(after[0].timestamp, Timestamp::from_micros(0).unwrap());
+	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
+	// Both renditions carry the rewound span; audio is not held back by a tune-in
+	// anchor that belongs to the old timeline.
+	let bytes: Vec<_> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
+	assert!(!video_pts.is_empty(), "video resumed");
+	assert!(!audio_pts.is_empty(), "audio resumed");
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut video_pid = None;
+	let mut video_frames = 0;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) => {
+				video_pid = pmt
+					.es_info
+					.iter()
+					.find(|es| es.stream_type == StreamType::H264)
+					.map(|es| es.elementary_pid.as_u16());
+			}
+			Some(TsPayload::PesStart(pes)) if Some(packet.header.pid.as_u16()) == video_pid => {
+				let pts = pes.header.pts.unwrap().as_u64();
+				assert!(
+					pes.header.dts.is_none_or(|dts| dts.as_u64() <= pts),
+					"DTS retained the old epoch"
+				);
+				video_frames += 1;
+			}
+			_ => {}
+		}
+	}
+	assert!(video_frames > 0);
+	let video_pid = video_pid.expect("video PID in PMT");
+
+	// Keep old video queued while the lower-count audio source rewinds again.
+	// It must start a new program epoch despite having the smaller counter.
+	video.discontinuity().unwrap();
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(8_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	for i in 0..20 {
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 100_000).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0xaa; 180]),
+				keyframe: i == 0,
+			})
+			.unwrap();
+	}
+	audio.cut(None).unwrap();
+	let again = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), epoch + 2);
+	assert_eq!(count_discontinuity(&again), 1);
+	assert!(again.len() > 20, "rewound audio kept emitting without its stale peer");
+	assert!(
+		again.iter().all(|f| f.timestamp.as_micros() < 2_000_000),
+		"stale video advanced the clock"
+	);
+	assert_eq!(count_pid(&again, video_pid), 0, "old video was discarded");
+
+	// An unrelated old-timeline marker cannot admit the peer's stale clock.
+	video.discontinuity().unwrap();
+	video
+		.write(Frame {
+			timestamp: Timestamp::from_micros(9_000_000).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[idr.as_slice()]),
+			keyframe: true,
+		})
+		.unwrap();
+	video.cut(None).unwrap();
+	assert!(drain_frames(&mut export).await.is_empty());
+
+	// A delayed peer joins on its own boundary without resetting the clock again.
+	for i in 0..4 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[idr.as_slice()]),
+				keyframe: true,
+			})
+			.unwrap();
+		video.cut(None).unwrap();
+	}
+	let joined = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), epoch + 2);
+	assert_eq!(count_discontinuity(&joined), 0);
+	assert!(count_pid(&joined, video_pid) > 0, "video rejoined");
+	// A discarded span already had counters assigned. They must roll back to
+	// the last emitted bytes, so dropping the span introduces no packet loss.
+	let mut counters = std::collections::HashMap::new();
+	for frame in before.iter().chain(&marked).chain(&after).chain(&again).chain(&joined) {
+		for packet in frame.payload.chunks_exact(188) {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			let cc = packet[3] & 15;
+			if let Some(prev) = counters.insert(pid, cc) {
+				let expected = (prev + u8::from(packet[3] & 0x10 != 0)) & 15;
+				assert_eq!(cc, expected, "counter gap on PID {pid}");
+			}
+		}
+	}
+}
+
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
 /// `si_packet` only covers a single-packet section; a real SDT with several services (or a
 /// NIT) spans packets, exercising the `SectionReassembler` PUSI + continuity path that
@@ -3059,9 +3516,10 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 }
 
 /// A broadcast with one avc1 video track and one SI entry, for driving SI emission
-/// frame by frame: `media(millis, pid)` writes one keyframe group and reports how
+/// frame by frame: `media(millis, pid)` writes one video frame and reports how
 /// many packets of `pid` ride the output it produced.
 struct SiCadenceRig {
+	started: bool,
 	producer: Producer<HangContainer>,
 	si_track: moq_net::track::Producer,
 	exporter: Export<tscat::Ext>,
@@ -3112,6 +3570,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		.await
 		.unwrap();
 	SiCadenceRig {
+		started: false,
 		producer,
 		si_track,
 		exporter,
@@ -3121,17 +3580,18 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 
 impl SiCadenceRig {
 	async fn media_frames(&mut self, millis: u64) -> Vec<Frame> {
-		let mut idr = vec![0x65u8];
-		idr.extend(std::iter::repeat_n(0xAB, 64));
+		// Reordered pictures stay in one group; a newer group going backwards is a rewind.
+		let mut nal = vec![if self.started { 0x41u8 } else { 0x65u8 }];
+		nal.extend(std::iter::repeat_n(0xAB, 64));
 		self.producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(millis).unwrap(),
 				duration: None,
-				payload: length_prefixed(&[&idr]),
-				keyframe: true,
+				payload: length_prefixed(&[&nal]),
+				keyframe: !self.started,
 			})
 			.unwrap();
-		self.producer.cut(None).unwrap();
+		self.started = true;
 
 		let frames = drain_frames(&mut self.exporter).await;
 		for frame in &frames {
@@ -3143,19 +3603,6 @@ impl SiCadenceRig {
 	async fn media(&mut self, millis: u64, pid: u16) -> usize {
 		count_pid(&self.media_frames(millis).await, pid)
 	}
-}
-
-/// How many TS packets of `pid` ride the given frames.
-fn count_pid(frames: &[Frame], pid: u16) -> usize {
-	frames
-		.iter()
-		.map(|f| {
-			f.payload
-				.chunks_exact(188)
-				.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
-				.count()
-		})
-		.sum()
 }
 
 /// #2934: a revised SI snapshot goes out on the revision floor instead of waiting
@@ -3259,6 +3706,7 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 		"the deferred revision enters the span at the floor"
 	);
 	assert_eq!(rig.media(3_600, 0x0011).await, 1, "the next span closes the revision");
+	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
 
 /// The emission anchor never moves backwards, even where a zero-interval entry
@@ -3299,6 +3747,7 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	);
 	assert_eq!(rig.media(3_500, 0x0011).await, 0, "the due table enters the open span");
 	assert_eq!(rig.media(3_600, 0x0011).await, 1, "the next span closes the due table");
+	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
 
 /// A publisher revising its snapshot before every frame must not drive the mux at

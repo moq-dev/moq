@@ -52,9 +52,24 @@ check *args:
     {{ cargo_compile }} clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     just rs _doc-names
+    just rs _fuzz-lock
     RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
+
+# The fuzz harness is its own workspace, because libFuzzer needs nightly and
+# sanitizer flags. Nothing in `check` or `test` builds it, so its lockfile drifts
+# from the path dependencies it shares with the main workspace and nobody finds out
+# until a `just rs fuzz` silently re-resolves it. Re-resolving against the committed
+# lock is metadata only, so it costs no compilation and can sit in the PR gate.
+_fuzz-lock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! cargo metadata --locked --format-version 1 --manifest-path rs/moq-net/fuzz/Cargo.toml > /dev/null; then
+        echo "rs: run: cargo update --manifest-path rs/moq-net/fuzz/Cargo.toml --workspace" >&2
+        exit 1
+    fi
 
 # Two targets whose names differ only by `-` vs `_` render to the same
 # `target/doc/<name>`, and a `cargo doc` that selects both races to clean it: the
@@ -556,8 +571,9 @@ relay-minimal:
 # for the all-features clippy alone), which is why this is nightly rather than
 # part of the per-PR gate.
 #
-# `--all-features` is the only thing that compiles moq-cli's play/capture,
-# moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
+# `--all-features` is the only thing that compiles moq-cli's play/capture, the
+# moq-video and moq-audio device features, the Linux bindgen codecs (vaapi,
+# v4l2), PipeWire, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
 #
 # Cargo unifies features across a workspace selection. Check each package alone

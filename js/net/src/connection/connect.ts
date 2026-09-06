@@ -5,6 +5,7 @@ import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
+import { dev, redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
@@ -218,10 +219,11 @@ async function connectInner(url: URL, props: ConnectProps | undefined, abort: Pr
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 	if (session instanceof Session) {
-		console.warn(url.toString(), "connected via WebSocket");
+		// Still a warning, not a debug line: losing the race means we fell back off QUIC.
+		if (dev()) console.warn(redact(url), "connected via WebSocket");
 		websocketWon.add(url.toString());
-	} else {
-		console.debug(url.toString(), "connected via WebTransport");
+	} else if (dev()) {
+		console.debug(redact(url), "connected via WebTransport");
 	}
 
 	// The remaining setup is identical whether the transport was raced or supplied.
@@ -261,7 +263,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	// qmux Session exposes the negotiated protocol directly (as "" when there is none);
 	// native WebTransport doesn't have a standard .protocol property yet.
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
-	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
+	if (dev()) console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
@@ -458,14 +460,18 @@ async function connectWebTransport(
 	if (url.protocol === "http:") {
 		const fingerprintUrl = new URL(url);
 		fingerprintUrl.pathname = "/certificate.sha256";
+		// The certificate endpoint is unauthenticated, so don't hand it the token.
 		fingerprintUrl.search = "";
+
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		console.debug(
-			fingerprintUrl.toString(),
-			"performing an insecure fingerprint fetch; use https:// in production",
-		);
+		if (dev()) {
+			console.debug(
+				redact(fingerprintUrl),
+				"performing an insecure fingerprint fetch; use https:// in production",
+			);
+		}
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.

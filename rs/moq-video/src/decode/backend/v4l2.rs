@@ -3,7 +3,7 @@
 //! The mirror of the encode backend, on the same device abstraction and usually
 //! on a sibling node of the same driver: a Raspberry Pi decodes on
 //! `/dev/video10` and encodes on `/dev/video11`, both `bcm2835-codec`. Behind
-//! the same default-on `v4l2` feature.
+//! the same opt-in `v4l2` feature.
 //!
 //! Access units go in on the OUTPUT queue in decode order and pictures come back
 //! on CAPTURE as CPU [`Surface::I420`](crate::Surface). The driver copies each

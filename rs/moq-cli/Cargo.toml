@@ -23,7 +23,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia", "vaapi", "v4l2", "pipewire"]
+default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia"]
 iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -41,7 +41,8 @@ websocket = ["moq-tokio/websocket"]
 # (camera: `v4l`/v4l2-sys-mit needs libclang + V4L2 headers via bindgen; mic: cpal
 # needs ALSA/libasound), plus binary size. macOS/Windows use OS frameworks, no
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
-# Enable with `cargo build -p moq-cli --features capture`.
+# Enable with `cargo build -p moq-cli --features capture`, adding `pipewire` for
+# display capture on Linux.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-video/capture", "moq-audio/capture"]
 # Just-in-time transcoding (`moq ... transcode`). Off by default because it pulls
 # in moq-video and its codec dependencies. Enable with
@@ -62,19 +63,20 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature tables name only `nvidia`.
 nvenc = ["nvidia"]
 nvdec = ["nvidia"]
-# Intel/AMD VAAPI hardware encoding (Linux), on by default like `nvidia` and
-# trimmable the same way: libva is dlopen'd at runtime, so it costs the build
-# nothing. Only bites when `capture` or `transcode` pulls in moq-video.
+# Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
+# it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
+# libclang on the build host. Only bites when `capture`, `transcode`, or `play`
+# pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
-# on by default like `nvidia` and trimmable the same way. The `v4l` crate it
-# needs is the one `capture` already builds for the camera, so it costs nothing
-# a capture build does not pay already. Only bites when `capture`, `transcode`,
-# or `play` pulls in moq-video.
+# opt-in like the moq-video feature it turns on: the `v4l` crate's bindgen needs
+# libclang and the kernel headers on the build host. `capture` already pays that
+# for the camera, so a capture build adds it for free. Only bites when `capture`,
+# `transcode`, or `play` pulls in moq-video.
 v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
-# on by default like the hardware codecs above and trimmable the same way. Only
-# bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.
+# opt-in like moq-video's own `pipewire` because it links libpipewire-0.3 at
+# build time. Only bites when `capture` pulls in moq-video and moq-audio.
 # Also reaches audio, so `devices`, microphone capture and playback go through
 # the sound server rather than its ALSA plugin on a machine running one.
 pipewire = ["moq-video?/pipewire", "moq-audio?/pipewire"]

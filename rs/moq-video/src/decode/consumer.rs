@@ -360,4 +360,65 @@ mod tests {
 		};
 		assert!(err.to_string().contains("cancelled call"), "unexpected error: {err}");
 	}
+
+	/// VAAPI returns its buffered tail before the consumer reports track end.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	async fn the_track_ending_drains_the_decoder() {
+		const FRAMES: u64 = 5;
+		let config = EncodeConfig {
+			kind: EncodeKind::Software,
+			..EncodeConfig::new(320, 240, 30)
+		};
+		let catalog = config.probe().await.expect("probe the software encoder");
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+		for index in 0..FRAMES {
+			if index == 0 {
+				encoder.keyframe();
+			}
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
+			for encoded in encoder.encode(&frame).unwrap() {
+				producer
+					.write(moq_mux::container::Frame {
+						timestamp: encoded.timestamp,
+						duration: None,
+						payload: encoded.payload,
+						keyframe: index == 0,
+					})
+					.unwrap();
+			}
+		}
+		producer.finish().unwrap();
+
+		let decode = Config {
+			kind: Kind::Named("vaapi".into()),
+			..Config::new()
+		};
+		// The hardware gate: no libva, no render node, or no H.264 decode
+		// entrypoint and the named backend refuses to open.
+		let Ok(mut consumer) = Consumer::new(&subscriber, &catalog, "video", decode).await else {
+			return;
+		};
+
+		let mut timestamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		let expected: Vec<u128> = (0..FRAMES as u128).map(|index| index * 33_333).collect();
+		assert_eq!(timestamps, expected, "the track ended before the stream did");
+
+		// The end stays the end: the drain runs once, so a caller that keeps
+		// reading past it does not get the tail a second time.
+		assert!(consumer.read().await.unwrap().is_none());
+	}
 }

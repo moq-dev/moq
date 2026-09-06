@@ -17,9 +17,10 @@
 //!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media
 //!   Foundation (camera), DXGI Desktop Duplication (screen), and GDI (window) on
 //!   Windows, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
-//!   [`capture::open`] for an embeddable raw-frame stream or
-//!   [`encode::publish_capture`] for turnkey publication. It requires the
-//!   default-on `capture` feature.
+//!   `capture::open` for an embeddable raw-frame stream or
+//!   `encode::publish_capture` for turnkey publication. It requires the opt-in
+//!   `capture` feature: on Linux the camera path's bindgen needs libclang and
+//!   the V4L2 headers on the build host.
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
@@ -35,27 +36,27 @@
 //!     [`encode::Producer`] publishes the results.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
-//!   DXVA on Windows, NVDEC or an ARM SoC's V4L2 M2M decoder on Linux, openh264
+//!   DXVA on Windows, NVDEC, VAAPI, or an ARM SoC's V4L2 M2M decoder on Linux, openh264
 //!   software fallback for H.264).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
-//!   [`decode::Config::resize`].
+//!   [`decode::Config::resize`]. A VAAPI decoder can return importable DMA-BUFs
+//!   when [`decode::Config::gpu_frames`] is enabled.
 //! - [`convert`] downloads any [`Surface`] to owned, tightly packed RGBA pixels
 //!   for CPU image and UI toolkits, honoring native color metadata when present.
 //! - `render` draws a [`Frame`] on the GPU and hands back a `wgpu` texture to
 //!   present, importing a GPU frame's surface directly where the platform
-//!   allows and uploading I420 otherwise. Behind the non-default `render`
-//!   feature, since it pulls in a graphics stack a publisher or relay does not
-//!   need.
+//!   allows and uploading I420 otherwise. Behind the `render` feature, on by
+//!   default, which a publisher or relay drops to skip the graphics stack.
 //!
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / V4L2) or a
+//! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / VAAPI / V4L2) or a
 //! codec implementation. [`encode::Encoder`] takes a [`Frame`],
 //! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
-//! hardware decoded), and [`capture::Stream`] returns a [`Surface`]. So swapping
+//! hardware decoded), and `capture::Stream` returns a [`Surface`]. So swapping
 //! or bumping any backend crate is not a breaking change for consumers. Config
 //! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
 //! fields, so new options stay additive.

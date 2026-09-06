@@ -810,6 +810,14 @@ impl Consumer {
 			// created the track may have it now. Drop it so this request reaches a
 			// source again, exactly as the plain lookup below reclaims a closed
 			// entry. A *finished* one stays, since its cache is still readable.
+			//
+			// So a name, once finished, never comes back here: a publisher that
+			// finishes a track and publishes it again is serving new content, not
+			// resuming this one, and a subscriber has to re-read the catalog and
+			// re-initialize rather than be spliced onto it. Resuming the same
+			// content across routes is the transparent case, and that is what
+			// `resume::Producer` already does. Publish new content under a new
+			// name.
 			if spliced.tracks.get(name).is_some_and(|track| track.is_aborted()) {
 				spliced.tracks.remove(name);
 			}
