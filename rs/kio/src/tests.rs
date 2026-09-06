@@ -228,3 +228,27 @@ fn weak_consumers_can_read_the_final_value() {
 	assert!(consumer.is_closed());
 	assert_eq!(*consumer.read(), 7);
 }
+
+#[test]
+fn consumer_creation_with_existing_demand_does_not_relock() {
+	let (done, result) = std::sync::mpsc::channel();
+	let worker = std::thread::spawn(move || {
+		let producer = Producer::new(7);
+		let consumer = producer.consume();
+		let producer_weak = producer.weak();
+		let consumer_weak = consumer.weak();
+		let guard = producer.read();
+		let one = producer.consume();
+		let two = producer_weak.consume();
+		let three = consumer_weak.consume();
+		drop(guard);
+		assert_eq!(*one.read(), 7);
+		assert_eq!(*two.read(), 7);
+		assert_eq!(*three.read(), 7);
+		done.send(()).unwrap();
+	});
+	result
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("consumer creation reacquired the held lock");
+	worker.join().unwrap();
+}

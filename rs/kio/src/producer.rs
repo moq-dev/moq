@@ -50,8 +50,8 @@ impl<T> Producer<T> {
 
 	/// Acquire mutable access only while nothing is consuming the channel.
 	///
-	/// The count is read under the same lock [`consume`](Self::consume) bumps it
-	/// under, so the returned guard is a promise the channel stays unused until it
+	/// The count is read under the lock [`consume`](Self::consume) takes when
+	/// demand is zero, so the returned guard keeps the channel unused until it
 	/// drops. That is what a teardown decided by [`poll_unused`](Self::poll_unused)
 	/// needs: the poll is a level snapshot, so committing on it directly can cancel
 	/// a consumer that appeared in the gap. Commit through this instead, and take
@@ -66,8 +66,8 @@ impl<T> Producer<T> {
 			return Unused::Closed;
 		}
 
-		// Relaxed is enough: an increment happens under this lock, so acquiring it
-		// already orders us after any consumer that exists. A decrement runs outside
+		// Relaxed is enough: a zero-to-one increment happens under this lock.
+		// Further increments cannot pass through zero. A decrement runs outside
 		// it, so this may still read a consumer that is going away, which only
 		// declines a teardown that the next `unused` wake will offer again.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {

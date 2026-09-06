@@ -16,13 +16,21 @@ pub struct Consumer<T> {
 
 /// Mint a consumer, or `None` if `only_open` and the channel has closed.
 ///
-/// The count moves under the state lock, in step with the `closed` flag it is
-/// weighed against. Bumping it outside would let a consumer appear between
-/// [`Producer::write_unused`](crate::Producer::write_unused) reading the count and
-/// the teardown it guards committing, which is a live consumer holding a channel
-/// that is about to be aborted.
+/// Zero-to-one transitions share the state lock with idle teardown. Existing
+/// demand can be incremented without relocking when closed-channel reads are allowed.
 fn mint<T>(state: &Lock<State<T>>, counts: &Arc<Counts>, only_open: bool) -> Option<Consumer<T>> {
-	let waiters = {
+	let waiters = if !only_open
+		&& counts
+			.consumers
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+				(count > 0).then(|| count + 1)
+			})
+			.is_ok()
+	{
+		// The successful increment keeps the count above zero, so an idle teardown
+		// cannot commit. Callers may already hold the state lock on this path.
+		None
+	} else {
 		let mut guard = state.lock();
 		if only_open && guard.closed {
 			return None;

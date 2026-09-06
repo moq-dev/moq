@@ -433,3 +433,20 @@ fn a_projected_hold_defers_before_relocking() {
 		assert!(flag.0.load(Ordering::SeqCst), "deferred wake never arrived");
 	});
 }
+
+#[test]
+fn consumer_creation_cannot_cross_an_idle_guard() {
+	loom::model(|| {
+		let producer = Producer::new(0u32);
+		let existing = producer.consume();
+		let weak = producer.weak();
+		let minting = thread::spawn(move || weak.consume());
+		drop(existing);
+		if let crate::Unused::Idle(guard) = producer.write_unused() {
+			thread::yield_now();
+			assert!(!producer.is_used(), "consumer appeared while idle guard was held");
+			guard.close();
+		}
+		drop(minting.join().unwrap());
+	});
+}
