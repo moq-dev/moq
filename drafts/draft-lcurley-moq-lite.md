@@ -18,6 +18,14 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  I-D.lcurley-moq-pattern:
+    title: "MoQ Pattern Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   qmux: I-D.ietf-quic-qmux
   qmuxws:
     title: "QMux over WebSocket"
@@ -112,6 +120,7 @@ A Broadcast is a collection of Tracks from a single publisher.
 This corresponds to a MoqTransport's "track namespace".
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a route covering every broadcast path beneath it.
+A publisher that could serve paths it cannot enumerate, such as a transcoder for any broadcast's derivative, advertises a path pattern instead via ANNOUNCE_PATTERN (see [Patterns](#patterns)).
 The subscriber uses the ANNOUNCE_REQUEST message to discover these routes, then subscribes to specific paths under them; which paths name broadcasts is an application convention.
 The common convention is that a publisher announces each broadcast's exact path as its own route, so subscribers can enumerate broadcasts, while a service announces one short prefix and serves whatever is requested beneath it.
 Announcements are live and can change over time, allowing for dynamic origin discovery.
@@ -249,9 +258,12 @@ Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
 An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
 
-Codes 32 through 63 are reserved and MUST NOT be interpreted.
+Codes 32 through 47 are reserved and MUST NOT be interpreted.
 Implementations currently emit values in this range for conditions with no code above, but those values are provisional placeholders, not assignments: a receiver MUST treat one as an unspecified error, exactly as it would any other unregistered code.
 A future revision will assign this range, or fold the conditions into the shared codes.
+
+Codes 48 through 63 are moq-lite's own, for conditions moq-transport has no code for, and are assigned by the tables below.
+This is the one range that does not survive a bridge unchanged: an endpoint speaking both protocols MUST map a code here to the moq-transport code with the same meaning rather than forward the value, and MUST map an unmapped one to an unspecified error.
 
 ### Session Error Codes
 Sent when terminating the session, via the transport's session close.
@@ -294,6 +306,8 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
+|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-pattern}}. |
+| ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
 An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
@@ -332,25 +346,46 @@ A route is an advertisement that paths under its prefix can be served; it claims
 The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by announcements for any matching routes and any future changes:
 
-- ANNOUNCE_START: a matching route is available.
+- ANNOUNCE_START: a matching route over a path prefix is available.
+- ANNOUNCE_PATTERN: a matching route over a path pattern is available (see [Patterns](#patterns)).
 - ANNOUNCE_END: a previously started route is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically updated (new hops or cost).
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
 
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per ANNOUNCE_START.
+Each ANNOUNCE_START or ANNOUNCE_PATTERN implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the route's prefix.
+ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the route's prefix or pattern.
 
-Each route prefix has at most one current advertisement per stream.
-A second ANNOUNCE_START for an already-advertised prefix is a protocol violation; an ANNOUNCE_UPDATE atomically updates the current advertisement's metadata while keeping its id live.
+Each route, prefix or pattern, has at most one current advertisement per stream.
+A second ANNOUNCE_START or ANNOUNCE_PATTERN for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE atomically updates the current advertisement's metadata while keeping its id live.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a prefix that is already advertised, or any announcement before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START or ANNOUNCE_PATTERN for a route that is already advertised, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all routes are now unavailable.
 
 A route covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher answering a request stream presents each of its routes clamped to the intersection with the requested prefix: a route above the request's prefix appears as the request prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
+
+#### Patterns {#patterns}
+A route may cover a path pattern instead of a prefix, advertised with ANNOUNCE_PATTERN (see [ANNOUNCE_PATTERN](#announce-pattern)).
+Matching, exactness, rebasing, and authorization follow {{I-D.lcurley-moq-pattern}}, treating each path segment as one namespace field.
+A prefix route is the pattern ending in a globstar, and every rule for routes in this document applies to both forms.
+Where an implementation spells a pattern as text, `*` is the wildcard, `**` the globstar, and a partial is its prefix, `*`, and suffix (`*.hang`, `foo*`, `foo.*.hang`); a literal never contains `*`, and a segment with more than one `*` is reserved for a later revision.
+
+A pattern route claims capability, not inventory, like any route: it says matching paths can be served, never that any exist.
+An advertiser that will not serve a requested path refuses the request (see [Resolution](#resolution)), which is why a pattern claiming more than the advertiser can serve, up to the globstar alone, is well-formed.
+
+Like a prefix, a pattern presents on a request stream clamped to the requested prefix.
+Rebasing a pattern under a prefix is set-valued: when the globstar may or may not have consumed the rest of the prefix, each alignment yields a distinct residual pattern, and the publisher sends each as its own advertisement with its own Announce ID.
+`**/a` under the request `a` is both the empty pattern (the request prefix itself) and `**/a` (deeper paths ending in `a`).
+A pattern that cannot match under the request is not sent.
+
+Several advertisers of one pattern are the expected state, a pool rather than a contest (see [Resolution](#resolution)).
+A receiver presenting routes to an application SHOULD combine duplicate pattern advertisements into one entry, withdrawn when the last advertiser retracts, and MUST NOT present a pattern as an available broadcast.
+
+A receiver MUST discard a pattern advertisement that is not contained by what the sender may publish, meaning every path matching the pattern lies inside the sender's authorized patterns.
+How that authorization is expressed is out of scope; the check is containment rather than clamping, so an over-wide claim is refused whole instead of being narrowed.
 
 #### Routing {#routing}
 Each advertisement carries the path of Hop IDs it traversed and an accumulated Warm and Cold Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
@@ -369,12 +404,41 @@ The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last quali
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering prefix, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
 Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
 Equal first hops promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
+
+#### Resolution {#resolution}
+A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, prefix and pattern alike, after the per-subscriber exclusion above.
+
+Only the most specific covering routes are consulted.
+Specificity is structural: more literal segments first, then a route without a globstar over one with, then more partials, then more wildcards, then more bytes pinned by partials, then a longer literal head.
+A route strictly inside another's paths always ranks above it, a broadcast's exact path is the most specific route there is, so a concrete announcement shadows every pattern covering it at any cost, and equally specific routes form one tier.
+The winning tier is the whole answer: a refusal from it never falls through to a less specific route, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
+
+Within the tier, cost and the tie-breaks of [Routing](#routing) order the routes, except that pattern routes tied at the lowest cost are a pool: a deterministic hash of the requested path against each advertiser distributes distinct paths across them, so one path always resolves the same way and a member arriving or leaving moves only its own share.
+The hash is FNV-1a: start the accumulator at `0x420C0DECB00B`, then for each byte of the requested path (segments joined by `/`, no leading or trailing `/`) followed by the eight bytes of the advertiser's Hop ID in little-endian order, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
+The advertiser is the route's first hop; a first hop of 0 identifies nothing, so such a route is a pool member of its own, keyed by the session it arrived on. The receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
+
+A route resolved this way serves the request like any other, and the pattern is not consumed by it.
+A relay MUST NOT announce a path merely because it resolved it: the pattern stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
+
+Standby ordering is a deployment guarantee within one specificity tier, not a bound on every representable Route Cost.
+A deployment relying on it MUST bound the number of charged links on an admitted path by H and each charged link cost by C, including the receiving link, and MUST enforce those bounds when admitting paths and links.
+Already-producing origins in that deployment MUST seed their cost at 0; standby origins MUST choose a seed S satisfying `H * C < S < saturation ceiling`.
+A seed of `2^32` is RECOMMENDED only when `H * C < 2^32`; otherwise the deployment must choose a larger seed or tighter bounds.
+Unknown, out-of-budget, and saturated routes are outside this guarantee; a receiver MUST NOT infer that they outrank standby capacity merely because they might already carry content.
+
+An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
+A NO_CAPACITY reset permits the receiver ONE re-resolution, within the same tier and excluding every route whose advertiser is the refusing one.
+The exclusion is what makes the retry safe, not the retraction arriving first: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross.
+Re-resolution may find no other route, and the request is then unroutable; that is a correct outcome, not a fallback list.
+A receiver that has spent its re-resolution, or has nothing to spend it on, MUST reset the downstream request with a code other than NO_CAPACITY, so the single retry cannot compound hop by hop.
+Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
+A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -749,7 +813,7 @@ ANNOUNCE_REQUEST Message {
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
+The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START and ANNOUNCE_PATTERN messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_PATTERN, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -767,13 +831,13 @@ ANNOUNCE_OK Message {
 
 **Hop ID**:
 The publisher's own Hop ID.
-This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_UPDATE Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
+This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_PATTERN, and ANNOUNCE_UPDATE Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 **Active Count**:
-The number of ANNOUNCE_START messages that the publisher will send immediately as the initial set.
+The number of ANNOUNCE_START and ANNOUNCE_PATTERN messages that the publisher will send immediately as the initial set.
 The subscriber MAY block reporting any announcement to the application until all `Active Count` initial announcements have arrived, then deliver the initial set as a batch.
 Any announcements beyond `Active Count` are live updates and SHOULD be reported as they arrive.
 A value of `0` is valid and means the publisher is offering no initial available broadcasts; all subsequent announcements (if any) are live updates.
@@ -828,6 +892,71 @@ Saturation MUST cap each sum at the largest value a variable-length integer can 
 A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
 
 
+## ANNOUNCE_PATTERN {#announce-pattern}
+A publisher sends an ANNOUNCE_PATTERN message to advertise a route over a path pattern (see [Patterns](#patterns)).
+It assigns the next Announce ID exactly as ANNOUNCE_START does, and is retracted and updated through the same ANNOUNCE_END and ANNOUNCE_UPDATE.
+
+The pattern is relative to the requested prefix, like ANNOUNCE_START's suffix.
+It is encoded as typed segments rather than text, so no glob syntax reaches the wire and a later revision can add segment kinds.
+
+~~~
+ANNOUNCE_PATTERN Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Segment Count (i),
+  Segment (..) ...,
+  Hop Count (i),
+  Hop ID (i) ...,
+  Route Cost (i),
+}
+
+Segment {
+  Segment Kind (i),
+  Segment Length (i),
+  Segment Value (..),
+}
+~~~
+
+**Type**:
+Set to 0x3 to indicate an ANNOUNCE_PATTERN message.
+
+**Segment Count**:
+The number of Segments that follow.
+Zero advertises exactly the requested prefix, as the pattern with no segments does.
+
+**Segment Kind**, **Segment Length**, and **Segment Value**:
+One pattern segment.
+The following kinds are defined:
+
+|------|----------|-------------|
+| Kind | Name     | Value       |
+|-----:|:---------|:------------|
+| 0x0  | Literal  | The segment's bytes. Matches exactly that segment. |
+|------|----------|-------------|
+| 0x1  | Wildcard | Empty. Matches any one segment. |
+|------|----------|-------------|
+| 0x2  | Globstar | Empty. Matches any run of zero or more segments; at most one per pattern. |
+|------|----------|-------------|
+| 0x3  | Partial  | Prefix Length (i), Prefix (..), Suffix (..). Matches any one segment starting with Prefix and ending with Suffix. |
+|------|----------|-------------|
+
+A Partial's Suffix runs to the end of the Value; a matching segment is at least as long as the two together.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on an empty Literal, a Literal, Prefix, or Suffix containing `/` or `*`, a Partial whose Prefix and Suffix are both empty (that is a Wildcard), a non-empty Wildcard or Globstar value, a second Globstar, or a pattern that together with the requested prefix exceeds 32 segments, the limit a path has.
+Other kinds are reserved for extensions.
+A receiver MUST skip an unknown kind by its Segment Length and MUST NOT select or forward the advertisement, but MUST still assign and track its Announce ID so that a later ANNOUNCE_END or ANNOUNCE_UPDATE referencing it is not a violation.
+
+**Hop Count** and **Hop ID**:
+As defined for [ANNOUNCE_START](#announce-start), and forwarded, checked for loops, and excluded per subscriber the same way.
+
+**Route Cost**:
+What serving a matching path costs, in the units of ANNOUNCE_START's Route Costs, accumulated the same way when forwarded.
+A single value rather than the Warm and Cold pair: a pattern claims capability rather than carried content, so it is never warm and the two halves would be provably equal.
+An ANNOUNCE_UPDATE referencing a pattern advertisement carries this value in both of its Route Cost fields.
+See [Resolution](#resolution) for the floor a standby seed MUST clear.
+
+An endpoint MUST NOT send ANNOUNCE_PATTERN on a moq-lite session whose version predates it. A bridge MAY translate a pattern to NAMESPACE_PATTERN on a moq-transport session that negotiated {{I-D.lcurley-moq-pattern}}, preserving its matching set, and MUST otherwise suppress the pattern advertisement.
+
+
 ## ANNOUNCE_END {#announce-end}
 A publisher sends an ANNOUNCE_END message to retract a previously started route, referencing its Announce ID.
 The id is retired and MUST NOT be referenced again.
@@ -847,14 +976,14 @@ ANNOUNCE_END Message {
 Set to 0x1 to indicate an ANNOUNCE_END message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_PATTERN on this stream.
 Referencing an id that was never assigned, or one already retired, is a protocol violation.
-Announce IDs are never reused within a stream; a prefix that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START.
+Announce IDs are never reused within a stream; a route that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START or ANNOUNCE_PATTERN.
 
 
 ## ANNOUNCE_UPDATE {#announce-update}
 A publisher sends an ANNOUNCE_UPDATE message to atomically update a previously started advertisement's metadata, referencing its Announce ID.
-The route's prefix is unchanged and the id stays live; the Hop ID list MAY differ from the original (e.g. after a relay failover or upstream restart).
+The route's prefix or pattern is unchanged and the id stays live; the Hop ID list MAY differ from the original (e.g. after a relay failover or upstream restart).
 An update carries no content claim: in-flight subscriptions under the route are undisturbed.
 
 ~~~
@@ -873,12 +1002,13 @@ ANNOUNCE_UPDATE Message {
 Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_PATTERN on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
 **Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
+An update referencing an ANNOUNCE_PATTERN advertisement MUST carry the same value in both Route Cost fields, and a receiver reads the Warm one (see [ANNOUNCE_PATTERN](#announce-pattern)).
 
 
 ## SUBSCRIBE
@@ -1260,6 +1390,11 @@ The `Message Length` describes the payload size on the wire.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.
 - Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
 - Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_UPDATE (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
+- Defined shared pattern semantics in draft-lcurley-moq-pattern, whose moq-transport capability is independent of clustering; moq-lite carries its native message under the lite-06 version gate.
+- Added ANNOUNCE_PATTERN (0x3): a route over a path pattern of literal, wildcard, partial (prefix and suffix within one segment), and at most one globstar segment, each matching whole segments, encoded as typed segments (kind, length, value) relative to the requested prefix rather than as text, with the hop list and a single Route Cost. It shares the Announce ID space with ANNOUNCE_START, so ANNOUNCE_END and ANNOUNCE_UPDATE apply unchanged, an update writing the cost in both fields. An unknown segment kind is skipped by its length and the advertisement ignored rather than a violation. A pattern presents under a request as the set of its residuals, one advertisement each. Not sent to a peer whose version predates it.
+- Specified resolution of a request against the routes covering its path, prefix and pattern alike: only the most specific tier is consulted (literal segments, then no globstar, then partials, then wildcards, then pinned bytes, then literal head, so a concrete path shadows every pattern), a refusal never falls through, cost and the existing tie-breaks order the tier, and pattern routes tied at the lowest cost form a pool distributed by a seeded FNV-1a hash of the requested path against the advertiser's first hop. A relay never announces a path because it resolved it; the advertiser announces the concrete path once producing. Standby ordering requires enforced deployment bounds on charged link count and cost; 2^32 is a recommended seed only when it exceeds their product.
+- Split the reserved stream error range: 32 through 47 stays reserved for the placeholders implementations emit today, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x30 NO_CAPACITY there: it permits one re-resolution within the tier excluding the refusing advertiser, and a receiver that has spent or lacks that retry resets downstream with another code. Every other code is terminal.
+- Required a receiver to discard a pattern advertisement not contained by what the sender may publish, to present patterns to applications as routes and never as broadcasts, and to combine duplicate advertisers of one pattern into a single entry.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-advertised prefix is now a protocol violation.
@@ -1416,7 +1551,7 @@ GOAWAY carries an optional New Session URI that asks the peer to reconnect elsew
 Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
-A peer can open many streams (subscriptions, announcements, fetches) or request large announce prefixes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control.
+A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad patterns. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A pattern route invites a request for any matching path, each of which may start work: an advertiser SHOULD bound the work it starts and refuse beyond that with NO_CAPACITY, and a receiver re-resolves at most once per request, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
 
 ## Datagram Injection
 Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID and MUST deduplicate against groups received on streams (see [Datagrams](#datagrams)).

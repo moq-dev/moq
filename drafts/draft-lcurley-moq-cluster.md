@@ -18,6 +18,14 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  I-D.lcurley-moq-pattern:
+    title: "MoQ Pattern Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 informative:
 
@@ -27,6 +35,7 @@ This document defines a clustering extension for MoQ Transport {{moqt}}, used to
 Each namespace advertisement carries the ordered list of Hop IDs it has traversed, starting with the original publisher, plus the accumulated cost of that path.
 A receiver uses the list to detect routing loops and to identify which advertisements come from the same publisher, and the cost to choose between paths.
 Each endpoint declares its own Hop ID during setup, and the peer uses it to avoid advertising or serving a path that already passed through that endpoint.
+Pattern advertisements are defined and negotiated independently by {{I-D.lcurley-moq-pattern}}; this extension supplies their routing metadata when both are enabled.
 
 --- middle
 
@@ -131,7 +140,7 @@ An assigned ID is indistinguishable on the wire from a declared one, so it ident
 This extension carries HOP_PATH and ROUTE_COST as Key-Value-Pair parameters ({{moqt}} Section 2.5).
 PUBLISH_NAMESPACE ({{moqt}} Section 10.15) already has a Parameters field.
 
-NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines an extended form used only on a session that negotiated Relay Hops:
+NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines a parameter block enabled by Relay Hops. The pattern extension can independently enable the same block:
 
 ~~~
 NAMESPACE Message (Relay Hops) {
@@ -144,9 +153,13 @@ NAMESPACE Message (Relay Hops) {
 ~~~
 
 The appended fields are encoded exactly as in PUBLISH_NAMESPACE.
-An endpoint MUST NOT append them on a session that did not negotiate the extension.
+Negotiating either Relay Hops or the pattern extension {{I-D.lcurley-moq-pattern}} enables this same parameter block on every NAMESPACE message, including a zero parameter count when empty. When both are negotiated, an endpoint appends one block containing the parameters from both extensions, not two blocks.
+An endpoint MUST NOT append the block when neither extension is negotiated, and MUST NOT include HOP_PATH or ROUTE_COST unless Relay Hops is negotiated.
 
-NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension and is not extended.
+NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension. Its pattern parameter block is present only when {{I-D.lcurley-moq-pattern}} is negotiated, irrespective of Relay Hops.
+
+An advertisement is a claim of capability, not inventory: it says namespaces beneath the advertised one can be served, never that any exists.
+Patterns and per-request refusals follow {{I-D.lcurley-moq-pattern}}.
 
 ## HOP_PATH Parameter {#hop-path}
 HOP_PATH is the ordered list of Hop IDs an advertisement has traversed, from the original publisher to the relay immediately upstream of the receiver:
@@ -176,7 +189,11 @@ It is OPTIONAL and absent means 0, so an endpoint that prices nothing sends noth
 Costs still accumulate across such a mesh, because each receiver adds the price for the direction it received over ({{relay-cost}}) regardless.
 
 The original publisher seeds the value with its production cost: 0 for content it is already producing, higher for content it would have to spin up on demand, such as a standby transcoder advertising everything it *could* serve.
-
+Standby ordering is a deployment guarantee within one specificity tier, not a bound on every representable Route Cost.
+A deployment relying on it MUST bound the number of charged links on an admitted path by H and each charged link cost by C, including the receiving link, and MUST enforce those bounds when admitting paths and links.
+Already-producing origins in that deployment MUST seed their cost at 0; standby origins MUST choose a seed S satisfying `H * C < S < saturation ceiling`.
+A seed of `2^32` is RECOMMENDED only when `H * C < 2^32`; otherwise the deployment must choose a larger seed or tighter bounds.
+Unknown, out-of-budget, and saturated routes are outside this guarantee; a receiver MUST NOT infer that they outrank standby capacity merely because they might already carry content.
 
 # Relay Behavior
 When forwarding an advertisement downstream, a relay MUST append its own Hop ID to the HOP_PATH it received, so its own ID is always the last entry.
@@ -205,7 +222,7 @@ An endpoint updates an advertisement by re-sending it with new parameters **on t
 A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
 In {{moqt}} an advertisement lives for the lifetime of its stream, so an update on a *new* stream would leave two streams claiming one namespace and let the superseded one retract its replacement.
-An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
+An endpoint MUST NOT open a second stream for an advertisement identity it already maintains on this session. For patterns, identity includes the segment kinds as specified by {{I-D.lcurley-moq-pattern}}; identical tuple bytes with different kinds are distinct advertisements.
 
 An update is metadata only: it re-prices or re-routes the advertisement and carries no content claim, so a receiver MUST NOT tear down subscriptions or drop cached state merely because one arrived.
 
@@ -213,8 +230,17 @@ The expected case is a ROUTE_COST-only change, which is how a relay signals that
 
 
 # Path Selection {#selection}
-A receiver holding advertisements for the same namespace over several sessions SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
+A receiver resolving a request against the advertisements covering its namespace, prefixes and patterns alike, consults only the most specific.
+For prefix advertisements, prefer the longest covering prefix. When patterns are enabled, specificity and refusal follow {{I-D.lcurley-moq-pattern}}.
+Pattern support does not follow from negotiating Relay Hops; advertisements to a session without the pattern capability MUST remain prefixes.
+
+Within the tier, a receiver SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
+Pattern advertisements tied at the lowest cost are a pool: a deterministic hash of the requested namespace against each advertiser distributes distinct namespaces across them.
+The hash is FNV-1a from the basis `0x420C0DECB00B`: encode each requested namespace field as its byte length in eight little-endian bytes followed by its bytes, then append the advertiser's first Hop ID in eight little-endian bytes. For each encoded byte, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
+A first Hop ID of 0 makes the advertisement a pool member keyed by its incoming session: the receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
 This is advisory: a receiver MAY apply local policy such as measured RTT instead.
+
+NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}. Excluding the refusing advertiser excludes every route with its non-zero first Hop ID, or its incoming session when that ID is 0.
 
 An advertisement carries no content identity: nothing promises that two paths to one namespace serve interchangeable bytes.
 A receiver MUST NOT splice an active subscription across sessions; when the serving session's advertisement goes away, subscriptions through it end, and the receiver re-subscribes through the best remaining path.
@@ -241,7 +267,7 @@ Both cost only a suboptimal path choice, and the latter is self-limiting, since 
 A receiver MUST NOT make security decisions based on Hop IDs, and a deployment spanning a trust boundary SHOULD treat a peer's ROUTE_COST as a hint to clamp or ignore rather than an accounting figure.
 
 
-# IANA Considerations
+# IANA Considerations {#iana}
 
 This document requests the following registrations.
 High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions.
@@ -258,12 +284,12 @@ This document requests two registrations in the "MOQT Setup Options" registry ({
 ## MOQT Message Parameters
 
 This document requests two registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-Both are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
+All are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
 
-| Value   | Name        | Carried In                   | Reference     |
-|:--------|:------------|:-----------------------------|:--------------|
-| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, NAMESPACE | This Document |
-| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| Value   | Name              | Carried In                   | Reference     |
+|:--------|:------------------|:-----------------------------|:--------------|
+| 0x40B57 | HOP_PATH          | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| 0x40B58 | ROUTE_COST        | PUBLISH_NAMESPACE, NAMESPACE | This Document |
 
 The Key-Value-Pair parity is load-bearing: HOP_PATH and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
 
