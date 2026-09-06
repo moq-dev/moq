@@ -604,7 +604,7 @@ impl web_transport_quiche::ez::CertResolver for ServeCerts {
 }
 
 impl QuicheServer {
-	pub fn new(config: listen::Config, quic: &crate::quic::Config, shard: Option<listen::Shard>) -> Result<Self> {
+	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Member>) -> Result<Self> {
 		if config.lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
@@ -613,7 +613,7 @@ impl QuicheServer {
 		// falls back to hashing addresses, and a client that changes address lands
 		// on a worker that has never seen its connection. `web-transport-quiche`
 		// exposes no connection ID hook to encode the owner with.
-		if shard.is_some() {
+		if member.is_some() {
 			return Err(Error::ShardUnsupported);
 		}
 

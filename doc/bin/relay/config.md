@@ -60,8 +60,10 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` (default) or `quinn` backend, an explicit
-non-zero `listen.bind` port, and real certificate files rather than
+worker. The group shares one port, including an ephemeral (zero) port: the
+first worker binds it and the rest join that port. Use an explicit port unless
+something reads the bound address at startup. `workers` needs the `noq`
+(default) or `quinn` backend and real certificate files rather than
 `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,
 and refuses to start anywhere it cannot deliver. `[quic]` applies either way,

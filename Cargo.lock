@@ -5104,6 +5104,7 @@ dependencies = [
  "libc",
  "rand 0.10.2",
  "socket2 0.6.5",
+ "thiserror 2.0.20",
  "tracing",
  "tracing-test",
 ]
