@@ -57,8 +57,7 @@ Raise the receive windows when a fat, long path idles below the link rate: a
 window under the bandwidth-delay product stalls the sender waiting for credit.
 Keep `stream_receive_window` well under `receive_window` so one slow group
 cannot starve the connection. `send_window` caps unacknowledged outgoing data
-whatever the peer allows, bounding both what a send buffer holds and how stale
-it can get. A zero window is refused, and the receive windows must fit a QUIC
+whatever the peer allows, bounding the transport send buffer. A zero window is refused, and the receive windows must fit a QUIC
 varint since they ride on the wire as transport parameters.
 
 quiche has no local send cap, so it refuses `send_window` rather than quietly

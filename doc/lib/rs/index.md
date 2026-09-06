@@ -91,7 +91,7 @@ quic.send_window = Some(32 << 20);          // unacknowledged data we may hold
 let client = moq_tokio::connect::Config::default().init(quic)?;
 ```
 
-Every field defaults to whatever the selected backend does, and `init` errors on
+Unset flow-control windows keep the selected backend defaults, and `init` errors on
 a knob that backend cannot honor rather than dropping it: quiche has no local
 send cap, and iroh cannot disable GSO. `quic::Resolved::default()` is what an
 untouched config resolves to, so read the defaults from there. The

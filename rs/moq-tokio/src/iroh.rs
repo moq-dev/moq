@@ -37,6 +37,10 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The supplied QUIC transport configuration is invalid.
+	#[error(transparent)]
+	Config(crate::Error),
+
 	/// Reading or writing the secret key file failed.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
@@ -195,6 +199,7 @@ impl EndpointConfig {
 		if !deprecated.is_empty() {
 			return Err(Error::Deprecated(deprecated));
 		}
+		quic.validate().map_err(Error::Config)?;
 
 		let quic = quic.resolve();
 		if quic.gso_disabled() {
@@ -235,8 +240,6 @@ impl EndpointConfig {
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
 		}
-		// Saturating rather than erroring: `Config::validate` already rejects a window
-		// past the varint, so this only bites a `Resolved` built without it.
 		if let Some(window) = quic.receive_window {
 			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
 			transport = transport.receive_window(window);
@@ -429,6 +432,39 @@ mod tests {
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
 		assert!(err.to_string().contains("--quic-gso / MOQ_QUIC_GSO"), "{err}");
+	}
+
+	#[tokio::test]
+	async fn bind_rejects_invalid_windows_before_reading_secret() {
+		let dir = tempfile::tempdir().unwrap();
+		for (name, value) in [
+			("receive_window", 0),
+			("stream_receive_window", 0),
+			("send_window", 0),
+			("receive_window", 1 << 62),
+			("stream_receive_window", u64::MAX),
+		] {
+			let mut quic = crate::quic::Config::default();
+			match name {
+				"receive_window" => quic.receive_window = Some(value),
+				"stream_receive_window" => quic.stream_receive_window = Some(value),
+				"send_window" => quic.send_window = Some(value),
+				_ => unreachable!(),
+			}
+			let config = EndpointConfig {
+				enabled: Some(true),
+				// Reading a directory fails if validation lets the invalid config through.
+				secret: Some(dir.path().to_str().unwrap().to_owned()),
+				..Default::default()
+			};
+			let Err(err) = config.bind(&quic).await else {
+				panic!("binding must reject {name} = {value}");
+			};
+			assert!(
+				matches!(&err, Error::Config(crate::Error::WindowRange(knob)) if *knob == name),
+				"{err}"
+			);
+		}
 	}
 
 	/// Build a controller from each family's factory and downcast it to the

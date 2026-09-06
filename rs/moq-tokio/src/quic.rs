@@ -179,9 +179,8 @@ pub struct Config {
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
 	/// allows. Unset leaves the backend default.
 	///
-	/// This bounds how much memory a send buffer can hold, so it also bounds how
-	/// stale the queued data can get. The quiche backend has no local send cap and
-	/// refuses this rather than dropping it.
+	/// This bounds the transport send buffer. The quiche backend has no local send
+	/// cap and refuses this rather than dropping it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "quic-send-window", long = "quic-send-window", env = "MOQ_QUIC_SEND_WINDOW")]
 	pub send_window: Option<u64>,
