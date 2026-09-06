@@ -177,10 +177,12 @@ field.
   declare two workers' output interchangeable and splice between them; a service
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
-- **The spec home is moq-lite core, mirrored in moq-cluster**, following how
-  route cost landed. moq-lite-06 is still WIP, so this went into it rather than
-  opening an 07: ANNOUNCE_PATTERN (0x3) on the announce stream, and a
-  NAMESPACE_PATTERN parameter on moq-transport's PUBLISH_NAMESPACE/NAMESPACE.
+- **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
+  owns shared semantics and the moq-transport NAMESPACE_PATTERNS capability,
+  NAMESPACE_PATTERN parameter, and pattern withdrawal framing. moq-lite-06
+  carries ANNOUNCE_PATTERN (0x3) natively and references those semantics.
+  moq-cluster adds hop lists, costs, and pool selection when both extensions
+  are negotiated. Neither extension implies support for the other.
 - **A pattern travels as typed segments, not text.** Each wire segment is a
   kind (0 literal, 1 wildcard, 2 globstar, 3 partial = prefix + suffix) plus a
   length-prefixed value, so no glob syntax reaches the wire, an unknown kind

@@ -18,6 +18,14 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  I-D.lcurley-moq-pattern:
+    title: "MoQ Pattern Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   qmux: I-D.ietf-quic-qmux
   qmuxws:
     title: "QMux over WebSocket"
@@ -298,7 +306,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in draft-lcurley-moq-cluster. |
+|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-pattern}}. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -361,16 +369,8 @@ There MAY be multiple Announce Streams, potentially containing overlapping prefi
 
 #### Patterns {#patterns}
 A route may cover a path pattern instead of a prefix, advertised with ANNOUNCE_PATTERN (see [ANNOUNCE_PATTERN](#announce-pattern)).
-A pattern is a sequence of segments, each one of:
-
-- a literal, matching exactly that path segment;
-- a wildcard, matching any one segment;
-- a partial, a prefix and a suffix, matching any one segment that starts with the prefix and ends with the suffix without overlap;
-- a globstar, matching any run of zero or more segments, at most once per pattern.
-
-A path matches a pattern when its segments can be assigned to the pattern's segments in order, the globstar taking any number of them.
-Every segment kind matches whole segments, and a pattern is exact: a pattern with no wildcard matches one path, and a subtree is a prefix followed by a globstar.
-A prefix route is therefore the pattern ending in a globstar, and every rule for routes in this document applies to both forms.
+Matching, exactness, rebasing, and authorization follow {{I-D.lcurley-moq-pattern}}, treating each path segment as one namespace field.
+A prefix route is the pattern ending in a globstar, and every rule for routes in this document applies to both forms.
 Where an implementation spells a pattern as text, `*` is the wildcard, `**` the globstar, and a partial is its prefix, `*`, and suffix (`*.hang`, `foo*`, `foo.*.hang`); a literal never contains `*`, and a segment with more than one `*` is reserved for a later revision.
 
 A pattern route claims capability, not inventory, like any route: it says matching paths can be served, never that any exist.
@@ -421,7 +421,7 @@ The winning tier is the whole answer: a refusal from it never falls through to a
 
 Within the tier, cost and the tie-breaks of [Routing](#routing) order the routes, except that pattern routes tied at the lowest cost are a pool: a deterministic hash of the requested path against each advertiser distributes distinct paths across them, so one path always resolves the same way and a member arriving or leaving moves only its own share.
 The hash is FNV-1a: start the accumulator at `0x420C0DECB00B`, then for each byte of the requested path (segments joined by `/`, no leading or trailing `/`) followed by the eight bytes of the advertiser's Hop ID in little-endian order, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
-The advertiser is the route's first hop; a first hop of 0 identifies nothing, so such a route is a pool member of its own, keyed by the session it arrived on.
+The advertiser is the route's first hop; a first hop of 0 identifies nothing, so such a route is a pool member of its own, keyed by the session it arrived on. The receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
 
 A route resolved this way serves the request like any other, and the pattern is not consumed by it.
 A relay MUST NOT announce a path merely because it resolved it: the pattern stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
@@ -952,7 +952,7 @@ A single value rather than the Warm and Cold pair: a pattern claims capability r
 An ANNOUNCE_UPDATE referencing a pattern advertisement carries this value in both of its Route Cost fields.
 See [Resolution](#resolution) for the floor a standby seed MUST clear.
 
-Earlier versions of moq-lite have no pattern advertisement, and moq-transport's namespace advertisements are prefixes: a pattern route is not advertised to such a peer at all, and an endpoint MUST NOT send ANNOUNCE_PATTERN on a session whose version predates it.
+An endpoint MUST NOT send ANNOUNCE_PATTERN on a moq-lite session whose version predates it. A bridge MAY translate a pattern to NAMESPACE_PATTERN on a moq-transport session that negotiated {{I-D.lcurley-moq-pattern}}, preserving its matching set, and MUST otherwise suppress the pattern advertisement.
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -974,7 +974,7 @@ ANNOUNCE_END Message {
 Set to 0x1 to indicate an ANNOUNCE_END message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_PATTERN on this stream.
 Referencing an id that was never assigned, or one already retired, is a protocol violation.
 Announce IDs are never reused within a stream; a route that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START or ANNOUNCE_PATTERN.
 
@@ -1000,7 +1000,7 @@ ANNOUNCE_UPDATE Message {
 Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_PATTERN on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
 **Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
@@ -1388,6 +1388,7 @@ The `Message Length` describes the payload size on the wire.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.
 - Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
 - Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_UPDATE (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
+- Defined shared pattern semantics in draft-lcurley-moq-pattern, whose moq-transport capability is independent of clustering; moq-lite carries its native message under the lite-06 version gate.
 - Added ANNOUNCE_PATTERN (0x3): a route over a path pattern of literal, wildcard, partial (prefix and suffix within one segment), and at most one globstar segment, each matching whole segments, encoded as typed segments (kind, length, value) relative to the requested prefix rather than as text, with the hop list and a single Route Cost. It shares the Announce ID space with ANNOUNCE_START, so ANNOUNCE_END and ANNOUNCE_UPDATE apply unchanged, an update writing the cost in both fields. An unknown segment kind is skipped by its length and the advertisement ignored rather than a violation. A pattern presents under a request as the set of its residuals, one advertisement each. Not sent to a peer whose version predates it.
 - Specified resolution of a request against the routes covering its path, prefix and pattern alike: only the most specific tier is consulted (literal segments, then no globstar, then partials, then wildcards, then pinned bytes, then literal head, so a concrete path shadows every pattern), a refusal never falls through, cost and the existing tie-breaks order the tier, and pattern routes tied at the lowest cost form a pool distributed by a seeded FNV-1a hash of the requested path against the advertiser's first hop. A relay never announces a path because it resolved it; the advertiser announces the concrete path once producing. A standby seed MUST exceed any accumulated topology cost, with 2^32 RECOMMENDED.
 - Split the reserved stream error range: 32 through 47 stays reserved for the placeholders implementations emit today, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x30 NO_CAPACITY there: it permits one re-resolution within the tier excluding the refusing advertiser, and a receiver that has spent or lacks that retry resets downstream with another code. Every other code is terminal.

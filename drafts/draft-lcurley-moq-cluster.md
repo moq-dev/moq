@@ -18,6 +18,14 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  I-D.lcurley-moq-pattern:
+    title: "MoQ Pattern Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-pattern/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 informative:
 
@@ -27,7 +35,7 @@ This document defines a clustering extension for MoQ Transport {{moqt}}, used to
 Each namespace advertisement carries the ordered list of Hop IDs it has traversed, starting with the original publisher, plus the accumulated cost of that path.
 A receiver uses the list to detect routing loops and to identify which advertisements come from the same publisher, and the cost to choose between paths.
 Each endpoint declares its own Hop ID during setup, and the peer uses it to avoid advertising or serving a path that already passed through that endpoint.
-An advertisement may also be a pattern over namespaces, so a service claims what it could serve without enumerating it.
+Pattern advertisements are defined and negotiated independently by {{I-D.lcurley-moq-pattern}}; this extension supplies their routing metadata when both are enabled.
 
 --- middle
 
@@ -132,7 +140,7 @@ An assigned ID is indistinguishable on the wire from a declared one, so it ident
 This extension carries HOP_PATH and ROUTE_COST as Key-Value-Pair parameters ({{moqt}} Section 2.5).
 PUBLISH_NAMESPACE ({{moqt}} Section 10.15) already has a Parameters field.
 
-NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines an extended form used only on a session that negotiated Relay Hops:
+NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines a parameter block enabled by Relay Hops. The pattern extension can independently enable the same block:
 
 ~~~
 NAMESPACE Message (Relay Hops) {
@@ -145,12 +153,13 @@ NAMESPACE Message (Relay Hops) {
 ~~~
 
 The appended fields are encoded exactly as in PUBLISH_NAMESPACE.
-An endpoint MUST NOT append them on a session that did not negotiate the extension.
+Negotiating either Relay Hops or the pattern extension {{I-D.lcurley-moq-pattern}} enables this same parameter block on every NAMESPACE message, including a zero parameter count when empty. When both are negotiated, an endpoint appends one block containing the parameters from both extensions, not two blocks.
+An endpoint MUST NOT append the block when neither extension is negotiated, and MUST NOT include HOP_PATH or ROUTE_COST unless Relay Hops is negotiated.
 
-NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension and is not extended.
+NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension. Its pattern parameter block is present only when {{I-D.lcurley-moq-pattern}} is negotiated, irrespective of Relay Hops.
 
 An advertisement is a claim of capability, not inventory: it says namespaces beneath the advertised one can be served, never that any exists.
-That is what makes a pattern advertisement ({{namespace-pattern}}) well-formed however wide it claims, and refusal ({{selection}}) how one namespace is denied.
+Patterns and per-request refusals follow {{I-D.lcurley-moq-pattern}}.
 
 ## HOP_PATH Parameter {#hop-path}
 HOP_PATH is the ordered list of Hop IDs an advertisement has traversed, from the original publisher to the relay immediately upstream of the receiver:
@@ -182,40 +191,6 @@ Costs still accumulate across such a mesh, because each receiver adds the price 
 The original publisher seeds the value with its production cost: 0 for content it is already producing, higher for content it would have to spin up on demand, such as a standby transcoder advertising everything it *could* serve.
 A standby seed MUST exceed the largest accumulated cost a bounded HOP_PATH can carry, and `2^32` is RECOMMENDED; below that a nearby standby outranks a distant publisher already doing the work, and the mesh starts a second copy.
 
-## NAMESPACE_PATTERN Parameter {#namespace-pattern}
-NAMESPACE_PATTERN makes the advertised namespace a pattern: one Segment Kind per tuple field, in order.
-
-~~~
-NAMESPACE_PATTERN Parameter {
-  Type (vi64) = 0x40B59
-  Length (vi64)
-  Segment Kind (vi64) ...
-}
-~~~
-
-|------|----------|-------------|
-| Kind | Name     | Tuple Field |
-|-----:|:---------|:------------|
-| 0x0  | Literal  | The field's bytes. Matches exactly that field. |
-|------|----------|-------------|
-| 0x1  | Wildcard | Empty. Matches any one field. |
-|------|----------|-------------|
-| 0x2  | Globstar | Empty. Matches any run of zero or more fields; at most one per namespace. |
-|------|----------|-------------|
-| 0x3  | Partial  | Prefix Length (vi64), Prefix (..), Suffix (..). Matches any one field starting with Prefix and ending with Suffix. |
-|------|----------|-------------|
-
-A namespace matches a pattern when its fields can be assigned to the pattern's segments in order, the globstar taking any number of them.
-Every kind matches whole fields, and a pattern is exact: without the parameter an advertisement covers its namespace and everything beneath it, which is the pattern ending in a globstar.
-A receiver MUST close the session with a PROTOCOL_VIOLATION if the number of kinds differs from the number of tuple fields, a Wildcard or Globstar field is non-empty, a Partial's Prefix and Suffix are both empty, or a second Globstar appears.
-Other kinds are reserved for extensions: a receiver MUST NOT select or forward an advertisement carrying one, but MUST otherwise process the message.
-
-The parameter is sent only on a session that negotiated Relay Hops.
-{{moqt}} itself advertises only prefixes, so a pattern is not forwarded to a peer that did not negotiate this extension; it is simply not advertised there.
-Like the Track Namespace Suffix it accompanies, the pattern is relative to the subscribed prefix, and rebasing a pattern under a prefix is set-valued: each way the globstar can align with the prefix yields a distinct residual, and the publisher sends each as its own advertisement.
-A receiver MUST NOT present a pattern as a namespace that exists, and MUST discard a pattern advertisement not contained by what the sender may publish; how that authorization is expressed is out of scope.
-
-
 # Relay Behavior
 When forwarding an advertisement downstream, a relay MUST append its own Hop ID to the HOP_PATH it received, so its own ID is always the last entry.
 An advertisement arriving from an upstream that did not negotiate the extension has no HOP_PATH; the relay creates one containing a single entry for that upstream, 0 ({{zero}}) or an ID it assigned ({{assigned}}), then appends its own.
@@ -243,7 +218,7 @@ An endpoint updates an advertisement by re-sending it with new parameters **on t
 A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
 In {{moqt}} an advertisement lives for the lifetime of its stream, so an update on a *new* stream would leave two streams claiming one namespace and let the superseded one retract its replacement.
-An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
+An endpoint MUST NOT open a second stream for an advertisement identity it already maintains on this session. For patterns, identity includes the segment kinds as specified by {{I-D.lcurley-moq-pattern}}; identical tuple bytes with different kinds are distinct advertisements.
 
 An update is metadata only: it re-prices or re-routes the advertisement and carries no content claim, so a receiver MUST NOT tear down subscriptions or drop cached state merely because one arrived.
 
@@ -252,19 +227,16 @@ The expected case is a ROUTE_COST-only change, which is how a relay signals that
 
 # Path Selection {#selection}
 A receiver resolving a request against the advertisements covering its namespace, prefixes and patterns alike, consults only the most specific.
-Specificity is structural: more literal fields first, then no globstar over one, then more partials, then more wildcards, then more bytes pinned by partials, then a longer literal head, so an advertisement strictly inside another's namespaces ranks above it, a concrete namespace shadows every pattern covering it, and equally specific advertisements form one tier.
-A refusal from that tier never falls through to a less specific one.
+For prefix advertisements, prefer the longest covering prefix. When patterns are enabled, specificity and refusal follow {{I-D.lcurley-moq-pattern}}.
+Pattern support does not follow from negotiating Relay Hops; advertisements to a session without the pattern capability MUST remain prefixes.
 
 Within the tier, a receiver SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 Pattern advertisements tied at the lowest cost are a pool: a deterministic hash of the requested namespace against each advertiser distributes distinct namespaces across them.
-The hash is FNV-1a from the basis `0x420C0DECB00B`: for each byte of the requested namespace's fields joined by `/`, then each of the eight little-endian bytes of the advertiser's first Hop ID, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins, and a first Hop ID of 0 makes the advertisement a pool member of its own.
+The hash is FNV-1a from the basis `0x420C0DECB00B`: encode each requested namespace field as its byte length in eight little-endian bytes followed by its bytes, then append the advertiser's first Hop ID in eight little-endian bytes. For each encoded byte, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
+A first Hop ID of 0 makes the advertisement a pool member keyed by its incoming session: the receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
 This is advisory: a receiver MAY apply local policy such as measured RTT instead.
 
-An advertiser that will not serve a request resolved against its pattern refuses it with an error code.
-NO_CAPACITY ({{iana}}) permits the receiver ONE re-resolution within the same tier, excluding that advertiser; the exclusion is what makes the retry safe, since a retraction and a request for the slot it gave away necessarily cross.
-A receiver that has spent that retry, or has nothing to spend it on, MUST refuse downstream with another code, so the retry cannot compound hop by hop.
-Every other code, and any unrecognized one, is terminal.
-A relay MUST NOT advertise a namespace merely because it resolved it; the advertiser announces the concrete namespace once it is producing.
+NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}. Excluding the refusing advertiser excludes every route with its non-zero first Hop ID, or its incoming session when that ID is 0.
 
 An advertisement carries no content identity: nothing promises that two paths to one namespace serve interchangeable bytes.
 A receiver MUST NOT splice an active subscription across sessions; when the serving session's advertisement goes away, subscriptions through it end, and the receiver re-subscribes through the best remaining path.
@@ -307,26 +279,15 @@ This document requests two registrations in the "MOQT Setup Options" registry ({
 
 ## MOQT Message Parameters
 
-This document requests three registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
+This document requests two registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
 All are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
 
 | Value   | Name              | Carried In                   | Reference     |
 |:--------|:------------------|:-----------------------------|:--------------|
 | 0x40B57 | HOP_PATH          | PUBLISH_NAMESPACE, NAMESPACE | This Document |
 | 0x40B58 | ROUTE_COST        | PUBLISH_NAMESPACE, NAMESPACE | This Document |
-| 0x40B59 | NAMESPACE_PATTERN | PUBLISH_NAMESPACE, NAMESPACE | This Document |
 
-The Key-Value-Pair parity is load-bearing: HOP_PATH, NAMESPACE_PATTERN, and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
-
-## MOQT Error Codes
-
-This document requests one registration in the "REQUEST_ERROR Codes" registry ({{moqt}} Section 15.11.2).
-
-| Value   | Name        | Reference     |
-|:--------|:------------|:--------------|
-| 0x40B5A | NO_CAPACITY | This Document |
-
-NO_CAPACITY refuses a request the publisher could serve but has no capacity for now ({{selection}}).
+The Key-Value-Pair parity is load-bearing: HOP_PATH and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
 
 
 --- back

@@ -21,6 +21,14 @@ unchanged (an update writes the cost in both fields). The wire type maps onto
 `moq_net::path::Segment`, so the codec is a kind byte per variant and nothing
 parses text. The skew hazard below applies, and the decode side lands first.
 
+The shared semantics live in `drafts/draft-lcurley-moq-pattern.md`.
+Its moq-transport binding negotiates NAMESPACE_PATTERNS independently of
+RELAY_HOPS. Pattern-only sessions carry no cluster metadata; when both
+extensions are negotiated, NAMESPACE uses one shared parameter block.
+NAMESPACE_DONE repeats the pattern kinds to distinguish withdrawals of
+patterns with identical tuple bytes. Keep the moq-transport implementation
+aligned with that binding, including capability gating and withdrawal tests.
+
 That gate is NOT sufficient on its own. `moq-lite-06-wip` is one ALPN with no
 sub-version, and `AnnounceBroadcast::decode` rejects an unknown message type
 outright (`DecodeError::InvalidMessage`), which kills the announce stream. A
@@ -75,6 +83,8 @@ refusal, root and descendant residuals from a `**` rebase, duplicates
 aggregated into one entry, and withdrawal firing only when the last advertiser
 leaves. Cover that a pattern and a literal prefix coexist in one route table
 and that a literal-only deployment behaves exactly as it does today.
+
+## Required
 
 - [Matcher](/quest/m2/path-patterns/matcher.md) - the shared pattern
   matching, containment, and rebasing this authorizes with
