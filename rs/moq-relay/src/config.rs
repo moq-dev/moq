@@ -767,6 +767,33 @@ auth_api = "https://api.moq.dev/cluster/auth"
 		);
 	}
 
+	/// Same clap+TOML clobber guard for `auth.api_mode`. It's an `Option` so an
+	/// absent `--auth-api-mode` must not wipe a TOML-configured value during the
+	/// `update_from` re-parse.
+	#[test]
+	fn cli_does_not_clobber_toml_auth_api_mode() {
+		let _env = EnvGuard::clear(&["MOQ_AUTH_API", "MOQ_AUTH_API_MODE"]);
+
+		let toml = r#"
+[auth]
+auth_api = "https://api.moq.dev/cluster/auth"
+api_mode = "proxy"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("auth-api-mode-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.auth.api_mode,
+			Some(crate::AuthApiMode::Proxy),
+			"TOML's auth.api_mode must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// The optional system-roots policy loaded from TOML survives when omitted on the CLI.
 	#[test]
 	fn cli_does_not_clobber_toml_system_roots() {

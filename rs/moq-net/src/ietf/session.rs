@@ -1179,4 +1179,91 @@ mod tests {
 	async fn a_bidi_stream_dead_before_its_header_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
+
+	/// The bytes a publisher writes at the head of a group's unidirectional stream. Built
+	/// with the crate's own encoder so the framing can't drift from the decoder the
+	/// dispatch loop runs.
+	async fn subgroup_header(version: Version, track_alias: u64) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		writer
+			.encode(&ietf::GroupHeader {
+				track_alias,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: ietf::GroupFlags::default(),
+			})
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// A group for an alias we retired is answered with STOP_SENDING carrying the
+	/// moq-transport CANCELLED code.
+	///
+	/// Such a group is the expected tail of our own cancellation, still in flight when we
+	/// unsubscribed. moq-lite's cancel encodes to 0, which on this wire says the stream
+	/// died of an internal fault on our side, so sending that for a routine unsubscribe
+	/// distorts the publisher's error handling.
+	///
+	/// Driven over a real receive stream through the loop that sends it, which is what
+	/// makes this the test that fails if the loop stops mapping the error or stops calling
+	/// `stop` at all. `subscriber::a_retired_alias_maps_to_the_cancelled_code` owns the
+	/// mapping itself and would pass either way.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
+		const VERSION: Version = Version::Draft19;
+		const ALIAS: u64 = 7;
+
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		// The peer opens one uni stream carrying the group header and then goes quiet, so
+		// the loop is still running when the assertion is taken.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+			.with_incoming_unis(vec![subgroup_header(VERSION, ALIAS).await]);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		let subscriber = Subscriber::new(
+			TestRuntime::new(),
+			session.clone(),
+			origin,
+			Control::new(None, true),
+			None,
+			peer_setup.clone(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+		subscriber.retire_alias(ALIAS);
+
+		// Held so the trigger side stays alive for as long as the loop runs.
+		let (_goaway, goaway) = crate::goaway::Handle::new(false);
+		// The peer's SETUP has not arrived yet, which is the state a group stream racing
+		// ahead of it lands in.
+		let mut unis = std::pin::pin!(run_unis(session, subscriber, Some(peer_setup), false, VERSION, goaway));
+
+		for _ in 0..100 {
+			if let std::task::Poll::Ready(result) = futures::poll!(unis.as_mut()) {
+				panic!("the dispatch loop ended over one dropped group: {result:?}");
+			}
+			if !log.stops().is_empty() {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
+		assert_eq!(
+			log.stops(),
+			vec![crate::ietf::error::CANCELLED],
+			"the group stream must be stopped with the cancelled code",
+		);
+		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
+	}
 }

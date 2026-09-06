@@ -45,4 +45,3 @@ test per field and documents the contract in `doc/bin/relay/auth.md`.
 ## Related
 
 - [#3058](https://github.com/moq-dev/moq/issues/3058) - the issue the implementing quest closes
-- [Auth verdict](/quest/m2/auth-verdict.md) - the proxy mode whose re-check this also governs
