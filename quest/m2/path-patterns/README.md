@@ -80,5 +80,3 @@ represent `pid/*/chat`.
 
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work
-- [JWT-free verdict mode](/quest/m2/auth-verdict.md) - verdict grants use the
-  same versioned publish and subscribe pattern sets

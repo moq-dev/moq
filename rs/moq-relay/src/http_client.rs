@@ -8,12 +8,22 @@ use std::time::Duration;
 /// budget it gives a re-check, so it lives here rather than inline.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// HTTP cache visibility for this client's responses.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum CacheScope {
+	/// Honor shared freshness directives for relay-wide data.
+	#[default]
+	Shared,
+	/// Cache credential-specific grants with ordinary `max-age`.
+	Private,
+}
+
 /// Build a reqwest client with RFC-compliant HTTP caching (honors `Cache-Control`,
 /// `ETag`, `Last-Modified`) over the given TLS config. The client presents the
 /// supplied client certificate, so an mTLS-gated endpoint can identify the relay.
 ///
 /// Shared by auth (JWK / public-API fetches) and cluster (peer-list polling).
-pub(crate) fn build(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
+pub(crate) fn build(tls: &rustls::ClientConfig, scope: CacheScope) -> anyhow::Result<ClientWithMiddleware> {
 	let client = reqwest::Client::builder()
 		.timeout(REQUEST_TIMEOUT)
 		.use_preconfigured_tls(tls.clone())
@@ -30,16 +40,9 @@ pub(crate) fn build(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMidd
 			manager: MokaManager::new(MokaCache::new(10_000)),
 			options: HttpCacheOptions {
 				cache_key: Some(std::sync::Arc::new(cache_key)),
-				// A private cache, for every client built here. RFC 9111 §3.5 stops a
-				// SHARED cache storing any response to a request carrying
-				// `Authorization`, because it cannot tell one user's response from
-				// another's; `cache_key` draws exactly that line, and without this a
-				// proxy-mode endpoint sending a plain `max-age` would never be cached
-				// at all. The cost is that a private cache ignores `s-maxage`, which
-				// nothing here documents or reads (see `CacheHints`), and stores
-				// `private` responses, which only this process ever sees anyway.
+				// Credential-specific grants need private caching for plain max-age.
 				cache_options: Some(http_cache_reqwest::CacheOptions {
-					shared: false,
+					shared: matches!(scope, CacheScope::Shared),
 					..Default::default()
 				}),
 				..HttpCacheOptions::default()

@@ -170,6 +170,7 @@ pub enum AuthError {
 	#[error("key not found")]
 	KeyNotFound,
 
+	/// The proxy auth endpoint rejected the connection credential or grant.
 	#[error("the auth API refused the credential")]
 	Refused,
 
@@ -1530,7 +1531,13 @@ impl Auth {
 			Some(url_str) => Some(AuthApi {
 				base: Url::parse(&url_str).context("invalid --auth-api URL")?,
 				mode: config.api_mode.unwrap_or_default(),
-				client: Self::build_client(&tls)?,
+				client: crate::http_client::build(
+					&tls,
+					match config.api_mode.unwrap_or_default() {
+						AuthApiMode::Token => crate::http_client::CacheScope::Shared,
+						AuthApiMode::Proxy => crate::http_client::CacheScope::Private,
+					},
+				)?,
 				revalidator: Arc::default(),
 			}),
 			None => None,
@@ -1866,20 +1873,12 @@ impl Auth {
 
 	/// Wait until `token` stops being valid, then say why.
 	///
-	/// Resolves when the credential's own bound passes (a JWT `exp`, or a client
-	/// cert's `notAfter`), or when the auth API stops vouching for the grant -
-	/// because a key was disabled or replaced, a project was gated, or the API
-	/// went unreachable for long enough to fail closed. Pends forever for a token
-	/// with neither bound, so it is always safe to `select!` on.
+	/// Wait for credential expiry or withdrawal of an API grant.
 	///
-	/// Every session that authenticated through `--auth-api` carries the second
-	/// bound, anonymous ones included; mTLS peers carry neither. This is the one
-	/// seam a session loop needs: selecting on the credential's expiry alone
-	/// would keep serving through a revoked grant.
-	///
-	/// The endpoint consulted is the one that ADMITTED the session, carried on the
-	/// token itself, so a process holding several differently-configured `Auth`
-	/// instances still judges each token against the authority that issued it.
+	/// API responses with a usable positive `max-age` enable revalidation against
+	/// the admitting endpoint. Proxy rechecks replace the expiry; token-mode
+	/// rechecks retain the signed expiry. Without revalidation, only the
+	/// credential's expiry applies. With neither, this waits forever.
 	pub async fn expired(&self, token: &AuthToken) -> Expired {
 		match &token.revalidate {
 			// The loop starts from this same credential bound and each reply may move
@@ -1894,34 +1893,14 @@ impl Auth {
 		}
 	}
 
-	/// Wait until the auth API stops vouching for this session's grant.
+	/// Recheck the admission request on the endpoint's `max-age` cadence.
 	///
-	/// Re-checks ride the same cached HTTP client as admission, which is the other
-	/// half of the cost story: coalescing merges re-checks in flight at the same
-	/// moment, and the cache merges the ones that are not. Sessions start at
-	/// different times, so without it a staggered audience would each dial on its
-	/// own schedule. The price is that a re-check may be answered from an entry up
-	/// to one `max-age` old, so the revocation window is up to TWICE the
-	/// endpoint's `max-age`. Size it accordingly.
+	/// Refusals close the session immediately. Outages retry with jittered
+	/// backoff until the response's staleness window is exhausted. The current
+	/// credential expiry also bounds each in-flight request.
 	///
-	/// Re-checks ride the same cached HTTP client as admission, which is the other
-	/// half of the cost story: coalescing merges re-checks in flight at the same
-	/// moment, and the cache merges the ones that are not. Sessions start at
-	/// different times, so without it a staggered audience would each dial on its
-	/// own schedule. The price is that a re-check may be answered from an entry up
-	/// to one `max-age` old, so the revocation window is up to TWICE the
-	/// endpoint's `max-age`. Size it accordingly.
-	///
-	/// Re-checks on the endpoint's `Cache-Control: max-age` cadence and resolves
-	/// once the API refuses the replayed request or answers with a smaller grant
-	/// ([`Expired::Revoked`]), or keeps failing for the whole staleness window,
-	/// 3x the last max-age ([`Expired::Stale`]).
-	///
-	/// The two failure directions are deliberately asymmetric. A refusal is the
-	/// API answering, so it closes the session at once. Everything else is
-	/// evidence of nothing, so the session keeps SERVING through jittered
-	/// retries: a brief auth outage must not mass-disconnect a fleet's worth of
-	/// viewers. A sustained one still fails closed.
+	/// Requests share both in-flight fetches and the HTTP cache. A cached reply
+	/// may be up to one `max-age` old, so revocation can take twice that interval.
 	async fn revalidate(&self, grant: &Revalidate) -> Expired {
 		let mut schedule = grant.schedule;
 		let mut next = Instant::now() + schedule.cadence;
@@ -2064,7 +2043,7 @@ impl Auth {
 	}
 
 	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
-		crate::http_client::build(tls)
+		crate::http_client::build(tls, crate::http_client::CacheScope::Shared)
 	}
 }
 
@@ -5462,6 +5441,49 @@ api = "https://api.example.com/access"
 			matches!(result, Err(AuthError::KeyNotFound)),
 			"a kid lookup must require a key, got {result:?}"
 		);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn token_api_cache_honors_shared_freshness() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			"max-age=0, s-maxage=3600",
+			r#"{"public":{"subscribe":[""]}}"#.into(),
+		)
+		.await;
+		let auth = auth_with_api(&server).await;
+		let params = AuthParams::new("demo");
+		for _ in 0..2 {
+			auth.verify(&params).await?;
+		}
+		assert_eq!(server.received_requests().await.unwrap().len(), 1);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn proxy_api_cache_isolates_credentials_without_vary() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		for viewer in ["alice", "bob"] {
+			Mock::given(method("GET"))
+				.and(header("Authorization", format!("Bearer {viewer}")))
+				.respond_with(
+					ResponseTemplate::new(200)
+						.insert_header("Cache-Control", "max-age=3600")
+						.set_body_json(serde_json::json!({"grant": {"subscribe": [viewer]}})),
+				)
+				.expect(1)
+				.mount(&server)
+				.await;
+		}
+		let auth = auth_with_api_proxy(&server).await;
+		for viewer in ["alice", "bob", "alice", "bob"] {
+			let mut params = AuthParams::new("demo");
+			params.jwt = Some(viewer.into());
+			let token = auth.verify(&params).await?;
+			assert_eq!(token.subscribe, PathPrefixes::new([viewer]));
+		}
 		Ok(())
 	}
 
