@@ -79,6 +79,7 @@ pub struct Relay {
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
 	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// [`Self::server`] carries no QUIC listener of its own.
+	#[cfg(feature = "_quic")]
 	pub workers: Option<moq_tokio::worker::Workers>,
 
 	/// The io_uring QUIC workers, already bound and waiting for
@@ -118,6 +119,15 @@ impl Relay {
 			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
 		);
 
+		// Refused rather than ignored: a group is the whole point of the setting, and
+		// silently serving from the shared runtime instead would look like it worked.
+		#[cfg(not(feature = "_quic"))]
+		anyhow::ensure!(
+			io_uring || config.runtime.workers().is_none(),
+			"runtime.workers needs moq-relay built with a QUIC backend: noq, quinn, or quiche"
+		);
+
+		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => Some(
 				moq_tokio::worker::Workers::bind(config.listen.clone(), config.quic.clone(), worker)
@@ -125,6 +135,18 @@ impl Relay {
 			),
 			_ => None,
 		};
+
+		// What the rest of setup reads off the group, so it has one shape whether or
+		// not a QUIC backend gave us one to read.
+		#[cfg(feature = "_quic")]
+		let workers_addr = workers.as_ref().map(moq_tokio::worker::Workers::local_addr);
+		#[cfg(not(feature = "_quic"))]
+		let workers_addr: Option<std::net::SocketAddr> = None;
+		#[cfg(feature = "_quic")]
+		let workers_certificates = workers.as_ref().map(moq_tokio::worker::Workers::certificates);
+		#[cfg(not(feature = "_quic"))]
+		let workers_certificates: Option<moq_tokio::tls::Certificates> = None;
+
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let uring = match config.runtime.workers() {
 			Some(worker) if io_uring => Some(
@@ -135,9 +157,9 @@ impl Relay {
 		};
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let quic_owned_elsewhere = workers.is_some() || uring.is_some();
+		let quic_owned_elsewhere = workers_addr.is_some() || uring.is_some();
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
-		let quic_owned_elsewhere = workers.is_some();
+		let quic_owned_elsewhere = workers_addr.is_some();
 
 		#[allow(unused_mut)]
 		let mut server = match quic_owned_elsewhere {
@@ -151,8 +173,8 @@ impl Relay {
 		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let uring_addr: Option<std::net::SocketAddr> = None;
-		let addr = match (&workers, uring_addr) {
-			(Some(workers), _) => Some(workers.local_addr()),
+		let addr = match (workers_addr, uring_addr) {
+			(Some(addr), _) => Some(addr),
 			(None, Some(addr)) => Some(addr),
 			(None, None) => match server.local_addr() {
 				Ok(addr) => Some(addr),
@@ -211,8 +233,8 @@ impl Relay {
 		let uring_certificates = uring.as_ref().map(crate::uring::Workers::certificates);
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let uring_certificates: Option<moq_tokio::tls::Certificates> = None;
-		let certificates = match (&workers, uring_certificates) {
-			(Some(workers), _) => workers.certificates(),
+		let certificates = match (workers_certificates, uring_certificates) {
+			(Some(certificates), _) => certificates,
 			(None, Some(certificates)) => certificates,
 			(None, None) => server.certificates(),
 		};
@@ -254,6 +276,7 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
+			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
@@ -274,6 +297,7 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
+			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
@@ -327,34 +351,48 @@ impl Relay {
 		// reports the outcome. The group is what owns those threads, so it has to
 		// outlive the loop below: the borrow ends here, and the group is torn down
 		// after it.
+		#[cfg(feature = "_quic")]
 		let mut workers = workers;
-		let mut running = futures::stream::FuturesUnordered::new();
-		if let Some(workers) = workers.as_mut() {
-			for (server, spawner) in workers.split() {
-				let index = spawner.index();
-				let cluster = cluster.clone();
-				let auth = auth.clone();
-				let worker_shutdown = shutdown.clone();
-				let task = spawner.run(move || serve(server, cluster, auth, worker_shutdown));
-				running.push(async move {
-					match task.await {
-						Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
-						Err(err) => Err(anyhow::Error::new(err).context(format!("QUIC worker {index} stopped"))),
-					}
-				});
-			}
-		}
 
 		// Pends forever with no workers, so it composes into the `select!` either
 		// way. A worker only stops on error or on shutdown, so the first one to
 		// finish ends the relay the same way the shared accept loop does.
-		let quic_workers = async move {
-			use futures::StreamExt;
-			match running.next().await {
-				Some(res) => res,
-				None => std::future::pending().await,
+		#[cfg(feature = "_quic")]
+		let quic_workers = {
+			let mut running = futures::stream::FuturesUnordered::new();
+			if let Some(workers) = workers.as_mut() {
+				for (server, spawner) in workers.split() {
+					let index = spawner.index();
+					let cluster = cluster.clone();
+					let auth = auth.clone();
+					let worker_shutdown = shutdown.clone();
+					let task = spawner.run(move || serve(server, cluster, auth, worker_shutdown));
+					running.push(async move {
+						match task.await {
+							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
+							Err(err) => Err(anyhow::Error::new(err).context(format!("QUIC worker {index} stopped"))),
+						}
+					});
+				}
+			}
+
+			async move {
+				use futures::StreamExt;
+				match running.next().await {
+					Some(res) => res,
+					None => std::future::pending().await,
+				}
 			}
 		};
+		// No group to run, so this leg never resolves and the shared accept loop
+		// below decides the `select!` on its own.
+		#[cfg(not(feature = "_quic"))]
+		let quic_workers = std::future::pending::<anyhow::Result<()>>();
+
+		#[cfg(feature = "_quic")]
+		let has_workers = workers.is_some();
+		#[cfg(not(feature = "_quic"))]
+		let has_workers = false;
 
 		// With the QUIC listener owned by a worker group, the shared server has
 		// only the `tcp`/`unix` stream listeners left, and a config with none
@@ -362,9 +400,9 @@ impl Relay {
 		// accepting" immediately and take the healthy relay down. Pend instead;
 		// the workers are what serve.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let quic_on_workers = workers.is_some() || uring_serving;
+		let quic_on_workers = has_workers || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
-		let quic_on_workers = workers.is_some();
+		let quic_on_workers = has_workers;
 		// Iroh is not an `accept(2)` listener, so it never shows up in the
 		// health list; pending on the shared loop would leave its endpoint
 		// unpolled and every inbound `iroh://` connection hanging.
@@ -399,6 +437,7 @@ impl Relay {
 
 		// Explicitly, so the joins land on the blocking pool rather than on the
 		// executor thread this future happens to be running on.
+		#[cfg(feature = "_quic")]
 		if let Some(workers) = workers {
 			workers.shutdown().await;
 		}
@@ -478,4 +517,21 @@ pub async fn serve(server: moq_tokio::Server, cluster: Cluster, auth: Auth, shut
 	}
 
 	anyhow::bail!("stopped accepting connections")
+}
+
+#[cfg(all(test, not(feature = "_quic")))]
+mod tests {
+	#[tokio::test]
+	async fn workers_require_a_quic_backend() {
+		let mut config = crate::Config::default();
+		config.runtime.workers = Some(1);
+		let error = match super::Relay::load(config).await {
+			Ok(_) => panic!("workers accepted without a QUIC backend"),
+			Err(error) => error,
+		};
+		assert_eq!(
+			error.to_string(),
+			"runtime.workers needs moq-relay built with a QUIC backend: noq, quinn, or quiche"
+		);
+	}
 }

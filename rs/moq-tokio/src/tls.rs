@@ -14,23 +14,15 @@
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "aws-lc-rs",
-	feature = "ring"
-))]
+#[cfg(feature = "_certs")]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::{fs, io};
 
-#[cfg(all(
-	any(feature = "quinn", feature = "noq", feature = "quiche"),
-	any(feature = "aws-lc-rs", feature = "ring")
-))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
+
 /// Errors loading or generating TLS certificates and keys.
 ///
 /// Shared by the client TLS config and the quinn/noq servers so each backend's
@@ -153,7 +145,7 @@ pub enum Error {
 	Rustls(#[from] rustls::Error),
 
 	/// The mTLS client-certificate verifier couldn't be built from the configured roots.
-	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
@@ -162,7 +154,7 @@ pub enum Error {
 	ServerVerifier(#[source] rustls::client::VerifierBuilderError),
 
 	/// Generating a self-signed certificate failed.
-	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
@@ -176,7 +168,7 @@ pub enum Error {
 	Deprecated(crate::Deprecated),
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 crate::error::from_message! {
 	rcgen::Error => Rcgen,
 }
@@ -220,13 +212,7 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 /// quinn and noq backends need. quiche hands the key to boringssl itself, so the
 /// DER is kept alongside the signer instead of being dropped once loaded, and one
 /// certificate source feeds every backend.
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "aws-lc-rs",
-	feature = "ring"
-))]
+#[cfg(feature = "_certs")]
 pub(crate) struct Certified {
 	/// The chain and its rustls signer, in leaf-first order.
 	pub rustls: Arc<rustls::sign::CertifiedKey>,
@@ -235,13 +221,7 @@ pub(crate) struct Certified {
 	pub key: PrivateKeyDer<'static>,
 }
 
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "aws-lc-rs",
-	feature = "ring"
-))]
+#[cfg(feature = "_certs")]
 impl Certified {
 	/// Load `chain` and `key`, building the rustls signer and keeping the DER.
 	pub(crate) fn new(
@@ -270,13 +250,7 @@ impl Certified {
 	}
 }
 
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "aws-lc-rs",
-	feature = "ring"
-))]
+#[cfg(feature = "_certs")]
 impl fmt::Debug for Certified {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		// Never derive: the DER private key would print in full.
@@ -682,6 +656,8 @@ impl CustomRoots {
 		read_roots(&self.paths)
 	}
 
+	/// Only a build that reloads has a second set of roots to install.
+	#[cfg(feature = "watch")]
 	fn replace(&self, roots: Vec<CertificateDer<'static>>) {
 		*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
 	}
@@ -1173,10 +1149,9 @@ fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certifi
 	Certified::new(provider, vec![cert.into()], key.into())
 }
 
-#[cfg(all(
-	not(any(feature = "aws-lc-rs", feature = "ring")),
-	any(feature = "quinn", feature = "noq", feature = "quiche")
-))]
+/// Refuse at runtime what the crate cannot do at all: quiche brings its own TLS,
+/// so it serves certificates without a rustls provider to sign a fresh one with.
+#[cfg(all(feature = "_certs", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<Certified> {
 	Err(Error::NoCryptoProvider)
 }
@@ -1399,7 +1374,11 @@ impl Listen {
 	}
 
 	/// Disable cached client authentication when client authorization can change.
-	#[cfg(feature = "watch")]
+	///
+	/// Gated with the rest of the serving side rather than with `watch`: a pinned
+	/// [`peers`](Self::peers) set changes while the process runs whether or not
+	/// anything is reloading from disk.
+	#[cfg(feature = "_certs")]
 	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
 		if !self.root.is_empty() || self.peers.is_some() {
 			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
@@ -1428,7 +1407,7 @@ impl Listen {
 	/// The one place the three server backends agree on what mTLS means here, so
 	/// a new mode lands once rather than in each of them: pinned [`peers`](Self::peers),
 	/// else optional CA-rooted [`root`](Self::root), else nothing.
-	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	pub(crate) fn client_auth(
 		&self,
 		provider: crypto::Provider,
@@ -1449,7 +1428,7 @@ impl Listen {
 	}
 
 	/// Build the optional-client-auth verifier, reloading configured roots in place.
-	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	pub(crate) fn client_verifier(
 		&self,
 		provider: crypto::Provider,
@@ -1472,7 +1451,7 @@ impl Listen {
 		Ok(initial)
 	}
 
-	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	fn build_client_verifier(
 		paths: &[PathBuf],
 		provider: &crypto::Provider,
@@ -1485,14 +1464,17 @@ impl Listen {
 	}
 
 	/// Build a [`rustls::ServerConfig`] for a plain-TLS (non-QUIC) server, e.g. an
-	/// RTMPS or HTTPS listener fronting the QUIC endpoint, reusing the QUIC
-	/// backend's certificate handling: on-disk `cert`/`key` pairs, `generate`
-	/// self-signed certs, and optional mTLS `root` client CAs.
+	/// RTMPS or HTTPS listener fronting the QUIC endpoint, reusing the same
+	/// certificate handling the QUIC listeners use: on-disk `cert`/`key` pairs,
+	/// `generate` self-signed certs, and optional mTLS `root` client CAs.
+	///
+	/// Available whenever a crypto provider is compiled in, so a build with no
+	/// QUIC backend at all can still terminate TLS.
 	///
 	/// `alpn` sets the advertised ALPN protocols (e.g.
 	/// `vec![b"h2".to_vec(), b"http/1.1".to_vec()]`); pass an empty list for a
 	/// protocol like RTMPS that doesn't use ALPN.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
 		server_config(self, alpn)
@@ -1500,7 +1482,7 @@ impl Listen {
 }
 
 /// Build a [`rustls::ServerConfig`] from a [`Listen`] for a plain-TLS listener.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 	let provider = crypto::provider();
 
@@ -1589,10 +1571,12 @@ impl PeerIdentity {
 
 /// The certificates a server is currently serving.
 ///
-/// Only a QUIC backend serves TLS of its own, so nothing else populates this.
+/// The chains themselves are kept only where a resolver picks between them per
+/// SNI, so a build without server-side certificate handling carries fingerprints
+/// alone.
 #[derive(Debug, Default)]
 pub(crate) struct Info {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "_certs")]
 	pub(crate) certs: Vec<Arc<Certified>>,
 	pub(crate) fingerprints: Vec<String>,
 }
@@ -1642,7 +1626,7 @@ impl Certificates {
 			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
 			.collect();
 		Ok(Self::new(Arc::new(RwLock::new(Info {
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			#[cfg(feature = "_certs")]
 			certs: Vec::new(),
 			fingerprints,
 		}))))
@@ -1724,13 +1708,13 @@ impl rustls::client::danger::ServerCertVerifier for ReloadingServerVerifier {
 }
 
 /// Delegates each client-certificate check to the latest valid root verifier.
-#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 #[derive(Debug)]
 struct ReloadingClientVerifier {
 	inner: Reloading<dyn rustls::server::danger::ClientCertVerifier>,
 }
 
-#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 impl ReloadingClientVerifier {
 	fn new(
 		paths: &[PathBuf],
@@ -1743,7 +1727,7 @@ impl ReloadingClientVerifier {
 	}
 }
 
-#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 impl rustls::server::danger::ClientCertVerifier for ReloadingClientVerifier {
 	fn offer_client_auth(&self) -> bool {
 		self.inner.current().offer_client_auth()
@@ -1843,21 +1827,21 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 /// The mirror of [`FingerprintVerifier`] on the accept side, with one difference
 /// that matters: the allowed set is read per handshake rather than fixed when the
 /// listener was built, because a mesh learns its members while it runs.
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 #[derive(Debug)]
 pub(crate) struct PeerVerifier {
 	provider: crypto::Provider,
 	peers: Peers,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 impl PeerVerifier {
 	pub fn new(provider: crypto::Provider, peers: Peers) -> Self {
 		Self { provider, peers }
 	}
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 impl rustls::server::danger::ClientCertVerifier for PeerVerifier {
 	fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
 		// Self-signed identities chain to nothing, so there is no issuer to hint at.
@@ -2797,7 +2781,7 @@ mod tests {
 
 // ── ServeCerts ──────────────────────────────────────────────────────
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<Info>>,
@@ -2806,7 +2790,7 @@ pub(crate) struct ServeCerts {
 	generated: RwLock<Option<Arc<Certified>>>,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
@@ -2934,7 +2918,7 @@ impl ServeCerts {
 	}
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "_certs")]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		Some(self.select(client_hello.server_name())?.rustls.clone())

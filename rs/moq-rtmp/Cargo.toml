@@ -55,6 +55,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
-# `rustls::ServerConfig`; `quinn` pulls in a backend so `tls::Server` is built.
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "quinn"] }
+# `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
+# unified into every other crate a `--workspace` build selects, which is exactly
+# what hid moq-tokio's backend-less build from the nightly feature matrix.
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }

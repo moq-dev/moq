@@ -115,6 +115,9 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            # Per-crate feature matrices (`just rs features`), where workspace
+            # unification would otherwise hide a broken single-crate build.
+            cargo-hack
             cargo-nextest
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the

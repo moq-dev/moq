@@ -378,17 +378,21 @@ tokio-features:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    cargo check --locked -p moq-tokio --no-default-features
-    cargo check --locked -p moq-tokio --all-features
-    cargo check --locked -p moq-tokio --no-default-features --features quiche
-    cargo check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
-    cargo check --locked -p moq-tokio --no-default-features --features quinn,ring
-    cargo check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
-    cargo check --locked -p moq-tokio --no-default-features --features noq,ring
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features
+    {{ cargo_compile }} check --locked -p moq-tokio --all-features
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quiche
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quinn,ring
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
+    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features noq,ring
+
+    for feature in aws-lc-rs ring tcp uds websocket; do
+        {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features "$feature"
+    done
 
     want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
     for backend in quinn noq; do
-        if output=$(cargo check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
+        if output=$({{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
             echo "rs: moq-tokio with only $backend should reject its missing crypto provider" >&2
             exit 1
         fi
@@ -543,6 +547,10 @@ wasm-fix *args:
 audit:
     cargo deny check --show-stats
 
+# Verify relay startup validation without a QUIC backend.
+relay-minimal:
+    {{ cargo_compile }} nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
+
 # The feature permutations `check` leaves out. Each is a full workspace compile
 # at a feature set that shares almost no artifacts with the default one (~6min
 # for the all-features clippy alone), which is why this is nightly rather than
@@ -552,6 +560,11 @@ audit:
 # moq-video's PipeWire capture, quiche, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
 #
+# Cargo unifies features across a workspace selection. Check each package alone
+# to catch missing dependencies in minimal builds. The nightly sweep adds each
+# feature to aws-lc-rs; tokio-features checks provider-free transports, standalone
+# providers, and the intentional refusal of rustls QUIC without a provider.
+#
 # Both carry `--all-targets`. A `#[cfg(test)]` module leans on whatever the
 # default features happened to import, so a test that only compiles by accident
 # is invisible to a lib-only check.
@@ -559,6 +572,12 @@ audit:
 # Compile the workspace at the feature extremes.
 features:
     {{ cargo_compile }} check --locked --workspace --all-targets --no-default-features
+    {{ cargo_compile }} hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
+    {{ cargo_compile }} check --locked -p moq-relay --no-default-features
+    just rs relay-minimal
+    {{ cargo_compile }} check --locked -p moq-cli --no-default-features
+    {{ cargo_compile }} check --locked -p moq-bench --no-default-features
+    {{ cargo_compile }} check --locked -p moq-boy --no-default-features
     {{ cargo_compile }} clippy --locked --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace --all-features --no-deps
     {{ cargo_compile }} nextest run --locked --workspace --all-targets --all-features
@@ -614,6 +633,10 @@ test-changed $FILES:
     	ALL)   just rs test --workspace ;;
     	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
+
+    if [[ "$packages" == "ALL" ]] || just rs _names "$packages" | grep -qw moq-relay; then
+        just rs relay-minimal
+    fi
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
