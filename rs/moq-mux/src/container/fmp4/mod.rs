@@ -358,8 +358,6 @@ pub(crate) fn encode(
 		track_id,
 		timescale,
 		sequence_number,
-		// A published fragment keeps the source's presentation times: it is addressed by them.
-		origin: 0,
 	};
 	let bytes = encode_fragment(info, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
@@ -386,42 +384,29 @@ pub(crate) struct FragmentInfo {
 	pub timescale: moq_net::Timescale,
 	/// The `mfhd` sequence number, informative only.
 	pub sequence_number: u32,
-	/// Where the fragment's timeline puts zero, in ticks at `timescale`.
-	///
-	/// Every timestamp the fragment writes is measured from here, so a consumer authoring a
-	/// timeline of its own (an export whose file must start at zero, not at the publisher's
-	/// wall-clock age) subtracts one shared value across every track rather than shifting each
-	/// one apart. Zero keeps the source's own presentation times, which is what a
-	/// self-contained fragment fetched by absolute time needs.
-	pub origin: u64,
 }
 
 /// Encode a single-traf moof+mdat fragment anchored at its own first frame.
 ///
-/// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time relative to
-/// [`FragmentInfo::origin`], so it decodes without reference to whatever came before it. To
-/// cut a stream into one fragment per frame, on a single continuous decode timeline, use
-/// [`Fragmenter`].
+/// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
+/// without reference to whatever came before it. To cut a stream into one fragment per
+/// frame, on a single continuous decode timeline, use [`Fragmenter`].
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<Bytes> {
 	let Some(first) = frames.first() else {
 		return Ok(Bytes::new());
 	};
-	encode_at(
-		info,
-		rebased_ticks(first.timestamp, info.timescale, info.origin)?,
-		frames,
-	)
+	encode_at(info, base_ticks(first, info.timescale)?, frames)
 }
 
-/// A presentation time as a tick count at the track's timescale, measured from `origin`.
+/// A frame's presentation time as a tick count at the track's timescale.
 ///
-/// A timestamp before the origin clamps to zero rather than wrapping. That only happens when a
-/// track delivers its first frame after the origin was already fixed and behind it, which the
-/// export's ascending cross-track order otherwise rules out.
-fn rebased_ticks(timestamp: Timestamp, timescale: moq_net::Timescale, origin: u64) -> Result<u64> {
-	Ok(timestamp_ticks(timestamp, timescale)?.saturating_sub(origin))
+/// When the importer preserved the source scale (the common passthrough case) this is a no-op;
+/// otherwise it's a single rescale rather than the legacy `micros * scale / 1_000_000`
+/// round-trip.
+fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> Result<u64> {
+	timestamp_ticks(frame.timestamp, timescale)
 }
 
 /// Round an absolute timestamp to its nearest tick at the output scale.
@@ -438,10 +423,9 @@ fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Resul
 /// to learn the moof size, then again with `trun.data_offset` pointing past
 /// the moof and mdat header.
 ///
-/// `base_dts` is already at the track's timescale and already measured from
-/// [`FragmentInfo::origin`], so it is the same unit the `trun` sample durations are written
-/// in. That's what lets [`Fragmenter`] carry a timeline across calls without a rounding step
-/// between them.
+/// `base_dts` is already at the track's timescale, so it is the same unit the `trun` sample
+/// durations are written in. That's what lets [`Fragmenter`] carry a timeline across
+/// calls without a rounding step between them.
 ///
 /// Frames arrive in decode order carrying presentation timestamps. DTS is authored by
 /// accumulating sample durations from `base_dts`, and each sample stores `PTS - DTS` as its
@@ -454,7 +438,6 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 		track_id,
 		timescale,
 		sequence_number,
-		origin,
 	} = info;
 
 	use mp4_atom::Encode;
@@ -472,7 +455,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
 			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
-			let pts = i128::from(rebased_ticks(f.timestamp, timescale, origin)?);
+			let pts = i128::from(timestamp_ticks(f.timestamp, timescale)?);
 			let cts = pts - i128::from(dts);
 			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
 
@@ -1037,7 +1020,6 @@ mod tests {
 			track_id,
 			timescale,
 			sequence_number,
-			origin: 0,
 		}
 	}
 

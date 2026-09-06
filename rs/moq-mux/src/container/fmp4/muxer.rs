@@ -293,9 +293,6 @@ impl Muxer {
 			track_id: TRACK_ID,
 			timescale: self.timescale,
 			sequence_number: sequence,
-			// A fetch-on-demand fragment is addressed by its real presentation time, so it
-			// keeps the source's timeline rather than starting one of its own.
-			origin: 0,
 		}
 	}
 }

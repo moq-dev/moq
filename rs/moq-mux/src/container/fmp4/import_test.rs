@@ -480,7 +480,6 @@ fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> s
 		track_id,
 		timescale,
 		sequence_number,
-		origin: 0,
 	}
 }
 

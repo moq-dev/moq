@@ -10,7 +10,7 @@ pub(crate) struct Live {
 	pub(crate) track: crate::container::Producer<crate::catalog::hang::Container>,
 	pub(crate) catalog: crate::catalog::Producer,
 	consumer: moq_net::broadcast::Consumer,
-	broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::broadcast::Producer,
 }
 
 impl Live {
@@ -19,44 +19,19 @@ impl Live {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = Self::create(
-			&mut broadcast,
-			&mut catalog,
-			name,
-			hang::catalog::PRIORITY.video,
-			insert,
-		);
+		let track = broadcast
+			.create_track(
+				broadcast.unique_name(name),
+				hang::container::track_info(hang::catalog::PRIORITY.video),
+			)
+			.unwrap();
+		insert(&mut catalog, track.name().to_string());
 		Self {
-			track,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog,
 			consumer,
-			broadcast,
+			_broadcast: broadcast,
 		}
-	}
-
-	/// Another rendition on the same broadcast, for a test that needs more than one track.
-	pub(crate) fn add(
-		&mut self,
-		name: &str,
-		priority: u8,
-		insert: impl FnOnce(&mut crate::catalog::Producer, String),
-	) -> crate::container::Producer<crate::catalog::hang::Container> {
-		Self::create(&mut self.broadcast, &mut self.catalog, name, priority, insert)
-	}
-
-	fn create(
-		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: &mut crate::catalog::Producer,
-		name: &str,
-		priority: u8,
-		insert: impl FnOnce(&mut crate::catalog::Producer, String),
-	) -> crate::container::Producer<crate::catalog::hang::Container> {
-		let name = broadcast.unique_name(name);
-		let track = broadcast
-			.create_track(name, hang::container::track_info(priority))
-			.unwrap();
-		insert(catalog, track.name().to_string());
-		crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
 	}
 
 	/// One Avc3-shape H.264 rendition (320x240 at 30 fps).
