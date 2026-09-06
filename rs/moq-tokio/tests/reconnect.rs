@@ -60,8 +60,8 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 /// Returns the port, a receiver yielding every accepted session (so a test can
 /// drain one), and the listener task. The free-port probe can lose a race with
 /// another test between the probe closing and the real bind, so retry rather
-/// than panicking in `init`.
-fn spawn_server() -> (
+/// than panicking in `listen`.
+async fn spawn_server() -> (
 	u16,
 	tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
 	tokio::task::JoinHandle<()>,
@@ -73,13 +73,13 @@ fn spawn_server() -> (
 
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		let Ok(server) = config.init(Default::default()) else {
+		let server = config.init(Default::default()).expect("init server");
+		let Ok(mut server) = server.listen().await else {
 			continue;
 		};
 
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let handle = tokio::spawn(async move {
-			let mut server = server.listen().await.expect("listen");
 			while let Some(request) = server.accept().await {
 				let origin = moq_tokio::origin::spawn(Hop::random());
 				match request.with_publisher(&origin).ok().await {
@@ -94,15 +94,6 @@ fn spawn_server() -> (
 		return (port, sessions, handle);
 	}
 	panic!("could not bind a free TCP port after 20 attempts");
-}
-
-/// Wait for a listener to come up, so the first dial isn't racing the bind.
-async fn wait_listening(port: u16) {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
-	while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-		assert!(std::time::Instant::now() < deadline, "port {port} never came up");
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
 }
 
 /// A client that redials fast, so a refused redirect lands back on the original
@@ -127,10 +118,8 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 /// choose a host at all.
 #[tokio::test]
 async fn a_redirect_to_another_host_is_refused_by_default() {
-	let (port_a, mut sessions_a, _task_a) = spawn_server();
-	let (port_b, mut sessions_b, _task_b) = spawn_server();
-	wait_listening(port_a).await;
-	wait_listening(port_b).await;
+	let (port_a, mut sessions_a, _task_a) = spawn_server().await;
+	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
 
 	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let _connection = quick_client(Default::default()).connect(url);
@@ -162,10 +151,8 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 /// indistinguishable from ignoring the URI outright.
 #[tokio::test]
 async fn follow_still_honors_a_cross_host_redirect() {
-	let (port_a, mut sessions_a, _task_a) = spawn_server();
-	let (port_b, mut sessions_b, _task_b) = spawn_server();
-	wait_listening(port_a).await;
-	wait_listening(port_b).await;
+	let (port_a, mut sessions_a, _task_a) = spawn_server().await;
+	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
 
 	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let _connection = quick_client(moq_tokio::Redirect::Follow).connect(url);
