@@ -3,8 +3,8 @@
 ## Goal
 
 VAAPI encodes H.264 and H.265 from a DMA-BUF without a download, decodes at
-all, and an always-on VAAPI binary loads on a host with no libva. Every piece
-needs a `moq-dev/vaapi` release first.
+all, and the `vaapi` feature costs a consumer nothing at build time so it can
+return to default-on. Every piece needs a `moq-dev/vaapi` release first.
 
 ## Plan
 
@@ -25,14 +25,17 @@ the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to
 `VAProfileH264Main` / `VAEntrypointEncSlice`, so exposing an HEVC encoder is a
 change to that crate, not a flag here.
 
-**Loading.** `moq-vaapi` 0.0.2 links libva rather than dlopening it: the
-binary carries `NEEDED libva.so.2` and `libva-drm.so.2`, so a libva-less host
-fails at process load, before any Rust probe could run. That is why the
-NVENC-style driver probe cannot help here, and why `nvenc` and `vaapi` are
-default-on opt-out features today so a self-compiler can drop the dependency.
-The fix is restoring the documented `vaapi_dlopen` design in the external
-crate (no `cargo:rustc-link-lib`, no `DT_NEEDED`), and only then adding the
-probe on this side.
+**Build cost.** `moq-vaapi` 0.0.3 dlopens libva (no `DT_NEEDED`), so a
+libva-less host starts and `backend::open` falls through to the next encoder.
+What remains is the build side: its build script runs bindgen over the
+vendored libva headers, so every consumer needs libclang on the build host.
+That is why `vaapi` is off by default while `nvidia` is on. Commit the
+generated bindings to the crate and drop the build script and the bindgen
+dependency, as `moq-nvenc` does: the output is portable (layout tests off,
+fixed-width types, `c_char` left symbolic), so one checked-in file serves
+every Linux target. Then the feature can return to default-on here. The
+`v4l2` feature has the same shape, but its bindgen lives in the third-party
+`v4l` crate, so that is a separate decision.
 
 Note what is already fine: a host with libva present but no usable VA driver
 already falls back cleanly, since `Encoder::new` returns `Err` and
@@ -41,4 +44,5 @@ already falls back cleanly, since `Encoder::new` returns `Err` and
 ## Required
 
 - A `moq-dev/vaapi` release exposing an HEVC encoder, the decode half and a
-  VPP wrapper, and restoring the `vaapi_dlopen` design
+  VPP wrapper, and shipping pre-generated bindings instead of a bindgen build
+  script

@@ -88,7 +88,8 @@ moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3
 ```
 
 Video goes through the platform hardware encoder (VideoToolbox, Media
-Foundation, NVENC, VAAPI, V4L2 M2M) with a built-in H.264 software fallback;
+Foundation, NVENC, and with the opt-in `vaapi` / `v4l2` features VAAPI and V4L2
+M2M) with a built-in H.264 software fallback;
 audio is Opus. The camera is opened only while someone is watching, and
 `--bitrate` is the opening ceiling. Backends with live bitrate control lower it
 to fit the connection's bandwidth estimate. `moq devices` prints every source

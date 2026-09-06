@@ -26,7 +26,9 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
-# Enable the NVIDIA hardware codecs (default-off at the workspace level).
+# Enable the NVIDIA and VAAPI hardware codecs (default-off at the workspace
+# level). Both dlopen their driver at runtime; `vaapi` also runs bindgen at build
+# time, so building libmoq on Linux needs libclang (the dev shell carries it).
 moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
