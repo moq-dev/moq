@@ -84,6 +84,13 @@ priority order, each with a one-line summary:
   links resolve, the index matches the file tree, headings stay inside the set
   above, and `Required` stays acyclic. `just check` runs it on any branch
   touching `quest/`.
+- `quest ready <quest>` reads the same section the other way: it prints what
+  blocks that quest, one per line, expanding a required questline into the
+  quests it still holds. `quest ready` with no path lists every ready quest in
+  tree order. Both exit 0, so the printed list is the answer: no output means
+  ready. Run it as `cargo run --quiet --locked --package quest -- ready ...`.
+  It reads the tree and nothing else, so a quest an unrelated PR already
+  finished still reports ready; that question is GitHub's.
 
 ## Creation
 

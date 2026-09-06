@@ -69,11 +69,11 @@ Batch the questions; do not spend a round per quest. The choices are **start**,
 **delete**, and **leave**.
 
 Offer **start** only for a ready quest: `quest/AGENTS.md` executes one only when
-it has no `Required` section. For work an agent cannot do - a decision that is
-a conversation, a credential only the user can mint, or verification this
-machine cannot run, such as a Linux-only build or a benchmark whose exit
-criteria is a measured before/after - recommend **leave** and name what would
-unblock it.
+it has no `Required` section, which `quest ready` lists and, given a path,
+explains. For work an agent cannot do - a decision that is a conversation, a
+credential only the user can mint, or verification this machine cannot run,
+such as a Linux-only build or a benchmark whose exit criteria is a measured
+before/after - recommend **leave** and name what would unblock it.
 
 ## Spawning
 

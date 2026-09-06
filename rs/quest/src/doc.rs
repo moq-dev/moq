@@ -40,6 +40,23 @@ pub struct Link {
 	pub position: Position,
 }
 
+/// One top-level list entry: the shape a `Required` blocker and a `Quests`
+/// index entry both have.
+#[derive(Clone, Debug)]
+pub struct Entry {
+	/// 1-based source line, for findings.
+	pub line: usize,
+	/// The enclosing `## Heading`, or `None` above the first one.
+	pub section: Option<String>,
+	/// The rendered text with whitespace collapsed, so a bullet that wrapped
+	/// onto a second line reads as the one line it renders as.
+	pub text: String,
+	/// The destination of the link that opens the entry, if one does. This is
+	/// the [`Position::Entry`] link, so it is a dependency rather than a
+	/// sentence that happens to mention one.
+	pub target: Option<String>,
+}
+
 /// One `# ` or `## ` heading as the rules need to see it.
 #[derive(Clone, Debug)]
 pub struct Heading {
@@ -63,15 +80,23 @@ pub struct Doc {
 	pub headings: Vec<Heading>,
 	/// Every link in the document, in source order.
 	pub links: Vec<Link>,
-	/// Sections holding at least one top-level list item, so a heading left
-	/// behind by its last entry can be told from one that still has entries.
-	pub sections_with_entries: Vec<String>,
+	/// Every top-level list item, in source order. A heading left behind by its
+	/// last entry has none, and a `Required` blocker is one of these whether or
+	/// not it carries a link.
+	pub entries: Vec<Entry>,
 }
 
 impl Doc {
 	/// Whether the document has this exact `## ` heading.
 	pub fn has(&self, heading: &str) -> bool {
 		self.headings.iter().any(|h| h.text == heading)
+	}
+
+	/// The top-level entries under a `## ` section, in source order.
+	pub fn entries(&self, section: &str) -> impl Iterator<Item = &Entry> {
+		self.entries
+			.iter()
+			.filter(move |e| e.section.as_deref() == Some(section))
 	}
 
 	/// A questline is a `README.md`; everything else is an executable quest.
@@ -105,7 +130,8 @@ impl Doc {
 		let mut title = None;
 		let mut headings = Vec::new();
 		let mut links = Vec::new();
-		let mut sections_with_entries = Vec::new();
+		let mut entries: Vec<Entry> = Vec::new();
+		let mut entry: Option<Entry> = None;
 		let mut section: Option<String> = None;
 
 		// Depth of nesting, so a sub-list inside an entry does not read as a
@@ -151,6 +177,7 @@ impl Doc {
 						}
 					}
 					item_depth = 0;
+					entry = None;
 					fresh = false;
 				}
 				Event::Start(Tag::BlockQuote(..)) => {
@@ -162,17 +189,24 @@ impl Doc {
 					fresh = false;
 				}
 				Event::Start(Tag::Item) => {
+					if item_depth == 0 && quote_depth == 0 {
+						entry = Some(Entry {
+							line: lines.line_of(range.start),
+							section: section.clone(),
+							text: String::new(),
+							target: None,
+						});
+					}
 					item_depth += 1;
 					fresh = true;
-					if item_depth == 1
-						&& quote_depth == 0
-						&& let Some(name) = &section
-						&& !sections_with_entries.iter().any(|s| s == name)
-					{
-						sections_with_entries.push(name.clone());
-					}
 				}
 				Event::End(TagEnd::Item) => {
+					if item_depth == 1
+						&& let Some(mut done) = entry.take()
+					{
+						done.text = collapse(&done.text);
+						entries.push(done);
+					}
 					item_depth = item_depth.saturating_sub(1);
 					fresh = false;
 				}
@@ -188,6 +222,11 @@ impl Doc {
 						Position::Inside
 					};
 					fresh = false;
+					if position == Position::Entry
+						&& let Some(entry) = entry.as_mut()
+					{
+						entry.target = Some(dest_url.to_string());
+					}
 					links.push(Link {
 						line: lines.line_of(range.start),
 						section: section.clone(),
@@ -203,6 +242,8 @@ impl Doc {
 				Event::Text(ref t) | Event::Code(ref t) => {
 					if let Some((_, _, buf)) = heading.as_mut() {
 						buf.push_str(t);
+					} else if let Some(entry) = entry.as_mut() {
+						entry.text.push_str(t);
 					}
 					if !t.trim().is_empty() {
 						fresh = false;
@@ -211,7 +252,11 @@ impl Doc {
 				Event::Start(Tag::Emphasis | Tag::Strong | Tag::Paragraph)
 				| Event::End(TagEnd::Emphasis | TagEnd::Strong) => {}
 				Event::End(TagEnd::Paragraph) => fresh = false,
-				Event::SoftBreak | Event::HardBreak => {}
+				Event::SoftBreak | Event::HardBreak => {
+					if let Some(entry) = entry.as_mut() {
+						entry.text.push(' ');
+					}
+				}
 				_ => {
 					if item_depth > 0 {
 						fresh = false;
@@ -225,9 +270,15 @@ impl Doc {
 			title,
 			headings,
 			links,
-			sections_with_entries,
+			entries,
 		}
 	}
+}
+
+/// One line of whitespace-separated words, so a wrapped or loosely indented
+/// bullet prints the way it renders.
+fn collapse(text: &str) -> String {
+	text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Byte offset -> 1-based line number, so findings can name a line.

@@ -7,13 +7,18 @@ Before you begin, read `quest/AGENTS.md` completely.
 
 Resolve an optional argument to a base questline directory under `quest/`, defaulting to `quest/` itself.
 
-Find every ready quest: one with no `Required` section. Questline `README.md`s are never executed, so exclude them:
+Find every ready quest, filtered to the base. The tool reads the `Required`
+sections the same way `quest check` validates them and excludes questline
+`README.md`s, which are never executed:
 
 ```bash
-rg --files-without-match '^## Required$' <base> --glob '*.md' --glob '!README.md' --glob '!AGENTS.md' --glob '!CLAUDE.md'
+set -o pipefail
+cargo run --quiet --locked --package quest -- ready | awk -v base="<base>" 'BEGIN { sub(/\/$/, "", base); base = base "/" } index($0, base) == 1'
 ```
 
-No output (rg exits 1) means the questline has no ready work; say so.
+No output means the questline has no ready work; say so. To explain one quest,
+`quest ready <path>` prints its blockers, a required questline expanded into the
+quests it still holds. Both always exit 0.
 
 Drop candidates that are already claimed: a local or remote branch named after
 the quest path that is recent or has an open PR. A stale branch (old, no open
