@@ -50,10 +50,6 @@ same path are indistinguishable at the endpoint.
   absent for a nameless cert.
   Update the mTLS and auth API sections of `doc/bin/relay/auth.md`.
 
-## Required
-
-- [Auth verdict](/quest/m2/auth-verdict.md) - lands the proxy mode, the grant response, and the `host` field this builds on
-
 ## Closes
 
 - [#3087](https://github.com/moq-dev/moq/issues/3087) - close this issue when the quest finishes

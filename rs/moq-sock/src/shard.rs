@@ -1,4 +1,4 @@
-//! Steering a `SO_REUSEPORT` group by QUIC connection ID.
+//! Forming and steering a `SO_REUSEPORT` group by QUIC connection ID.
 //!
 //! A reuseport group left to itself is picked by hashing the packet's 4-tuple,
 //! which is wrong for QUIC: a connection is identified by its connection ID, not
@@ -9,6 +9,29 @@
 //!
 //! The fix is the standard one: the server chooses connection IDs that say which
 //! member owns them, and a filter on the group reads that back.
+//!
+//! # The group
+//!
+//! [`Group`] is the whole entry point. It takes the port, fixes the member
+//! count, and hands out one [`Member`] per slot in index order; binding a member
+//! is the only way to join the group, and the last one to bind attaches the
+//! steering filter. Hold the group for as long as its sockets are served, and
+//! the sockets with it: the kernel numbers the group by what is still in it, so
+//! closing one renumbers every member after it.
+//!
+//! ```no_run
+//! # fn example(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+//! let mut group = moq_sock::shard::Group::acquire(addr, 4)?;
+//! let mut members = Vec::new();
+//! while let Some(member) = group.member() {
+//!     let shard = member.shard();
+//!     // Kept, not dropped: a socket leaving the group renumbers the rest.
+//!     members.push((shard, member.bind()?));
+//! }
+//! // Serve each socket, issuing connection IDs led by `cid_prefix(shard)`.
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # The encoding
 //!
@@ -32,24 +55,23 @@
 //! index. That is the whole rule in seven instructions, with no `CAP_BPF`, no
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
 //! cost is that the kernel selects by *position*, so the group has to be built
-//! once, in order, and never resized. Each runtime's worker group (moq-tokio's
-//! `worker::Workers`, moq-uring's) is what holds that invariant; a [`Shard`]
-//! is only meaningful inside a group built that way.
+//! once, in order, and never resized, which is what [`Group`] is for.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// One member's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
 ///
 /// Every member binds the same address and the kernel spreads inbound datagrams
 /// across the group, so N servers on N threads can serve one port without a
-/// shared socket between them.
+/// shared socket between them. The kernel identifies a member by its *position*
+/// in the group, which is why only [`Group::member`] mints one: a shard is
+/// meaningful only inside a group that was bound once, in index order, and is
+/// never resized.
 ///
-/// A shard is only meaningful as part of a group that was bound once, in index
-/// order, and is never resized: the kernel identifies a member by its
-/// *position*, so a shard bound out of order, twice, or into a resized group
-/// breaks steering with no error to show for it. Mint them from the loop that
-/// forms the group, and nowhere else.
+/// Carry it wherever the member issues connection IDs, which [`cid_prefix`]
+/// leads with its index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shard {
 	index: u16,
@@ -57,14 +79,14 @@ pub struct Shard {
 }
 
 impl Shard {
-	/// Slot `index` of a group of `count` sockets, or `None` if that slot
-	/// cannot exist: a `count` of zero or past [`MAX_SHARDS`], or an `index`
-	/// at or past the end.
+	/// Slot `index` of a group of `count` sockets, or `None` if that slot cannot
+	/// exist: a `count` of zero or past [`MAX_SHARDS`], or an `index` at or past
+	/// the end.
 	///
-	/// The upper bound is what makes every constructible shard safe to steer:
-	/// [`cid_prefix`] spends `256 / count` values of a byte, so a larger group
-	/// would leave it none to spend.
-	pub fn new(index: u16, count: u16) -> Option<Self> {
+	/// The upper bound is what makes every shard safe to steer: [`cid_prefix`]
+	/// spends `256 / count` values of a byte, so a larger group would leave it
+	/// none to spend.
+	fn new(index: u16, count: u16) -> Option<Self> {
 		(count <= MAX_SHARDS && index < count).then_some(Self { index, count })
 	}
 
@@ -79,24 +101,227 @@ impl Shard {
 	}
 }
 
-/// Bind this member's socket into the group, steering the whole group once the
-/// last member has joined.
+/// Why a reuseport group could not be formed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// More members than the steering filter can address.
+	#[error("a reuseport group holds at most {max} members; {count} were asked for")]
+	Count {
+		/// What was asked for.
+		count: u16,
+		/// The ceiling, set by the byte the steering filter reads.
+		max: u16,
+	},
+
+	/// Another group of this UID already holds the port.
+	///
+	/// Over-exclusive on purpose: the lock is keyed by port alone, because every
+	/// address spelling that can overlap on a port (`[::]`, `0.0.0.0`, and any
+	/// specific address) must share one lock. Two groups on distinct addresses
+	/// sharing a port are refused although they could coexist, which is a loud
+	/// failure in place of silent traffic loss.
+	#[error("another reuseport group already holds port {port}")]
+	Overlap {
+		/// The port both groups asked for.
+		port: u16,
+	},
+}
+
+/// A `SO_REUSEPORT` group being formed: the port it holds, how many members it
+/// has, and the order they bind in.
 ///
-/// Call it for every member in index order and nothing else in between: the
-/// kernel identifies a member by its position in the group, which is the order
-/// the sockets bound. An unsharded bind is the plain one.
+/// Everything a steered group has to get right lives here rather than in its
+/// caller, because none of it is visible in a socket afterwards:
 ///
-/// # Hold a [`Lock`] across the whole group
+/// - The port is locked before the first member binds and stays locked until the
+///   group and every member it handed out are gone, so a second same-UID group
+///   cannot interleave into this one. Hold the group for as long as its sockets
+///   are served.
+/// - The member count is checked once, against what the steering filter can
+///   address, and never changes.
+/// - [`member`](Self::member) hands out slots in index order, and a [`Member`]
+///   is the only thing that can bind into the group. The kernel numbers the
+///   group by bind order, so a member that binds out of turn is refused rather
+///   than silently taking a sibling's slot.
 ///
-/// On a named port, acquire one before the first member binds and hold it
-/// until the group is gone. The probe below only refuses a group that is
-/// *already* bound; two groups constructing at once would each pass it before
-/// either held the port, then interleave into one reuseport group whose
-/// positional filter routes one process's connection ids to the other's
-/// sockets. This is a precondition rather than a parameter because an
-/// ephemeral port has nothing to lock, and a host with no lock directory runs
-/// on the probe alone; see [`Lock::acquire`].
-pub fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
+/// The one rule left to the caller is keeping every bound socket: the kernel
+/// numbers the group by what is *in* it, so closing one renumbers every member
+/// after it and the filter steers their traffic to the wrong sockets. Nothing
+/// here can enforce that while the caller owns the sockets, which is what
+/// handing them back from the group would fix.
+///
+/// Members may be bound wherever their sockets are served, a worker's own thread
+/// included, as long as each one binds before the next takes its turn.
+#[derive(Debug)]
+pub struct Group {
+	count: u16,
+
+	/// The next slot to hand out. Not the same as the next slot to *bind*: a
+	/// member may be bound on a thread of its own, which is what [`State`]
+	/// tracks.
+	next: u16,
+
+	state: Arc<State>,
+}
+
+impl Group {
+	/// Take the port and fix the group at `count` members.
+	///
+	/// A `count` of zero is a group of one: a lone member is a valid group, and
+	/// the callers that size a group from a worker count would otherwise each
+	/// clamp it themselves.
+	///
+	/// An ephemeral port (`0`) is bound by the first member and shared by the
+	/// rest, so a group can take whatever port the kernel hands out. Nothing is
+	/// locked in that case: no second group can be aiming at a port that cannot
+	/// be named in advance.
+	pub fn acquire(addr: SocketAddr, count: u16) -> Result<Self, Error> {
+		let count = count.max(1);
+		if count > MAX_SHARDS {
+			return Err(Error::Count { count, max: MAX_SHARDS });
+		}
+
+		let lock = match addr.port() {
+			0 => None,
+			port => Lock::acquire(port).map_err(|_| Error::Overlap { port })?,
+		};
+
+		Ok(Self {
+			count,
+			next: 0,
+			state: Arc::new(State::new(addr, lock)),
+		})
+	}
+
+	/// How many sockets share the port.
+	pub fn count(&self) -> u16 {
+		self.count
+	}
+
+	/// The address the group holds: what was asked for until the first member
+	/// binds, and what it actually bound from there on.
+	pub fn addr(&self) -> SocketAddr {
+		self.state.progress().addr
+	}
+
+	/// The next slot to bind, or `None` once every slot has been handed out.
+	///
+	/// Bind each member before taking the next: they join the group in the order
+	/// they bind, and that order is the only thing the kernel knows them by.
+	pub fn member(&mut self) -> Option<Member> {
+		let shard = Shard::new(self.next, self.count)?;
+		self.next += 1;
+		Some(Member {
+			shard,
+			state: self.state.clone(),
+		})
+	}
+}
+
+/// One member's claim on a slot in a [`Group`], which binding spends.
+///
+/// Send it wherever the socket is served, a worker's own thread included. It
+/// carries the group's address, so every member holds one port whatever the
+/// caller thought it asked for, and its share of the group's port lock, so a
+/// member still waiting to bind cannot be raced by a second group even if its
+/// group is dropped first.
+#[derive(Debug)]
+pub struct Member {
+	shard: Shard,
+	state: Arc<State>,
+}
+
+impl Member {
+	/// This member's slot, which its connection IDs have to encode
+	/// ([`cid_prefix`]).
+	pub fn shard(&self) -> Shard {
+		self.shard
+	}
+
+	/// Bind this member's socket into the group, steering the whole group once
+	/// the last member has joined.
+	///
+	/// Fails when a sibling has not bound yet: the kernel numbers a reuseport
+	/// group by bind order, so a member joining out of turn would take another's
+	/// slot and steer its traffic, with no error to show for it.
+	///
+	/// Keep the socket for as long as the group is served. Closing one takes it
+	/// out of the group, which renumbers every member that joined after it, and
+	/// the steering filter goes on pointing at the positions they used to hold.
+	pub fn bind(self) -> io::Result<UdpSocket> {
+		let mut progress = self.state.progress();
+		if progress.bound != self.shard.index() {
+			return Err(io::Error::other(format!(
+				"reuseport member {} cannot bind while {} of {} are in: the kernel numbers a group by bind order",
+				self.shard.index(),
+				progress.bound,
+				self.shard.count(),
+			)));
+		}
+
+		let socket = bind(progress.addr, self.shard)?;
+
+		// An ephemeral request gives each member a port of its own, so the rest
+		// of the group joins the port the first member actually got.
+		if self.shard.index() == 0 {
+			progress.addr = socket.local_addr()?;
+		}
+		progress.bound += 1;
+
+		Ok(socket)
+	}
+}
+
+/// What the members of a forming group share: the port it holds, how far the
+/// group has been bound, and the address it holds.
+///
+/// Shared rather than owned by the [`Group`] because a member is bound wherever
+/// its socket is served, which is usually not where the group lives. The lock
+/// rides along for the same reason: a member outstanding after its group is
+/// dropped can still bind, so the port has to stay held until the last of them
+/// is gone.
+#[derive(Debug)]
+struct State {
+	progress: Mutex<Progress>,
+
+	/// Held until the group and its members are all dropped, and released by the
+	/// kernel with the process. `None` for an ephemeral port, which cannot be
+	/// named in advance, and on a host with no lock directory.
+	_lock: Option<Lock>,
+}
+
+/// How far a group has been bound, and the address its members hold.
+#[derive(Debug)]
+struct Progress {
+	/// How many members have bound, which is also the only index allowed to bind
+	/// next.
+	bound: u16,
+	addr: SocketAddr,
+}
+
+impl State {
+	fn new(addr: SocketAddr, lock: Option<Lock>) -> Self {
+		Self {
+			progress: Mutex::new(Progress { bound: 0, addr }),
+			_lock: lock,
+		}
+	}
+
+	/// The progress, whatever a panicking member left behind: a failed bind is
+	/// reported by the count it did not advance, so there is no torn state a
+	/// poisoned lock would be protecting.
+	fn progress(&self) -> MutexGuard<'_, Progress> {
+		self.progress.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+}
+
+/// Bind one member's socket into the group at `addr`.
+///
+/// Private because the order is the whole invariant: reachable only through a
+/// [`Member`], which a [`Group`] hands out in index order and only while it
+/// holds the port.
+fn bind(addr: SocketAddr, shard: Shard) -> io::Result<UdpSocket> {
 	// The first member probes with a plain bind before the group forms.
 	// `SO_REUSEPORT` groups by address and UID, so a member would otherwise
 	// *join* any group a same-UID process already has on the address, as two
@@ -110,24 +335,23 @@ pub fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
 	// *constructing* concurrently could each probe while the other holds
 	// nothing yet, which is what [`Lock`] excludes; the probe's job is the
 	// holder the lock cannot see, one that predates it or never took it.
-	if shard.is_some_and(|shard| shard.index() == 0) {
+	if shard.index() == 0 {
 		drop(crate::bind::udp(crate::bind::Udp::new(addr))?);
 	}
 
-	let options = crate::bind::Udp::new(addr).with_reuse_port(shard.is_some());
-	let socket = crate::bind::udp(options)?;
+	let socket = crate::bind::udp(crate::bind::Udp::new(addr).with_reuse_port(true))?;
 
 	// The filter covers the group, not the socket, so it goes on once everyone is
 	// in. Attaching earlier would steer by an index range that is still growing,
 	// and the members that joined later would be unreachable until it was redone.
-	if let Some(shard) = shard.filter(|shard| shard.index() + 1 == shard.count()) {
+	if shard.index() + 1 == shard.count() {
 		attach(&socket, shard.count())?;
 	}
 
 	Ok(socket)
 }
 
-/// Holds a listen port for one worker group's lifetime.
+/// Holds a listen port for one group's lifetime.
 ///
 /// The [`bind`] probe refuses an address whose group is already *bound*, but
 /// two processes constructing concurrently could each probe while the other
@@ -151,7 +375,8 @@ pub fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
 /// and no other user can touch the lock to deny it. When no such directory
 /// can be had, the lock is skipped with a warning rather than refusing to
 /// start, and the probe carries the remaining risk.
-pub struct Lock {
+#[derive(Debug)]
+struct Lock {
 	#[cfg(target_os = "linux")]
 	_file: std::fs::File,
 }
@@ -164,7 +389,7 @@ impl Lock {
 	///
 	/// Elsewhere than Linux this is a no-op: the platform refuses the reuseport
 	/// bind itself, so there is nothing to exclude.
-	pub fn acquire(port: u16) -> io::Result<Option<Self>> {
+	fn acquire(port: u16) -> io::Result<Option<Self>> {
 		#[cfg(target_os = "linux")]
 		{
 			use std::os::unix::fs::OpenOptionsExt;
@@ -190,7 +415,7 @@ impl Lock {
 			{
 				Ok(file) => file,
 				Err(err) => {
-					tracing::warn!(?path, %err, "cannot open the lock file; worker overlap detection falls back to the bind probe");
+					tracing::warn!(?path, %err, "cannot open the lock file; group overlap detection falls back to the bind probe");
 					return Ok(None);
 				}
 			};
@@ -208,7 +433,7 @@ impl Lock {
 				if !trusted || file.set_permissions(std::fs::Permissions::from_mode(0o600)).is_err() {
 					tracing::warn!(
 						?path,
-						"the lock file is not exclusively ours; worker overlap detection falls back to the bind probe"
+						"the lock file is not exclusively ours; group overlap detection falls back to the bind probe"
 					);
 					return Ok(None);
 				}
@@ -224,7 +449,7 @@ impl Lock {
 			if err.kind() == io::ErrorKind::WouldBlock {
 				return Err(err);
 			}
-			tracing::warn!(?path, %err, "cannot lock the lock file; worker overlap detection falls back to the bind probe");
+			tracing::warn!(?path, %err, "cannot lock the lock file; group overlap detection falls back to the bind probe");
 			Ok(None)
 		}
 		#[cfg(not(target_os = "linux"))]
@@ -288,7 +513,7 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 	if !parent {
 		tracing::warn!(
 			?dir,
-			"the lock directory's parent cannot protect it; worker overlap detection falls back to the bind probe"
+			"the lock directory's parent cannot protect it; group overlap detection falls back to the bind probe"
 		);
 		return None;
 	}
@@ -297,7 +522,7 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 	if let Err(err) = &created
 		&& err.kind() != io::ErrorKind::AlreadyExists
 	{
-		tracing::warn!(?dir, %err, "cannot create a lock directory; worker overlap detection falls back to the bind probe");
+		tracing::warn!(?dir, %err, "cannot create a lock directory; group overlap detection falls back to the bind probe");
 		return None;
 	}
 
@@ -311,7 +536,7 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 	if !safe {
 		tracing::warn!(
 			?dir,
-			"lock directory is not exclusively ours; worker overlap detection falls back to the bind probe"
+			"lock directory is not exclusively ours; group overlap detection falls back to the bind probe"
 		);
 		return None;
 	}
@@ -337,7 +562,7 @@ pub fn cid_prefix(shard: Shard) -> u8 {
 
 	let count = u32::from(shard.count());
 	// The number of whole strides of `count` that fit in a byte. At least one,
-	// because `Shard::new` refuses a group larger than `MAX_SHARDS`.
+	// because a group is never larger than `MAX_SHARDS`.
 	let strides = 256 / count;
 	let stride = rand::rng().random_range(0..strides);
 
@@ -380,7 +605,7 @@ fn attach(socket: &UdpSocket, count: u16) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn attach(_socket: &UdpSocket, _count: u16) -> io::Result<()> {
-	// Unreachable in practice: a shard only exists once `bind::udp` accepted
+	// Unreachable in practice: a member only gets here once `bind::udp` accepted
 	// `SO_REUSEPORT`, which is Linux-only.
 	Err(io::Error::new(
 		io::ErrorKind::Unsupported,
@@ -453,6 +678,45 @@ mod tests {
 		assert!(Shard::new(0, MAX_SHARDS + 1).is_none());
 	}
 
+	/// The group is the only source of slots, and it hands out exactly the ones
+	/// it was sized for, in order.
+	#[test]
+	fn a_group_hands_out_every_slot_in_order() {
+		const COUNT: u16 = 4;
+
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		assert_eq!(group.count(), COUNT);
+
+		for index in 0..COUNT {
+			let member = group.member().expect("a slot per member");
+			assert_eq!(member.shard().index(), index);
+			assert_eq!(member.shard().count(), COUNT);
+		}
+		assert!(group.member().is_none(), "the group cannot be resized");
+	}
+
+	/// A group of zero is a group of one: every caller sizes a group from a
+	/// worker count, and a lone member is a valid group.
+	#[test]
+	fn an_empty_group_holds_one_member() {
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 0).unwrap();
+		assert_eq!(group.count(), 1);
+		assert_eq!(group.member().map(|member| member.shard().count()), Some(1));
+	}
+
+	/// The steering filter names a member with one byte, so a group past 256 has
+	/// members it could never reach. Refused where the group is sized, rather
+	/// than when the first connection ID has no stride left to spend.
+	#[test]
+	fn an_unaddressable_group_is_refused() {
+		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+		assert!(Group::acquire(addr, MAX_SHARDS).is_ok());
+		assert!(matches!(
+			Group::acquire(addr, MAX_SHARDS + 1),
+			Err(Error::Count { count: 257, max: 256 })
+		));
+	}
+
 	/// The encoding's only real requirement: whatever byte a member issues has to
 	/// reduce back to that member.
 	#[test]
@@ -490,6 +754,48 @@ mod tests {
 		assert_eq!(seen.len(), usize::from(COUNT));
 	}
 
+	/// An ephemeral request gives the first member a port of the kernel's
+	/// choosing, and the group is only balanced over a port every member holds.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn a_group_shares_one_ephemeral_port() {
+		const COUNT: u16 = 3;
+
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		let sockets: Vec<UdpSocket> = (0..COUNT)
+			.map(|_| group.member().expect("a slot per member").bind().expect("bind member"))
+			.collect();
+
+		let addr = group.addr();
+		assert_ne!(addr.port(), 0, "the group holds the port its first member bound");
+		for socket in &sockets {
+			assert_eq!(
+				socket.local_addr().unwrap(),
+				addr,
+				"every member holds the group's port"
+			);
+		}
+	}
+
+	/// The kernel numbers a group by bind order, so a member that binds out of
+	/// turn would take a sibling's slot and steer its traffic. Refused instead,
+	/// which is the one part of the ordering rule a caller can still get wrong
+	/// once its members are bound on threads of their own.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn binding_out_of_order_is_refused() {
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		let first = group.member().expect("first slot");
+		let second = group.member().expect("second slot");
+
+		second.bind().expect_err("the second member cannot bind first");
+
+		// Refused, not deferred: nothing joined the group, so the slot the
+		// kernel would have handed the second member is still the first's.
+		let socket = first.bind().expect("bind the first member");
+		assert_eq!(socket.local_addr().unwrap(), group.addr());
+	}
+
 	/// The whole point, end to end against a real kernel: a packet carrying a
 	/// member's connection ID has to reach that member and no other.
 	///
@@ -501,17 +807,16 @@ mod tests {
 	fn a_connection_id_reaches_its_own_member() {
 		const COUNT: u16 = 4;
 
-		// Bound in index order, because the kernel identifies a member by its
-		// position in the group.
-		let mut group = Vec::new();
-		let mut addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-		for index in 0..COUNT {
-			let shard = Shard::new(index, COUNT).unwrap();
-			let socket = bind(addr, Some(shard)).unwrap();
-			addr = socket.local_addr().unwrap();
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		let mut sockets = Vec::new();
+		let mut shards = Vec::new();
+		while let Some(member) = group.member() {
+			shards.push(member.shard());
+			let socket = member.bind().expect("bind group member");
 			socket.set_nonblocking(true).unwrap();
-			group.push(socket);
+			sockets.push(socket);
 		}
+		let addr = group.addr();
 
 		/// Which member received something, given every send targets exactly one.
 		fn receiver(group: &[UdpSocket]) -> Option<usize> {
@@ -519,8 +824,8 @@ mod tests {
 			group.iter().position(|socket| socket.recv_from(&mut buf).is_ok())
 		}
 
-		for index in 0..COUNT {
-			let prefix = cid_prefix(Shard::new(index, COUNT).unwrap());
+		for (index, shard) in shards.into_iter().enumerate() {
+			let prefix = cid_prefix(shard);
 
 			// A short header: form bit clear, connection ID straight after.
 			let short = [0x40, prefix, 1, 2, 3, 4, 5, 6, 7, 8];
@@ -537,12 +842,68 @@ mod tests {
 				// still has to be given a moment to land.
 				std::thread::sleep(std::time::Duration::from_millis(50));
 				assert_eq!(
-					receiver(&group),
-					Some(usize::from(index)),
+					receiver(&sockets),
+					Some(index),
 					"{form} header for member {index} landed on the wrong socket"
 				);
 			}
 		}
+	}
+
+	/// A second group on a named port must lose it while the first is alive: two
+	/// groups constructing at once would each pass the bind probe before either
+	/// held the port, then interleave into one group whose filter steers each
+	/// process's traffic to the other's sockets.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn a_second_group_cannot_take_the_port() {
+		// A port the kernel just handed out and nothing holds any more, which is
+		// as close to a reserved port as a test gets.
+		let addr = {
+			let probe = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+			probe.local_addr().unwrap()
+		};
+
+		let mut first = Group::acquire(addr, 1).unwrap();
+		let socket = first.member().unwrap().bind().expect("bind the first group");
+
+		assert!(
+			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
+			"a second group took a held port"
+		);
+
+		// The lock dies with the group, so the port is takeable again.
+		drop(first);
+		drop(socket);
+		Group::acquire(addr, 1).expect("the released port must be takeable again");
+	}
+
+	/// A member outlives the group that handed it out and can still bind, so the
+	/// exclusion has to outlive the group too. Releasing the port at the group's
+	/// drop would let a second group probe and interleave into this one while its
+	/// first member had yet to join.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn an_outstanding_member_keeps_the_port() {
+		let addr = {
+			let probe = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+			probe.local_addr().unwrap()
+		};
+
+		let mut group = Group::acquire(addr, 1).unwrap();
+		let member = group.member().expect("the only slot");
+		drop(group);
+
+		assert!(
+			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
+			"a second group took a port an unbound member still holds"
+		);
+
+		let socket = member.bind().expect("bind the outstanding member");
+		assert_eq!(socket.local_addr().unwrap(), addr);
+
+		drop(socket);
+		Group::acquire(addr, 1).expect("the released port must be takeable again");
 	}
 
 	/// The jumps are offsets from the *following* instruction, so an off-by-one
