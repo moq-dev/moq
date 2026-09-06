@@ -35,7 +35,7 @@ mod tests {
 		let origin = moq_net::Origin::random().produce();
 		let consumer = origin.consume();
 
-		// Resolving straight away, which is what the media task used to do.
+		// Direct resolution has no route before the announcement.
 		let unannounced = moq_mux::Source::new(consumer.clone(), "room.hang").broadcast().await;
 		assert!(unannounced.is_err(), "expected an unroutable broadcast");
 

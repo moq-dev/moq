@@ -57,13 +57,14 @@ impl AudioTimeline {
 		}
 
 		// Measure every hole from the track origin so timestamp rounding cannot
-		// accumulate into drift. Advancing to `expected` even when the fill is capped
-		// makes a longer hole a timeline skip rather than refilling the cap forever.
+		// accumulate into drift. Advancing to `expected` even when the hole is skipped
+		// keeps the next frame contiguous with the new timeline position.
 		let origin = *self.origin.get_or_insert(start);
 		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
 		let hole = expected.saturating_sub(self.written);
-		let silence = hole.min(fill_max);
-		let reset_sink = rewound || hole > fill_max;
+		let skipped = hole > fill_max;
+		let silence = if skipped { 0 } else { hole };
+		let reset_sink = rewound || skipped;
 		self.written = self
 			.written
 			.max(expected)
@@ -128,6 +129,10 @@ mod tests {
 
 		let skipped = timeline.push(Duration::from_secs(1), 960, 48_000, 4_800);
 		assert!(skipped.reset_sink);
-		assert_eq!(skipped.silence, 4_800);
+		assert_eq!(skipped.silence, 0);
+
+		let next = timeline.push(Duration::from_millis(1_020), 960, 48_000, 4_800);
+		assert!(!next.reset_sink);
+		assert_eq!(next.silence, 0);
 	}
 }
