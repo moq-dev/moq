@@ -4,6 +4,8 @@ use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, HashMap, HashSet},
 	fmt,
+	future::Future,
+	pin::Pin,
 	sync::Arc,
 	sync::atomic::{AtomicU64, Ordering},
 	task::{Poll, ready},
@@ -17,6 +19,7 @@ use super::{Requests, WeakCache};
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 /// A relay origin, identified by a 62-bit varint on the wire.
@@ -1107,20 +1110,10 @@ impl Producer {
 			"create_broadcast called with a looping hop chain",
 		);
 
-		let (node, rest) = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
-		let full = self.root.join(&path).to_owned();
-
-		// A decoded announce prefix and suffix are each within the wire limit, but their
-		// join might not be. Enforcing here bounds the tree depth and guarantees the path
-		// can be re-encoded when forwarded.
-		if full.parts().count() > Path::MAX_PARTS {
-			return Err(BoundsExceeded.into());
-		}
-
-		// Resolve the ingress counters once, keyed by the absolute broadcast path.
-		// The source producer tags its tracks; run_source drives the announce guard
-		// off route transitions.
-		let ingress = self.stats.ingress(&full);
+		// The ingress counters are keyed by the absolute broadcast path. The source
+		// producer tags its tracks; run_source drives the announce guard off route
+		// transitions.
+		let (node, rest, full, ingress) = self.publish_at(&path)?;
 
 		let mut source = broadcast::Info { origin: self.info() }
 			.produce()
@@ -1130,6 +1123,55 @@ impl Producer {
 		web_async::spawn(run_source(self.info(), node, full, rest, source.consume(), ingress));
 
 		Ok(source)
+	}
+
+	/// Publish a broadcast this origin does not own, mirroring it at `path`.
+	///
+	/// The counterpart to [`Self::create_broadcast`] for content already held as a
+	/// [`broadcast::Consumer`]: `source` becomes a route source at `path`, splicing
+	/// and ranking against the other sources there exactly like a locally created
+	/// one, and tracking the source's own [`Route`](broadcast::Route), including
+	/// whether it is announced. Nothing is copied; subscribers read the source's
+	/// own tracks.
+	///
+	/// Returns the [`Attached`] that keeps it there: poll it (usually by spawning
+	/// it) or the mirror never becomes visible, and drop it to detach. That is the
+	/// one difference from [`Self::create_broadcast`], which spawns for you because
+	/// the producer it returns already is the lifetime; here the caller owns it.
+	///
+	/// Fails on the same terms as [`Self::create_broadcast`]:
+	/// [`Error::Unauthorized`] outside this producer's prefixes,
+	/// [`Error::BoundsExceeded`] past [`Path::MAX_PARTS`].
+	pub fn attach_broadcast(&self, path: impl AsPath, source: broadcast::Consumer) -> Result<Attached, Error> {
+		let path = path.as_path();
+
+		debug_assert!(
+			!source.route().hops.contains(&self.info),
+			"attach_broadcast called with a looping hop chain",
+		);
+
+		let (node, rest, full, ingress) = self.publish_at(&path)?;
+
+		Ok(Attached(
+			run_source(self.info(), node, full, rest, source, ingress).maybe_boxed(),
+		))
+	}
+
+	/// Resolve `path` to the tree node a source attaches under, its absolute path,
+	/// and the ingress counters keyed by it.
+	fn publish_at(&self, path: &Path) -> Result<(Lock<OriginNode>, PathOwned, PathOwned, stats::Scope), Error> {
+		let (node, rest) = self.nodes.get(path).ok_or(Error::Unauthorized)?;
+		let full = self.root.join(path).to_owned();
+
+		// A decoded announce prefix and suffix are each within the wire limit, but their
+		// join might not be. Enforcing here bounds the tree depth and guarantees the path
+		// can be re-encoded when forwarded.
+		if full.parts().count() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
+
+		let ingress = self.stats.ingress(&full);
+		Ok((node, rest, full, ingress))
 	}
 
 	/// Returns a new Producer restricted to publishing under one of `prefixes`.
@@ -1474,6 +1516,46 @@ fn sync_front(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer
 	}
 }
 
+/// The attachment [`run_source`] currently holds, detached on drop.
+///
+/// A source that stays in the front's table with nothing watching it keeps the
+/// front alive forever, so abandoning the future has to unwind the attach. Drop
+/// counts as an abrupt loss (never a finish): the source itself said nothing, so a
+/// replacement may still splice within the linger window.
+#[derive(Default)]
+struct DetachGuard {
+	attached: Option<(kio::Producer<FrontState>, broadcast::Producer, Lock<OriginNode>, u64)>,
+}
+
+impl DetachGuard {
+	fn arm(
+		&mut self,
+		state: &kio::Producer<FrontState>,
+		broadcast: &broadcast::Producer,
+		leaf: &Lock<OriginNode>,
+		id: u64,
+	) {
+		self.attached = Some((state.clone(), broadcast.clone(), leaf.clone(), id));
+	}
+
+	/// Forget the attachment without detaching: the front already closed it out.
+	fn disarm(&mut self) {
+		self.attached = None;
+	}
+
+	fn detach(&mut self, graceful: bool) {
+		if let Some((state, broadcast, leaf, id)) = self.attached.take() {
+			detach_source(&state, &broadcast, &leaf, id, graceful);
+		}
+	}
+}
+
+impl Drop for DetachGuard {
+	fn drop(&mut self) {
+		self.detach(false);
+	}
+}
+
 /// Detach source `id`, promoting the next-best source; the tracks it was serving
 /// re-splice on their own. Idempotent.
 ///
@@ -1572,6 +1654,10 @@ async fn run_source(
 	// the same content losing the same argument twice. Whether the route is
 	// announced is a separate gate, owned by `attach_source`.
 	let mut may_take_over = true;
+	// Detaches whatever is attached when this future is dropped, so an abandoned
+	// task (the caller of [`Producer::attach_broadcast`] letting its `Attached` go)
+	// leaves no route behind for the front to wait on forever.
+	let mut attached = DetachGuard::default();
 
 	'attach: loop {
 		// Re-resolved every attempt: between attaches the previous front's
@@ -1627,6 +1713,7 @@ async fn run_source(
 				continue 'attach;
 			}
 		};
+		attached.arm(&state, &broadcast, &leaf, id);
 		let publisher = route.hops.iter().next().copied();
 
 		loop {
@@ -1649,6 +1736,7 @@ async fn run_source(
 				None => {
 					// The winner owns the path now. Stand by behind it, holding the
 					// ingress announce guard, until it leaves or our route moves again.
+					attached.disarm();
 					may_take_over = false;
 					continue 'attach;
 				}
@@ -1665,7 +1753,7 @@ async fn run_source(
 					// handle to a new publisher. An UNKNOWN-to-UNKNOWN metadata
 					// update (a legacy peer repricing) must not detach.
 					if update.hops.iter().next().copied() != publisher {
-						detach_source(&state, &broadcast, &leaf, id, true);
+						attached.detach(true);
 						sync_announce(&mut announce, announced, &ingress);
 						// A new publisher, so this is content no front has beaten yet. A
 						// sibling source may still hold the old front open, making the
@@ -1693,11 +1781,27 @@ async fn run_source(
 				Some(Err(_)) => {
 					// A deliberate finish closes the front immediately; an abrupt loss
 					// (dropped producer, dead session) may linger for a replacement.
-					detach_source(&state, &broadcast, &leaf, id, source.is_finished());
+					attached.detach(source.is_finished());
 					return;
 				}
 			}
 		}
+	}
+}
+
+/// Keeps a broadcast mirrored into an origin by
+/// [`Producer::attach_broadcast`].
+///
+/// A future that resolves once the source closes and the mirror detaches. Drop it
+/// to detach early; nothing is published while it is not being polled.
+#[must_use = "the broadcast is only mirrored while this is polled"]
+pub struct Attached(MaybeSendBox<'static, ()>);
+
+impl Future for Attached {
+	type Output = ();
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+		self.0.as_mut().poll(cx)
 	}
 }
 
@@ -4742,6 +4846,94 @@ mod tests {
 			!fresh.is_clone(&broadcast),
 			"a finish must not leave a lingering broadcast to splice into"
 		);
+	}
+
+	/// A broadcast attached from another origin is announced and served there like
+	/// a local one, with the source's own tracks rather than a copy.
+	#[tokio::test]
+	async fn test_attach_mirrors_a_foreign_broadcast() {
+		tokio::time::pause();
+
+		let upstream = Origin::random().produce();
+		let mirror = Origin::random().produce();
+		let mut announced = mirror.consume().announced();
+
+		let source = upstream.create_broadcast("cam", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+
+		let attached = tokio::spawn(
+			mirror
+				.attach_broadcast("cam", upstream.consume().request_broadcast("cam").await.unwrap())
+				.unwrap(),
+		);
+		settle().await;
+		settle().await;
+
+		announced.assert_next_some("cam");
+
+		// Subscribing through the mirror dispatches to the upstream source, so the
+		// frames a viewer reads are the source's own.
+		let broadcast = mirror.consume().request_broadcast("cam").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// Detaching unannounces it, leaving the upstream broadcast untouched.
+		attached.abort();
+		settle().await;
+		announced.assert_next_none("cam");
+		assert!(upstream.consume().get_broadcast("cam").is_some());
+	}
+
+	/// The mirror follows the source: a source that ends unannounces downstream and
+	/// resolves the attachment, so the caller's task exits on its own.
+	#[tokio::test]
+	async fn test_attach_ends_with_its_source() {
+		tokio::time::pause();
+
+		let upstream = Origin::random().produce();
+		let mirror = Origin::random().produce();
+		let mut announced = mirror.consume().announced();
+
+		let mut source = upstream.create_broadcast("cam", announce()).unwrap();
+		settle().await;
+
+		let attached = tokio::spawn(
+			mirror
+				.attach_broadcast("cam", upstream.consume().request_broadcast("cam").await.unwrap())
+				.unwrap(),
+		);
+		settle().await;
+		settle().await;
+		announced.assert_next_some("cam");
+
+		source.finish();
+		settle().await;
+		settle().await;
+
+		announced.assert_next_none("cam");
+		attached.await.expect("attachment panicked");
+	}
+
+	/// An attach is scoped exactly like a create: a path outside the producer's
+	/// prefixes is refused rather than silently published.
+	#[tokio::test]
+	async fn test_attach_respects_scope() {
+		tokio::time::pause();
+
+		let upstream = Origin::random().produce();
+		let source = upstream.create_broadcast("cam", announce()).unwrap();
+		settle().await;
+
+		let mirror = Origin::random().produce().scope(&[Path::new("allowed")]).unwrap();
+		assert!(matches!(
+			mirror.attach_broadcast("denied", source.consume()),
+			Err(Error::Unauthorized)
+		));
+		assert!(mirror.attach_broadcast("allowed", source.consume()).is_ok());
 	}
 
 	/// A non-live broadcast is reachable by exact path but never announced;

@@ -33,7 +33,7 @@ pub use time::*;
 
 /// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Dynamic, Info, Producer, Request, Requesting};
+	pub use super::origin_impl::{Attached, Consumer, Dynamic, Info, Producer, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.
