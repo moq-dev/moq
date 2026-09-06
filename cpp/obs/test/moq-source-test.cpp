@@ -687,6 +687,10 @@ int32_t moq_consume_video_config(uint32_t catalog, uint32_t, struct moq_video_co
 	if (g_video_config_result < 0)
 		return g_video_config_result;
 
+	// The caller hands over an uninitialized struct and libmoq writes every
+	// field, so zero it first: a field this stub doesn't know about (the label,
+	// today) would otherwise be read back as whatever the stack held.
+	*dst = {};
 	dst->name = "video";
 	dst->name_len = 5;
 	dst->codec = g_codec;
@@ -696,8 +700,6 @@ int32_t moq_consume_video_config(uint32_t catalog, uint32_t, struct moq_video_co
 	dst->coded_width = g_coded_width;
 	dst->coded_height = g_coded_height;
 	dst->container.kind = MOQ_CONTAINER_KIND_LEGACY;
-	dst->container.init = nullptr;
-	dst->container.init_len = 0;
 	return 0;
 }
 
@@ -731,6 +733,8 @@ int32_t moq_consume_frame(uint32_t frame, struct moq_frame *dst)
 		g_stub_errors++;
 		return -1;
 	}
+	// Zeroed for the reason moq_consume_video_config zeroes its own out-param.
+	*dst = {};
 	dst->payload = g_description;
 	dst->payload_size = sizeof(g_description);
 	dst->timestamp_us = 1000 * static_cast<uint64_t>(frame);

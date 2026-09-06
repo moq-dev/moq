@@ -327,12 +327,13 @@ check $BASE="":
         just swift check "$files"
         just go check "$files"
         just dart check "$files"
-    	# Type-checking the plugin needs only headers, so it runs here rather
-    	# than waiting for obs.yml to link it on Linux. libmoq is in scope
-    	# because the plugin calls through its generated C header, and flake.nix
-    	# because it owns the libobs headers this compiles against -- obs.yml
-    	# links against nixpkgs' obs-studio instead, so nothing else would notice
-    	# that package going bad.
+    	# Type-checking the plugin and its unit tests needs only headers, so it
+    	# runs here rather than waiting for obs.yml to link them on Linux. libmoq
+    	# is in scope because the plugin calls through its generated C header, and
+    	# the tests restate those entry points as stubs, so an ABI change breaks
+    	# both. flake.nix because it owns the libobs headers this compiles
+    	# against -- obs.yml links against nixpkgs' obs-studio instead, so nothing
+    	# else would notice that package going bad.
     	if echo "$files" | grep -qE '^(cpp/obs/|rs/libmoq/|flake\.nix$)'; then
     		just obs compile
     	fi
