@@ -991,15 +991,18 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		// A pure route: the path itself is the advertisement, no broadcast behind it.
-		let self_registration: Option<moq_net::announce::Producer> = if gossip {
+		// The path itself is the advertisement: an empty broadcast, announced.
+		let mut self_registration: Option<moq_net::broadcast::Producer> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
-			let announcement = self
+			let registration = self
 				.origin
-				.announce(&path, moq_net::origin::Route::default())
+				.create_broadcast(&path)
 				.expect(".internal/origins is within the relay origin's root");
+			registration
+				.announce(moq_net::origin::Route::default())
+				.expect("the origin driver outlives the cluster");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
 			if can_dial {
@@ -1013,7 +1016,7 @@ impl Cluster {
 				});
 			}
 
-			Some(announcement)
+			Some(registration)
 		} else {
 			None
 		};
@@ -1035,8 +1038,10 @@ impl Cluster {
 			}
 		}
 
-		// Deliberate shutdown: dropping the registration retracts the route.
-		drop(self_registration);
+		// Deliberate shutdown: finishing the registration retracts the route.
+		if let Some(registration) = self_registration.as_mut() {
+			registration.finish();
+		}
 		Ok(())
 	}
 
@@ -1193,7 +1198,7 @@ impl Cluster {
 					.client_tls
 					.as_ref()
 					.expect("http(s) connect_api source requires client TLS");
-				let http = match crate::http_client::build(tls) {
+				let http = match crate::http_client::build(tls, crate::http_client::CacheScope::Shared) {
 					Ok(http) => http,
 					Err(err) => {
 						tracing::error!(%err, "cluster.connect_api: failed to build HTTP client");
@@ -1384,9 +1389,10 @@ impl Cluster {
 	}
 
 	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
-		let mut log_url = url.clone();
-		log_url.set_query(None);
-		tracing::info!(url = %log_url, "dialing cluster peer");
+		// The peer URL carries the cluster JWT in its query, so neither the log line
+		// nor the node label below may show the raw URL.
+		let redacted = moq_tokio::RedactedUrl::new(url);
+		tracing::info!(url = %redacted, "dialing cluster peer");
 
 		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
 		let client = self
@@ -1420,7 +1426,7 @@ impl Cluster {
 		loop {
 			match reconnect.status().await? {
 				moq_tokio::Status::Connected if connection.is_none() => {
-					connection = Some(self.nodes.connect_outbound(id, log_url.to_string()));
+					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
 				}
 				moq_tokio::Status::Disconnected => connection = None,
 				moq_tokio::Status::Migrating => {}

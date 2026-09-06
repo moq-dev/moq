@@ -258,25 +258,11 @@ impl Origin {
 	/// Create a live broadcast at `path` on an origin, announcing the exact path.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	#[allow(clippy::type_complexity)]
-	pub fn publish<P: moq_net::AsPath>(
-		&self,
-		origin: Id,
-		path: P,
-	) -> Result<
-		(
-			moq_net::broadcast::Producer,
-			moq_net::origin::Producer,
-			moq_net::PathOwned,
-			moq_net::announce::Producer,
-		),
-		Error,
-	> {
+	pub fn publish<P: moq_net::AsPath>(&self, origin: Id, path: P) -> Result<moq_net::broadcast::Producer, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let path = path.as_path().to_owned();
-		let broadcast = origin.create_broadcast(&path)?;
-		let announcement = origin.announce(&path, Default::default())?;
-		Ok((broadcast, origin.clone(), path, announcement))
+		let broadcast = origin.create_broadcast(path)?;
+		broadcast.announce(Default::default())?;
+		Ok(broadcast)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

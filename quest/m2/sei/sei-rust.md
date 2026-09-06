@@ -32,7 +32,5 @@ bounded cleanup of sidecar samples whose video frame never arrives.
 
 ## Required
 
-- [H.265 suffix SEI](/quest/m0/h265-suffix.md) - fixes access-unit ownership
-  before the splitter makes that ownership a sidecar contract
 - [SEI section](/quest/m2/sei/sei.md) - defines the catalog and correlation
   contract

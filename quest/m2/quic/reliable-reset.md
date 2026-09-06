@@ -2,7 +2,7 @@
 
 ## Goal
 
-The selected Quinn-family core and its WebTransport adapter implement
+noq-proto and its WebTransport adapter implement
 [QUIC Stream Resets with Partial Delivery](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/).
 A reset WebTransport data stream reliably delivers enough prefix bytes for the
 receiver to associate it with its session before surfacing the application
@@ -16,7 +16,7 @@ the receiver may discard that header and cannot attribute the reset.
 
 ## Plan
 
-Implement the current reliable-reset draft in the selected protocol core:
+Implement the current reliable-reset draft in noq-proto:
 
 - advertise and validate the empty `reset_stream_at` transport parameter,
   including remembered negotiation state for 0-RTT;
@@ -59,12 +59,12 @@ provisional codepoints if the document changes before release.
 
 ## Required
 
-- [Choose the parent and establish the fork](/quest/m2/quic/parent.md) - the
-  frame and stream-state implementation must land in the selected core
+- [Establish the noq relationship](/quest/m2/quic/parent.md) - the frame and
+  stream-state implementation is proposed to noq first
 
 ## Related
 
 - [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - consumes
   the same reset state without a parallel implementation
-- [Cut moq-uring WebTransport over to the selected core](/quest/m2/quic/uring-webtransport.md) -
-  cannot claim WebTransport parity without reliable reset
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - cannot claim
+  WebTransport parity without reliable reset

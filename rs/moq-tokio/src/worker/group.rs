@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::Config;
-use crate::{Error, Result, Server, listen::Shard};
+use crate::{Error, Result, Server, listen::Member};
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -38,10 +38,10 @@ pub struct Workers {
 	certificates: crate::tls::Certificates,
 	addr: SocketAddr,
 
-	/// Holds the listen port against a second group for as long as this one
-	/// lives. `None` for an ephemeral port, or when no lock directory was
-	/// available and the group started on probe-only protection.
-	_lock: Option<moq_sock::shard::Lock>,
+	/// The reuseport group the workers bound into. Held for the group's
+	/// lifetime, because it is what holds the listen port against a second
+	/// group.
+	_group: moq_sock::shard::Group,
 }
 
 impl std::fmt::Debug for Workers {
@@ -71,14 +71,6 @@ impl Workers {
 			return Err(Error::WorkerTlsGenerate);
 		}
 
-		let count = config.count.max(1);
-		if count > moq_sock::shard::MAX_SHARDS {
-			return Err(Error::WorkerCount {
-				count,
-				max: moq_sock::shard::MAX_SHARDS,
-			});
-		}
-
 		let cores = config.pin.then(cores).unwrap_or_default();
 
 		// One resolution for the whole group. Each worker resolves its own config
@@ -99,42 +91,28 @@ impl Workers {
 				.expect("the default bind is a literal"),
 		};
 
-		// Two groups constructing concurrently would each pass the bind-time
-		// probe before either holds the port, then interleave into one reuseport
-		// group, so the port is locked before the first member binds and held
-		// until the group is gone. An ephemeral port has nothing to lock: only a
-		// lone worker may use one, and its port cannot be named in advance.
-		let lock = match requested.port() {
-			0 => None,
-			port => moq_sock::shard::Lock::acquire(port).map_err(|_| Error::WorkerOverlap { addr: requested })?,
-		};
+		// The group owns everything a reuseport group has to get right: it takes
+		// the port before the first member binds and holds it until the group is
+		// dropped, refuses a size the steering filter could not address, and
+		// hands out one member per slot in the order the kernel numbers them by.
+		let mut group = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
+			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
+			// The port lock is the only other way to lose the address, and it is
+			// held by exactly one thing: another group of this UID.
+			_ => Error::WorkerOverlap { addr: requested },
+		})?;
+		let count = group.count();
 
 		let mut workers = Vec::with_capacity(count as usize);
 		let mut certificates = None;
-		let mut addr: Option<SocketAddr> = None;
 
-		for index in 0..count {
+		while let Some(member) = group.member() {
+			let index = member.shard().index();
 			// `max(1)` because an empty core list means pinning is off, not that
 			// there are no workers.
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
-			let shard = Shard::new(index, count).expect("index is below count");
 
-			let worker = Worker::spawn(listen.clone(), quic.clone(), shard, core)?;
-
-			// The group only balances a port every member actually holds. An
-			// ephemeral bind gives each worker a port of its own instead, leaving all
-			// but the first unreachable behind an address that looks bound.
-			match addr {
-				Some(first) if first != worker.addr => {
-					return Err(Error::WorkerPortMismatch {
-						index,
-						addr: worker.addr,
-						first,
-					});
-				}
-				Some(_) => {}
-				None => addr = Some(worker.addr),
-			}
+			let worker = Worker::spawn(listen.clone(), quic.clone(), member, core)?;
 
 			certificates.get_or_insert_with(|| {
 				worker
@@ -146,7 +124,9 @@ impl Workers {
 			workers.push(worker);
 		}
 
-		let addr = addr.expect("at least one worker");
+		// Whatever the first member bound, which is the requested address unless
+		// it asked for an ephemeral port.
+		let addr = group.addr();
 		tracing::info!(workers = count, pinned = !cores.is_empty(), %addr, "bound QUIC workers");
 
 		Ok(Self {
@@ -155,7 +135,7 @@ impl Workers {
 			// answers for the fingerprint endpoint.
 			certificates: certificates.expect("at least one worker"),
 			addr,
-			_lock: lock,
+			_group: group,
 		})
 	}
 
@@ -356,7 +336,6 @@ struct Worker {
 	spawn: tokio::sync::mpsc::UnboundedSender<Spawn>,
 	thread: Option<std::thread::JoinHandle<()>>,
 	stop: Option<tokio::sync::oneshot::Sender<()>>,
-	addr: SocketAddr,
 }
 
 impl Worker {
@@ -365,17 +344,17 @@ impl Worker {
 	fn spawn(
 		listen: crate::listen::Config,
 		quic: crate::quic::Config,
-		shard: Shard,
+		member: Member,
 		core: Option<CoreId>,
 	) -> Result<Self> {
-		let index = shard.index();
+		let index = member.shard().index();
 		let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 		let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 		let (spawn_tx, spawn_rx) = tokio::sync::mpsc::unbounded_channel();
 
 		let thread = std::thread::Builder::new()
 			.name(format!("moq-quic-{index}"))
-			.spawn(move || run(shard, core, listen, quic, ready_tx, stop_rx, spawn_rx))
+			.spawn(move || run(member, core, listen, quic, ready_tx, stop_rx, spawn_rx))
 			.map_err(|err| Error::WorkerStart {
 				index,
 				source: Arc::new(err),
@@ -413,7 +392,6 @@ impl Worker {
 			spawn: spawn_tx,
 			thread: Some(thread),
 			stop: Some(stop_tx),
-			addr,
 		})
 	}
 }
@@ -469,7 +447,7 @@ impl<T> Drop for AbortOnDrop<T> {
 /// is handed back for the owner to build an accept loop from, which
 /// [`Spawner::run`] spawns onto this same runtime.
 fn run(
-	shard: Shard,
+	member: Member,
 	core: Option<CoreId>,
 	listen: crate::listen::Config,
 	quic: crate::quic::Config,
@@ -477,7 +455,7 @@ fn run(
 	stop: tokio::sync::oneshot::Receiver<()>,
 	mut spawn: tokio::sync::mpsc::UnboundedReceiver<Spawn>,
 ) {
-	let index = shard.index();
+	let index = member.shard().index();
 	if let Some(core) = core {
 		pin(index, core);
 	}
@@ -497,7 +475,7 @@ fn run(
 		let _guard = runtime.enter();
 		Server::build(
 			crate::server::Config::default().with_listen(listen).with_quic(quic),
-			crate::server::Parts::Shard(shard),
+			crate::server::Parts::Member(member),
 		)
 		.and_then(|server| server.local_addr().map(|addr| (server, addr)))
 	};

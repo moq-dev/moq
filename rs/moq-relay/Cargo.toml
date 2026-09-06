@@ -35,10 +35,11 @@ quiche = ["_quic", "moq-tokio/quiche"]
 # `runtime.workers`. Not one to enable on its own: it names no backend, so
 # moq-tokio would have nothing to bind a socket with.
 _quic = []
-# qlog trace capture (`--server-quic-qlog <DIR>`). Off by default: it compiles the
+# qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
-# congestion-control testing.
-qlog = ["moq-tokio/qlog"]
+# congestion-control testing. Covers the io_uring workers too, so one feature
+# means one thing whichever runtime is serving.
+qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
 websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
@@ -65,6 +66,7 @@ axum-server = { workspace = true }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
+hex = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 jsonwebtoken = { workspace = true }
@@ -80,6 +82,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false 
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
+sha2 = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

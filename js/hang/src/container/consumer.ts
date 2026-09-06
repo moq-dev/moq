@@ -9,9 +9,15 @@ import type { BufferedRanges, Frame } from "./types";
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
-	/** Target latency in milliseconds, controlling how aggressively slow groups are skipped (default: 0). */
+	/**
+	 * How stale a group may get before it is skipped, in milliseconds (default: 0).
+	 *
+	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
+	 * late or missing group is waited for. The local half of the subscription's
+	 * `maxAge`; both measure the same budget, one on the wire and one as frames are read.
+	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	latency?: GetterInit<Time.Milli>;
+	maxAge?: GetterInit<Time.Milli>;
 }
 
 interface Group {
@@ -108,11 +114,11 @@ function continues(prev: Group, next: Group | undefined): next is Group {
 	);
 }
 
-/** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
+/** Reads frames from a MoQ track in order, buffering groups and skipping ones that age past `maxAge`. */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#latency: Getter<Time.Milli>;
+	#maxAge: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
@@ -122,8 +128,8 @@ export class Consumer {
 	// Group of the last frame next() returned, so it can report whether the following result
 	// continues that frame's timeline. Undefined until the first delivery and after a rewind.
 	#deliveredGroup?: number;
-	// Set whenever the consumer throws content away: a slow group skipped to meet the latency
-	// target, a group truncated by a decode error, a reneged straggler, a rewind. Reported (and
+	// Set whenever the consumer throws content away: a group that aged past `maxAge`,
+	// a group truncated by a decode error, a reneged straggler, a rewind. Reported (and
 	// cleared) on the first frame delivered from the next group, which is where the missing span
 	// sits. Only the consumer can know this, which is why next() reports it instead of leaving
 	// callers to guess from group numbers.
@@ -143,7 +149,7 @@ export class Consumer {
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
+		this.#maxAge = getter(props.maxAge ?? Moq.Time.Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -244,13 +250,13 @@ export class Consumer {
 					let skipped = false;
 					if (group.consumer.sequence !== this.#active) {
 						// A non-active group: resolve it against an active reset (dropping a
-						// reneged straggler), else detect a new rewind, then check latency. This
+						// reneged straggler), else detect a new rewind, then check the age. This
 						// runs even when the group is the delivery head, because that is exactly
 						// the stalled case (#active sits below every buffered group) where the
-						// latency budget is what eventually breaks the stall.
+						// max age budget is what eventually breaks the stall.
 						if (this.#classifyStale(group)) return;
 						this.#checkReset(group);
-						this.#checkLatency();
+						this.#checkMaxAge();
 
 						// A newer group reaching back to where the stalled active group has
 						// already presented means we can advance now instead of waiting.
@@ -286,11 +292,11 @@ export class Consumer {
 				// Advance to the next buffered group's actual sequence, but ONLY if it continues this
 				// group's timeline. Some encoders number groups non-sequentially with large gaps (not
 				// +1), so a bare `+= 1` would point #active at a nonexistent sequence and stall next()
-				// until #checkLatency skipped it -- every group through the skip path, i.e. constant
+				// until #checkMaxAge skipped it -- every group through the skip path, i.e. constant
 				// stutter. A real PTS gap is different: an intermediate group may still be in transit,
 				// so fall back to +1 there (next()'s promotion guard fixes it up once a continuous
-				// group arrives) and let #checkLatency / #tryDurationSkip skip the gap only once
-				// latency or duration coverage proves it too old.
+				// group arrives) and let #checkMaxAge / #tryDurationSkip skip the gap only once
+				// age or duration coverage proves it too old.
 				const next = this.#groups[this.#groups.indexOf(group) + 1];
 				this.#active = continues(group, next) ? next.consumer.sequence : group.consumer.sequence + 1;
 			}
@@ -322,22 +328,22 @@ export class Consumer {
 	// Frames within a group are consecutive by protocol, so only a group boundary can break it, and
 	// there it comes down to whether anything was dropped in between. Deliberately not derived from
 	// group numbers: they need not be sequential, so adjacency neither proves continuity nor catches
-	// a group the latency check truncated on the way past.
+	// a group the max age check truncated on the way past.
 	#continuesDelivery(sequence: number): boolean {
 		if (this.#deliveredGroup === undefined) return false;
 		return sequence === this.#deliveredGroup || !this.#gap;
 	}
 
-	#checkLatency() {
+	#checkMaxAge() {
 		if (this.#active === undefined) return;
 
 		let skipped = false;
 
-		// Keep skipping the oldest group while the buffered span exceeds the latency target.
+		// Keep skipping the oldest group while the buffered span exceeds the max age.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
-		// group, the latency span proves the missing content is too old to wait for.
+		// group, the span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
-			const threshold = Moq.Time.Micro.fromMilli(this.#latency.peek());
+			const threshold = Moq.Time.Micro.fromMilli(this.#maxAge.peek());
 			const first = this.#groups[0];
 			if (first.empty && !first.consumer.done) break;
 
@@ -355,8 +361,8 @@ export class Consumer {
 
 			if (min === undefined || max === undefined) break;
 
-			const latency = max - min;
-			if (latency <= threshold) break;
+			const age = max - min;
+			if (age <= threshold) break;
 
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
@@ -510,7 +516,7 @@ export class Consumer {
 	 * `continuous` is true when this result picks up exactly where the previous frame left off, so
 	 * the span between them can be treated as delivered. It is false on the first frame, after a
 	 * rewind, and whenever the consumer threw content away to keep up: a slow group skipped for the
-	 * latency target, a group truncated by a decode error, a reneged straggler. Use it rather than
+	 * max age, a group truncated by a decode error, a reneged straggler. Use it rather than
 	 * comparing group numbers, which are not required to be sequential: adjacency neither proves
 	 * the timeline is unbroken nor catches a group dropped on the way past.
 	 *
@@ -540,7 +546,7 @@ export class Consumer {
 			// Promote #active to the first buffered group when it continues the timeline we left off at,
 			// or when a completed empty group declares a boundary that makes the earlier gap irrelevant.
 			// Otherwise a real gap sits before it and an in-transit group may still arrive, so wait.
-			// #checkLatency skips the gap once the buffered span exceeds the latency budget, and
+			// #checkMaxAge skips the gap once the buffered span exceeds the budget, and
 			// #tryDurationSkip once the duration covers it.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
@@ -591,7 +597,7 @@ export class Consumer {
 				// a below-#active group (a backlog group admitted behind the live edge) may
 				// still be downloading when its buffer momentarily drains, and removing it
 				// then silently truncates its tail. #runGroup notifies whenever the head
-				// group gains a frame, so waiting here is woken, and #checkLatency bounds
+				// group gains a frame, so waiting here is woken, and #checkMaxAge bounds
 				// how long a stalled head can hold delivery up.
 				if (this.#groups[0].done) {
 					if (this.#groups[0].consumer.sequence === this.#active) {

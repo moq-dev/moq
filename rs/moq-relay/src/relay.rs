@@ -189,6 +189,10 @@ impl Relay {
 			None => (server, client),
 		};
 
+		// Before the empty check: an mTLS-only relay never builds an `Auth`, and an
+		// option that only `Auth::new` would have refused must not slip past.
+		config.auth.validate()?;
+
 		// Reject configs where neither JWT nor mTLS can authenticate anyone.
 		if config.auth.is_empty() {
 			anyhow::ensure!(
@@ -247,6 +251,14 @@ impl Relay {
 			.with_cluster(&cluster)
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health());
+		// Bound but not yet serving: registering here (rather than after the
+		// threads start) is what gives every worker a series from the first
+		// scrape, including one that is about to fail setup.
+		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		let internal = match uring.as_ref() {
+			Some(uring) => internal.with_uring(uring.metrics()),
+			None => internal,
+		};
 
 		match addr {
 			Some(addr) => tracing::info!(%addr, "listening"),
@@ -505,4 +517,21 @@ pub async fn serve(server: moq_tokio::Server, cluster: Cluster, auth: Auth, shut
 	}
 
 	anyhow::bail!("stopped accepting connections")
+}
+
+#[cfg(all(test, not(feature = "_quic")))]
+mod tests {
+	#[tokio::test]
+	async fn workers_require_a_quic_backend() {
+		let mut config = crate::Config::default();
+		config.runtime.workers = Some(1);
+		let error = match super::Relay::load(config).await {
+			Ok(_) => panic!("workers accepted without a QUIC backend"),
+			Err(error) => error,
+		};
+		assert_eq!(
+			error.to_string(),
+			"runtime.workers needs moq-relay built with a QUIC backend: noq, quinn, or quiche"
+		);
+	}
 }

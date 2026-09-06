@@ -1,36 +1,41 @@
 ---
 title: Applications
-description: Ready-to-use tools built on MoQ
+description: Ready-to-run tools built on MoQ
 ---
 
 # Applications
 
-Use these tools to operate MoQ or bridge it to an existing media workflow.
+Everything here is a binary or plugin you can run without writing code. See
+[Install](/setup/install) for packages.
 
-## Core tools
+## Core
 
 | Tool | Use it to |
 | --- | --- |
-| [moq-relay](/bin/relay/) | Route, cache, and fan out broadcasts. Relays can also form multi-region clusters. |
-| [moq-cli](/bin/cli) | Publish, subscribe, play, transcode, or convert media from the command line. |
-| [Web demo](/bin/web) | Publish and watch from a browser with the project web components. |
+| [moq-relay](/bin/relay/) | Route, cache, and fan out broadcasts. Authenticate with JWTs, cluster across regions, publish stats. |
+| [moq-cli](/bin/cli) | Move media in and out of MoQ: pipe FFmpeg in, play natively, capture a camera or screen, transcode, mint tokens. |
 
-## Protocol gateways
+## Gateways
+
+All four ship inside `moq-cli` as `moq import <gateway>` and `moq export <gateway>`.
 
 | Gateway | Direction |
 | --- | --- |
-| [moq-hls](/bin/hls) | Import HLS into MoQ or serve a MoQ broadcast as HLS. |
-| [moq-rtmp](/bin/rtmp) | Accept RTMP and enhanced RTMP publishers and forward them into MoQ. |
-| [moq-rtc](/bin/rtc) | Bridge WHIP/WHEP and MoQ in either client or server roles. |
+| [RTMP](/bin/rtmp) | Accept RTMP/E-RTMP pushes from OBS or FFmpeg; serve RTMP plays; restream to Twitch-style endpoints. |
+| [SRT](/bin/srt) | Accept SRT contribution; serve SRT to players; pull from or push to a remote SRT endpoint. |
+| [WebRTC](/bin/rtc) | WHIP ingest and WHEP playback in either HTTP role. |
+| [HLS](/bin/hls) | Serve any broadcast as HLS from the relay cache; import a remote HLS playlist. |
 
-These pages document gateway endpoints exposed by `moq-cli` and the libraries
-that implement them.
+## Plugins
 
-## Media integrations
-
-| Integration | Use it to |
+| Plugin | Use it to |
 | --- | --- |
-| [OBS plugin](/bin/obs) | Publish a scene to MoQ or use a MoQ broadcast as an OBS source. |
-| [GStreamer plugin](/bin/gstreamer) | Add MoQ source and sink elements to a GStreamer pipeline. |
+| [OBS Studio](/bin/obs) | Stream from OBS to a relay, or bring a broadcast into a scene as a source. |
+| [GStreamer](/bin/gstreamer) | `moqsink` and `moqsrc` elements for any pipeline. |
 
-To embed MoQ directly in another application, choose a [library](/lib/) instead.
+## Demos
+
+The [web demo and MoQ Boy](/bin/demo) are runnable examples of browser
+playback, publishing, and bidirectional input.
+
+To embed MoQ in your own program, use a [library](/lib/) instead.

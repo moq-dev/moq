@@ -774,7 +774,7 @@ mod tests {
 	async fn the_environment_cannot_ask_for_a_moq_side() {
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");
-		let _announce_alpha = origin.announce("alpha", Default::default()).expect("alpha");
+		_alpha.announce(Default::default()).expect("alpha");
 		let connect = relay(&origin);
 
 		// The same reachable relay, named only by the environment.
@@ -869,9 +869,9 @@ mod tests {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");
-		let _announce_alpha = origin.announce("alpha", Default::default()).expect("alpha");
+		_alpha.announce(Default::default()).expect("alpha");
 		let _nested = origin.create_broadcast("room/beta").expect("beta");
-		let _announce_nested = origin.announce("room/beta", Default::default()).expect("beta");
+		_nested.announce(Default::default()).expect("beta");
 
 		let connect = relay(&origin);
 		let found = complete(&format!("moq {connect} --broadcast ")).await;
@@ -899,7 +899,7 @@ mod tests {
 		let mut keep = Vec::new();
 		for (path, video, audio) in [("wanted", "hd", "stereo"), ("other", "sd", "mono")] {
 			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
-			let announcement = origin.announce(path, Default::default()).expect("broadcast");
+			broadcast.announce(Default::default()).expect("broadcast");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
 			let mut edit = catalog.lock();
 			edit.video.renditions.insert(
@@ -915,7 +915,7 @@ mod tests {
 				.renditions
 				.insert(audio.to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 			edit.commit().expect("publish the catalog");
-			keep.push((broadcast, catalog, announcement));
+			keep.push((broadcast, catalog));
 		}
 
 		// The global names `other`; the stage overrides it, exactly as the invocation
@@ -940,7 +940,7 @@ mod tests {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast("room").expect("broadcast");
-		let _announce_broadcast = origin.announce("room", Default::default()).expect("broadcast");
+		broadcast.announce(Default::default()).expect("broadcast");
 
 		let mut track = broadcast
 			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())

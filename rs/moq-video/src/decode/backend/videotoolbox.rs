@@ -14,10 +14,11 @@
 //!   asks, via the same path the capture surfaces use.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
-//! higher-level crate we trust. Decoding is synchronous (no async flag), so the
-//! output callback fires from within `decode_frame` before it returns, which is
-//! what lets the `!Send` CoreFoundation handles stay thread-confined.
+//! higher-level crate we trust. Decoding is synchronous (no async flag), so
+//! callbacks run on the decode task. VideoToolbox can still retain reordered
+//! pictures until a later decode or an explicit drain.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
@@ -26,8 +27,9 @@ use moq_mux::codec::annexb::NalIterator;
 use moq_net::Timestamp;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 use objc2_core_media::{
-	CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreateFromH264ParameterSets,
-	CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
+	CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
+	CMVideoFormatDescriptionCreateFromH264ParameterSets, CMVideoFormatDescriptionCreateFromHEVCParameterSets,
+	kCMBlockBufferAssureMemoryNowFlag, kCMTimeInvalid,
 };
 use objc2_core_video::{
 	CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVPixelBufferPixelFormatTypeKey,
@@ -43,6 +45,11 @@ use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
+/// Maximum access-unit timestamps retained while the decoder produces no
+/// picture. H.264 and H.265 decoded-picture buffers are smaller than this for
+/// the supported profiles, so anything older can no longer be a valid reorder.
+const MAX_PENDING: usize = 32;
+
 /// A parameter-set NAL we pull out of the stream to (re)build the format
 /// description; `Slice` is everything else (the coded picture data we decode).
 enum NalKind {
@@ -56,7 +63,7 @@ enum NalKind {
 /// `decode_frame`. Boxed so its address is a stable refcon for the session.
 #[derive(Default)]
 struct Sink {
-	frames: Vec<PixelBuffer>,
+	frames: Vec<(PixelBuffer, i64)>,
 	error: Option<String>,
 }
 
@@ -76,6 +83,11 @@ pub(crate) struct VideoToolbox {
 	sps: Option<Bytes>,
 	pps: Option<Bytes>,
 	built_from: Option<Vec<Bytes>>,
+	/// Synthetic presentation time assigned to the next input sample.
+	sample_index: i64,
+	/// Original container timestamps keyed by the synthetic presentation times
+	/// VideoToolbox returns through the callback.
+	pending: VecDeque<(i64, Timestamp)>,
 	sink: Box<Sink>,
 }
 
@@ -101,6 +113,8 @@ impl VideoToolbox {
 			sps: None,
 			pps: None,
 			built_from: None,
+			sample_index: 0,
+			pending: VecDeque::new(),
 			sink: Box::new(Sink::default()),
 		}))
 	}
@@ -169,6 +183,28 @@ impl VideoToolbox {
 		self.built_from = Some(params);
 		Ok(true)
 	}
+
+	/// Pair one callback time back to the timestamp of its submitted access unit.
+	fn take_timestamp(&mut self, sample_time: i64) -> Result<Timestamp, Error> {
+		let found = self.pending.iter().position(|(fed, _)| *fed == sample_time);
+		let Some(index) = found else {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"decoder output did not match fed sample time {sample_time}"
+			)));
+		};
+		Ok(self.pending.remove(index).expect("index found above").1)
+	}
+
+	/// Convert every callback result collected by the last decode or drain.
+	fn take_frames(&mut self) -> Result<Vec<Frame>, Error> {
+		std::mem::take(&mut self.sink.frames)
+			.into_iter()
+			.map(|(surface, sample_time)| {
+				let timestamp = self.take_timestamp(sample_time)?;
+				Ok(Frame::new(Surface::PixelBuffer(surface), timestamp))
+			})
+			.collect()
+	}
 }
 
 impl Backend for VideoToolbox {
@@ -212,8 +248,9 @@ impl Backend for VideoToolbox {
 			return Ok(Vec::new());
 		}
 
+		let sample_time = self.sample_index;
 		let format = self.format.as_ref().expect("format ensured above");
-		let sample = make_sample_buffer(&avcc, format)?;
+		let sample = make_sample_buffer(&avcc, format, sample_time)?;
 		let session = self.session.as_ref().expect("session ensured above");
 
 		self.sink.frames.clear();
@@ -231,12 +268,42 @@ impl Backend for VideoToolbox {
 				"VideoToolbox decode callback failed: {error}"
 			)));
 		}
-		// The decode callback fires synchronously inside `decode_frame`, so
-		// every output frame belongs to the access unit just submitted.
-		Ok(std::mem::take(&mut self.sink.frames)
-			.into_iter()
-			.map(|surface| Frame::new(Surface::PixelBuffer(surface), timestamp))
-			.collect())
+		remember_timestamp(&mut self.pending, sample_time, timestamp);
+		self.sample_index += 1;
+		self.take_frames()
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		self.sink.frames.clear();
+		self.sink.error = None;
+
+		let status = if let Some(session) = self.session.take() {
+			// This finishes delayed pictures and waits for every callback before the
+			// session is invalidated, so no callback can outlive `sink`.
+			let status = unsafe { session.wait_for_asynchronous_frames() };
+			unsafe { session.invalidate() };
+			status
+		} else {
+			0
+		};
+		self.format = None;
+		self.built_from = None;
+
+		let result = if status != 0 {
+			Err(Error::Codec(anyhow::anyhow!(
+				"VTDecompressionSessionWaitForAsynchronousFrames failed: {status}"
+			)))
+		} else if let Some(error) = self.sink.error.take() {
+			Err(Error::Codec(anyhow::anyhow!(
+				"VideoToolbox drain callback failed: {error}"
+			)))
+		} else {
+			self.take_frames()
+		};
+
+		self.sink.frames.clear();
+		self.pending.clear();
+		result
 	}
 
 	fn name(&self) -> &str {
@@ -244,15 +311,24 @@ impl Backend for VideoToolbox {
 	}
 }
 
-/// C callback VideoToolbox invokes (synchronously, from `decode_frame`) for each
-/// decoded frame. Retains the NV12 pixel buffer so the picture stays on the GPU.
+/// Remember which container timestamp belongs to a submitted sample while
+/// bounding streams whose pictures are repeatedly dropped.
+fn remember_timestamp(pending: &mut VecDeque<(i64, Timestamp)>, sample_time: i64, timestamp: Timestamp) {
+	pending.push_back((sample_time, timestamp));
+	while pending.len() > MAX_PENDING {
+		pending.pop_front();
+	}
+}
+
+/// C callback VideoToolbox invokes from decode or drain for each decoded frame.
+/// Retains the NV12 pixel buffer so the picture stays on the GPU.
 unsafe extern "C-unwind" fn output_callback(
 	refcon: *mut c_void,
 	_source_frame_refcon: *mut c_void,
 	status: i32,
 	_flags: VTDecodeInfoFlags,
 	image_buffer: *mut CVImageBuffer,
-	_pts: CMTime,
+	pts: CMTime,
 	_duration: CMTime,
 ) {
 	let sink = unsafe { &mut *(refcon as *mut Sink) };
@@ -263,6 +339,13 @@ unsafe extern "C-unwind" fn output_callback(
 	let Some(image) = NonNull::new(image_buffer) else {
 		return; // dropped frame
 	};
+	let flags = pts.flags;
+	let timescale = pts.timescale;
+	let sample_time = pts.value;
+	if !flags.contains(CMTimeFlags::Valid) || timescale != 1 || sample_time < 0 {
+		sink.error = Some("invalid presentation timestamp".to_string());
+		return;
+	}
 
 	// The decoded image buffer is a CVPixelBuffer; retain it (the callback only
 	// borrows) and keep it as-is rather than downloading here. The retain is also
@@ -273,7 +356,8 @@ unsafe extern "C-unwind" fn output_callback(
 	let width = CVPixelBufferGetWidth(&pixel_buffer) as u32;
 	let height = CVPixelBufferGetHeight(&pixel_buffer) as u32;
 
-	sink.frames.push(PixelBuffer::new(pixel_buffer, width, height));
+	sink.frames
+		.push((PixelBuffer::new(pixel_buffer, width, height), sample_time));
 }
 
 /// Build a `CMVideoFormatDescription` from the ordered parameter-set NAL units
@@ -332,7 +416,11 @@ fn create_format_description(codec: Codec, params: &[Bytes]) -> Result<CFRetaine
 
 /// Wrap an AVCC (length-prefixed) access unit in a `CMSampleBuffer` for decode.
 /// The block buffer owns a fresh copy of the bytes, so the sample outlives `avcc`.
-fn make_sample_buffer(avcc: &[u8], format: &CMFormatDescription) -> Result<CFRetained<CMSampleBuffer>, Error> {
+fn make_sample_buffer(
+	avcc: &[u8],
+	format: &CMFormatDescription,
+	sample_time: i64,
+) -> Result<CFRetained<CMSampleBuffer>, Error> {
 	let mut block_ptr: *mut CMBlockBuffer = ptr::null_mut();
 	let status = unsafe {
 		CMBlockBuffer::create_with_memory_block(
@@ -367,6 +455,11 @@ fn make_sample_buffer(avcc: &[u8], format: &CMFormatDescription) -> Result<CFRet
 	}
 
 	let sizes: [usize; 1] = [avcc.len()];
+	let timing = CMSampleTimingInfo {
+		duration: unsafe { kCMTimeInvalid },
+		presentationTimeStamp: unsafe { CMTime::new(sample_time, 1) },
+		decodeTimeStamp: unsafe { kCMTimeInvalid },
+	};
 	let mut sample_ptr: *mut CMSampleBuffer = ptr::null_mut();
 	let status = unsafe {
 		CMSampleBuffer::create_ready(
@@ -374,8 +467,8 @@ fn make_sample_buffer(avcc: &[u8], format: &CMFormatDescription) -> Result<CFRet
 			Some(&block),
 			Some(format),
 			1,
-			0,
-			ptr::null(),
+			1,
+			&timing,
 			1,
 			sizes.as_ptr(),
 			NonNull::new(&mut sample_ptr).unwrap(),
@@ -431,5 +524,25 @@ fn nal_kind(nal: &[u8], codec: Codec) -> NalKind {
 			_ => NalKind::Slice,
 		},
 		Codec::Av1 => NalKind::Slice,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pending_timestamps_are_bounded() {
+		let mut pending = VecDeque::new();
+		for index in 0..MAX_PENDING + 5 {
+			remember_timestamp(
+				&mut pending,
+				index as i64,
+				Timestamp::from_micros(index as u64).unwrap(),
+			);
+		}
+
+		assert_eq!(pending.len(), MAX_PENDING);
+		assert_eq!(pending.front().map(|(sample, _)| *sample), Some(5));
 	}
 }

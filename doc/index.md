@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Media over QUIC
   text: Live media without latency buildup
-  tagline: A composable protocol stack for real-time media and data at scale.
+  tagline: Real-time latency at CDN scale, for video, audio, and any live data.
   actions:
     - theme: brand
       text: Quick start
@@ -13,60 +13,72 @@ hero:
       text: Try the demo
       link: https://moq.dev/
     - theme: alt
-      text: Understand MoQ
+      text: How it works
       link: /concept/
 
 features:
   - icon:
       src: /emoji/rocket.svg
     title: Low latency
-    details: Independent streams prevent old media from delaying the live edge during congestion.
+    details: Independent QUIC streams let congestion drop old media instead of delaying new media, while tiny single-frame groups can use datagrams.
 
   - icon:
       src: /emoji/stonk.svg
     title: Scalable
-    details: Generic relays cache and fan out content without understanding its media format.
+    details: Relays cache and fan out broadcasts without understanding the payload, and cluster across regions.
 
   - icon:
       src: /emoji/puzzle.svg
     title: Composable
-    details: Protocol, media, and application layers can evolve independently and carry custom tracks.
+    details: Generic pub/sub underneath, media on top. Add your own tracks for chat, input, telemetry, or AI output.
 
   - icon:
       src: /emoji/globe.svg
-    title: Cross-platform
-    details: Native and browser implementations, language bindings, gateways, and production tools share one protocol.
+    title: Everywhere
+    details: Browsers via WebTransport, native apps via Rust and language bindings, plus gateways to RTMP, SRT, HLS, and WebRTC.
 ---
 
 ## What is MoQ?
 
-Media over QUIC (MoQ) is a family of protocols for live media and data. It uses
-independent QUIC streams so congestion on one part of a broadcast does not block
-newer content on another.
+Media over QUIC (MoQ) is a live media protocol built on QUIC. A publisher
+sends a **broadcast** made of **tracks**; each track is a series of **groups**
+(a group of pictures, a second of audio, one JSON snapshot). Most groups use
+independent QUIC streams; eligible single-frame groups can use unreliable
+datagrams. Relays forward and cache the stream-delivered groups without parsing
+them, so the same infrastructure carries video, audio, and arbitrary data.
 
-This project provides a production-oriented implementation in Rust and
-TypeScript. Its primary protocol stack is [moq-lite](/concept/layer/moq-lite)
-for transport and [hang](/concept/layer/hang) for media, with compatibility for
-the [IETF MoQ specifications](/concept/standard/).
+This project is the reference implementation: a Rust relay and toolchain, a
+TypeScript browser stack, and bindings for C, Python, Kotlin, Swift, Go, and
+Dart. It speaks [moq-lite](/concept/moq-lite), a simple profile that is
+forward-compatible with the IETF [moq-transport](/concept/standard) drafts.
+
+## What you can build
+
+| Use case | Reach for |
+| --- | --- |
+| Twitch-style live streaming | Ingest with [OBS](/bin/obs), [RTMP or SRT](/bin/cli), distribute with [moq-relay](/bin/relay/), watch with [`<moq-watch>`](/lib/js/watch), and keep legacy players via the [HLS gateway](/bin/hls). |
+| Conferencing | [`<moq-publish>`](/lib/js/publish) and [`<moq-watch>`](/lib/js/watch) in the browser, one broadcast per participant, plus the [WebRTC gateway](/bin/rtc) for WHIP/WHEP clients. |
+| Voice and video AI | Server-side media in [Rust](/lib/rs/) or [Python](/lib/py/) with hardware codecs, faster-than-real-time playback in the browser. See [MoQ for AI](/concept/use-case/ai). |
+| Real-time data | Chat, game state, telemetry, and control channels over the same relays with [`moq-net`](/lib/rs/moq-net) or [`@moq/net`](/lib/js/net). |
+| Interactive streams | Media down, input up. [MoQ Boy](/bin/demo) is a crowd-controlled Game Boy built this way. |
+| Native and mobile apps | One Rust core behind [Swift](/lib/swift/), [Kotlin](/lib/kt/), [Go](/lib/go/), [Dart](/lib/dart/), and [C](/lib/c/) bindings. |
 
 ## Choose a path
 
 | Goal | Start here |
 | --- | --- |
-| Run the local demo | [Quick start](/setup/) |
+| Run the demo locally | [Quick start](/setup/) |
+| Install the relay or CLI | [Install](/setup/install) |
 | Publish, play, or convert media | [Applications](/bin/) |
-| Add MoQ to an application | [Libraries](/lib/) |
+| Add MoQ to an app | [Libraries](/lib/) |
 | Operate a relay | [moq-relay](/bin/relay/) |
-| Learn the architecture and tradeoffs | [Concepts](/concept/) |
-| Read the protocol specifications | [Internet-Drafts](/draft/) |
-
-The main implementations are [Rust](/lib/rs/) for native applications and
-[TypeScript](/lib/js/) for browsers and JavaScript runtimes. C, Python, Kotlin,
-Swift, and Go bindings wrap the Rust core.
+| Understand the design | [Concepts](/concept/) |
+| Read the specs | [Internet-Drafts](/draft/) |
+| Teach your coding agent | [Agent setup](/setup/agent) |
 
 ## Project links
 
-- [Live demo](https://moq.dev/)
-- [GitHub repository](https://github.com/moq-dev/moq)
+- [Live demo](https://moq.dev/) and [blog](https://moq.dev/blog)
+- [GitHub](https://github.com/moq-dev/moq)
 - [Discord](https://discord.moq.dev)
 - [IETF MoQ Working Group](https://datatracker.ietf.org/group/moq/about/)

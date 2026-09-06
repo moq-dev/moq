@@ -9,9 +9,9 @@ per crate are held to the same bar as the default one.
 ## Plan
 
 The backend-less build compiles, but emits dead-code warnings, every one of them
-an item whose only callers sit behind a transport gate: `listen::Shard`,
+an item whose only callers sit behind a transport gate: `listen::Member`,
 `listen::Config::validate`, `quic::Config::validate` with `MAX_IDLE_TIMEOUT` and
-`validate_idle_timeout`, `Client`'s `timeout` field, `server::Parts::Shard`,
+`validate_idle_timeout`, `Client`'s `timeout` field, `server::Parts::Member`,
 `tls::Peers::contains_raw`, `tls::CustomRoots::load`, and
 `tls::Certificates::empty`.
 

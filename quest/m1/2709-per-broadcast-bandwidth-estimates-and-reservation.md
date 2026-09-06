@@ -60,4 +60,4 @@ Branch from `dev`, where the shared connection and `forward.ts` live.
 
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - audio following its grant, the Rust half
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports reserving nothing
-- [#2857](/quest/m1/2857-bindings-cant-reach-encoder-rate-control-so-every-non.md) - the same gap for the native bindings
+- [#2857](/quest/m1/plan-binding-rate-control.md) - the same gap for the native bindings

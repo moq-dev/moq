@@ -28,6 +28,7 @@
 //! Used only from the one decode task (the consumer's `read` loop), so the COM
 //! handles are wrapped in a thread-confined `Send` type.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -39,10 +40,11 @@ use windows::Win32::Media::MediaFoundation::{
 	IMF2DBuffer, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFTransform, MF_E_NO_MORE_TYPES,
 	MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_FRAME_SIZE,
 	MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MFCreateMediaType, MFCreateMemoryBuffer,
-	MFCreateSample, MFMediaType_Video, MFOffset, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SORTANDFILTER,
-	MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-	MFTEnumEx, MFVideoArea, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+	MFCreateSample, MFMediaType_Video, MFOffset, MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_DECODER,
+	MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoArea, MFVideoFormat_H264,
+	MFVideoFormat_HEVC, MFVideoFormat_NV12,
 };
 use windows::core::{GUID, Interface};
 
@@ -60,6 +62,10 @@ pub(crate) const NAME: &str = "mediafoundation";
 /// 30fps tick.
 const HNS_PER_SEC: i64 = 10_000_000;
 const NOMINAL_FPS: i64 = 30;
+/// Maximum timestamps retained while accepted access units produce no picture.
+/// H.264 and H.265 decoded-picture buffers are smaller than this for the
+/// supported profiles, so anything older can no longer be a valid reorder.
+const MAX_PENDING: usize = 32;
 
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
@@ -81,6 +87,12 @@ pub(crate) struct MediaFoundation {
 	/// Output buffer size to allocate when `provides_samples` is false.
 	output_size: u32,
 	sample_index: i64,
+	/// Container timestamps paired with the synthetic sample times fed to the MFT.
+	pending: VecDeque<(i64, Timestamp)>,
+	/// Last output timestamp, used only if the MFT emits an unmatched sample.
+	last_timestamp: Option<Timestamp>,
+	/// Mark the first accepted sample after a drain as a new stream epoch.
+	discontinuity: bool,
 	/// Kept alive for the MFT's lifetime; the MFT holds its own ref but we own the
 	/// pairing. Drops before `_com`.
 	_manager: IMFDXGIDeviceManager,
@@ -116,10 +128,8 @@ impl MediaFoundation {
 				.map_err(|e| mf_err("set D3D manager", e))?;
 		}
 
-		// Disable the decoder's output-reorder buffer so each access unit produces
-		// its frame right away. Our streams carry no B-frames, so this adds no
-		// latency and avoids holding frames until an end-of-stream drain (which the
-		// per-access-unit `Backend` interface never signals).
+		// Ask the decoder to minimize its reorder delay. This is advisory, so stream
+		// boundaries still perform the explicit Media Foundation drain sequence.
 		let attrs = unsafe { transform.GetAttributes().map_err(|e| mf_err("MFT GetAttributes", e))? };
 		unsafe {
 			let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
@@ -135,6 +145,9 @@ impl MediaFoundation {
 			provides_samples: false,
 			output_size: 0,
 			sample_index: 0,
+			pending: VecDeque::new(),
+			last_timestamp: None,
+			discontinuity: false,
 			_manager: manager,
 			_com: com,
 		};
@@ -276,13 +289,18 @@ impl MediaFoundation {
 			sample.AddBuffer(&buffer).map_err(|e| mf_err("AddBuffer", e))?;
 			let tick = HNS_PER_SEC / NOMINAL_FPS;
 			sample
-				.SetSampleTime(self.sample_index * tick)
+				.SetSampleTime(self.sample_time())
 				.map_err(|e| mf_err("SetSampleTime", e))?;
 			sample
 				.SetSampleDuration(tick)
 				.map_err(|e| mf_err("SetSampleDuration", e))?;
 		}
 		Ok(sample)
+	}
+
+	/// Synthetic Media Foundation timestamp for the next input sample.
+	fn sample_time(&self) -> i64 {
+		self.sample_index * (HNS_PER_SEC / NOMINAL_FPS)
 	}
 
 	/// Pull every frame the MFT has ready, stopping when it asks for more input.
@@ -292,7 +310,7 @@ impl MediaFoundation {
 	/// Reports whether the decoder got anywhere, which is not the same as whether
 	/// it handed back a picture: renegotiating the output type is progress too, and
 	/// it produces no frame.
-	fn drain_output(&mut self, out: &mut Vec<Surface>) -> Result<bool, Error> {
+	fn drain_output(&mut self, out: &mut Vec<Frame>) -> Result<bool, Error> {
 		if !self.output_configured {
 			return Ok(false);
 		}
@@ -306,7 +324,7 @@ impl MediaFoundation {
 	/// One `ProcessOutput`. Returns `true` if it produced a frame or handled a
 	/// stream change (so the caller keeps draining), `false` on
 	/// `MF_E_TRANSFORM_NEED_MORE_INPUT` (the decoder wants the next access unit).
-	fn process_output(&mut self, out: &mut Vec<Surface>) -> Result<bool, Error> {
+	fn process_output(&mut self, out: &mut Vec<Frame>) -> Result<bool, Error> {
 		// In DXVA mode the MFT provides its own texture-backed sample, so we pass a
 		// null slot; otherwise we hand it a system-memory buffer to fill.
 		let provided = if self.provides_samples {
@@ -333,7 +351,9 @@ impl MediaFoundation {
 		match result {
 			Ok(()) => {
 				if let Some(sample) = sample {
-					out.push(self.sample_to_surface(&sample)?);
+					let sample_time = unsafe { sample.GetSampleTime() }.ok();
+					let surface = self.sample_to_surface(&sample)?;
+					out.push(Frame::new(surface, self.take_timestamp(sample_time)));
 				}
 				Ok(true)
 			}
@@ -343,6 +363,32 @@ impl MediaFoundation {
 				Ok(true)
 			}
 			Err(e) => Err(mf_err("ProcessOutput", e)),
+		}
+	}
+
+	/// Pair an output sample back to the container timestamp of its input.
+	fn take_timestamp(&mut self, sample_time: Option<i64>) -> Timestamp {
+		let found = sample_time.and_then(|time| self.pending.iter().position(|(fed, _)| *fed == time));
+		let matched = match found {
+			Some(index) => self.pending.remove(index),
+			None => {
+				let oldest = self.pending.pop_front();
+				if oldest.is_some() {
+					tracing::debug!(?sample_time, "decoder output did not match a fed sample time");
+				}
+				oldest
+			}
+		};
+
+		match matched {
+			Some((_, timestamp)) => {
+				self.last_timestamp = Some(timestamp);
+				timestamp
+			}
+			None => {
+				tracing::warn!("decoder produced output with no access unit outstanding");
+				self.last_timestamp.unwrap_or(Timestamp::ZERO)
+			}
 		}
 	}
 
@@ -382,6 +428,10 @@ impl Backend for MediaFoundation {
 		let mut out = Vec::new();
 
 		let sample = self.build_sample(&access_unit)?;
+		if self.discontinuity {
+			unsafe { sample.SetUINT32(&MFSampleExtension_Discontinuity, 1) }
+				.map_err(|e| mf_err("mark discontinuity", e))?;
+		}
 		// The decoder accepts one access unit at a time. If it's still holding
 		// output it returns NOTACCEPTING; drain that, then the input goes in.
 		loop {
@@ -405,6 +455,12 @@ impl Backend for MediaFoundation {
 				Err(e) => return Err(mf_err("ProcessInput", e)),
 			}
 		}
+		self.discontinuity = false;
+		// Read the stamp before the call: arguments evaluate left to right, so
+		// `&mut self.pending` would still hold the borrow when `sample_time`
+		// wants `&self`.
+		let sample_time = self.sample_time();
+		remember_timestamp(&mut self.pending, sample_time, timestamp);
 		self.sample_index += 1;
 
 		// The decoder only reports the picture size once it has parsed the first
@@ -415,13 +471,41 @@ impl Backend for MediaFoundation {
 		}
 
 		self.drain_output(&mut out)?;
-		// The synchronous MFT drains within the call, so every output frame
-		// belongs to the access unit just submitted.
-		Ok(out.into_iter().map(|surface| Frame::new(surface, timestamp)).collect())
+		Ok(out)
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		let mut out = Vec::new();
+		if self.output_configured {
+			unsafe {
+				self.transform
+					.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
+					.map_err(|e| mf_err("drain", e))?;
+			}
+			self.drain_output(&mut out)?;
+			// A synchronous MFT may accept input immediately after NEED_MORE_INPUT.
+			// START_OF_STREAM is still useful to implementations that track the
+			// notification, but it is optional for this MFT category.
+			unsafe {
+				let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+			}
+		}
+		self.pending.clear();
+		self.discontinuity = true;
+		Ok(out)
 	}
 
 	fn name(&self) -> &str {
 		NAME
+	}
+}
+
+/// Remember which container timestamp belongs to an accepted sample while
+/// bounding streams whose pictures are repeatedly dropped.
+fn remember_timestamp(pending: &mut VecDeque<(i64, Timestamp)>, sample_time: i64, timestamp: Timestamp) {
+	pending.push_back((sample_time, timestamp));
+	while pending.len() > MAX_PENDING {
+		pending.pop_front();
 	}
 }
 
@@ -496,4 +580,24 @@ fn enumerate_decoder(subtype: GUID) -> Result<IMFTransform, Error> {
 	}
 
 	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate decoder MFT")))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pending_timestamps_are_bounded() {
+		let mut pending = VecDeque::new();
+		for index in 0..MAX_PENDING + 5 {
+			remember_timestamp(
+				&mut pending,
+				index as i64,
+				Timestamp::from_micros(index as u64).unwrap(),
+			);
+		}
+
+		assert_eq!(pending.len(), MAX_PENDING);
+		assert_eq!(pending.front().map(|(sample, _)| *sample), Some(5));
+	}
 }

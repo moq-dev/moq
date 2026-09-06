@@ -63,7 +63,7 @@ pub struct Frame {
 ///
 /// A fill stamps the group's cache access once for the whole batch, which bounds
 /// frames rather than elapsed time. A reader that may take longer than the track's
-/// `latency_max` to work through one batch calls
+/// `max_age` to work through one batch calls
 /// [`group::Consumer::keep_alive`] between frames, or the rest of the group is
 /// expired out from under it.
 #[derive(Debug, Default)]

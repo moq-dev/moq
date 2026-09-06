@@ -18,12 +18,12 @@ pub struct Stats {
 	pub bytes_sent: AtomicU64,
 	pub frames_recv: AtomicU64,
 	pub bytes_recv: AtomicU64,
-	/// Distinct groups received across all subscriptions (the displayed total).
+	/// Completed group deliveries across all subscriptions (the displayed total).
+	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
-	/// Size of every subscription's settled sequence span, excluding the live frontier.
+	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
-	/// How many groups within those settled spans actually arrived. The shortfall
-	/// `groups_expected - groups_present` is the number skipped. See `connection::GapTracker`.
+	/// Completed deliveries within `groups_expected`. The shortfall is lost groups.
 	pub groups_present: AtomicU64,
 	latency: Latency,
 }

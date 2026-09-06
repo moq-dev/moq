@@ -48,3 +48,12 @@ Related: #2960 (a restarting relay joining the old process's group), #2875 (the 
 ## Closes
 
 - [#2964](https://github.com/moq-dev/moq/issues/2964) - close this issue when the quest finishes
+
+The socket ownership redesign must also cover `moq_sock::shard::Group`
+formation: binding fewer than all declared members currently exposes usable
+sockets before the steering filter is attached. Dropping an earlier socket
+before the last bind also invalidates the recorded slot positions. Require
+complete formation before serving, and retain every socket for the served
+group lifetime. Add regressions for partial formation and early socket drop.
+Both current runtime callers bind every member before returning the group;
+this remains a limitation of the lower-level public API.

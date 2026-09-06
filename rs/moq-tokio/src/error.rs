@@ -147,18 +147,6 @@ pub enum Error {
 	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]
 	WorkerTlsGenerate,
 
-	/// A worker group was pointed at an ephemeral port, so each member bound a
-	/// port of its own instead of sharing one.
-	#[error("QUIC workers need an explicit non-zero listen port; worker {index} bound {addr} instead of {first}")]
-	WorkerPortMismatch {
-		/// The member that disagreed.
-		index: u16,
-		/// What it bound.
-		addr: std::net::SocketAddr,
-		/// What the first member bound, which the rest must match.
-		first: std::net::SocketAddr,
-	},
-
 	/// Another worker group already holds this listen port.
 	///
 	/// A second group on an overlapping address would silently join the first's

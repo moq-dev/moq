@@ -23,9 +23,6 @@ use anyhow::Context as _;
 
 use crate::{Auth, AuthParams, Cluster, Shutdown};
 
-/// How many workers the steering filter can address.
-const MAX_WORKERS: u16 = moq_sock::shard::MAX_SHARDS;
-
 /// One member's bound socket and its slot in the steered group.
 struct Member {
 	shard: moq_sock::shard::Shard,
@@ -90,6 +87,12 @@ pub struct Workers {
 	server: moq_uring::quic::server::Config,
 	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
 	certificates: moq_tokio::tls::Certificates,
+	/// One counter set per worker, in shard order. Created here rather than on
+	/// the worker thread so `/metrics` can publish every worker's series from
+	/// the first scrape, before the threads exist: a series that only appears
+	/// once a worker has done something reads as a healthy node until it is too
+	/// late to notice.
+	metrics: Vec<moq_uring::metrics::Metrics>,
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
@@ -101,9 +104,10 @@ pub struct Workers {
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 
-	/// Holds the listen port against a second group for as long as this one
-	/// lives.
-	_lock: Option<moq_sock::shard::Lock>,
+	/// The reuseport group the workers bound into. Held for the group's
+	/// lifetime, because it is what holds the listen port against a second
+	/// group.
+	_group: moq_sock::shard::Group,
 }
 
 impl Workers {
@@ -156,11 +160,6 @@ impl Workers {
 			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
 		};
 
-		let count = config.count.max(1);
-		if count > MAX_WORKERS {
-			anyhow::bail!("at most {MAX_WORKERS} io_uring workers, got {count}");
-		}
-
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -179,30 +178,26 @@ impl Workers {
 				.with_context(|| format!("{bind} resolved to no address"))?
 		};
 
-		// Excludes a concurrently-constructing same-UID group; the bind probe
-		// inside `shard::bind` excludes one that already holds the port.
-		let lock = match requested.port() {
-			0 => None,
-			port => moq_sock::shard::Lock::acquire(port)
-				.map_err(|_| anyhow::anyhow!("another QUIC worker group already owns {requested}"))?,
-		};
+		// The group owns the reuseport invariants: it locks the port against a
+		// concurrently-constructing same-UID group (the bind probe covers one
+		// that already holds it), refuses a size the steering filter could not
+		// address, and hands out members in the order the kernel numbers them
+		// by.
+		let mut group = moq_sock::shard::Group::acquire(requested, config.count)
+			.with_context(|| format!("failed to take the reuseport group on {requested}"))?;
+		let count = group.count();
 
 		let mut members = Vec::with_capacity(count as usize);
-		let mut addr = requested;
-		for index in 0..count {
-			let shard = moq_sock::shard::Shard::new(index, count).expect("index is below count");
-			let socket = moq_sock::shard::bind(addr, Some(shard))
-				.with_context(|| format!("failed to bind worker {index} on {addr}"))?;
-			let bound = socket.local_addr().context("bound socket has no address")?;
-			// An ephemeral request gives each worker a port of its own; the
-			// group only balances a port every member actually holds.
-			if index == 0 {
-				addr = bound;
-			} else if bound != addr {
-				anyhow::bail!("worker {index} bound {bound}, the group holds {addr}; use a fixed port");
-			}
+		while let Some(member) = group.member() {
+			let shard = member.shard();
+			let socket = member
+				.bind()
+				.with_context(|| format!("failed to bind worker {} on {}", shard.index(), group.addr()))?;
 			members.push(Member { shard, socket });
 		}
+		// Whatever the first member bound, which is the requested address unless
+		// it asked for an ephemeral port.
+		let addr = group.addr();
 
 		// The moq-lite ALPNs this listener speaks: the operator's version
 		// restriction when one is set, minus anything that is not lite (the
@@ -253,6 +248,7 @@ impl Workers {
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
 		Ok(Self {
+			metrics: (0..count).map(|_| moq_uring::metrics::Metrics::default()).collect(),
 			members,
 			addr,
 			server,
@@ -265,13 +261,21 @@ impl Workers {
 			stops: Vec::new(),
 			failures,
 			failures_tx,
-			_lock: lock,
+			_group: group,
 		})
 	}
 
 	/// The address every worker is bound to.
 	pub fn local_addr(&self) -> SocketAddr {
 		self.addr
+	}
+
+	/// Every worker's counters, in shard order, for an ops surface to scrape.
+	///
+	/// Available from [`bind`](Self::bind), so a scrape covers a worker that has
+	/// not started (or has died) instead of dropping its series.
+	pub fn metrics(&self) -> Vec<moq_uring::metrics::Metrics> {
+		self.metrics.clone()
 	}
 
 	/// The certificate every worker presents, for publishing its SHA-256
@@ -313,6 +317,7 @@ impl Workers {
 			let spawn = Spawn {
 				member,
 				core,
+				metrics: self.metrics[index as usize].clone(),
 				server: self.server.clone(),
 				udp: self.udp.clone(),
 				serve: serve.clone(),
@@ -394,19 +399,33 @@ impl std::fmt::Debug for Workers {
 /// error here rather than a setting the operator believes is in force. GSO is
 /// the exception in the other direction: it belongs to the socket, so the
 /// caller applies it to the UDP config instead.
+///
+/// One qlog sink is built for the whole group and cloned into every worker, so
+/// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
-	anyhow::ensure!(
-		quic.qlog.is_none(),
-		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
-	);
 	// The datagram path fixes both payload ceilings at SEGMENT and hands
 	// `conn.send` slices of exactly that, so there is no larger size to find.
 	anyhow::ensure!(
 		!quic.mtu_discovery,
 		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
 	);
+	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
+	// which nothing builds here: this listener is the io_uring stack.
+	#[cfg(not(feature = "qlog"))]
+	anyhow::ensure!(
+		quic.qlog.is_none(),
+		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
+	);
 
 	let mut transport = moq_uring::quic::Transport::default();
+	#[cfg(feature = "qlog")]
+	if let Some(dir) = quic.qlog.as_deref() {
+		transport.qlog = Some(
+			moq_uring::quic::qlog::Sink::directory(dir)
+				.with_context(|| format!("failed to capture qlog into {}", dir.display()))?,
+		);
+		tracing::info!(dir = %dir.display(), "writing qlog");
+	}
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
@@ -436,6 +455,8 @@ struct Spawn {
 	member: Member,
 	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
+	/// This worker's counter set, shared with whoever scrapes `/metrics`.
+	metrics: moq_uring::metrics::Metrics,
 	server: moq_uring::quic::server::Config,
 	udp: moq_uring::udp::Config,
 	serve: Serve,
@@ -482,6 +503,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let Spawn {
 		member,
 		core,
+		metrics,
 		server,
 		udp,
 		serve,
@@ -499,7 +521,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 	}
 
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
-		let worker = moq_uring::Worker::new(Default::default()).context("io_uring setup failed")?;
+		let mut config = moq_uring::Config::default();
+		config.metrics = metrics;
+		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
 		let handle = worker.handle();
 		let socket = handle
 			.udp(member.socket, udp)

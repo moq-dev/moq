@@ -15,6 +15,16 @@
 #   ./run.sh --analyze-only cap.ts # skip the round-trip, just analyze a file
 #   ./run.sh --strict              # fail on broadcast-shape warnings too
 #   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
+#   ./run.sh --live                # grade PCR release timing off the live pipe
+
+# `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
+# on the stream's own PCR clock, which is the right basis for the IRD model it
+# builds and is why it needs no wall-clock capture -- and also why nothing it
+# checks can see *when* the exporter handed the bytes over. pcr-timing.py reads
+# the subscriber's stdout a packet at a time and stamps each read, so it grades
+# release timing and byte position alongside the values. Nightly runs this arm
+# (.github/workflows/nightly.yml); it is not a per-PR gate, because it needs a
+# real-time window to measure at all.
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -29,6 +39,7 @@ PORT="${TSC_PORT:-4443}"
 PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
 WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
+LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
 PASSTHRU=() # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-eit)
             WITH_EIT=1
+            shift
+            ;;
+        --live)
+            LIVE=1
             shift
             ;;
         *)
@@ -172,6 +187,10 @@ if [[ -n "$SOURCE" ]]; then
     }
 else
     echo "### generating ~${DURATION}s broadcast-like clip with ffmpeg"
+    # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
+    # paces on the source PCR, so a clip whose clock is coarse and whose rate is
+    # unconstrained is released unevenly and finishes early (measured: a 20 s clip
+    # in 17 s, and release jitter of its own). The harness then grades ffmpeg.
     ffmpeg -y -hide_banner -loglevel error \
         -f lavfi -i "testsrc=size=1280x720:rate=25" \
         -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
@@ -179,7 +198,7 @@ else
         -c:v libx264 -profile:v high -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 8M \
         -c:a aac -b:a 128k \
-        -f mpegts -pes_payload_size 0 "$SRC_TS"
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 fi
 
 # No capture in this repository carries EIT, so the import path's EIT handling is
@@ -206,21 +225,49 @@ fi
 # Start the subscriber first so it is waiting on the announce before the
 # publisher appears; a live broadcast has no history, so a late joiner would miss
 # the start of the stream (or the whole thing for a short clip).
-echo "### capturing subscriber output (export ts)"
-timeout -k 3 $((DURATION + 20)) \
-    "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
-SUB_PID=$!
+#
+# In --live mode the grader reads that stdout directly rather than a capture: it
+# stamps each 188-byte read, which is the only way release timing survives at all
+# (a file has none left in it). It stops itself after its own window, so the
+# round-trip below still bounds the run.
+if [[ -n "$LIVE" ]]; then
+    echo "### grading subscriber output live (export ts | pcr-timing.py)"
+    # Both halves matter and `wait` can only report one, so record each. The
+    # exporter's own status is not incidental here: it decides whether the grader
+    # saw the whole window or graded a stream that ended under it.
+    (
+        # `set -e` would abort the subshell on the pipeline's own failure, which is
+        # exactly the status we are here to record.
+        set +e
+        timeout -k 3 $((DURATION + 20)) \
+            "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts 2>"$TMP/sub.log" |
+            python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
+                ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$TMP/timing.out" 2>&1
+        printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$TMP/timing.rc"
+    ) &
+    SUB_PID=$!
+else
+    echo "### capturing subscriber output (export ts)"
+    timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
+    SUB_PID=$!
+fi
 sleep 1
 
 # Pace on the source PCR (real media time), not a fixed bitrate: a synthetic clip
 # compresses tiny, so bitrate pacing would rush the whole stream out in a blink.
+# `--wait-min 5` is what makes that pacing fine-grained enough to measure against:
+# at the default, `regulate` releases in ~50 ms chunks, which is jitter of its own
+# on top of whatever the exporter does (measured: p95 40 ms at the default, 1 ms
+# at 5). It is the publisher's granularity, not the exporter's, so the harness has
+# to be well inside it or it grades tsp.
 # Bounded like the subscriber: if the relay stalls after readiness, `moq import
 # ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
 # pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
 timeout -k 3 $((DURATION + 20)) bash -c '
-    tsp -I file "$1" -P regulate --pcr-synchronous |
+    tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
         "$2" --connect "$3" --broadcast "$4" import ts
 ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
@@ -230,9 +277,6 @@ PUB_PID=$!
 # explain a truncated capture, so surface it alongside the logs on failure.
 wait "$PUB_PID" 2>/dev/null && PUB_RC=0 || PUB_RC=$?
 PUB_PID=""
-sleep 3
-kill_tree "$SUB_PID" 2>/dev/null || true
-SUB_PID=""
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
@@ -240,6 +284,54 @@ dump_logs() {
     sed 's/^/  pub: /' "$TMP/pub.log" >&2 || true
     sed 's/^/  sub: /' "$TMP/sub.log" >&2 || true
 }
+
+# ── live: the grader owns the verdict ───────────────────────────────────────
+if [[ -n "$LIVE" ]]; then
+    wait "$SUB_PID" 2>/dev/null || true
+    SUB_PID=""
+    if [[ ! -s "$TMP/timing.rc" ]]; then
+        echo "error: the live grader never reported a status" >&2
+        dump_logs
+        exit 1
+    fi
+    read -r EXPORT_RC GRADE_RC <"$TMP/timing.rc"
+    echo
+    cat "$TMP/timing.out"
+    # 124 is `timeout` reaching the end of the window, which is how the exporter is
+    # meant to stop; SIGPIPE (141) is the grader closing the pipe on its own window.
+    # Anything else ended the stream under the grader, so say so: it graded a
+    # shorter window than it was asked for, and the report alone doesn't show that.
+    # Not fatal, because the grader's verdict on what it did see is still the
+    # verdict, and a short window can only make the sample smaller, not kinder.
+    if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 124 && "$EXPORT_RC" -ne 141 ]]; then
+        echo >&2
+        echo "warning: the exporter exited $EXPORT_RC before the window closed" >&2
+        sed 's/^/  sub: /' "$TMP/sub.log" >&2 || true
+    fi
+    if [[ "$GRADE_RC" -ne 0 ]]; then
+        echo >&2
+        echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit "$GRADE_RC"
+    fi
+    # The grader's verdict is not the whole run. It grades whatever reached it, and
+    # the sample floor only rejects a window that came up short: a publisher that
+    # dies late still leaves enough behind to pass every check. That is a broken
+    # round-trip reported as a good one, so the publisher's own status is a gate
+    # too. 124 is `timeout` killing a stalled `moq import ts`, which is a failure
+    # of the same kind rather than a clean end, so it is not excused here.
+    if [[ "$PUB_RC" -ne 0 ]]; then
+        echo >&2
+        echo "error: the publisher exited $PUB_RC; the graded stream is not a whole round-trip" >&2
+        dump_logs
+        exit 1
+    fi
+    exit 0
+fi
+
+sleep 3
+kill_tree "$SUB_PID" 2>/dev/null || true
+SUB_PID=""
 
 if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2

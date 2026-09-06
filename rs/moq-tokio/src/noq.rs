@@ -1,5 +1,6 @@
 //! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
+use crate::RedactedUrl;
 use crate::connect;
 use crate::listen;
 use crate::quic::CongestionControl;
@@ -344,7 +345,7 @@ impl NoqClient {
 				fingerprint.set_query(None);
 				fingerprint.set_fragment(None);
 
-				tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
+				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
@@ -497,10 +498,11 @@ fn proto_status(err: &web_transport_noq::proto::ConnectError) -> Option<u16> {
 pub(crate) struct NoqServer {
 	pub quic: noq::Endpoint,
 	pub certs: Arc<ServeCerts>,
+	_reload: crate::tls::Reload,
 }
 
 impl NoqServer {
-	pub fn new(config: listen::Config, quic: &crate::quic::Config, shard: Option<listen::Shard>) -> Result<Self> {
+	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Member>) -> Result<Self> {
 		let mut transport = noq::TransportConfig::default();
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
@@ -558,7 +560,7 @@ impl NoqServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();
-		if let Some(shard) = shard {
+		if let Some(shard) = member.as_ref().map(listen::Member::shard) {
 			if config.lb_id.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
@@ -589,16 +591,23 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = moq_sock::shard::bind(listen, shard).map_err(Error::BindSocket)?;
+		// A group member binds the address its group holds, not the one this
+		// config resolved: the group is what guarantees every member shares one
+		// port, in the order the kernel steers by.
+		let socket = match member {
+			Some(member) => member.bind(),
+			None => crate::bind::udp(crate::bind::Udp::new(listen)),
+		}
+		.map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
 
 		// Spawn the cert reload watcher only after endpoint creation succeeds,
 		// so we don't leave a dangling watcher on failure.
-		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
+		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
 
-		Ok(Self { quic, certs })
+		Ok(Self { quic, certs, _reload })
 	}
 
 	pub fn accept(&self) -> impl std::future::Future<Output = Option<noq::Incoming>> + '_ {

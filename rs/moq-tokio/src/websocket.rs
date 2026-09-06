@@ -13,7 +13,6 @@ use std::{net, time};
 use url::Url;
 
 use crate::Duration as CliDuration;
-
 /// Errors specific to the WebSocket fallback backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

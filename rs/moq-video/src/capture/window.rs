@@ -1,42 +1,45 @@
 //! Native Windows single-window capture.
 //!
 //! Desktop Duplication is monitor-scoped, so selected windows use GDI. The
-//! backend enumerates visible top-level windows, copies the selected window DC
-//! at the requested frame rate, and converts BGRA to I420. The shared
-//! latest-frame channel keeps the GDI loop independent from encoder latency.
+//! backend enumerates visible top-level windows, renders the selected one into
+//! a memory DC at the requested frame rate, and converts BGRA to I420. The
+//! shared latest-frame channel keeps the GDI loop independent from encoder
+//! latency.
 
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, FILETIME, HANDLE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
 	BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
 	DeleteObject, GetDIBits, GetWindowDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
 };
+use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::System::Threading::{
-	OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+	GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::HiDpi::{
 	DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
 	CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, EnumWindows, GetCursorInfo, GetIconInfo, GetPropW,
-	GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsWindow,
-	IsWindowVisible, PRF_CHILDREN, PRF_CLIENT, PRF_ERASEBKGND, PRF_NONCLIENT, RemovePropW, SMTO_ABORTIFHUNG,
-	SMTO_BLOCK, SendMessageTimeoutW, SetPropW, WM_PRINT,
+	GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HICON, ICONINFO, IsIconic, IsWindow,
+	IsWindowVisible, PW_RENDERFULLCONTENT, RemovePropW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, SetPropW,
+	WM_NULL,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
+use super::settle::{Settle, Settled};
 use super::{Config, Stream, Window};
 use crate::Error;
 use crate::frame::{I420, Surface};
 
 const DEFAULT_FRAMERATE: u32 = 30;
-const PRINT_TIMEOUT_MS: u32 = 50;
+const PROBE_TIMEOUT_MS: u32 = 50;
 static NEXT_WINDOW_IDENTITY: AtomicUsize = AtomicUsize::new(1);
 
 /// List visible, titled top-level windows by native HWND.
@@ -127,8 +130,11 @@ struct Capture {
 	interval: Duration,
 	next: Instant,
 	name: String,
-	wm_print: bool,
 	cursor: bool,
+	settle: Settle<(u32, u32)>,
+	/// Whether the window was minimized on the previous read, so the hold is
+	/// logged when it starts and ends rather than once per frame.
+	iconic: bool,
 	_dpi: DpiContext,
 }
 
@@ -149,7 +155,7 @@ impl Capture {
 		if width == 0 || height == 0 {
 			return Err(Error::SourceUnavailable("window has no capturable area".to_string()));
 		}
-		let identity = WindowIdentity::new(handle)?;
+		let identity = WindowIdentity::new(handle);
 		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
 		Ok(Self {
 			handle,
@@ -160,50 +166,71 @@ impl Capture {
 			interval: Duration::from_micros(1_000_000 / u64::from(framerate)),
 			next: Instant::now(),
 			name: format!("window:{}", handle.0 as usize),
-			wm_print: true,
 			cursor: config.cursor,
+			settle: Settle::new((width, height)),
+			iconic: false,
 			_dpi: dpi,
 		})
 	}
 
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let now = Instant::now();
 		if self.next > now {
 			std::thread::sleep(self.next - now);
 		}
 		self.next = Instant::now() + self.interval;
 
-		if !self.identity.matches() {
+		if !self.identity.matches(self.handle) {
 			return Err(Error::SourceUnavailable(format!(
 				"{} was closed or replaced",
 				self.name
 			)));
 		}
+		// A minimized window reports an off-screen rect and has no capturable
+		// area, so hold the capture instead of ending it: reopening would fail
+		// outright, killing the broadcast for what is only a taskbar click.
+		if unsafe { IsIconic(self.handle) }.as_bool() {
+			if !self.iconic {
+				self.iconic = true;
+				tracing::info!(source = %self.name, "window minimized; holding capture");
+			}
+			return Ok(pump::Read::Idle);
+		}
+		if self.iconic {
+			self.iconic = false;
+			tracing::info!(source = %self.name, "window restored; resuming capture");
+		}
+
 		let mut rect = RECT::default();
 		unsafe { GetWindowRect(self.handle, &mut rect) }
 			.map_err(|error| Error::SourceUnavailable(format!("read window geometry: {error}")))?;
 		let width = ((rect.right - rect.left).max(0) as u32) & !1;
 		let height = ((rect.bottom - rect.top).max(0) as u32) & !1;
-		if (width, height) != (self.width, self.height) {
+		match self.settle.observe(&(width, height), Instant::now()) {
+			Settled::Open => {}
+			// Mid-drag: the window is a size the encoder can't take, but one that
+			// is still moving, so skip the frame and look again next interval.
+			Settled::Waiting => return Ok(pump::Read::Idle),
 			// The encoder's geometry is fixed at open, so end the stream and let
-			// the caller reopen against the new size.
-			tracing::info!(
-				source = %self.name,
-				from = %format_args!("{}x{}", self.width, self.height),
-				to = %format_args!("{width}x{height}"),
-				"window resized; ending capture"
-			);
-			return Ok(None);
+			// the caller reopen against the size the drag came to rest at.
+			Settled::Changed => {
+				tracing::info!(
+					source = %self.name,
+					from = %format_args!("{}x{}", self.width, self.height),
+					to = %format_args!("{width}x{height}"),
+					"window resized; ending capture"
+				);
+				return Ok(pump::Read::Done);
+			}
 		}
-		let (bgra, printed) = snapshot(self.handle, self.width, self.height, self.wm_print, self.cursor)?;
-		if !self.identity.matches() {
+		let bgra = snapshot(self.handle, self.width, self.height, self.cursor)?;
+		if !self.identity.matches(self.handle) {
 			return Err(Error::SourceUnavailable(format!(
 				"{} was closed or replaced",
 				self.name
 			)));
 		}
-		self.wm_print &= printed;
-		Ok(Some(Surface::I420(I420::from_bgra(
+		Ok(pump::Read::Frame(Surface::I420(I420::from_bgra(
 			&bgra,
 			self.width * 4,
 			self.width,
@@ -230,38 +257,79 @@ impl Drop for DpiContext {
 	}
 }
 
+/// Identity for a window we do not own, so a recycled `HWND` is not mistaken
+/// for the one that was selected.
+///
+/// A unique property gives exact identity when the target accepts it. UIPI
+/// refuses that write to a higher-integrity window, so elevated targets fall
+/// back to the owning process id and creation time.
 struct WindowIdentity {
-	handle: HWND,
-	name: Vec<u16>,
-	token: HANDLE,
+	marker: Option<WindowMarker>,
+	/// Owning process, 0 when it could not be read.
+	process: u32,
+	/// Owning process's creation time, `None` when it could not be read.
+	created: Option<u64>,
 }
 
 impl WindowIdentity {
-	fn new(handle: HWND) -> Result<Self, Error> {
+	fn new(handle: HWND) -> Self {
 		let value = NEXT_WINDOW_IDENTITY.fetch_add(1, Ordering::Relaxed).max(1);
 		let token = HANDLE(value as *mut c_void);
 		let name = format!("moq.capture.identity.{}.{value}\0", std::process::id())
 			.encode_utf16()
 			.collect::<Vec<_>>();
-		unsafe { SetPropW(handle, PCWSTR(name.as_ptr()), Some(token)) }
-			.map_err(|error| capture_error("mark window identity", error))?;
-		Ok(Self { handle, name, token })
+		let marker = unsafe { SetPropW(handle, PCWSTR(name.as_ptr()), Some(token)) }
+			.is_ok()
+			.then_some(WindowMarker { handle, name, token });
+		let process = process_id(handle);
+		Self {
+			marker,
+			process,
+			created: process_created(process),
+		}
 	}
 
-	fn matches(&self) -> bool {
-		unsafe { GetPropW(self.handle, PCWSTR(self.name.as_ptr())).0 == self.token.0 }
+	fn matches(&self, handle: HWND) -> bool {
+		if !unsafe { IsWindow(Some(handle)) }.as_bool() {
+			return false;
+		}
+		if let Some(marker) = &self.marker {
+			return marker.matches(handle);
+		}
+		let process = process_id(handle);
+		if process == 0 || process != self.process {
+			return false;
+		}
+		// A creation time we failed to read is not evidence the process changed,
+		// so only compare when both reads succeeded.
+		match (self.created, process_created(process)) {
+			(Some(before), Some(after)) => before == after,
+			_ => true,
+		}
 	}
 }
 
-impl Drop for WindowIdentity {
+struct WindowMarker {
+	handle: HWND,
+	name: Vec<u16>,
+	token: HANDLE,
+}
+
+impl WindowMarker {
+	fn matches(&self, handle: HWND) -> bool {
+		unsafe { GetPropW(handle, PCWSTR(self.name.as_ptr())).0 == self.token.0 }
+	}
+}
+
+impl Drop for WindowMarker {
 	fn drop(&mut self) {
-		if self.matches() {
+		if self.matches(self.handle) {
 			let _ = unsafe { RemovePropW(self.handle, PCWSTR(self.name.as_ptr())) };
 		}
 	}
 }
 
-fn snapshot(handle: HWND, width: u32, height: u32, print: bool, cursor: bool) -> Result<(Vec<u8>, bool), Error> {
+fn snapshot(handle: HWND, width: u32, height: u32, cursor: bool) -> Result<Vec<u8>, Error> {
 	let source = unsafe { GetWindowDC(Some(handle)) };
 	if source.is_invalid() {
 		return Err(last_capture_error("get window device context"));
@@ -296,9 +364,12 @@ fn snapshot(handle: HWND, width: u32, height: u32, print: bool, cursor: bool) ->
 		)
 		.map_err(|error| capture_error("copy window pixels", error))?;
 	}
-	// WM_PRINT keeps occluded windows useful but runs on the target UI thread.
-	// Bound that request, then keep using the copied DC if the target times out.
-	let printed = !print || print_window(handle, memory.0);
+	// A window composed by DirectComposition (a browser, Electron, any UWP app)
+	// puts nothing in its window DC, so the copy above is black on its own.
+	// PrintWindow asks the window to render over it, and PW_RENDERFULLCONTENT is
+	// what makes a GPU-composited window honor that; a window that declines
+	// leaves the copy in place.
+	print_window(handle, memory.0);
 	if cursor {
 		draw_cursor(handle, memory.0);
 	}
@@ -331,7 +402,7 @@ fn snapshot(handle: HWND, width: u32, height: u32, print: bool, cursor: bool) ->
 	if rows != height as i32 {
 		return Err(last_capture_error("read window bitmap"));
 	}
-	Ok((pixels, printed))
+	Ok(pixels)
 }
 
 fn draw_cursor(handle: HWND, target: HDC) {
@@ -360,16 +431,33 @@ fn draw_cursor(handle: HWND, target: HDC) {
 	let _ = unsafe { DrawIconEx(target, x, y, icon, 0, 0, 0, None, DI_NORMAL) };
 }
 
-fn print_window(handle: HWND, target: HDC) -> bool {
-	let flags = PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND | PRF_CHILDREN;
+/// Ask the window to render itself over `target`, best effort.
+///
+/// Deliberately not latched off after a failure: a window that misses one frame
+/// is not a window that can never be printed, and giving up permanently is what
+/// would leave a composited window black for the rest of the capture.
+fn print_window(handle: HWND, target: HDC) {
+	// PrintWindow runs on the target's UI thread and has no timeout of its own,
+	// while the pump thread joins on this call at shutdown, so a hung window
+	// would wedge the capture. A bounded probe first also covers UIPI, which
+	// refuses a cross-integrity send outright. Either way the copied window DC
+	// still yields a frame.
+	if !responding(handle) {
+		return;
+	}
+	let _ = unsafe { PrintWindow(handle, target, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) };
+}
+
+/// Bounded check that the window's thread is still pumping messages.
+fn responding(handle: HWND) -> bool {
 	unsafe {
 		SendMessageTimeoutW(
 			handle,
-			WM_PRINT,
-			WPARAM(target.0 as usize),
-			LPARAM(flags as isize),
+			WM_NULL,
+			WPARAM(0),
+			LPARAM(0),
 			SMTO_BLOCK | SMTO_ABORTIFHUNG,
-			PRINT_TIMEOUT_MS,
+			PROBE_TIMEOUT_MS,
 			None,
 		)
 		.0 != 0
@@ -387,8 +475,7 @@ fn title(handle: HWND) -> String {
 }
 
 fn app_name(handle: HWND) -> String {
-	let mut process_id = 0;
-	unsafe { GetWindowThreadProcessId(handle, Some(&mut process_id)) };
+	let process_id = process_id(handle);
 	if process_id == 0 {
 		return String::new();
 	}
@@ -409,6 +496,32 @@ fn app_name(handle: HWND) -> String {
 		.and_then(|name| name.to_str())
 		.unwrap_or_default()
 		.to_string()
+}
+
+/// The process that owns `handle`, or 0 when it cannot be read.
+fn process_id(handle: HWND) -> u32 {
+	let mut process = 0;
+	unsafe { GetWindowThreadProcessId(handle, Some(&mut process)) };
+	process
+}
+
+/// A process's creation time as a raw FILETIME, which pins one process instance
+/// across pid reuse.
+fn process_created(process: u32) -> Option<u64> {
+	if process == 0 {
+		return None;
+	}
+	// PROCESS_QUERY_LIMITED_INFORMATION is the access right that a medium
+	// integrity process is granted against an elevated one, which is the whole
+	// point of identifying the window this way.
+	let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process) }.ok()?;
+	let handle = ProcessHandle(handle);
+	let mut created = FILETIME::default();
+	let mut exit = FILETIME::default();
+	let mut kernel = FILETIME::default();
+	let mut user = FILETIME::default();
+	unsafe { GetProcessTimes(handle.0, &mut created, &mut exit, &mut kernel, &mut user) }.ok()?;
+	Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 struct ProcessHandle(HANDLE);

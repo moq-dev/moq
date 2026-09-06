@@ -50,7 +50,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ maxAge: 30_000 });
 	const consumer = new Consumer(track.subscribe({ maxAge: 5000 }), {
 		format: new LegacyFormat(),
-		latency: 5000 as Time.Milli,
+		maxAge: 5000 as Time.Milli,
 	});
 
 	// The live edge lands first, and delivery starts there rather than waiting.
@@ -80,7 +80,7 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ maxAge: 30_000 });
 	const consumer = new Consumer(track.subscribe({ maxAge: 5000 }), {
 		format: new LegacyFormat(),
-		latency: 5000 as Time.Milli,
+		maxAge: 5000 as Time.Milli,
 	});
 
 	// The live edge group arrives first and starts delivery (still open).

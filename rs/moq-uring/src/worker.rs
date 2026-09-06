@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use io_uring::{EnterFlags, IoUring, opcode, types};
 
+use crate::metrics::Metrics;
 use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKED, RUNNING, Unpark};
 use crate::shared::{Cqe, Op, Shared, Task};
 use crate::{Error, timer, udp};
@@ -38,12 +39,31 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_millis(3200);
 
 /// Worker construction knobs.
 ///
-/// Currently empty: the worker sizes its ring internally, with a completion
-/// queue that comfortably covers the per-socket pool ceilings in
-/// [`udp::Config`]. The struct exists so future knobs stay additive.
-#[derive(Clone, Debug, Default)]
+/// The worker sizes its ring internally, with a completion queue that
+/// comfortably covers the per-socket pool ceilings in [`udp::Config`].
+#[derive(Debug, Default)]
 #[non_exhaustive]
-pub struct Config {}
+pub struct Config {
+	/// Where the worker accumulates its counters.
+	///
+	/// Default gives it a fresh set, still readable through
+	/// [`Handle::metrics`]. Pass one in to hold a copy on the thread that
+	/// spawned the worker, which is how an ops surface scrapes a worker it
+	/// cannot otherwise reach. A [`Metrics`] clone shares one set of counters,
+	/// so give each worker its own. Cloning this config starts a fresh set for
+	/// the cloned worker.
+	pub metrics: Metrics,
+}
+
+impl Clone for Config {
+	fn clone(&self) -> Self {
+		// A cloned construction plan targets a new worker, so its counters must
+		// not be folded into the source worker's per-worker series.
+		Self {
+			metrics: Metrics::default(),
+		}
+	}
+}
 
 /// A thread-pinned io_uring executor: the ring, a timer heap, and a local
 /// (`!Send`) task set, driven by a caller-owned loop.
@@ -79,7 +99,8 @@ impl Worker {
 	/// park timeout, and batched minimum waits with one code path; there is
 	/// deliberately no fallback (use the tokio stack instead).
 	pub fn new(config: Config) -> Result<Self, Error> {
-		let Config {} = config;
+		let Config { metrics } = config;
+		let metrics = metrics.counters().clone();
 		let ring = IoUring::builder()
 			.setup_single_issuer()
 			.setup_defer_taskrun()
@@ -113,9 +134,10 @@ impl Worker {
 			shared: Rc::new(Shared {
 				ring: RefCell::new(ring),
 				ops: RefCell::new(slab::Slab::new()),
-				timers: Rc::new(RefCell::new(timer::Heap::default())),
+				timers: Rc::new(RefCell::new(timer::Heap::new(metrics.clone()))),
 				spawns: RefCell::new(Vec::new()),
-				unpark: Unpark::new(),
+				unpark: Unpark::new(metrics.clone()),
+				metrics,
 				next_bgid: std::cell::Cell::new(0),
 				stopped: std::cell::Cell::new(false),
 				spill: RefCell::new(std::collections::VecDeque::new()),
@@ -197,6 +219,7 @@ impl Worker {
 						flags: entry.flags(),
 					}));
 			}
+			self.shared.metrics.completions.add(self.cqes.len() as u64);
 			if self.cqes.is_empty() || !self.dispatch_batch(deadline, Instant::now) {
 				return Ok(());
 			}
@@ -223,9 +246,13 @@ impl Worker {
 		if ring.submission().is_empty() {
 			return Ok(());
 		}
+		self.shared.metrics.enters.add(1);
 		match ring.submit() {
 			// A partial submit leaves the rest staged for the next pump.
-			Ok(_) => Ok(()),
+			Ok(count) => {
+				self.shared.metrics.submissions.add(count as u64);
+				Ok(())
+			}
 			// A signal interrupted the enter before it consumed anything. The
 			// next worker turn retries the same staged SQEs.
 			Err(err) if err.raw_os_error() == Some(libc::EINTR) => Ok(()),
@@ -243,13 +270,14 @@ impl Worker {
 			if ring.submission().is_empty() {
 				return Ok(());
 			}
+			self.shared.metrics.enters.add(1);
 			match ring.submit() {
 				// Keep submitting after partial progress. Returning zero while SQEs
 				// remain would otherwise spin forever.
 				Ok(0) => {
 					return Err(std::io::Error::other("io_uring teardown submission made no progress").into());
 				}
-				Ok(_) => {}
+				Ok(count) => self.shared.metrics.submissions.add(count as u64),
 				Err(err) => retry_teardown_submit(&mut interruptions, err)?,
 			}
 		}
@@ -275,6 +303,7 @@ impl Worker {
 				let wait = remaining.min(std::time::Duration::from_millis(50));
 				let ts = types::Timespec::from(wait);
 				let args = types::SubmitArgs::new().timespec(&ts);
+				self.shared.metrics.enters.add(1);
 				let _ = ring.submitter().submit_with_args(1, &args);
 			}
 		}
@@ -366,12 +395,14 @@ impl Worker {
 		}
 
 		let deadline = self.shared.timers.borrow().next();
+		self.shared.metrics.parks.add(1);
+		self.shared.metrics.enters.add(1);
 		let result = {
 			let mut ring = self.shared.ring.borrow_mut();
 			let to_submit = ring.submission().len() as u32;
 			let submitter = ring.submitter();
 			match deadline {
-				None => submitter.submit_and_wait(1).map(drop),
+				None => submitter.submit_and_wait(1),
 				Some(at) => {
 					// Zero timeout SQEs: the earliest userspace deadline rides
 					// the enter call as an absolute CLOCK_MONOTONIC timeout.
@@ -380,14 +411,17 @@ impl Worker {
 					let flags = EnterFlags::GETEVENTS | EnterFlags::EXT_ARG | EnterFlags::ABS_TIMER;
 					// SAFETY: `args` (and the timespec it references) outlive
 					// the call, and EXT_ARG matches its type.
-					unsafe { submitter.enter(to_submit, 1, flags.bits(), Some(&args)) }.map(drop)
+					unsafe { submitter.enter(to_submit, 1, flags.bits(), Some(&args)) }
 				}
 			}
 		};
 		unpark.word.store(RUNNING, Ordering::Release);
 
 		match result {
-			Ok(()) => Ok(()),
+			Ok(count) => {
+				self.shared.metrics.submissions.add(count as u64);
+				Ok(())
+			}
 			Err(err)
 				if matches!(
 					err.raw_os_error(),
@@ -459,6 +493,11 @@ impl Clone for Handle {
 }
 
 impl Handle {
+	/// This worker's counters, readable from any thread.
+	pub fn metrics(&self) -> Metrics {
+		Metrics::from_counters(self.shared.metrics.clone())
+	}
+
 	/// Run a `!Send` future on this worker until completion.
 	///
 	/// If the worker has already been dropped the future is dropped instead of
@@ -572,7 +611,11 @@ mod tests {
 	/// Kernel-gated: `None` (with a loud skip) below the 6.12 floor, so these
 	/// tests pass vacuously on older CI kernels and run everywhere else.
 	fn worker() -> Option<Worker> {
-		match Worker::new(Config::default()) {
+		worker_with(Config::default())
+	}
+
+	fn worker_with(config: Config) -> Option<Worker> {
+		match Worker::new(config) {
 			Ok(worker) => Some(worker),
 			Err(Error::Unsupported(reason)) => {
 				eprintln!("skipping io_uring test: {reason}");
@@ -580,6 +623,16 @@ mod tests {
 			}
 			Err(err) => panic!("worker setup failed: {err}"),
 		}
+	}
+
+	#[test]
+	fn cloned_config_has_fresh_metrics() {
+		let config = Config::default();
+		let clone = config.clone();
+		assert!(!std::sync::Arc::ptr_eq(
+			config.metrics.counters(),
+			clone.metrics.counters()
+		));
 	}
 
 	#[test]
@@ -980,9 +1033,189 @@ mod tests {
 		drop(worker);
 	}
 
+	/// The counters an ops scrape reads have to move for real work, and a
+	/// handed-in [`Metrics`] has to be the same set the worker writes: reading
+	/// zeros off a worker that is busy is indistinguishable from a healthy idle
+	/// one, which is the failure this whole surface exists to prevent.
+	#[test]
+	fn metrics_record_ring_and_socket_activity() {
+		let metrics = Metrics::default();
+		let config = Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		};
+		let Some(mut worker) = worker_with(config) else { return };
+		let handle = worker.handle();
+		let sock = handle
+			.udp(
+				std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"),
+				udp::Config::default(),
+			)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+
+		// One GSO train of four datagrams: one `sendmsg`, four packets.
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		tx[..4 * 1200].fill(7);
+		tx.send(4 * 1200, to, 1200).expect("send");
+
+		// Drive the worker until the loopback delivers, parking on a timer each
+		// turn so the park and timer counters see traffic too.
+		let deadline = Instant::now() + Duration::from_secs(5);
+		let mut received = 0;
+		while received == 0 && Instant::now() < deadline {
+			let handle = handle.clone();
+			worker
+				.block_on(async move {
+					Deadline::after(&handle, Duration::from_millis(10)).wait().await;
+				})
+				.unwrap();
+			while let Poll::Ready(packet) = sock.poll_recv(&kio::Waiter::noop()) {
+				let packet = packet.expect("receive path failed");
+				received += packet.payload().len();
+			}
+		}
+		assert!(received > 0, "the loopback never delivered the send");
+
+		let snap = metrics.snapshot();
+		assert_eq!(snap.tx_sends, 1, "one GSO train is one sendmsg: {snap:?}");
+		assert_eq!(snap.tx_datagrams, 4, "four segments: {snap:?}");
+		assert!(snap.rx_receives > 0, "no receive completions: {snap:?}");
+		assert!(
+			snap.rx_datagrams >= snap.rx_receives,
+			"fewer datagrams than receives: {snap:?}"
+		);
+		assert!(snap.submissions > 0, "nothing was submitted: {snap:?}");
+		assert!(snap.completions > 0, "nothing completed: {snap:?}");
+		assert!(snap.enters > 0, "the ring was never entered: {snap:?}");
+		assert!(snap.parks > 0, "the worker never parked: {snap:?}");
+		assert!(snap.timers_fired > 0, "the park deadlines never fired: {snap:?}");
+		// The worker's own handle reads the same counters as the one passed in,
+		// rather than a private set the scraper would never see.
+		let own = handle.metrics().snapshot();
+		assert_eq!((own.tx_sends, own.tx_datagrams), (snap.tx_sends, snap.tx_datagrams));
+	}
+
+	/// The backpressure counters are the first thing to look at when throughput
+	/// sags, so both ends of it have to be recorded: a send that found the pool
+	/// drained, and a receive that could not be re-armed for want of a buffer.
+	#[test]
+	fn metrics_record_pool_backpressure() {
+		let metrics = Metrics::default();
+		let config = Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		};
+		let Some(mut worker) = worker_with(config) else { return };
+		let handle = worker.handle();
+		// One buffer each way, so the pools are at their ceiling immediately.
+		// Oneshot receives claim a whole buffer, which is what lets a held
+		// packet leave the socket unarmed.
+		let sock = handle
+			.udp(
+				std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"),
+				udp::Config {
+					gro: false,
+					gso: false,
+					multishot: false,
+					rx_buffers_max: 1,
+					rx_buffer_len: 2048,
+					tx_buffers_max: 1,
+					tx_buffer_len: 2048,
+				},
+			)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		// The pool is one buffer deep and that one is checked out.
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert_eq!(metrics.snapshot().tx_stalls, 1);
+		tx.send(1200, to, 1200).expect("send");
+
+		// Hold the received packet: its buffer is the pool, so the re-arm has
+		// nowhere to receive into.
+		let deadline = Instant::now() + Duration::from_secs(5);
+		let mut held = None;
+		while held.is_none() && Instant::now() < deadline {
+			let handle = handle.clone();
+			worker
+				.block_on(async move {
+					Deadline::after(&handle, Duration::from_millis(10)).wait().await;
+				})
+				.unwrap();
+			if let Poll::Ready(packet) = sock.poll_recv(&kio::Waiter::noop()) {
+				held = Some(packet.expect("receive path failed"));
+			}
+		}
+		assert!(held.is_some(), "the loopback never delivered the send");
+		assert!(
+			metrics.snapshot().rx_exhausted > 0,
+			"a re-arm with every buffer held went unreported: {:?}",
+			metrics.snapshot()
+		);
+
+		// A completed send ends the first stall. Draining the pool again starts
+		// exactly one new episode, however often its waiter is polled.
+		let Poll::Ready(Ok(_tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("completed tx buffer was not released");
+		};
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
+		assert_eq!(metrics.snapshot().tx_stalls, 2);
+	}
+
+	/// Timer churn is the thing #3122 needs a baseline for, so an arm, a
+	/// re-arm, and a drop each have to land in a different counter, and the
+	/// derived heap depth has to come back to zero.
+	#[test]
+	fn metrics_count_timer_churn() {
+		use moq_net::runtime::Timer as _;
+		let metrics = Metrics::default();
+		let config = Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		};
+		let Some(worker) = worker_with(config) else { return };
+		let handle = worker.handle();
+		let mut timer = handle.timer();
+
+		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		assert_eq!(metrics.snapshot().timers_active(), 1);
+
+		// A re-arm is a cancel plus an arm, which is exactly the churn signal.
+		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		let snap = metrics.snapshot();
+		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (2, 1, 0));
+		assert_eq!(snap.timers_active(), 1);
+
+		// An eager poll past the deadline fires rather than cancels.
+		timer.set(Some(Instant::now() - Duration::from_millis(1)));
+		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
+		let snap = metrics.snapshot();
+		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (3, 2, 1));
+		assert_eq!(snap.timers_active(), 0);
+
+		// A dropped armed timer is a cancel, and the heap empties again.
+		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		assert_eq!(metrics.snapshot().timers_active(), 1);
+		drop(timer);
+		assert_eq!(metrics.snapshot().timers_active(), 0);
+	}
+
 	#[test]
 	fn remote_wake_unparks() {
-		let Some(mut worker) = worker() else { return };
+		let metrics = Metrics::default();
+		let config = Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		};
+		let Some(mut worker) = worker_with(config) else { return };
 		let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
 		let thread_flag = flag.clone();
@@ -1009,5 +1242,8 @@ mod tests {
 			.unwrap();
 		assert!(start.elapsed() >= Duration::from_millis(50));
 		thread.join().unwrap();
+		// The futex syscall the wake had to make is the expensive half, and the
+		// only counter written from off the worker's thread.
+		assert!(metrics.snapshot().wakes > 0, "the remote wake went unreported");
 	}
 }

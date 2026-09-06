@@ -85,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
 	let output = publish
 		.create_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
-	let _announce_output = publish
-		.announce(&output_path, Default::default())
+	output
+		.announce(Default::default())
 		.context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

@@ -5,15 +5,16 @@
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
-//! Certificates, keys, and custom root CAs loaded from disk are normally hot
-//! reloaded for new handshakes. Quiche servers are the exception: all inbound
-//! TLS material is fixed when the listener is built. [`Certificates`] reads the
-//! current served set back out.
+//! Certificates, keys, and custom root CAs loaded from disk are hot reloaded for
+//! new handshakes. A quiche server is the exception for the mTLS client roots
+//! ([`Listen::root`]), which boringssl fixes when the listener is built; the
+//! certificates it serves reload like every other backend's. [`Certificates`]
+//! reads the current served set back out.
 
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -80,12 +81,16 @@ pub enum Error {
 	)]
 	ConflictingClientAuth,
 
-	/// An in-memory identity or a pinned peer set was configured on a backend that
-	/// cannot consume the live rustls material.
+	#[doc(hidden)]
+	#[deprecated(note = "an in-memory Identity is now supported; pinned peers return PeersUnsupported")]
 	#[error(
 		"the quiche backend cannot use an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
 	)]
 	MemoryUnsupported,
+
+	/// A pinned peer set was configured on a backend that cannot run a rustls verifier.
+	#[error("the quiche backend cannot pin client fingerprints; use the quinn or noq backend")]
+	PeersUnsupported,
 
 	/// Client pinning was combined with client CA roots. Pinning bypasses the chain,
 	/// so one of the two would be silently ignored.
@@ -199,6 +204,63 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 	Ok(roots)
 }
 
+// ── Certified ───────────────────────────────────────────────────────
+
+/// A certificate chain with both usable forms of its private key.
+///
+/// rustls signs through an opaque [`rustls::sign::SigningKey`], which is all the
+/// quinn and noq backends need. quiche hands the key to boringssl itself, so the
+/// DER is kept alongside the signer instead of being dropped once loaded, and one
+/// certificate source feeds every backend.
+#[cfg(feature = "_certs")]
+pub(crate) struct Certified {
+	/// The chain and its rustls signer, in leaf-first order.
+	pub rustls: Arc<rustls::sign::CertifiedKey>,
+	/// The same private key, still in DER, for backends that load it themselves.
+	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
+	pub key: PrivateKeyDer<'static>,
+}
+
+#[cfg(feature = "_certs")]
+impl Certified {
+	/// Load `chain` and `key`, building the rustls signer and keeping the DER.
+	pub(crate) fn new(
+		provider: &crypto::Provider,
+		chain: Vec<CertificateDer<'static>>,
+		key: PrivateKeyDer<'static>,
+	) -> Result<Self> {
+		let signer = provider.key_provider.load_private_key(key.clone_key())?;
+		Ok(Self {
+			rustls: Arc::new(rustls::sign::CertifiedKey::new(chain, signer)),
+			key,
+		})
+	}
+
+	/// The certificate chain, leaf first.
+	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
+	pub fn chain(&self) -> &[CertificateDer<'static>] {
+		&self.rustls.cert
+	}
+
+	/// The leaf certificate, which is what a fingerprint identifies.
+	pub fn leaf(&self) -> &CertificateDer<'static> {
+		// `new` and `Identity::generate` are the only constructors and both reject an
+		// empty chain, so there is always a leaf.
+		&self.rustls.cert[0]
+	}
+}
+
+#[cfg(feature = "_certs")]
+impl fmt::Debug for Certified {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// Never derive: the DER private key would print in full.
+		formatter
+			.debug_struct("Certified")
+			.field("chain", &self.rustls.cert.len())
+			.finish_non_exhaustive()
+	}
+}
+
 // ── Identity ────────────────────────────────────────────────────────
 
 /// A self-signed certificate and key, held in memory and used as both a served
@@ -216,7 +278,7 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 #[derive(Clone)]
 pub struct Identity {
-	key: Arc<rustls::sign::CertifiedKey>,
+	key: Arc<Certified>,
 	fingerprint: String,
 }
 
@@ -231,7 +293,7 @@ impl Identity {
 		let hostnames: Vec<String> = hostnames.into_iter().map(Into::into).collect();
 		let provider = crypto::provider();
 		let key = Arc::new(generate(&provider, &hostnames)?);
-		let fingerprint = hex::encode(crypto::sha256(&provider, key.cert[0].as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(&provider, key.leaf().as_ref()));
 		Ok(Self { key, fingerprint })
 	}
 
@@ -244,7 +306,8 @@ impl Identity {
 		&self.fingerprint
 	}
 
-	fn certified(&self) -> Arc<rustls::sign::CertifiedKey> {
+	/// The certificate and key, in both the rustls and the DER form a backend may need.
+	pub(crate) fn certified(&self) -> Arc<Certified> {
 		self.key.clone()
 	}
 }
@@ -1042,7 +1105,7 @@ impl Connect {
 			if self.cert.is_some() || self.key.is_some() {
 				return Err(Error::ConflictingClientAuth);
 			}
-			let resolver = Arc::new(IdentityResolver(identity.certified()));
+			let resolver = Arc::new(IdentityResolver(identity.certified().rustls.clone()));
 			return Ok(builder.with_client_cert_resolver(resolver));
 		}
 
@@ -1071,7 +1134,7 @@ impl Connect {
 /// and the backdating absorbs clock drift between two hosts that have never
 /// agreed on a time source.
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certified> {
 	let key_pair = rcgen::KeyPair::generate()?;
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -1081,16 +1144,15 @@ fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<rustls:
 	let cert = params.self_signed(&key_pair)?;
 
 	// Convert the rcgen types to the rustls ones.
-	let key_der = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
-	let key = provider.key_provider.load_private_key(key_der.into())?;
+	let key = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
 
-	Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
+	Certified::new(provider, vec![cert.into()], key.into())
 }
 
 /// Refuse at runtime what the crate cannot do at all: quiche brings its own TLS,
 /// so it serves certificates without a rustls provider to sign a fresh one with.
 #[cfg(all(feature = "_certs", not(any(feature = "aws-lc-rs", feature = "ring"))))]
-fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<Certified> {
 	Err(Error::NoCryptoProvider)
 }
 
@@ -1515,7 +1577,7 @@ impl PeerIdentity {
 #[derive(Debug, Default)]
 pub(crate) struct Info {
 	#[cfg(feature = "_certs")]
-	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
+	pub(crate) certs: Vec<Arc<Certified>>,
 	pub(crate) fingerprints: Vec<String>,
 }
 
@@ -2034,6 +2096,92 @@ mod tests {
 		assert!(config.build().is_ok());
 	}
 
+	/// Rotating a file-backed pair reloads every source, but the self-signed
+	/// certificate is not one of them: minting a fresh leaf would break anyone
+	/// pinning the old fingerprint even though nothing asked for a new identity.
+	#[test]
+	fn generated_certificate_survives_a_reload() {
+		use std::io::Write;
+
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let cert = params.self_signed(&key).unwrap();
+
+		let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+		cert_file.write_all(cert.pem().as_bytes()).unwrap();
+		let mut key_file = tempfile::NamedTempFile::new().unwrap();
+		key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+
+		let config = Listen {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			generate: vec!["generated.invalid".to_string()],
+			..Default::default()
+		};
+
+		let certs = ServeCerts::new(crypto::provider());
+		certs.load_certs(&config).unwrap();
+		let before = Certificates::new(certs.info.clone()).fingerprints();
+
+		// What a rotation of the file-backed pair does: reload every source.
+		certs.load_certs(&config).unwrap();
+		let after = Certificates::new(certs.info.clone()).fingerprints();
+
+		assert_eq!(before, after);
+	}
+
+	/// Dropping the listener has to stop its reload watcher. The watcher parks in
+	/// `FileWatcher::changed` and never returns on its own, so without the abort it
+	/// keeps its task, an OS directory watch, and the certificate keys alive for the
+	/// rest of the process. The `Arc` is the observable half: while the task lives it
+	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[tokio::test]
+	async fn dropping_the_reload_guard_stops_the_watcher() {
+		use std::io::Write;
+
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let cert = params.self_signed(&key).unwrap();
+
+		let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+		cert_file.write_all(cert.pem().as_bytes()).unwrap();
+		let mut key_file = tempfile::NamedTempFile::new().unwrap();
+		key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+
+		// File-backed, so the watcher actually parks rather than returning early.
+		let config = Listen {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let certs = Arc::new(ServeCerts::new(crypto::provider()));
+		certs.load_certs(&config).unwrap();
+		let weak = Arc::downgrade(&certs);
+
+		let reload = Reload::spawn(certs.clone(), config);
+		// Let the task run far enough to be parked on the watcher, holding its Arc.
+		tokio::task::yield_now().await;
+
+		drop(certs);
+		assert!(
+			weak.upgrade().is_some(),
+			"the watcher should still hold the certificates"
+		);
+
+		drop(reload);
+
+		// The abort lands when the runtime next gets to the task, not on the drop.
+		for _ in 0..100 {
+			if weak.upgrade().is_none() {
+				return;
+			}
+			tokio::task::yield_now().await;
+		}
+		panic!("the watcher outlived the listener that spawned it");
+	}
+
 	/// Only one client certificate can go on the wire, so asking for two is a
 	/// configuration error rather than a silent preference for either.
 	#[test]
@@ -2089,7 +2237,7 @@ mod tests {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
 		let peers = Peers::new();
 		let verifier = PeerVerifier::new(crypto::provider(), peers.clone());
-		let leaf = identity.certified().cert[0].clone();
+		let leaf = identity.certified().leaf().clone();
 		let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
 
 		assert!(
@@ -2107,7 +2255,7 @@ mod tests {
 		// A different peer's certificate is not interchangeable with an allowed one.
 		let other = Identity::generate(["mesh.invalid"]).unwrap();
 		peers.insert(identity.fingerprint()).unwrap();
-		let other_leaf = other.certified().cert[0].clone();
+		let other_leaf = other.certified().leaf().clone();
 		assert!(verifier.verify_client_cert(&other_leaf, &[], now).is_err());
 	}
 
@@ -2151,7 +2299,7 @@ mod tests {
 	#[test]
 	fn peer_identity_reports_the_published_fingerprint() {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
-		let chain = vec![identity.certified().cert[0].clone()];
+		let chain = vec![identity.certified().leaf().clone()];
 		let peer = PeerIdentity { chain };
 		assert_eq!(peer.fingerprint().as_deref(), Some(identity.fingerprint()));
 	}
@@ -2638,6 +2786,8 @@ mod tests {
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<Info>>,
 	provider: crypto::Provider,
+	/// The self-signed certificate, kept so a reload doesn't mint a new one.
+	generated: RwLock<Option<Arc<Certified>>>,
 }
 
 #[cfg(feature = "_certs")]
@@ -2646,6 +2796,7 @@ impl ServeCerts {
 		Self {
 			info: Arc::new(RwLock::new(Info::default())),
 			provider,
+			generated: RwLock::new(None),
 		}
 	}
 
@@ -2670,9 +2821,9 @@ impl ServeCerts {
 			certs.push(Arc::new(self.load(cert, key)?));
 		}
 
-		// Generate a new certificate if requested.
+		// Generate a self-signed certificate if requested.
 		if !config.generate.is_empty() {
-			certs.push(Arc::new(generate(&self.provider, &config.generate)?));
+			certs.push(self.generated(&config.generate)?);
 		}
 
 		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -2684,8 +2835,24 @@ impl ServeCerts {
 		Ok(())
 	}
 
+	/// The self-signed certificate, minted on the first load and reused afterwards.
+	///
+	/// Rotating a file-backed pair triggers a reload of every source, and a fresh
+	/// self-signed leaf would break anyone who pinned the old one even though nothing
+	/// asked for it to change.
+	fn generated(&self, hostnames: &[String]) -> Result<Arc<Certified>> {
+		let mut generated = self.generated.write().expect("generated write lock poisoned");
+		if let Some(existing) = generated.as_ref() {
+			return Ok(existing.clone());
+		}
+
+		let certified = Arc::new(generate(&self.provider, hostnames)?);
+		*generated = Some(certified.clone());
+		Ok(certified)
+	}
+
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<rustls::sign::CertifiedKey> {
+	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<Certified> {
 		let chain = read_certs(chain_path)?;
 		if chain.is_empty() {
 			return Err(Error::Empty);
@@ -2693,25 +2860,23 @@ impl ServeCerts {
 
 		// Read the PEM private key
 		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
-		let key = self.provider.key_provider.load_private_key(key)?;
+		let certified = Certified::new(&self.provider, chain, key)?;
 
-		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
-
-		certified_key.keys_match().map_err(|source| Error::KeyMismatch {
+		certified.rustls.keys_match().map_err(|source| Error::KeyMismatch {
 			key: key_path.to_path_buf(),
 			cert: chain_path.to_path_buf(),
 			source,
 		})?;
 
-		Ok(certified_key)
+		Ok(certified)
 	}
 
 	// Replace the certificates
-	pub fn set_certs(&self, certs: Vec<Arc<rustls::sign::CertifiedKey>>) {
+	pub fn set_certs(&self, certs: Vec<Arc<Certified>>) {
 		let fingerprints = certs
 			.iter()
 			.map(|ck| {
-				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());
+				let fingerprint = crate::crypto::sha256(&self.provider, ck.leaf().as_ref());
 				hex::encode(fingerprint)
 			})
 			.collect();
@@ -2721,72 +2886,109 @@ impl ServeCerts {
 		info.fingerprints = fingerprints;
 	}
 
-	// Return the best certificate for the given ClientHello.
-	fn best_certificate(
-		&self,
-		client_hello: &rustls::server::ClientHello<'_>,
-	) -> Option<Arc<rustls::sign::CertifiedKey>> {
-		let server_name = client_hello.server_name()?;
-		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
+	/// The certificate to serve for `server_name`, or the first configured one when
+	/// nothing matches. `None` only when nothing is configured at all.
+	///
+	/// Every backend selects through this, so the rustls-based ones and quiche agree
+	/// on which certificate a given SNI gets.
+	pub(crate) fn select(&self, server_name: Option<&str>) -> Option<Arc<Certified>> {
+		let info = self.info.read().expect("info read lock poisoned");
 
-		for ck in self.info.read().expect("info read lock poisoned").certs.iter() {
-			let leaf: webpki::EndEntityCert = ck
-				.end_entity_cert()
-				.expect("missing certificate")
-				.try_into()
-				.expect("failed to parse certificate");
+		if let Some(name) = server_name
+			&& let Ok(dns_name) = ServerName::try_from(name)
+		{
+			for ck in info.certs.iter() {
+				// A malformed leaf can't match a name, but it also shouldn't take the
+				// whole selection down: skip it and let the next candidate answer.
+				let Ok(leaf) = webpki::EndEntityCert::try_from(ck.leaf()) else {
+					tracing::warn!("failed to parse served certificate");
+					continue;
+				};
 
-			if leaf.verify_is_valid_for_subject_name(&dns_name).is_ok() {
-				return Some(ck.clone());
+				if leaf.verify_is_valid_for_subject_name(&dns_name).is_ok() {
+					return Some(ck.clone());
+				}
 			}
 		}
 
-		None
+		// The client asked for a hostname none of the certificates cover (or sent no
+		// SNI at all). Serve the first one and let it decide whether to trust it.
+		tracing::warn!(?server_name, "no SNI certificate found");
+		info.certs.first().cloned()
 	}
 }
 
 #[cfg(feature = "_certs")]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
-		if let Some(cert) = self.best_certificate(&client_hello) {
-			return Some(cert);
-		}
-
-		// If this happens, it means the client was trying to connect to an unknown hostname.
-		// We do our best and return the first certificate.
-		tracing::warn!(server_name = ?client_hello.server_name(), "no SNI certificate found");
-
-		self.info
-			.read()
-			.expect("info read lock poisoned")
-			.certs
-			.first()
-			.cloned()
+		Some(self.select(client_hello.server_name())?.rustls.clone())
 	}
 }
 
 // ── reload_certs ────────────────────────────────────────────────────
 
-/// Watch the on-disk cert/key files and reload them whenever they change.
+/// Holds the certificate reload watcher for as long as the listener that spawned it.
+///
+/// The watcher parks in [`crate::watch::FileWatcher::changed`] and never returns on
+/// its own, so a listener that goes away without this leaves the task, the keys it
+/// holds, and an OS directory watch behind. An embedder that builds listeners
+/// repeatedly in one process would accumulate all three.
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[derive(Debug)]
+pub(crate) struct Reload(tokio::task::JoinHandle<()>);
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl Reload {
+	/// Start watching the file-backed pairs in `config`, if it has any.
+	///
+	/// The watch is registered here rather than inside the task, so it covers the
+	/// listener from the moment this returns. Registering it in the spawned future
+	/// would leave a window between the listener going live and its first poll, and a
+	/// rotation landing in that window would go unseen until the next unrelated change.
+	///
+	/// Call it only once the listener exists, so a failed bind leaves no watcher behind.
+	pub(crate) fn spawn(certs: Arc<ServeCerts>, config: Listen) -> Self {
+		let paths: Vec<PathBuf> = config.cert.iter().chain(config.key.iter()).cloned().collect();
+		if paths.is_empty() {
+			// Nothing on disk to watch, so the task has nothing to do.
+			return Self(tokio::spawn(std::future::ready(())));
+		}
+
+		let watcher = match crate::watch::FileWatcher::new(&paths) {
+			Ok(watcher) => watcher,
+			Err(err) => {
+				tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
+				return Self(tokio::spawn(std::future::ready(())));
+			}
+		};
+
+		// The certificates were loaded before the watch existed, so anything that
+		// landed in between produced no event and would sit unseen until the next
+		// unrelated change. Read once more now that nothing further can be missed.
+		if let Err(err) = certs.load_certs(&config) {
+			// The previously loaded set is still being served, so this is not fatal:
+			// a rotation caught mid-write reloads again on the event it will emit.
+			tracing::warn!(%err, "failed to re-read server certificates after watching");
+		}
+
+		Self(tokio::spawn(reload_certs(watcher, certs, config)))
+	}
+}
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl Drop for Reload {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
+/// Reload the certificates every time `watcher` reports a change.
 ///
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
-/// `mv`-into-place rotate certs with no external signal. Returns immediately when
-/// only generated certs are configured: there's nothing on disk to watch.
-#[cfg(any(feature = "quinn", feature = "noq"))]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
-	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
-	if paths.is_empty() {
-		return;
-	}
-
-	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
-		Ok(watcher) => watcher,
-		Err(err) => {
-			tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
-			return;
-		}
-	};
-
+/// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
+/// registering the watch and is the only caller.
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+async fn reload_certs(mut watcher: crate::watch::FileWatcher, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading server certificates");

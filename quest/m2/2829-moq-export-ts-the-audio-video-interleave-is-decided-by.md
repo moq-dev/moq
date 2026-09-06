@@ -95,7 +95,7 @@ track cannot hold the output: after a small window, emit what is in hand, as tod
 
 That makes the ordering a function of the media wherever the window is not exceeded, which is the
 condition under which two legs can be a redundant pair. It would fit naturally alongside the existing
-`--latency-max`.
+`--max-age`.
 
 I am happy to put this behind a flag if a deterministic-rendering mode is preferable to changing the
 default.

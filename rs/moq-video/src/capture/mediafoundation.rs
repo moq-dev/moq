@@ -266,7 +266,7 @@ impl Camera {
 
 	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop
 	/// and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		loop {
 			let mut flags: u32 = 0;
 			let mut sample: Option<IMFSample> = None;
@@ -284,7 +284,7 @@ impl Camera {
 			}
 
 			if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-				return Ok(None);
+				return Ok(pump::Read::Done);
 			}
 			// A null sample with no end-of-stream is a gap / stream tick (e.g. a
 			// mid-stream format change); keep reading until a real frame arrives.
@@ -295,7 +295,7 @@ impl Camera {
 				Some(device) => self.sample_to_texture(device, &sample)?,
 				None => self.sample_to_i420(&sample)?,
 			};
-			return Ok(Some(frame));
+			return Ok(pump::Read::Frame(frame));
 		}
 	}
 }

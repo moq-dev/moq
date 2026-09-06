@@ -491,6 +491,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio-codec-algorithms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
+
+[[package]]
 name = "audio-core"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -507,13 +513,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "audioadapter"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4"
+
+[[package]]
 name = "audioadapter-buffers"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ece3390b6eb40379094843a1da5aaccc34bc0d85a8cbf68d09fe092fee6de29e"
 dependencies = [
- "audioadapter",
- "audioadapter-sample",
+ "audioadapter 4.0.0",
+ "audioadapter-sample 4.0.0",
+ "num-traits",
+]
+
+[[package]]
+name = "audioadapter-buffers"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce"
+dependencies = [
+ "audioadapter 5.0.0",
+ "audioadapter-sample 5.2.0",
  "num-traits",
 ]
 
@@ -524,6 +547,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1592f90413568e259413c21a41a3d571feb1774255c209e7966d98f9db708c90"
 dependencies = [
  "audio-core",
+ "num-traits",
+]
+
+[[package]]
+name = "audioadapter-sample"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d"
+dependencies = [
+ "audio-codec-algorithms",
  "num-traits",
 ]
 
@@ -2191,14 +2224,14 @@ dependencies = [
 
 [[package]]
 name = "dns-lookup"
-version = "3.0.1"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e39034cee21a2f5bbb66ba0e3689819c4bb5d00382a282006e802a7ffa6c41d"
+checksum = "6120e7e5dcd1c90098e349def389e2797377cdbe6b465ad8fdd115c0c99d5cf2"
 dependencies = [
  "cfg-if",
  "libc",
  "socket2 0.6.5",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2242,10 +2275,11 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebml-iterable"
-version = "0.6.3"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5173ac3752f08b526a6991509615e1a345b221ec3c58c7633433e8c9582312"
+checksum = "255f697fda61d9a3ea24ec21aa4a443d2380660e2cb138e7167d18891abb4daa"
 dependencies = [
+ "bytes",
  "ebml-iterable-specification",
  "ebml-iterable-specification-derive",
  "futures",
@@ -2528,10 +2562,10 @@ version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3505607cc0adc388ce98f59707477c02fbd05a2fa0c1b8c4cf42b71a3cb9c34"
 dependencies = [
- "audioadapter",
- "audioadapter-buffers",
+ "audioadapter 4.0.0",
+ "audioadapter-buffers 4.0.0",
  "ringbuf",
- "rubato",
+ "rubato 4.0.0",
 ]
 
 [[package]]
@@ -4696,7 +4730,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "rand 0.10.2",
  "ringbuf",
- "rubato",
+ "rubato 5.0.0",
  "sonora",
  "symphonia-codec-aac",
  "symphonia-core",
@@ -4982,6 +5016,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "futures",
+ "hex",
  "http-body",
  "http-cache-reqwest",
  "jsonwebtoken",
@@ -5002,6 +5037,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.20",
@@ -5070,6 +5106,7 @@ dependencies = [
  "libc",
  "rand 0.10.2",
  "socket2 0.6.5",
+ "thiserror 2.0.20",
  "tracing",
  "tracing-test",
 ]
@@ -5236,6 +5273,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "rustls",
  "rustls-platform-verifier",
+ "serde_json",
  "slab",
  "tempfile",
  "thiserror 2.0.20",
@@ -5285,6 +5323,7 @@ dependencies = [
  "moq-nvenc",
  "moq-tokio",
  "moq-vaapi",
+ "ndk",
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-core-foundation",
@@ -7899,8 +7938,22 @@ version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f57c655d11e929f05a8663b323ff553f8d9773be05dfdc087795955bedeb8d92"
 dependencies = [
- "audioadapter",
- "audioadapter-buffers",
+ "audioadapter 4.0.0",
+ "audioadapter-buffers 4.0.0",
+ "num-integer",
+ "num-traits",
+ "visibility",
+ "windowfunctions",
+]
+
+[[package]]
+name = "rubato"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7cb1ffaf8738df50aab642a7f6465df81c6ba9e2818268053487165298114be"
+dependencies = [
+ "audioadapter 5.0.0",
+ "audioadapter-buffers 5.2.0",
  "num-integer",
  "num-traits",
  "visibility",
@@ -10704,9 +10757,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quiche"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "153ece42b1d6e86015fcac192b6d4aae0ac8595045e844ac075169b22f1d37c6"
+checksum = "723f409f2e2d440a53e3c44e64af9b4f9d0c8d49e815c7194b4c581df981632e"
 dependencies = [
  "boring",
  "bytes",
@@ -10772,9 +10825,9 @@ dependencies = [
 
 [[package]]
 name = "webm-iterable"
-version = "0.6.4"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9fbf173b4b38f2f8bbb0082a0d4cb21f263a70811f5fccb1663c421c66d9f9"
+checksum = "a2ebdc6faab4925edc7737bd0a04f9784f8b8e2cbb174aa523e94689575cd152"
 dependencies = [
  "ebml-iterable",
 ]
@@ -11515,13 +11568,14 @@ dependencies = [
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff",
  "group",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]

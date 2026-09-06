@@ -524,7 +524,7 @@ mod tests {
 	use moq_mux::catalog::Stream as _;
 
 	use super::*;
-	use crate::encode::{Config, Encoder};
+	use crate::encode::{Codec, Config, Encoder};
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a real
 	/// [`Producer`], returning the catalog rendition's track name and config.

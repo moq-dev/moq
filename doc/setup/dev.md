@@ -1,83 +1,59 @@
 ---
 title: Development
-description: Run, test, and debug the MoQ workspace
+description: Build, test, and debug the MoQ repository
 ---
 
 # Development
 
-The repository uses [Just](https://github.com/casey/just) as its command runner.
-Run commands inside the Nix development shell when possible so your tools match
-CI.
-
-## Common commands
+The repository uses [Just](https://github.com/casey/just) as its command
+runner. Run commands inside the Nix dev shell (`nix develop`) so your tools
+match CI.
 
 | Command | Purpose |
 | --- | --- |
 | `just` | Start the local relay, test publisher, and web demo. |
-| `just --list` | List available recipes. |
-| `just fix` | Format and lint changed packages and their dependents. |
-| `just check` | Compile and lint the same changed-package scope. |
-| `just test` | Run tests for the same changed-package scope. |
-| `just fix-all` | Format and lint every Rust, TypeScript, and Python package. |
-| `just check-all` | Compile and lint every package. |
-| `just test all` | Test every Rust, TypeScript, and Python package. |
+| `just --list` | List every recipe. |
+| `just fix` | Format and lint the packages this branch changed. |
+| `just check` | Compile and lint the same scope. This is what CI runs. |
+| `just test` | Run tests for the same scope. |
+| `just fix-all`, `just check-all`, `just test all` | The same, over every package. |
+| `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
+| `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
+| `just relay` | Run a local relay on its own. |
+| `just boy` | Run the [MoQ Boy](/bin/demo) demo. |
 
-For example, publish the Tears of Steel HLS fixture over MoQ with:
+Recipes default to the local relay at `http://localhost:4443`. Pass
+`https://cdn.moq.dev/anon` to use the public relay instead.
 
-```bash
-just pub hls tos
-```
-
-The root [justfile](https://github.com/moq-dev/moq/blob/main/justfile) and
-`just --list` show the remaining recipes.
-
-## Test over the internet
-
-Most demo commands use the local relay at `http://localhost:4443`. The public
-test relay is available at `https://cdn.moq.dev/anon`:
-
-::: warning Public namespace
-The `/anon` path is unauthenticated. Broadcasts published there are public and
-discoverable. Do not publish private media or rely on a name remaining reserved.
-:::
+## Debugging
 
 ```bash
-# Run the local web client against the public relay.
-just web serve https://cdn.moq.dev/anon
-
-# Publish Tears of Steel, then open https://moq.dev/watch?name=tos.
-just pub tos https://cdn.moq.dev/anon
-
-# Publish and subscribe to a data-only clock broadcast in separate terminals.
-just pub clock publish https://cdn.moq.dev/anon
-just pub clock subscribe https://cdn.moq.dev/anon
+RUST_LOG=debug just            # structured logs
+RUST_LOG=moq_net=trace just    # one crate
+RUST_BACKTRACE=1 just          # panic backtraces
 ```
 
-For private paths, deploy a relay and configure
-[authentication](/bin/relay/auth).
+The relay's [HTTP endpoints](/bin/relay/http) list announced broadcasts and
+fetch groups with `curl`, which is the quickest way to see what a relay holds.
 
-## Debug Rust
+## Windows
 
-Use `RUST_LOG` for structured logs and `RUST_BACKTRACE` for panic backtraces:
+Nix isn't available on Windows, so `setup.bat` installs the toolchain with
+winget: Git, Rust, Bun, Node, just, CMake, and the Visual Studio Build Tools.
+Run it from an Administrator terminal on a fresh machine, and re-run it after
+reopening the terminal if it reports tools missing from `PATH`.
 
-```bash
-RUST_LOG=trace just
-RUST_BACKTRACE=1 just
+Run `just` recipes from **Git Bash**, not PowerShell or `cmd`: they need
+`bash` and `cygpath`. Only one `just dev` can run at a time on Windows, because
+the free-port probe needs `lsof`. If a rebuild fails with "Access is denied",
+a previous relay is still running:
+
+```bat
+taskkill /IM moq-relay.exe /F
+taskkill /IM moq.exe /F
 ```
-
-## Editor setup
-
-Any editor with standard Rust and TypeScript support works. Useful extensions
-include:
-
-- [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-- [Biome](https://marketplace.visualstudio.com/items?itemName=biomejs.biome)
-- [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
-- [direnv](https://marketplace.visualstudio.com/items?itemName=mkhl.direnv)
 
 ## Before opening a pull request
-
-Run the same checks used by CI:
 
 ```bash
 just fix
@@ -85,11 +61,6 @@ just check
 just test
 ```
 
-These commands scope work to packages changed from the branch's configured
-upstream and include their dependents. Use `just fix-all`, `just check-all`, and
-`just test all` when changing shared tooling or configuration that the package
-diff cannot attribute. `just check-all` also covers language wrappers whose
-tests are part of their check recipe.
-
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
-for branch targeting, commits, and pull requests.
+for branch targeting, commit messages, and reviews, and [Agent setup](/setup/agent)
+if an AI coding agent is doing the work.

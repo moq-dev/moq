@@ -90,3 +90,7 @@ When the reference timestamp represents capture time, receivers can estimate cap
 ## Closes
 
 - [#3021](https://github.com/moq-dev/moq/issues/3021) - close this issue when the quest finishes
+
+## Related
+
+- [Publishers anchor the timeline](/quest/m2/timeline-wall.md) - the same anchor from the built-in publishers; the anchor is data, never a sync source

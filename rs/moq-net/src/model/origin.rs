@@ -529,8 +529,9 @@ impl std::fmt::Display for Prefix {
 
 /// The path a route took through the mesh and what using it costs.
 ///
-/// The metadata half of an advertisement: [`Producer::announce`] pairs it with
-/// the [`Prefix`] it covers, and [`Consumer::announced`] yields both. A route
+/// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
+/// the [`Prefix`] it covers, [`broadcast::Producer::announce`] with the
+/// broadcast's exact path, and [`Consumer::announced`] yields both. A route
 /// claims capability, not inventory: it says paths under its prefix are
 /// servable, never that any specific broadcast exists. The common convention is
 /// that a publisher announces each broadcast's exact path, so subscribers can
@@ -739,16 +740,16 @@ struct RouteEntry {
 	hops: Hops,
 	cost: Cost,
 	/// The queue requests under this route are served from, when the announcer
-	/// serves content on demand (a session). `None` for an advertise-only
-	/// announcement, whose requests fall through to the origin's fallback handler.
+	/// serves content on demand (a [`Dynamic`]). `None` for an advertise-only
+	/// announcement (a broadcast's exact path, or [`Producer::announce`]), whose
+	/// covered paths resolve only through the tree.
 	server: Option<kio::Shared<ServeState>>,
 }
 
-/// A per-announcer request queue: what materializes a requested path on demand.
+/// A served route's request queue: what materializes a requested path on demand.
 ///
-/// Shared by every requester resolving through the owning route (or, for the
-/// origin's fallback, every requester with no covering route) and the handler
-/// draining it, so both sides work under one lock.
+/// Shared by every requester resolving through the owning route and the
+/// [`Dynamic`] draining it, so both sides work under one lock.
 #[derive(Default)]
 struct ServeState {
 	// Result channels for pending requests, keyed by absolute path so concurrent
@@ -1039,7 +1040,7 @@ pub struct Producer {
 	root: PathOwned,
 
 	// The origin's shared state: the route table, announce cursors, and the
-	// fallback request queue. Shared with every derived consumer.
+	// remotely-served fronts. Shared with every derived consumer.
 	shared: kio::Shared<OriginState>,
 
 	// The cache pool inherited by broadcasts created under this origin (sessions
@@ -1090,6 +1091,7 @@ impl Producer {
 		let nodes = OriginNodes::default();
 		let shared = kio::Shared::<OriginState>::default();
 		let timers = TimersSlot::default();
+		let pool = info.pool.clone();
 		let producer = Self {
 			info: info.id,
 			nodes: nodes.clone(),
@@ -1108,8 +1110,10 @@ impl Producer {
 				nodes,
 				shared,
 				done: false,
+				sweep: None,
 			},
 			timers,
+			pool,
 		};
 		(producer, driver)
 	}
@@ -1170,9 +1174,10 @@ impl Producer {
 	/// tracks resume from the replacement at the first missing group; consumers
 	/// never observe the swap.
 	///
-	/// The broadcast is *not* advertised: it is reachable by exact path for
-	/// subscribes and fetches. Advertise it (or a whole prefix of paths) separately
-	/// with [`Self::announce`]; the two are independent, so cached or on-demand
+	/// The broadcast starts *unadvertised*: it is reachable by exact path for
+	/// subscribes and fetches. Advertise it once its tracks exist with
+	/// [`broadcast::Producer::announce`] (or a whole prefix of paths with
+	/// [`Self::dynamic`]); the two are independent, so cached or on-demand
 	/// content can stay reachable without ever being announced.
 	///
 	/// The broadcast is visible to exact lookups before this returns; only
@@ -1197,7 +1202,7 @@ impl Producer {
 		// Held across the whole attach: the driver's teardown sets `closed` under
 		// this lock, so a create either completes before the teardown (whose walk
 		// then cleans the entry up) or observes `closed` here and fails.
-		let lifecycle = self.shared.lock();
+		let mut lifecycle = self.shared.lock();
 		if lifecycle.closed {
 			return Err(Error::Closed);
 		}
@@ -1215,12 +1220,26 @@ impl Producer {
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
 
+		// The broadcast advertises its own exact path: the path is in scope (checked
+		// above), so it clamps to itself under every root that covers it.
+		let announcer = Announcer {
+			announcing: Announcing {
+				hop: self.info,
+				shared: self.shared.clone(),
+				requested: full.clone(),
+				prefixes: vec![full.clone()],
+				stats: self.stats.clone(),
+			},
+			current: None,
+		};
+
 		let source = broadcast::Info {
 			origin: self.info(),
 			path: full.clone(),
 		}
 		.produce()
-		.with_stats(ingress.clone());
+		.with_stats(ingress.clone())
+		.with_announcer(announcer);
 		let consumer = source.consume();
 
 		// Attach synchronously: the source is visible to exact lookups before this
@@ -1249,6 +1268,9 @@ impl Producer {
 			broadcast,
 			id,
 		}));
+		// A local broadcast changes what the exact path resolves to, so a requester
+		// parked on the route table (see `routed_broadcast`) retries.
+		lifecycle.generation += 1;
 		drop(lifecycle);
 
 		Ok(source)
@@ -1257,7 +1279,7 @@ impl Producer {
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's identity (cache pool included) and ingress attribution, but
 	/// is *not* inserted into the broadcast tree. Sessions answer
-	/// [`RouteServer`] requests with one of these; the requester already holds
+	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the tree never needs to resolve it.
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
@@ -1271,60 +1293,54 @@ impl Producer {
 		.with_stats(ingress)
 	}
 
-	/// Advertise a route: a claim that paths under `prefix` can be served.
+	/// Advertise a route without serving it: a claim that paths under `prefix`
+	/// can be served, answered by nothing.
+	///
+	/// A request under an advertise-only route resolves [`Error::Unroutable`]
+	/// unless a local broadcast or a served route ([`Self::dynamic`]) covers the
+	/// path too. Tests use it to shape the route table; everything else
+	/// advertises through a broadcast ([`broadcast::Producer::announce`]) or a
+	/// [`Dynamic`] handler, which serve what they claim.
+	#[cfg(test)]
+	pub(crate) fn announce(&self, prefix: impl Into<Prefix>, route: Route) -> Result<AnnounceProducer, Error> {
+		Announcing::new(self, prefix.into())?.announce(route, None)
+	}
+
+	/// Advertise a route and serve the requests beneath it.
 	///
 	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
-	/// sessions until the returned [`AnnounceProducer`] is dropped. Announcing is
-	/// independent of [`Self::create_broadcast`], and the right order is
-	/// create-populate-announce: announce each broadcast's exact path once its
-	/// tracks exist so subscribers can enumerate broadcasts, or announce one short
-	/// prefix and serve requests beneath it via [`Self::dynamic`].
+	/// sessions for as long as the returned [`Dynamic`] (and every clone) lives.
+	/// A consumer resolving a path under `prefix` that no local broadcast covers
+	/// is handed to the handler as a [`Request`] to materialize on demand. This is
+	/// how a service answers a whole subtree without publishing each path, and how
+	/// sessions land the routes a peer announces to them; a publisher that knows
+	/// its broadcasts advertises each one's exact path with
+	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
+	/// them.
 	///
 	/// The prefix is clamped to the intersection with this producer's allowed
 	/// scope, so a broad route announced through a narrow token advertises exactly
 	/// what the token may serve. Fails with [`Error::Unauthorized`] when they are
 	/// disjoint, and [`Error::Closed`] once the origin's [`Driver`] has been
 	/// dropped.
-	pub fn announce(&self, prefix: impl Into<Prefix>, route: Route) -> Result<AnnounceProducer, Error> {
-		self.announce_inner(prefix.into(), route, None)
-	}
-
-	/// [`Self::announce`], plus a request queue: a consumer resolving a path under
-	/// this route is handed to the returned server to materialize on demand.
-	/// Sessions use this for the routes a peer announces to them.
-	pub(crate) fn announce_served(
-		&self,
-		prefix: impl Into<Prefix>,
-		route: Route,
-	) -> Result<(AnnounceProducer, RouteServer), Error> {
+	pub fn dynamic(&self, prefix: impl Into<Prefix>, route: Route) -> Result<Dynamic, Error> {
+		let announcing = Announcing::new(self, prefix.into())?;
 		let serve = kio::Shared::<ServeState>::default();
 		serve.lock().requests.add_handler();
-		let server = RouteServer {
+		let announcement = announcing.announce(route, Some(serve.clone()))?;
+		Ok(Dynamic {
+			announcement,
+			hop: self.info,
 			root: self.root.clone(),
-			state: serve.clone(),
-		};
-		let announcement = self.announce_inner(prefix.into(), route, Some(serve))?;
-		Ok((announcement, server))
+			state: serve,
+		})
 	}
 
-	fn announce_inner(
-		&self,
-		prefix: Prefix,
-		route: Route,
-		server: Option<kio::Shared<ServeState>>,
-	) -> Result<AnnounceProducer, Error> {
-		debug_assert!(
-			!route.hops.contains(&self.info),
-			"announce called with a looping hop chain",
-		);
-
-		let meta: RouteMeta = (route.hops, route.cost);
-
-		// Clamp the prefix against each allowed root: the intersection is exactly
-		// the set of covered paths this producer may claim. One entry per
-		// intersecting root (a broad route through a multi-prefix token covers each
-		// of them).
-		let requested = self.root.join(prefix.as_path()).to_owned();
+	/// Clamp an absolute `requested` prefix against each allowed root: the
+	/// intersection is exactly the set of covered paths this producer may claim,
+	/// one entry per intersecting root (a broad route through a multi-prefix
+	/// token covers each of them).
+	fn clamp_prefix(&self, requested: &PathOwned) -> Result<Vec<PathOwned>, Error> {
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
@@ -1340,36 +1356,7 @@ impl Producer {
 		if prefixes.is_empty() {
 			return Err(Error::Unauthorized);
 		}
-
-		let mut shared = self.shared.lock();
-		if shared.closed {
-			return Err(Error::Closed);
-		}
-
-		let mut ids = Vec::with_capacity(prefixes.len());
-		for prefix in prefixes {
-			let id = shared.next_route;
-			shared.next_route += 1;
-			shared.routes.push(RouteEntry {
-				id,
-				prefix: prefix.clone(),
-				hops: meta.0.clone(),
-				cost: meta.1,
-				server: server.clone(),
-			});
-			shared.sync_route(&prefix.as_path());
-			ids.push(id);
-		}
-		drop(shared);
-
-		// Ingress announce guard: held for the announcement's lifetime.
-		let guard = self.stats.ingress(&requested).announce();
-
-		Ok(AnnounceProducer {
-			shared: self.shared.clone(),
-			ids,
-			_guard: guard,
-		})
+		Ok(prefixes)
 	}
 
 	/// Returns a new Producer restricted to publishing under one of `prefixes`.
@@ -1391,18 +1378,6 @@ impl Producer {
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
-	}
-
-	/// Create a dynamic handler that picks up [`Consumer::request_broadcast`]
-	/// calls no local broadcast or served route resolves.
-	///
-	/// This is the origin-level analogue of [`broadcast::Producer::dynamic`]: it serves
-	/// broadcasts on demand rather than tracks. The served broadcasts are *not*
-	/// announced; pair the handler with [`Producer::announce`] to advertise the
-	/// prefix it answers under. Drop the handler (and every clone) to reject
-	/// pending requests.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.info, self.root.clone(), self.shared.clone())
 	}
 
 	/// Cheap read handle over this origin's broadcast tree.
@@ -1453,14 +1428,112 @@ impl Producer {
 	}
 }
 
-/// The write half of an advertisement, from [`Producer::announce`]: a live
-/// claim that paths under a [`Prefix`] can be served.
+/// What it takes to insert a route: the clamped prefixes it covers and the
+/// origin table to insert them into. Built by [`Producer::announce`],
+/// [`Producer::dynamic`], and [`Announcer`], which is the same advertisement
+/// re-issued from a broadcast.
+struct Announcing {
+	hop: Hop,
+	shared: kio::Shared<OriginState>,
+	/// The absolute prefix as requested, before clamping: what the ingress
+	/// announce counters are keyed by.
+	requested: PathOwned,
+	/// The requested prefix clamped to each allowed root it intersects.
+	prefixes: Vec<PathOwned>,
+	stats: stats::Session,
+}
+
+impl Announcing {
+	fn new(producer: &Producer, prefix: Prefix) -> Result<Self, Error> {
+		let requested = producer.root.join(prefix.as_path()).to_owned();
+		let prefixes = producer.clamp_prefix(&requested)?;
+		Ok(Self {
+			hop: producer.info,
+			shared: producer.shared.clone(),
+			requested,
+			prefixes,
+			stats: producer.stats.clone(),
+		})
+	}
+
+	fn announce(&self, route: Route, server: Option<kio::Shared<ServeState>>) -> Result<AnnounceProducer, Error> {
+		debug_assert!(
+			!route.hops.contains(&self.hop),
+			"announce called with a looping hop chain",
+		);
+
+		let meta: RouteMeta = (route.hops, route.cost);
+
+		let mut shared = self.shared.lock();
+		if shared.closed {
+			return Err(Error::Closed);
+		}
+
+		let mut ids = Vec::with_capacity(self.prefixes.len());
+		for prefix in &self.prefixes {
+			let id = shared.next_route;
+			shared.next_route += 1;
+			shared.generation += 1;
+			shared.routes.push(RouteEntry {
+				id,
+				prefix: prefix.clone(),
+				hops: meta.0.clone(),
+				cost: meta.1,
+				server: server.clone(),
+			});
+			shared.sync_route(&prefix.as_path());
+			ids.push(id);
+		}
+		drop(shared);
+
+		// Ingress announce guard: held for the advertisement's lifetime.
+		let guard = self.stats.ingress(&self.requested).announce();
+
+		Ok(AnnounceProducer {
+			shared: self.shared.clone(),
+			ids,
+			_guard: guard,
+		})
+	}
+}
+
+/// The advertisement a broadcast owns: its exact path, announced and retracted
+/// through [`broadcast::Producer::announce`] and [`broadcast::Producer::unannounce`],
+/// and retracted for good when the broadcast ends.
 ///
-/// Hold it for as long as the route should stay advertised and
-/// [`update`](Self::update) it to re-price; dropping it retracts the route, which
-/// [`AnnounceConsumer`]s observe and sessions withdraw from their peers.
-#[must_use = "dropping an announce::Producer retracts the route"]
-pub struct AnnounceProducer {
+/// Handed to the broadcast by [`Producer::create_broadcast`], so a standalone
+/// broadcast has none and cannot announce.
+pub(crate) struct Announcer {
+	announcing: Announcing,
+	current: Option<AnnounceProducer>,
+}
+
+impl Announcer {
+	/// Advertise the broadcast's path with `route`, or re-price the standing
+	/// advertisement in place.
+	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
+		if let Some(current) = &self.current {
+			return current.update(route);
+		}
+		self.current = Some(self.announcing.announce(route, None)?);
+		Ok(())
+	}
+
+	/// Take the standing advertisement, if any, so the caller retracts it by
+	/// dropping it outside whatever lock guards this announcer.
+	pub(crate) fn take(&mut self) -> Option<AnnounceProducer> {
+		self.current.take()
+	}
+}
+
+/// The write half of an advertisement: a live claim that paths under a
+/// [`Prefix`] can be served.
+///
+/// Held by a [`Dynamic`] and by a broadcast's [`Announcer`]; dropping it
+/// retracts the route, which [`AnnounceConsumer`]s observe and sessions withdraw
+/// from their peers.
+#[must_use = "dropping an announcement retracts the route"]
+pub(crate) struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
 	/// The table entries this advertisement created: one per allowed root the
 	/// requested prefix intersected.
@@ -1490,20 +1563,22 @@ impl AnnounceProducer {
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			let prefix = entry.prefix.clone();
+			shared.generation += 1;
 			shared.sync_route(&prefix.as_path());
 		}
 		Ok(())
 	}
-}
 
-impl Drop for AnnounceProducer {
-	fn drop(&mut self) {
+	/// Retract the route now: remove its table entries and reject anything still
+	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
+	fn retract(&self) {
 		let mut shared = self.shared.lock();
 		for id in &self.ids {
 			let Some(index) = shared.routes.iter().position(|entry| entry.id == *id) else {
 				continue;
 			};
 			let entry = shared.routes.swap_remove(index);
+			shared.generation += 1;
 			// Reject anything still waiting on this route's server; a request
 			// already handed to the handler resolves through its own `Request`.
 			if let Some(server) = &entry.server {
@@ -1520,61 +1595,9 @@ impl Drop for AnnounceProducer {
 	}
 }
 
-/// The request queue behind a served route, from [`Producer::announce_served`].
-///
-/// Sessions poll it for the paths consumers resolve under the route and
-/// materialize each on demand. Dropping it (without the announcement) leaves the
-/// route advertised but unservable; drop both to retract.
-pub(crate) struct RouteServer {
-	root: PathOwned,
-	state: kio::Shared<ServeState>,
-}
-
-impl RouteServer {
-	/// Poll for the next requested path under this route, without blocking.
-	///
-	/// Returns [`Error::Closed`] once the announcement is retracted or the origin
-	/// torn down: no request will ever arrive again, so server loops should end.
-	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
-		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.closed || state.requests.has_queued() {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}));
-
-		if state.closed {
-			return Poll::Ready(Err(Error::Closed));
-		}
-
-		let path = state.requests.pop().expect("predicate guaranteed a request");
-		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
-		Poll::Ready(Ok(Request {
-			path,
-			producer,
-			home: RequestHome::Route(self.state.clone()),
-		}))
-	}
-
-	/// Returns the prefix that is automatically stripped from requested paths.
-	#[allow(dead_code)]
-	pub fn root(&self) -> &Path<'_> {
-		&self.root
-	}
-}
-
-impl Drop for RouteServer {
+impl Drop for AnnounceProducer {
 	fn drop(&mut self) {
-		let mut state = self.state.lock();
-		if state.requests.remove_handler() {
-			state.closed = true;
-			for producer in state.requests.drain_all() {
-				if let Ok(mut request) = producer.write() {
-					request.resolved.get_or_insert(Err(Error::Unroutable));
-				}
-			}
-		}
+		self.retract();
 	}
 }
 
@@ -1601,6 +1624,9 @@ pub struct Driver {
 	state: DriverState,
 	// The producer's slot, filled by `run` so lifecycle work can mint deadlines.
 	timers: TimersSlot,
+	// The cache pool this origin's groups charge into, swept on a wall-clock
+	// cadence so its idle window binds a track whose publisher stopped writing.
+	pool: cache::Pool,
 }
 
 /// Everything the driver polls and tears down, split from the park so the two
@@ -1610,11 +1636,14 @@ struct DriverState {
 	set: TaskSet,
 	/// The whole broadcast tree, for the teardown walk on drop.
 	nodes: OriginNodes,
-	/// The route table, announce cursors, and the fallback request queue, for
+	/// The route table, announce cursors, and the remotely-served fronts, for
 	/// ending everything on drop.
 	shared: kio::Shared<OriginState>,
 	/// Cached completion so a poll after `Ready` doesn't re-poll the drained set.
 	done: bool,
+	/// The cache pool's idle sweep, installed by [`Driver::run`] (which is where the
+	/// timers arrive) and absent when the pool never expires content.
+	sweep: Option<Sweep>,
 }
 
 impl Driver {
@@ -1627,10 +1656,50 @@ impl Driver {
 		T: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
 		T::Timer: MaybeSend + 'static,
 	{
-		self.timers.install(AnyTimers::new(timers));
+		let timers = AnyTimers::new(timers);
+		self.timers.install(timers.clone());
+		let mut state = self.state;
+		state.sweep = Sweep::new(&timers, self.pool);
 		Run {
-			state: self.state,
+			state,
 			park: kio::Park::default(),
+		}
+	}
+}
+
+/// The wall-clock half of the cache pool's idle window.
+///
+/// A track settles its own expiry as it writes, which covers every track that is
+/// still producing. A publisher that stalls with a group open stops writing, so this
+/// is what still reclaims that group (and unblocks whoever is parked inside it): a
+/// periodic [`cache::Pool::sweep`] on the origin's own timers.
+///
+/// Disarmed, and never allocated, when the pool has no expiry window.
+struct Sweep {
+	timers: AnyTimers,
+	pool: cache::Pool,
+	interval: Duration,
+	deadline: crate::runtime::Deadline<AnyTimers>,
+}
+
+impl Sweep {
+	fn new(timers: &AnyTimers, pool: cache::Pool) -> Option<Self> {
+		let interval = pool.sweep_interval()?;
+		Some(Self {
+			timers: timers.clone(),
+			pool,
+			interval,
+			deadline: crate::runtime::Deadline::after(timers, interval),
+		})
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		// A `Deadline` stays ready until it is re-armed, so re-arm before sweeping
+		// again; a clock that has not moved lands the next one in the future and
+		// this returns after one pass.
+		while self.deadline.poll(waiter).is_ready() {
+			self.deadline.set(self.timers.now().checked_add(self.interval));
+			self.pool.sweep();
 		}
 	}
 }
@@ -1667,6 +1736,12 @@ impl Run {
 
 impl DriverState {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Never gates completion: the pool outlives this origin (a relay shares one
+		// across every origin), so a sweep that is still due must not keep the driver
+		// alive after its lifecycle work has drained.
+		if let Some(sweep) = &mut self.sweep {
+			sweep.poll(waiter);
+		}
 		if !self.done {
 			ready!(self.set.poll(waiter));
 			self.done = true;
@@ -1686,23 +1761,14 @@ impl DriverState {
 		// `create_broadcast` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (pending, servers, cursors, fronts) = {
+		let (servers, cursors, fronts) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			let servers: Vec<_> = shared.routes.iter().filter_map(|entry| entry.server.clone()).collect();
 			let cursors: Vec<_> = shared.cursors.values().map(|cursor| cursor.state.clone()).collect();
 			let fronts: Vec<_> = shared.fronts.values().map(|front| front.request.clone()).collect();
-			(shared.fallback.drain_all(), servers, cursors, fronts)
+			(servers, cursors, fronts)
 		};
-
-		// Reject every pending request, including those already handed to a
-		// handler: the teardown is terminal, so a handler resolving late must not
-		// beat it (resolution is first-write-wins).
-		for producer in pending {
-			if let Ok(mut request) = producer.write() {
-				request.resolved.get_or_insert(Err(Error::Dropped));
-			}
-		}
 
 		// Reject requesters still parked on a remote front's channel: its watcher
 		// was cancelled above and will never resolve them.
@@ -1711,6 +1777,9 @@ impl DriverState {
 				request.resolved.get_or_insert(Err(Error::Dropped));
 			}
 		}
+		// Reject every pending route request, including those already handed to a
+		// handler: the teardown is terminal, so a handler resolving late must not
+		// beat it (resolution is first-write-wins).
 		for server in servers {
 			let mut server = server.lock();
 			server.closed = true;
@@ -2639,7 +2708,11 @@ async fn run_remote_front(task: RemoteFrontTask) {
 					// The route retracted before serving: the table already
 					// reflects it, so the next pass retries the survivor. Each
 					// such retry consumed a real retraction, so this cannot spin.
-					Err(Error::Unroutable) => {
+					// A retraction and a handler's rejection resolve alike, so the
+					// table tells them apart: an `Unroutable` from a route that
+					// still stands is the handler's answer, and re-asking it
+					// would spin forever.
+					Err(Error::Unroutable) if !shared.lock().routes.iter().any(|entry| entry.id == route) => {
 						last_err = Some(Error::Unroutable);
 					}
 					// An authoritative refusal of the path. It ends a front with
@@ -2749,7 +2822,7 @@ impl FrontDriver {
 }
 
 /// The origin's shared state: the route table, the announce cursors observing
-/// it, and the fallback request queue.
+/// it, and the remotely-served fronts.
 ///
 /// Carried in a [`kio::Shared`], so producers, consumers, and handlers work
 /// under one lock. Local broadcasts live in the tree ([`OriginNode`]) instead;
@@ -2760,19 +2833,13 @@ struct OriginState {
 	// holds one entry per live advertisement, not one per broadcast consumer.
 	routes: Vec<RouteEntry>,
 	next_route: u64,
+	// Bumped on every change to what a path resolves to: a route inserted,
+	// re-priced, or retracted, and a local broadcast attached. A requester waits
+	// on it rather than re-asking a table that has not moved.
+	generation: u64,
 
 	// The registered announce cursors, each with its own coalescing buffer.
 	cursors: HashMap<ConsumerId, TableCursor>,
-
-	// Fallback request queue: `request_broadcast` calls that no local broadcast
-	// or served route resolves, drained by `Dynamic` handlers.
-	fallback: Requests<PathOwned, kio::Producer<PendingBroadcast>>,
-
-	// Broadcasts a fallback handler has already served, kept weakly so a repeat
-	// request for the same path resolves to a shared clone instead of re-invoking
-	// the handler. Weak so a served broadcast still closes once its real
-	// consumers drop.
-	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
 
 	// The remotely-served fronts, keyed by absolute path and the requester's
 	// split-horizon exclusion. Each is a spliced broadcast whose watcher task
@@ -2880,9 +2947,9 @@ impl OriginState {
 	/// `exclude`, skipping the `refused` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
-	/// announcement shadows a broad served one: requests under it fall through to
-	/// the fallback handler instead of being routed around it. Among routes at the
-	/// winning prefix, the cheapest served one is picked by [`route_order`].
+	/// announcement shadows a broad served one: requests under it resolve
+	/// unroutable instead of being routed around it. Among routes at the winning
+	/// prefix, the cheapest served one is picked by [`route_order`].
 	///
 	/// With `publisher` set, only routes originated by that first hop are
 	/// candidates: this is the identity a front resumes through, and a route from
@@ -2931,56 +2998,50 @@ struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
 }
 
-/// Picks up [`Consumer::request_broadcast`] calls for paths that are not announced.
+/// A served route, from [`Producer::dynamic`]: advertises a [`Prefix`] and
+/// answers the [`Consumer::request_broadcast`] calls beneath it.
 ///
-/// The origin-level analogue of [`broadcast::Dynamic`]: where that serves tracks on
-/// demand within a broadcast, this serves whole broadcasts on demand within an origin. A
-/// relay uses it as a fallback router, fetching a broadcast from upstream only when a
-/// downstream consumer asks for an exact path that nobody announced.
+/// The origin-level analogue of [`broadcast::Dynamic`]: where that serves tracks
+/// on demand within a broadcast, this serves whole broadcasts on demand within
+/// an origin. A relay holds one per route a peer announces to it, materializing
+/// a requested path from that peer; an application holds one to answer a
+/// subtree it never publishes ahead of time.
 ///
-/// Served broadcasts are deliberately *not* announced, so they never appear in
-/// [`Consumer::announced`]. Drop this handle (and every clone) to reject the
-/// requests still waiting to be served.
+/// Drop it to retract the route and reject the requests still waiting to be
+/// served; [`update`](Self::update) re-prices it in place.
+#[must_use = "dropping an origin::Dynamic retracts the route"]
 pub struct Dynamic {
+	/// The advertisement, retracted on drop.
+	announcement: AnnounceProducer,
 	hop: Hop,
 	root: PathOwned,
-	state: kio::Shared<OriginState>,
-}
-
-impl Clone for Dynamic {
-	fn clone(&self) -> Self {
-		// Mirror `new`: count each live handle. Without this, dropping a clone would
-		// decrement past `new`'s increment and prematurely flip the handler count to
-		// zero, making future `request_broadcast` calls return `Unroutable`.
-		self.state.lock().fallback.add_handler();
-
-		Self {
-			hop: self.hop,
-			root: self.root.clone(),
-			state: self.state.clone(),
-		}
-	}
+	state: kio::Shared<ServeState>,
 }
 
 impl Dynamic {
-	fn new(hop: Hop, root: PathOwned, state: kio::Shared<OriginState>) -> Self {
-		state.lock().fallback.add_handler();
-
-		Self { hop, root, state }
-	}
-
 	/// The id of the origin this handler belongs to.
 	pub fn hop(&self) -> Hop {
 		self.hop
 	}
 
-	/// Poll for the next requested broadcast, without blocking.
+	/// Re-price the route in place: replace its hops and cost.
+	///
+	/// Consumers observe another active update for the same prefix; sessions
+	/// forward it as a restart, so route churn never looks like new content. The
+	/// prefix is fixed at announce time: to move a route, drop this and call
+	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped.
+	pub fn update(&self, route: Route) -> Result<(), Error> {
+		self.announcement.update(route)
+	}
+
+	/// Poll for the next requested path under this route, without blocking.
 	///
 	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
 	/// no request will ever arrive again, so handler loops should end.
-	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
+	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.closed || state.fallback.has_queued() {
+			if state.closed || state.requests.has_queued() {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -2992,23 +3053,26 @@ impl Dynamic {
 			return Poll::Ready(Err(Error::Closed));
 		}
 
-		let path = state.fallback.pop().expect("predicate guaranteed a request");
+		let path = state.requests.pop().expect("predicate guaranteed a request");
 		// The popped request stays pending, so a repeat request in the window between
 		// hand-off and accept coalesces onto it instead of re-invoking the handler. The
 		// producer is a shared clone; `Request::{accept, reject, drop}` removes the
 		// entry. This mirrors how `poll_requested_track` keeps a served track
 		// discoverable via the weak cache across the same window.
-		let producer = state.fallback.get(&path).expect("popped key must be pending").clone();
+		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
 		Poll::Ready(Ok(Request {
 			path,
 			producer,
-			home: RequestHome::Fallback(self.state.clone()),
+			home: self.state.clone(),
 		}))
 	}
 
-	/// Block until a consumer requests an unannounced broadcast, returning a
+	/// Block until a consumer requests a path under this route, returning a
 	/// [`Request`] to serve.
-	pub async fn requested_broadcast(&mut self) -> Result<Request, Error> {
+	///
+	/// Takes `&self` so a handler can serve from one task while another re-prices
+	/// the route; concurrent callers each receive distinct requests.
+	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
 		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
 	}
 
@@ -3018,112 +3082,53 @@ impl Dynamic {
 	}
 }
 
-impl Drop for Dynamic {
-	fn drop(&mut self) {
-		// Decrement and reject under one lock, so a `request_broadcast` that saw a
-		// live handler through the same lock can't slip a request past the rejection.
-		let mut state = self.state.lock();
-		if state.fallback.remove_handler() {
-			// No handlers left to pop queued requests; drop them, closing their result
-			// channels so awaiting requesters resolve to `Unroutable`. A request already
-			// handed to a handler stays, resolved by its `Request` instead.
-			state.fallback.drain_queued();
-		}
-	}
-}
-
-/// Where a [`Request`] came from: the origin's fallback queue, or one served
-/// route's queue. Both hold the same request bookkeeping under their own lock.
-enum RequestHome {
-	Fallback(kio::Shared<OriginState>),
-	Route(kio::Shared<ServeState>),
-}
-
-impl RequestHome {
-	/// Resolve the pending request: cache an accepted broadcast for repeat
+impl ServeState {
+	/// Resolve a pending request: cache an accepted broadcast for repeat
 	/// requests, remove the queue entry, and wake the requesters.
 	///
-	/// Resolved while the home's lock is held, so this linearizes with the
+	/// Resolved while the queue's lock is held, so this linearizes with the
 	/// teardown: either the teardown ran first (the `closed` check returns, its
 	/// rejection stands) or this write lands first and the teardown finds the
-	/// entry already gone. The home lock is released before the channel guard
+	/// entry already gone. The queue lock is released before the channel guard
 	/// drops, so the requester wakes outside it: an inline executor re-entering
 	/// `request_broadcast` from the wake must not find the non-reentrant lock
 	/// still held.
 	fn resolve(
-		&self,
+		shared: &kio::Shared<Self>,
 		path: &PathOwned,
 		producer: &kio::Producer<PendingBroadcast>,
 		result: Result<broadcast::Consumer, Error>,
 	) {
-		match self {
-			Self::Fallback(shared) => {
-				let mut state = shared.lock();
-				if state.closed {
-					return;
-				}
-				let OriginState { fallback, served, .. } = &mut *state;
-				let resolved = Self::settle(fallback, served, path, producer, result);
-				if let Ok(mut pending) = producer.write() {
-					pending.resolved.get_or_insert(resolved);
-					drop(state);
-				}
-			}
-			Self::Route(shared) => {
-				let mut state = shared.lock();
-				if state.closed {
-					return;
-				}
-				let ServeState { requests, served, .. } = &mut *state;
-				let resolved = Self::settle(requests, served, path, producer, result);
-				if let Ok(mut pending) = producer.write() {
-					pending.resolved.get_or_insert(resolved);
-					drop(state);
-				}
-			}
+		let mut state = shared.lock();
+		if state.closed {
+			return;
 		}
-	}
-
-	/// Move an accepted broadcast into the weak `served` cache (deduping onto a
-	/// live entry served concurrently) and remove the queue entry.
-	fn settle(
-		requests: &mut Requests<PathOwned, kio::Producer<PendingBroadcast>>,
-		served: &mut WeakCache<PathOwned, broadcast::WeakConsumer>,
-		path: &PathOwned,
-		producer: &kio::Producer<PendingBroadcast>,
-		result: Result<broadcast::Consumer, Error>,
-	) -> Result<broadcast::Consumer, Error> {
 		let resolved = match result {
 			Ok(broadcast) => {
 				// If a live broadcast was already served for this path while we were
 				// fetching upstream, dedup onto it and drop ours rather than replace
 				// a good entry with a duplicate subscription.
-				let existing = served.insert(path.clone(), broadcast.weak());
+				let existing = state.served.insert(path.clone(), broadcast.weak());
 				Ok(existing.map(|weak| weak.consume()).unwrap_or(broadcast))
 			}
 			Err(err) => Err(err),
 		};
-		requests.remove_if(path, |p| p.same_channel(producer));
-		resolved
+		state.requests.remove_if(path, |p| p.same_channel(producer));
+		if let Ok(mut pending) = producer.write() {
+			pending.resolved.get_or_insert(resolved);
+			drop(state);
+		}
 	}
 
 	/// Drop the still-pending entry, if it is still ours.
-	fn forget(&self, path: &PathOwned, producer: &kio::Producer<PendingBroadcast>) {
-		match self {
-			Self::Fallback(shared) => {
-				shared.lock().fallback.remove_if(path, |p| p.same_channel(producer));
-			}
-			Self::Route(shared) => {
-				shared.lock().requests.remove_if(path, |p| p.same_channel(producer));
-			}
-		}
+	fn forget(shared: &kio::Shared<Self>, path: &PathOwned, producer: &kio::Producer<PendingBroadcast>) {
+		shared.lock().requests.remove_if(path, |p| p.same_channel(producer));
 	}
 }
 
 /// A pending request for a broadcast to be served on demand.
 ///
-/// Yielded by [`Dynamic::requested_broadcast`] (the origin's fallback) and by a
-/// served route's queue. The requester is awaiting inside
+/// Yielded by [`Dynamic::requested_broadcast`]. The requester is awaiting inside
 /// [`Consumer::request_broadcast`]; [`accept`](Self::accept) resolves it with a live
 /// broadcast (which the handler keeps producing into) and [`reject`](Self::reject) resolves
 /// it with an error. Dropping the request without either rejects it.
@@ -3137,7 +3142,7 @@ pub struct Request {
 
 	// The queue this request came from, so `accept` can cache the served
 	// broadcast for repeat requests.
-	home: RequestHome,
+	home: kio::Shared<ServeState>,
 }
 
 impl Request {
@@ -3153,13 +3158,13 @@ impl Request {
 	/// path share the served broadcast for as long as it stays live.
 	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
-		self.home.resolve(&self.path, &self.producer, Ok(broadcast));
+		ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		self.home.resolve(&self.path, &self.producer, Err(err));
+		ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
 	}
 }
 
@@ -3172,7 +3177,7 @@ impl Drop for Request {
 		// The identity guard matters: `accept`/`reject` already removed our entry and released
 		// the lock before we run, so a concurrent request for the same path may have registered
 		// a *new* one here. Removing unconditionally would clobber it, stranding its requesters.
-		self.home.forget(&self.path, &self.producer);
+		ServeState::forget(&self.home, &self.path, &self.producer);
 	}
 }
 
@@ -3191,6 +3196,9 @@ pub struct Requesting {
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
+	// The route table's generation when the request was made, so a retry can
+	// wait for the table to move rather than re-ask the same routes.
+	generation: u64,
 }
 
 enum RequestState {
@@ -3216,8 +3224,8 @@ impl Requesting {
 		Self::new(RequestState::Pending(consumer))
 	}
 
-	/// Whether the request was handed to a serving route or fallback handler,
-	/// rather than decided on the spot.
+	/// Whether the request was handed to a serving route, rather than decided on
+	/// the spot.
 	///
 	/// Fixed at request time, so it distinguishes the two ways
 	/// [`Error::Unroutable`] arises: a queued request that fails was killed by
@@ -3233,12 +3241,23 @@ impl Requesting {
 			inner,
 			path: PathOwned::default(),
 			stats: stats::Scope::default(),
+			generation: 0,
 		}
 	}
 
 	fn with_path(mut self, path: PathOwned) -> Self {
 		self.path = path;
 		self
+	}
+
+	fn with_generation(mut self, generation: u64) -> Self {
+		self.generation = generation;
+		self
+	}
+
+	/// The route table's generation when the request was made.
+	fn generation(&self) -> u64 {
+		self.generation
 	}
 
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -3351,7 +3370,7 @@ pub struct Consumer {
 	root: PathOwned,
 
 	// The origin's shared state: the route table, announce cursors, and the
-	// fallback request queue.
+	// remotely-served fronts.
 	shared: kio::Shared<OriginState>,
 
 	// Egress stats context. Broadcasts handed out through this consumer (and any
@@ -3521,46 +3540,49 @@ impl Consumer {
 	/// [`Self::request_broadcast`], retried when the two race.
 	///
 	/// The wait and the resolution are separate steps, so the covering route can
-	/// retract between them (failover churn), and a route can cover the path while
-	/// nothing serves it yet (an advertise-only announce racing its handler). This
-	/// rides out the churn by retrying whenever the path's coverage changes, which
-	/// is what makes it the right call for resolving a path right after
-	/// connecting. Returns [`Error::Unauthorized`] for a path outside this
-	/// consumer's scope, [`Error::Closed`] once the origin closes, and any other
-	/// resolution failure as-is.
+	/// retract between them (failover churn), a route can cover the path while
+	/// nothing serves it yet (an advertise-only announce racing its handler), and
+	/// a handler can turn the path down. This rides out the churn by retrying
+	/// whenever the route table moves, which is what makes it the right call for
+	/// resolving a path right after connecting. Returns [`Error::Unauthorized`]
+	/// for a path outside this consumer's scope, [`Error::Closed`] once the origin
+	/// closes, and any other resolution failure as-is.
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
-		// Watch the path's coverage for the retry wake: scoped so it only wakes
-		// for covering routes, untagged because this is a lookup, not egress
-		// announce forwarding.
-		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
 		// `scope` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
+		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
 		if !scoped.allowed().any(|allowed| path.has_prefix(allowed)) {
 			return Err(Error::Unauthorized);
 		}
-		let mut announced = scoped.untagged().announced();
 		loop {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
 			let request = self.request_broadcast(&path);
-			// A queued request and an instant verdict fail differently. A request
-			// that queued and then failed `Unroutable` was killed by its serving
-			// route retracting, and an identical standby swaps in without any
-			// announce update, so retry through the already-updated table
-			// immediately; each such retry consumed a real retraction, so this
-			// cannot spin. An instant `Unroutable` means nothing serves the path
-			// right now, and only a coverage change fixes that: park on the
-			// announce stream (it replays the current coverage first, so at most
-			// one extra attempt runs before this genuinely blocks).
-			let queued = request.is_queued();
+			// `Unroutable` is a verdict of the table as it stood when the request
+			// was made: nothing covered the path, the serving route retracted
+			// under the request, or its handler declined. Re-asking the same
+			// table would spin, so wait for it to move (an identical standby
+			// swapping in counts, even though no announce update reports it,
+			// and so does a local broadcast attaching at the path) and try
+			// again. A retraction that already happened bumped the generation
+			// before the error was observed, so that retry is immediate.
+			let seen = request.generation();
 			match request.await {
 				Ok(broadcast) => return Ok(broadcast),
-				Err(Error::Unroutable) if queued => {}
 				Err(Error::Unroutable) => {
-					if announced.next().await.is_none() {
+					let closed = kio::wait(|waiter| {
+						self.shared
+							.poll(waiter, |table| match table.closed || table.generation != seen {
+								true => Poll::Ready(()),
+								false => Poll::Pending,
+							})
+							.map(|table| table.closed)
+					})
+					.await;
+					if closed {
 						return Err(Error::Closed);
 					}
 				}
@@ -3599,11 +3621,9 @@ impl Consumer {
 	///    group boundary, invisibly to subscribers. A route change that does not
 	///    preserve the first hop ends the broadcast instead, and the next
 	///    request re-serves the path.
-	/// 3. Otherwise a live [`Dynamic`] handler (see [`Producer::dynamic`])
-	///    receives the request as a fallback.
 	///
-	/// The returned future resolves to [`Error::Unroutable`] when none of those
-	/// exist. A route claims capability, not inventory: resolving a covered path
+	/// The returned future resolves to [`Error::Unroutable`] when neither exists.
+	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
@@ -3625,9 +3645,10 @@ impl Consumer {
 			return kio::Pending::new(resolved);
 		}
 
-		// Routes only cover paths within this consumer's scope; the fallback
-		// handler is deliberately unscoped, matching the dynamic behavior.
-		let in_scope = self.nodes.get(&path).is_some();
+		// Routes only cover paths within this consumer's scope.
+		if self.nodes.get(&path).is_none() {
+			return kio::Pending::new(Requesting::failed(Error::Unroutable));
+		}
 
 		let mut state = self.shared.lock();
 
@@ -3636,82 +3657,68 @@ impl Consumer {
 			return kio::Pending::new(Requesting::failed(Error::Closed));
 		}
 
-		if in_scope {
-			// Join the live front for this path and exclusion, if any: its watcher
-			// resolves (or already resolved) the request channel with the front's
-			// spliced broadcast, so repeat requests share one upstream
-			// subscription. A front whose route has since retracted still serves
-			// for as long as its session does.
-			let key = (absolute.clone(), self.exclude);
-			if let Some(front) = state.fronts.get(&key) {
-				let pending = Requesting::pending(front.request.consume())
-					.with_path(requested)
-					.with_stats(scope);
-				return kio::Pending::new(pending);
-			}
-
-			if state
-				.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new())
-				.is_some()
-			{
-				// A route covers the path: mint the front and hand its watcher the
-				// request. The watcher materializes the path from the best covering
-				// route, resolves the channel, and re-splices the front through
-				// routes sharing its first hop for as long as one serves.
-				let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
-					origin: self.origin.clone(),
-					path: absolute.clone(),
-				});
-				let front_state = kio::Producer::new(FrontState {
-					next_source: 0,
-					sources: Vec::new(),
-					active: None,
-					closed: false,
-				});
-				let request = kio::Producer::<PendingBroadcast>::default();
-				let consumer = request.consume();
-				state.fronts.insert(
-					key,
-					RemoteFront {
-						request: request.clone(),
-						broadcast: broadcast.consume().weak(),
-					},
-				);
-				self.tasks.push(run_remote_front(RemoteFrontTask {
-					shared: self.shared.clone(),
-					state: front_state,
-					broadcast,
-					path: absolute,
-					exclude: self.exclude,
-					request,
-					tasks: self.tasks.clone(),
-					timers: self.timers.clone(),
-				}));
-				return kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope));
-			}
+		// Join the live front for this path and exclusion, if any: its watcher
+		// resolves (or already resolved) the request channel with the front's
+		// spliced broadcast, so repeat requests share one upstream
+		// subscription. A front whose route has since retracted still serves
+		// for as long as its session does.
+		let key = (absolute.clone(), self.exclude);
+		if let Some(front) = state.fronts.get(&key) {
+			let pending = Requesting::pending(front.request.consume())
+				.with_path(requested)
+				.with_stats(scope)
+				.with_generation(state.generation);
+			return kio::Pending::new(pending);
 		}
 
-		// Reuse a still-live broadcast a fallback handler already served for this
-		// path.
-		if let Some(weak) = state.served.get(&absolute) {
-			let resolved = Requesting::ready(weak.consume()).with_path(requested).with_stats(scope);
-			return kio::Pending::new(resolved);
+		// Nothing serves the path: no local broadcast and no served route.
+		if state
+			.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new())
+			.is_none()
+		{
+			return kio::Pending::new(Requesting::failed(Error::Unroutable));
 		}
 
-		// Coalesce onto a pending request for the same path; otherwise register a new
-		// one, unless there is no handler alive to serve it.
-		let consumer = if let Some(producer) = state.fallback.join(&absolute) {
-			producer.consume()
-		} else {
-			let producer = kio::Producer::<PendingBroadcast>::default();
-			let consumer = producer.consume();
-			if state.fallback.insert(absolute, producer).is_err() {
-				return kio::Pending::new(Requesting::failed(Error::Unroutable));
-			}
-			consumer
-		};
-
-		kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope))
+		// A route covers the path: mint the front and hand its watcher the
+		// request. The watcher materializes the path from the best covering
+		// route, resolves the channel, and re-splices the front through
+		// routes sharing its first hop for as long as one serves.
+		let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
+			origin: self.origin.clone(),
+			path: absolute.clone(),
+		});
+		let front_state = kio::Producer::new(FrontState {
+			next_source: 0,
+			sources: Vec::new(),
+			active: None,
+			closed: false,
+		});
+		let request = kio::Producer::<PendingBroadcast>::default();
+		let consumer = request.consume();
+		let generation = state.generation;
+		state.fronts.insert(
+			key,
+			RemoteFront {
+				request: request.clone(),
+				broadcast: broadcast.consume().weak(),
+			},
+		);
+		self.tasks.push(run_remote_front(RemoteFrontTask {
+			shared: self.shared.clone(),
+			state: front_state,
+			broadcast,
+			path: absolute,
+			exclude: self.exclude,
+			request,
+			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
+		}));
+		kio::Pending::new(
+			Requesting::pending(consumer)
+				.with_path(requested)
+				.with_stats(scope)
+				.with_generation(generation),
+		)
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -3994,7 +4001,7 @@ mod tests {
 	}
 
 	/// Yield to the driver until the server's front watcher delivers a request.
-	async fn queued(server: &mut RouteServer) -> Request {
+	async fn queued(server: &Dynamic) -> Request {
 		let mut request = None;
 		settle(|| match server.poll_requested_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(popped)) => {
@@ -4023,6 +4030,78 @@ mod tests {
 		drop(announcement);
 		announced.assert_next_ended("room/alice");
 		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn broadcast_announces_its_own_path() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+
+		// Created unannounced: reachable by exact path, invisible to the cursor.
+		let mut broadcast = producer.create_broadcast("room/alice").unwrap();
+		announced.assert_next_wait();
+		let local = consumer
+			.request_broadcast("room/alice")
+			.now_or_never()
+			.expect("local")
+			.expect("resolves");
+		assert_eq!(local.info().path.as_str(), "room/alice");
+
+		broadcast.announce(Route::default().with_cost(3)).unwrap();
+		let route = announced.assert_next_active("room/alice");
+		assert_eq!(route.cost, Cost::new(3));
+
+		// Announcing again re-prices in place.
+		broadcast.announce(Route::default().with_cost(1)).unwrap();
+		let route = announced.assert_next_active("room/alice");
+		assert_eq!(route.cost, Cost::new(1));
+
+		// Off the air: the route retracts while the broadcast stays reachable.
+		broadcast.unannounce();
+		announced.assert_next_ended("room/alice");
+		broadcast.unannounce();
+		announced.assert_next_wait();
+		let local = consumer
+			.request_broadcast("room/alice")
+			.now_or_never()
+			.expect("local")
+			.expect("resolves");
+		assert_eq!(local.info().path.as_str(), "room/alice");
+
+		// Back on the air, then the end of the broadcast retracts for good.
+		broadcast.announce(Route::default()).unwrap();
+		announced.assert_next_active("room/alice");
+		broadcast.finish();
+		announced.assert_next_ended("room/alice");
+		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn broadcast_announcement_retracts_with_the_last_producer() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.announced();
+
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		let clone = broadcast.clone();
+		broadcast.announce(Route::default()).unwrap();
+		announced.assert_next_active("room/alice");
+
+		// A clone keeps the broadcast, and its advertisement, alive.
+		drop(broadcast);
+		announced.assert_next_wait();
+		drop(clone);
+		announced.assert_next_ended("room/alice");
+	}
+
+	#[tokio::test]
+	async fn standalone_broadcast_cannot_announce() {
+		let broadcast = broadcast::Info::new().produce();
+		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
+		// Harmless without an advertisement to retract.
+		broadcast.unannounce();
 	}
 
 	#[tokio::test]
@@ -4242,10 +4321,10 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let (_announcement, mut server) = producer.announce_served("room", Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut server).await;
+		let request = queued(&server).await;
 		assert_eq!(request.path().as_str(), "room/alice");
 
 		let source = broadcast::Info::new().produce();
@@ -4268,12 +4347,12 @@ mod tests {
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let (_announcement, mut server) = producer.announce_served("room", Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
 
-		let request = queued(&mut server).await;
+		let request = queued(&server).await;
 		// Only one request reaches the server.
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 
@@ -4289,10 +4368,9 @@ mod tests {
 	async fn retract_rejects_pending_requests() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let (announcement, server) = producer.announce_served("room", Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
-		drop(announcement);
 		drop(server);
 
 		let err = pending.await.err().unwrap();
@@ -4315,9 +4393,9 @@ mod tests {
 
 		// Three identical routes, oldest first: the newest identical route wins
 		// requests, and swapping between them emits no announce update.
-		let (_standby, mut standby_server) = producer.announce_served("room", Route::default()).unwrap();
-		let (second, second_server) = producer.announce_served("room", Route::default()).unwrap();
-		let (incumbent, incumbent_server) = producer.announce_served("room", Route::default()).unwrap();
+		let standby_server = producer.dynamic("room", Route::default()).unwrap();
+		let second_server = producer.dynamic("room", Route::default()).unwrap();
+		let incumbent_server = producer.dynamic("room", Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -4327,14 +4405,12 @@ mod tests {
 		// standby instead of parking on an announce update that never comes. Two
 		// retractions in a row, so the announce stream's initial coverage replay
 		// cannot paper over the missing retry.
-		drop(incumbent);
 		drop(incumbent_server);
 		assert!((&mut resolving).now_or_never().is_none());
-		drop(second);
 		drop(second_server);
 		assert!((&mut resolving).now_or_never().is_none());
 
-		let request = queued(&mut standby_server).await;
+		let request = queued(&standby_server).await;
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
 
@@ -4345,8 +4421,8 @@ mod tests {
 	#[tokio::test]
 	async fn split_horizon_skips_routes_through_the_requester() {
 		let producer = origin(1).produce();
-		let (_announcement, _server) = producer
-			.announce_served("room", Route::default().with_hops(hops(&[7])))
+		let _server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[7])))
 			.unwrap();
 
 		// The requester's own bytes must not be served back to it.
@@ -4365,12 +4441,132 @@ mod tests {
 		assert!(pending.now_or_never().is_none());
 	}
 
+	/// A handler that rejects a path with `Unroutable` while its route stands
+	/// gives the requester that answer; the front must not re-ask the same route
+	/// forever, which would spin the origin driver.
+	#[tokio::test]
+	async fn handler_rejection_is_final() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		request.reject(Error::Unroutable);
+		let err = tokio::time::timeout(Duration::from_secs(5), pending)
+			.await
+			.expect("the front must give up, not spin")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
+
+		// The route still stands and serves the next path.
+		let pending = consumer.request_broadcast("room/bob");
+		let request = queued(&server).await;
+		assert_eq!(request.path().as_str(), "room/bob");
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		pending.await.expect("resolves");
+	}
+
+	/// `routed_broadcast` treats a handler's rejection as the table's verdict:
+	/// it waits for the table to move instead of re-asking the same route.
+	#[tokio::test]
+	async fn routed_broadcast_waits_out_a_rejection() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+		let request = queued(&server).await;
+		request.reject(Error::Unroutable);
+
+		// Parked: the route stands, so nothing changed that a retry could use.
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!((&mut resolving).now_or_never().is_none());
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+
+		// A re-price moves the table: the retry reaches the handler, which serves it.
+		server.update(Route::default().with_cost(2)).unwrap();
+		assert!((&mut resolving).now_or_never().is_none());
+		let request = queued(&server).await;
+		let served = broadcast::Info::new().produce();
+		request.accept(&served);
+		resolving.await.expect("resolves");
+	}
+
+	/// A local broadcast appearing at the exact path is a table change too: a
+	/// requester parked on a handler's rejection resolves to it.
+	#[tokio::test]
+	async fn routed_broadcast_wakes_for_a_local_broadcast() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+		queued(&server).await.reject(Error::Unroutable);
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!((&mut resolving).now_or_never().is_none());
+
+		// Unannounced, so no route changes: the exact path itself is what moved.
+		let _local = producer.create_broadcast("room/alice").unwrap();
+		let resolved = resolving.await.expect("resolves locally");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// A track first subscribed after the front is already serving another still
+	/// replays what its source holds, like the first track did.
+	#[tokio::test]
+	async fn late_track_on_a_served_front_replays() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut source = broadcast::Info::new().produce();
+		for name in ["a", "b"] {
+			let mut track = source.create_track(name, None).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
+			group.finish().unwrap();
+			// The producer stays alive: the track is open, like a live SI track.
+			std::mem::forget(track);
+		}
+
+		let pending = consumer.request_broadcast("room/alice");
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.expect("resolves");
+
+		let budget = track::Subscription::default().with_max_age(Duration::from_secs(3600));
+		for name in ["a", "b"] {
+			let mut subscription = resolved
+				.track(name)
+				.unwrap()
+				.subscribe(budget.clone())
+				.await
+				.expect("subscribe");
+			let mut group = tokio::time::timeout(Duration::from_secs(5), subscription.recv_group())
+				.await
+				.expect("the late track must replay, not park")
+				.expect("recv group")
+				.expect("track ended early");
+			let frame = group.read_frame().await.expect("read frame").expect("frame");
+			assert_eq!(&frame.payload[..], name.as_bytes());
+		}
+	}
+
 	#[tokio::test]
 	async fn most_specific_prefix_shadows() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let (_broad, mut broad_server) = producer.announce_served("", Route::default()).unwrap();
+		let broad_server = producer.dynamic("", Route::default()).unwrap();
 		// A narrow advertise-only claim: requests under it must NOT route to the
 		// broad server; they fall through to the (absent) fallback handler.
 		let _narrow = producer.announce(".dash", Route::default()).unwrap();
@@ -4385,27 +4581,38 @@ mod tests {
 
 		// Everything else still routes to the broad server.
 		let _pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut broad_server).await;
+		let request = queued(&broad_server).await;
 		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
 	#[tokio::test]
-	async fn dynamic_fallback_serves_uncovered_paths() {
+	async fn root_dynamic_serves_any_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let mut dynamic = producer.dynamic();
+		let mut announced = consumer.announced();
+		let dynamic = producer.dynamic("", Route::default()).unwrap();
+		// The root claim is advertised like any other prefix.
+		announced.assert_next_active("");
 
 		let pending = consumer.request_broadcast("anything/at/all");
-		let request = match dynamic.poll_requested_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(request)) => request,
-			_ => panic!("expected a queued request"),
-		};
+		let request = queued(&dynamic).await;
 		assert_eq!(request.path().as_str(), "anything/at/all");
 
 		let source = broadcast::Info::new().produce();
 		request.accept(&source);
-		let resolved = pending.now_or_never().expect("accepted").expect("resolves");
+		let resolved = pending.await.expect("resolves");
 		assert_eq!(resolved.info().path.as_str(), "anything/at/all");
+
+		// Nothing serves an uncovered path once the handler is gone.
+		drop(dynamic);
+		announced.assert_next_ended("");
+		let err = consumer
+			.request_broadcast("something/else")
+			.now_or_never()
+			.expect("unroutable")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
 	}
 
 	#[tokio::test]
@@ -4451,7 +4658,7 @@ mod tests {
 		let mut announced = consumer.announced();
 		announced.assert_next_active("room");
 
-		let (_a2, _server) = producer.announce_served("served", Route::default()).unwrap();
+		let _server = producer.dynamic("served", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("served/path");
 
 		drop(driver);
@@ -4491,16 +4698,16 @@ mod tests {
 	impl ResumeRig {
 		/// Announce a served route with `first` as its first hop, materialize
 		/// "room/alice" through it with a one-group "before" track, and subscribe.
-		async fn new(first: &[u64]) -> (Self, AnnounceProducer, broadcast::Producer) {
+		async fn new(first: &[u64]) -> (Self, Dynamic, broadcast::Producer) {
 			let producer = origin(1).produce();
 			let consumer = producer.consume();
 
-			let (announcement, mut server) = producer
-				.announce_served("room", Route::default().with_hops(hops(first)))
+			let server = producer
+				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap();
 
 			let pending = consumer.request_broadcast("room/alice");
-			let request = queued(&mut server).await;
+			let request = queued(&server).await;
 			let mut source = broadcast::Info::new().produce();
 			let mut track = source.create_track("video", None).unwrap();
 			let mut group = track.append_group().unwrap();
@@ -4530,16 +4737,16 @@ mod tests {
 					subscription,
 					_incumbent_track: track,
 				},
-				announcement,
+				server,
 				source,
 			)
 		}
 
 		/// Stand up a second served route with `first` as its first hop and hand
-		/// back its server, ready to answer the front's re-request.
-		fn standby(&self, first: &[u64]) -> (AnnounceProducer, RouteServer) {
+		/// back its handle, ready to answer the front's re-request.
+		fn standby(&self, first: &[u64]) -> Dynamic {
 			self.producer
-				.announce_served("room", Route::default().with_hops(hops(first)))
+				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap()
 		}
 	}
@@ -4548,7 +4755,7 @@ mod tests {
 	/// content stream (the delivered group plus its successor) and prove the
 	/// rig's subscription resumes onto it: the successor group is delivered on
 	/// the same subscription, at the group boundary.
-	async fn assert_resumes(rig: &mut ResumeRig, server: &mut RouteServer) {
+	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
 		let mut replacement = broadcast::Info::new().produce();
 		let mut track = replacement.create_track("video", None).unwrap();
@@ -4573,24 +4780,6 @@ mod tests {
 		assert_eq!(&frame.payload[..], b"resumed");
 	}
 
-	/// A `RouteServer` dropped while its announcement stands leaves the entry in
-	/// the table with a closed queue. The front must refuse it rather than
-	/// re-pick it forever, which would spin the origin driver on one core.
-	#[tokio::test]
-	async fn dropped_server_with_live_announcement_is_refused() {
-		let producer = origin(1).produce();
-		let consumer = producer.consume();
-		let (_announcement, server) = producer.announce_served("room", Route::default()).unwrap();
-		drop(server);
-
-		let err = tokio::time::timeout(Duration::from_secs(5), consumer.request_broadcast("room/alice"))
-			.await
-			.expect("the front must give up, not spin")
-			.err()
-			.unwrap();
-		assert!(matches!(err, Error::Unroutable));
-	}
-
 	/// The driver's completion contract: it resolves once every producer handle
 	/// drops, however many read handles remain.
 	#[tokio::test]
@@ -4608,21 +4797,21 @@ mod tests {
 	#[tokio::test]
 	async fn remote_source_resumes_through_same_first_hop() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
-		let (_standby, mut standby_server) = rig.standby(&[10, 20]);
+		let standby_server = rig.standby(&[10, 20]);
 
 		// The serving route dies: retraction plus source abort, like a session.
 		drop(incumbent);
 		drop(source);
 
 		// The standby shares the first hop, so the subscription resumes there.
-		assert_resumes(&mut rig, &mut standby_server).await;
+		assert_resumes(&mut rig, &standby_server).await;
 	}
 
 	#[tokio::test]
 	async fn different_first_hop_ends_the_subscription() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		// Another publisher entirely: same path, different first hop.
-		let (_rival, mut rival_server) = rig.standby(&[11]);
+		let rival_server = rig.standby(&[11]);
 
 		drop(incumbent);
 		drop(source);
@@ -4634,7 +4823,7 @@ mod tests {
 		// A fresh request resolves through the rival.
 		let consumer = rig.producer.consume();
 		let pending = consumer.request_broadcast("room/alice");
-		let request = queued(&mut rival_server).await;
+		let request = queued(&rival_server).await;
 		let replacement = broadcast::Info::new().produce();
 		request.accept(&replacement);
 		pending.await.expect("re-request resolves through the rival");
@@ -4645,7 +4834,7 @@ mod tests {
 		// An empty hop chain identifies nobody, so two of them must not pass for
 		// one publisher reconnecting.
 		let (mut rig, incumbent, source) = ResumeRig::new(&[]).await;
-		let (_twin, _twin_server) = rig.standby(&[]);
+		let _twin_server = rig.standby(&[]);
 
 		drop(incumbent);
 		drop(source);
@@ -4688,7 +4877,7 @@ mod tests {
 	#[tokio::test]
 	async fn drain_reprice_migrates_before_the_session_dies() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
-		let (_standby, mut standby_server) = rig.standby(&[10, 20]);
+		let standby_server = rig.standby(&[10, 20]);
 
 		// The serving route drains: repriced to the ceiling while its session
 		// keeps serving. The front migrates to the standby without waiting for
@@ -4697,7 +4886,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(DRAIN_COST))
 			.unwrap();
 
-		assert_resumes(&mut rig, &mut standby_server).await;
+		assert_resumes(&mut rig, &standby_server).await;
 
 		// The drained source outlived the migration.
 		drop(incumbent);
@@ -4763,6 +4952,68 @@ mod tests {
 		// An unknown cold path stays unknown however many links it crosses, so it
 		// can never accumulate its way into outranking a path we actually know.
 		assert_eq!(Cost::UNKNOWN.charged(3).cold, MAX_COST);
+	}
+
+	/// Mint an origin whose pool reclaims idle content after `expiry`.
+	fn expiring_origin(expiry: Duration) -> Producer {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
+		Info::default().with_pool(pool).produce()
+	}
+
+	/// A publisher that stalls with a group still open runs no write path, so the
+	/// track's own write-driven expiry never fires and a reader parked in that group
+	/// is never told. The driver's wall-clock sweep is the bound.
+	#[tokio::test(start_paused = true)]
+	async fn stalled_publisher_open_group_is_reclaimed() {
+		let expiry = Duration::from_secs(1);
+		let origin = expiring_origin(expiry);
+		let mut broadcast = origin.create_broadcast("test").unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+
+		let mut stalled = track.append_group().unwrap();
+		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		// A successor, so the stalled group is not the protected live edge. Its
+		// timestamp is inside the retention budget, so subscription expiry keeps the
+		// stalled group: only reclamation can bound it.
+		let _successor = track.append_group().unwrap();
+
+		let mut reading = stalled.consume();
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		// Production goes quiet: nothing writes to this track again.
+		crate::model::clock::advance(expiry * 2);
+
+		// Bounded so a regression fails rather than parking forever, which is the
+		// bug itself. Time is virtual, so the wait costs nothing.
+		let reclaimed = tokio::time::timeout(Duration::from_secs(60), reading.read_frame()).await;
+		assert!(
+			matches!(reclaimed, Ok(Err(Error::Old))),
+			"the sweep must reclaim an idle open group and surface the gap, got {reclaimed:?}"
+		);
+	}
+
+	/// Reclamation is the pool's policy, not the origin's: a pool with no expiry
+	/// window keeps idle content until byte pressure takes it, sweep or no sweep.
+	#[tokio::test(start_paused = true)]
+	async fn sweep_respects_a_disabled_expiry() {
+		let origin = Info::default().with_pool(cache::Pool::unbounded()).produce();
+		let mut broadcast = origin.create_broadcast("test").unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+
+		let mut stalled = track.append_group().unwrap();
+		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		let _successor = track.append_group().unwrap();
+
+		let mut reading = stalled.consume();
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		crate::model::clock::advance(Duration::from_secs(3600));
+		tokio::time::advance(Duration::from_secs(3600)).await;
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"a pool without an expiry window never reclaims"
+		);
 	}
 
 	/// A draining cost still has to fit the wire, since the route keeps being

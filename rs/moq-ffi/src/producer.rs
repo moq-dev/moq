@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 
+use crate::cancel::{self, MoqCancel};
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -72,18 +73,6 @@ pub(crate) struct BroadcastProducer {
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
-	// How to (re-)announce the exact path, for origin-created broadcasts.
-	// `None` for a standalone broadcast, which has no origin to announce on.
-	pub(crate) announce: Option<AnnounceState>,
-}
-
-/// The origin handle and path an origin-created broadcast was published under,
-/// so `set_announce` can toggle its route.
-pub(crate) struct AnnounceState {
-	pub(crate) origin: moq_net::origin::Producer,
-	pub(crate) path: moq_net::PathOwned,
-	/// The live advertisement, absent while unannounced.
-	pub(crate) announcement: Option<moq_net::announce::Producer>,
 }
 
 /// A whole-frame importer for one codec track.
@@ -165,24 +154,11 @@ impl TrackDynamicProducer {
 impl MoqBroadcastProducer {
 	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
 	/// the catalog track every FFI broadcast carries.
-	pub(crate) fn from_inner(broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
-		Self::from_inner_announced(broadcast, None)
-	}
-
-	/// [`Self::from_inner`], carrying the origin/path/announcement state that lets
-	/// `set_announce` toggle an origin-created broadcast's route.
-	pub(crate) fn from_inner_announced(
-		mut broadcast: moq_net::broadcast::Producer,
-		announce: Option<AnnounceState>,
-	) -> Result<Self, MoqError> {
+	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Self {
-			state: std::sync::Mutex::new(Some(BroadcastProducer {
-				broadcast,
-				catalog,
-				announce,
-			})),
+			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		})
 	}
 
@@ -268,14 +244,10 @@ impl MoqBroadcastProducer {
 	pub fn set_announce(&self, announce: bool) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let announce_state = state.announce.as_mut().ok_or(MoqError::Closed)?;
-			match (announce, announce_state.announcement.is_some()) {
-				(true, false) => {
-					let route = moq_net::origin::Route::default();
-					announce_state.announcement = Some(announce_state.origin.announce(&announce_state.path, route)?);
-				}
-				(false, true) => announce_state.announcement = None,
-				_ => {}
+			if announce {
+				state.broadcast.announce(moq_net::origin::Route::default())?;
+			} else {
+				state.broadcast.unannounce();
 			}
 			Ok(())
 		})
@@ -696,15 +668,21 @@ impl MoqTrackProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.used().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { track.used().await })).await
 	}
 
 	/// Wait until this track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.unused().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { track.unused().await })).await
 	}
 
 	/// Create a consumer that reads from this producer's track.
@@ -887,7 +865,10 @@ impl MoqMediaProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	pub async fn used(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -896,11 +877,14 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		crate::ffi::detached(async move { demand.used().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
 	}
 
 	/// Wait until this track has no active consumers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
+	///
+	/// `cancel` aborts this call alone; see [`MoqCancel`].
+	#[uniffi::method(default(cancel = None))]
+	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -909,7 +893,7 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		crate::ffi::detached(async move { demand.unused().await }).await
+		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
 	}
 
 	/// Write `frame` to this track.

@@ -2,54 +2,38 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-/** A single latency bound: `"real-time"` adapts to the RTT; a `Time.Milli` fixes the jitter buffer. */
-export type Bound = "real-time" | Time.Milli;
-
 /**
- * Latency target. A scalar (or `"real-time"`) collapses the range and minimizes latency, the live
- * default. An object opens a range `[min, max]`: playback buffers freely between the floor and the
- * ceiling and only skips ahead once latency would exceed the ceiling, so faster-than-real-time
- * frames (e.g. a TTS response with future timestamps) build up instead of being skipped. Both
- * bounds default to `"real-time"` when omitted. The ceiling is always finite (no uncapped buffering),
- * so worst case the audio ring drops its oldest samples rather than exhausting memory.
+ * How far playback trails the live edge.
+ *
+ * `"auto"` (the default) sizes the jitter buffer from the connection RTT; a `Time.Milli` fixes it.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and {@link Sync.wait}
- * returns without sleeping, so a frame presents as soon as it exists. It replaces the range rather
- * than sitting inside it, so it is not a {@link Bound} and can't be used as a floor or ceiling.
- * Audio is the owner's business: a ring with no depth underruns, so whoever wants this mode is
- * expected to turn audio off.
+ * returns without sleeping, so a frame presents as soon as it exists. It also overrides
+ * {@link SyncInput.buffer}, since holding a lookahead would contradict holding nothing. Audio is
+ * the owner's business: a ring with no depth underruns, so whoever wants this mode is expected to
+ * turn audio off.
  */
-export type Latency = "instant" | Bound | { min?: Bound; max?: Bound };
-
-/**
- * Resolve a {@link Latency} into explicit floor/ceiling bounds (a scalar collapses to `min == max`).
- * `"instant"` holds nothing, so both bounds are zero.
- */
-export function latencyBounds(latency: Latency): { min: Bound; max: Bound } {
-	if (latency === "instant") return { min: Time.Milli.zero, max: Time.Milli.zero };
-	if (latency === "real-time" || typeof latency === "number") {
-		return { min: latency, max: latency };
-	}
-	return { min: latency.min ?? "real-time", max: latency.max ?? "real-time" };
-}
-
-/** Build a {@link Latency} from explicit bounds, collapsing to a scalar when they're equal. */
-export function latencyFromBounds(min: Bound, max: Bound): Latency {
-	return min === max ? min : { min, max };
-}
+export type Delay = "instant" | "auto" | Time.Milli;
 
 const MIN_JITTER = Time.Milli(20);
 const FALLBACK_JITTER = Time.Milli(100);
 
 export type SyncInput = {
-	/**
-	 * Latency target: a scalar minimizes (collapsed range), an object opens a range, and
-	 * `"instant"` holds nothing and never sleeps. See {@link Latency}.
-	 */
-	latency: Getter<Latency>;
+	/** How far playback trails the live edge. See {@link Delay}. */
+	delay: Getter<Delay>;
 
 	/**
-	 * The connection's PROBE estimates, whose RTT drives "real-time" jitter. Usually wired
+	 * Future-dated media held beyond the live edge before playback skips ahead (default: zero).
+	 *
+	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
+	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
+	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
+	 * drops its oldest samples rather than exhausting memory.
+	 */
+	buffer: Getter<Time.Milli>;
+
+	/**
+	 * The connection's PROBE estimates, whose RTT drives "auto" jitter. Usually wired
 	 * from a `Connection.Shared`'s or `Reload`'s `probe`.
 	 */
 	probe: Getter<Moq.Connection.Probe | undefined>;
@@ -66,24 +50,25 @@ type SyncOutput = {
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
 	reference: Signal<Time.Milli | undefined>;
 
-	// The total buffer required: jitter + max(audio, video).
-	buffer: Signal<Time.Milli>;
+	// The resolved delay from the live edge to the playhead: jitter + max(audio, video).
+	delay: Signal<Time.Milli>;
 
-	// The jitter buffer in milliseconds (always numeric).
-	// In "real-time" mode this is updated automatically from RTT.
-	// When the floor is a number, jitter equals that number.
+	// The jitter component of `delay` (always numeric).
+	// In "auto" mode this is updated automatically from RTT.
+	// When the delay is a number, jitter equals that number.
 	jitter: Signal<Time.Milli>;
 
 	// The media timestamp of the most recently received frame.
 	timestamp: Signal<Time.Milli | undefined>;
 
-	// Derived: true when the ceiling sits above the floor. Buffered playback lets the reference
-	// stay anchored so future-dated frames build up a buffer, re-anchoring (skipping ahead) only
-	// when latency would exceed the ceiling. See `reset()`.
+	// Derived: true when a lookahead is configured. Buffered playback lets the reference stay
+	// anchored so future-dated frames build up, re-anchoring (skipping ahead) only once they
+	// would sit further than `maxAge` ahead of the playhead. See `reset()`.
 	buffered: Signal<boolean>;
 
-	// Derived cap on buffered audio (ms), consumed by the audio ring to size itself. Always finite.
-	maxBuffer: Signal<Time.Milli>;
+	// Derived: `delay + buffer`, the furthest a held frame may sit ahead of the playhead. Feeds the
+	// transport subscription and the container consumer, which bound the same span. Always finite.
+	maxAge: Signal<Time.Milli>;
 };
 
 export class Sync {
@@ -91,11 +76,11 @@ export class Sync {
 
 	readonly #out: SyncOutput = {
 		reference: new Signal<Time.Milli | undefined>(undefined),
-		buffer: new Signal<Time.Milli>(Time.Milli.zero),
+		delay: new Signal<Time.Milli>(Time.Milli.zero),
 		jitter: new Signal<Time.Milli>(FALLBACK_JITTER),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
-		maxBuffer: new Signal<Time.Milli>(Time.Milli.zero),
+		maxAge: new Signal<Time.Milli>(Time.Milli.zero),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -114,7 +99,8 @@ export class Sync {
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
-			latency: getter(props?.latency ?? ("real-time" as Latency)),
+			delay: getter(props?.delay ?? ("auto" as Delay)),
+			buffer: getter(props?.buffer ?? Time.Milli.zero),
 			probe: getter(props?.probe),
 			audio: getter(props?.audio),
 			video: getter(props?.video),
@@ -123,46 +109,38 @@ export class Sync {
 		this.#update = Promise.withResolvers();
 
 		this.#signals.run(this.#runJitter.bind(this));
-		this.#signals.run(this.#runBuffer.bind(this));
-		this.#signals.run(this.#runRange.bind(this));
+		this.#signals.run(this.#runDelay.bind(this));
+		this.#signals.run(this.#runMaxAge.bind(this));
 	}
 
-	// Derive `buffered` / `maxBuffer` from the floor (`buffer`) and the ceiling (the `max` bound).
-	#runRange(effect: Effect): void {
-		const { max } = latencyBounds(effect.get(this.in.latency));
-		const floor = effect.get(this.#out.buffer);
+	// Derive `buffered` / `maxAge` from the resolved delay and the configured lookahead.
+	#runMaxAge(effect: Effect): void {
+		const delay = effect.get(this.#out.delay);
+		// "instant" holds nothing, so a configured lookahead doesn't apply.
+		const buffer = effect.get(this.in.delay) === "instant" ? Time.Milli.zero : effect.get(this.in.buffer);
 
-		if (max === "real-time") {
-			// Ceiling tracks the floor: minimize latency, the live default.
-			this.#out.buffered.set(false);
-			this.#out.maxBuffer.set(floor);
-		} else {
-			// Buffered only when the ceiling is above the floor; otherwise it collapses to minimize.
-			this.#out.buffered.set(max > floor);
-			this.#out.maxBuffer.set(Time.Milli.max(max, floor));
-		}
-	}
-
-	// The maximum total latency (lookahead + floor) we tolerate before re-anchoring, in ms.
-	// Used by `received()` to decide when to skip ahead.
-	#latencyCap(): Time.Milli {
-		const { max } = latencyBounds(this.in.latency.peek());
-		const floor = this.#out.buffer.peek();
-		if (max === "real-time") return floor;
-		return Time.Milli.max(max, floor);
+		this.#out.buffered.set(buffer > 0);
+		this.#out.maxAge.set(Time.Milli.add(delay, buffer));
 	}
 
 	#runJitter(effect: Effect): void {
-		const { min } = latencyBounds(effect.get(this.in.latency));
+		const delay = effect.get(this.in.delay);
 
-		if (typeof min === "number") {
-			// Fixed mode: the floor value is the jitter.
+		if (delay === "instant") {
+			// Holds nothing at all.
 			this.#minRtt = undefined;
-			this.#out.jitter.set(min);
+			this.#out.jitter.set(Time.Milli.zero);
 			return;
 		}
 
-		// "real-time" mode: compute jitter from the connection's RTT estimate.
+		if (typeof delay === "number") {
+			// Fixed mode: the configured delay is the jitter.
+			this.#minRtt = undefined;
+			this.#out.jitter.set(delay);
+			return;
+		}
+
+		// "auto" mode: compute jitter from the connection's RTT estimate.
 		const rtt = effect.get(this.in.probe)?.rtt;
 		if (rtt !== undefined) {
 			// Track minimum RTT as baseline, ignoring bufferbloat.
@@ -179,23 +157,23 @@ export class Sync {
 		this.#out.jitter.set(FALLBACK_JITTER);
 	}
 
-	#runBuffer(effect: Effect): void {
+	#runDelay(effect: Effect): void {
 		const jitter = effect.get(this.#out.jitter);
 		const video = effect.get(this.in.video) ?? Time.Milli.zero;
 		const audio = effect.get(this.in.audio) ?? Time.Milli.zero;
 
-		// A zero floor still holds the rendition's own delay, which is a frame interval at 60fps.
+		// A zero delay still holds the rendition's own delay, which is a frame interval at 60fps.
 		// "instant" holds nothing at all.
-		const instant = effect.get(this.in.latency) === "instant";
-		const buffer = instant ? Time.Milli.zero : Time.Milli.add(Time.Milli.max(video, audio), jitter);
-		this.#out.buffer.set(buffer);
+		const instant = effect.get(this.in.delay) === "instant";
+		const delay = instant ? Time.Milli.zero : Time.Milli.add(Time.Milli.max(video, audio), jitter);
+		this.#out.delay.set(delay);
 
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
 	}
 
 	// Fold a newly received frame into the reference. The reference anchors playback to the
-	// wall clock; we lower it (skip ahead) only when keeping it would push latency past the cap.
+	// wall clock; we lower it (skip ahead) only when keeping it would push the lookahead past `maxAge`.
 	received(timestamp: Time.Milli, label = ""): void {
 		this.#out.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
@@ -211,8 +189,8 @@ export class Sync {
 		// Check if `wait()` would not sleep at all.
 		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
-		const floor = this.#out.buffer.peek();
-		const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), floor);
+		const delay = this.#out.delay.peek();
+		const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), delay);
 		if (sleep < 0) {
 			const entry = this.#late.get(label);
 			if (entry) {
@@ -231,15 +209,16 @@ export class Sync {
 			}
 		}
 
-		// Frame isn't earlier than the anchor: it can't lower latency, so keep the reference.
+		// Frame isn't earlier than the anchor: it can't add lookahead, so keep the reference.
 		if (ref >= currentRef) return;
 
-		// Frame is earlier (more lookahead). `sleep` is the latency keeping the anchor would impose.
-		const cap = this.#latencyCap();
+		// Frame is earlier (more lookahead). `sleep` is how far ahead of the playhead keeping the
+		// anchor would put it.
+		const cap = this.#out.maxAge.peek();
 		if (sleep <= cap) return; // within budget: let the buffer grow instead of skipping ahead
 
-		// Over the cap: re-anchor down so the resulting latency is exactly the cap.
-		this.#setReference(Time.Milli.add(ref, Time.Milli.sub(cap, floor)));
+		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
+		this.#setReference(Time.Milli.add(ref, Time.Milli.sub(cap, delay)));
 	}
 
 	#setReference(ref: Time.Milli): void {
@@ -263,14 +242,14 @@ export class Sync {
 	now(): Time.Milli | undefined {
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) return undefined;
-		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#out.buffer.peek());
+		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#out.delay.peek());
 	}
 
 	// Sleep until it's time to render this frame.
 	async wait(timestamp: Time.Milli): Promise<void> {
-		// A zero buffer still sleeps: the sleep comes from the reference, which holds an early frame
+		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
-		if (this.in.latency.peek() === "instant") return;
+		if (this.in.delay.peek() === "instant") return;
 
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) {
@@ -279,7 +258,7 @@ export class Sync {
 
 		for (;;) {
 			// Switching to "instant" resolves `#update`, so frames parked here wake and leave.
-			if (this.in.latency.peek() === "instant") return;
+			if (this.in.delay.peek() === "instant") return;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
@@ -289,7 +268,7 @@ export class Sync {
 			const currentRef = this.#out.reference.peek();
 			if (currentRef === undefined) return;
 
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#out.buffer.peek());
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#out.delay.peek());
 			if (sleep <= 0) return;
 
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.

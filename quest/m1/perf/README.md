@@ -30,12 +30,12 @@ quests don't re-litigate them:
   the egress `Prefetch`) already exists in moq-net; egress is amortized,
   ingest and the stream-send path are not.
 
-[Worker metrics](/quest/m1/uring-metrics.md) is a soft dependency: it adds
-the ring-level counters (enters, park/wake, batch effectiveness) several
-quests want as evidence. Use bench CPU/RSS until it lands. The
-[raw QUIC adoption](/quest/m2/quic/uring-raw.md) benchmarks the selected
-Quinn-family core against the quiche backend; the zero-copy quests here stay
-independently measured on the backend we ship today.
+The relay's `/metrics` endpoint already carries the ring-level counters
+(enters, park/wake, batch effectiveness) several quests want as evidence, one
+row per io_uring worker. The
+[noq parity gate](/quest/m2/quic/noq-parity.md) benchmarks noq against the
+quiche backend; the zero-copy quests here stay independently measured on the
+backend we ship today.
 
 ## Quests
 
@@ -49,13 +49,11 @@ independently measured on the backend we ship today.
 - [#3202](/quest/m1/perf/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
 - [#3204](/quest/m1/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
 - [Send order width](/quest/m1/perf/send-order-width.md) - a wider transport send order lets a group rank itself instead of taking the queue lock
-- [Stream scheduler](/quest/m1/perf/stream-scheduler.md) - round-robin between equal-priority subscriptions, prototyped as a quinn patch
 - [Priority set_track wakes](/quest/m1/perf/priority-set-track-wakes.md) - a track priority change stops waking groups that end up where they started
 - [#3203](/quest/m1/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
 - [#3205](/quest/m1/perf/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments
 
 ## Related
 
-- [Worker metrics](/quest/m1/uring-metrics.md) - the counters these quests are judged by
-- [Raw QUIC adoption](/quest/m2/quic/uring-raw.md) - carries these optimized
-  worker primitives into the selected protocol core
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - the benchmark that
+  decides whether quiche can go, run on these worker primitives

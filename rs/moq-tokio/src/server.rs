@@ -95,7 +95,7 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 /// listeners across threads, not what the process listens on. Keeping it out of
 /// the config also keeps it off the Usage and serde surface, where it would be a
 /// flag nobody can set and a field every round-trip drops.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) enum Parts {
 	/// Every listener the config asks for.
 	#[default]
@@ -105,15 +105,15 @@ pub(crate) enum Parts {
 	Streams,
 
 	/// The QUIC listener only, as one member of a `SO_REUSEPORT` group. Folding
-	/// the slot in here is what stops a shard and a stream-only server from being
-	/// asked for at once.
-	Shard(crate::listen::Shard),
+	/// the member in here is what stops a group member and a stream-only server
+	/// from being asked for at once.
+	Member(crate::listen::Member),
 }
 
 impl Parts {
 	/// Whether a QUIC backend should be built.
-	fn quic(self) -> bool {
-		matches!(self, Self::All | Self::Shard(_))
+	fn quic(&self) -> bool {
+		matches!(self, Self::All | Self::Member(_))
 	}
 
 	/// Whether the `tcp`/`unix` listeners should be opened.
@@ -121,18 +121,20 @@ impl Parts {
 		not(any(feature = "tcp", all(feature = "uds", unix))),
 		expect(dead_code, reason = "no stream listener is compiled in")
 	)]
-	fn streams(self) -> bool {
+	fn streams(&self) -> bool {
 		matches!(self, Self::All | Self::Streams)
 	}
 
-	/// This server's slot in the group, when it is a member of one.
+	/// This server's claim on a slot in the group, when it is a member of one.
+	/// Consuming, because binding it is what joins the group and only one
+	/// backend does that.
 	#[cfg_attr(
 		not(any(feature = "noq", feature = "quinn", feature = "quiche")),
 		expect(dead_code, reason = "no QUIC backend is compiled in")
 	)]
-	fn shard(self) -> Option<crate::listen::Shard> {
+	fn member(self) -> Option<crate::listen::Member> {
 		match self {
-			Self::Shard(shard) => Some(shard),
+			Self::Member(member) => Some(member),
 			_ => None,
 		}
 	}
@@ -239,6 +241,9 @@ impl Server {
 		quic.validate()?;
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		// Read before the member is taken out below, which consumes `parts`.
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		let build_streams = parts.streams();
 		// `parts.quic()` and not `build_quic`: a caller that asked for streams only
 		// is not asking for a backend, while leaving everything else configured is
 		// still the error it always was.
@@ -271,10 +276,15 @@ impl Server {
 			}
 		}
 
+		// The member is a claim on a slot in a reuseport group, which binding
+		// spends, so exactly one backend may take it.
+		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+		let mut member = parts.member();
+
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic, parts.shard())?),
+			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic, member.take())?),
 			_ => None,
 		};
 
@@ -282,7 +292,7 @@ impl Server {
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
 			QuicBackend::Quinn if build_quic => {
-				Some(crate::quinn::QuinnServer::new(config.clone(), &quic, parts.shard())?)
+				Some(crate::quinn::QuinnServer::new(config.clone(), &quic, member.take())?)
 			}
 			_ => None,
 		};
@@ -290,7 +300,7 @@ impl Server {
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
 			QuicBackend::Quiche if build_quic => {
-				Some(crate::quiche::QuicheServer::new(config.clone(), &quic, parts.shard())?)
+				Some(crate::quiche::QuicheServer::new(config.clone(), &quic, member.take())?)
 			}
 			_ => None,
 		};
@@ -299,11 +309,11 @@ impl Server {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let mut stream_binds = Vec::new();
 		#[cfg(feature = "tcp")]
-		if let Some(addr) = config.tcp.bind.filter(|_| parts.streams()) {
+		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
 			stream_binds.push(StreamBind::Tcp(addr));
 		}
 		#[cfg(all(feature = "uds", unix))]
-		if let Some(path) = config.unix.bind.clone().filter(|_| parts.streams()) {
+		if let Some(path) = config.unix.bind.clone().filter(|_| build_streams) {
 			stream_binds.push(StreamBind::Unix(path));
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.
@@ -1479,7 +1489,7 @@ mod tests {
 
 		let origin = crate::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-		let _announce_broadcast = origin.announce("test", Default::default()).expect("announce broadcast");
+		broadcast.announce(Default::default()).expect("announce broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group

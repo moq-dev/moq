@@ -60,9 +60,9 @@ android-logcat = ["dep:tracing-android"]
 bytes = "1"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
-dns-lookup = { version = "3", optional = true }
+dns-lookup = { version = "4", optional = true }
 futures = "0.3"
-hex = "0.4"
+hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 humantime = "2.3"
 mdns-sd = { workspace = true, optional = true }

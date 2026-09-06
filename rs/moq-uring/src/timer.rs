@@ -9,14 +9,17 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Instant;
 
+use crate::metrics::Counters;
+
 /// The ordered set of armed timers, keyed by (deadline, tiebreak).
-#[derive(Default)]
 pub(crate) struct Heap {
 	queue: BTreeMap<(Instant, u64), Rc<Slot>>,
 	seq: u64,
+	metrics: Arc<Counters>,
 }
 
 /// One timer's state, shared between its [`Timer`] handle and the heap.
@@ -29,6 +32,14 @@ struct Slot {
 }
 
 impl Heap {
+	pub fn new(metrics: Arc<Counters>) -> Self {
+		Self {
+			queue: BTreeMap::new(),
+			seq: 0,
+			metrics,
+		}
+	}
+
 	/// Fire everything due at `now`. Returns whether anything fired.
 	pub fn fire(&mut self, now: Instant) -> bool {
 		let mut fired = false;
@@ -40,6 +51,7 @@ impl Heap {
 			slot.key.set(None);
 			slot.elapsed.set(true);
 			slot.waiters.borrow_mut().wake();
+			self.metrics.timers_fired.add(1);
 			fired = true;
 		}
 		fired
@@ -54,11 +66,23 @@ impl Heap {
 		self.seq += 1;
 		let key = (at, self.seq);
 		self.queue.insert(key, slot);
+		self.metrics.timers_armed.add(1);
 		key
 	}
 
-	fn remove(&mut self, key: (Instant, u64)) {
-		self.queue.remove(&key);
+	/// Drop an armed timer before its deadline. A re-arm goes through here
+	/// too, so the counter reads as timer churn rather than as loss.
+	fn cancel(&mut self, key: (Instant, u64)) {
+		if self.queue.remove(&key).is_some() {
+			self.metrics.timers_cancelled.add(1);
+		}
+	}
+
+	/// Drop an armed timer a poll found already due.
+	fn fire_one(&mut self, key: (Instant, u64)) {
+		if self.queue.remove(&key).is_some() {
+			self.metrics.timers_fired.add(1);
+		}
 	}
 }
 
@@ -90,7 +114,7 @@ impl moq_net::runtime::Timer for Timer {
 	fn set(&mut self, at: Option<Instant>) {
 		let mut heap = self.heap.borrow_mut();
 		if let Some(key) = self.slot.key.take() {
-			heap.remove(key);
+			heap.cancel(key);
 		}
 		self.slot.elapsed.set(false);
 		if let Some(at) = at {
@@ -112,7 +136,7 @@ impl moq_net::runtime::Timer for Timer {
 		if at <= Instant::now() {
 			// Fire eagerly rather than waiting for the sweep, and drop the
 			// heap entry so the sweep doesn't wake anyone spuriously.
-			self.heap.borrow_mut().remove(self.slot.key.take().expect("armed"));
+			self.heap.borrow_mut().fire_one(self.slot.key.take().expect("armed"));
 			self.slot.elapsed.set(true);
 			return Poll::Ready(());
 		}
@@ -124,7 +148,7 @@ impl moq_net::runtime::Timer for Timer {
 impl Drop for Timer {
 	fn drop(&mut self) {
 		if let Some(key) = self.slot.key.take() {
-			self.heap.borrow_mut().remove(key);
+			self.heap.borrow_mut().cancel(key);
 		}
 	}
 }

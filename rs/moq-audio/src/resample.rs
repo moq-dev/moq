@@ -137,10 +137,26 @@ impl Resampler {
 	/// audio.
 	///
 	/// Takes `self` because that padding runs the filter through silence the
-	/// caller never supplied: resampling more afterwards would carry that state
-	/// into it, across a gap nothing reported. Ending the stream is the only thing
-	/// this can be used for, so that is the only thing it can express.
+	/// caller never supplied: a stream that continues afterwards is a different
+	/// stream, which is what [`drain`](Self::drain) says out loud.
 	pub fn flush(mut self) -> Result<Vec<f32>, Error> {
+		self.drain()
+	}
+
+	/// End the current stream and start a new one in place, returning everything
+	/// the old one was still holding.
+	///
+	/// [`flush`](Self::flush) for a gap: the buffered input and the filter's tail
+	/// belong *before* the hole, so they come out as their own audio rather than
+	/// being filtered together with whatever follows it. Equivalent to a `flush`
+	/// followed by a fresh [`Resampler`], without rebuilding the filter tables.
+	pub fn drain(&mut self) -> Result<Vec<f32>, Error> {
+		let out = self.drained()?;
+		self.reset();
+		Ok(out)
+	}
+
+	fn drained(&mut self) -> Result<Vec<f32>, Error> {
 		// Not `pending == 0`: what the filter owes has nothing to do with what is
 		// buffered, so a stream that happens to end on a chunk boundary owes a tail
 		// just the same. Only one that never ran owes nothing.
@@ -376,6 +392,32 @@ mod tests {
 			"the stream came back silent: peak {}",
 			tail.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 		);
+	}
+
+	/// A gap ends one stream and starts another through the same filter, so the
+	/// drain has to hand back everything `flush` would and then be usable again,
+	/// with none of the first stream's audio reaching the second.
+	#[test]
+	fn drain_ends_the_stream_and_starts_a_new_one() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		let mut input = vec![0.0f32; 1024];
+		input[1000] = 1.0;
+		let body = r.process(&input).unwrap();
+		let tail = r.drain().unwrap();
+
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
+		assert!(
+			(1105..=1120).contains(&(body.len() + tail.len())),
+			"unexpected total: {}",
+			body.len() + tail.len()
+		);
+
+		// Silence in, silence out: nothing is carried over the gap.
+		assert_eq!(r.pending_frames(), 0);
+		let after = r.process(&vec![0.0f32; 1024]).unwrap();
+		assert!(peak(&after) < 0.01, "audio crossed the gap: peak {}", peak(&after));
 	}
 
 	#[test]

@@ -1,6 +1,7 @@
 //! Transport doubles shared by the lite tests: a session whose streams record
-//! everything written and every reset code, peers that never speak, and peers
-//! whose incoming streams die before their first byte.
+//! everything written and every reset code, peers that never speak, peers whose
+//! incoming streams die before their first byte, and peers that open unidirectional
+//! streams carrying a scripted payload.
 //!
 //! These implement the poll traits directly, since that is what the crate's
 //! transport bound requires. A pending fake simply returns `Poll::Pending`
@@ -324,6 +325,9 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
+	/// every session that only ever opens its own streams expects.
+	accept_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -343,6 +347,7 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: None,
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -377,6 +382,25 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			accept_gate: None,
+			uni_gate: None,
+			uni_open_gate: None,
+			uni_open_park: kio::Park::default(),
+			protocol: None,
+			stats: Arc::new(Mutex::new(SinkStats::default())),
+		}
+	}
+
+	/// Accept bidi streams from the peer, holding every write until `gate` flips to true.
+	///
+	/// The accepted half of a control stream carries the answers (track info,
+	/// subscribe responses), so a test of what must be true before the first byte of
+	/// a reply reaches the wire needs a session that hands out accepted streams.
+	pub fn accepted_bi(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			accept_gate: Some(gate),
 			uni_gate: None,
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -390,6 +414,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: Some(gate),
 			uni_open_gate: None,
 			uni_open_park: kio::Park::default(),
@@ -403,6 +428,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: None,
+			accept_gate: None,
 			uni_gate: None,
 			uni_open_gate: Some(gate),
 			uni_open_park: kio::Park::default(),
@@ -422,7 +448,17 @@ impl poll::Session for SinkSession {
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		Poll::Pending
+		let Some(gate) = self.accept_gate.clone() else {
+			return Poll::Pending;
+		};
+
+		let send = SinkSend {
+			log: self.log.clone(),
+			gate: Some(gate),
+			park: kio::Park::default(),
+			finished: false,
+		};
+		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -580,6 +616,9 @@ pub struct ScriptedSession {
 	open_gate: Option<kio::Consumer<bool>>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
+	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
+	/// in order. See [`Self::with_incoming_unis`].
+	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 }
 
 impl ScriptedSession {
@@ -591,7 +630,21 @@ impl ScriptedSession {
 			queue: None,
 			open_gate: None,
 			park: kio::Park::default(),
+			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 		}
+	}
+
+	/// Have the peer open one unidirectional stream per script, in order, each replaying
+	/// its bytes and then going quiet (or reporting EOF, on an `eof` session).
+	///
+	/// This is the only double here whose `accept_uni` yields anything readable, so it is
+	/// what a test of an incoming-stream dispatch loop drives: the loop sees a real stream
+	/// carrying a real header, and [`Log::stops`] then records the STOP_SENDING the loop
+	/// answers with. Once the scripts run out, `accept_uni` parks like a peer with nothing
+	/// more to open.
+	pub fn with_incoming_unis(mut self, scripts: Vec<Vec<u8>>) -> Self {
+		self.incoming_unis = Arc::new(Mutex::new(scripts.into_iter().collect()));
+		self
 	}
 
 	/// Replay `script`, then close the stream instead of parking.
@@ -609,12 +662,8 @@ impl ScriptedSession {
 	/// empty entry) reads as a peer that never speaks.
 	pub fn per_stream(scripts: Vec<Vec<u8>>) -> Self {
 		Self {
-			log: Log::default(),
-			eof: false,
-			script: Arc::new(Mutex::new(Vec::new())),
 			queue: Some(Arc::new(Mutex::new(scripts.into_iter().collect()))),
-			open_gate: None,
-			park: kio::Park::default(),
+			..Self::new(Vec::new())
 		}
 	}
 
@@ -643,7 +692,14 @@ impl poll::Session for ScriptedSession {
 	type Error = SinkError;
 
 	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		Poll::Pending
+		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
+			return Poll::Pending;
+		};
+		Poll::Ready(Ok(ScriptedRecv {
+			script: Arc::new(Mutex::new(script)),
+			eof: self.eof,
+			log: self.log.clone(),
+		}))
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
