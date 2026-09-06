@@ -1,16 +1,16 @@
-import { error, fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
-// Both transport implementations read streamErrorCode from the transport error.
-// IETF failures must be encoded even for code 0 so an incoming transport-shaped
-// reason cannot bypass the protocol mapping. Ordinary moq-lite errors keep their identity.
+// Decode raw transport errors before mapping so they cannot bypass the negotiated
+// registry. Ordinary errors already send 0 and retain their local identity.
 function withCode(reason: unknown, version?: IetfVersion): unknown {
-	const code = toStreamCode(reason, { version });
-	return code === StreamCode.Internal && version === undefined ? reason : toTransport(code, error(reason).message);
+	const decoded = fromTransport(reason, { version });
+	const code = toStreamCode(decoded, { version });
+	return code === StreamCode.Internal && decoded === reason ? reason : toTransport(code, decoded.message);
 }
 
 const MAX_U31 = 2 ** 31 - 1;

@@ -577,6 +577,7 @@ for (const version of [undefined, Version.DRAFT_14, Version.DRAFT_19, Version.DR
 	test(`stream resets select the negotiated registry (${version})`, async () => {
 		for (const [reason, liteCode] of [
 			[new Lagged(), StreamCode.TooFarBehind],
+			[new Reset(5), StreamCode.TooFarBehind],
 			[new FrameTooLarge(), StreamCode.FrameTooLarge],
 			[new NotFound("broadcast"), StreamCode.NotFound],
 			[new TimeoutError("open"), StreamCode.DeliveryTimeout],
