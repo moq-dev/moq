@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.13...moq-mux-v0.9.14) - 2026-09-06
+
+### Added
+
+- *(obs)* add connection stats and encoding controls to the MoQ dock ([#3453](https://github.com/moq-dev/moq/pull/3453))
+- *(moq-mux)* count and log MPEG-TS audio resyncs ([#3372](https://github.com/moq-dev/moq/pull/3372))
+
+### Fixed
+
+- *(moq-mux)* recover buffered TS output after a rewind ([#3375](https://github.com/moq-dev/moq/pull/3375))
+- *(moq-mux)* slice the TS export on the PCR grid ([#3351](https://github.com/moq-dev/moq/pull/3351))
+- *(moq-mux)* keep H.265 suffix SEI on the access unit it follows ([#3384](https://github.com/moq-dev/moq/pull/3384))
+- *(moq-mux)* drive the fMP4 export poll with a loop, not tail recursion ([#3333](https://github.com/moq-dev/moq/pull/3333))
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 5 updates ([#3395](https://github.com/moq-dev/moq/pull/3395))
+
 ## [0.9.13](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.12...moq-mux-v0.9.13) - 2026-09-02
 
 ### Other

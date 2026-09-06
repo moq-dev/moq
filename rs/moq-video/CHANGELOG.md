@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/moq-dev/moq/compare/moq-video-v0.0.22...moq-video-v0.0.23) - 2026-09-06
+
+### Added
+
+- *(moq-video)* add the VAAPI H.264 decoder and import its pictures zero-copy ([#3331](https://github.com/moq-dev/moq/pull/3331))
+- *(moq-video)* add the Android MediaCodec encoder and decoder ([#3354](https://github.com/moq-dev/moq/pull/3354))
+- *(moq-video)* add the V4L2 stateful M2M hardware encoder and decoder ([#3332](https://github.com/moq-dev/moq/pull/3332))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(moq-video)* pick the V4L2 mode nearest the requested resolution ([#3355](https://github.com/moq-dev/moq/pull/3355))
+- *(moq-video)* stop openh264 leaking its picture pool, and survive a lost picture ([#3357](https://github.com/moq-dev/moq/pull/3357))
+- *(rs)* compile the lib tests at --no-default-features ([#3397](https://github.com/moq-dev/moq/pull/3397))
+- *(moq-audio)* treat a media gap as a hole rather than a splice ([#3386](https://github.com/moq-dev/moq/pull/3386))
+- *(moq-video)* end the stream when an AVFoundation camera goes away ([#3382](https://github.com/moq-dev/moq/pull/3382))
+- *(moq-video)* decode an avc1 track with no avcC as Annex-B ([#3388](https://github.com/moq-dev/moq/pull/3388))
+- *(video)* hold window capture through a minimize and settle a resize ([#3374](https://github.com/moq-dev/moq/pull/3374))
+- *(moq-video)* name the libspa transfer functions older headers lack ([#3387](https://github.com/moq-dev/moq/pull/3387))
+- *(moq-video)* print GPU-composited windows instead of copying a black DC ([#3370](https://github.com/moq-dev/moq/pull/3370))
+- *(moq-video)* compile the Windows test target, and gate it nightly ([#3391](https://github.com/moq-dev/moq/pull/3391))
+- *(moq-video)* end X11 window capture when the window is destroyed ([#3383](https://github.com/moq-dev/moq/pull/3383))
+
+### Other
+
+- take every feature that needs a library or libclang at build time off the defaults ([#3464](https://github.com/moq-dev/moq/pull/3464))
+- *(moq-audio,moq-cli)* assert publish_capture stays Send off macOS ([#3433](https://github.com/moq-dev/moq/pull/3433))
+
 ## [0.0.22](https://github.com/moq-dev/moq/compare/moq-video-v0.0.21...moq-video-v0.0.22) - 2026-09-02
 
 ### Fixed

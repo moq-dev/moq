@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.8...moq-rtc-v0.2.9) - 2026-09-06
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 5 updates ([#3395](https://github.com/moq-dev/moq/pull/3395))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.7...moq-rtc-v0.2.8) - 2026-09-02
 
 ### Other

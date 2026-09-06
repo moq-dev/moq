@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.16...moq-transcode-v0.0.17) - 2026-09-06
+
+### Added
+
+- *(moq-video)* add the VAAPI H.264 decoder and import its pictures zero-copy ([#3331](https://github.com/moq-dev/moq/pull/3331))
+- *(moq-transcode)* [**breaking**] validate and order the output ladder ([#3447](https://github.com/moq-dev/moq/pull/3447))
+- *(moq-video)* add the V4L2 stateful M2M hardware encoder and decoder ([#3332](https://github.com/moq-dev/moq/pull/3332))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(transcode)* follow a source resolution change with the ladder ([#3381](https://github.com/moq-dev/moq/pull/3381))
+- *(moq-video)* stop openh264 leaking its picture pool, and survive a lost picture ([#3357](https://github.com/moq-dev/moq/pull/3357))
+
+### Other
+
+- take every feature that needs a library or libclang at build time off the defaults ([#3464](https://github.com/moq-dev/moq/pull/3464))
+- *(transcode)* correct the retirement comments and record what the test covers ([#3460](https://github.com/moq-dev/moq/pull/3460))
+
 ## [0.0.16](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.15...moq-transcode-v0.0.16) - 2026-09-02
 
 ### Other

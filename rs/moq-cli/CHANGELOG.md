@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-06
+
+### Added
+
+- *(moq-transcode)* [**breaking**] validate and order the output ladder ([#3447](https://github.com/moq-dev/moq/pull/3447))
+- *(moq-video)* add the V4L2 stateful M2M hardware encoder and decoder ([#3332](https://github.com/moq-dev/moq/pull/3332))
+- *(moq-mux)* count and log MPEG-TS audio resyncs ([#3372](https://github.com/moq-dev/moq/pull/3372))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(moq-mux)* recover buffered TS output after a rewind ([#3375](https://github.com/moq-dev/moq/pull/3375))
+- *(transcode)* follow a source resolution change with the ladder ([#3381](https://github.com/moq-dev/moq/pull/3381))
+- *(moq-mux)* slice the TS export on the PCR grid ([#3351](https://github.com/moq-dev/moq/pull/3351))
+- *(moq-audio)* treat a media gap as a hole rather than a splice ([#3386](https://github.com/moq-dev/moq/pull/3386))
+- *(moq-native)* stop logging credentials in relay URLs and RTMP stream keys ([#3379](https://github.com/moq-dev/moq/pull/3379))
+
+### Other
+
+- take every feature that needs a library or libclang at build time off the defaults ([#3464](https://github.com/moq-dev/moq/pull/3464))
+- *(quest)* plan the abort guard, an advisory quest gate, and what the echo-delay test already establishes ([#3466](https://github.com/moq-dev/moq/pull/3466))
+- *(cli)* put the play module's tests in the merge gate ([#3461](https://github.com/moq-dev/moq/pull/3461))
+- *(moq-audio,moq-cli)* assert publish_capture stays Send off macOS ([#3433](https://github.com/moq-dev/moq/pull/3433))
+
 ## [0.10.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.15...moq-cli-v0.10.0) - 2026-09-02
 
 ### Added
