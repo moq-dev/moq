@@ -77,6 +77,30 @@ int main()
 	}
 	printf("end after close is a no-op: ok\n");
 
+	{
+		MoQDockStopBridge bridge;
+		int reusedOutputStorage = 0;
+		int *output = &reusedOutputStorage;
+		const auto oldTicket = bridge.stopTicket();
+		auto queuedStop = [&](uint64_t ticket) {
+			if (bridge.acceptsStop(ticket)) {
+				output = nullptr;
+				bridge.invalidateStops();
+			}
+		};
+		// Stop and restart can reuse the exact output address before Qt dispatches.
+		bridge.invalidateStops();
+		output = &reusedOutputStorage;
+		const auto currentTicket = bridge.stopTicket();
+		queuedStop(oldTicket);
+		CHECK(output == &reusedOutputStorage);
+		CHECK(bridge.acceptsStop(currentTicket));
+		queuedStop(currentTicket);
+		CHECK(output == nullptr);
+		CHECK(!bridge.acceptsStop(currentTicket));
+	}
+	printf("queued stops reject reused output addresses: ok\n");
+
 	printf("\nall passed\n");
 	return 0;
 }

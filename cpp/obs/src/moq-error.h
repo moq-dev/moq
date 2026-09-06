@@ -21,7 +21,8 @@ inline Kind Classify(int code, std::string reason)
 	if (has("forbidden") || code == -35)
 		return Kind::Forbidden;
 	// Fetching the pin happens before TLS verification and can fail on an outage.
-	const bool fetching = has("failed to fetch fingerprint");
+	const bool fetching = has("failed to fetch fingerprint") || has("fingerprint request failed") ||
+			      has("failed to read fingerprint") || has("failed to fetch certificate fingerprint");
 	if (!fetching && (has("fingerprint") || has("certificate")))
 		return Kind::Certificate;
 	if (has("timed out") || has("timeout"))

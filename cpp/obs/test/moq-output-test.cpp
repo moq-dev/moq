@@ -44,6 +44,8 @@ std::vector<RecordedSignal> g_signals;
 std::string g_last_error;
 std::atomic<int> g_begin_capture{0};
 std::atomic<int> g_client_result{0};
+std::string g_rate_control = "CBR";
+moq_video_hint g_video_hint{};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -156,6 +158,11 @@ uint32_t obs_encoder_get_height(const obs_encoder_t *)
 	return 1080;
 }
 
+const char *obs_data_get_string(obs_data_t *, const char *)
+{
+	return g_rate_control.c_str();
+}
+
 long long obs_data_get_int(obs_data_t *, const char *)
 {
 	return 8000;
@@ -225,8 +232,9 @@ int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_
 	return 7;
 }
 
-int32_t moq_publish_media_hint(uint32_t, const char *, size_t, const uint8_t *, size_t, const moq_video_hint *)
+int32_t moq_publish_media_hint(uint32_t, const char *, size_t, const uint8_t *, size_t, const moq_video_hint *hint)
 {
+	g_video_hint = *hint;
 	return 7;
 }
 
@@ -385,6 +393,8 @@ void reset()
 	g_closed_handle = 0;
 	g_begin_capture = 0;
 	g_client_result = 0;
+	g_rate_control = "CBR";
+	g_video_hint = {};
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
@@ -408,6 +418,26 @@ void reset()
 int main()
 {
 	auto out = reinterpret_cast<obs_output_t *>(0x9);
+	for (const char *mode : {"CBR", "CRF", "CQP", "VBR", ""}) {
+		reset();
+		g_rate_control = mode;
+		MoQOutput o(nullptr, out);
+		CHECK(o.Start());
+		fire(1);
+		encoder_packet packet{};
+		packet.type = OBS_ENCODER_VIDEO;
+		packet.encoder = reinterpret_cast<obs_encoder_t *>(0x2);
+		packet.timebase_num = 1;
+		packet.timebase_den = 30;
+		o.Data(&packet);
+		CHECK(g_video_hint.has_coded);
+		CHECK(g_video_hint.has_bitrate == (g_rate_control == "CBR"));
+		if (g_video_hint.has_bitrate)
+			CHECK(g_video_hint.bitrate == 8'000'000);
+		o.Stop();
+		fire(0);
+	}
+	printf("only CBR publishes configured bitrate hints: ok\n");
 
 	// Invalid advanced settings stop before a session or capture is created.
 	{

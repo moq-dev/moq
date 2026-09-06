@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -8,6 +10,14 @@
 // Tracks OBS-thread work in MoQDock::OnOutputStopped. Queued Qt work must
 // not hold an activity reference: dock destruction runs on that event loop.
 struct MoQDockStopBridge {
+private:
+	std::atomic<uint64_t> generation{0};
+
+public:
+	uint64_t stopTicket() const { return generation.load(std::memory_order_relaxed); }
+	bool acceptsStop(uint64_t ticket) const { return ticket == stopTicket(); }
+	void invalidateStops() { generation.fetch_add(1, std::memory_order_relaxed); }
+
 	std::mutex mutex;
 	std::condition_variable cv;
 	int active = 0;

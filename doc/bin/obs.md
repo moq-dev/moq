@@ -13,7 +13,9 @@ OBS Studio install.
 - **Dock**: **Stream** contains the relay URL, optional publish token and
   broadcast name, Go Live, and connection state. Leave the broadcast name empty
   to publish at the relay URL path. Paste a URL with `?jwt=` to fill the token
-  field automatically. Reconnect settings live under **Advanced**.
+  field automatically. Enter a relay URL explicitly; on the shared anonymous
+  relay, use a unique path such as `https://cdn.moq.dev/anon/your-stream`.
+  Reconnect settings live under **Advanced**.
   **Encoding** chooses between **Use OBS Output settings** and **Custom settings
   for MoQ**. Both use OBS encoders; custom settings apply only to this MoQ stream.
   **Encoder latency** defaults to **Low latency** in both modes. It overrides
@@ -40,12 +42,13 @@ the ladder catalog appears beside that source as `{broadcast}/transcode.hang`
 in `.hang`, a canvas at least as tall as the top rung you want (1080p for the
 default ladder), and a source bitrate above the top rung ceiling (Quality
 targets 8 Mbps CBR so the default 5 Mbps 1080p rung can undercut it). The catalog
-carries coded size and configured bitrate so the transcoder can size rungs
+carries coded size and configured CBR bitrate so the transcoder can size rungs
 before measured rates arrive.
 
-Local check before moq.pro:
+Local check before moq.pro (requires a CLI built with the `transcode` feature):
 
 ```bash
+cargo install --locked moq-cli --features transcode
 # OBS Go Live to e.g. my-obs.hang on a local relay, then:
 moq --client-connect https://localhost:4443/anon --broadcast my-obs.hang transcode
 # Watch my-obs.hang/transcode.hang

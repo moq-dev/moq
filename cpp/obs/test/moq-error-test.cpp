@@ -7,6 +7,13 @@ int main()
 {
 	using MoQError::Classify;
 	using MoQError::Kind;
+	for (const char *failure :
+	     {"fingerprint request failed", "failed to read fingerprint", "failed to fetch certificate fingerprint",
+	      "certificate fingerprint request failed"}) {
+		if (Classify(-5, failure) != Kind::Network ||
+		    Classify(-5, std::string("reconnect timed out: ") + failure) != Kind::Timeout)
+			return 1;
+	}
 	const char *outage = "connect error: reconnect timed out after 10s: failed to connect to server: "
 			     "QUIC failed: failed to fetch fingerprint; WebSocket failed: failed to connect WebSocket";
 	if (Classify(-5, outage) != Kind::Timeout || Classify(-5, "failed to fetch fingerprint") != Kind::Network ||

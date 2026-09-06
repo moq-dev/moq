@@ -622,7 +622,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 
 	// Seed catalog fields a downstream moq-transcode needs before measured rates
-	// arrive: coded size (also from SPS once parsed) and configured bitrate so
+	// arrive: coded size (also from SPS once parsed) and configured CBR bitrate so
 	// same-height ladder rungs can undercut the mezzanine.
 	moq_video_hint hint{};
 	if (video_width > 0 && video_height > 0) {
@@ -630,7 +630,8 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		hint.coded_height = video_height;
 		hint.has_coded = true;
 	}
-	if (video_bitrate_kbps > 0) {
+	const std::string rate_control = settings ? obs_data_get_string(settings, "rate_control") : "";
+	if (video_bitrate_kbps > 0 && (rate_control == "CBR" || rate_control == "cbr")) {
 		hint.bitrate = (uint64_t)video_bitrate_kbps * 1000ULL;
 		hint.has_bitrate = true;
 	}

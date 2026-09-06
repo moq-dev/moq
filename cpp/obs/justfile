@@ -306,18 +306,11 @@ _unit mode="plain":
             -o "$out/$name-test" "test/$name-test.cpp" "src/$name.cpp"
         TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
     done
-    "$cxx" "${flags[@]}" "${includes[@]}" \
-        -o "$out/moq-quality-defaults-test" "test/moq-quality-defaults-test.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/moq-quality-defaults-test"
-    "$cxx" "${flags[@]}" -I src \
-        -o "$out/moq-dock-stop-test" "test/moq-dock-stop-test.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/moq-dock-stop-test"
-    "$cxx" "${flags[@]}" -I src \
-        -o "$out/moq-error-test" "test/moq-error-test.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/moq-error-test"
-    "$cxx" "${flags[@]}" "${includes[@]}" \
-        -o "$out/moq-encoder-latency-test" "test/moq-encoder-latency-test.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/moq-encoder-latency-test"
+    for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
+        "$cxx" "${flags[@]}" "${includes[@]}" \
+            -o "$out/$name-test" "test/$name-test.cpp"
+        TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
+    done
 
 # Lint formatting. Skips a tool silently if it isn't on $PATH (matches repo convention).
 check:

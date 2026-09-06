@@ -3,6 +3,8 @@
 #include "moq-advanced-dialog.h"
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-dial.h"
+#include "moq-spark-data.h"
 #include "moq-encoder-latency.h"
 #include "moq-quality-defaults.h"
 #include "moq-settings.h"
@@ -286,24 +288,13 @@ public:
 
 	void Clear()
 	{
-		samples_.clear();
-		latest_ = 0;
-		have_ = false;
+		data_.samples.clear();
 		update();
 	}
 
 	void Push(bool valid, double value)
 	{
-		Sample s;
-		s.valid = valid;
-		s.value = value;
-		samples_.push_back(s);
-		while (samples_.size() > 60)
-			samples_.pop_front();
-		if (valid) {
-			have_ = true;
-			latest_ = value;
-		}
+		data_.push(valid, value);
 		update();
 	}
 
@@ -327,7 +318,7 @@ protected:
 		p.drawText(QRect(6, 0, labelW, height()), Qt::AlignVCenter | Qt::AlignLeft, title_);
 
 		size_t validCount = 0;
-		for (const Sample &s : samples_) {
+		for (const MoQSparkData::Sample &s : data_.samples) {
 			if (s.valid)
 				validCount++;
 		}
@@ -335,7 +326,7 @@ protected:
 			double lo = 0;
 			double hi = 0;
 			bool haveRange = false;
-			for (const Sample &s : samples_) {
+			for (const MoQSparkData::Sample &s : data_.samples) {
 				if (!s.valid)
 					continue;
 				if (!haveRange) {
@@ -351,14 +342,15 @@ protected:
 			const double span = std::max(hi - lo, 1e-9);
 			QPainterPath path;
 			bool drawing = false;
-			for (size_t i = 0; i < samples_.size(); i++) {
-				if (!samples_[i].valid) {
+			for (size_t i = 0; i < data_.samples.size(); i++) {
+				if (!data_.samples[i].valid) {
 					drawing = false;
 					continue;
 				}
 				const double x = plot.left() + (plot.width() * static_cast<double>(i) /
-								static_cast<double>(samples_.size() - 1));
-				const double y = plot.bottom() - (plot.height() * ((samples_[i].value - lo) / span));
+								static_cast<double>(data_.samples.size() - 1));
+				const double y =
+					plot.bottom() - (plot.height() * ((data_.samples[i].value - lo) / span));
 				if (!drawing) {
 					path.moveTo(x, y);
 					drawing = true;
@@ -373,22 +365,16 @@ protected:
 		p.setPen(QColor("#e0e0e0"));
 		f.setPointSize(9);
 		p.setFont(f);
-		const QString value = have_ ? FormatSpark(unit_, latest_) : QStringLiteral("-");
+		const auto latest = data_.latest();
+		const QString value = latest ? FormatSpark(unit_, *latest) : QStringLiteral("-");
 		p.drawText(QRect(width() - valueW - 4, 0, valueW, height()), Qt::AlignVCenter | Qt::AlignRight, value);
 	}
 
 private:
-	struct Sample {
-		bool valid = false;
-		double value = 0;
-	};
-
 	QString title_;
 	SparkUnit unit_;
 	QColor color_;
-	std::deque<Sample> samples_;
-	double latest_ = 0;
-	bool have_ = false;
+	MoQSparkData data_;
 };
 
 MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
@@ -397,7 +383,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	auto *streamPage = new QWidget(tabs);
 
 	urlEdit = new QLineEdit(streamPage);
-	urlEdit->setText("https://cdn.moq.dev/anon");
+	urlEdit->setPlaceholderText("https://cdn.moq.dev/anon/your-stream");
 	urlEdit->setPlaceholderText("http://localhost:4443/anon");
 	const QString urlHelp = "Relay origin URL, for example https://cdn.moq.dev/anon. "
 				"Paste a URL with ?jwt= and the token is moved into Publish token.";
@@ -690,12 +676,6 @@ void MoQDock::PeelJwtFromRelayUrl()
 	urlEdit->setText(url.toString());
 }
 
-static bool IsCleartextDialScheme(const QString &scheme)
-{
-	return scheme.compare(QStringLiteral("ws"), Qt::CaseInsensitive) == 0 ||
-	       scheme.compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0;
-}
-
 QString MoQDock::ConnectUrl() const
 {
 	QString text = urlEdit->text().trimmed();
@@ -709,8 +689,8 @@ QString MoQDock::ConnectUrl() const
 		return text;
 	}
 
-	// Never put a JWT on cleartext dial URLs (ws:// / http://).
-	if (IsCleartextDialScheme(url.scheme()))
+	// Never put a JWT on cleartext network dial URLs.
+	if (MoQDial::IsCleartext(url.scheme().toStdString()))
 		return text;
 
 	QUrlQuery query(url);
@@ -1059,8 +1039,9 @@ void MoQDock::StartStream()
 	const QString token = tokenEdit->text().trimmed();
 	if (!token.isEmpty()) {
 		const QUrl dial(relayText);
-		if (dial.isValid() && IsCleartextDialScheme(dial.scheme())) {
-			status->setText("Publish token requires https:// or wss:// (not cleartext ws:// or http://)");
+		if (dial.isValid() && MoQDial::IsCleartext(dial.scheme().toStdString())) {
+			status->setText(
+				"Publish token requires an encrypted relay URL (not http://, ws://, or tcp://)");
 			return;
 		}
 	}
@@ -1129,6 +1110,8 @@ void MoQDock::StopStream()
 		obs_output_stop(output);
 	}
 
+	// Disconnect waits for OBS callbacks before invalidating their queued work.
+	stopCookie->bridge->invalidateStops();
 	output = nullptr;
 	service = nullptr;
 	videoEncoder = nullptr;
@@ -1408,13 +1391,14 @@ void MoQDock::OnOutputStopped(void *data, calldata_t *params)
 	// Queue onto the application object, not the dock: the dock may be destroyed
 	// before the event runs. QPointer makes a late delivery a no-op.
 	const QPointer<MoQDock> dock(self);
+	const auto ticket = cookie->bridge->stopTicket();
 	QMetaObject::invokeMethod(
 		qApp,
-		[dock, code, failText, stopped]() {
+		[dock, code, failText, ticket]() {
 			if (!dock)
 				return;
 			// A late stop for a superseded output must not tear down a newer Go Live.
-			if (stopped && dock->output && static_cast<obs_output_t *>(dock->output) != stopped)
+			if (!dock->stopCookie->bridge->acceptsStop(ticket))
 				return;
 			dock->StopStream();
 			if (code == OBS_OUTPUT_SUCCESS)
