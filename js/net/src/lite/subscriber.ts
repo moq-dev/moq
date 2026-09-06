@@ -3,7 +3,7 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation, reason } from "../error.ts";
+import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { type Hop, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
@@ -843,7 +843,7 @@ export class Subscriber {
 				if (track.closed.peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
-					stream.stop(new Error("cancel"));
+					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 					return;
 				}
 				await Signal.race(timescale, track.closed);
@@ -875,7 +875,7 @@ export class Subscriber {
 			}
 
 			producer.close();
-			stream.stop(new Error("cancel"));
+			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 		} catch (err: unknown) {
 			const e = error(err);
 			producer.close(e);
