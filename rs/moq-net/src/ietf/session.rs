@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Hop, SessionError,
+	Error, Hop, SessionError, StreamError,
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -694,11 +694,12 @@ where
 			let mut reader = reader.with_version(version);
 			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
 				tracing::debug!(%err, "uni stream error");
-				// A moq-transport code, not `Error::to_code`'s moq-lite one. A group arriving
-				// for an alias we retired is the expected tail of our own cancellation, and
-				// moq-lite's cancel encodes to 0, which on this wire means the stream died of
-				// an internal failure on our side.
-				reader.stop(super::error::to_stream_code(&err));
+				// This handler stops only the stream, so it cannot claim the session closed.
+				let reset = match StreamError::from(&err) {
+					StreamError::Session(_) => StreamError::Internal,
+					reset => reset,
+				};
+				reader.abort(reset);
 			}
 		});
 	}
@@ -1202,28 +1203,13 @@ mod tests {
 		writes.clone()
 	}
 
-	/// A group for an alias we retired is answered with STOP_SENDING carrying the
-	/// moq-transport CANCELLED code.
-	///
-	/// Such a group is the expected tail of our own cancellation, still in flight when we
-	/// unsubscribed. moq-lite's cancel encodes to 0, which on this wire says the stream
-	/// died of an internal fault on our side, so sending that for a routine unsubscribe
-	/// distorts the publisher's error handling.
-	///
-	/// Driven over a real receive stream through the loop that sends it, which is what
-	/// makes this the test that fails if the loop stops mapping the error or stops calling
-	/// `stop` at all. `subscriber::a_retired_alias_maps_to_the_cancelled_code` owns the
-	/// mapping itself and would pass either way.
-	#[tokio::test(start_paused = true)]
-	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
+	async fn dispatch_uni(payload: Vec<u8>, retired_alias: Option<u64>) -> crate::lite::test_transport::Log {
 		const VERSION: Version = Version::Draft19;
-		const ALIAS: u64 = 7;
 
 		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
-		// The peer opens one uni stream carrying the group header and then goes quiet, so
+		// The peer opens one uni stream and then goes quiet, so
 		// the loop is still running when the assertion is taken.
-		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
-			.with_incoming_unis(vec![subgroup_header(VERSION, ALIAS).await]);
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![payload]);
 		let log = session.log.clone();
 
 		let (tasks, _task_set) = TaskSet::new();
@@ -1241,7 +1227,9 @@ mod tests {
 			tasks,
 			Default::default(),
 		);
-		subscriber.retire_alias(ALIAS);
+		if let Some(alias) = retired_alias {
+			subscriber.retire_alias(alias);
+		}
 
 		// Held so the trigger side stays alive for as long as the loop runs.
 		let (_goaway, goaway) = crate::goaway::Handle::new(false);
@@ -1251,7 +1239,7 @@ mod tests {
 
 		for _ in 0..100 {
 			if let std::task::Poll::Ready(result) = futures::poll!(unis.as_mut()) {
-				panic!("the dispatch loop ended over one dropped group: {result:?}");
+				panic!("the dispatch loop ended over one rejected stream: {result:?}");
 			}
 			if !log.stops().is_empty() {
 				break;
@@ -1259,11 +1247,26 @@ mod tests {
 			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
+		log
+	}
+
+	/// A late group must reach the dispatch loop and stop with CANCELLED.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
+		let log = dispatch_uni(subgroup_header(Version::Draft19, 7).await, Some(7)).await;
+
 		assert_eq!(
 			log.stops(),
 			vec![crate::ietf::error::CANCELLED],
 			"the group stream must be stopped with the cancelled code",
 		);
 		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unknown_uni_type_does_not_claim_the_session_closed() {
+		let log = dispatch_uni(vec![0], None).await;
+		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert!(log.closes().is_empty());
 	}
 }

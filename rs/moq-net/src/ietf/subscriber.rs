@@ -1658,7 +1658,7 @@ where
 
 		// STOP_SENDING needs no acknowledgement, so it goes first and the wait below covers
 		// only what we still have to deliver.
-		reader.stop(super::error::CANCELLED);
+		reader.abort(&Error::Cancel);
 
 		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
 		// that has sent its FIN is still retransmitting: the reset would discard the
@@ -2601,7 +2601,7 @@ mod tests {
 			.expect_err("a retired alias resolves to a cancellation");
 
 		assert_eq!(
-			crate::ietf::error::to_stream_code(&err),
+			crate::ietf::error::to_stream_code(&crate::StreamError::from(&err), Version::Draft20),
 			crate::ietf::error::CANCELLED,
 			"the code the dispatch loop maps this error onto",
 		);

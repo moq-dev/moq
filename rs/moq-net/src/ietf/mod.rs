@@ -9,7 +9,7 @@ mod parameters;
 mod adapter;
 pub mod cluster;
 mod control;
-mod error;
+pub(crate) mod error;
 mod fetch;
 mod filter;
 mod goaway;

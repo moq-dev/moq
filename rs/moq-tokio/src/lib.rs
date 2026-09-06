@@ -12,7 +12,11 @@
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
 //! With `default-features = false`, the `quinn` and `noq` backends must be paired
-//! with the `aws-lc-rs` or `ring` crypto-provider feature.
+//! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
+//! compiles, including no transport at all: such a build cannot connect to
+//! anything, though a crypto provider on its own is still enough to configure TLS
+//! and to build a plain-TLS listener's `rustls::ServerConfig` from
+//! [`tls::Listen::server_config`].
 
 #![warn(missing_docs)]
 
@@ -64,7 +68,6 @@ pub mod tls;
 pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.

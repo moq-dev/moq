@@ -1,74 +1,9 @@
-//! Thread-per-core QUIC workers.
-//!
-//! A [`Server`] on a work-stealing runtime serves every connection off one UDP
-//! socket: every packet can cross threads, and every wakeup is a candidate
-//! context switch. [`Workers`] is the opposite shape. Each
-//! member is a thread of its own, pinned to a core, running a `current_thread`
-//! runtime and owning one socket in a `SO_REUSEPORT` group. A connection lands
-//! on one worker and stays there, so the locks its driver and its session take
-//! are uncontended and nothing is stolen.
-//!
-//! Packets reach their worker by connection ID rather than by address, so a
-//! client that migrates (a NAT rebinding, a network change) stays with the
-//! worker that owns its connection rather than landing on one that has never
-//! heard of it.
-//!
-//! ```no_run
-//! # async fn example(listen: moq_tokio::listen::Config) -> anyhow::Result<()> {
-//! use moq_tokio::worker;
-//!
-//! let mut workers = worker::Workers::bind(listen, Default::default(), worker::Config::new(8))?;
-//! println!("listening on {}", workers.local_addr());
-//!
-//! // The group owns the threads, so keep it alive as long as you want the
-//! // port served.
-//! for (server, spawner) in workers.split() {
-//!     spawner.run(|| async move {
-//!         let _ = server.listen().await;
-//!     });
-//! }
-//! workers.shutdown().await;
-//! # Ok(())
-//! # }
-//! ```
-
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use super::Config;
 use crate::{Error, Result, Server, listen::Member};
-
-/// How many QUIC workers to run, and whether to pin them.
-#[derive(Clone, Copy, Debug)]
-#[non_exhaustive]
-pub struct Config {
-	/// How many workers to run, each with a thread and a socket of its own.
-	pub count: u16,
-
-	/// Pin each worker to a CPU core.
-	///
-	/// The mode's measured win comes from each worker owning a socket and a
-	/// runtime, not from pinning: on a single-socket machine, pinned and unpinned
-	/// benchmark inside run-to-run noise of each other. Pinning stops the
-	/// scheduler migrating a busy worker, which should matter on a multi-socket
-	/// or NUMA machine, and costs nothing elsewhere, so it defaults on. Turn it
-	/// off when sharing the machine with something that manages CPU placement
-	/// itself.
-	pub pin: bool,
-}
-
-impl Config {
-	/// `count` workers, pinned.
-	pub fn new(count: u16) -> Self {
-		Self { count, pin: true }
-	}
-
-	/// Whether to pin each worker to a core.
-	pub fn with_pin(mut self, pin: bool) -> Self {
-		self.pin = pin;
-		self
-	}
-}
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -79,6 +14,25 @@ impl Config {
 ///
 /// Iterate to take the workers out. The group is what guarantees they were bound
 /// once, in index order, which is what the steering filter selects on.
+///
+/// ```no_run
+/// # async fn example(listen: moq_tokio::listen::Config) -> anyhow::Result<()> {
+/// use moq_tokio::worker;
+///
+/// let mut workers = worker::Workers::bind(listen, Default::default(), worker::Config::new(8))?;
+/// println!("listening on {}", workers.local_addr());
+///
+/// // The group owns the threads, so keep it alive as long as you want the
+/// // port served.
+/// for (server, spawner) in workers.split() {
+///     spawner.run(|| async move {
+///         let _ = server.listen().await;
+///     });
+/// }
+/// workers.shutdown().await;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Workers {
 	workers: Vec<Worker>,
 	certificates: crate::tls::Certificates,

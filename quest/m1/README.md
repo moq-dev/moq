@@ -23,7 +23,7 @@ with the current dev tree before starting.
 - [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-tokio: bring the quiche backend to quinn/noq feature parity
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
 - [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - QUIC workers: dropping one split() Server resizes the reuseport group
-- [#2979](/quest/m1/2979-moq-tokio-does-not-compile-with-no-default-features-and.md) - moq-tokio compiles with any subset of transport features, and nightly checks it per crate
+- [Transport feature](/quest/m1/tokio-transport-feature.md) - moq-tokio has one gate for "has a transport", and its backend-less build passes `-D warnings`
 - [#2853](/quest/m1/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
 - [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence is the discontinuity unless the boundary proves continuity; no marker has to arrive
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
@@ -41,6 +41,8 @@ with the current dev tree before starting.
 - [Plan: binding rate control](/quest/m1/plan-binding-rate-control.md) - settle how a non-Rust publisher follows the send estimate before wiring five bindings
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
 - [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - returning demand during IETF setup keeps its track across microtasks
+- [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - accept padding and close sessions for genuinely unknown uni-stream types
+- [HLS cache misses](/quest/m1/hls-cache-miss-codes.md) - moq-hls: a segment the relay dropped is served as a 500, because the miss is matched against a table the wire stopped using
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
 - [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range controls, typed errors)
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - Collapse Reload and Shared into one Connection class
