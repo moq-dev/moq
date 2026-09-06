@@ -15,8 +15,9 @@ is a packaging gap, not a documentation one: `doc/bin/cli.md` already
 documents the `--features capture` build.
 
 Turn both on by default and keep the heavy parts individually droppable. The
-sub-features already exist for this: `nvidia`, `vaapi`, and `pipewire` are
-opt-out, so a self-compiler can shed CUDA, libva, and libpipewire, and
+sub-features already exist for this: `nvidia` is opt-out, and `vaapi`, `v4l2`,
+and `pipewire` are opt-in because they need libclang or libpipewire on the
+build host, so a self-compiler can shed CUDA or add the Linux extras, and
 `--no-default-features` still reaches a minimal build. The cost is real and
 lands on Linux source builds: the camera path pulls libclang and V4L2 headers
 through bindgen, the microphone pulls ALSA through cpal, and `play` pulls

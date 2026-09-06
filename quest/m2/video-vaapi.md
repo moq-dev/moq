@@ -2,18 +2,19 @@
 
 ## Goal
 
-VAAPI encodes H.264 and H.265 from a DMA-BUF without a download, decodes at
-all, and the `vaapi` feature costs a consumer nothing at build time so it can
-return to default-on. Every piece needs a `moq-dev/vaapi` release first.
+VAAPI encodes H.264 and H.265 from a DMA-BUF without a download, decodes
+H.265 as well as H.264, and the `vaapi` feature costs a consumer nothing at
+build time so it can return to default-on. Every piece needs a `moq-dev/vaapi`
+release first.
 
 ## Plan
 
 Four gaps, one external dependency.
 
-**Decode.** There is no VAAPI decoder at all; the only Linux hardware decode
-is NVDEC. iroh-live has a full stateless decoder with PRIME export, which is
-the piece that pairs with DMA-BUF capture and the Vulkan renderer to make a
-Linux path that never touches system memory.
+**Decode.** The H.264 decoder landed (moq-vaapi 0.0.4, `decode/backend/vaapi.rs`),
+with `decode::Config::gpu_frames` exporting DMA-BUF surfaces the renderer
+imports without a download. H.265 decode is still missing, so a Linux box
+without NVDEC has no hardware path for it.
 
 **The encoder.** Ours is a 111-line CPU-only adapter whose own header says it
 is unvalidated on hardware. iroh-live's imports a DMA-BUF directly and does

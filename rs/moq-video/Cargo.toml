@@ -13,23 +13,24 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# On by default: everything that costs the build nothing beyond cargo, plus
-# `capture`, the crate's headline. Off by default: the Linux features that need
-# libclang or a system library on the build host. `vaapi` runs bindgen over its
-# vendored libva headers, `v4l2` runs it over the kernel's videodev2.h, and
+# On by default: everything that costs the build nothing beyond cargo. Off by
+# default: every feature that needs libclang or a system library on the build
+# host, however cheap it is on other platforms, since a default is one setting
+# for every host. `capture` and `v4l2` run bindgen over the kernel's videodev2.h
+# (the `v4l` crate), `vaapi` runs it over its vendored libva headers, and
 # `pipewire` links libpipewire; a consumer whose build host has those turns them
-# on. `capture` is the one default that pays such a cost, and only on Linux, where
-# the camera path is the same `v4l` crate `v4l2` uses. The features exist so a
-# consumer can drop what it does not want, not to hide code from the default
-# compile (`just check` lints default features only, so the opt-in ones are
-# compiled by nightly's `just rs features`). Openh264 stays as the always-compiled
-# software fallback. Workspace consumers opt out at the root manifest
-# (`default-features = false`) and pick per crate, so the relay and the language
-# bindings never build the device or render stacks.
-default = ["capture", "mediacodec", "nvidia", "render"]
-# Native camera and screen capture. Enabled by default for direct consumers,
-# but workspace consumers opt in so codec-only bindings avoid device build
-# dependencies such as V4L2 and libclang.
+# on. The features exist so a consumer can pick what it wants, not to hide code
+# from the default compile (`just check` lints default features only, so the
+# opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
+# Openh264 stays as the always-compiled software fallback. Workspace consumers
+# opt out at the root manifest (`default-features = false`) and pick per crate,
+# so the relay and the language bindings never build the device or render
+# stacks.
+default = ["mediacodec", "nvidia", "render"]
+# Native camera and screen capture. Off by default because the Linux camera path
+# (the `v4l` crate) runs bindgen over the kernel's videodev2.h, so the build host
+# needs libclang and the Linux headers; macOS and Windows use OS frameworks and
+# would pay nothing. moq-cli's `capture` turns it on.
 capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
@@ -91,7 +92,8 @@ render = [
 # Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
 # at build time (and its bindgen needs libclang), so it only belongs in builds
-# that actually capture displays. Camera capture (V4L2) needs nothing extra.
+# that actually capture displays. Camera capture (V4L2) needs only what
+# `capture` already does.
 pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
