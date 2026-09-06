@@ -334,8 +334,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		dialUrl = server_url;
 	}
 
-	moq_connection_stats raw{};
-	const int32_t rc = moq_session_stats(handle, &raw);
+	moq_connection_snapshot connection{};
+	const int32_t rc = moq_session_snapshot(handle, &connection);
 	if (rc != 0) {
 		const char *message = moq_error();
 		const std::string next = message && *message ? message : "offline";
@@ -351,6 +351,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		return false;
 	}
 
+	const auto &raw = connection.stats;
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
 	snapshot.rtt_valid = raw.rtt_valid;
@@ -368,9 +369,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	}
 	snapshot.dial = DialSchemeLabel(dialUrl);
 
-	moq_string version{};
-	if (moq_session_version(handle, &version) == 0 && version.data && version.len > 0)
-		snapshot.protocol.assign(version.data, version.len);
+	snapshot.protocol.assign(connection.protocol.data, connection.protocol.len);
 
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);

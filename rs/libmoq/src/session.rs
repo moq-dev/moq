@@ -127,17 +127,17 @@ impl Session {
 			.ok_or(Error::Offline)
 	}
 
-	/// Negotiated protocol version of the live session.
+	/// Statistics and protocol from the same live connection.
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
 	/// if the session is currently between connections (reconnecting).
-	pub fn version(&self, id: Id) -> Result<moq_net::Version, Error> {
+	pub fn snapshot(&self, id: Id) -> Result<moq_native::ConnectionSnapshot, Error> {
 		self.task
 			.get(id)
 			.and_then(|entry| entry.as_ref())
 			.ok_or(Error::SessionNotFound)?
 			.stats
-			.version()
+			.snapshot()
 			.ok_or(Error::Offline)
 	}
 

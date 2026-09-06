@@ -204,35 +204,43 @@ fn publish_media_lifecycle() {
 }
 
 #[test]
-fn publish_media_hint_rejects_container_format() {
+fn publish_media_hint_rejects_non_video_formats() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"hint-rejects-container");
+	let broadcast = publish_broadcast(origin, b"hint-rejects-non-video");
 	let _guard = Guard(Some(|| {
 		moq_publish_finish(broadcast);
 	}));
-
-	let format = b"fmp4";
-	let init = b"";
 	let hint = moq_video_hint {
 		has_bitrate: true,
 		bitrate: 1_000_000,
 		..Default::default()
 	};
-	let ret = unsafe {
-		moq_publish_media_hint(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			&hint,
-		)
-	};
-	assert_eq!(
-		ret,
-		Error::InvalidConfig(String::new()).code(),
-		"container + video hint must fail before init decode"
-	);
+	for format in [
+		"fmp4", "cmaf", "mkv", "webm", "matroska", "ts", "mpegts", "mpeg2ts", "m2ts", "flv", "opus", "aac", "flac",
+		"mp3",
+	] {
+		let ret =
+			unsafe { moq_publish_media_hint(broadcast, format.as_ptr().cast(), format.len(), b"".as_ptr(), 0, &hint) };
+		assert_eq!(
+			ret,
+			Error::InvalidConfig(String::new()).code(),
+			"{format}: reject the hint before parsing init"
+		);
+	}
+	let format = b"vp8";
+	let media =
+		id(unsafe { moq_publish_media_hint(broadcast, format.as_ptr().cast(), format.len(), b"".as_ptr(), 0, &hint) });
+	assert_eq!(moq_publish_media_finish(media), 0);
+}
+
+#[test]
+fn session_snapshot_error_preserves_destination() {
+	let mut dst: moq_connection_snapshot = unsafe { std::mem::zeroed() };
+	dst.stats.rtt_us = 123;
+	dst.protocol.len = 456;
+	assert!(unsafe { moq_session_snapshot(0, &mut dst) } < 0);
+	assert_eq!(dst.stats.rtt_us, 123);
+	assert_eq!(dst.protocol.len, 456);
 }
 
 #[test]

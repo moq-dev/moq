@@ -194,7 +194,7 @@ std::atomic<bool> g_connect_fires_terminal_threaded{false};
 std::atomic<bool> g_stats_offline{false};
 // When true, only RTT is marked valid (dock must omit the rest).
 std::atomic<bool> g_stats_partial{false};
-std::function<void()> g_during_version;
+std::function<void()> g_during_snapshot;
 std::atomic<bool> g_connect_rejected{false};
 std::thread g_connect_terminal_thread;
 const char *g_error = "unauthorized";
@@ -316,11 +316,16 @@ int32_t moq_session_stats(uint32_t session, moq_connection_stats *dst)
 	return 0;
 }
 
-int32_t moq_session_version(uint32_t, moq_string *)
+int32_t moq_session_snapshot(uint32_t session, moq_connection_snapshot *dst)
 {
-	if (g_during_version)
-		g_during_version();
-	return -1;
+	const int32_t rc = moq_session_stats(session, &dst->stats);
+	if (rc != 0)
+		return rc;
+	static const char protocol[] = "moq-lite-04";
+	dst->protocol = {protocol, sizeof(protocol) - 1};
+	if (g_during_snapshot)
+		g_during_snapshot();
+	return 0;
 }
 
 } // extern "C"
@@ -400,7 +405,7 @@ void reset()
 	g_connect_fires_terminal_threaded = false;
 	g_stats_offline = false;
 	g_stats_partial = false;
-	g_during_version = nullptr;
+	g_during_snapshot = nullptr;
 	g_connect_rejected = false;
 	g_stall_last_error = false;
 	g_in_report_window = false;
@@ -715,6 +720,7 @@ int main()
 		CHECK(stats.loss_valid);
 		CHECK(stats.loss_pct > 0.9 && stats.loss_pct < 1.1);
 		CHECK(stats.reconnects == 0);
+		CHECK(stats.protocol == "moq-lite-04");
 		CHECK(o.GetReconnectCount() == 0);
 
 		fire(1);
@@ -777,7 +783,7 @@ int main()
 		MoQOutput::ConnectionStats stats;
 		stats.rtt_ms = 99;
 		stats.dial = "previous";
-		g_during_version = [&] {
+		g_during_snapshot = [&] {
 			o.Stop(false);
 			fire(0);
 			CHECK(o.Start());
@@ -785,7 +791,7 @@ int main()
 		CHECK(!o.TryGetConnectionStats(&stats));
 		CHECK(stats.rtt_ms == 99);
 		CHECK(stats.dial == "previous");
-		g_during_version = nullptr;
+		g_during_snapshot = nullptr;
 		CHECK(o.TryGetConnectionStats(&stats));
 		CHECK(stats.rtt_ms == 12.5);
 		o.Stop(false);

@@ -114,6 +114,11 @@ impl Publish {
 				match import::Track::new(request, catalog.reserve(), import_init) {
 					Ok(track) => Media::Track(Box::new(track)),
 					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
+					Err(moq_mux::Error::UnexpectedVideoHint) => {
+						return Err(Error::InvalidConfig(
+							"video hint is only supported for video tracks".into(),
+						));
+					}
 					Err(err) => return Err(err.into()),
 				}
 			}

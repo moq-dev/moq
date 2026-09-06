@@ -384,9 +384,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	urlEdit = new QLineEdit(streamPage);
 	urlEdit->setPlaceholderText("https://cdn.moq.dev/anon/your-stream");
-	urlEdit->setPlaceholderText("http://localhost:4443/anon");
-	const QString urlHelp = "Relay origin URL, for example https://cdn.moq.dev/anon. "
-				"Paste a URL with ?jwt= and the token is moved into Publish token.";
+	const QString urlHelp =
+		"Relay URL including your unique path, for example https://cdn.moq.dev/anon/your-stream. "
+		"Paste a URL with ?jwt= and the token is moved into Publish token.";
 	urlEdit->setToolTip(urlHelp);
 
 	tokenEdit = new QLineEdit(streamPage);

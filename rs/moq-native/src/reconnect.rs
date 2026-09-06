@@ -148,6 +148,15 @@ struct State {
 	session: Option<moq_net::Session>,
 }
 
+/// Statistics and protocol sampled from the same live connection.
+#[non_exhaustive]
+pub struct ConnectionSnapshot {
+	/// Transport statistics at the time of the snapshot.
+	pub stats: moq_net::ConnectionStats,
+	/// Protocol negotiated by the connection that supplied these statistics.
+	pub version: Version,
+}
+
 /// A cloneable read handle for the live connection stats of a [`Reconnect`] loop.
 ///
 /// Obtained via [`Reconnect::stats`]. [`stats`](Self::stats) returns `None` while the loop is
@@ -163,9 +172,14 @@ impl ConnectionStatsReader {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
-	/// Negotiated MoQ version of the live session, or `None` while disconnected.
-	pub fn version(&self) -> Option<Version> {
-		self.state.read().version
+	/// Snapshot statistics and protocol together, or `None` while disconnected.
+	pub fn snapshot(&self) -> Option<ConnectionSnapshot> {
+		let state = self.state.read();
+		let session = state.session.as_ref()?;
+		Some(ConnectionSnapshot {
+			stats: session.stats(),
+			version: session.version(),
+		})
 	}
 }
 
@@ -484,6 +498,41 @@ fn terminal(state: &State) -> Error {
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn snapshot_uses_one_live_session() {
+		let mut config = crate::ServerConfig::default();
+		config.bind = Some("[::]:0".into());
+		config.tls.generate = vec!["localhost".into()];
+		let mut server = config.init().unwrap();
+		let url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
+			.parse()
+			.unwrap();
+		let mut config = crate::ClientConfig::default();
+		config.tls.disable_verify = Some(true);
+		let client = config.init().unwrap();
+		let (accepted, connected) = tokio::time::timeout(Duration::from_secs(10), async {
+			tokio::join!(
+				async { server.accept().await.unwrap().ok().await.unwrap() },
+				client.connect(url)
+			)
+		})
+		.await
+		.unwrap();
+		let session = connected.unwrap();
+		let version = session.version();
+		let producer = kio::Producer::<State>::default();
+		let reader = ConnectionStatsReader {
+			state: producer.consume(),
+		};
+		assert!(reader.snapshot().is_none());
+		producer.write().unwrap().session = Some(session);
+		// The snapshot must read the protocol from that same session, without a second state query.
+		assert_eq!(reader.snapshot().unwrap().version, version);
+		producer.write().unwrap().session = None;
+		assert!(reader.snapshot().is_none());
+		drop(accepted);
+	}
+
 	/// The retry loop is `delay = min(delay * multiplier, max)`, so a zero anywhere
 	/// pins the delay at zero and turns an unreachable relay into a hot dial loop,
 	/// unbounded when the give-up timeout is also zero.

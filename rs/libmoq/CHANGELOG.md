@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `moq_session_version` for the negotiated protocol draft of a live session
+- `moq_session_snapshot` for statistics and negotiated protocol from the same live connection
 
 ## [0.5.13](https://github.com/moq-dev/moq/compare/libmoq-v0.5.12...libmoq-v0.5.13) - 2026-09-02
 

@@ -419,6 +419,16 @@ pub struct moq_announced {
 	pub active: bool,
 }
 
+/// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_connection_snapshot {
+	/// Transport statistics, with per-metric availability flags.
+	pub stats: moq_connection_stats,
+	/// Negotiated draft name, backed by static storage valid for the process lifetime.
+	pub protocol: moq_string,
+}
+
 /// A snapshot of connection statistics, filled in by [moq_session_stats].
 ///
 /// Each metric has a `*_valid` flag: when `false`, the matching value is meaningless because
@@ -1500,24 +1510,28 @@ pub unsafe extern "C" fn moq_session_stats(session: u32, dst: *mut moq_connectio
 	})
 }
 
-/// Negotiated MoQ protocol version for a live session.
+/// Snapshot statistics and the negotiated protocol from the same live connection.
 ///
-/// Fills `dst` with the handshake name (e.g. `moq-lite-05` or `moq-transport-20`). The
-/// string points at static storage valid for the life of the process. Returns zero on
-/// success, or a negative code when the handle is unknown or the session is offline
-/// between reconnects (`dst` left untouched).
+/// Returns zero on success, or a negative code when the handle is unknown or offline
+/// between reconnects. On failure, `dst` is untouched. The protocol string points at
+/// static storage valid for the process lifetime and must not be freed.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_string] struct.
+/// - `dst` must point at a writable [moq_connection_snapshot] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_session_version(session: u32, dst: *mut moq_string) -> i32 {
+pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connection_snapshot) -> i32 {
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let version = State::lock().session.version(session)?;
-		let name = version.as_str();
-		dst.data = name.as_ptr().cast::<c_char>();
-		dst.len = name.len();
+		let snapshot = State::lock().session.snapshot(session)?;
+		let name = snapshot.version.as_str();
+		*dst = moq_connection_snapshot {
+			stats: moq_connection_stats::from(&snapshot.stats),
+			protocol: moq_string {
+				data: name.as_ptr().cast::<c_char>(),
+				len: name.len(),
+			},
+		};
 		Ok(())
 	})
 }
@@ -1803,8 +1817,8 @@ pub unsafe extern "C" fn moq_publish_media(
 /// Same as [moq_publish_media], plus `hint`: pass NULL for none, or a
 /// zeroed [moq_video_hint] with the `has_*` flags set for fields to seed
 /// (notably bitrate, so a downstream transcoder can size same-height rungs
-/// before measured rates arrive). A non-NULL hint is supported only for codec
-/// formats; container formats return an invalid-config error before parsing init.
+/// before measured rates arrive). A non-NULL hint is supported only for video codec
+/// formats; audio and container formats return an invalid-config error before parsing init.
 ///
 /// # Safety
 /// - Same pointer rules as [moq_publish_media].
