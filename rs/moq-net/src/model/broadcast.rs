@@ -836,7 +836,7 @@ impl Consumer {
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
 		if let Some(weak) = state.tracks.get(name) {
-			match weak.consume() {
+			match weak.try_consume() {
 				Some(consumer) => return Ok(consumer),
 				// It closed between the liveness probe and the count bump (an idle
 				// teardown committing under us). Reclaim it and request the track
@@ -1598,20 +1598,36 @@ mod test {
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap();
-		assert_eq!(track.abort_unused(Error::Cancel), track::Teardown::Declined);
+		let mut track = track
+			.abort_unused(Error::Cancel)
+			.expect_err("viewer keeps the track alive");
 
 		// So the viewer holds a live track, not a cancelled one.
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.subscribe(None).await.unwrap();
 		subscriber.assert_no_group();
+		track.append_group().unwrap();
+		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup
 		// re-requests the track instead of resolving the closed one.
 		drop(subscriber);
 		drop(viewer);
-		assert_eq!(track.abort_unused(Error::Cancel), track::Teardown::Committed);
+		assert!(track.abort_unused(Error::Cancel).is_ok());
 		assert!(matches!(consumer.track("video"), Err(Error::NotFound)));
 
+		producer.finish();
+	}
+
+	#[test]
+	fn abort_unused_accepts_an_already_closed_track_with_consumers() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", None).unwrap();
+		let _viewer = consumer.track("video").unwrap();
+		track.clone().abort(Error::Cancel).unwrap();
+		assert!(track.is_used());
+		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.finish();
 	}
 }

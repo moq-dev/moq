@@ -22,7 +22,7 @@
 
 use bytes::Bytes;
 use loom::{future::block_on, thread};
-use moq_net::{Error, Timestamp, broadcast, cache, origin, track};
+use moq_net::{Error, Timestamp, broadcast, cache, origin};
 
 /// A frame written on the publisher thread must reach a subscriber parked on
 /// `next_frame`, however the write interleaves with the reader's parking.
@@ -248,11 +248,7 @@ fn an_idle_teardown_never_cancels_a_returning_viewer() {
 			// The track was already gone, so nothing was handed out to cancel. Nobody
 			// is serving this broadcast on demand, so the re-request has nowhere to go.
 			Err(err) => {
-				assert_eq!(
-					teardown,
-					track::Teardown::Committed,
-					"a declined teardown refused a viewer"
-				);
+				assert!(teardown.is_ok(), "a declined teardown refused a viewer");
 				assert!(matches!(err, Error::NotFound), "unexpected lookup error: {err}");
 			}
 		}

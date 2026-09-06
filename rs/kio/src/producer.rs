@@ -57,7 +57,7 @@ impl<T> Producer<T> {
 	/// a consumer that appeared in the gap. Commit through this instead, and take
 	/// [`Unused::Used`] as "a consumer got there first, keep going".
 	///
-	/// Pair it with [`ProducerWeak::consume`], which refuses to mint a consumer for
+	/// Pair it with [`ProducerWeak::try_consume`], which refuses to mint a consumer for
 	/// a closed channel: between the two, a consumer either exists in time to
 	/// decline the teardown or is never handed out at all.
 	pub fn write_unused(&self) -> Unused<'_, T> {

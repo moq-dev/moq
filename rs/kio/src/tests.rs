@@ -202,7 +202,7 @@ fn a_consumer_minted_before_the_guard_declines_it() {
 	assert!(matches!(producer.write_unused(), crate::Unused::Idle(_)));
 
 	// Demand returns in the gap between that wake and the commit.
-	let consumer = weak.consume().expect("the channel is open");
+	let consumer = weak.try_consume().expect("the channel is open");
 	assert!(matches!(producer.write_unused(), crate::Unused::Used));
 
 	// Once the teardown does commit, the weak handle mints nothing more.
@@ -211,5 +211,20 @@ fn a_consumer_minted_before_the_guard_declines_it() {
 		panic!("unused again");
 	};
 	guard.close();
-	assert!(weak.consume().is_none(), "a closed channel minted a consumer");
+	assert!(weak.try_consume().is_none(), "a closed channel minted a consumer");
+}
+
+#[test]
+fn weak_consumers_can_read_the_final_value() {
+	let producer = Producer::new(7u32);
+	let weak = producer.weak();
+	let consumer = weak.try_consume().expect("open channel");
+	assert_eq!(*consumer.read(), 7);
+	drop(consumer);
+	producer.close().ok().expect("open channel");
+
+	assert!(weak.try_consume().is_none());
+	let consumer = weak.consume();
+	assert!(consumer.is_closed());
+	assert_eq!(*consumer.read(), 7);
 }

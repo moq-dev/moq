@@ -1447,6 +1447,7 @@ where
 			BroadcastClosed(Error),
 		}
 
+		let track_name = track.name().to_owned();
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
@@ -1468,39 +1469,30 @@ where
 				})
 				.await;
 
-				// The unused wake is a level snapshot, so the teardown is only real once it
-				// commits while the track is still unused. A subscriber that returned in the
-				// gap keeps this request, which is why the abort happens here rather than
-				// after the loop.
-				if matches!(setup, Setup::Unused) && track.abort_unused(Error::Cancel) == track::Teardown::Declined {
-					continue;
+				match setup {
+					Setup::Response(res) => break Some((res, track)),
+					Setup::Unused => match track.abort_unused(Error::Cancel) {
+						Ok(()) => break None,
+						Err(used) => track = used,
+					},
+					Setup::BroadcastClosed(err) => {
+						let _ = track.abort(err);
+						break None;
+					}
 				}
-
-				break setup;
 			}
 		};
 
-		// Abandoned before the publisher answered. It may already be serving, so this still
-		// owes it a cancellation rather than a silent walk away.
-		let response = match setup {
-			Setup::Response(res) => res,
-			setup => {
-				tracing::info!(
-					broadcast = %self.origin.absolute(&broadcast_path),
-					track = %track.name(),
-					"subscribe abandoned before it was accepted"
-				);
-
-				// `Unused` already aborted the track above, atomically with the decision;
-				// a closed broadcast still owes it that error.
-				if let Setup::BroadcastClosed(err) = setup {
-					let _ = track.abort(err);
-				}
-
-				self.remove_subscribe(request_id);
-				self.cancel_subscribe(stream, request_id).await;
-				return;
-			}
+		let Some((response, mut track)) = setup else {
+			tracing::info!(
+				broadcast = %self.origin.absolute(&broadcast_path),
+				track = %track_name,
+				"subscribe abandoned before it was accepted"
+			);
+			// The publisher may already be serving before it answers.
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream, request_id).await;
+			return;
 		};
 
 		// Read the response and register the alias mapping
@@ -1569,7 +1561,7 @@ where
 			StreamClosed(Result<(), Error>),
 		}
 
-		let end = loop {
+		let cancelled = loop {
 			let end = kio::wait(|waiter| {
 				if track.poll_unused(waiter).is_ready() {
 					return Poll::Ready(End::Unused);
@@ -1582,42 +1574,33 @@ where
 			})
 			.await;
 
-			// The unused wake is a level snapshot, so committing the teardown is what
-			// decides it: a subscriber that returned in the gap keeps this subscription
-			// on the same stream instead of being cancelled along with it.
-			if matches!(end, End::Unused) && track.abort_unused(Error::Cancel) == track::Teardown::Declined {
-				continue;
-			}
-
-			break end;
-		};
-
-		// Whether we are walking away from a subscription the publisher still considers
-		// Established, which is what obliges us to cancel it rather than just close.
-		let cancelled = match end {
-			// The track was aborted above, atomically with the decision to end here.
-			End::Unused => {
-				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe cancelled");
-				true
-			}
-			End::BroadcastClosed(err) => {
-				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "broadcast closed");
-				let _ = track.abort(err);
-				true
-			}
-			End::StreamClosed(res) => {
-				match res {
+			match end {
+				End::Unused => match track.abort_unused(Error::Cancel) {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
-						let _ = track.finish();
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe cancelled");
+						break true;
 					}
-					Err(err) => {
-						tracing::debug!(%err, "subscribe stream closed with error");
-						let _ = track.abort(err);
-					}
+					Err(used) => track = used,
+				},
+				End::BroadcastClosed(err) => {
+					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "broadcast closed");
+					let _ = track.abort(err);
+					break true;
 				}
-				// The publisher already ended the request, so there is nothing to cancel.
-				false
+				End::StreamClosed(res) => {
+					match res {
+						Ok(()) => {
+							tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
+							let _ = track.finish();
+						}
+						Err(err) => {
+							tracing::debug!(%err, "subscribe stream closed with error");
+							let _ = track.abort(err);
+						}
+					}
+					// The publisher already ended the request, so there is nothing to cancel.
+					break false;
+				}
 			}
 		};
 

@@ -206,7 +206,7 @@ fn a_teardown_and_a_consumer_never_both_win() {
 		let producer = Producer::new(0u32);
 		let weak = producer.weak();
 
-		let consumer = thread::spawn(move || weak.consume());
+		let consumer = thread::spawn(move || weak.try_consume());
 
 		let committed = match producer.write_unused() {
 			crate::Unused::Idle(guard) => {

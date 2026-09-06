@@ -106,16 +106,17 @@ impl<T> ProducerWeak<T> {
 		})
 	}
 
-	/// Create a new [`Consumer`] that shares this state, or `None` once the channel
-	/// has closed.
+	/// Create a consumer that can read the final value even after the channel closes.
+	pub fn consume(&self) -> Consumer<T> {
+		crate::consumer::consume(&self.state, &self.counts)
+	}
+
+	/// Create a consumer only if the channel is open.
 	///
-	/// The closed check and the count bump happen under one lock, mirroring
-	/// [`produce`](Self::produce): a consumer minted here is always one a
-	/// [`Producer::write_unused`] teardown will see and decline for. The `None` is
-	/// the other half of that deal, so a caller that reaches a torn-down channel
-	/// through a cached weak handle re-requests the resource instead of handing out
-	/// a consumer that can only report the teardown.
-	pub fn consume(&self) -> Option<Consumer<T>> {
+	/// The closed check and count increment share the lock held by
+	/// [`Producer::write_unused`], so an idle teardown either sees this consumer
+	/// or closes the channel before this returns `None`.
+	pub fn try_consume(&self) -> Option<Consumer<T>> {
 		crate::consumer::consume_open(&self.state, &self.counts)
 	}
 
@@ -251,7 +252,7 @@ pub struct ConsumerWeak<T> {
 impl<T> ConsumerWeak<T> {
 	/// Create a new [`Consumer`] that shares this state.
 	///
-	/// Unlike [`ProducerWeak::consume`] this always succeeds: the handle it came
+	/// Unlike [`ProducerWeak::try_consume`] this always succeeds: the handle it came
 	/// from is a read handle, so there is no teardown on this side to coordinate
 	/// with, and a closed channel's consumer still drains the final value.
 	pub fn consume(&self) -> Consumer<T> {
