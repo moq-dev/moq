@@ -525,10 +525,10 @@ mod tests {
 			state: producer.consume(),
 		};
 		assert!(reader.snapshot().is_none());
-		producer.write().unwrap().session = Some(session);
+		producer.write().ok().unwrap().session = Some(session);
 		// The snapshot must read the protocol from that same session, without a second state query.
 		assert_eq!(reader.snapshot().unwrap().version, version);
-		producer.write().unwrap().session = None;
+		producer.write().ok().unwrap().session = None;
 		assert!(reader.snapshot().is_none());
 		drop(accepted);
 	}
