@@ -8,7 +8,7 @@ within the existing test budget on a busy developer machine.
 ## Plan
 
 While validating #3448, `a compressed delta is gated on its encoded size, not its
-plaintext` exceeded Bun's five-second timeout twice in `just test default
+plaintext` exceeded Bun's five-second timeout in `just test default
 origin/dev` with Bun 1.3.13. An isolated run with host Bun 1.2.23 also timed out.
 CI passed on the same source. The machine was concurrently compiling Rust;
 contention is a hypothesis, not a confirmed diagnosis.

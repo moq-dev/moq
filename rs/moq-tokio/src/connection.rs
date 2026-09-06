@@ -679,9 +679,12 @@ impl Connection {
 						// An accepted redirect is an assignment: keep dialing it from here on, and
 						// only it. The peer named exactly one place to go, which retires
 						// whatever other addresses got us to this session.
-						if let Some(target) = goaway.redirect().target(&msg.uri, &url) {
-							addrs = Addrs::new(target);
-						}
+						let url = if let Some(target) = goaway.redirect().target(&msg.uri, &url) {
+							addrs = Addrs::new(target.clone());
+							target
+						} else {
+							url
+						};
 
 						// Hand over gracefully however the backoff bookkeeping scores this
 						// session. The old one keeps serving until it closes or overstays,
