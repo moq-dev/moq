@@ -1395,10 +1395,7 @@ mod tests {
 		);
 	}
 
-	/// Every scheme this crate dials but `http`/`https`/`ws`/`wss` is non-special,
-	/// so the URL parser hands its host back as a domain even when it is an address
-	/// literal. Reading that as a name rather than an address is what let a
-	/// `moqt://127.0.0.1` target past the reachability check.
+	/// Native schemes must classify address literals even when the URL parser returns a domain.
 	#[test]
 	fn a_non_special_scheme_classifies_its_literal_host() {
 		for url in [

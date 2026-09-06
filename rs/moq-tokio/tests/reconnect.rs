@@ -107,15 +107,7 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	config.init(Default::default()).expect("failed to init client")
 }
 
-/// A GOAWAY naming another host is refused by the default policy, and the loop
-/// redials the URL it was configured with.
-///
-/// Both servers are on loopback, so the host the peer names here is one we can
-/// obviously reach. That is the point: the guard this replaced judged the URL,
-/// and a peer that named a host rather than an address walked past it, since the
-/// name is never resolved (and resolving it here would settle nothing anyway,
-/// because the dial resolves it again). The default no longer lets the peer
-/// choose a host at all.
+/// The default refuses peer-selected host changes and redials the configured URL.
 #[tokio::test]
 async fn a_redirect_to_another_host_is_refused_by_default() {
 	let (port_a, mut sessions_a, _task_a) = spawn_server().await;
