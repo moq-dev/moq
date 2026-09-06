@@ -63,8 +63,9 @@ down in its effect cleanup, and `Connection.Shared`
   the cap and never a zero-length handover. Groups in flight finish. A GOAWAY does not go through the backoff delay; a failed
   replacement dial does.
 - Port the guard: same-host by default, refuse a scheme-tier drop or a
-  widening to a local host, and offer the follow mode. An empty URI redials the
-  current URL. A redirect with a certificate pin (`serverCertificateHashes`)
+  widening to a local host, and offer the follow mode. Empty, ignored, malformed, or refused URIs preserve the
+  current address list, including caller-selected fallbacks. Only an accepted
+  redirect replaces the list. A redirect with a certificate pin (`serverCertificateHashes`)
   is refused unless the host is unchanged, since the pin cannot verify another
   relay; the pool already refuses to share pinned connections.
 - `Connection.Shared` re-keys its entry to the redirect target, so a later

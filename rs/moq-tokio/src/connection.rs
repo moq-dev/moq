@@ -176,7 +176,7 @@ pub enum Redirect {
 	/// between ports or schemes but not to another host. The default.
 	#[default]
 	SameHost,
-	/// Ignore the URI and redial the configured URL.
+	/// Ignore the URI and retry the current address list.
 	Ignore,
 }
 
@@ -184,18 +184,26 @@ impl Redirect {
 	/// Resolve the URL to dial after a GOAWAY, falling back to `current` when the
 	/// redirect is empty ("reconnect to me"), malformed, or refused by policy.
 	pub fn resolve(&self, uri: &str, current: &Url) -> Url {
+		self.target(uri, current).unwrap_or_else(|| current.clone())
+	}
+
+	// Absence keeps the caller's address list; only an accepted URI replaces it.
+	fn target(&self, uri: &str, current: &Url) -> Option<Url> {
 		if uri.is_empty() || matches!(self, Self::Ignore) {
-			return current.clone();
+			return None;
 		}
 
 		let Ok(target) = uri.parse::<Url>() else {
-			tracing::warn!(uri, "malformed GOAWAY URI; redialing the current URL");
-			return current.clone();
+			tracing::warn!(uri, "malformed GOAWAY URI; keeping the current addresses");
+			return None;
 		};
 
 		if scheme_tier(target.scheme()) < scheme_tier(current.scheme()) {
-			tracing::warn!(uri, "GOAWAY redirect downgrades the scheme; redialing the current URL");
-			return current.clone();
+			tracing::warn!(
+				uri,
+				"GOAWAY redirect downgrades the scheme; keeping the current addresses"
+			);
+			return None;
 		}
 
 		// Only as far as the URL itself says: a name is dialed, never resolved here,
@@ -203,8 +211,11 @@ impl Redirect {
 		// nothing about one that hides the same address behind a hostname. That gap
 		// is why [`Self::SameHost`] is the default; see [`is_local`].
 		if is_local(&target) && !is_local(current) {
-			tracing::warn!(uri, "GOAWAY redirect widens reachability; redialing the current URL");
-			return current.clone();
+			tracing::warn!(
+				uri,
+				"GOAWAY redirect widens reachability; keeping the current addresses"
+			);
+			return None;
 		}
 
 		// Host only, not the full authority: the port is what a peer legitimately
@@ -212,12 +223,12 @@ impl Redirect {
 		if matches!(self, Self::SameHost) && target.host_str() != current.host_str() {
 			tracing::warn!(
 				uri,
-				"GOAWAY redirect leaves the current host; redialing the current URL"
+				"GOAWAY redirect leaves the current host; keeping the current addresses"
 			);
-			return current.clone();
+			return None;
 		}
 
-		target
+		Some(target)
 	}
 }
 
@@ -290,7 +301,7 @@ pub struct GoawayConfig {
 	/// What to do with the URI a peer names in its GOAWAY. `same-host` (the
 	/// default) lets it move us between ports and schemes on the host we already
 	/// chose, `follow` also lets it name the host, and `ignore` redials the
-	/// configured URL.
+	/// current address list.
 	#[usage(
 		name = "goaway-redirect",
 		long,
@@ -665,11 +676,12 @@ impl Connection {
 					}
 
 					if let Ended::Goaway(msg) = &ended {
-						// A redirect is an assignment: keep dialing it from here on, and
+						// An accepted redirect is an assignment: keep dialing it from here on, and
 						// only it. The peer named exactly one place to go, which retires
 						// whatever other addresses got us to this session.
-						let url = goaway.redirect().resolve(&msg.uri, &url);
-						addrs = Addrs::new(url.clone());
+						if let Some(target) = goaway.redirect().target(&msg.uri, &url) {
+							addrs = Addrs::new(target);
+						}
 
 						// Hand over gracefully however the backoff bookkeeping scores this
 						// session. The old one keeps serving until it closes or overstays,
@@ -1438,6 +1450,28 @@ mod tests {
 			Redirect::SameHost,
 			"and the shipped config carries that default"
 		);
+	}
+
+	#[test]
+	fn only_an_accepted_redirect_replaces_the_address_list() {
+		let current: Url = "https://relay.example/".parse().unwrap();
+		for (policy, uri) in [
+			(Redirect::SameHost, "https://other.example/"),
+			(Redirect::Follow, ""),
+			(Redirect::Follow, "not a url"),
+			(Redirect::Ignore, "https://relay.example:5443/"),
+			(Redirect::Follow, "http://relay.example/"),
+			(Redirect::Follow, "https://127.0.0.1/"),
+		] {
+			assert_eq!(policy.target(uri, &current), None, "{policy:?}: {uri}");
+		}
+		// An explicit assignment remains an assignment even if its URL is unchanged.
+		assert_eq!(
+			Redirect::SameHost.target(current.as_str(), &current),
+			Some(current.clone())
+		);
+		let moved = "https://relay.example:5443/";
+		assert_eq!(Redirect::SameHost.target(moved, &current), Some(moved.parse().unwrap()));
 	}
 
 	/// `SameHost` lets a peer move us between ports or schemes on the endpoint we

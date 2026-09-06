@@ -172,3 +172,31 @@ async fn follow_still_honors_a_cross_host_redirect() {
 		.expect("never followed the redirect")
 		.expect("server B stopped accepting");
 }
+
+/// Refusing a peer-selected host must not discard caller-selected fallbacks.
+#[tokio::test]
+async fn a_refused_redirect_preserves_configured_fallbacks() {
+	let (port_a, mut sessions_a, task_a) = spawn_server().await;
+	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
+	let primary = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
+	let fallback = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
+	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
+	let _connection = quick_client(Default::default()).connect(addrs);
+	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+		.await
+		.expect("first dial timed out")
+		.expect("server A stopped accepting");
+
+	// Stop accepting before GOAWAY so reconnect must use the configured fallback.
+	task_a.abort();
+	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
+	first
+		.drain()
+		.send(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
+		.expect("send goaway");
+
+	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())
+		.await
+		.expect("configured fallback was discarded")
+		.expect("server B stopped accepting");
+}

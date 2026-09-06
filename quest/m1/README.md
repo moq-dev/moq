@@ -16,6 +16,8 @@ with the current dev tree before starting.
 
 ## Quests
 
+- [Compressed delta regression](/quest/m1/json-compressed-delta-test-timeout.md) - diagnose the encoded-size test timeout under load
+
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model: copies, locks, clock reads, allocations, syscalls
 - [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-native: bring the quiche backend to quinn/noq feature parity
