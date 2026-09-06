@@ -75,8 +75,8 @@ impl<T> std::fmt::Debug for Weak<T> {
 
 /// A weak handle from the producing side ([`Producer::weak`](crate::Producer::weak)).
 ///
-/// Holds no ref count, so it never keeps the channel open. Upgrade it back to a [`Producer`]
-/// (write access) or a [`Consumer`] (read access) while the channel is still live.
+/// Holds no ref count, so it never keeps the channel open. Upgrade it to a [`Producer`]
+/// while the channel is live, or create a [`Consumer`] to read even after closure.
 ///
 /// It does keep the state *allocated*, which is what lets it read a closed channel's final
 /// value. Reach for [`Weak`] instead when the handle is stored inside that same state.
@@ -250,11 +250,7 @@ pub struct ConsumerWeak<T> {
 }
 
 impl<T> ConsumerWeak<T> {
-	/// Create a new [`Consumer`] that shares this state.
-	///
-	/// Unlike [`ProducerWeak::try_consume`] this always succeeds: the handle it came
-	/// from is a read handle, so there is no teardown on this side to coordinate
-	/// with, and a closed channel's consumer still drains the final value.
+	/// Create a consumer that can read the final value even after the channel closes.
 	pub fn consume(&self) -> Consumer<T> {
 		crate::consumer::consume(&self.state, &self.counts)
 	}
