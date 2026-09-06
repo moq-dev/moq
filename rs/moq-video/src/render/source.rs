@@ -13,8 +13,9 @@ pub(super) enum Layout {
 	/// Luma plane plus one interleaved chroma plane. What every hardware
 	/// decoder hands back, so only a zero-copy import produces it: the CPU
 	/// upload path is always I420. Gated to the platforms that have such an
-	/// importer, which today means macOS alone.
-	#[cfg(target_os = "macos")]
+	/// importer: macOS via CoreVideo, and Linux by importing an NV12 DMA-BUF's
+	/// two memory planes as two Vulkan images.
+	#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
 	Nv12,
 	/// Three separate planes.
 	I420,

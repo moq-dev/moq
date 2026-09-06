@@ -128,6 +128,9 @@ pub struct Renderer {
 	strikes: u32,
 	/// Set once the fast path is retired for the life of this renderer.
 	retired: bool,
+	/// Set once a frame has been imported rather than uploaded, so the line
+	/// saying so is logged once rather than per frame.
+	imported: bool,
 }
 
 /// The compiled pipeline, one variant per plane layout, and everything they share.
@@ -137,7 +140,7 @@ struct Pipelines {
 	/// Paired with [`Layout::Nv12`], so it exists only where an importer can
 	/// hand back that layout. The shader still declares the entry point
 	/// everywhere, so it stays validated on every platform either way.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
 	nv12: wgpu::RenderPipeline,
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	/// Packed RGB or BGR imported from a Linux DMA-BUF.
@@ -237,6 +240,7 @@ impl Renderer {
 			output: None,
 			strikes: 0,
 			retired: false,
+			imported: false,
 		})
 	}
 
@@ -289,7 +293,7 @@ impl Renderer {
 		let pipeline = match source.layout {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Layout::Rgba => &self.shader.rgba,
-			#[cfg(target_os = "macos")]
+			#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
 		};
@@ -337,6 +341,17 @@ impl Renderer {
 			match self.source.import(&self.device, &frame.surface) {
 				Ok(Some(source)) => {
 					self.strikes = 0;
+					// The one observable difference between a picture that
+					// reached the GPU untouched and one that went through system
+					// memory. Worth a line the first time it happens, because
+					// nothing else about a working renderer says which it was.
+					if !self.imported {
+						self.imported = true;
+						tracing::debug!(
+							layout = ?source.layout,
+							"drawing frames zero-copy; the picture reaches the GPU without a download"
+						);
+					}
 					return Ok(source);
 				}
 				// No import path for this surface on this platform. Not a
@@ -499,7 +514,7 @@ impl Pipelines {
 		Ok(Self {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			rgba: pipeline("rgba"),
-			#[cfg(target_os = "macos")]
+			#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
 			layout,
@@ -815,6 +830,460 @@ mod tests {
 
 		let pixels = readback(&device, &queue, &texture).await;
 		assert_close(pixels[8 * 32 + 16], [255, 0, 0, 255]);
+	}
+
+	/// The palette the NV12 tests draw with: saturated and mutually
+	/// distinguishable, so a wrong matrix or a swapped chroma pair changes a
+	/// block's color rather than nudging it.
+	///
+	/// Blue and orange are both here on purpose. NV12 interleaves Cb then Cr, and
+	/// reading them the other way round turns one into the other while leaving
+	/// every gray alone, so a gradient or a luma ramp would pass a swapped
+	/// import.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	const PALETTE: [[u8; 3]; 8] = [
+		[255, 0, 0],
+		[0, 255, 0],
+		[0, 0, 255],
+		[255, 255, 0],
+		[0, 255, 255],
+		[255, 0, 255],
+		[255, 128, 0],
+		[255, 255, 255],
+	];
+
+	/// The block of [`PALETTE`] covering a pixel, in a grid of 32x32 blocks whose
+	/// colors shift along each row of blocks.
+	///
+	/// Shifting matters: a pattern that repeats identically down the frame still
+	/// looks right when a row pitch is ignored and the picture shears, because
+	/// every row is a copy of the one above. This one does not.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	fn block(x: u32, y: u32) -> [u8; 3] {
+		PALETTE[((y / 32 * 3 + x / 32) % PALETTE.len() as u32) as usize]
+	}
+
+	/// Encode one RGB triple to limited-range 8-bit Y'CbCr with the forward
+	/// matrix of `color`.
+	///
+	/// The inverse of what the shader does, written out rather than derived from
+	/// [`super::super::color`], so the expected pixels come from the definition
+	/// of the color space rather than from the code under test. Only the matrix
+	/// follows `color`; the range does not, which is all the callers need since
+	/// they assert the space is limited before building a pattern.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	fn to_yuv(color: Color, rgb: [u8; 3]) -> [u8; 3] {
+		let (kr, kb) = match color {
+			Color::Bt601Limited | Color::Bt601Full => (0.299f32, 0.114f32),
+			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+		};
+		let kg = 1.0 - kr - kb;
+		let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
+		let luma = kr * r + kg * g + kb * b;
+
+		// Limited range: luma spans 219 codes from 16, chroma 224 around 128.
+		let (y, cb, cr) = (
+			luma * 219.0 + 16.0,
+			(b - luma) / (2.0 * (1.0 - kb)) * 224.0 + 128.0,
+			(r - luma) / (2.0 * (1.0 - kr)) * 224.0 + 128.0,
+		);
+		[y, cb, cr].map(|c| c.round().clamp(0.0, 255.0) as u8)
+	}
+
+	/// The block pattern as tightly packed planes of `format`.
+	///
+	/// The blocks are 32 pixels on a side, so each 2x2 chroma group sits wholly
+	/// inside one of them and the subsampling loses nothing. Any difference the
+	/// comparison then finds is the import's, not the format's.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	fn pattern(format: crate::DrmFormat, size: Size, color: Color) -> Vec<u8> {
+		let (width, height) = (size.width, size.height);
+		let mut pixels = Vec::with_capacity((width * height * 3 / 2) as usize);
+
+		for y in 0..height {
+			for x in 0..width {
+				pixels.push(to_yuv(color, block(x, y))[0]);
+			}
+		}
+
+		// NV12 interleaves Cb then Cr in one plane; I420 keeps them as two.
+		// Getting that pair the wrong way round is the failure this test is
+		// most concerned with, so it is written out once here and read back by
+		// the shader rather than round-tripped through a helper that could
+		// share the mistake.
+		let chroma = |channel: usize, pixels: &mut Vec<u8>| {
+			for y in (0..height).step_by(2) {
+				for x in (0..width).step_by(2) {
+					pixels.push(to_yuv(color, block(x, y))[channel]);
+				}
+			}
+		};
+		match format {
+			crate::DrmFormat::NV12 => {
+				for y in (0..height).step_by(2) {
+					for x in (0..width).step_by(2) {
+						let [_, cb, cr] = to_yuv(color, block(x, y));
+						pixels.push(cb);
+						pixels.push(cr);
+					}
+				}
+			}
+			crate::DrmFormat::YUV420 => {
+				chroma(1, &mut pixels);
+				chroma(2, &mut pixels);
+			}
+			format => panic!("no pattern for DMA-BUF format {:#x}", format.as_raw()),
+		}
+
+		pixels
+	}
+
+	/// A Vulkan device that can import DMA-BUFs, or `None` where nothing can.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	async fn dmabuf_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+		let instance = wgpu::Instance::default();
+		let adapter = instance
+			.request_adapter(&wgpu::RequestAdapterOptions::default())
+			.await
+			.expect("a GPU adapter");
+
+		let external_memory = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+		if adapter.get_info().backend != wgpu::Backend::Vulkan || !adapter.features().contains(external_memory) {
+			return None;
+		}
+
+		Some(
+			adapter
+				.request_device(&wgpu::DeviceDescriptor {
+					required_features: external_memory,
+					..Default::default()
+				})
+				.await
+				.expect("a DMA-BUF-capable GPU device"),
+		)
+	}
+
+	/// Draw one DMA-BUF of `format` and `size` twice, imported and uploaded, and
+	/// check the two against each other and against the palette.
+	///
+	/// Three assertions rather than one:
+	///
+	/// - The import returns a source at all and its layout is `expected`. Only
+	///   the DMA-BUF importer produces those layouts, so this says which branch
+	///   ran. Without it the CPU fallback would quietly satisfy everything below.
+	/// - Every pixel matches the CPU upload of the same samples. That is the one
+	///   that catches a swapped chroma pair, a plane at the wrong offset, an
+	///   ignored row pitch, and a mismatched matrix, all at once.
+	/// - The block centers match the colors the pattern was built from, computed
+	///   here from the definition of the color space. Both paths agreeing on the
+	///   wrong answer would pass the comparison and fail this.
+	///
+	/// `false` when the host cannot allocate such a buffer, which is a skip
+	/// rather than a pass.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	async fn imported_matches_uploaded(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		format: crate::DrmFormat,
+		size: Size,
+		expected: Layout,
+	) -> bool {
+		// Below the 576 lines the crate infers BT.709 above, so both paths land
+		// on BT.601 limited and the pattern is built for that.
+		let color = Color::infer(size);
+		assert_eq!(color, Color::Bt601Limited);
+
+		let Some(buffer) = crate::render::dmabuf::fixture::surface(format, size, &pattern(format, size, color)) else {
+			return false;
+		};
+		eprintln!(
+			"{size} {:?}: modifier {:#x}, planes {:?}",
+			expected,
+			buffer.modifier(),
+			buffer.planes()
+		);
+
+		let config = Config {
+			usage: wgpu::TextureUsages::COPY_SRC,
+			..Config::new()
+		};
+
+		// The reference: the same samples, deinterleaved and uploaded as three
+		// CPU planes. Built from the bytes that went into the DMA-BUF rather
+		// than read back out of it, so it shares nothing with the path it is
+		// checking.
+		let uploaded = {
+			let nv12 = pattern(crate::DrmFormat::NV12, size, color);
+			let i420 = crate::frame::I420::from_nv12(&nv12, size.width, size.height).expect("deinterleave NV12");
+			let frame = Frame::new(Surface::I420(i420), Timestamp::ZERO);
+			let mut renderer = Renderer::new(device, queue, config.clone()).expect("a renderer");
+			let texture = renderer.render(&frame).expect("a rendered frame");
+			readback(device, queue, &texture).await
+		};
+
+		let frame = Frame::new(Surface::DmaBuf(buffer), Timestamp::ZERO);
+		let mut renderer = Renderer::new(device, queue, config).expect("a renderer");
+
+		// Which branch ran. These layouts come from the per-plane DMA-BUF
+		// import and from nothing else on this platform.
+		let imported = renderer
+			.source
+			.import(device, &frame.surface)
+			.expect("import the DMA-BUF")
+			.expect("a DMA-BUF import path");
+		assert_eq!(imported.layout, expected, "the frame imported as the wrong layout");
+		assert_eq!(imported.color, Some(color));
+		drop(imported);
+
+		let texture = renderer.render(&frame).expect("a rendered frame");
+		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
+		assert!(!renderer.retired);
+		let zero_copy = readback(device, queue, &texture).await;
+
+		// Every pixel, not a sample of them: a shear from an ignored row pitch
+		// grows down the frame and leaves the top correct.
+		assert_eq!(zero_copy.len(), uploaded.len());
+		let mut worst = 0u8;
+		for (index, (&imported, &reference)) in zero_copy.iter().zip(&uploaded).enumerate() {
+			let drift = (0..4).map(|c| imported[c].abs_diff(reference[c])).max().unwrap_or(0);
+			worst = worst.max(drift);
+			let (x, y) = (index % size.width as usize, index / size.width as usize);
+			assert!(drift <= 2, "({x}, {y}): imported {imported:?}, uploaded {reference:?}");
+		}
+		eprintln!(
+			"  imported vs uploaded: worst drift {worst} of 255 over {} pixels",
+			zero_copy.len(),
+		);
+
+		// And both agree with the palette the pattern was built from, so a
+		// shared misreading of the samples cannot pass.
+		for y in (16..size.height).step_by(32) {
+			for x in (16..size.width).step_by(32) {
+				let rgb = block(x, y);
+				assert_close(zero_copy[(y * size.width + x) as usize], [rgb[0], rgb[1], rgb[2], 255]);
+			}
+		}
+
+		true
+	}
+
+	/// An NV12 DMA-BUF has to import as two Vulkan images and draw the same
+	/// picture the CPU path draws from the same samples.
+	///
+	/// The test the whole per-plane import exists to pass. It runs at two sizes:
+	/// one whose width the driver leaves alone, and one it has to pad, so the
+	/// row pitch and the chroma plane's offset both stop being derivable from
+	/// the frame size. A pitch taken as the width shears the picture, and the
+	/// shear grows down the frame, which is why the comparison is over every
+	/// pixel rather than a sample of them.
+	///
+	/// Ignored: needs a GPU that can import DMA-BUFs and a VA-API device to
+	/// allocate one. Run with
+	/// `cargo test -p moq-video --features render,vaapi nv12_dmabuf -- --ignored --nocapture`.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn the_nv12_dmabuf_import_matches_the_cpu_path() {
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+
+		let mut ran = false;
+		for size in [Size::new(256, 192), Size::new(200, 120), Size::new(62, 34)] {
+			ran |= imported_matches_uploaded(&device, &queue, crate::DrmFormat::NV12, size, Layout::Nv12).await;
+		}
+		assert!(ran, "no NV12 DMA-BUF could be allocated to import");
+	}
+
+	/// The same for fully planar 4:2:0, which imports as three single-component
+	/// images rather than two.
+	///
+	/// Skips rather than fails where the driver will not allocate or export a
+	/// YU12 surface: what the layout has to get right is covered by NV12 either
+	/// way, and this is the arrangement a VA-API decode hands back.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn the_i420_dmabuf_import_matches_the_cpu_path() {
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+
+		for size in [Size::new(256, 192), Size::new(200, 120)] {
+			if !imported_matches_uploaded(&device, &queue, crate::DrmFormat::YUV420, size, Layout::I420).await {
+				eprintln!("skipping: this driver does not do YU12 DMA-BUFs");
+				return;
+			}
+		}
+	}
+
+	/// A real decoded picture drawn without ever reaching system memory.
+	///
+	/// The chain the whole thing is for, end to end: openh264 encodes a
+	/// gradient, the VAAPI decode backend is asked for GPU-resident frames and
+	/// hands back the surfaces it decoded into, and the renderer imports their
+	/// two planes. The same stream is decoded a second time by the same backend
+	/// asked for CPU frames and drawn through the upload path, and the two
+	/// pictures have to agree.
+	///
+	/// Through `decode::backend` rather than `moq_vaapi` directly, so what this
+	/// covers is the path `Config::gpu_frames` actually turns on rather than an
+	/// arrangement only the test knows how to build.
+	///
+	/// A gradient rather than the block palette, because this one is checking
+	/// the plumbing rather than the color math: it varies in both axes, so a
+	/// plane at a wrong offset or a pitch taken as the width shows up as a
+	/// mismatch. What the samples mean is settled by the sibling tests, which
+	/// know exactly what went into the buffer; here the decoder decides, and a
+	/// lossy encoder sits in front of it.
+	///
+	/// Ignored: needs a Vulkan GPU and a VA-API device. Run with
+	/// `cargo test -p moq-video --features render,vaapi decoded_frames -- --ignored --nocapture`.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan GPU and a VA-API device"]
+	async fn decoded_frames_reach_the_gpu_without_a_download() {
+		use crate::decode::backend::{self, Codec, vaapi};
+
+		let Some((device, queue)) = dmabuf_gpu().await else {
+			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
+			return;
+		};
+		let decode = |gpu_frames| {
+			backend::open(
+				Codec::H264,
+				&crate::decode::Config {
+					// By name rather than by literal: a `Named` that matches
+					// nothing fails to open, which reads here as absent hardware
+					// and skips the test.
+					kind: crate::decode::Kind::Named(vaapi::NAME.into()),
+					gpu_frames,
+					..crate::decode::Config::new()
+				},
+			)
+		};
+		let Ok(mut exporting) = decode(true) else {
+			eprintln!("skipping: no VA-API H.264 decoder");
+			return;
+		};
+		let mut downloading = decode(false).expect("a second decoder");
+
+		// A gradient in both axes, so the chroma planes carry structure and a
+		// plane split or stride mistake corrupts the picture rather than
+		// tinting it.
+		let size = Size::new(320, 240);
+		let (width, height) = (size.width, size.height);
+		let mut rgba = vec![0u8; (width * height * 4) as usize];
+		for y in 0..height {
+			for x in 0..width {
+				let index = ((y * width + x) * 4) as usize;
+				rgba[index] = (x * 255 / width) as u8;
+				rgba[index + 1] = (y * 255 / height) as u8;
+				rgba[index + 2] = ((x + y) * 255 / (width + height)) as u8;
+				rgba[index + 3] = 255;
+			}
+		}
+
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
+			kind: crate::encode::Kind::Software,
+			..crate::encode::Config::new(width, height, 30)
+		})
+		.expect("a software H.264 encoder");
+
+		let mut exported = Vec::new();
+		let mut downloaded = Vec::new();
+		for index in 0..8u64 {
+			if index == 0 {
+				encoder.keyframe();
+			}
+			let surface = Surface::rgba(&rgba, size).expect("a valid RGBA frame");
+			let frame = Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap());
+			for unit in encoder.encode(&frame).expect("encode a picture") {
+				let timestamp = unit.timestamp;
+				exported.extend(
+					exporting
+						.decode(unit.payload.clone(), timestamp, index == 0)
+						.expect("decode to the GPU"),
+				);
+				downloaded.extend(
+					downloading
+						.decode(unit.payload, timestamp, index == 0)
+						.expect("decode to the CPU"),
+				);
+			}
+		}
+		assert!(!exported.is_empty(), "the decoder produced no pictures");
+		assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
+
+		let Surface::DmaBuf(first) = &exported[0].surface else {
+			panic!("gpu_frames did not produce a DMA-BUF surface");
+		};
+		eprintln!(
+			"decoded {} pictures, exported at modifier {:#x}",
+			exported.len(),
+			first.modifier()
+		);
+
+		let config = Config {
+			usage: wgpu::TextureUsages::COPY_SRC,
+			..Config::new()
+		};
+		let mut importing = Renderer::new(&device, &queue, config.clone()).expect("a renderer");
+		let mut uploading = Renderer::new(&device, &queue, config).expect("a renderer");
+
+		for (index, (gpu, cpu)) in exported.iter().zip(&downloaded).enumerate() {
+			let Surface::DmaBuf(buffer) = &gpu.surface else {
+				panic!("picture {index} did not come back GPU-resident");
+			};
+			if index == 0 {
+				eprintln!("  planes {:?}", buffer.planes());
+			}
+			assert!(
+				matches!(cpu.surface, Surface::I420(_)),
+				"picture {index} was not downloaded without gpu_frames"
+			);
+
+			// Which branch ran, per picture: the decoder's own surfaces import
+			// as NV12, and only the per-plane DMA-BUF path produces that.
+			let source = importing
+				.source
+				.import(&device, &gpu.surface)
+				.expect("import the decoded surface")
+				.expect("a DMA-BUF import path");
+			assert_eq!(source.layout, Layout::Nv12, "picture {index} did not import as NV12");
+			drop(source);
+
+			let texture = importing.render(gpu).expect("draw the imported picture");
+			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
+			let zero_copy = readback(&device, &queue, &texture).await;
+
+			let texture = uploading.render(cpu).expect("draw the downloaded picture");
+			let cpu = readback(&device, &queue, &texture).await;
+
+			assert_eq!(
+				zero_copy.len(),
+				cpu.len(),
+				"picture {index} read back at a different size"
+			);
+			let mut worst = 0u8;
+			for (pixel, (&imported, &reference)) in zero_copy.iter().zip(&cpu).enumerate() {
+				let drift = (0..4).map(|c| imported[c].abs_diff(reference[c])).max().unwrap_or(0);
+				worst = worst.max(drift);
+				let (x, y) = (pixel % width as usize, pixel / width as usize);
+				assert!(
+					drift <= 2,
+					"picture {index} at ({x}, {y}): imported {imported:?}, downloaded {reference:?}"
+				);
+			}
+			if index == 0 {
+				eprintln!(
+					"  imported vs downloaded: worst drift {worst} of 255 over {} pixels",
+					cpu.len()
+				);
+			}
+		}
 	}
 
 	/// A pool-backed NV12 surface, shaped like a hardware decode's output.
