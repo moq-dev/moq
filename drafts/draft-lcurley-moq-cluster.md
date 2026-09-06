@@ -189,7 +189,11 @@ It is OPTIONAL and absent means 0, so an endpoint that prices nothing sends noth
 Costs still accumulate across such a mesh, because each receiver adds the price for the direction it received over ({{relay-cost}}) regardless.
 
 The original publisher seeds the value with its production cost: 0 for content it is already producing, higher for content it would have to spin up on demand, such as a standby transcoder advertising everything it *could* serve.
-A standby seed MUST exceed the largest accumulated cost a bounded HOP_PATH can carry, and `2^32` is RECOMMENDED; below that a nearby standby outranks a distant publisher already doing the work, and the mesh starts a second copy.
+Standby ordering is a deployment guarantee within one specificity tier, not a bound on every representable Route Cost.
+A deployment relying on it MUST bound the number of charged links on an admitted path by H and each charged link cost by C, including the receiving link, and MUST enforce those bounds when admitting paths and links.
+Already-producing origins in that deployment MUST seed their cost at 0; standby origins MUST choose a seed S satisfying `H * C < S < saturation ceiling`.
+A seed of `2^32` is RECOMMENDED only when `H * C < 2^32`; otherwise the deployment must choose a larger seed or tighter bounds.
+Unknown, out-of-budget, and saturated routes are outside this guarantee; a receiver MUST NOT infer that they outrank standby capacity merely because they might already carry content.
 
 # Relay Behavior
 When forwarding an advertisement downstream, a relay MUST append its own Hop ID to the HOP_PATH it received, so its own ID is always the last entry.

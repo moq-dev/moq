@@ -112,9 +112,9 @@ field.
   specificity do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
   concrete announcement and with warm-advertise's exact-path warm routes. The
-  floor MUST exceed the maximum accumulated topology cost a bounded hop list
-  can reach (`MAX_HOPS` is 32 and the planned link costs are 1/3/5, so the
-  ceiling is 160), or a nearby standby outranks a distant running copy and the
+  floor MUST exceed the deployment's enforced maximum charged-link count
+  times its enforced maximum link cost (32 links at cost at most 5 gives
+  a bound of 160, with producing origins seeded at 0), or a nearby standby outranks a distant running copy and the
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
   carries today, and it is the same stride discipline
