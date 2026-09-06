@@ -17,7 +17,7 @@ registry.
 
 ## Plan
 
-What the tree does today, identically on main and dev:
+Current implementation paths (verify against the target branch before starting):
 
 - `rs/moq-net/src/ietf/publisher.rs` `run_subscribe` rejects with the literal
   `404` at three sites and `run_fetch_stream` with `500`;
@@ -34,11 +34,10 @@ What the tree does today, identically on main and dev:
 - `js/net/src/ietf/subscriber.ts` `runPublish` writes a draft-14 `PublishError`
   with the function-local `NOT_SUPPORTED` and a `RequestError` on later
   drafts; the Rust subscriber's publish handling is the same shape.
-- Stream resets on an IETF session send `Error::to_code()`, the moq-lite space
-  where `Cancel` is `0`; draft-19 section 3.3.4 assigns `0x0` to INTERNAL_ERROR
-  and `0x1` to CANCELLED. `Error::from_transport` maps only `0` back to
-  `Cancel`, so both directions have to move together. #2993 fixed one site
-  (`cancel_subscribe`, a named `STREAM_CANCELLED`).
+- Rust's `ietf/error.rs::to_stream_code` and JS's `toStreamCode` with an IETF
+  version send CANCELLED (1) for cancellation and INTERNAL_ERROR (0) otherwise.
+  JS keeps received IETF resets opaque rather than decoding them as moq-lite
+  local error classes. Per-draft typed decoding and richer mappings remain here.
 - `Version::Draft14` through `Draft20` are all negotiated, straddling the
   draft-19 consolidation into REQUEST_ERROR, so the values are per version.
 

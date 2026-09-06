@@ -5,16 +5,12 @@ import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import * as Varint from "./varint.ts";
 
-// Every reset funnels through here, so the code a condition means is what lands on the wire,
-// whether it was raised locally or forwarded from a peer. Without it the transport reads a
-// code off nothing but a WebTransportError and sends 0 (INTERNAL_ERROR) for the rest, so a
-// routine event (a lagging reader, an unknown broadcast) looks like a crash on our side.
-//
-// An error with no code of its own already means 0, so leave it alone: the caller's own class,
-// message and stack are more use locally than a transport-shaped stand-in.
-function withCode(reason: unknown): unknown {
-	const code = toStreamCode(reason);
-	return code === StreamCode.Internal ? reason : toTransport(code, error(reason).message);
+// Both transport implementations read streamErrorCode from the transport error.
+// IETF failures must be encoded even for code 0 so an incoming transport-shaped
+// reason cannot bypass the protocol mapping. Ordinary moq-lite errors keep their identity.
+function withCode(reason: unknown, version?: IetfVersion): unknown {
+	const code = toStreamCode(reason, { version });
+	return code === StreamCode.Internal && version === undefined ? reason : toTransport(code, error(reason).message);
 }
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -208,7 +204,7 @@ export class Reader {
 		// Every read of this stream funnels through here, so decoding the peer's reset code
 		// once is enough to keep the raw transport error out of every caller (and every app).
 		const result = await this.#reader.read().catch((err: unknown) => {
-			throw fromTransport(err);
+			throw fromTransport(err, { version: this.version });
 		});
 
 		if (result.done) {
@@ -381,14 +377,14 @@ export class Reader {
 	}
 
 	stop(reason: unknown) {
-		this.#reader?.cancel(withCode(reason)).catch(() => void 0);
+		this.#reader?.cancel(withCode(reason, this.version)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error
 	// shape depending on which one won. Derived once, so racing it per frame doesn't allocate.
 	get closed(): Promise<void> {
 		this.#closed ??= (this.#reader?.closed ?? Promise.resolve()).catch((err: unknown) => {
-			throw fromTransport(err);
+			throw fromTransport(err, { version: this.version });
 		});
 		return this.#closed;
 	}
@@ -476,7 +472,7 @@ export class Writer {
 		// Mirrors Reader.#fill: every write funnels through here, so a STOP_SENDING from the
 		// peer surfaces as a typed code rather than the transport's own error shape.
 		await this.#writer.write(v).catch((err: unknown) => {
-			throw fromTransport(err);
+			throw fromTransport(err, { version: this.version });
 		});
 	}
 
@@ -494,13 +490,13 @@ export class Writer {
 	// typed code it would get from a write.
 	get closed(): Promise<void> {
 		this.#closed ??= this.#writer.closed.catch((err: unknown) => {
-			throw fromTransport(err);
+			throw fromTransport(err, { version: this.version });
 		});
 		return this.#closed;
 	}
 
 	reset(reason: unknown) {
-		this.#writer.abort(withCode(reason)).catch(() => void 0);
+		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
 	}
 
 	/**

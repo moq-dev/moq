@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
 
 /** The nominal brand for session termination codes. */
@@ -159,7 +160,7 @@ export interface StreamErrorOptions {
  * @public
  */
 export class StreamError extends Error {
-	/** The stream code, sent verbatim on a reset. */
+	/** The stream code; moq-lite resets forward it verbatim. */
 	readonly code: StreamCode;
 
 	constructor(code: StreamCode, options?: StreamErrorOptions) {
@@ -177,7 +178,7 @@ export class StreamError extends Error {
  * The reader fell behind a group's eviction window: frames it had not read were dropped to stay
  * under the cache cap, so the stream has a gap.
  *
- * Raised locally by a frame read, and decoded from a peer's `TOO_FAR_BEHIND` reset, since a gap
+ * Raised locally by a frame read, and decoded from a moq-lite peer's `TOO_FAR_BEHIND` reset, since a gap
  * reads the same either way.
  *
  * @public
@@ -250,6 +251,12 @@ function streamCode(err: unknown): StreamCode | undefined {
 	return streamErrorCode as StreamCode;
 }
 
+/** Transport context for encoding and decoding errors. @internal */
+interface TransportErrorOptions {
+	/** The negotiated IETF draft, or absent for moq-lite. */
+	version?: IetfVersion;
+}
+
 /**
  * Which {@link StreamCode} to send when resetting a stream because of `err`.
  *
@@ -262,9 +269,16 @@ function streamCode(err: unknown): StreamCode | undefined {
  * rather than inventing one. A {@link SessionError} lands there too: the two registries are
  * disjoint, so forwarding its code onto a stream would mistranslate it.
  *
+ * On IETF streams only cancellation is mapped; other failures use INTERNAL_ERROR.
+ *
  * @internal
  */
-export function toStreamCode(err: unknown): StreamCode {
+export function toStreamCode(err: unknown, options?: TransportErrorOptions): StreamCode {
+	if (options?.version !== undefined) {
+		// Match Rust's IETF mapping: a local timeout is not a negotiated delivery timeout,
+		// and losing one group does not establish that the subscription is terminating.
+		return err instanceof StreamError && err.code === StreamCode.Cancel ? StreamCode.Cancel : StreamCode.Internal;
+	}
 	if (err instanceof StreamError) return err.code;
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
@@ -280,16 +294,16 @@ export function toStreamCode(err: unknown): StreamCode {
  * with the same `source`/`streamErrorCode` fields. Reading the fields rather than the class
  * covers both, and works in a runtime with no `WebTransportError` at all.
  *
- * A code with a local class of its own decodes back into it, so a peer's condition is caught by
+ * On moq-lite, a code with a local class decodes back into it, so a peer's condition is caught by
  * the same `instanceof` as one raised here. Only the registered codes do: the reserved 32-63
  * placeholders carry no meaning the draft assigns, so they stay a plain {@link StreamError}.
  *
  * @internal Called at the transport boundary so the raw error never reaches an application.
  */
-export function fromTransport(err: unknown): Error {
+export function fromTransport(err: unknown, options?: TransportErrorOptions): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
+	if (options?.version === undefined && code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
 	return new StreamError(code, { cause: err });
 }
 

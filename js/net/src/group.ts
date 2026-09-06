@@ -52,8 +52,8 @@ export interface Info {
  * Thrown by a frame read when the reader fell behind the group's eviction window, and by a frame
  * write when the frame is larger than a group can cache.
  *
- * Both carry a stream code, so the condition survives a reset to the peer and comes back as the
- * same class there.
+ * Both carry a moq-lite stream code. Registered peer resets decode to Lagged; reserved
+ * codes such as FrameTooLarge remain opaque StreamError values.
  */
 export { FrameTooLarge, Lagged } from "./error.ts";
 
