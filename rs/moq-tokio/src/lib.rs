@@ -28,6 +28,7 @@
 ))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
+mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;

@@ -11,6 +11,8 @@
 //! certificates it serves reload like every other backend's. [`Certificates`]
 //! reads the current served set back out.
 
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+use crate::abort::AbortOnDrop;
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -2935,10 +2937,20 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// repeatedly in one process would accumulate all three.
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 #[derive(Debug)]
-pub(crate) struct Reload(tokio::task::JoinHandle<()>);
+pub(crate) struct Reload {
+	/// Named for the drop alone: nothing reads it, and losing it stops the watcher.
+	_task: AbortOnDrop,
+}
 
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 impl Reload {
+	/// A guard over a task with nothing to do, for a listener with nothing to watch.
+	fn inert() -> Self {
+		Self {
+			_task: AbortOnDrop::new(tokio::spawn(std::future::ready(()))),
+		}
+	}
+
 	/// Start watching the file-backed pairs in `config`, if it has any.
 	///
 	/// The watch is registered here rather than inside the task, so it covers the
@@ -2951,14 +2963,14 @@ impl Reload {
 		let paths: Vec<PathBuf> = config.cert.iter().chain(config.key.iter()).cloned().collect();
 		if paths.is_empty() {
 			// Nothing on disk to watch, so the task has nothing to do.
-			return Self(tokio::spawn(std::future::ready(())));
+			return Self::inert();
 		}
 
 		let watcher = match crate::watch::FileWatcher::new(&paths) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
-				return Self(tokio::spawn(std::future::ready(())));
+				return Self::inert();
 			}
 		};
 
@@ -2971,14 +2983,9 @@ impl Reload {
 			tracing::warn!(%err, "failed to re-read server certificates after watching");
 		}
 
-		Self(tokio::spawn(reload_certs(watcher, certs, config)))
-	}
-}
-
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-impl Drop for Reload {
-	fn drop(&mut self) {
-		self.0.abort();
+		Self {
+			_task: AbortOnDrop::new(tokio::spawn(reload_certs(watcher, certs, config))),
+		}
 	}
 }
 
