@@ -17,6 +17,7 @@ Most crates use a split-handle pattern: a `Producer` writes, any number of `Cons
 # Async / poll
 
 Two ways to drive things, both backed by `kio`:
+
 - `poll_*` functions take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously. Like `Future`, but wakers are cleaned up on drop.
 - `async fn` wrappers, usually `kio::wait(|waiter| self.poll_x(waiter))`.
 
