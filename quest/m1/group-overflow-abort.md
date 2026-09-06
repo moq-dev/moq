@@ -8,13 +8,11 @@ split, where a reader that kept up streams the whole group while a late or new
 one gets `Lagged`, and the head-shedding machinery becomes dead code to
 delete. The writer learns about its own overrun instead of being told nothing.
 
-A remote peer can tell the overrun apart from its own lag when the publisher is
-Rust. From a JS publisher it still arrives as `Internal` until
-[JS stream codes](/quest/m1/js-net-stream-error-codes.md) lands, because
-`Writer.reset` cannot put a code on the wire for a locally raised error at all.
-That is a gap in js/net rather than in this change, so it does not block this
-quest; it does bound what this quest can promise, so it is stated here rather
-than left to be discovered.
+A remote peer can tell the overrun apart from its own lag from either publisher.
+js/net maps a locally raised error to its stream code in `withCode`
+(`js/net/src/stream.ts`, via `toStreamCode` in `error.ts`), so the new code
+needs an entry in `StreamCode` and a class carrying it, the way `Lagged` does,
+rather than any new plumbing.
 
 This is a semantics change to the model in both languages, not a bug fix. It
 was settled in a planning pass; the decisions are recorded below rather than
@@ -126,5 +124,4 @@ already claims its top end "intentionally reaches the raised
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
-- [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - without it a JS publisher sends this new code to the wire as Internal
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - the moq-transport half of the code mapping

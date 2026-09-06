@@ -416,6 +416,16 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		quic.qlog.is_none(),
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
+	for (name, window) in [
+		("quic.receive_window", quic.receive_window),
+		("quic.stream_receive_window", quic.stream_receive_window),
+		("quic.send_window", quic.send_window),
+	] {
+		anyhow::ensure!(
+			window.is_none(),
+			"io_uring workers run fixed flow-control windows; drop {name} or use the tokio workers"
+		);
+	}
 
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
@@ -730,4 +740,37 @@ async fn serve_connection(
 	});
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The worker's transport settings have no window knobs, so a configured one is
+	/// refused at startup rather than left as a setting the operator believes is in
+	/// force. Each is named separately so the message points at the right line.
+	#[test]
+	fn windows_are_refused() {
+		let cases: [(&str, fn(&mut moq_tokio::quic::Config)); 3] = [
+			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
+			("quic.stream_receive_window", |quic| {
+				quic.stream_receive_window = Some(8 << 20)
+			}),
+			("quic.send_window", |quic| quic.send_window = Some(32 << 20)),
+		];
+
+		for (name, set) in cases {
+			let mut quic = moq_tokio::quic::Config::default();
+			set(&mut quic);
+
+			let err = transport(&quic.resolve()).expect_err("a window must be refused");
+			assert!(err.to_string().contains(name), "{err}");
+		}
+	}
+
+	/// Leaving the windows unset is the ordinary case and must still build.
+	#[test]
+	fn defaults_are_accepted() {
+		transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+	}
 }

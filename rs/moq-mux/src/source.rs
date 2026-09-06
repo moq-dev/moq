@@ -172,6 +172,20 @@ impl Source {
 		Ok(self.request(rel)?.await?)
 	}
 
+	/// Start one broadcast request now and retain its result for repeated reads.
+	///
+	/// Unlike [`resolve`](Self::resolve), this issues the request without awaiting or polling.
+	/// A remote or dynamic handler may answer later. The binding never retries a failed request
+	/// or resolves the path again after a publisher is replaced.
+	///
+	/// This always looks up the path, including for a self-reference. Use [`Binding::new`]
+	/// when the intended broadcast is already in hand.
+	///
+	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
+	pub fn bind(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<Binding> {
+		Ok(Binding(Bound::Requested(self.request(rel)?.into_inner())))
+	}
+
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
 	/// awaiting SUBSCRIBE_OK.
 	///
@@ -190,6 +204,39 @@ impl Source {
 	) -> crate::Result<moq_net::track::Subscriber> {
 		let broadcast = self.request(rel)?.await?;
 		Ok(broadcast.track(name)?.subscribe(None).await?)
+	}
+}
+
+/// A held broadcast or the retained result of one eagerly issued broadcast request.
+///
+/// Reading the binding never looks up its path again, even after a failure or publisher
+/// replacement. Pending requests follow the origin's routing semantics; issuing a request
+/// does not establish an epoch relationship with a separate catalog broadcast.
+///
+/// Build one with [`Source::bind`], or with [`Binding::new`] for a broadcast already in hand.
+pub struct Binding(Bound);
+
+enum Bound {
+	/// A broadcast the caller already holds.
+	Ready(moq_net::broadcast::Consumer),
+	/// A request issued when the binding was made.
+	Requested(moq_net::origin::Requesting),
+}
+
+impl Binding {
+	/// Bind to a broadcast already in hand, for a reference that named it.
+	pub fn new(broadcast: moq_net::broadcast::Consumer) -> Self {
+		Self(Bound::Ready(broadcast))
+	}
+
+	/// The bound broadcast, awaiting the origin's answer when it hasn't arrived yet.
+	///
+	/// Concurrent reads and cancelled waits retain the same request and result.
+	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
+		match &self.0 {
+			Bound::Ready(broadcast) => Ok(broadcast.clone()),
+			Bound::Requested(request) => Ok(kio::wait(|waiter| request.poll_ok(waiter)).await?),
+		}
 	}
 }
 
@@ -272,6 +319,44 @@ mod tests {
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}
+	}
+
+	#[tokio::test]
+	async fn binding_retains_a_pending_request_across_cancelled_and_repeated_reads() {
+		let origin = produce_origin();
+		let dynamic = origin.dynamic("", Default::default()).unwrap();
+		let source = Source::new(origin.consume(), "live");
+		let binding = source.bind(None).unwrap();
+		let request = dynamic.requested_broadcast().await.unwrap();
+
+		tokio::select! {
+			biased;
+			_ = binding.broadcast() => panic!("the handler has not answered"),
+			_ = std::future::ready(()) => {}
+		}
+
+		let producer = moq_net::broadcast::Info::default().produce();
+		let (first, second, ()) = tokio::join!(binding.broadcast(), binding.broadcast(), async {
+			request.accept(producer.consume());
+		});
+		let first = first.unwrap();
+		assert!(!first.is_closed());
+		assert!(first.is_clone(&second.unwrap()));
+		drop((producer, dynamic));
+		first.closed().await;
+		assert!(first.is_clone(&binding.broadcast().await.unwrap()));
+	}
+
+	#[tokio::test]
+	async fn failed_binding_does_not_retry_a_later_publisher() {
+		let origin = produce_origin();
+		let source = Source::new(origin.consume(), "live");
+		let binding = source.bind(None).unwrap();
+		assert!(binding.broadcast().await.is_err());
+		let _publisher = origin.create_broadcast("live").unwrap();
+		settle().await;
+		assert!(!source.broadcast().await.unwrap().is_closed());
+		assert!(binding.broadcast().await.is_err());
 	}
 
 	#[tokio::test]

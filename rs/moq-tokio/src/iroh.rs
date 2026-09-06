@@ -37,6 +37,10 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The supplied QUIC transport configuration is invalid.
+	#[error(transparent)]
+	Config(crate::Error),
+
 	/// Reading or writing the secret key file failed.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
@@ -179,8 +183,9 @@ impl EndpointConfig {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
-	/// discovery, congestion control); it has no keep-alive knob and cannot disable
-	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// discovery, congestion control, flow-control windows); it has no keep-alive
+	/// knob and cannot disable GSO, so `gso = false` fails with
+	/// [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -194,6 +199,7 @@ impl EndpointConfig {
 		if !deprecated.is_empty() {
 			return Err(Error::Deprecated(deprecated));
 		}
+		quic.validate().map_err(Error::Config)?;
 
 		let quic = quic.resolve();
 		if quic.gso_disabled() {
@@ -233,6 +239,17 @@ impl EndpointConfig {
 			.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
+		}
+		if let Some(window) = quic.receive_window {
+			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+			transport = transport.receive_window(window);
+		}
+		if let Some(window) = quic.stream_receive_window {
+			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+			transport = transport.stream_receive_window(window);
+		}
+		if let Some(window) = quic.send_window {
+			transport = transport.send_window(window);
 		}
 		transport = transport.congestion_controller_factory(congestion_factory(congestion_control(&quic)));
 
@@ -415,6 +432,39 @@ mod tests {
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
 		assert!(err.to_string().contains("--quic-gso / MOQ_QUIC_GSO"), "{err}");
+	}
+
+	#[tokio::test]
+	async fn bind_rejects_invalid_windows_before_reading_secret() {
+		let dir = tempfile::tempdir().unwrap();
+		for (name, value) in [
+			("receive_window", 0),
+			("stream_receive_window", 0),
+			("send_window", 0),
+			("receive_window", 1 << 62),
+			("stream_receive_window", u64::MAX),
+		] {
+			let mut quic = crate::quic::Config::default();
+			match name {
+				"receive_window" => quic.receive_window = Some(value),
+				"stream_receive_window" => quic.stream_receive_window = Some(value),
+				"send_window" => quic.send_window = Some(value),
+				_ => unreachable!(),
+			}
+			let config = EndpointConfig {
+				enabled: Some(true),
+				// Reading a directory fails if validation lets the invalid config through.
+				secret: Some(dir.path().to_str().unwrap().to_owned()),
+				..Default::default()
+			};
+			let Err(err) = config.bind(&quic).await else {
+				panic!("binding must reject {name} = {value}");
+			};
+			assert!(
+				matches!(&err, Error::Config(crate::Error::WindowRange(knob)) if *knob == name),
+				"{err}"
+			);
+		}
 	}
 
 	/// Build a controller from each family's factory and downcast it to the

@@ -53,11 +53,10 @@ and cached per prefix in `ServeState.served`. That is the split-horizon-safe
 lookup the old `origin::Dynamic` could not provide, and it is what
 [Resolve](/quest/m2/wildcard/resolve.md) now extends rather than replaces.
 
-Matching, by contrast, is prefix-only. The pattern matcher is not this
-questline's to build: path authorization adopts the same dialect first, and its
-[Matcher](/quest/m2/path-patterns/matcher.md) quest delivers the shared
-matching, containment, and rebasing that
-[Advertise](/quest/m2/wildcard/advertise.md) requires.
+Route matching, by contrast, is prefix-only. The pattern matcher itself
+exists: `moq_net::path` and `@moq/net`'s `Path` module own the shared
+matching, containment, specificity, and rebasing that
+[Advertise](/quest/m2/wildcard/advertise.md) builds on.
 
 What is genuinely missing, beyond patterns themselves, is content identity.
 Announcement `Epoch` was specified into lite-06 by
@@ -72,8 +71,8 @@ field.
 
 - **One pattern: the [path-patterns](/quest/m2/path-patterns/README.md)
   dialect.** An advertisement carries the same path pattern token rules use
-  (literal, `*`, or `lit*lit` segments, at most one `**`), matched by the same
-  shared matcher, so nothing resembles a second grammar. Exact set-valued
+  (literal, `*`, or `lit*lit` segments, at most one `**`),
+  matched by the same shared matcher, so nothing resembles a second grammar. Exact set-valued
   rebasing preserves every match inside a rooted view, including both the root
   and deeper residuals when `**` consumes zero or more segments.
 - **Most specific pattern wins, and its refusal is final.** This is the rule
@@ -112,9 +111,9 @@ field.
   specificity do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
   concrete announcement and with warm-advertise's exact-path warm routes. The
-  floor MUST exceed the maximum accumulated topology cost a bounded hop list
-  can reach (`MAX_HOPS` is 32 and the planned link costs are 1/3/5, so the
-  ceiling is 160), or a nearby standby outranks a distant running copy and the
+  floor MUST exceed the deployment's enforced maximum charged-link count
+  times its enforced maximum link cost (32 links at cost at most 5 gives
+  a bound of 160, with producing origins seeded at 0), or a nearby standby outranks a distant running copy and the
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
   carries today, and it is the same stride discipline
@@ -146,7 +145,8 @@ field.
   availability there.
 - **Refusal is a typed stream reset, with no negative cache.** An advertiser
   resets a subscribe it will not serve, and the reset carries which KIND of
-  refusal it is (`Error::to_code` already puts a typed code on the wire).
+  refusal it is (`Error::to_code` already puts a typed code on the wire; the
+  capacity code is NO_CAPACITY, 0x30, in moq-lite's own 48-63 range).
 
   A capacity refusal is unavoidable: an advertiser's capacity and a relay's view
   of it are separated by at least half a round trip, so a retraction and a
@@ -176,9 +176,19 @@ field.
   declare two workers' output interchangeable and splice between them; a service
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
-- **The spec home is moq-lite core, mirrored in moq-cluster**, following how
-  route cost landed. moq-lite-06 is still WIP, so this goes into it rather than
-  opening an 07.
+- **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
+  owns shared semantics and the moq-transport NAMESPACE_PATTERNS capability,
+  NAMESPACE_PATTERN parameter, and pattern withdrawal framing. moq-lite-06
+  carries ANNOUNCE_PATTERN (0x3) natively and references those semantics.
+  moq-cluster adds hop lists, costs, and pool selection when both extensions
+  are negotiated. Neither extension implies support for the other.
+- **A pattern travels as typed segments, not text.** Each wire segment is a
+  kind (0 literal, 1 wildcard, 2 globstar, 3 partial = prefix + suffix) plus a
+  length-prefixed value, so no glob syntax reaches the wire, an unknown kind
+  is skipped by its length and the advertisement ignored rather than the
+  stream killed, and a later revision can add kinds (multi-star segments,
+  regexes) without a new message. The `*` and `**` spellings exist only in
+  `moq_net::path` and `@moq/net`.
 
 ### Where derived output lives
 
@@ -242,8 +252,6 @@ than announce state.
 
 ## Quests
 
-- [Draft](/quest/m2/wildcard/draft.md) - specify the wildcard advertisement in
-  moq-lite and mirror it in the moq-cluster extension
 - [Advertise](/quest/m2/wildcard/advertise.md) - moq-net encodes, forwards, and
   authorizes wildcard advertisements, without yet resolving one into a
   subscription

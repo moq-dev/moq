@@ -9,7 +9,7 @@ cargo install --locked cargo-fuzz
 just rs fuzz lite
 ```
 
-The targets are `lite`, `ietf`, `varint`, and `path`. Extra arguments pass through to
+The targets are `lite`, `ietf`, `varint`, `path`, and `pattern`. Extra arguments pass through to
 libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
 
 ## How it fits together

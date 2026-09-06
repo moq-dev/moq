@@ -314,7 +314,9 @@ impl Producer {
 	/// whole catalog is skipped with a warning.
 	///
 	/// `upstream` carries the broadcast the snapshot was read from, so each rendition serves media
-	/// from that same broadcast rather than whatever is at the path by the time it is asked.
+	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
+	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
+	/// all, so it is dropped with a warning rather than served.
 	pub fn sync(&self, upstream: &Upstream, catalog: &Catalog) {
 		let Some(section) = catalog.timeline.clone() else {
 			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
@@ -326,28 +328,6 @@ impl Producer {
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
-		let mut catalog = catalog.clone();
-		catalog.video.renditions.retain(|name, config| {
-			let valid = upstream.source.resolve_reference(config.broadcast.as_ref()).is_some();
-			if !valid {
-				tracing::warn!(
-					rendition = name,
-					"ignoring video rendition whose broadcast escapes above the root"
-				);
-			}
-			valid
-		});
-		catalog.audio.renditions.retain(|name, config| {
-			let valid = upstream.source.resolve_reference(config.broadcast.as_ref()).is_some();
-			if !valid {
-				tracing::warn!(
-					rendition = name,
-					"ignoring audio rendition whose broadcast escapes above the root"
-				);
-			}
-			valid
-		});
-		let catalog = &catalog;
 
 		// Renditions the catalog dropped or reconfigured. Close each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -382,7 +362,13 @@ impl Producer {
 				rendition.refresh(video.bitrate);
 				continue;
 			}
-			let rendition = Arc::new(Rendition::video(name.clone(), video, upstream, section.clone()));
+			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone()) {
+				Ok(rendition) => Arc::new(rendition),
+				Err(err) => {
+					tracing::warn!(rendition = name, %err, "ignoring unservable video rendition");
+					continue;
+				}
+			};
 			self.register(&rendition);
 			current.insert(key, rendition);
 		}
@@ -392,7 +378,13 @@ impl Producer {
 				rendition.refresh(audio.bitrate);
 				continue;
 			}
-			let rendition = Arc::new(Rendition::audio(name.clone(), audio, upstream, section.clone()));
+			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone()) {
+				Ok(rendition) => Arc::new(rendition),
+				Err(err) => {
+					tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition");
+					continue;
+				}
+			};
 			self.register(&rendition);
 			current.insert(key, rendition);
 		}

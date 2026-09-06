@@ -25,8 +25,10 @@ struct ConnectTest<'a> {
 	/// The request path the server must observe, when the test cares.
 	expect_path: Option<&'a str>,
 	backend: moq_tokio::QuicBackend,
-	/// Capture qlog traces from both ends into this directory.
-	qlog: Option<&'a std::path::Path>,
+	/// The transport knobs both ends are built with.
+	quic: moq_tokio::quic::Config,
+	/// The single frame the publisher writes, which the subscriber must read back.
+	payload: &'a [u8],
 }
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
@@ -44,7 +46,8 @@ async fn backend_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "",
 		expect_path: Some(""),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -64,7 +67,8 @@ async fn path_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "/room?jwt=abc",
 		expect_path: Some("/room"),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -83,7 +87,8 @@ async fn no_sni_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 		path: "",
 		expect_path: Some(""),
 		backend,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -100,7 +105,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 		path,
 		expect_path,
 		backend,
-		qlog,
+		quic,
+		payload,
 	} = config;
 
 	// ── publisher (server) ──────────────────────────────────────────
@@ -113,7 +119,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -121,9 +127,6 @@ async fn connect_test(config: ConnectTest<'_>) {
 	server_config.bind = Some(bind.to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.qlog = qlog.map(Into::into);
-
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
@@ -136,8 +139,6 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backend = Some(backend);
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.qlog = qlog.map(Into::into);
 	// Bind the client to the same address family as the server so an IPv4 dial
 	// doesn't try to egress from an IPv6 socket (and vice versa).
 	client_config.bind = Some(client_bind.unwrap_or(bind).parse().expect("invalid bind address"));
@@ -203,7 +204,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("read_frame failed")
 		.expect("group closed prematurely");
 
-	assert_eq!(&frame.payload[..], b"hello");
+	assert_eq!(&frame.payload[..], payload);
 
 	drop(connection);
 	server_handle
@@ -628,7 +629,8 @@ async fn quiche_dual_stack_ipv4() {
 		path: "",
 		expect_path: None,
 		backend: moq_tokio::QuicBackend::Quiche,
-		qlog: None,
+		quic: Default::default(),
+		payload: b"hello",
 	})
 	.await;
 }
@@ -865,6 +867,9 @@ async fn noq_mtls() {
 async fn qlog_test(scheme: &str, backend: moq_tokio::QuicBackend) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.qlog = Some(dir.path().to_path_buf());
+
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
@@ -873,7 +878,8 @@ async fn qlog_test(scheme: &str, backend: moq_tokio::QuicBackend) -> Vec<std::pa
 		path: "",
 		expect_path: None,
 		backend,
-		qlog: Some(dir.path()),
+		quic,
+		payload: b"hello",
 	})
 	.await;
 
@@ -951,4 +957,74 @@ async fn connect_once(
 ) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
+}
+
+// ── flow control ────────────────────────────────────────────────────
+
+/// Run a connect with every flow-control window pinned well under the payload, so
+/// the frame only arrives if the receiver keeps issuing credit as it drains.
+///
+/// The size is the point: a frame that fits inside one window would pass whether or
+/// not the setting ever reached the backend.
+///
+/// `send_window` is a parameter because quiche has no local send cap and refuses one
+/// (see `quiche_refuses_send_window`), so only the backends that have it pass a size.
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn window_test(scheme: &str, backend: moq_tokio::QuicBackend, send_window: Option<u64>) {
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.receive_window = Some(64 * 1024);
+	quic.stream_receive_window = Some(16 * 1024);
+	quic.send_window = send_window;
+
+	let payload: Vec<u8> = (0..256 * 1024).map(|i| i as u8).collect();
+
+	connect_test(ConnectTest {
+		scheme,
+		bind: "[::]:0",
+		client_bind: None,
+		authority: "localhost",
+		path: "",
+		expect_path: Some(""),
+		backend,
+		quic,
+		payload: &payload,
+	})
+	.await;
+}
+
+#[cfg(feature = "quinn")]
+#[tokio::test]
+async fn quinn_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Quinn, Some(32 * 1024)).await;
+}
+
+#[cfg(feature = "noq")]
+#[tokio::test]
+async fn noq_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Noq, Some(32 * 1024)).await;
+}
+
+/// quiche takes the receive windows, so cover them over raw QUIC the same way.
+#[cfg(feature = "quiche")]
+#[tokio::test]
+async fn quiche_windows() {
+	window_test("moqt", moq_tokio::QuicBackend::Quiche, None).await;
+}
+
+/// The quiche backend refuses a send window rather than pretending to apply one, and
+/// it says so when the endpoint is built rather than at the first connection.
+#[cfg(feature = "quiche")]
+#[tokio::test]
+async fn quiche_refuses_send_window() {
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.send_window = Some(32 * 1024);
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.backend = Some(moq_tokio::QuicBackend::Quiche);
+
+	// `Client` is not `Debug`, so unwrap the error by pattern rather than `expect_err`.
+	let Err(err) = config.init(quic) else {
+		panic!("a send window must be refused");
+	};
+	assert!(err.to_string().contains("send window"), "{err}");
 }

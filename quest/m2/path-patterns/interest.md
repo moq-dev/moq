@@ -27,5 +27,4 @@ IETF over-request plus local-filter fallback.
 
 ## Required
 
-- [Matcher](/quest/m2/path-patterns/matcher.md)
 - [Origin scopes](/quest/m2/path-patterns/origin.md)

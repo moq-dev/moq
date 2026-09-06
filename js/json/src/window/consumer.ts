@@ -2,9 +2,10 @@ import * as Moq from "@moq/net";
 
 import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.ts";
 
-// Rust currently maps expired and evicted groups onto these reserved peer reset codes.
-const OLD = 0x22;
-const EVICTED = 0x23;
+// A group that ended early rather than failing: the next one restates the window, so a gap is
+// something to resync from. Old and Evicted are how the publisher says it dropped a group it was
+// still serving, which reads the same here.
+const GAPS: Moq.StreamCode[] = [Moq.StreamCode.TooFarBehind, Moq.StreamCode.Old, Moq.StreamCode.Evicted];
 
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.
@@ -62,13 +63,8 @@ export class Consumer<T> {
 			try {
 				frame = await this.#group.readFrame();
 			} catch (err) {
-				const lagged =
-					err instanceof Moq.Group.Lagged ||
-					(err instanceof Moq.StreamError &&
-						(err.code === Moq.StreamCode.TooFarBehind ||
-							Number(err.code) === OLD ||
-							Number(err.code) === EVICTED));
-				if (!lagged) throw err;
+				// A locally raised gap carries its code too, so this catches both sides.
+				if (!(err instanceof Moq.StreamError && GAPS.includes(err.code))) throw err;
 
 				// The next group starts with a checkpoint that accounts for everything missed.
 				this.#group = undefined;
