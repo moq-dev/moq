@@ -142,10 +142,11 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
 
 	// Finished here rather than in `live`, because the boundary is only known once
-	// every fetch has claimed its group. `finish` takes the live edge, which on a
-	// rung that only ever served fetches is sequence 0, and a group at or above
-	// the boundary is refused: finishing while a fetch was still opening its
-	// decoder would reject the very fetch retirement drained the loop to keep.
+	// every fetch has claimed its group. `finish` sets the exclusive boundary one
+	// past the highest group produced so far (0 when none was), and a group at or
+	// above it is refused. A fetch still opening its decoder has produced nothing
+	// to count, so finishing then would reject the very fetch retirement drained
+	// the loop to keep.
 	let result = match (live, fetches) {
 		(Ok(Ended::Open), Ok(())) => producer.finish().map_err(Into::into),
 		(live, fetches) => live.map(|_| ()).and(fetches),
@@ -438,9 +439,10 @@ async fn fetches(
 			spawn_fetch(&mut tasks, rung.clone(), request, permit);
 		}
 
-		// The track may already have declared its final sequence, but groups below
-		// that boundary remain writable. Finish every one the handler accepted, or
-		// its producer stays open and the fetch stalls forever.
+		// Finish every group the handler accepted, or its producer stays open and
+		// the fetch stalls forever. Nothing has declared the track's final sequence
+		// yet: `serve` does that only once this returns, which is what leaves
+		// every one of these groups writable.
 		while let Some(result) = tasks.join_next().await {
 			if let Err(err) = result {
 				tracing::warn!(%err, "transcode fetch task panicked");
