@@ -1,4 +1,5 @@
-//! Structural validation of the quest tree, whose contract is quest/CLAUDE.md.
+//! The quest tree, whose contract is quest/CLAUDE.md: structural validation of
+//! it, and whether a given quest can be started.
 //!
 //! The whole tree is validated on every run, never just the changed files: the
 //! link graph and the questline index are global, so completing one quest
@@ -7,6 +8,7 @@
 //! conflict at all.
 
 pub mod doc;
+pub mod ready;
 pub mod rules;
 
 use std::path::{Path, PathBuf};
@@ -14,6 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 pub use doc::Doc;
+pub use ready::Blocker;
 pub use rules::Finding;
 
 /// CLAUDE.md is the contract rather than a quest: not executable work, so
@@ -50,13 +53,14 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 /// Parse and validate the tree. Returns every finding, worst-case empty.
 pub fn check(root: &Path) -> Result<Vec<Finding>> {
+	Ok(rules::check(root, &load(root)?))
+}
+
+/// Every quest document, parsed, in tree order.
+fn load(root: &Path) -> Result<Vec<Doc>> {
 	let paths = collect(root)?;
 	if paths.is_empty() {
 		bail!("no quest documents found under {}", root.join("quest").display());
 	}
-	let docs = paths
-		.into_iter()
-		.map(|p| Doc::parse(root, p))
-		.collect::<Result<Vec<_>>>()?;
-	Ok(rules::check(root, &docs))
+	paths.into_iter().map(|p| Doc::parse(root, p)).collect()
 }

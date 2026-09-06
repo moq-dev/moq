@@ -133,7 +133,7 @@ fn headings(found: &mut Findings, doc: &Doc) {
 		_ => {}
 	}
 	for heading in &doc.headings {
-		if LIST_SECTIONS.contains(&heading.text.as_str()) && !doc.sections_with_entries.contains(&heading.text) {
+		if LIST_SECTIONS.contains(&heading.text.as_str()) && doc.entries(&heading.text).next().is_none() {
 			let why = match heading.text.as_str() {
 				"Required" => "; an empty one blocks the quest forever, so remove the heading with its last entry",
 				"Quests" => "; a questline with no quests left should be deleted",
@@ -154,7 +154,7 @@ fn without_fragment(target: &str) -> &str {
 /// A root-absolute target as a repository-relative path, or `None` if it is not
 /// root-absolute. Fragment-stripped AND normalized: the index and the cycle walk
 /// both key on this, and a `..` left in one of them is a node nothing matches.
-fn rooted(target: &str) -> Option<PathBuf> {
+pub(crate) fn rooted(target: &str) -> Option<PathBuf> {
 	target
 		.strip_prefix('/')
 		.map(|r| normalize(Path::new(without_fragment(r))))
@@ -169,7 +169,7 @@ fn resolve(doc_path: &Path, target: &str) -> PathBuf {
 
 /// Collapse `..` textually. `Path::canonicalize` would need the file to exist,
 /// which is the very thing being tested.
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
 	let mut out = PathBuf::new();
 	for part in path.components() {
 		match part {
