@@ -155,8 +155,18 @@ timeout = "30s"                      # Dial plus handshake. "0" waits forever.
 tls.root = ["ca.pem"]                # Trust these CAs (replaces system roots unless system_roots = true).
 tls.cert = "relay.pem"               # Present a client certificate (mTLS to peers and the auth API).
 tls.key = "relay.key"
-
+goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
+goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 ```
+
+A draining upstream may name a replacement URI. `same-host` follows it only
+onto the host we already dialed, so a peer moves us between ports and schemes;
+`follow` also lets it choose the host, which means trusting it not to point us
+into the local network, since a name it controls resolves wherever it likes;
+`ignore` keeps the current address list. Empty, malformed, or refused redirects
+also preserve caller-configured fallbacks; only an accepted redirect replaces
+the list with the peer's URI. `handover` is a cap: a shorter deadline on
+the received GOAWAY wins, a longer one does not extend it.
 
 ## \[cache]
 
