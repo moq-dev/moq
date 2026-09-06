@@ -17,6 +17,10 @@ it does not establish that every input adaptation-field flag reaches that signal
 - Trace TS import's adaptation-field handling and container boundary publication.
   Preserve a clock discontinuity at a media boundary without treating continuity
   counter loss or a normal 33-bit rollover as a program timebase reset.
+- Define how a shared forward boundary is identified across renditions. Local
+  consumer counters cannot distinguish one program break from independent gaps;
+  the exporter conservatively resets for each forward marker. Cover delayed peer
+  markers and mixed forward/backward classifications before coalescing them.
 - Test forward and backward changes, a flag on a PCR-only packet, normal rollover,
   independent rendition gaps, and reordered B-frames. Check clock flags and output
   timing, not only input flag parsing.

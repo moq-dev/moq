@@ -1900,12 +1900,12 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
 }
 
-/// Count the TS packets on `pid` across every frame.
+/// Count payload-bearing TS packets on `pid`, excluding its standalone clock packets.
 fn count_pid(frames: &[Frame], pid: u16) -> usize {
 	frames
 		.iter()
 		.flat_map(|f| f.payload.chunks_exact(188))
-		.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+		.filter(|p| p[3] & 0x10 != 0 && ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 		.count()
 }
 
@@ -1990,7 +1990,11 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 	producer.discontinuity().unwrap();
 	write(&mut producer, 2, 605_000_000);
 	let marked = drain_frames(&mut export).await;
-	let tail: Vec<_> = marked.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let tail: Vec<_> = before
+		.iter()
+		.chain(&marked)
+		.flat_map(|f| f.payload.iter().copied())
+		.collect();
 	let (_, audio_pts) = collect_pes_pts(&tail);
 	// The carried tail may precede the refreshed PMT, so inspect all PES starts.
 	let mut reader = TsPacketReader::new(Cursor::new(tail));
@@ -2227,24 +2231,35 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
 	// Both renditions carry the rewound span; audio is not held back by a tune-in
 	// anchor that belongs to the old timeline.
-	assert!(count_pid(&after, 0x1001) > 0, "video resumed");
-	assert!(count_pid(&after, 0x1002) > 0, "audio resumed");
 	let bytes: Vec<_> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
+	assert!(!video_pts.is_empty(), "video resumed");
+	assert!(!audio_pts.is_empty(), "audio resumed");
 	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut video_pid = None;
 	let mut video_frames = 0;
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
-		if packet.header.pid.as_u16() == 0x1001
-			&& let Some(TsPayload::PesStart(pes)) = packet.payload
-		{
-			let pts = pes.header.pts.unwrap().as_u64();
-			assert!(
-				pes.header.dts.is_none_or(|dts| dts.as_u64() <= pts),
-				"DTS retained the old epoch"
-			);
-			video_frames += 1;
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) => {
+				video_pid = pmt
+					.es_info
+					.iter()
+					.find(|es| es.stream_type == StreamType::H264)
+					.map(|es| es.elementary_pid.as_u16());
+			}
+			Some(TsPayload::PesStart(pes)) if Some(packet.header.pid.as_u16()) == video_pid => {
+				let pts = pes.header.pts.unwrap().as_u64();
+				assert!(
+					pes.header.dts.is_none_or(|dts| dts.as_u64() <= pts),
+					"DTS retained the old epoch"
+				);
+				video_frames += 1;
+			}
+			_ => {}
 		}
 	}
 	assert!(video_frames > 0);
+	let video_pid = video_pid.expect("video PID in PMT");
 
 	// Keep old video queued while the lower-count audio source rewinds again.
 	// It must start a new program epoch despite having the smaller counter.
@@ -2277,7 +2292,7 @@ async fn rewind_flags_the_break_once_across_tracks() {
 		again.iter().all(|f| f.timestamp.as_micros() < 2_000_000),
 		"stale video advanced the clock"
 	);
-	assert_eq!(count_pid(&again, 0x1001), 0, "old video was discarded");
+	assert_eq!(count_pid(&again, video_pid), 0, "old video was discarded");
 
 	// An unrelated old-timeline marker cannot admit the peer's stale clock.
 	video.discontinuity().unwrap();
@@ -2307,7 +2322,7 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	let joined = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), epoch + 2);
 	assert_eq!(count_discontinuity(&joined), 0);
-	assert!(count_pid(&joined, 0x1001) > 0, "video rejoined");
+	assert!(count_pid(&joined, video_pid) > 0, "video rejoined");
 	// A discarded span already had counters assigned. They must roll back to
 	// the last emitted bytes, so dropping the span introduces no packet loss.
 	let mut counters = std::collections::HashMap::new();
