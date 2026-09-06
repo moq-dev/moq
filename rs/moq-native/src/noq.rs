@@ -1,5 +1,6 @@
 //! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
+use crate::RedactedUrl;
 use crate::client::ClientConfig;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
@@ -314,7 +315,7 @@ impl NoqClient {
 				fingerprint.set_query(None);
 				fingerprint.set_fragment(None);
 
-				tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
+				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
@@ -349,7 +350,7 @@ impl NoqClient {
 		let mut config = noq::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, "connecting");
+		tracing::debug!(url = %RedactedUrl::new(&url), "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);

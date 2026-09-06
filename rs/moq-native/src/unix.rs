@@ -11,6 +11,8 @@ use std::{fs, io};
 
 use url::Url;
 
+use crate::RedactedUrl;
+
 /// The QMux wire-format version both ends speak. Fixed (not negotiated) since a
 /// raw stream has no TLS ALPN to carry it.
 const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
@@ -142,7 +144,7 @@ pub struct PeerCred {
 /// path: `unix:///run/moq/internal.sock`.
 pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
-	tracing::debug!(%url, "connecting via Unix socket");
+	tracing::debug!(url = %RedactedUrl::new(&url), "connecting via Unix socket");
 	qmux::uds::Config::new(WIRE_VERSION)
 		.protocols(protocols.iter().copied())
 		.connect(path)

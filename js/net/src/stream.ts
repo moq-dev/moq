@@ -204,10 +204,10 @@ export class Reader {
 			throw new Error("unexpected empty chunk");
 		}
 
-		const buffer = new Uint8Array(result.value);
+		const buffer = result.value;
 
 		if (this.#buffer.byteLength === 0) {
-			this.#buffer = buffer;
+			this.#buffer = new Uint8Array(buffer);
 		} else {
 			const temp = new Uint8Array(this.#buffer.byteLength + buffer.byteLength);
 			temp.set(this.#buffer);

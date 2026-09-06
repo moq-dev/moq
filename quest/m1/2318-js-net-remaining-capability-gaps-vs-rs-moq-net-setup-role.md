@@ -8,10 +8,10 @@ within the issue's stated scope and boundaries.
 ## Plan
 
 Rescoped during the 2026-08 grooming: SETUP role, frame naming, typed errors,
-and start/end cursors landed on dev. Two gaps survive: track end semantics
-(finishAt / finished(), still collapsed into close(abort?)), and the
-producer-side `announce(prefix)` a Rust publisher has and a browser one does
-not.
+and start/end cursors landed on dev. One gap survives here: track end
+semantics (finishAt / finished(), still collapsed into close(abort?)). The
+producer-side prefix serving a Rust publisher has and a browser one does not
+is [JS announce](/quest/m1/js-announce.md), not this quest.
 
 ### Issue context
 

@@ -11,6 +11,7 @@ import * as track from "./track.ts";
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
+	pending = new Set<track.Request>();
 	closed = new Once<Error | null>();
 	tracks = new Map<string, track.Producer>();
 	sequences = new Map<string, TrackSequence>();
@@ -34,8 +35,8 @@ function dequeueRequest(state: BroadcastState): track.Request | undefined {
 function closeState(state: BroadcastState, abort?: Error) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(abort ?? null);
+	for (const request of state.pending) request.reject(abort);
 	state.requested.mutate((requests) => {
-		for (const request of requests) request.reject(abort);
 		requests.length = 0;
 	});
 }
@@ -76,7 +77,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
 	});
 
 	return subscriber;
@@ -94,7 +95,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
 	});
 
 	try {

@@ -13,11 +13,11 @@ none of the machinery.
 
 ## Plan
 
-Both backends, not just the default: quiche compiles qlog support in
-unconditionally and quinn-proto has its own `qlog` feature, so
+Every backend, not just the default: noq-proto and quinn-proto have their own
+`qlog` feature and quiche compiles qlog support in unconditionally, so
 `--server-quic-qlog` must mean the same thing whether the relay was built with
-`io-uring` or `io-uring-quinn`. Drop the bail in `transport()` once both are
-wired.
+`io-uring` (noq), `io-uring-quinn`, or `io-uring-quiche`. Drop the bail in
+`transport()` once all three are wired.
 
 The open piece is where the bytes land. A pinned worker must not block on a
 file, so write through the ring if the adaptation is clean: the QUIC stacks

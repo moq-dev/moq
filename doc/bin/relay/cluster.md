@@ -1,143 +1,88 @@
 ---
 title: Clustering
-description: Run multiple moq-relay instances across multiple hosts/regions
+description: Connect relays across hosts and regions
 ---
 
 # Clustering
 
-Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
+Relays connect to each other and forward announcements and subscriptions. A
+viewer talks to the nearest relay; if the broadcast lives elsewhere, that relay
+pulls it from a peer and caches it, so the second viewer in a region costs no
+upstream bandwidth.
 
-A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one. When two paths are the same length, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
-
-Both wire protocols carry this. `moq-lite` has the hop list and route cost in its announcements natively; `moq-transport` gets them from the [MoQ Cluster extension](/draft/moq-cluster), negotiated per session on `moqt-17` and later. A peer that doesn't speak the extension still works, it just contributes no path or price of its own.
+Each broadcast carries the list of relays it passed through. That hop list
+catches loops and picks the shortest route, and every relay breaks ties the
+same way so the cluster converges instead of flapping. Both wire protocols
+carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
+on moq-transport 17+.
 
 ## Topology
 
-Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links. Each peer is a full URL (e.g. `https://us-east.example.com/`); a bare host or `host:port` is deprecated but still accepted, and is wrapped in `https://.../` with a warning.
-
-A simple chain works well when one region is the source and others are caches:
-
-```text
-eu-west  <---  us-east  <---  us-west
-```
+List the peers each relay dials. That's the whole topology.
 
 ```toml
-# us-east.toml
-[cluster]
-connect = ["https://eu-west.example.com/"]
-
 # us-west.toml
 [cluster]
 connect = ["https://us-east.example.com/"]
 ```
 
-A publisher on `eu-west` reaches a viewer on `us-west` through `us-east`. If a second `us-west` viewer subscribes to the same broadcast, `us-east` already has it cached, so only one fetch crosses the Atlantic. A full mesh (every relay dialing every other) would skip the cache entirely and waste an outbound link per pair.
-
-Pick the shape that matches your traffic. Linear chains are great for fanout; small N-way meshes are fine when latency matters more than dedup; mixed shapes work too.
+A chain (`eu-west <- us-east <- us-west`) dedupes fetches through the middle;
+a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 
 ## Link costs
 
-Hop counting treats every link the same, but links rarely cost the same: traffic between two relays in one datacenter is free, while a metered backbone bills per byte. Announcements carry a route cost so relays can route by price instead of distance, on `moq-lite-06` (still work-in-progress and opt-in via `--version`) and on `moqt-17` and later.
-
-Price a link by adding `?cost=N` to the peer URL:
+Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
+link costs 1. A relay already carrying a broadcast re-announces it at cost 0,
+so siblings pull the warm copy over the free intra-datacenter link instead of
+paying for a second metered fetch. Standby publishers (a transcoder pool) can
+advertise a high cost and drop it once they're working.
 
 ```toml
 [cluster]
-connect = [
-  "https://sibling.same-dc.example/?cost=0",
-  "https://us-east.example.com/?cost=10",
-]
+connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost=10"]
 ```
 
-`?cost=N` prices what *this* relay charges to pull a broadcast from that peer, so it steers this relay's own routing. It is also declared during setup, which tells the peer what pulling from us costs, so a link priced on one side alone still ranks the same from both. The param is consumed locally; it is never sent as part of the URL.
+## Discovery
 
-Price is per direction. Pulling from a metered origin can cost far more than pushing to it, so each end declares its own and the two need not match; a relay that receives a price it disagrees with keeps its own `?cost=` for its own routing. An unpriced direction costs 1, which reproduces plain hop counting.
-
-The cost a relay advertises is the *marginal* cost of pulling the broadcast through it. A relay actively carrying a broadcast (a subscriber is pulling it) re-announces it at cost 0: its upstream fetch is already paid for, so a sibling should pull the warm copy over a free intra-DC link instead of opening a second metered fetch. When the last subscriber leaves, the cost decays back after a short grace period. Standby publishers (e.g. a transcoder pool) can seed a large cost so they are only selected when nothing cheaper exists, and the winner's cost drops to 0 once it starts working.
-
-## Auto-discovery
-
-Listing every peer by hand can get tedious in larger clusters. Tell the relay its own URL with `cluster.node`, then enable gossip with `cluster.mesh`; connected peers will discover and dial it back automatically:
+Instead of listing every peer, tell each relay its own URL and turn on gossip.
+Connected relays learn about each other and dial back; between any two
+gossiping nodes, only the one with the smaller URL dials.
 
 ```toml
 [cluster]
 connect = ["https://us-east.example.com/"]
-node    = "us-west.example.com:4443"
-mesh    = true
+node = "https://us-west.example.com/"
+mesh = true
 ```
 
-`node` is this relay's identity (its externally-reachable URL); `mesh` is a boolean that turns gossip on. Each gossiping node creates a broadcast carrying its `node` address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow. Enabling `mesh` without `node` is an error, since there'd be no address to advertise.
-
-When two gossiping nodes discover each other, only one of them dials: the node with the lexicographically-smaller URL is the client, the larger is the server. The session is bidirectional, so a single connection carries announcements both ways and the pair avoids opening two redundant links. This tiebreaker applies only to gossip-discovered peers; an explicit `connect` entry always dials.
-
-A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
-
-## Origin id
-
-Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
-
-Set `cluster.id` to pin a stable id across restarts:
-
-```toml
-[cluster]
-id = 12345
-```
-
-The id must be non-zero and below 2^62 (the wire varint limit); an out-of-range value is an error at startup. Keep it below 2^53 if older `@moq/lite` browser clients connect to the cluster, since they decode hop ids as a `u53` and reject anything larger. Give each relay a distinct id, otherwise two nodes sharing one id can break loop detection.
+A relay with `node` and `mesh` but no `connect` is a passive rendezvous.
 
 ## Dynamic peer lists
 
-`cluster.connect` is fixed at startup, so adding or removing a node means editing every affected config and restarting. When you'd rather keep the topology somewhere external and change it without a redeploy, point `cluster.connect_api` at an HTTP(S) endpoint or a local file:
+Point `connect_api` at an HTTP(S) endpoint or local file returning a JSON
+array of peer URLs. The relay re-checks it (honoring `Cache-Control`, or
+watching the file) and reconciles: new peers are dialed, missing ones dropped,
+changed URLs redialed. A bad fetch keeps the last good list.
 
 ```toml
 [cluster]
-connect_api = "https://api.example.com/cluster/connect"
-node        = "us-west.example.com:4443"
+connect_api = "https://api.example.com/cluster/peers"
+node = "https://us-west.example.com/"
 ```
 
-The source returns a JSON array of peer URLs. Legacy bare hosts remain accepted:
+## Identity
 
-```json
-["https://eu-west.example.com/?cost=10", "us-east.example.com:4443"]
-```
-
-The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped, and a changed URL for a `connect_api`-owned peer replaces its session. That includes dial-side inputs such as `?cost=` and an inline `?jwt=`. An identical render is a no-op. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). If another source already owns a peer's session, the API entry remains its updated fallback until that source disappears. The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
-
-- **HTTP(S) URL**: re-checked every 30s, but freshness is delegated to a standard HTTP cache (`http-cache`), so the response's `Cache-Control` controls how often a check turns into a real fetch. While the cached list is still fresh (`max-age`), the re-check is served from cache with no network round-trip; once it's stale the cache issues a conditional GET (`ETag` / `Last-Modified`) and falls back to the last cached body if revalidation fails (stale-if-error). Set a longer `max-age` to reduce load on your endpoint, or `no-cache` to force a conditional GET on every tick. Transient endpoint blips don't churn the dial set.
-- **Local file** (a path or `file://` URL): watched via OS filesystem notifications (inotify / FSEvents / kqueue), with a periodic re-check as a safety net.
-
-If a fetch fails, an entry is invalid, or one identity has conflicting entries, the relay logs and keeps the entire last good list rather than applying a partial topology. This keeps the moq-relay binary generic: all routing decisions (which node connects where) live in whatever service answers the endpoint.
+Set `cluster.id` to a stable non-zero integer so a restarted relay keeps its
+place in hop lists instead of looking like a new node. Keep it below 2^53 if
+browser clients decode it.
 
 ## Authentication
 
-Cluster peers must authenticate to each other:
+Peers authenticate with **mTLS** (recommended: `server.tls.root` on the
+listener, `client.tls.cert`/`key` on the dialer) or a **JWT** (inline
+`?jwt=` on a peer URL, or a shared `cluster.token` file for gossip). Dials
+retry forever with capped backoff, so a rejected token is loud in the logs
+rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
-- **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
-- **JWT**. Supply a per-peer token inline as a `?jwt=` query parameter on a static or `connect_api` URL. Alternatively, set `cluster.token` to a file holding the shared JWT; it is presented on any dial whose URL has no inline token. Gossip must use the shared token or mTLS: never put a JWT in `cluster.node`, because that URL is advertised to the mesh and written to logs. Either way the token needs broad enough scope to cover whatever paths the cluster carries.
-
-See [Authentication](/bin/relay/auth) for the full setup.
-
-Peers are redialed indefinitely, with exponential backoff and jitter so a restarting cluster doesn't
-reconnect in lockstep. That includes a peer that rejects us: a bad token logs `cluster peer error;
-will retry` on every attempt rather than giving up, so watch for a peer that never reaches
-`cluster peer session closed`. The delay escalates to ten seconds at most, so a dead or rejecting
-peer stays loudly visible in the logs and a returning one is picked up within seconds.
-
-## Migration from older configs
-
-`cluster.root` was removed. To dial cluster peers use `cluster.connect`; to advertise this relay's own address set `cluster.node` and enable `cluster.mesh`. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).
-
-`cluster.connect` entries are now full URLs; a bare host or `host:port` still works but logs a deprecation warning. A per-peer JWT belongs inline as a `?jwt=` query parameter on a static or `connect_api` URL. The `cluster.token` file remains the shared fallback and is required for JWT-authenticated gossip; never put a JWT in the advertised `cluster.node` URL.
-
-| Old | New |
-|---|---|
-| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `node = "us-east:4443"` + `mesh = true` |
-| `root = "rendezvous:4443"` only | `node = "rendezvous:4443"` + `mesh = true` (passive rendezvous) |
-| `mesh = "us-east:4443"` | `node = "us-east:4443"` + `mesh = true` |
-| `connect = ["host:4443"]` + `token = "c.jwt"` | `connect = ["https://host/?jwt=<token>"]` |
-
-## Next steps
-
-- Review [Production deployment](/setup/prod)
-- Set up [Authentication](/bin/relay/auth)
-- Learn about [Protocol concepts](/concept/layer/)
+The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) shows the cluster
+as this relay sees it.

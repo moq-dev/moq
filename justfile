@@ -247,10 +247,16 @@ _tools $FILES="":
     # here to prevent.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
     scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
-    # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
-    # ffmpeg. Every platform: the plugin type-checks against headers, and the
-    # dev shell ships those even on Darwin, where obs-studio can't build.
-    scoped '^(cpp/obs/|rs/libmoq/)' && tools+=(clang-format gersemi pkg-config cargo)
+    # Two obs recipes with two dispatch scopes, so two lines: over-requiring
+    # would fail a diff that never runs the recipe. `just obs compile` needs
+    # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every
+    # platform: the plugin type-checks against headers, and the dev shell ships
+    # those even on Darwin, where obs-studio can't build.
+    scoped '^(cpp/obs/|rs/libmoq/|flake\.nix$)' && tools+=(pkg-config cargo)
+    # `just obs check` lints with clang-format and gersemi, validates the CMake
+    # release configuration, and compares the three OBS pins, one of which moves
+    # on a flake.lock bump alone.
+    scoped '^(cpp/obs/|flake\.(nix|lock)$)' && tools+=(clang-format gersemi cmake)
 
     # Scopes overlap (rs/moq-ffi/ is in five of them), so the same tool can land
     # in the list twice and be reported missing twice. Splitting on whitespace is
@@ -323,7 +329,10 @@ check $BASE="":
     	fi
     	# flake.nix is in scope because `just obs check` is what compares the OBS
     	# version pinned there against buildspec.json, and either side can move.
-    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.nix$)'; then
+        # flake.lock too, because the third OBS the guard compares is nixpkgs'
+        # obs-studio, the one `just obs ci` links: it moves on a lock bump alone,
+        # and that bump is the change that opens the gap.
+        if echo "$files" | grep -qE '^(cpp/obs/|flake\.(nix|lock)$)'; then
     		just obs check
     	fi
     	# Validates flake eval + dev shell build; it no longer compiles the
@@ -409,12 +418,124 @@ _shell $ACTION:
             ;;
     esac
 
+# remark-cli has no `--check`. `--frail` raises the exit code on lint messages,
+# and only `--output` formats, so a file that is merely misformatted passes both
+# ways. Format a scratch mirror and diff that, so the check stays read-only
+# while `fix` still writes in place.
+
+# Run Markdown lints over the worktree, either checking formatting or applying it.
+[private]
+_markdown $ACTION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$ACTION" in
+        check) ;;
+        fix)
+            bun remark . --quiet --output
+            exit 0
+            ;;
+        *)
+            echo "invalid markdown action: $ACTION" >&2
+            exit 2
+            ;;
+    esac
+
+    mirror=$(mktemp -d)
+    trap 'rm -rf "$mirror"' EXIT
+
+    extension_list=$(bun -e \
+        'import extensions from "markdown-extensions"; console.log(extensions.join("\n"))')
+    patterns=()
+    while IFS= read -r extension; do
+        [[ -n "$extension" ]] && patterns+=("*.$extension")
+    done <<< "$extension_list"
+    ((${#patterns[@]})) || {
+        echo "error: remark reported no Markdown extensions" >&2
+        exit 1
+    }
+
+    # Untracked files are in scope so a new doc is linted before it is staged;
+    # --exclude-standard keeps build output out.
+    files=()
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        files+=("$file")
+        mkdir -p "$mirror/$(dirname "$file")"
+        cp "$file" "$mirror/$file"
+    done < <(git ls-files -z --cached --others --exclude-standard -- "${patterns[@]}")
+    ((${#files[@]})) || exit 0
+
+    # The config rides along so every .remarkignore pattern resolves against the
+    # mirror root exactly as it does here, and node_modules is where the plugins
+    # named by .remarkrc.mjs come from.
+    cp .remarkrc.mjs .remarkignore "$mirror/"
+    ln -s "$PWD/node_modules" "$mirror/node_modules"
+
+    status=0
+    (cd "$mirror" && bun remark . --quiet --frail --output) || status=$?
+
+    stale=()
+    for file in "${files[@]}"; do
+        cmp -s "$file" "$mirror/$file" || stale+=("$file")
+    done
+
+    if ((${#stale[@]})); then
+        echo "error: these files are not formatted, run 'just fix':" >&2
+        printf '       %s\n' "${stale[@]}" >&2
+        status=1
+    fi
+
+    exit "$status"
+
+# Check Markdown formatting detection without touching the caller's worktree.
+[private]
+_markdown-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    fail() { echo "markdown: _markdown-test: $1" >&2; exit 1; }
+
+    repo=$PWD
+    fixture=$(mktemp -d)
+    trap 'rm -rf "$fixture"' EXIT
+
+    git -C "$fixture" init --quiet
+    cp .remarkrc.mjs .remarkignore "$fixture/"
+    ln -s "$repo/node_modules" "$fixture/node_modules"
+    for file in dirty.md dirty.markdown; do
+        printf '# dirty_heading\n' > "$fixture/$file"
+        git -C "$fixture" add "$file"
+    done
+
+    original='# dirty_heading'
+    if just --justfile "$repo/justfile" --working-directory "$fixture" \
+        _markdown check > "$fixture/check.log" 2>&1; then
+        fail "formatter-only drift must fail the check"
+    fi
+    for file in dirty.md dirty.markdown; do
+        [[ "$(<"$fixture/$file")" == "$original" ]] \
+            || fail "the check modified $file"
+        grep -q "$file" "$fixture/check.log" \
+            || fail "the check did not name $file"
+    done
+
+    just --justfile "$repo/justfile" --working-directory "$fixture" _markdown fix
+    for file in dirty.md dirty.markdown; do
+        [[ "$(<"$fixture/$file")" == '# dirty\_heading' ]] \
+            || fail "the fix did not format $file"
+    done
+    just --justfile "$repo/justfile" --working-directory "$fixture" _markdown check
+
+    echo "markdown: check/fix regression ok"
+
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
     just _changed-test
     bun install --frozen-lockfile
-    bun remark . --quiet --frail
+    just _markdown-test
+    just _markdown check
     just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
@@ -467,7 +588,7 @@ fix-all:
 [private]
 _fix-common:
     bun install
-    bun remark . --quiet --output
+    just _markdown fix
     just _shell fix
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi

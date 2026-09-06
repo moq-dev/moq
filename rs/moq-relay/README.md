@@ -20,7 +20,7 @@ sudo apt update && sudo apt install moq-relay
 
 The package drops a `moq-relay.service` systemd unit and an
 `/etc/moq-relay/relay.toml` config file. See
-[Linux Installation](https://doc.moq.dev/setup/linux) for the full
+[Linux Installation](https://doc.moq.dev/setup/install) for the full
 walkthrough.
 
 ### Fedora / RHEL / Rocky / AlmaLinux
@@ -72,7 +72,7 @@ See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/
 The relay supports JWT-based authentication and authorization with path-based access control.
 
 For detailed authentication setup, including token generation and configuration examples, see:
-**[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/app/relay/auth.md)**
+**[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/auth.md)**
 
 Key features:
 

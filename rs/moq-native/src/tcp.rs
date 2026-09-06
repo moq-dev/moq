@@ -11,6 +11,8 @@
 use std::net;
 use url::Url;
 
+use crate::RedactedUrl;
+
 /// The QMux wire-format version both ends speak over a raw stream. Fixed (not
 /// negotiated) since there's no TLS ALPN to carry it.
 const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
@@ -104,7 +106,7 @@ pub(crate) async fn connect(
 	let host = url.host().ok_or(Error::MissingHostname)?;
 	let port = url.port().ok_or(Error::MissingPort)?;
 
-	tracing::debug!(%url, "connecting via TCP");
+	tracing::debug!(url = %RedactedUrl::new(&url), "connecting via TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
 	connect_addrs(candidates, protocols, failover_delay).await
 }

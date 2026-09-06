@@ -11,7 +11,11 @@ Every item here is blocked on a physical machine rather than on code, which is
 why they sit together and why they sit in m3.
 
 - **VAAPI encode on an Intel or AMD box**: low-power against full entrypoint,
-  the NV12 upload round trip, and `cargo deny` license resolution.
+  the NV12 upload round trip, and `cargo deny` license resolution. The
+  backend's own comment says NOT YET VALIDATED ON HARDWARE even though the
+  `vaapi` feature is on by default (moq-vaapi dlopens libva), so this run
+  either clears that comment or records what still blocks it. It covers the
+  Intel-based ground robots and NUC companions the teleoperation line needs.
 - **VAAPI zero-copy dmabuf input**: the backend uses an NV12 surface upload
   today. Exercise the `Surface::DmaBuf` path with a V4L2 `VIDIOC_EXPBUF`
   source instead.

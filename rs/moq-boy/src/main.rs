@@ -227,7 +227,7 @@ async fn run(config: &Config) -> Result<()> {
 		.consume()
 		.announced();
 
-	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(url = %moq_native::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publisher(&publish_origin)

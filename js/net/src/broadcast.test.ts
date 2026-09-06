@@ -105,25 +105,19 @@ test("concurrent dynamic producers share a sequence namespace", async () => {
 	broadcast.close();
 });
 
-test("closing a broadcast preserves dequeued request sequences", async () => {
+test("closing a broadcast rejects a dequeued request", async () => {
 	const broadcast = new BroadcastProducer();
-	const firstSubscriber = broadcast.subscribe("media");
-	const firstRequest = await broadcast.requested();
-	if (!firstRequest) throw new Error("expected first request");
-	const firstProducer = firstRequest.accept();
-	expect(firstProducer.appendGroup().sequence).toBe(0);
-
-	const secondSubscriber = broadcast.subscribe("media");
-	const secondRequest = await broadcast.requested();
-	if (!secondRequest) throw new Error("expected second request");
+	const subscriber = broadcast.subscribe("media");
+	const request = await broadcast.requested();
+	if (!request) throw new Error("expected request");
 	broadcast.close();
-	const secondProducer = secondRequest.accept();
-	expect(secondProducer.appendGroup().sequence).toBe(1);
+	await expect(subscriber.info()).rejects.toThrow("track closed before info was known");
 
-	firstSubscriber.close();
-	secondSubscriber.close();
-	firstProducer.close();
-	secondProducer.close();
+	const producer = request.accept();
+	expect(() => producer.appendGroup()).toThrow("track is closed");
+	await expect(subscriber.info()).rejects.toThrow("track closed before info was known");
+	subscriber.close();
+	producer.close();
 });
 
 test("a request exposes the aggregate subscription options", async () => {

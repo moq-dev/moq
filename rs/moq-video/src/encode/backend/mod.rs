@@ -10,7 +10,7 @@
 //! Output is stamped with the timestamp of the frame it was encoded from, not
 //! whichever frame happened to be going in. A backend that flushes each frame
 //! before returning just echoes the input timestamp; one that buffers (Media
-//! Foundation) correlates through the codec's own sample clock.
+//! Foundation, MediaCodec) correlates through the codec's own sample clock.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
@@ -32,8 +32,14 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+mod mediacodec;
+
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvenc;
+
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+mod v4l2;
 
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 mod vaapi;
@@ -99,6 +105,12 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
+	#[cfg(all(target_os = "android", feature = "mediacodec"))]
+	Candidate {
+		name: mediacodec::NAME,
+		codecs: &[Codec::H264, Codec::H265],
+		open: mediacodec::MediaCodec::open,
+	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvenc::NAME,
@@ -110,6 +122,15 @@ const HARDWARE: &[Candidate] = &[
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],
 		open: vaapi::Vaapi::open,
+	},
+	// Last of the Linux hardware encoders: the SoC blocks it drives are the only
+	// hardware on a board that has neither an NVIDIA GPU nor a VAAPI stack, so it
+	// is never the one being chosen over a faster peer.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	Candidate {
+		name: v4l2::NAME,
+		codecs: &[Codec::H264],
+		open: v4l2::V4l2::open,
 	},
 ];
 

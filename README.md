@@ -21,15 +21,15 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 - 🎯 **Multi-language** with both Rust (native) and TypeScript (web) libraries.
 - 🔧 **Generic** for any live data, not just media. Includes text chat as both an example and a core feature.
 
-> **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
+> **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
 
 ## Getting Started
 
 Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 
-- **[Run the demo](https://doc.moq.dev/setup/demo/web)** - try MoQ locally with a relay, demo media, and the web UI.
+- **[Run the demo](https://doc.moq.dev/setup/)** - try MoQ locally with a relay, demo media, and the web UI.
 - **[Agent setup](https://doc.moq.dev/setup/agent)** - teach your AI coding agent (Claude Code, Cursor, etc.) how to build with MoQ.
-- **[Linux packages](https://doc.moq.dev/setup/linux)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
+- **[Linux packages](https://doc.moq.dev/setup/install)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
 - **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
 
 The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://nixos.wiki/wiki/Flakes)):
@@ -39,7 +39,7 @@ The quickest way to see it in action (requires [Nix](https://nixos.org/download.
 nix develop -c just
 ```
 
-Then visit <https://localhost:8080>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/demo/web) for manual setup.
+Then visit <https://localhost:8080>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
 
 ## Architecture
 
@@ -102,7 +102,6 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 | **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
 | **[@moq/watch](js/watch)**         | Subscribe to and render MoQ broadcasts (Web Component + JS API).                                                        | [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)     |
 | **[@moq/publish](js/publish)**     | Publish media to MoQ broadcasts (Web Component + JS API).                                                               | [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish) |
-| **[@moq/ui-core](js/ui-core)**     | Shared UI components (Button, Icon, Stats, CSS theme) used by `@moq/watch/ui` and `@moq/publish/ui`.                    | [![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core) |
 
 ## Protocol
 

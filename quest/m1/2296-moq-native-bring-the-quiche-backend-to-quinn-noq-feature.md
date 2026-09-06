@@ -107,6 +107,10 @@ Likely upstream `web-transport-quiche` / `tokio-quiche` / `quiche` work, or a lo
 - \#686 tracks congestion control/BBR, where quinn and noq do not currently behave the same.
 - \#679 tracks multi-threaded UDP receive scaling, which is a reason to use quiche rather than a parity gap.
 
+## Required
+
+- [noq parity gate](/quest/m2/quic/noq-parity.md) - decides whether quiche stays a supported backend; if it is retired this quest is abandoned with the verdict
+
 ## Closes
 
 - [#2296](https://github.com/moq-dev/moq/issues/2296) - close this issue when the quest finishes
