@@ -402,3 +402,37 @@ test("pattern instances cannot replace their validated representation", () => {
 	expect(union.matches("evil")).toBe(false);
 	expect(union.toJSON()).toEqual(["safe"]);
 });
+
+test("untyped segment records must satisfy the grammar", () => {
+	for (const text of [
+		'[{"kind":"bogus"}]',
+		"[{}]",
+		"[null]",
+		'[{"kind":"literal","value":7}]',
+		'[{"kind":"literal","value":null}]',
+		'[{"kind":"partial","prefix":7,"suffix":"a"}]',
+		'[{"kind":"partial","prefix":"a"}]',
+	]) {
+		expect(
+			errorCode(() => Pattern.from(JSON.parse(text))),
+			text,
+		).toBe("invalid-segment");
+	}
+});
+
+test("structurally typed segments snapshot inherited getters", () => {
+	let value = "safe";
+	class Literal {
+		get kind(): "literal" {
+			return "literal";
+		}
+		get value(): string {
+			return value;
+		}
+	}
+	const pattern = Pattern.from([new Literal()]);
+	value = "evil";
+	expect(pattern.text).toBe("safe");
+	expect(pattern.matches("safe")).toBe(true);
+	expect(pattern.matches("evil")).toBe(false);
+});

@@ -330,7 +330,7 @@ export type Segment =
 export type ErrorCode =
 	/** A segment is empty: a leading, trailing, or doubled `/`. */
 	| "empty-segment"
-	/** A literal, prefix, or suffix contains `/` or `*`, a partial has neither, or a segment has more than one `*` (reserved). */
+	/** A segment's kind, fields, or wildcard syntax is invalid. */
 	| "invalid-segment"
 	/** More than one `**`. */
 	| "multiple-globstars"
@@ -418,6 +418,22 @@ function segmentText(segment: Segment): string {
 			return `${segment.prefix}*${segment.suffix}`;
 		case "globstar":
 			return "**";
+	}
+}
+
+function freezeSegment(segment: Segment): Segment {
+	// Copy fields explicitly so structurally typed objects may use inherited getters.
+	switch (segment?.kind) {
+		case "literal":
+			return Object.freeze({ kind: "literal", value: segment.value });
+		case "partial":
+			return Object.freeze({ kind: "partial", prefix: segment.prefix, suffix: segment.suffix });
+		case "wildcard":
+			return Object.freeze({ kind: "wildcard" });
+		case "globstar":
+			return Object.freeze({ kind: "globstar" });
+		default:
+			throw new PatternError("invalid-segment", "unknown pattern segment kind");
 	}
 }
 
@@ -520,19 +536,25 @@ export class Pattern {
 	readonly #head: number;
 
 	private constructor(segments: readonly Segment[]) {
-		const owned = segments.map((segment) => Object.freeze({ ...segment }));
-		segments = owned;
 		if (segments.length > Pattern.MAX_SEGMENTS) {
 			throw new PatternError("too-many-segments", `more than ${Pattern.MAX_SEGMENTS} segments`);
 		}
+		const owned = segments.map(freezeSegment);
+		segments = owned;
 
 		let globstar: number | undefined;
 		for (const [i, segment] of segments.entries()) {
 			if (segment.kind === "literal") {
+				if (typeof segment.value !== "string") {
+					throw new PatternError("invalid-segment", "literal value must be a string");
+				}
 				if (segment.value === "") throw new PatternError("empty-segment", "empty path segment");
 				if (segment.value.includes("*") || segment.value.includes("/")) throw invalidSegment(segment.value);
 			} else if (segment.kind === "partial") {
 				const { prefix, suffix } = segment;
+				if (typeof prefix !== "string" || typeof suffix !== "string") {
+					throw new PatternError("invalid-segment", "partial prefix and suffix must be strings");
+				}
 				if ((prefix === "" && suffix === "") || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
 					throw invalidSegment(`${prefix}*${suffix}`);
 				}

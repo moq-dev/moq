@@ -25,4 +25,3 @@ exact v1 wire shape:
 - Add Rust/TypeScript signing, verification, authorization, scope, and
   cross-version interoperability vectors, including old-reader fail-closed
   behavior.
-
