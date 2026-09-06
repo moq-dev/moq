@@ -461,13 +461,13 @@ io_uring = false
 [web]
 ws = false
 
-[connect.websocket]
-enabled = false
 "#;
+		#[cfg(feature = "websocket")]
+		let toml = format!("{toml}\n[connect.websocket]\nenabled = false\n");
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("runtime-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
+		std::fs::write(&path, &toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
@@ -490,6 +490,7 @@ enabled = false
 			Some(false),
 			"TOML's web.ws=false must survive the CLI re-parse"
 		);
+		#[cfg(feature = "websocket")]
 		assert_eq!(
 			config.connect.websocket.enabled,
 			Some(false),
@@ -501,11 +502,13 @@ enabled = false
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--runtime-pin=true"),
 			std::ffi::OsString::from("--web-ws=true"),
+			#[cfg(feature = "websocket")]
 			std::ffi::OsString::from("--connect-websocket-enabled=true"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.runtime.pin, Some(true));
 		assert_eq!(config.web.ws, Some(true));
+		#[cfg(feature = "websocket")]
 		assert_eq!(config.connect.websocket.enabled, Some(true));
 	}
 

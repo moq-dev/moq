@@ -103,6 +103,7 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 rcgen = "0.14"
 tempfile = { workspace = true }
 wiremock = "0.6"
