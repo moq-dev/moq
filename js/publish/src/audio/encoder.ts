@@ -13,6 +13,8 @@ import { sourceKind } from "./types";
 
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION = Time.Milli(20);
+// The only frame durations libopus (and so WebCodecs) will encode, in ms.
+const OPUS_FRAME_DURATIONS = [2.5, 5, 10, 20, 40, 60];
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 
@@ -43,7 +45,8 @@ export type OpusConfig = {
 	mime: "opus";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
-	// The type carries the unit (ms): build with Time.Milli(20). Opus supports 2.5-60ms, defaults to 20ms.
+	// The type carries the unit (ms): build with Time.Milli(20). Opus takes exactly 2.5, 5, 10, 20,
+	// 40, or 60 ms, and defaults to 20.
 	frameDuration?: Time.Milli;
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
@@ -133,9 +136,9 @@ export class Encoder {
 		return this.in.capture.peek();
 	}
 
-	// The catalog fields known before encoding starts. Opus adds its decoder description from the
+	// The encode settings known before encoding starts. Opus adds its decoder description from the
 	// first encoder output without feeding that catalog-only update back into the encoder.
-	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
+	#config = new Signal<Resolved | undefined>(undefined);
 	#decoderDescription = new Signal<{ config: Catalog.AudioConfig; description: Catalog.Hex } | undefined>(undefined);
 
 	readonly #out: EncoderOutput = {
@@ -248,41 +251,6 @@ export class Encoder {
 		});
 	}
 
-	#createConfig(captured: Format, codec: OpusConfig | AacConfig): Catalog.AudioConfig {
-		// The catalog has to describe what the encoder emits, not what we feed it. A capture graph
-		// already runs at a rate the codec supports, since Capture picks the AudioContext rate.
-		// Decoded samples arrive at whatever rate the file was authored at, which Opus may not be
-		// able to carry, so snap to one it can and let #encode resample into it.
-		const rate = pickSampleRate(codec.mime, captured.sampleRate) ?? captured.sampleRate;
-
-		const sampleRate = Catalog.u53(rate);
-		const numberOfChannels = Catalog.u53(captured.channelCount);
-
-		if (codec.mime === "aac") {
-			return {
-				codec: AAC_CODEC,
-				sampleRate,
-				numberOfChannels,
-				bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * AAC_BITRATE_PER_CHANNEL),
-				container: { kind: "legacy" } as const,
-				// Frames are raw (no ADTS header), so the decoder needs the AudioSpecificConfig to init.
-				description: Util.Hex.fromBytes(Util.Aac.audioSpecificConfig(rate, captured.channelCount)),
-				// Each AAC-LC frame is 1024 samples; report that duration as the jitter hint.
-				jitter: Catalog.u53(Math.ceil((AAC_FRAME_SAMPLES / rate) * 1000)),
-			};
-		}
-
-		return {
-			codec: "opus",
-			sampleRate,
-			numberOfChannels,
-			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
-			container: { kind: "legacy" } as const,
-			// jitter doubles as the Opus frame duration; toEncoderConfig converts it to µs for WebCodecs.
-			jitter: Catalog.u53(codec.frameDuration ?? OPUS_FRAME_DURATION),
-		};
-	}
-
 	// Derive the encoder config from the captured format and the codec. Re-runs whenever either changes, so a
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	//
@@ -296,14 +264,13 @@ export class Encoder {
 			return;
 		}
 
-		const codec = normalizeCodec(effect.get(this.codec));
-		effect.set(this.#config, this.#createConfig(captured, codec));
+		effect.set(this.#config, resolve(captured, effect.get(this.codec)));
 	}
 
 	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
 	// starts, republish Opus with the exact decoder description reported for that encoder config.
 	#runCatalog(effect: Effect): void {
-		const config = effect.get(this.#config);
+		const config = effect.get(this.#config)?.catalog;
 		if (!config) {
 			effect.set(this.#out.catalog, undefined);
 			return;
@@ -337,13 +304,14 @@ export class Encoder {
 			await Util.Libav.polyfill();
 
 			effect.run((effect: Effect) => {
-				const config = effect.get(this.#config);
-				if (!config) return;
+				const resolved = effect.get(this.#config);
+				if (!resolved) return;
+				const config = resolved.catalog;
 
 				const capture = effect.get(this.in.capture);
 				const source = capture ? effect.get(capture.in.source) : undefined;
 				const kind: Kind = source ? sourceKind(source) : "auto";
-				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
+				const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
 
 				// WebCodecs rejects input whose rate doesn't match the encoder config outright, so
 				// anything arriving at a rate the codec can't carry (a 44.1kHz file as Opus) has to
@@ -358,7 +326,7 @@ export class Encoder {
 								channels: config.numberOfChannels,
 							});
 
-				const framer = createFramer(config, config.sampleRate);
+				const framer = createFramer(resolved, config.sampleRate);
 
 				const encoder = new AudioEncoder({
 					output: (frame, metadata) => {
@@ -451,10 +419,82 @@ export class Encoder {
 	}
 }
 
+/**
+ * The encode settings a {@link Codec} resolves to against a captured PCM format.
+ *
+ * The catalog is a decoder hint carrying whole milliseconds, so it can only round a frame duration.
+ * {@link frameDuration} keeps the exact value the encoder is configured with, which is what lets
+ * Opus run at 2.5 ms.
+ */
+type Resolved = {
+	/** The rendition config published in the catalog. */
+	catalog: Catalog.AudioConfig;
+
+	/** The exact encoded frame duration, or undefined for a codec whose frame is a fixed sample count. */
+	frameDuration?: Time.Micro;
+};
+
+/**
+ * Resolve a {@link Codec} against the captured PCM format, giving what the encoder will run with
+ * and the catalog rendition published alongside it.
+ * @internal
+ */
+export function resolve(captured: Format, selected: Codec): Resolved {
+	const codec = normalizeCodec(selected);
+
+	// The catalog has to describe what the encoder emits, not what we feed it. A capture graph
+	// already runs at a rate the codec supports, since Capture picks the AudioContext rate.
+	// Decoded samples arrive at whatever rate the file was authored at, which Opus may not be
+	// able to carry, so snap to one it can and let #encode resample into it.
+	const rate = pickSampleRate(codec.mime, captured.sampleRate) ?? captured.sampleRate;
+
+	const sampleRate = Catalog.u53(rate);
+	const numberOfChannels = Catalog.u53(captured.channelCount);
+
+	if (codec.mime === "aac") {
+		return {
+			catalog: {
+				codec: AAC_CODEC,
+				sampleRate,
+				numberOfChannels,
+				bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * AAC_BITRATE_PER_CHANNEL),
+				container: { kind: "legacy" } as const,
+				// Frames are raw (no ADTS header), so the decoder needs the AudioSpecificConfig to init.
+				description: Util.Hex.fromBytes(Util.Aac.audioSpecificConfig(rate, captured.channelCount)),
+				// Each AAC-LC frame is 1024 samples; report that duration as the jitter hint.
+				jitter: Catalog.u53(Math.ceil((AAC_FRAME_SAMPLES / rate) * 1000)),
+			},
+		};
+	}
+
+	const frameDuration = codec.frameDuration ?? OPUS_FRAME_DURATION;
+	// Check here rather than letting AudioEncoder.configure throw: by then the rendition has been
+	// advertised and requested, so the failure surfaces to a subscriber instead of the caller.
+	if (!OPUS_FRAME_DURATIONS.includes(frameDuration)) {
+		throw new Error(`opus frame duration must be ${OPUS_FRAME_DURATIONS.join("/")} ms: ${frameDuration}`);
+	}
+
+	return {
+		catalog: {
+			codec: "opus",
+			sampleRate,
+			numberOfChannels,
+			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
+			container: { kind: "legacy" } as const,
+			// jitter is an integer upper bound on how long a decoder waits for the next frame, so a
+			// 2.5ms Opus frame rounds up to 3 rather than down. The encoder uses the exact value.
+			jitter: Catalog.u53(Math.ceil(frameDuration)),
+		},
+		frameDuration: Time.Micro.fromMilli(frameDuration),
+	};
+}
+
 // Build the framer for a config, given the rate the PCM actually arrives at. That's the catalog rate
 // for a capture graph, but a decoded file can arrive at a rate the codec doesn't carry (44100 for
 // Opus), and the framer has to count the samples we're handed rather than the ones the encoder emits.
-function createFramer(config: Catalog.AudioConfig, sampleRate: number): Framer {
+function createFramer(resolved: Resolved, sampleRate: number): Framer {
+	const config = resolved.catalog;
+
 	// WebCodecs copies input AudioData timestamps to encoded chunks. Align those inputs to codec frames
 	// because the worklet's 128-sample quanta usually do not align with Opus frame boundaries.
 	if (config.codec.startsWith("mp4a")) {
@@ -466,11 +506,10 @@ function createFramer(config: Catalog.AudioConfig, sampleRate: number): Framer {
 	}
 
 	if (config.codec !== "opus") throw new Error(`unsupported audio codec: ${config.codec}`);
-	const duration = Time.Micro.fromMilli(Time.Milli(config.jitter ?? OPUS_FRAME_DURATION));
 	return new Framer({
 		sampleRate,
 		channels: config.numberOfChannels,
-		size: { duration },
+		size: { duration: resolved.frameDuration ?? Time.Micro.fromMilli(OPUS_FRAME_DURATION) },
 	});
 }
 
@@ -507,11 +546,8 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
-function toEncoderConfig(
-	config: Catalog.AudioConfig,
-	kind: Kind,
-	opusOptions: OpusEncoderConfigExt,
-): AudioEncoderConfig {
+function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
+	const config = resolved.catalog;
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
 		sampleRate: config.sampleRate,
@@ -530,9 +566,10 @@ function toEncoderConfig(
 		// already dropped upstream, so the spread only overrides what the caller actually set).
 		const opus: OpusEncoderConfigExt = { ...opusKindDefaults(kind), ...opusOptions };
 
-		// jitter carries the frame duration in ms; WebCodecs wants µs.
-		if (config.jitter !== undefined) {
-			opus.frameDuration = Time.Micro.fromMilli(Time.Milli(config.jitter));
+		// The exact duration, not the catalog's rounded jitter hint: WebCodecs rejects anything but
+		// 2.5/5/10/20/40/60 ms, so 2.5 has to arrive as 2500 µs rather than 3000.
+		if (resolved.frameDuration !== undefined) {
+			opus.frameDuration = resolved.frameDuration;
 		}
 
 		if (Object.keys(opus).length > 0) {
