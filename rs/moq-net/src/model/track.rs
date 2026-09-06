@@ -1072,6 +1072,18 @@ impl TrackState {
 	}
 }
 
+/// Record `err` and close the track: the shared tail of [`Producer::abort`] and
+/// [`Producer::abort_unused`].
+fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
+	// Snapshot the frame boundary before the cache it's derived from goes away: an
+	// abort is exactly when a replacement route asks where to resume.
+	state.resume = state.resume_position();
+	state.abort = Some(err);
+	state.clear_cache();
+	state.datagrams.clear();
+	state.close();
+}
+
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct Producer {
@@ -1341,15 +1353,41 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
-		let mut guard = self.modify()?;
-		// Snapshot the frame boundary before the cache it's derived from goes away: an
-		// abort is exactly when a replacement route asks where to resume.
-		guard.resume = guard.resume_position();
-		guard.abort = Some(err);
-		guard.clear_cache();
-		guard.datagrams.clear();
-		guard.close();
+		commit_abort(self.modify()?, err);
 		Ok(())
+	}
+
+	/// Abort an unused track, returning the producer unchanged if consumers remain.
+	///
+	/// Consumer creation and the unused check share a lock, so demand returning
+	/// after [`poll_unused`](Self::poll_unused) prevents the abort. `Ok(())` means
+	/// the track is closed, including when it was already closed; existing handles
+	/// may still observe its final state. `Err(producer)` leaves the track unchanged
+	/// so the caller can continue serving and wait for the next unused wake.
+	#[expect(
+		clippy::result_large_err,
+		reason = "return the owned producer without allocating on an idle check"
+	)]
+	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
+		match self.state.write_unused() {
+			kio::Unused::Idle(guard) => {
+				commit_abort(guard, err);
+				return Ok(());
+			}
+			kio::Unused::Closed => return Ok(()),
+			kio::Unused::Used => {}
+		}
+		Err(self)
+	}
+
+	/// Whether the track is open and anyone is consuming it right now.
+	///
+	/// A point-in-time snapshot for gating work on demand (on-demand capture,
+	/// dropping cached state nobody is watching). Acting on it to *end* the track
+	/// is the race [`abort_unused`](Self::abort_unused) exists for; use
+	/// [`unused`](Self::unused) to wait for the edge.
+	pub fn is_used(&self) -> bool {
+		!self.is_closed() && self.state.is_used()
 	}
 
 	/// Block until there are no active consumers.
@@ -1874,8 +1912,14 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn consume(&self) -> Consumer {
-		Consumer::plain(self.name.clone(), self.state.consume())
+	/// A [`Consumer`] for the cached track, or `None` once it has closed.
+	///
+	/// The count moves under the same lock the close takes, which is the other half
+	/// of [`Producer::abort_unused`]: a lookup either gets a consumer in time to
+	/// decline the teardown, or gets nothing and re-requests the track. It is never
+	/// handed a track that is already on its way out.
+	pub fn try_consume(&self) -> Option<Consumer> {
+		Some(Consumer::plain(self.name.clone(), self.state.try_consume()?))
 	}
 
 	/// The shared name handle, for use as a broadcast lookup key (clone is a

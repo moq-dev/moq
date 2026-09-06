@@ -163,3 +163,92 @@ fn close_wakes_value_closed_and_consumer() {
 	assert!(matches!(closed_fut.as_mut().poll(&mut closed_cx), Poll::Ready(())));
 	assert!(matches!(unused_fut.as_mut().poll(&mut unused_cx), Poll::Ready(Err(_))));
 }
+
+/// The three states `write_unused` distinguishes, since a teardown branches on all
+/// of them: commit, keep going, already gone.
+#[test]
+fn write_unused_reports_used_closed_and_idle() {
+	let producer = Producer::new(0u32);
+
+	let consumer = producer.consume();
+	assert!(
+		matches!(producer.write_unused(), crate::Unused::Used),
+		"a live consumer must decline the write"
+	);
+
+	drop(consumer);
+	let crate::Unused::Idle(mut guard) = producer.write_unused() else {
+		panic!("the last consumer left, so the write is owed");
+	};
+	*guard = 1;
+	guard.close();
+
+	assert!(
+		matches!(producer.write_unused(), crate::Unused::Closed),
+		"a closed channel has nothing left to write"
+	);
+}
+
+/// The deal the guard makes: a consumer minted before it declines the teardown,
+/// and one asked for after the teardown committed is never handed out. Single
+/// threaded here, so this pins the ordering rather than the race; the
+/// interleavings are `loom.rs`'s job.
+#[test]
+fn a_consumer_minted_before_the_guard_declines_it() {
+	let producer = Producer::new(0u32);
+	let weak = producer.weak();
+
+	// The wake a teardown acts on.
+	assert!(matches!(producer.write_unused(), crate::Unused::Idle(_)));
+
+	// Demand returns in the gap between that wake and the commit.
+	let consumer = weak.try_consume().expect("the channel is open");
+	assert!(matches!(producer.write_unused(), crate::Unused::Used));
+
+	// Once the teardown does commit, the weak handle mints nothing more.
+	drop(consumer);
+	let crate::Unused::Idle(guard) = producer.write_unused() else {
+		panic!("unused again");
+	};
+	guard.close();
+	assert!(weak.try_consume().is_none(), "a closed channel minted a consumer");
+}
+
+#[test]
+fn weak_consumers_can_read_the_final_value() {
+	let producer = Producer::new(7u32);
+	let weak = producer.weak();
+	let consumer = weak.try_consume().expect("open channel");
+	assert_eq!(*consumer.read(), 7);
+	drop(consumer);
+	producer.close().ok().expect("open channel");
+
+	assert!(weak.try_consume().is_none());
+	let consumer = weak.consume();
+	assert!(consumer.is_closed());
+	assert_eq!(*consumer.read(), 7);
+}
+
+#[test]
+fn consumer_creation_with_existing_demand_does_not_relock() {
+	let (done, result) = std::sync::mpsc::channel();
+	let worker = std::thread::spawn(move || {
+		let producer = Producer::new(7);
+		let consumer = producer.consume();
+		let producer_weak = producer.weak();
+		let consumer_weak = consumer.weak();
+		let guard = producer.read();
+		let one = producer.consume();
+		let two = producer_weak.consume();
+		let three = consumer_weak.consume();
+		drop(guard);
+		assert_eq!(*one.read(), 7);
+		assert_eq!(*two.read(), 7);
+		assert_eq!(*three.read(), 7);
+		done.send(()).unwrap();
+	});
+	result
+		.recv_timeout(std::time::Duration::from_secs(5))
+		.expect("consumer creation reacquired the held lock");
+	worker.join().unwrap();
+}

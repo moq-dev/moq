@@ -14,6 +14,57 @@ pub struct Consumer<T> {
 	pub(crate) counts: Arc<Counts>,
 }
 
+/// Mint a consumer, or `None` if `only_open` and the channel has closed.
+///
+/// Zero-to-one transitions share the state lock with idle teardown. Existing
+/// demand can be incremented without relocking when closed-channel reads are allowed.
+fn mint<T>(state: &Lock<State<T>>, counts: &Arc<Counts>, only_open: bool) -> Option<Consumer<T>> {
+	let waiters = if !only_open
+		&& counts
+			.consumers
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+				(count > 0).then(|| count + 1)
+			})
+			.is_ok()
+	{
+		// The successful increment keeps the count above zero, so an idle teardown
+		// cannot commit. Callers may already hold the state lock on this path.
+		None
+	} else {
+		let mut guard = state.lock();
+		if only_open && guard.closed {
+			return None;
+		}
+
+		// Wake `used()` waiters when the first consumer appears, after the lock is
+		// released.
+		match counts.consumers.fetch_add(1, Ordering::AcqRel) {
+			0 => Some(guard.waiters_consumer.take()),
+			_ => None,
+		}
+	};
+
+	if let Some(mut waiters) = waiters {
+		waiters.wake();
+	}
+
+	Some(Consumer {
+		state: state.clone(),
+		counts: counts.clone(),
+	})
+}
+
+/// Mint a consumer, whether or not the channel is still open. A closed channel's
+/// consumer reads its final value and then reports the closure.
+pub(crate) fn consume<T>(state: &Lock<State<T>>, counts: &Arc<Counts>) -> Consumer<T> {
+	mint(state, counts, false).expect("minting is infallible for an open-or-closed channel")
+}
+
+/// Mint a consumer only while the channel is open.
+pub(crate) fn consume_open<T>(state: &Lock<State<T>>, counts: &Arc<Counts>) -> Option<Consumer<T>> {
+	mint(state, counts, true)
+}
+
 impl<T> Consumer<T> {
 	/// Poll the shared state with a closure.
 	///
@@ -126,6 +177,9 @@ impl<T> Drop for Consumer<T> {
 
 impl<T> Clone for Consumer<T> {
 	fn clone(&self) -> Self {
+		// Unlike minting one from scratch, this needs no lock: `self` is already
+		// counted, so the count runs 1 -> 2 and a teardown holding the lock can never
+		// read the zero that would let it commit.
 		self.counts.consumers.fetch_add(1, Ordering::Relaxed);
 
 		Self {

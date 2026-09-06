@@ -193,6 +193,42 @@ fn consumer_churn_resolves_unused() {
 	});
 }
 
+/// The invariant `write_unused` exists for: a consumer and a teardown racing must
+/// never both win. Either the consumer is minted and the teardown is declined, or
+/// the teardown closes the channel and the weak handle mints nothing.
+///
+/// Without the count moving under the state lock, the "closed and minted" corner
+/// is reachable: the bump lands after the teardown read zero, and the consumer is
+/// left holding a channel that was torn down for being unused.
+#[test]
+fn a_teardown_and_a_consumer_never_both_win() {
+	loom::model(|| {
+		let producer = Producer::new(0u32);
+		let weak = producer.weak();
+
+		let consumer = thread::spawn(move || weak.try_consume());
+
+		let committed = match producer.write_unused() {
+			crate::Unused::Idle(guard) => {
+				guard.close();
+				true
+			}
+			crate::Unused::Used => false,
+			crate::Unused::Closed => unreachable!("nothing else closes this channel"),
+		};
+
+		let consumer = consumer.join().unwrap();
+		assert!(
+			!(committed && consumer.is_some()),
+			"the teardown cancelled a consumer that had already been handed out"
+		);
+		assert!(
+			committed || consumer.is_some(),
+			"the consumer was refused by a teardown that never happened"
+		);
+	});
+}
+
 /// `Shared` has no producer/consumer split: any handle can mutate, and every
 /// mutation must wake every other handle parked on a predicate.
 #[test]
@@ -395,5 +431,22 @@ fn a_projected_hold_defers_before_relocking() {
 		drop(state_guard);
 		drop(hold);
 		assert!(flag.0.load(Ordering::SeqCst), "deferred wake never arrived");
+	});
+}
+
+#[test]
+fn consumer_creation_cannot_cross_an_idle_guard() {
+	loom::model(|| {
+		let producer = Producer::new(0u32);
+		let existing = producer.consume();
+		let weak = producer.weak();
+		let minting = thread::spawn(move || weak.consume());
+		drop(existing);
+		if let crate::Unused::Idle(guard) = producer.write_unused() {
+			thread::yield_now();
+			assert!(!producer.is_used(), "consumer appeared while idle guard was held");
+			guard.close();
+		}
+		drop(minting.join().unwrap());
 	});
 }

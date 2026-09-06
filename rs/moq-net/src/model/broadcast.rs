@@ -836,7 +836,15 @@ impl Consumer {
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
 		if let Some(weak) = state.tracks.get(name) {
-			return Ok(weak.consume());
+			match weak.try_consume() {
+				Some(consumer) => return Ok(consumer),
+				// It closed between the liveness probe and the count bump (an idle
+				// teardown committing under us). Reclaim it and request the track
+				// again, rather than handing back a consumer of a dead track.
+				None => {
+					state.tracks.remove(name);
+				}
+			}
 		}
 
 		if let Some(pending) = state.requests.join(name) {
@@ -1571,6 +1579,56 @@ mod test {
 
 		request.reject(Error::NotFound);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
+		producer.finish();
+	}
+
+	/// The interleave every unused-driven teardown has to survive: a wire subscriber
+	/// observes zero consumers, and a viewer looks the track up again before the
+	/// teardown commits. The returning viewer keeps the track alive, and once it
+	/// really does commit the cached handle is reclaimed rather than handed out
+	/// cancelled.
+	#[tokio::test]
+	async fn an_idle_teardown_yields_to_a_returning_viewer() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", None).unwrap();
+
+		// The unused wake a teardown acts on.
+		assert!(track.poll_unused(&kio::Waiter::noop()).is_ready());
+
+		// Demand returns in the gap before it commits.
+		let viewer = consumer.track("video").unwrap();
+		let mut track = track
+			.abort_unused(Error::Cancel)
+			.expect_err("viewer keeps the track alive");
+
+		// So the viewer holds a live track, not a cancelled one.
+		assert!(!track.is_closed());
+		let mut subscriber = viewer.subscribe(None).await.unwrap();
+		subscriber.assert_no_group();
+		track.append_group().unwrap();
+		assert!(subscriber.recv_group().await.unwrap().is_some());
+
+		// Once the viewer really leaves, the same teardown commits, and the lookup
+		// re-requests the track instead of resolving the closed one.
+		drop(subscriber);
+		drop(viewer);
+		assert!(track.abort_unused(Error::Cancel).is_ok());
+		assert!(matches!(consumer.track("video"), Err(Error::NotFound)));
+
+		producer.finish();
+	}
+
+	#[test]
+	fn abort_unused_accepts_an_already_closed_track_with_consumers() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", None).unwrap();
+		let _viewer = consumer.track("video").unwrap();
+		assert!(track.is_used());
+		track.clone().abort(Error::Cancel).unwrap();
+		assert!(!track.is_used());
+		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.finish();
 	}
 }

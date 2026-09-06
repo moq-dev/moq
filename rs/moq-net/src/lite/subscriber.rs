@@ -2470,16 +2470,14 @@ impl AnnouncedRoute {
 }
 
 /// How a [`TrackServe`] run ends.
-enum Teardown {
+enum ServeEnd {
 	/// The upstream FIN'd: the track is over for good.
 	Finished,
 	/// The route or session failed: abort the track so the origin re-splices it
 	/// from another source.
 	GiveBack(Error),
-	/// The origin released this copy: nobody is reading it, so drop it (and the
-	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
-	/// may never come back.
-	Released,
+	/// No consumers or in-flight fetches remain; the owner must commit the idle abort.
+	Idle,
 }
 
 /// Serves one requested track for a relay: owns this session's copy of the
@@ -2901,29 +2899,30 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 						unreachable!()
 					};
 
+					match teardown {
+						ServeEnd::Idle => match serve_loop.serving.abort_unused(Error::Cancel) {
+							Ok(()) => {
+								tracing::debug!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "track released (idle)");
+							}
+							Err(used) => {
+								serve_loop.serving = used;
+								self.state = TrackRunState::Serve(serve_loop);
+								continue;
+							}
+						},
+						ServeEnd::Finished => {
+							let _ = serve_loop.serving.finish();
+						}
+						ServeEnd::GiveBack(err) => {
+							let _ = serve_loop.serving.abort(err);
+						}
+					}
+
 					if let Sub::Active(active) = &mut serve_loop.sub {
 						self.serve.subscriber.remove_subscribe(active.id);
 						let _ = active.stream.writer.finish();
 					}
 
-					match teardown {
-						// The upstream ended the track for good; the origin observes the
-						// completed copy and finishes the logical track.
-						Teardown::Finished => {
-							let _ = serve_loop.serving.finish();
-						}
-						Teardown::GiveBack(err) => {
-							// Mark this copy dead: subscribers stall while the origin
-							// re-splices the track from the next source.
-							let _ = serve_loop.serving.abort(err);
-						}
-						Teardown::Released => {
-							// A deliberate end with no reader to observe it, which also
-							// drops the cached groups. The origin re-requests the track from
-							// this session if one comes back.
-							let _ = serve_loop.serving.abort(Error::Cancel);
-						}
-					}
 					return Poll::Ready(());
 				}
 				TrackRunState::Done => return Poll::Ready(()),
@@ -3058,7 +3057,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		}
 	}
 
-	fn poll(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<Teardown> {
+	fn poll(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<ServeEnd> {
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
@@ -3071,7 +3070,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							// Opening the upstream failed (usually the session dying): hand
 							// the track back for another route to resume.
 							serve.subscriber.remove_subscribe(id);
-							return Poll::Ready(Teardown::GiveBack(err));
+							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
 					}
 				}
@@ -3088,7 +3087,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								// hand the track back.
 								serve.subscriber.remove_subscribe(active.id);
 								self.sub = Sub::None;
-								return Poll::Ready(Teardown::GiveBack(err));
+								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							Poll::Pending => return Poll::Pending,
 						}
@@ -3111,7 +3110,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							continue;
 						}
 						// Our own producer is alive (we hold it); treat as terminal anyway.
-						Poll::Ready(Err(_)) => return Poll::Ready(Teardown::GiveBack(Error::Dropped)),
+						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
@@ -3127,11 +3126,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								Ok(Begin::None) => {}
 								// Updating the upstream failed: hand the track back for
 								// another route to resume.
-								Err(err) => return Poll::Ready(Teardown::GiveBack(err)),
+								Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 							}
 							continue;
 						}
-						Poll::Ready(Err(_)) => return Poll::Ready(Teardown::GiveBack(Error::Dropped)),
+						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
 						Poll::Pending => {}
 					}
 
@@ -3143,8 +3142,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// TRACK_INFO) for a reader that may never return. In-flight fetches
 					// keep it alive: work already accepted still gets finished.
 					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
-						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "track released (idle)");
-						return Poll::Ready(Teardown::Released);
+						return Poll::Ready(ServeEnd::Idle);
 					}
 
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
@@ -3204,18 +3202,18 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								// the logical track is over for good (bounded downstream
 								// demand alone never FINs; the publisher parks, since a cap
 								// can be raised).
-								return Poll::Ready(Teardown::Finished);
+								return Poll::Ready(ServeEnd::Finished);
 							}
 							Err(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								return Poll::Ready(Teardown::GiveBack(err));
+								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 						}
 					}
 
 					// (5) The session died: hand the track back for another route.
 					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(Teardown::GiveBack(Error::Dropped));
+						return Poll::Ready(ServeEnd::GiveBack(Error::Dropped));
 					}
 
 					return Poll::Pending;

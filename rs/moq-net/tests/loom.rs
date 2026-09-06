@@ -210,6 +210,51 @@ fn concurrent_tracks_drain_a_shared_pool() {
 	});
 }
 
+/// The teardown every wire subscriber runs when its copy of a track goes idle,
+/// racing a viewer coming back for the same name.
+///
+/// `poll_unused` is a level snapshot, so the teardown it wakes can only be trusted
+/// at the instant it commits. The invariant is that the two can't both win: either
+/// the lookup gets a live consumer and the teardown declines, or the teardown
+/// commits and the lookup never sees the dead track at all. A consumer handed out
+/// and then cancelled by that teardown is the bug, and it shows up here as a
+/// subscribe resolving `Err` on a handle the broadcast just gave out.
+#[test]
+fn an_idle_teardown_never_cancels_a_returning_viewer() {
+	loom::model(|| {
+		let mut broadcast = broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		// Nothing is consuming it, which is the wake the teardown acts on.
+		let track = broadcast.create_track("video", None).expect("create track");
+
+		let viewer = thread::spawn(move || consumer.track("video"));
+
+		let teardown = track.abort_unused(Error::Cancel);
+		let looked_up = viewer.join().unwrap();
+
+		match looked_up {
+			Ok(consumer) => {
+				// The info outlives an abort, so subscribing resolves either way; the
+				// read is what surfaces the cancellation. A live track parks (nothing
+				// has been published), and so does a fresh request nobody serves yet.
+				let subscribing = consumer.subscribe(None).into_inner();
+				if let std::task::Poll::Ready(res) = subscribing.poll_ok(&kio::Waiter::noop()) {
+					let mut subscriber = res.expect("subscribing to a track just handed out");
+					if let std::task::Poll::Ready(Err(err)) = subscriber.poll_recv_group(&kio::Waiter::noop()) {
+						panic!("the teardown cancelled a track the broadcast had handed out: {err}");
+					}
+				}
+			}
+			// The track was already gone, so nothing was handed out to cancel. Nobody
+			// is serving this broadcast on demand, so the re-request has nowhere to go.
+			Err(err) => {
+				assert!(teardown.is_ok(), "a declined teardown refused a viewer");
+				assert!(matches!(err, Error::NotFound), "unexpected lookup error: {err}");
+			}
+		}
+	});
+}
+
 /// Dropping the publisher must resolve a subscriber parked on `recv_group` rather
 /// than leaving it waiting for a group that will never come.
 #[test]

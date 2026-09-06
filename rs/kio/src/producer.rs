@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
 	Closed, Counts, State,
-	consumer::Consumer,
+	consumer::{self, Consumer},
 	lock::*,
 	sync::Arc,
 	waiter::*,
@@ -45,18 +45,36 @@ impl<T> Producer<T> {
 
 	/// Create a new [`Consumer`] that shares this producer's state.
 	pub fn consume(&self) -> Consumer<T> {
-		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
+		consumer::consume(&self.state, &self.counts)
+	}
 
-		// Wake `used()` waiters when the first consumer appears.
-		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
+	/// Acquire mutable access only while nothing is consuming the channel.
+	///
+	/// The count is read under the lock [`consume`](Self::consume) takes when
+	/// demand is zero, so the returned guard keeps the channel unused until it
+	/// drops. That is what a teardown decided by [`poll_unused`](Self::poll_unused)
+	/// needs: the poll is a level snapshot, so committing on it directly can cancel
+	/// a consumer that appeared in the gap. Commit through this instead, and take
+	/// [`Unused::Used`] as "a consumer got there first, keep going".
+	///
+	/// Pair it with [`ProducerWeak::try_consume`], which refuses to mint a consumer for
+	/// a closed channel: between the two, a consumer either exists in time to
+	/// decline the teardown or is never handed out at all.
+	pub fn write_unused(&self) -> Unused<'_, T> {
+		let state = self.state.lock();
+		if state.closed {
+			return Unused::Closed;
 		}
 
-		Consumer {
-			state: self.state.clone(),
-			counts: self.counts.clone(),
+		// Relaxed is enough: a zero-to-one increment happens under this lock.
+		// Further increments cannot pass through zero. A decrement runs outside
+		// it, so this may still read a consumer that is going away, which only
+		// declines a teardown that the next `unused` wake will offer again.
+		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
+			return Unused::Used;
 		}
+
+		Unused::Idle(Mut::new(state))
 	}
 
 	/// Close the channel, notifying all consumers.
@@ -321,6 +339,20 @@ impl<T> Drop for Producer<T> {
 			list.wake();
 		}
 	}
+}
+
+/// What [`Producer::write_unused`] found.
+#[must_use]
+#[derive(Debug)]
+pub enum Unused<'a, T> {
+	/// Nothing is consuming the channel: write access, held under the lock a new
+	/// consumer has to take, so the write lands before one can exist.
+	Idle(Mut<'a, T>),
+	/// A consumer exists, so whatever was decided while the channel looked unused
+	/// is stale.
+	Used,
+	/// The channel is already closed, so there is nothing left to write.
+	Closed,
 }
 
 /// A mutable guard over the shared state.

@@ -40,7 +40,7 @@ with the current dev tree before starting.
 - [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [Plan: binding rate control](/quest/m1/plan-binding-rate-control.md) - settle how a non-Rust publisher follows the send estimate before wiring five bindings
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
-- [#3000](/quest/m1/3000-track-teardown-on-poll-unused-is-not-atomic-against-a.md) - Track teardown on poll_unused is not atomic against a consumer reattaching
+- [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - returning demand during IETF setup keeps its track across microtasks
 - [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - accept padding and close sessions for genuinely unknown uni-stream types
 - [HLS cache misses](/quest/m1/hls-cache-miss-codes.md) - moq-hls: a segment the relay dropped is served as a 500, because the miss is matched against a table the wire stopped using
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
