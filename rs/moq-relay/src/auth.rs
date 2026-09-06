@@ -1899,8 +1899,9 @@ impl Auth {
 	/// backoff until the response's staleness window is exhausted. The current
 	/// credential expiry also bounds each in-flight request.
 	///
-	/// Requests share both in-flight fetches and the HTTP cache. A cached reply
-	/// may be up to one `max-age` old, so revocation can take twice that interval.
+	/// Requests share both in-flight fetches and the HTTP cache. Cached replies
+	/// can delay revocation by their remaining freshness lifetime plus the
+	/// recheck cadence; shared caches may use `s-maxage` for that lifetime.
 	async fn revalidate(&self, grant: &Revalidate) -> Expired {
 		let mut schedule = grant.schedule;
 		let mut next = Instant::now() + schedule.cadence;
