@@ -44,6 +44,7 @@ private:
 	void SetRunning(bool running);
 	bool CreateConfiguredEncoders();
 	bool CreateCustomEncoders();
+	void CreateVideoEncoder(const char *id, obs_data_t *settings);
 	QString ConnectUrl() const;
 	void PeelJwtFromRelayUrl();
 	void ClearLiveStats();
@@ -72,6 +73,7 @@ private:
 	MoQSpark *sentSpark;
 
 	QComboBox *encodingMode;
+	QComboBox *latencyMode;
 	QGroupBox *encodingBox;
 	QComboBox *profileCombo;
 	QLabel *detectedLabel;
@@ -96,6 +98,7 @@ private:
 	bool running = false;
 	// Filled when Go Live creates encoders; shown in Stats while publishing.
 	QString publishSummary;
+	QString latencySummary;
 
 	// Shared with OnOutputStopped so a deferred OBS stop callback cannot race
 	// destruction. The signal user_data is this cookie, not the dock pointer.

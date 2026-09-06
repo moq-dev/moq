@@ -16,6 +16,14 @@ OBS Studio install.
   field automatically. Reconnect settings live under **Advanced**.
   **Encoding** chooses between **Use OBS Output settings** and **Custom settings
   for MoQ**. Both use OBS encoders; custom settings apply only to this MoQ stream.
+  **Encoder latency** defaults to **Low latency** in both modes. It overrides
+  buffering settings only for this MoQ stream; **Keep encoder settings** preserves
+  them. x264 uses its zero-latency tune, VideoToolbox disables B-frames, NVENC
+  uses ultra-low tuning without B-frames/lookahead, and Quick Sync uses ultra-low
+  mode without B-frames. Other encoders retain their settings. **Stats** reports
+  the applied policy. This trades compression efficiency for less buffering,
+  not a guaranteed end-to-end delay: OBS VideoToolbox and NVENC can still queue
+  frames internally. Keyframe join delay and viewer buffering are separate.
   Custom profiles offer Auto, Quality, or Performance, with hardware/software,
   video codec, encoder, and audio codec choices.
   **Stats** shows the active encoding, negotiated draft, dial scheme, and one

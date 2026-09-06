@@ -3,6 +3,7 @@
 #include "moq-advanced-dialog.h"
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-encoder-latency.h"
 #include "moq-quality-defaults.h"
 #include "moq-settings.h"
 #include "logger.h"
@@ -497,6 +498,16 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	encodingMode->addItem("Use OBS Output settings");
 	encodingMode->addItem("Custom settings for MoQ");
 
+	latencyMode = new QComboBox(encodingPage);
+	latencyMode->addItem("Low latency (recommended)", "low");
+	latencyMode->addItem("Keep encoder settings", "unchanged");
+	latencyMode->setToolTip("Reduce encoder lookahead and frame reordering where supported. "
+				"May reduce compression efficiency. Applies to this MoQ stream only; "
+				"Stats shows which controls were applied. This is not an end-to-end latency target.");
+	auto *encodingForm = new QFormLayout();
+	encodingForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
+	encodingForm->addRow("Encoder latency", latencyMode);
+
 	encodingBox = new QGroupBox("Custom encoding settings", encodingPage);
 	auto *qForm = new QFormLayout(encodingBox);
 	qForm->setRowWrapPolicy(QFormLayout::WrapAllRows);
@@ -532,6 +543,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	encodingLayout->setSpacing(10);
 	encodingLayout->addWidget(encodingMode);
 	encodingLayout->addWidget(encodingNote);
+	encodingLayout->addLayout(encodingForm);
 	encodingLayout->addWidget(encodingBox);
 	encodingLayout->addStretch();
 	encodingBox->setEnabled(false);
@@ -593,6 +605,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(encodingMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::OnEncodingChanged);
+	connect(latencyMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
 	connect(profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
 		// Profile owns the recommended path / codec / encoder / audio. Path and
 		// codec edits only rebuild the dependent lists without wiping those picks.
@@ -836,7 +849,7 @@ void MoQDock::RefreshEncodingOptions(bool applyProfileDefaults)
 
 bool MoQDock::CreateConfiguredEncoders()
 {
-	if ((encodingMode->currentIndex() == 1))
+	if (encodingMode->currentIndex() == 1)
 		return CreateCustomEncoders();
 
 	config_t *config = obs_frontend_get_profile_config();
@@ -903,8 +916,7 @@ bool MoQDock::CreateConfiguredEncoders()
 	obs_data_set_bool(videoSettings, "repeat_headers", true);
 	obs_data_set_int(audioSettings, "bitrate", audioBitrate);
 
-	videoEncoder =
-		OBSEncoderAutoRelease(obs_video_encoder_create(videoId, "moq_dock_video", videoSettings, nullptr));
+	CreateVideoEncoder(videoId, videoSettings);
 	audioEncoder = OBSEncoderAutoRelease(
 		obs_audio_encoder_create(audioId, "moq_dock_audio", audioSettings, audioMixerIdx, nullptr));
 	if (!videoEncoder || !audioEncoder) {
@@ -928,6 +940,7 @@ bool MoQDock::CreateConfiguredEncoders()
 				      audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay)
 								    : QString::fromUtf8(audioId))
 				 .arg(audioBitrate);
+	publishSummary += "\n" + latencySummary;
 	return true;
 }
 
@@ -982,8 +995,7 @@ bool MoQDock::CreateCustomEncoders()
 	obs_data_set_bool(videoSettings, "repeat_headers", true);
 	obs_data_set_int(audioSettings, "bitrate", audioBitrate);
 
-	videoEncoder = OBSEncoderAutoRelease(
-		obs_video_encoder_create(videoId.toUtf8().constData(), "moq_dock_video", videoSettings, nullptr));
+	CreateVideoEncoder(videoId.toUtf8().constData(), videoSettings);
 	size_t audioMixerIdx = 0;
 	if (config_t *config = obs_frontend_get_profile_config()) {
 		const char *mode = config_get_string(config, "Output", "Mode");
@@ -998,7 +1010,7 @@ bool MoQDock::CreateCustomEncoders()
 	audioEncoder = OBSEncoderAutoRelease(obs_audio_encoder_create(audioId.toUtf8().constData(), "moq_dock_audio",
 								      audioSettings, audioMixerIdx, nullptr));
 	if (!videoEncoder || !audioEncoder) {
-		LOG_ERROR("Failed to create transcode encoders (%s / %s)", videoId.toUtf8().constData(),
+		LOG_ERROR("Failed to create custom encoders (%s / %s)", videoId.toUtf8().constData(),
 			  audioId.toUtf8().constData());
 		return false;
 	}
@@ -1006,7 +1018,7 @@ bool MoQDock::CreateCustomEncoders()
 	obs_encoder_set_video(videoEncoder, obs_get_video());
 	obs_encoder_set_audio(audioEncoder, obs_get_audio());
 
-	LOG_INFO("Using dock transcode encoders: %s / %s (profile %s, %d kbps)", videoId.toUtf8().constData(),
+	LOG_INFO("Using dock custom encoders: %s / %s (profile %s, %d kbps)", videoId.toUtf8().constData(),
 		 audioId.toUtf8().constData(), high ? "quality" : "performance", videoBitrate);
 
 	QString profileLabel = high ? QStringLiteral("Quality") : QStringLiteral("Performance");
@@ -1023,7 +1035,15 @@ bool MoQDock::CreateCustomEncoders()
 				 .arg(audioChoice.isEmpty() ? QStringLiteral("audio") : audioChoice.toUpper(),
 				      audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay) : audioId)
 				 .arg(audioBitrate);
+	publishSummary += "\n" + latencySummary;
 	return true;
+}
+
+void MoQDock::CreateVideoEncoder(const char *id, obs_data_t *settings)
+{
+	latencySummary = QString::fromUtf8(ApplyEncoderLatency(id, settings, latencyMode->currentData() == "low"));
+	LOG_INFO("%s", latencySummary.toUtf8().constData());
+	videoEncoder = OBSEncoderAutoRelease(obs_video_encoder_create(id, "moq_dock_video", settings, nullptr));
 }
 
 void MoQDock::StartStream()
@@ -1135,6 +1155,7 @@ void MoQDock::SetRunning(bool isRunning)
 	// like it applied when it hadn't.
 	advancedButton->setEnabled(!isRunning);
 	encodingMode->setEnabled(!isRunning);
+	latencyMode->setEnabled(!isRunning);
 	encodingBox->setEnabled(!isRunning && (encodingMode->currentIndex() == 1));
 
 	if (!isRunning) {
@@ -1282,6 +1303,11 @@ void MoQDock::LoadSettings()
 	if (saved)
 		obs_data_apply(advanced, saved);
 
+	if (obs_data_has_user_value(data, "encoder_latency")) {
+		QSignalBlocker block(latencyMode);
+		SelectComboData(latencyMode, QString::fromUtf8(obs_data_get_string(data, "encoder_latency")));
+	}
+
 	obs_data_t *qualityRaw = obs_data_get_obj(data, "quality");
 	if (!qualityRaw)
 		qualityRaw = obs_data_get_obj(data, "transcode");
@@ -1320,6 +1346,7 @@ void MoQDock::SaveSettings()
 	obs_data_set_string(data, "token", tokenEdit->text().toUtf8().constData());
 	obs_data_set_string(data, "path", pathEdit->text().toUtf8().constData());
 	obs_data_set_obj(data, "advanced", advanced);
+	obs_data_set_string(data, "encoder_latency", latencyMode->currentData().toString().toUtf8().constData());
 
 	OBSDataAutoRelease quality = obs_data_create();
 	obs_data_set_bool(quality, "enabled", (encodingMode->currentIndex() == 1));
