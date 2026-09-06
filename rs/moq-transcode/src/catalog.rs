@@ -281,12 +281,33 @@ mod tests {
 
 	#[test]
 	fn rungs_never_upscale() {
-		let rungs = crate::Config::default().rungs;
+		let rungs = crate::Config::default().ladder;
 		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(2_000_000))).unwrap();
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
 		// admitted only because its bitrate (1.2M) undercuts the source (2M).
 		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
+	}
+
+	#[test]
+	fn filtering_preserves_order_across_source_changes() {
+		let ladder = Ladder::new([
+			Rung::new(720, 2_500_000),
+			Rung::new(241, 350_000),
+			Rung::new(480, 1_200_000),
+			Rung::new(360, 600_000),
+		])
+		.unwrap();
+		for (picture, expected) in [
+			(source(1920, 1080, None), vec![240, 360, 480, 720]),
+			(source(1280, 720, Some(1_000_000)), vec![240, 360]),
+			(source(320, 180, None), vec![]),
+			(source(1920, 1080, Some(6_000_000)), vec![240, 360, 480, 720]),
+		] {
+			let resolved = resolve_rungs(&ladder, "video", &picture).unwrap();
+			assert_eq!(resolved.iter().map(|rung| rung.height).collect::<Vec<_>>(), expected);
+			assert!(resolved.windows(2).all(|pair| pair[0].bitrate < pair[1].bitrate));
+		}
 	}
 
 	#[test]

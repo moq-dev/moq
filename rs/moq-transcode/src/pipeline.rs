@@ -101,7 +101,7 @@ impl Pipeline {
 		source: &VideoConfig,
 		carry: &[Published],
 	) -> Result<Vec<Published>, Error> {
-		let resolved = catalog::resolve_rungs(&self.config.rungs, source_name, source)?;
+		let resolved = catalog::resolve_rungs(&self.config.ladder, source_name, source)?;
 
 		let mut published = Vec::new();
 		for mut rung in resolved {

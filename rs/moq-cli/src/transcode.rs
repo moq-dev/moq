@@ -71,7 +71,7 @@ fn parse_resize_acceleration(arg: &str) -> Result<moq_video::resize::Acceleratio
 pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	let mut config = moq_transcode::Config::default();
 	if !args.rungs.is_empty() {
-		config.rungs = moq_transcode::Ladder::new(args.rungs.iter().copied()).context("invalid --rung ladder")?;
+		config.ladder = moq_transcode::Ladder::new(args.rungs.iter().copied()).context("invalid --rung ladder")?;
 	}
 	config.encoder = match args.encoder.as_str() {
 		"auto" => moq_video::encode::Kind::Auto,
@@ -139,7 +139,6 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.request_broadcast(&source_path)
 		.await
 		.context("source broadcast unavailable")?;
-
 
 	// Point the derivative catalog at the source renditions so players fetch them from the
 	// source directly. An empty reference would name the derivative broadcast itself, which

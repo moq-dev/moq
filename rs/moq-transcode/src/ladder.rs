@@ -1,10 +1,4 @@
-//! The output ladder: rungs in a canonical order, or no ladder at all.
-//!
-//! Everything downstream of the ladder reads "the next lower rendition", so a
-//! ladder has to have one. [`Ladder`] resolves the configured rungs into
-//! strictly ascending maximum bitrate and refuses the shapes that have no
-//! lower-is-lower reading, rather than picking an order for them and producing
-//! a ranking that looks right while protecting the wrong rendition.
+//! Validated output renditions in ascending bitrate and height order.
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.
 ///
@@ -17,7 +11,7 @@ pub struct Rung {
 	/// (I420 chroma is 2x2).
 	pub height: u32,
 
-	/// The configured maximum: the CBR target and the bitrate advertised in the
+	/// The configured maximum in bits per second: the CBR target advertised in the
 	/// derivative catalog.
 	pub bitrate: u64,
 }
@@ -74,8 +68,7 @@ pub enum Error {
 /// The output ladder, in canonical order: strictly ascending maximum bitrate,
 /// and strictly ascending height with it.
 ///
-/// Built through [`Ladder::new`], which is the only way to hold one, so a rung's
-/// neighbour in [`Ladder::rungs`] is always the next rendition up or down. The
+/// Construction validates the order; [`Ladder::rungs`] exposes a read-only slice. The
 /// rungs are still filtered against the source at runtime (nothing above it
 /// survives), which drops rungs but never reorders them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,11 +177,7 @@ mod tests {
 	/// Two rungs at one maximum: neither is the lower, so there is no ladder.
 	#[test]
 	fn duplicate_ceiling_is_refused() {
-		let err = Ladder::new([
-			Rung::new(720, 2_500_000),
-			Rung::new(480, 2_500_000),
-		])
-		.unwrap_err();
+		let err = Ladder::new([Rung::new(720, 2_500_000), Rung::new(480, 2_500_000)]).unwrap_err();
 		assert_eq!(
 			err,
 			Error::DuplicateBitrate {
@@ -204,11 +193,7 @@ mod tests {
 	/// "next lower rendition", so it is refused too.
 	#[test]
 	fn duplicate_height_is_refused() {
-		let err = Ladder::new([
-			Rung::new(721, 2_500_000),
-			Rung::new(720, 1_200_000),
-		])
-		.unwrap_err();
+		let err = Ladder::new([Rung::new(721, 2_500_000), Rung::new(720, 1_200_000)]).unwrap_err();
 		assert_eq!(
 			err,
 			Error::Unordered {
@@ -224,11 +209,7 @@ mod tests {
 	/// which rendition is lower, and guessing either one mis-ranks the ladder.
 	#[test]
 	fn resolution_inversion_is_refused() {
-		let err = Ladder::new([
-			Rung::new(1080, 1_000_000),
-			Rung::new(360, 3_000_000),
-		])
-		.unwrap_err();
+		let err = Ladder::new([Rung::new(1080, 1_000_000), Rung::new(360, 3_000_000)]).unwrap_err();
 		assert_eq!(
 			err,
 			Error::Unordered {

@@ -115,7 +115,6 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
-
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,

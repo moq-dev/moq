@@ -22,12 +22,12 @@
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
 pub mod active;
+pub mod ladder;
 
 mod catalog;
 mod config;
 mod error;
 mod feed;
-pub mod ladder;
 mod pipeline;
 mod rung;
 
@@ -465,7 +465,7 @@ mod tests {
 		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000), Rung::new(60, 50_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000), Rung::new(60, 50_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -531,7 +531,7 @@ mod tests {
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
 		let mut config = Config {
-			rungs: Ladder::new([Rung::new(180, 200_000), Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(180, 200_000), Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -609,7 +609,7 @@ mod tests {
 
 		let source = source_broadcast(2, 5);
 		let mut config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -648,7 +648,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -748,7 +748,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -810,7 +810,7 @@ mod tests {
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -881,11 +881,12 @@ mod tests {
 		let config = Config {
 			// 360p is admitted at 640x360 only because its bitrate undercuts the
 			// source's; 240p and 120p fit outright.
-			rungs: Ladder::new([
+			ladder: Ladder::new([
 				Rung::new(360, 900_000),
 				Rung::new(240, 300_000),
 				Rung::new(120, 100_000),
-			]).unwrap(),
+			])
+			.unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -990,7 +991,7 @@ mod tests {
 		write_keyframe(&mut group);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1054,7 +1055,7 @@ mod tests {
 		let mut source = source_catalog(320, 240);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1118,7 +1119,7 @@ mod tests {
 		let source = source_broadcast(1, 3);
 
 		let config = Config {
-			rungs: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,

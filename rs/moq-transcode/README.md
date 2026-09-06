@@ -52,16 +52,16 @@ Only renditions strictly below the source survive the ladder: a 480p source is
 never transcoded up to 720p, and a same-height rung is only offered when it
 undercuts a known source bitrate.
 
-`Config::rungs` is a `Ladder`, built from rungs in any order:
+`Config::ladder` is a `Ladder`, built from rungs in any order:
 
 ```rust
-config.rungs = moq_transcode::Ladder::new([
+config.ladder = moq_transcode::Ladder::new([
     moq_transcode::Rung::new(720, 2_500_000),
     moq_transcode::Rung::new(360, 600_000),
 ])?;
 ```
 
-It ranks them by bitrate, lowest first, so every rung has a next lower
+It ranks them by bitrate, lowest first, so every rung above the lowest has a next lower
 rendition. A ladder with no such ranking is an error rather than a guess: two
 rungs sharing a bitrate have no lower one, and a rung that costs more without
 being taller means bitrate and resolution disagree about which rendition is

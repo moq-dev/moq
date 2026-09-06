@@ -32,7 +32,7 @@ pub struct Config {
 	/// Filtering drops rungs but never reorders them, so the surviving ladder is
 	/// still ascending. Build it with [`Ladder::new`](crate::Ladder::new), which
 	/// takes the rungs in any order and refuses an ambiguous ladder.
-	pub rungs: Ladder,
+	pub ladder: Ladder,
 
 	/// Where the source broadcast lives relative to the output broadcast, e.g.
 	/// `"."` when the output is published at `<source>/transcode.hang`. When
