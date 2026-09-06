@@ -14,7 +14,10 @@ During local macOS/Nix validation of PR #3458, the unchanged test exceeded
 `nix develop --command just rs test -p moq-audio survives_a_moving_echo_delay`
 passed in 27.241 seconds. The full-run timeout cancelled the remaining tests.
 The mechanism is not yet established; an isolated pass does not explain the
-workspace failures.
+workspace failures. A synchronous JS pattern test on the same host also
+exceeded its five-second budget: 7.02 seconds wall time versus 0.87 seconds
+user CPU and 0.18 seconds system CPU. Use that as a control when separating
+host contention from DSP cost.
 
 Reproduce with the workspace's feature graph and the isolated crate's graph,
 recording CPU time, wall time, compiler profile, and concurrent build load.
