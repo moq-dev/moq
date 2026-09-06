@@ -1380,14 +1380,14 @@ impl Producer {
 		Err(self)
 	}
 
-	/// Whether anyone is consuming the track right now.
+	/// Whether the track is open and anyone is consuming it right now.
 	///
 	/// A point-in-time snapshot for gating work on demand (on-demand capture,
 	/// dropping cached state nobody is watching). Acting on it to *end* the track
 	/// is the race [`abort_unused`](Self::abort_unused) exists for; use
 	/// [`unused`](Self::unused) to wait for the edge.
 	pub fn is_used(&self) -> bool {
-		self.state.is_used()
+		!self.is_closed() && self.state.is_used()
 	}
 
 	/// Block until there are no active consumers.

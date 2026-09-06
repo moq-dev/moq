@@ -1625,8 +1625,9 @@ mod test {
 		let consumer = producer.consume();
 		let track = producer.create_track("video", None).unwrap();
 		let _viewer = consumer.track("video").unwrap();
-		track.clone().abort(Error::Cancel).unwrap();
 		assert!(track.is_used());
+		track.clone().abort(Error::Cancel).unwrap();
+		assert!(!track.is_used());
 		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.finish();
 	}

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -665,4 +665,72 @@ test("a group that claims its first object must start at zero", async () => {
 	await expect(group.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
 
 	track.close();
+});
+
+// Hold the actual legacy cancellation write so returning demand lands in the teardown gap.
+test("returning demand survives a blocked unsubscribe", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing control stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
+
+	const cancelStarted = Promise.withResolvers<void>();
+	const releaseCancel = Promise.withResolvers<void>();
+	const oldClosed = Promise.withResolvers<void>();
+	const open = session.openBi.bind(session);
+	const opening = spyOn(session, "openBi").mockImplementationOnce(() => {
+		const stream = open();
+		const write = stream.writer.u53.bind(stream.writer);
+		spyOn(stream.writer, "u53").mockImplementation(async (value) => {
+			if (value === Unsubscribe.id) {
+				cancelStarted.resolve();
+				await releaseCancel.promise;
+			}
+			await write(value);
+		});
+		const close = stream.close.bind(stream);
+		spyOn(stream, "close").mockImplementation(() => {
+			close();
+			oldClosed.resolve();
+		});
+		return stream;
+	});
+
+	const broadcast = subscriber.consume(Path.from("room"));
+	const first = broadcast.subscribe("video");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, version);
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+
+	// Receiving a group proves setup has accepted the track before demand disappears.
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		new Reader(undefined, encodeObjects([0]), VERSION),
+	);
+	const ordered = first.ordered();
+	expect(await ordered.nextGroup()).toBeDefined();
+	ordered.close();
+	first.close();
+	await cancelStarted.promise;
+	const returned = broadcast.subscribe("video");
+	releaseCancel.resolve();
+	await oldClosed.promise;
+	expect(returned.closed.peek()).toBeUndefined();
+	expect(opening).toHaveBeenCalledTimes(2);
+	returned.close();
+	broadcast.close();
+	session.close();
 });
