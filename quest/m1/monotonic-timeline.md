@@ -70,4 +70,4 @@ state.
 - [Duration marker](/quest/m2/duration-marker.md) - the empty frame that closes a group, which is not a discontinuity
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - the watch decoder reset that keeps mattering for declared discontinuities
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink's generation model after EOS, the same publisher
-- [#2833](/quest/m0/2833-moq-export-ts-a-rewound-timeline-stalls-the-si-table.md) - the TS export fix this trims once it lands
+- [#3375](https://github.com/moq-dev/moq/pull/3375) - the TS export fix this trims once it lands

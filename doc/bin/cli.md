@@ -55,6 +55,11 @@ MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. FLV
 covers H.264 + AAC.
 
+MPEG-TS export restarts its clock and table cadence after a publisher rewind,
+discarding the old mux buffer. The first new clock packet signals the break and
+stdout pacing re-anchors. Other renditions resume at their own discontinuity
+boundary, so old-timeline frames cannot advance the new clock.
+
 ## Play
 
 ```bash
