@@ -83,10 +83,6 @@ if (publishJsr) {
 		"--no-check",
 		"--allow-dirty",
 	];
-	// Only libs publish to JSR now (web components opt out), and their built
-	// .d.ts has explicit types, so slow types shouldn't appear. Keep this as a
-	// safety valve the release workflow can toggle without a code change.
-	if (process.env.JSR_ALLOW_SLOW_TYPES === "true") args.push("--allow-slow-types");
 	if (dryRun) {
 		console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
 		args.push("--dry-run");

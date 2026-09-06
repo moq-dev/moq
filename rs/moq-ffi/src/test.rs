@@ -1861,6 +1861,215 @@ async fn dynamic_broadcast_request() {
 	served.finish().unwrap();
 }
 
+/// An announced prefix serves through the origin's dynamic handler: a request
+/// beneath it waits for a handler, reaches `requested_broadcast()` once one
+/// exists, and is rejected when the announcement is cancelled first.
+#[tokio::test]
+async fn announced_prefix_requests_reach_dynamic() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+
+	// Without a handler the request waits, like any served route with a slow handler.
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
+	};
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(
+		!request_broadcast.is_finished(),
+		"an unserved prefix must park, not fail"
+	);
+
+	// A handler picks up the waiting request and serves it.
+	let dynamic = origin.dynamic();
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("timed out waiting for the announced prefix's request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "live/cam");
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the handler served the path");
+
+	// Cancelling the handler parks later requests again; cancelling the
+	// announcement is what rejects them.
+	dynamic.cancel();
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/other".into(), None).await })
+	};
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	assert!(
+		!request_broadcast.is_finished(),
+		"an unserved prefix must park, not fail"
+	);
+	route.cancel();
+	let err = tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the retraction to reject the request")
+		.expect("request task panicked")
+		.err()
+		.expect("nothing serves the prefix any more");
+	assert!(
+		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
+		"unexpected error: {err:?}"
+	);
+
+	served.finish().unwrap();
+}
+
+/// A second handler shares the queue with the first, and cancelling it leaves the
+/// first serving the announced prefix.
+#[tokio::test]
+async fn announced_prefix_survives_a_cancelled_second_handler() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let _route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+
+	let first = origin.dynamic();
+	let second = origin.dynamic();
+	second.cancel();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
+		.await
+		.expect("timed out waiting for the first handler's request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "live/cam");
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the first handler served the path");
+	served.finish().unwrap();
+}
+
+/// Cancelling an announcement rejects what it parked, and a handler created
+/// afterwards never receives a request for the retracted prefix.
+#[tokio::test]
+async fn cancelled_announce_leaves_no_phantom_request() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live/cam".into(), None).await })
+	};
+	// Let the request reach the forwarder, then retract under it.
+	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	route.cancel();
+	let err = tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the retraction to reject the request")
+		.expect("request task panicked")
+		.err()
+		.expect("a cancelled announcement rejects its requests");
+	assert!(
+		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
+		"unexpected error: {err:?}"
+	);
+
+	// Nothing of the retracted prefix is left for a later handler.
+	let dynamic = origin.dynamic();
+	let phantom = tokio::time::timeout(std::time::Duration::from_millis(200), dynamic.requested_broadcast()).await;
+	assert!(
+		phantom.is_err(),
+		"a cancelled announcement must not leave a request behind"
+	);
+	dynamic.cancel();
+}
+
+/// Two live handlers share one root route: whichever is waiting receives a
+/// request for an unannounced path, even the older one.
+#[tokio::test]
+async fn two_handlers_share_root_requests() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	let first = origin.dynamic();
+	let _second = origin.dynamic();
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("anything/at/all".into(), None).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, first.requested_broadcast())
+		.await
+		.expect("the older handler must receive the root request")
+		.unwrap();
+	assert_eq!(request.path().unwrap(), "anything/at/all");
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the older handler served the path");
+	served.finish().unwrap();
+}
+
+/// Tearing the origin down ends every handler with `Closed`. A parked request
+/// keeps the origin's driver alive (its front is lifecycle work the driver
+/// drains before resolving), so the teardown never runs underneath one; the
+/// case that does happen is a live handler with nothing parked.
+#[tokio::test]
+async fn origin_teardown_closes_dynamic_handlers() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let route = origin.announce("live".into(), MoqRoute::default()).unwrap();
+	let dynamic = origin.dynamic();
+
+	// The last producer handle: the origin's driver resolves and tears it down.
+	drop(origin);
+	match tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the handler must observe the teardown")
+	{
+		Err(MoqError::Closed) => {}
+		Err(err) => panic!("unexpected error: {err:?}"),
+		Ok(_) => panic!("a request was handed out after the teardown"),
+	}
+	route.cancel();
+}
+
+/// Cancelling the last handler retracts the shared root route before returning.
+#[tokio::test]
+async fn last_handler_cancel_retracts_the_root_synchronously() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let first = origin.dynamic();
+	let second = origin.dynamic();
+	let inner = origin.inner().consume();
+
+	// One handler left: the root still stands, so a request queues on it.
+	first.cancel();
+	let queued = inner.request_broadcast("x").into_inner();
+	assert!(
+		queued.poll_ok(&kio::Waiter::noop()).is_pending(),
+		"the root route must still serve while a handler lives"
+	);
+	drop(queued);
+
+	// None left: the route is gone by the time cancel returns.
+	second.cancel();
+	let verdict = inner.request_broadcast("y").into_inner();
+	match verdict.poll_ok(&kio::Waiter::noop()) {
+		std::task::Poll::Ready(Err(moq_net::Error::Unroutable)) => {}
+		std::task::Poll::Ready(Err(err)) => panic!("unexpected error: {err}"),
+		std::task::Poll::Ready(Ok(_)) => panic!("resolved through a retracted route"),
+		std::task::Poll::Pending => panic!("queued on a route that cancel should have retracted"),
+	}
+}
+
 /// The sequence cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.

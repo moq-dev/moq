@@ -1489,7 +1489,7 @@ mod tests {
 
 		let origin = crate::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
-		let _announce_broadcast = origin.announce("test", Default::default()).expect("announce broadcast");
+		broadcast.announce(Default::default()).expect("announce broadcast");
 		let mut track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group

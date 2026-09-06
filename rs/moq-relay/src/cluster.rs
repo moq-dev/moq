@@ -991,15 +991,18 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		// A pure route: the path itself is the advertisement, no broadcast behind it.
-		let self_registration: Option<moq_net::announce::Producer> = if gossip {
+		// The path itself is the advertisement: an empty broadcast, announced.
+		let mut self_registration: Option<moq_net::broadcast::Producer> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
-			let announcement = self
+			let registration = self
 				.origin
-				.announce(&path, moq_net::origin::Route::default())
+				.create_broadcast(&path)
 				.expect(".internal/origins is within the relay origin's root");
+			registration
+				.announce(moq_net::origin::Route::default())
+				.expect("the origin driver outlives the cluster");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
 			if can_dial {
@@ -1013,7 +1016,7 @@ impl Cluster {
 				});
 			}
 
-			Some(announcement)
+			Some(registration)
 		} else {
 			None
 		};
@@ -1035,8 +1038,10 @@ impl Cluster {
 			}
 		}
 
-		// Deliberate shutdown: dropping the registration retracts the route.
-		drop(self_registration);
+		// Deliberate shutdown: finishing the registration retracts the route.
+		if let Some(registration) = self_registration.as_mut() {
+			registration.finish();
+		}
 		Ok(())
 	}
 

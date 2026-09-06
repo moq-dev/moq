@@ -184,9 +184,10 @@ impl Publication {
 	/// Register one stable audio track and return its control handle and driver.
 	///
 	/// The initial source is enabled, but opens only while the track has a
-	/// subscriber. Await [`Driver::run`] on a local task because native capture
-	/// streams are not `Send`; [`Publication`] itself is `Send + Sync`, so the
-	/// controls can live anywhere.
+	/// subscriber. On macOS the driver's future is `!Send`, because the permission
+	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so await
+	/// [`Driver::run`] on a local task there; elsewhere it can be spawned.
+	/// [`Publication`] itself is `Send + Sync`, so the controls can live anywhere.
 	///
 	/// The track is registered here, but its catalog rendition describes the
 	/// source's PCM layout, so the driver probes for that first and registers the
@@ -719,6 +720,23 @@ pub async fn publish_capture<E: CatalogExt>(
 	}
 	.run()
 	.await
+}
+
+/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// `tokio::spawn` it. This is never called; it exists only to fail compilation
+/// if the future ever regains a `!Send` component. macOS is exempt: the TCC
+/// prompt and ScreenCaptureKit both hold ObjC handles across an await.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn assert_publish_capture_send(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	capture: capture::Config,
+	encode: Options,
+	clock: moq_mux::Clock,
+) {
+	fn is_send<T: Send>(_: &T) {}
+	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
 }
 
 /// A capture backend as the supervisor sees it. Kept separate from cpal so the
@@ -1746,7 +1764,7 @@ mod tests {
 		task.await.unwrap().unwrap();
 	}
 
-	/// The controls are meant to live away from the `!Send` capture driver.
+	/// The controls are meant to live away from the capture driver.
 	#[test]
 	fn publication_controls_cross_threads() {
 		fn assert_send_sync<T: Send + Sync>() {}

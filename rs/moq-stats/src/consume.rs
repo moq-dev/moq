@@ -138,7 +138,6 @@ mod tests {
 		track: track::Producer,
 		sub: track::Subscriber,
 		_announced: announce::Consumer,
-		_route: announce::Producer,
 		_source: broadcast::Producer,
 		_ctx: moq_net::stats::Session,
 	}
@@ -162,7 +161,7 @@ mod tests {
 
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).unwrap();
-		let route = feed_origin.announce(path, origin::Route::default()).unwrap();
+		source.announce(origin::Route::default()).unwrap();
 		let track = source.clone().create_track("video", None).unwrap();
 
 		let update = announced.next().await.expect("announce");
@@ -174,7 +173,6 @@ mod tests {
 			track,
 			sub,
 			_announced: announced,
-			_route: route,
 			_source: source,
 			_ctx: ctx,
 		}

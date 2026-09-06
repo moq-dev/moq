@@ -1,12 +1,12 @@
-# [M] js/net: createBroadcast, an announce flag, and an announce handle
+# [M] js/net: createBroadcast, a broadcast-owned announcement, and the dynamic handle
 
 ## Goal
 
 `Origin.Producer` in js/net has the same three operations as the Rust model:
-`createBroadcast(path)` creates an unadvertised broadcast, the producer's
-announce flag advertises its exact path once it is populated, and
-`announce(prefix, route)` returns a handle that advertises the prefix and
-yields the requests beneath it for the app to accept or reject.
+`createBroadcast(path)` creates an unadvertised broadcast, the broadcast
+producer's `announce(route)` / `unannounce()` advertise its exact path once it
+is populated, and `dynamic(prefix, route)` returns a handle that advertises the
+prefix and yields the requests beneath it for the app to accept or reject.
 
 ## Plan
 
@@ -16,24 +16,28 @@ through the local table, and `announce(prefix, provider)` takes a
 implements. Both fuse two decisions and the second is callback-shaped.
 
 - Rename `publish(path)` to `createBroadcast(path)`, unadvertised. The
-  broadcast producer carries a settable announce flag in the signals idiom
-  (see `js/CLAUDE.md`), default off, retracted when the producer closes.
-- `announce(prefix, route)` returns an `Announce` handle: `update(route)`,
+  broadcast producer gains `announce(route)` and `unannounce()`; the origin
+  keeps the association in its table and retracts when the producer closes.
+  Announcing again re-prices in place, so a route knob in the signals idiom
+  (see `js/CLAUDE.md`) is the natural backing.
+- js/net has no `Route` type today: `Hop[]` lives in `hop.ts` and `Cost` in
+  `lite/announce.ts`, and the origin never sees either. Add one (hops plus
+  cost) so the origin API and the wire agree, and stamp it on
+  `announce.Event` so consumers can read it back.
+- `dynamic(prefix, route)` returns a `Dynamic` handle: `update(route)`,
   `close()` to retract and reject, and `requested()` as an async iterator of
   requests with `accept(broadcast)` and `reject(error)`. `RouteProvider` is
   removed; `forward.ts` and the session code drive the handle instead.
-- Consumers: `js/publish`, `js/watch`, `js/boy`, `demo/web`, and the
-  `doc/lib/js/@moq` pages that show `publish(path)`.
+- Consumers: `js/publish` (whose `announce` attribute becomes the flip rather
+  than a gate on running at all), `js/watch`, `js/boy`, `js/clock`, `demo/web`,
+  and the `doc/lib/js/@moq` pages that show `publish(path)` or
+  `announce(prefix, provider)`.
 
-Tests: `origin.test.ts` and `integration.test.ts` cover create then flag,
+Tests: `origin.test.ts` and `integration.test.ts` cover create then announce,
 a handle serving a request under its prefix, and close rejecting queued
 requests; `reload.test.ts` keeps the announce state across a reload.
 
 Branch from `dev`, where the origin table lives; the rename is breaking.
-
-## Required
-
-- [Announce handle](/quest/m1/announce-handle.md) - the shape is proven in Rust first
 
 ## Related
 

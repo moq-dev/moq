@@ -1,8 +1,7 @@
 //! The thread that owns the cpal output stream.
 //!
-//! A `cpal::Stream` is `!Send`, so it has to live on the thread that built it.
-//! That thread also owns everything slow or fallible about the device: opening
-//! it, switching it, and rebuilding it after an error. Sinks never talk to it on
+//! That thread owns everything slow or fallible about the device: opening it,
+//! switching it, and rebuilding it after an error. Sinks never talk to it on
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 

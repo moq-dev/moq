@@ -441,7 +441,6 @@ mod tests {
 	#[allow(dead_code)]
 	struct Feed {
 		announced: announce::Consumer,
-		route: announce::Producer,
 		source: broadcast::Producer,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
@@ -458,7 +457,7 @@ mod tests {
 
 		let mut announced = egress.announced();
 		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
-		let route = feed_origin.announce(path, origin::Route::default()).expect("announce");
+		source.announce(origin::Route::default()).expect("announce");
 		let mut track = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
@@ -474,7 +473,6 @@ mod tests {
 
 		Feed {
 			announced,
-			route,
 			source,
 			consumer,
 			sub,
