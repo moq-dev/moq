@@ -4,7 +4,7 @@
 
 A settled shape for how a route's `{warm, cold}` cost crosses `moq-ffi` and
 the language wrappers, so observing a route and re-announcing it cannot
-silently rewrite a truthful cold cost. Run `/plan-quest`; the settled plan
+silently rewrite a truthful cold cost. Run `/plan-quests`; the settled plan
 becomes the implementing quest that closes the issue.
 
 ## Plan

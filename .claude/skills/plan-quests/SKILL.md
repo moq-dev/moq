@@ -1,6 +1,6 @@
 ---
-name: plan-quest
-description: Scope, create, and publish a quest through an interactive grilling interview. Use when the user invokes /plan-quest, asks to plan a quest, or wants unsettled work split into quests.
+name: plan-quests
+description: Scope, create, and publish a quest through an interactive grilling interview. Use when the user invokes /plan-quests, asks to plan a quest, or wants unsettled work split into quests.
 ---
 
 Before you begin, read `quest/CLAUDE.md` completely.
@@ -19,7 +19,7 @@ A question whose answer depends on another question still open in this round bel
 
 Finding *facts* is your job, never the user's.
 When a frontier question needs a fact from the environment (filesystem, tools, etc.), dispatch a sub-agent to find it.
-Don't block on it, ask the rest of the frontier now. 
+Don't block on it, ask the rest of the frontier now.
 The *decisions* are the user's: put each to them and wait.
 
 Search other quests and questlines to keep the larger plan consistent.
@@ -36,6 +36,7 @@ Prefix each quest title with `[XS]`, `[S]`, `[M]`, `[L]`, or `[XL]`, including i
 Once complete, create, update, or delete the relevant quests and questlines.
 
 Commit and make a PR then:
+
 - Monitor it for CI failures and reviews.
 - Address any automated review findings (Codex/CodeRabbit) you agree with. Turn down any you disagree with with a comment.
 - Push any changes you made to the PR, updating the summary if needed.
