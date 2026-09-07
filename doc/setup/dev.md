@@ -23,7 +23,9 @@ match CI.
 | `just boy` | Run the [MoQ Boy](/bin/demo) demo. |
 
 Recipes default to the local relay at `http://localhost:4443`. Pass
-`https://cdn.moq.dev/anon` to use the public relay instead.
+`https://cdn.moq.dev/anon` to use the public relay instead. The default BBB/TOS
+publishers and `just pub serve` use MPEG-TS, with one audio frame per PES to
+avoid batching latency. Use `just pub cmaf` only when testing fMP4/CMAF.
 
 ## Debugging
 

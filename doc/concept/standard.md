@@ -54,10 +54,10 @@ supports, and prints it in the logs. Publish a test pattern and play it back:
 ```bash
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
     -c:v libx264 -preset ultrafast -tune zerolatency -g 60 -c:a aac \
-    -f mp4 -movflags cmaf+frag_keyframe+empty_moov+default_base_moof - \
-| moq --client-connect https://relay.example.com --broadcast test.hang import fmp4
+    -f mpegts -pes_payload_size 0 - \
+| moq --client-connect https://relay.example.com --broadcast test.hang import ts
 
-moq --client-connect https://relay.example.com --broadcast test.hang export fmp4 | ffplay -
+moq --client-connect https://relay.example.com --broadcast test.hang export ts | ffplay -
 ```
 
 Add `--client-tls-disable-verify` for a self-signed relay on your own test

@@ -41,11 +41,11 @@ instead host sessions with `--server-bind`, or both at once. `moq import --help`
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
-ffmpeg -re -i video.mp4 -c copy -f mpegts - | \
+ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 
 # Pull it back out
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export ts | ffplay -
 
 # With a token
 moq --client-connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
