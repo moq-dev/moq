@@ -99,6 +99,9 @@ priority order, each with a one-line summary:
 - Search the living tree and git history before creating a quest.
 - Split independently completable work into separate quests. Group them in a
   questline only when they ship together; a one-off sits directly in its parent.
+- Every issue a quest or questline lists under `Closes` carries the `quest`
+  GitHub label (`gh issue edit <n> --add-label quest`). Apply it when the
+  quest lands; a `Related` link is context, not tracking, and gets no label.
 - Represent a release or pin bump that unblocks repository work as its own
   quest, holding the external condition as a plain-text `Required` bullet, and
   make every dependent quest require it. When the condition clears, remove the
@@ -130,6 +133,8 @@ priority order, each with a one-line summary:
 
 - A quest that is no longer needed or cannot be completed is abandoned: delete
   it and explain why in the PR.
+- Abandoning a quest removes the `quest` label from any issue it listed under
+  `Closes` that no other quest tracks.
 - The quest is deleted in the same PR that completes or abandons it.
 - When deleting a quest or questline, grep its absolute path and remove every
   reference; this reveals every quest the finished work unblocks. If the

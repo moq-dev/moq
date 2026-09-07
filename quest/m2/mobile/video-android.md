@@ -22,7 +22,11 @@ decides whether XL is worth spending.
 `moq-tokio` already reaches into Android through JNI for `tls::init_android`,
 so the mechanism exists.
 
+## Required
+
+- [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - decides whether an NDK/JNI backend family is worth building
+
 ## Related
 
-- [iOS capture](/quest/m2/video-ios.md) - the other half of mobile, which
+- [iOS capture](/quest/m2/mobile/video-ios.md) - the other half of mobile, which
   reuses an existing backend rather than adding one

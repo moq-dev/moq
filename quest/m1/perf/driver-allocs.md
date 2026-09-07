@@ -26,8 +26,19 @@ cadence into a measured knob instead of a hardcoded fairness choice.
   the shared socket; keep fairness by bounding the budget, and sweep 1, 2,
   and 4 trains per turn under the fanout and single-heavy-connection shapes
   to see whether the extra turn latency is real.
+- Separate "there is more to send" from "readiness changed". The self-wake
+  after every train re-runs the whole of `Driver::poll`, walking quiche's
+  `readable()`/`writable()` iterators and removing and re-registering a
+  waiter per ready stream per train (#3120); a requeue for the transmit pool
+  should not re-walk readiness, or only the streams whose readiness changed
+  since the last turn should be woken. `state.finishing.retain(..)` calling
+  `stream_capacity` per finishing stream per turn goes with it.
 - Each change stays independently ablatable.
 
 Acceptance: allocations per train and per pump (heaptrack or a debug
 counter), CPU per Gbps and throughput ceiling via `just bench BASE` on
 Linux. Latency must not regress at the swept budget.
+
+## Closes
+
+- [#3120](https://github.com/moq-dev/moq/issues/3120) - close this issue when the quest finishes

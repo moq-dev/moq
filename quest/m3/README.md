@@ -24,6 +24,7 @@ its verdict lands and the follow-on work becomes concrete.
 - [#703](/quest/m3/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
 - [#823](/quest/m3/823-svc-support.md) - SVC support?
 - [#1838](/quest/m3/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - TR 101 290 monitoring: requirements (broadcast/contribution health metrics)
+- [Status forwarding](/quest/m3/ietf-track-status-forward.md) - TRACK_STATUS is answered by asking upstream instead of attaching a route
 - [Teleoperation](/quest/m3/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m3/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m3/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice

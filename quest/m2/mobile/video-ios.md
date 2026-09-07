@@ -22,7 +22,11 @@ Reuse the `capture::Source` shape the other platforms use rather than growing
 an iOS-specific entry point, so device enumeration and selection behave the
 same everywhere.
 
+## Required
+
+- [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - decides whether Rust owns capture on mobile at all
+
 ## Related
 
-- [Android capture and encode](/quest/m2/video-android.md) - the other half of
+- [Android capture and encode](/quest/m2/mobile/video-android.md) - the other half of
   mobile, and a much larger one

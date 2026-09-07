@@ -52,6 +52,10 @@ lands.
 - [#2217](https://github.com/moq-dev/moq/issues/2217) - moq-ffi: the announce handle carries the lifecycle (announce-handle, #3190)
 - [#980](https://github.com/moq-dev/moq/issues/980) - dual-stack binding on main; happy eyeballs in `moq-tokio::resolve` (#2749)
 - [#2153](https://github.com/moq-dev/moq/issues/2153) - go: the wrapper caught up on main; hops landed on dev (#2168)
+- [#679](https://github.com/moq-dev/moq/issues/679) - QUIC receive is spread across thread-per-core workers, each on its own socket (#2875)
+- [#1073](https://github.com/moq-dev/moq/issues/1073) - the origin lifecycle is caller-driven: `origin::Driver` plus `moq_tokio::origin::spawn` (#2897, #2901)
+- [#2155](https://github.com/moq-dev/moq/issues/2155) - js/net: subscriptions take an options object with start and end groups and `update()`; ordering became a handle
+- [#3493](https://github.com/moq-dev/moq/issues/3493) - the timeline is a `moq_json::window` with a bounded checkpoint, so a 24/7 importer no longer retains every record (#3240)
 
 ## Related
 

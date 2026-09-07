@@ -261,3 +261,7 @@ than announce state.
   pattern, and its catalog names the generations a wildcard cannot
 - [pop-skipping](/quest/m2/pop-skipping/README.md) - it owns the route cost and
   the rank hash this reuses
+- [#3452](https://github.com/moq-dev/moq/issues/3452) - an OBS dock control to
+  request a transcode ladder; demand is viewer-driven here, so it waits on
+  [Resolve](/quest/m2/wildcard/resolve.md) and the `.pro` output convention
+  before any UI hard-codes a path

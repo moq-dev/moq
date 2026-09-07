@@ -11,10 +11,10 @@ The mechanism that remains is the timeline's shape, not the 500s originally
 reported downstream. A media timeline is a `moq_json::stream` on one
 never-rolled group (`rs/moq-mux/src/timeline.rs`), so a long-lived broadcast's
 index grows without bound, held by the publisher and read from the start by
-every new origin. The `dev` branch keeps that single group after
-[moq#2547](https://github.com/moq-dev/moq/pull/2547). That rework makes it one
-timeline per broadcast rather than one per rendition, which lowers the rate but
-not the shape. An aged-out group already maps to 404 rather than 500
+every new origin; #3493 measured it at 2.8 MB/h in a 24 h `moq import ts`
+soak. The `dev` branch already publishes one timeline per broadcast as a
+`moq_json::window` with a bounded checkpoint (#3240), so the shape is fixed
+there and reaches main with the [merge](/quest/m1/merge-dev.md). An aged-out group already maps to 404 rather than 500
 ([moq#2615](https://github.com/moq-dev/moq/pull/2615)), so re-verify the
 reported symptom before chasing it.
 
