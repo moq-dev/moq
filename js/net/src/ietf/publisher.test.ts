@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { error } from "../error.ts";
 import { MAX_GROUP_FRAMES } from "../group.ts";
@@ -125,6 +126,9 @@ test.each(["acknowledged", "rejected"] as const)(
 		const pub = publisher(pair.server);
 		const first = new BroadcastProducer();
 		const second = new BroadcastProducer();
+		const changed = Signal.prototype.changed;
+		const disposed = mock(() => {});
+		let registration: ReturnType<typeof spyOn<typeof Signal.prototype, "changed">> | undefined;
 		const loop = pub.runPublishNamespaces();
 		try {
 			pub.publish(Path.from("replacement"), first);
@@ -132,6 +136,18 @@ test.each(["acknowledged", "rejected"] as const)(
 			if (!old) throw new Error("missing initial advertisement");
 			expect(await readPublishNamespace(old)).toBe(Path.from("replacement"));
 			await acceptPublishNamespace(old);
+			registration = spyOn(Signal.prototype, "changed").mockImplementation(function (
+				this: Signal<unknown>,
+				fn?: (value: unknown) => void,
+			) {
+				const original = changed.bind(this);
+				if (!fn) return original();
+				const dispose = original(fn);
+				return () => {
+					dispose();
+					disposed();
+				};
+			} as typeof changed);
 			first.close();
 			pub.publish(Path.from("replacement"), second);
 			await closing.promise;
@@ -140,9 +156,11 @@ test.each(["acknowledged", "rejected"] as const)(
 			expect(early).toBeUndefined();
 			expect(opened).toBe(1);
 			if (result === "rejected") {
+				expect(disposed).not.toHaveBeenCalled();
 				acknowledged.reject(new Error("FIN acknowledgment failed"));
 				await loop;
 				expect(opened).toBe(1);
+				expect(disposed).toHaveBeenCalled();
 				return;
 			}
 			acknowledged.resolve();
@@ -151,6 +169,7 @@ test.each(["acknowledged", "rejected"] as const)(
 			expect(await readPublishNamespace(replacement)).toBe(Path.from("replacement"));
 			await acceptPublishNamespace(replacement);
 		} finally {
+			registration?.mockRestore();
 			acknowledged.resolve();
 			first.close();
 			second.close();

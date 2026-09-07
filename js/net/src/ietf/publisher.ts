@@ -740,6 +740,7 @@ export class Publisher {
 		// The open PUBLISH_NAMESPACE request per advertised path.
 		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
 
+		let dispose: Dispose | undefined;
 		try {
 			// Which producer holds each advertised path; see {@link runSubscribeNamespace}.
 			let active = new Map<Path.Valid, broadcast.Producer>();
@@ -754,14 +755,13 @@ export class Publisher {
 				// through it and leave the namespace unadvertised until something unrelated
 				// changed.
 				// TODO Make a better helper within Signals.
-				let dispose!: Dispose;
 				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
 					dispose = this.#broadcasts.changed(resolve);
 				});
 
 				const broadcasts = this.#broadcasts.peek();
 				if (!broadcasts) {
-					dispose();
+					dispose?.();
 					break;
 				}
 
@@ -806,7 +806,7 @@ export class Publisher {
 				const next = await (retry
 					? Promise.race([changed, retryAfter(retry).then(() => broadcasts)])
 					: changed);
-				dispose();
+				dispose?.();
 				if (!next) break;
 			}
 		} catch (err: unknown) {
@@ -814,6 +814,7 @@ export class Publisher {
 			// discovery. Not a debug-level event.
 			console.warn(`publish_namespace loop failed: ${reason(error(err))}`);
 		} finally {
+			dispose?.();
 			// Close out every open PUBLISH_NAMESPACE request.
 			for (const path of [...requests.keys()]) {
 				await this.#withdraw(path, requests);
