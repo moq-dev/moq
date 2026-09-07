@@ -88,4 +88,3 @@ fine.
 - [Encoder lag](/quest/m0/publish-audio-lag-measure.md) - the publisher-side lag the same report observed
 - [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - an honest catalog floor for bursty importers
 - [Audio identity](/quest/m0/3479-watch-audio-identity.md) - stops catalog churn resetting the ring
-- [Browser media QA](/quest/m0/browser-media-qa.md) - the harness that measures playback output
