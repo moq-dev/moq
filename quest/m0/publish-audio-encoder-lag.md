@@ -31,8 +31,9 @@ usable for this, its encoder lags by design; measure with a real device.
   publisher rebuilds the encoder on `publish ok`, and whether backpressure
   from the track (the write awaiting a group the relay has not accepted)
   stalls the callback that dequeues encoder output.
-- Fix at the source and add a regression that counts chunks against inputs
-  across a simulated subscriber churn.
+- Fix at the source and add a regression that counts chunks against inputs,
+  both across a simulated subscriber churn and on a steady subscription, so
+  the churn-free baseline the reproduction records stays covered.
 
 ## Related
 

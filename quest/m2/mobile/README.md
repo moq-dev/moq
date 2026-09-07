@@ -18,7 +18,7 @@ Android one is an XL bet. Capture and the Dart device proof follow.
 
 ## Quests
 
-- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - an app decodes a subscribed video rendition through moq-ffi on every binding
+- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - an app decodes a subscribed video rendition through moq-ffi on every binding that ships codecs
 - [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - settle whether Rust or the platform owns capture, codecs, and rendering before growing either
 - [iOS capture](/quest/m2/mobile/video-ios.md) - moq-video captures the camera and screen on iOS, reusing the VideoToolbox backend
 - [Android capture](/quest/m2/mobile/video-android.md) - Camera2, MediaProjection and MediaCodec, a whole NDK/JNI backend family

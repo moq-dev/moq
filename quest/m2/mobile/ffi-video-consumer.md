@@ -1,10 +1,12 @@
-# [L] moq-ffi: a video consumer decodes a subscribed rendition on every binding
+# [L] moq-ffi: a video consumer decodes a subscribed rendition on every binding that ships codecs
 
 ## Goal
 
-An application built on any binding subscribes to a video rendition and
-receives decoded frames, the counterpart of the existing raw video producer
-and of the audio consumer. `moq-ffi` has `MoqVideoProducer`,
+An application built on a binding whose artifacts carry codecs subscribes to
+a video rendition and receives decoded frames, the counterpart of the
+existing raw video producer and of the audio consumer. Dart is out of scope
+until [Dart codec parity](/quest/m2/dart-codecs.md) lands; every other
+binding is done here. `moq-ffi` has `MoqVideoProducer`,
 `MoqAudioProducer`, and `MoqAudioConsumer`; `moq-video::decode` exists with
 VideoToolbox and openh264 backends; nothing joins them.
 
@@ -18,9 +20,8 @@ VideoToolbox and openh264 backends; nothing joins them.
   surface waits on the ownership decision.
 - Walk the Cross-Package Sync table: `rs/libmoq` and `moq.h`, the `py`,
   `swift`, `kt`, and `dart` wrappers, the Go wrapper, and `doc/lib` for each.
-  The Dart binding alone has no codecs, so its consumer carries encoded
-  frames until [Dart codec parity](/quest/m2/dart-codecs.md) lands; say so
-  rather than stubbing.
+  The Dart binding alone has no codecs, so document the omission there rather
+  than stubbing a consumer that cannot decode.
 - Verify on an iOS simulator and an Android emulator with the smoke media,
   and on macOS through libmoq so `just test smoke-full` covers it.
 

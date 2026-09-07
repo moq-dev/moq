@@ -109,9 +109,10 @@ the writer sees `GroupTooLarge`, which nothing covers today.
 `js/json/src/window/encoder.ts` and the Rust `snapshot` and `window`
 encoders keep their own `MAX_GROUP_FRAMES = 256` roll trigger, sized "well
 below moq-net's per-group frame cap", which today means js/net's 1024. Once
-both languages cap at 8192, raise those roll caps in step (1024 or more) so a
-window timeline restates its checkpoint less often; the caps are self-imposed
-and a roll is invisible to a window consumer.
+both languages cap at 8192, raise those roll caps in step (1024 or more, and
+still under 8192 so a roll always precedes `GroupTooLarge`) so a window
+timeline restates its checkpoint less often; the caps are self-imposed and a
+roll is invisible to a window consumer.
 
 ### The benchmark breaks
 
