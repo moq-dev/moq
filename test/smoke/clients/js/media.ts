@@ -272,11 +272,20 @@ async function capabilities(page: Page): Promise<void> {
 const server = serve();
 const browsers: Browser[] = [];
 
+/**
+ * Chromium arguments shared by both roles.
+ *
+ * No fake camera or microphone: the fixture generates its own media. The autoplay policy is
+ * asserted rather than waived, and stated explicitly rather than left to the headless default, so
+ * the gate is a property of the run instead of a property of this Chromium build.
+ */
+const CHROMIUM_ARGS = ["--autoplay-policy=user-gesture-required"];
+
 // One browser per role. Pages in one browser share a renderer scheduler, and the one that is not
 // frontmost is throttled and reported hidden, which stalls both the fixture's clock and the
 // player's download policy.
 async function browserFor(): Promise<Browser> {
-	const browser = await launch();
+	const browser = await launch(CHROMIUM_ARGS);
 	browsers.push(browser);
 	return browser;
 }
