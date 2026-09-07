@@ -198,10 +198,19 @@ harness_port relay "$PORT"
 PORT="$HARNESS_PORT"
 URL="http://127.0.0.1:${PORT}"
 
+# The reservation covers other harness runs, not the rest of the machine, so
+# still refuse a port some unrelated process is already serving on. Without this
+# the readiness probe below would be satisfied by that relay while ours died on
+# its failed bind, and the round-trip would grade a binary nobody built here.
+if curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+    echo "error: something is already listening on 127.0.0.1:${PORT} (stale relay?)" >&2
+    exit 1
+fi
+
 echo "### starting relay on 127.0.0.1:${PORT}"
 sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
-if ! harness_ready "$URL/certificate.sha256" 30; then
+if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "error: relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1

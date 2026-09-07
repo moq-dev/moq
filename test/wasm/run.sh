@@ -142,7 +142,7 @@ for flavour in "${FLAVOURS[@]}"; do
     echo "starting $name relay on 127.0.0.1:${port}..."
     harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" "$RELAY" "${args[@]}"
 
-    if ! harness_ready "$url/certificate.sha256" 30; then
+    if ! harness_ready "$url/certificate.sha256" 30 "$HARNESS_PID"; then
         echo "$name relay never became ready" >&2
         sed 's/^/  relay: /' "$HARNESS_RUN/relay-$name.log" >&2 || true
         exit 1

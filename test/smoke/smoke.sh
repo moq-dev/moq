@@ -387,7 +387,7 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # committed file never has to be edited for a run.
 sed "s/4443/${PORT}/g" "$SMOKE_DIR/smoke.toml" >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
-if ! harness_ready "$URL/certificate.sha256" 30; then
+if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1

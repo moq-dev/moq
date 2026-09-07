@@ -154,16 +154,40 @@ harness_endpoint() {
     echo "endpoint: $label $url"
 }
 
-# Poll URL until it answers, up to SECONDS: `harness_ready <url> [seconds]`.
+# Poll URL until it answers, up to SECONDS: `harness_ready <url> [seconds] [pid]`.
 # Tight interval on purpose; a relay binds in about 130ms, so a half-second tick
 # spends most of the wait asleep.
+#
+# With PID, the process that is supposed to be answering. A URL that answers
+# while that process is gone is somebody else's server on our port, and the run
+# would otherwise go on to test whatever binary that is; a process that has
+# already exited will never bind, so waiting out the budget only delays the
+# report of a bind that failed.
 harness_ready() {
-    local url="$1" seconds="${2:-30}" i
+    local url="$1" seconds="${2:-30}" pid="${3:-}" i
     for ((i = 0; i < seconds * 20; i++)); do
-        curl -sf "$url" >/dev/null 2>&1 && return 0
+        if curl -sf "$url" >/dev/null 2>&1; then
+            if [[ -n "$pid" ]] && harness_exited "$pid"; then
+                echo "error: $url answered, but the process this run started is gone" >&2
+                return 1
+            fi
+            return 0
+        fi
+        if [[ -n "$pid" ]] && harness_exited "$pid"; then
+            return 1
+        fi
         sleep 0.05
     done
     return 1
+}
+
+# True once a spawned child has exited, waited on or not: `harness_exited <pid>`.
+# `kill -0` cannot answer this, because an unreaped child is still a process and
+# answers yes for a zombie. The process state can.
+harness_exited() {
+    local state
+    state=$(ps -o state= -p "$1" 2>/dev/null || true)
+    [[ -z "$state" || "$state" == Z* ]]
 }
 
 # ── processes ───────────────────────────────────────────────────────────────
