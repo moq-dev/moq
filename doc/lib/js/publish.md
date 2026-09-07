@@ -88,13 +88,15 @@ const broadcast = new Publish.Broadcast({
     name: Publish.Net.Path.from("alice.hang"),
 });
 
-const capture = new Publish.Video.Capture({ source });   // a Source.Camera's `out.source`
+const camera = new Publish.Source.Camera({ enabled: true });
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const capture = new Publish.Video.Capture({ source: camera.out.source });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
 // encodes only while someone is subscribed.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
-new Publish.Audio.Encoder("audio", { broadcast, source: audioSource, enabled: true });
+new Publish.Audio.Encoder("audio", { broadcast, source: microphone.out.source, enabled: true });
 ```
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).

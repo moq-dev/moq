@@ -133,13 +133,13 @@ The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>
 
 ## Features
 
-- **Camera & microphone** — Capture from user devices
-- **Screen sharing** — Capture display or window
-- **File playback** — Publish from a media file
-- **WebCodecs encoding** — Hardware-accelerated video and audio encoding
-- **Reactive state** — All properties are signals from `@moq/signals`
-- **Simulcast** — Any number of renditions, each its own encoder and track
-- **Custom tracks** — Application tracks and catalog sections ride alongside the media
+- **Camera & microphone**: Capture from user devices
+- **Screen sharing**: Capture display or window
+- **File playback**: Publish from a media file
+- **WebCodecs encoding**: Hardware-accelerated video and audio encoding
+- **Reactive state**: All properties are signals from `@moq/signals`
+- **Simulcast**: Any number of renditions, each its own encoder and track
+- **Custom tracks**: Application tracks and catalog sections ride alongside the media
 
 ## License
 

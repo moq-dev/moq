@@ -139,11 +139,11 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` el
 
 ## Features
 
-- **WebCodecs decoding** — Hardware-accelerated video and audio decoding
-- **Reactive state** — All properties are signals from `@moq/signals`
-- **Latency control** — A single target, or a range that buffers future-dated frames
-- **Quality selection** — Switch between available renditions
-- **Custom tracks** — Unknown catalog sections pass through, and `broadcast.out.active` subscribes your own tracks
+- **WebCodecs decoding**: Hardware-accelerated video and audio decoding
+- **Reactive state**: All properties are signals from `@moq/signals`
+- **Latency control**: A single target, or a range that buffers future-dated frames
+- **Quality selection**: Switch between available renditions
+- **Custom tracks**: Unknown catalog sections pass through, and `broadcast.out.active` subscribes your own tracks
 
 ## License
 
