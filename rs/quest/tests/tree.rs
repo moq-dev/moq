@@ -68,6 +68,16 @@ Another quest.
 - [One](/quest/m0/line/one.md) - must finish first
 ";
 
+#[test]
+fn skills_are_not_quests() {
+	let tree = Tree::new();
+	let documents = quest::collect(tree.path()).unwrap();
+	tree.write("quest/skills/plan-quests/SKILL.md", "# Planning instructions\n");
+	tree.write("quest/skills/plan-quests/references/guide.md", "# Reference\n");
+	assert_eq!(quest::collect(tree.path()).unwrap(), documents);
+	tree.accepts();
+}
+
 /// A minimal but complete tree: root questline -> milestone -> questline -> two
 /// quests, one blocking the other.
 struct Tree(TempDir);

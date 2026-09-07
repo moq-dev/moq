@@ -1,6 +1,7 @@
 # Quests
 
 Read this file whenever work mentions a quest or questline.
+Skills are in the `skills` folder.
 
 Quests are optional, versioned plans for work that needs durable scope, memory,
 or coordination. Think GitHub issues checked into the repository. GitHub issues
@@ -8,6 +9,7 @@ remain the public front door, but prefer making a quest.
 
 ## Model
 
+- `skills/` holds agent skills and is excluded from the quest tree.
 - A quest is a task that should be completed independently in a single PR. It
   is a Markdown file such as `archive.md`.
 - A questline is an ordered collection of quests and/or other questlines. It is

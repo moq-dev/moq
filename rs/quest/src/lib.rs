@@ -35,6 +35,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 	for entry in std::fs::read_dir(dir)? {
 		let entry = entry?;
 		let path = entry.path();
+		// Skill instructions and their references are not quest documents.
+		if path == root.join("quest/skills") {
+			continue;
+		}
 		// `file_type` does not follow symlinks, so quest/CLAUDE.md is a file
 		// here and a directory symlink can never make this recurse forever.
 		let kind = entry.file_type()?;

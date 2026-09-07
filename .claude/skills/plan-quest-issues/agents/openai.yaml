@@ -1,4 +1,0 @@
-interface:
-  display_name: "Plan Quest Issues"
-  short_description: "Triage untracked GitHub issues and plan a quest for each"
-  default_prompt: "Use $plan-quest-issues to triage every open issue without a quest and plan quests for the ones worth it."
