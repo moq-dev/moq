@@ -9,7 +9,8 @@
 		"dev": "vite --open"
 	},
 	"dependencies": {
-		"@moq/boy": "workspace:^"
+		"@moq/boy": "workspace:^",
+		"@moq/signals": "workspace:^"
 	},
 	"devDependencies": {
 		"esbuild": "^0.28.2",

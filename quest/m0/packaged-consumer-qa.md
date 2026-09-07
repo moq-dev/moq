@@ -39,6 +39,5 @@ consumer commands for review.
 
 ## Related
 
-- [Declared JS dependencies](/quest/m0/3361-js-every-moq-package-a-package-imports-is-declared.md) - owns the existing dependency declaration defect
 - [Dart on iOS](/quest/m2/mobile/dart-ios.md) - owns native-asset loading on Apple devices
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - owns release feature enablement
