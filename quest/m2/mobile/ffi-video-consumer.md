@@ -18,7 +18,9 @@ VideoToolbox and openh264 backends; nothing joins them.
   surface waits on the ownership decision.
 - Walk the Cross-Package Sync table: `rs/libmoq` and `moq.h`, the `py`,
   `swift`, `kt`, and `dart` wrappers, the Go wrapper, and `doc/lib` for each.
-  The Dart binding alone has no codecs; say so rather than stubbing.
+  The Dart binding alone has no codecs, so its consumer carries encoded
+  frames until [Dart codec parity](/quest/m2/dart-codecs.md) lands; say so
+  rather than stubbing.
 - Verify on an iOS simulator and an Android emulator with the smoke media,
   and on macOS through libmoq so `just test smoke-full` covers it.
 
@@ -26,3 +28,4 @@ VideoToolbox and openh264 backends; nothing joins them.
 
 - [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - decides whether frames stay byte arrays
 - [Decoder drain](/quest/m3/decode-drain.md) - flush and finish for pipelined decoders this will lean on
+- [Dart codec parity](/quest/m2/dart-codecs.md) - the one binding that cannot decode until it lands

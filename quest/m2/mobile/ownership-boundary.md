@@ -19,8 +19,9 @@ capture quests in this questline start only once this is settled.
   Rust-native audience, and the copy cost of byte-array frames measured on a
   device.
 - Record the verdict here and in `rs/moq-ffi/CLAUDE.md`, and re-estimate
-  [Android capture](/quest/m2/mobile/video-android.md) against it; abandon
-  that quest if the answer is option 1.
+  [Android capture](/quest/m2/mobile/video-android.md) and
+  [iOS capture](/quest/m2/mobile/video-ios.md) against it; both target
+  `moq-video`, so abandon both if the answer is option 1.
 
 ## Related
 

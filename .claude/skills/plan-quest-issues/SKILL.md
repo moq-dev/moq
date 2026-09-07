@@ -41,5 +41,7 @@ quest, or finding, ending with the `(written by <model>)` line, then close the
 issue. The batch answer is the approval; do not ask again per issue.
 
 Finish per `$plan-quest`: `just check`, commit, one PR for the whole tree.
-After the PR is open, apply the `quest` label to every issue the new or
-updated quests list under `Closes`, then offer to start the ready quests.
+The label tracks a landed quest, so wait for the PR to merge before applying
+the `quest` label to every issue the new or updated quests list under
+`Closes`; an abandoned PR leaves the issues unlabeled for the next run. Then
+offer to start the ready quests.
