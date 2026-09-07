@@ -20,7 +20,7 @@ When taking over someone else's PR, push commits on top of theirs so they keep c
 # AI
 
 AI-assisted issues, pull requests, reviews, and comments are welcome.
-If the right solution is not obvious, open an issue before writing code so contributors and maintainers can brainstorm the approach together.
+GitHub issues are the public front door for brainstorming. Prefer a quest for work needing durable scope or coordination.
 
 Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
 

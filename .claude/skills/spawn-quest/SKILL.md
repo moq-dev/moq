@@ -68,9 +68,9 @@ Batch the questions; do not spend a round per quest. The choices are **start**,
 **plan** (use `$plan-quest` when a material decision is unmade), **move**,
 **delete**, and **leave**.
 
-Offer **start** only for a ready quest: `quest/CLAUDE.md` executes one only when
-it has no `Required` section, which `quest ready` lists and, given a path,
-explains. For work an agent cannot do - a decision that is a conversation, a
+Offer **start** only for a ready quest: the selected quest has no
+`Required` section in its own file. `quest ready` lists ready quests and, given
+a path, explains its blockers. For work an agent cannot do - a decision that is a conversation, a
 credential only the user can mint, or verification this machine cannot run,
 such as a Linux-only build or a benchmark whose exit criteria is a measured
 before/after - recommend **leave** and name what would unblock it.

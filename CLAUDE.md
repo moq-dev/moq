@@ -10,11 +10,11 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
    - track: a live stream of groups within a broadcast.
    - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
    - frame: a sized payload of bytes.
-4. **hang** - Media-specific encoding/decoding in `moq-mux` that runs on top of `moq-net`. Contains:
+4. **hang** - Media catalog and container protocol in `rs/hang` and `js/hang`, on top of `moq-net`. Contains:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-net` or `moq-mux`
+5. **application** - Users building on top of `moq-net` or `hang`, with `moq-mux` translating media formats
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq-net` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -22,7 +22,7 @@ WebSocket, TLS, UDS, etc are fallback transports via qmux. Reliable transports c
 
 # Structure
 
-Top-level only. Each area has its own `CLAUDE.md`; read it before working there.
+Top-level only. Read the area-specific `CLAUDE.md` where one exists before working there.
 
 - `/rs/` - Rust crates, published as `moq-*`. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
@@ -32,13 +32,13 @@ Top-level only. Each area has its own `CLAUDE.md`; read it before working there.
 - `/test/` - harnesses that span languages or need a server (`just test smoke`).
 - `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
 - `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
-- `/quest/` - replacement for GitHub issues. See `quest/CLAUDE.md`. Prefer a quest over an issue.
+- `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.
 
-Changes ripple across languages. A `moq-ffi` change touches every wrapper and its docs. A wire change touches `drafts/`, `rs/moq-net`, and `js/net` in the same PR.
+Changes ripple across languages. Follow the Cross-Package Sync checklist below.
 
 # Libraries
 
-The same components exist in each language with matching names and semantics; only the package prefix changes (`moq-*`, `@moq/*`, the `moq` bindings).
+Components shared across languages use matching names and semantics (`moq-*`, `@moq/*`, the `moq` bindings). Availability varies by language.
 
 - **net**: the pub/sub wire layer above. Everything else rides on it.
 - **json**: JSON over a track. `snapshot` is lossy latest-value with merge-patch deltas; `stream` is a lossless append-log in a single group.
@@ -83,9 +83,9 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 
 # Development
 
-PRs target `main`. `dev` is reserved for semver-breaking API changes, except for `0.0.x` packages. Wire changes alone do not need `dev`.
+PRs target `main`. `dev` is reserved for semver-breaking API changes, except for `0.0.x` and unpublished/private packages. Wire changes alone do not need `dev`.
 
-Before starting, `git fetch origin` and set the upstream to the base branch. Rebase onto `dev` if a breaking change turns out to be needed.
+Before starting, `git fetch origin` and set the upstream to the base branch. If a published API break requires `dev`, retarget the PR to `dev`, set the upstream to `origin/dev`, then rebase onto it.
 
 Use the Nix dev shell so tooling matches CI. direnv loads it automatically, or `nix develop --command just ...`.
 
@@ -98,3 +98,26 @@ just fix          # Auto-fix lint/formatting, same scope
 These diff the branch against its base and only run the affected packages. Run `just fix` before committing. CI runs the same `check` and `test`.
 
 See `CONTRIBUTING.md` before making a PR.
+
+# Cross-Package Sync
+
+| Change in | Also update |
+|---|---|
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
+| `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
+| `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
+| `rs/moq-token` | `js/token` |
+| `rs/moq-stats` wire (track names, frame shapes) | `doc/bin/relay/config.md` (stats section) |
+| `rs/moq-relay` config/behavior | `doc/bin/relay/` |
+| `rs/moq-cli` | `doc/bin/cli.md` |
+| `rs/moq-token-cli` | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-token.md`, `doc/lib/rs/index.md` |
+| `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
+| `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+| a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
+
+Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/CLAUDE.md`.
+
+For wire, `moq-ffi`, or gateway changes, also run `just test smoke-full` for cross-language interop; plain `smoke` is Rust-only.
+
+When a CLI interface changes, search the whole repo for the binary name and update every example invocation, including docs and demo recipes. Check examples against `--help`.

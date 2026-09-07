@@ -456,7 +456,8 @@ impl Backend for MediaFoundation {
 			}
 		}
 		self.discontinuity = false;
-		remember_timestamp(&mut self.pending, self.sample_time(), timestamp);
+		let sample_time = self.sample_time();
+		remember_timestamp(&mut self.pending, sample_time, timestamp);
 		self.sample_index += 1;
 
 		// The decoder only reports the picture size once it has parsed the first
