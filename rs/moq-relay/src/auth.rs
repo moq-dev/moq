@@ -5904,18 +5904,28 @@ api = "https://api.example.com/access"
 		Ok(())
 	}
 
-	#[tokio::test(start_paused = true)]
+	/// A credential's bound is a wall-clock instant, and the sleep serving it is
+	/// seeded when the future is awaited rather than when the bound was built, so
+	/// the wait is only ever the span still REMAINING. Judging it as a span from
+	/// some earlier moment measures the wrong thing: any real time in between
+	/// shortens the sleep by exactly that much. The deadline itself is the only
+	/// stable reference, so that is what this asserts against.
+	#[tokio::test]
 	async fn expired_resolves_at_credential_expiry() {
 		let auth = Auth::default();
 		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
-		token.expires = Some(std::time::SystemTime::now() + Duration::from_millis(100));
+		let bound = std::time::SystemTime::now() + Duration::from_millis(100);
+		token.expires = Some(bound);
 
-		let start = tokio::time::Instant::now();
+		// Real time between building the bound and waiting on it, which is what a
+		// loaded test machine supplies on its own.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+
 		let reason = tokio::time::timeout(Duration::from_secs(5), auth.expired(&token))
 			.await
 			.expect("an expiring credential must resolve the bound");
 		assert_eq!(reason, Expired::Credential);
-		assert!(start.elapsed() >= Duration::from_millis(100), "resolved before expiry");
+		assert!(std::time::SystemTime::now() >= bound, "resolved before expiry");
 	}
 
 	#[tokio::test(start_paused = true)]

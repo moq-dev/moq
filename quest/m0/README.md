@@ -31,7 +31,6 @@ regression test per Root Cause First.
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [Echo-delay test runtime](/quest/m0/aec-test-runtime.md) - keep the audio regression within the normal workspace test budget
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
-- [Auth expiry test](/quest/m0/auth-expiry-test-clock.md) - remove mixed-clock scheduling from the credential expiry regression
 - [Retirement race](/quest/m0/transcode-retirement-race.md) - moq-transcode: retirement has no coverage for a fetch that is still opening its decoder
 - [Quest ready gate](/quest/m0/quest-ready-gate.md) - quest: nothing reports whether a quest is blocked, so the start flow reconstructs it by grepping
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
