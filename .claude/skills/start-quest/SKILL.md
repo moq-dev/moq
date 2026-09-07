@@ -1,43 +1,23 @@
 ---
 name: start-quest
-description: Find unblocked repository quests and start the user's choice. Use when the user invokes /start-quest, optionally with a base questline such as /start-quest vod, or asks what quest to work on next.
+description: Start work on a quest.
 ---
 
 Before you begin, read `quest/CLAUDE.md` completely.
 
-Resolve an optional argument to a base questline directory under `quest/`, defaulting to `quest/` itself.
+You goal is to implement the quest, or as much of it as possible, and create a PR.
+The argument is the quest to work on.
 
-Find every ready quest, filtered to the base. The tool reads the `Required`
-sections the same way `quest check` validates them and excludes questline
-`README.md`s, which are never executed:
+If you run into issues, or doubt the direction, you may create new quests or update/delete the selected one.
+Scheduling a /plan-quest session is a good idea if the plan/goal is unclear.
 
-```bash
-set -o pipefail
-cargo run --quiet --locked --package quest -- ready | awk -v base="<base>" 'BEGIN { sub(/\/$/, "", base); base = base "/" } index($0, base) == 1'
-```
+Start by claiming the quest via creating a placeholder commit, pushing it to the origin with the correct branch.
+Implement the quest until it is complete, or some blocker is hit, then create a PR.
 
-No output means the questline has no ready work; say so. To explain one quest,
-`quest ready <path>` prints its blockers, a required questline expanded into the
-quests it still holds. Both always exit 0.
+After submitting the PR:
+- Monitor it for CI failures and reviews.
+- Address any automated review findings (Codex/CodeRabbit) you agree with. Turn down any you disagree with with a comment.
+- Push any changes you made to the PR, updating the summary if needed.
 
-Drop candidates that are already claimed: a local or remote branch named after
-the quest path that is recent or has an open PR. A stale branch (old, no open
-PR) does not claim the quest; mention it so it can be reused or deleted. Also
-detect local and remote quest branches whose names are ancestors or descendants
-of the candidate branch. A recently moved quest may still be claimed by a
-branch at its former path; check the file's git history when a similar branch
-exists. Before creating the worktree, delete a conflicting ref
-only when it is confirmed stale, is not checked out, and has no unmerged
-commits; otherwise treat the candidate as claimed.
-
-Order the remaining candidates by a depth-first walk of the questline tree from
-the base `README.md` (`Quests` lists are priority-ordered, so the walk is too)
-and offer up to the first five. Append any ready quest the walk never reached
-and flag it as unlisted - that is a tree defect worth fixing.
-Include any relevant higher-level context, such as the goal, parent questline, and/or what completing it unblocks.
-Include each candidate's title size.
-
-After the user chooses, read the quest and the relevant repository guides.
-Decide the base branch, create a worktree on the quest's branch, and push an empty placeholder commit whose message contains a freshly generated UUID to claim it (skip the push without write access).
-Never force this push. A rejected push loses the claim race; stop and choose another quest.
-Start implementation when its scope is decision-complete; otherwise use `$plan-quest` to settle it first.
+Wait for at least one automated reviewer and if you're confident, enable auto-merge.
+Otherwise, leave the PR open and the user will decide if it should be merged.
