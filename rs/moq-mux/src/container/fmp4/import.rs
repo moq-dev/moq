@@ -563,7 +563,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			// Every fragment restates its decode time, so a stale one puts two different samples
 			// on the same timestamp, which reads downstream as an undeclared hole.
-			if let Some(previous) = track.last_decode_time.replace(dts)
+			if let Some(previous) = track.last_decode_time
 				&& dts <= previous
 			{
 				return Err(Error::NonMonotonicDecodeTime {
@@ -573,6 +573,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				.into());
 			}
+
+			track.last_decode_time = Some(dts);
 
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
@@ -905,6 +907,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				g.finish()?;
 			}
 			track.pending_sequence = Some(sequence);
+			track.last_decode_time = None;
 		}
 		Ok(())
 	}

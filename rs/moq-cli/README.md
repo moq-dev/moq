@@ -32,14 +32,14 @@ moq --client-connect https://relay.example.com/anon \
 ### Publish to a remote relay
 
 ```bash
-ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import fmp4
+ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+    moq --client-connect https://relay.example.com --broadcast my-stream.hang import ts
 ```
 
 ### Subscribe from a remote relay
 
 ```bash
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export fmp4 | \
+moq --client-connect https://relay.example.com --broadcast my-stream.hang export ts | \
     ffplay -
 ```
 
@@ -54,8 +54,8 @@ moq --client-connect https://relay.example.com --broadcast my-stream.hang play
 Hosts a MoQ server and publishes a single broadcast read from stdin into it. Useful for local testing without a separate relay process.
 
 ```bash
-ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang import fmp4
+ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 - | \
+    moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang import ts
 ```
 
 ### Self-host: subscribe to an inbound broadcast
@@ -63,7 +63,7 @@ ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
 Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang export fmp4 | ffplay -
+moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang export ts | ffplay -
 ```
 
 ### Import formats

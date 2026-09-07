@@ -657,3 +657,39 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 		"expected a non-monotonic decode time, got {err:?}"
 	);
 }
+
+#[test]
+fn seek_resets_fragment_decode_time() {
+	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
+	fmp4.seek(1).unwrap();
+	fmp4.decode(&audio_fragment(0, 1024, 327)).unwrap();
+	fmp4.decode(&audio_fragment(1024, 1024, 327)).unwrap();
+}
+
+#[test]
+fn rejected_fragment_preserves_decode_time() {
+	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
+	assert!(fmp4.decode(&audio_fragment(3000, 1024, 327)).is_err());
+	assert!(matches!(
+		fmp4.decode(&audio_fragment(3500, 1024, 327)),
+		Err(crate::Error::Cmaf(
+			crate::container::fmp4::Error::NonMonotonicDecodeTime { previous: 4096, .. }
+		))
+	));
+}

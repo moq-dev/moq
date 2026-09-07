@@ -38,12 +38,12 @@ list:
 # Publish Big Buck Bunny to a relay server.
 bbb url='http://localhost:4443' *args:
     just download bbb
-    just cmaf bbb "{{ url }}" {{ args }}
+    just ts bbb "{{ url }}" {{ args }}
 
 # Publish Tears of Steel to a relay server.
 tos url='http://localhost:4443' *args:
     just download tos
-    just cmaf tos "{{ url }}" {{ args }}
+    just ts tos "{{ url }}" {{ args }}
 
 # Publish a video using ffmpeg (CMAF / fMP4) to a relay server.
 cmaf name url='http://localhost:4443' *args:
@@ -59,7 +59,7 @@ ts name url='http://localhost:4443' *args:
 iroh name url prefix="":
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-cmaf "media/{{ name }}.mp4" | cargo run --bin moq -- --iroh-enabled --client-connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" import fmp4
+    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- --iroh-enabled --client-connect "{{ url }}" --broadcast "{{ prefix }}{{ name }}.hang" import ts
 
 # Generate and ingest an HLS stream from a video file.
 hls name relay="http://localhost:4443":
@@ -154,7 +154,7 @@ h264 name url="http://localhost:4443" *args:
 serve name *args:
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-cmaf "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --server-bind "[::]:4443" --tls-generate "localhost" --broadcast "{{ name }}.hang" import fmp4
+    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --server-bind "[::]:4443" --tls-generate "localhost" --broadcast "{{ name }}.hang" import ts
 
 # Generate and serve an HLS stream from a video for testing.
 serve-hls name port="8000":
