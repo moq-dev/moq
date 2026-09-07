@@ -587,3 +587,73 @@ fn test_flac_catalog() {
 	let desc = a.description.as_ref().expect("flac description");
 	assert_eq!(&desc[..4], b"fLaC");
 }
+
+/// One audio fragment for bbb's track 2, carrying a single sample at the track's 44100 timescale.
+///
+/// `trun.data_offset` is left unset so the samples start at the front of the mdat, which is all
+/// the importer needs to slice them back out.
+fn audio_fragment(base_media_decode_time: u64, duration: u32, size: u32) -> Vec<u8> {
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 2,
+				default_sample_duration: Some(duration),
+				default_sample_size: Some(size),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt { base_media_decode_time }),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: vec![mp4_atom::TrunEntry::default()],
+			}],
+			..Default::default()
+		}],
+	};
+
+	let mut buf = Vec::new();
+	moof.encode(&mut buf).unwrap();
+	mp4_atom::Mdat {
+		data: vec![0xAA; size as usize],
+	}
+	.encode(&mut buf)
+	.unwrap();
+	buf
+}
+
+/// Every fragment restates its decode time, so a stale one puts two different samples on the same
+/// timestamp, which a decoder reads as an undeclared hole and resets on. ffmpeg writes exactly that
+/// when `frag_every_frame` interleaves audio and video, so refuse the fragment rather than publish
+/// the collision.
+#[test]
+fn non_advancing_fragment_decode_time_is_rejected() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let (ftyp, moov) = decode_init(data);
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	// An advancing pair imports, one AAC frame apart.
+	fmp4.decode(&audio_fragment(3072, 1024, 327)).unwrap();
+	fmp4.decode(&audio_fragment(4096, 1024, 361)).unwrap();
+
+	// A third fragment repeating the previous decode time is a different sample landing on the
+	// same timestamp.
+	let err = fmp4.decode(&audio_fragment(4096, 1024, 339)).unwrap_err();
+	assert!(
+		matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime {
+				track: 2,
+				decode_time: 4096,
+				previous: 4096,
+			})
+		),
+		"expected a non-monotonic decode time, got {err:?}"
+	);
+}

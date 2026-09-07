@@ -12,7 +12,7 @@ deploy:
     bun install
     bun wrangler deploy
 
-# Upload a single file to R2. Fragment videos first, e.g. `ffmpeg -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame output.mp4`.
+# Upload a single file to R2. Fragment videos first, e.g. `ffmpeg -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 output.mp4`.
 upload file:
     bun install
     bun wrangler r2 object put "video-moq-dev/{{ file }}" --file "media/{{ file }}" --remote
@@ -230,14 +230,16 @@ download name:
     	curl -fsSL "https://vid.moq.dev/{{ name }}.mp4" -o "media/{{ name }}.mp4"; \
     fi
 
-# Convert an h264 input file to CMAF (fmp4) format to stdout.
+# Convert an h264 input file to CMAF (fmp4) format to stdout, with one fragment per sample.
+# -frag_duration rather than frag_every_frame: the latter repeats a fragment's tfdt when it
+# interleaves audio and video, landing two samples on one timestamp.
 [private]
 ffmpeg-cmaf input output='-' *args:
     ffmpeg -hide_banner -v quiet \
     	-stream_loop -1 -re \
     	-i "{{ input }}" \
     	-c copy \
-    	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{ args }} {{ output }}
+    	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 {{ args }} {{ output }}
 
 # Convert an h264 input file to MPEG-TS format to stdout, with one PES per audio frame.
 [private]

@@ -6,6 +6,7 @@ The transmuxer: file/stream containers (`container/`) and codec parsers (`codec/
 - Frame durations are backfilled from the next frame in decode order, never across a discontinuity; a backwards gap (B-frame reordering) stays unset. Frames that arrive with a duration keep it.
 - hang frames carry a timestamp normalized to microseconds (`hang::container::TIMESCALE`). `moq_net::track::Info::default()` is milliseconds, so pin the track with `with_timescale` when creating it.
 - Reject an unsupported codec or container with a typed `Error` rather than warn and drop.
+- An fMP4 fragment's `tfdt` must advance past the previous fragment on that track. ffmpeg's `frag_every_frame` repeats one when it interleaves audio and video, so the demo recipes use `-frag_duration`.
 - Catalog fields that decide decoder configuration (codec, dimensions, description) are effectively immutable for a rendition; bitrate and similar hints are maximums.
 
 # Cross-language

@@ -85,6 +85,9 @@ struct Fmp4Track {
 	// The last timestamp seen for this track.
 	last_timestamp: Option<Timestamp>,
 
+	// The decode time of the last fragment, which the next one has to advance past.
+	last_decode_time: Option<u64>,
+
 	// The minimum duration between frames for this track.
 	min_duration: Option<Timestamp>,
 
@@ -269,6 +272,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					recorder: Some(timeline.recorder()),
 					jitter: None,
 					last_timestamp: None,
+					last_decode_time: None,
 					min_duration: None,
 					pending_sequence: None,
 					estimator: Estimator::new(),
@@ -556,6 +560,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
+
+			// Every fragment restates its decode time, so a stale one puts two different samples
+			// on the same timestamp, which reads downstream as an undeclared hole.
+			if let Some(previous) = track.last_decode_time.replace(dts)
+				&& dts <= previous
+			{
+				return Err(Error::NonMonotonicDecodeTime {
+					track: track_id,
+					decode_time: dts,
+					previous,
+				}
+				.into());
+			}
+
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
