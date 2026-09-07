@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { randomOrigin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -12,6 +14,54 @@ import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_05, Version } from "./version.ts";
+
+test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
+	"an initial announcement write failure disposes its listener in version %s",
+	async (version) => {
+		const pair = createMockTransportPair(ALPN_05);
+		const publisher = new Publisher(pair.server, version, randomOrigin());
+		const broadcast = new BroadcastProducer();
+		publisher.publish(Path.from("static"), broadcast);
+		await Promise.resolve();
+		const failure = new Error("peer stopped receiving announcements");
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write() {
+					throw failure;
+				},
+			}),
+		});
+		const changed = Signal.prototype.changed;
+		const disposed = mock(() => {});
+		const registration = spyOn(Signal.prototype, "changed").mockImplementationOnce(function (
+			this: Signal<unknown>,
+			fn?: (value: unknown) => void,
+		) {
+			const original = changed.bind(this);
+			if (!fn) return original();
+			const dispose = original(fn);
+			return () => {
+				dispose();
+				disposed();
+			};
+		} as typeof changed);
+		try {
+			await expect(publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream)).rejects.toThrow(
+				failure.message,
+			);
+			expect(registration).toHaveBeenCalledTimes(1);
+			expect(disposed).toHaveBeenCalledTimes(1);
+		} finally {
+			registration.mockRestore();
+			publisher.close();
+			broadcast.close();
+			stream.close();
+			pair.client.close();
+			pair.server.close();
+		}
+	},
+);
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
 // SUBSCRIBE_END boundary the publisher put on the wire.

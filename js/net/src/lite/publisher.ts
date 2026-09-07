@@ -189,85 +189,86 @@ export class Publisher {
 			dispose = this.#broadcasts.changed(resolve);
 		});
 
-		const initial = this.#broadcasts.peek();
-		if (!initial) {
-			dispose();
-			return; // closed
-		}
+		try {
+			const initial = this.#broadcasts.peek();
+			if (!initial) return; // closed
 
-		for (const [name, producer] of initial) {
-			const suffix = Path.stripPrefix(msg.prefix, name);
-			if (suffix === null) continue;
-			active.set(suffix, producer);
-		}
-
-		switch (this.version) {
-			case Version.DRAFT_01:
-			case Version.DRAFT_02: {
-				for (const suffix of active.keys()) {
-					console.debug(`announce: broadcast=${suffix} active=true`);
-				}
-				const init = new AnnounceInit([...active.keys()]);
-				await init.encode(stream.writer, this.version);
-				break;
+			for (const [name, producer] of initial) {
+				const suffix = Path.stripPrefix(msg.prefix, name);
+				if (suffix === null) continue;
+				active.set(suffix, producer);
 			}
-			default: {
-				if (!hasAnnounceOk(this.version)) {
-					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
+
+			switch (this.version) {
+				case Version.DRAFT_01:
+				case Version.DRAFT_02: {
 					for (const suffix of active.keys()) {
-						await announce(suffix, [this.origin]);
+						console.debug(`announce: broadcast=${suffix} active=true`);
+					}
+					const init = new AnnounceInit([...active.keys()]);
+					await init.encode(stream.writer, this.version);
+					break;
+				}
+				default: {
+					if (!hasAnnounceOk(this.version)) {
+						// Draft03/04: send individual Announce messages, stamping our origin as a hop.
+						for (const suffix of active.keys()) {
+							await announce(suffix, [this.origin]);
+						}
+						break;
+					}
+
+					// Report our origin id once via AnnounceOk and the count of initial announces
+					// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
+					const ok = new AnnounceOk(this.origin, active.size);
+					await ok.encode(stream.writer, this.version);
+					for (const suffix of active.keys()) {
+						await announce(suffix, []);
 					}
 					break;
 				}
+			}
 
-				// Report our origin id once via AnnounceOk and the count of initial announces
-				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
-				const ok = new AnnounceOk(this.origin, active.size);
-				await ok.encode(stream.writer, this.version);
-				for (const suffix of active.keys()) {
-					await announce(suffix, []);
+			// Wait for updates to the broadcasts.
+			for (;;) {
+				// Wait until the map of broadcasts changes.
+				const broadcasts = await Promise.race([changed, stream.reader.closed]);
+				dispose();
+				if (!broadcasts) break;
+
+				// Re-arm before writing, for the same reason as above.
+				changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+					dispose = this.#broadcasts.changed(resolve);
+				});
+
+				// Rebuild who holds what.
+				// This is SLOW, but it's not worth optimizing because we often have just 1 broadcast anyway.
+				const updated = new Map<Path.Valid, broadcast.Producer>();
+				for (const [name, producer] of broadcasts) {
+					const suffix = Path.stripPrefix(msg.prefix, name);
+					if (suffix === null) continue; // Not our prefix.
+					updated.set(suffix, producer);
 				}
-				break;
-			}
-		}
 
-		// Wait for updates to the broadcasts.
-		for (;;) {
-			// Wait until the map of broadcasts changes.
-			const broadcasts = await Promise.race([changed, stream.reader.closed]);
+				// Retract first, so a replacement reads as an end followed by a start.
+				for (const [suffix, producer] of active) {
+					if (updated.get(suffix) === producer) continue;
+					await retract(suffix);
+				}
+
+				// Announce anything new, including a path a different producer now holds. Lite05+
+				// reports our origin once via AnnounceOk, so the subscriber stamps it onto each hop
+				// chain; older versions stamp it here.
+				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				for (const [suffix, producer] of updated) {
+					if (active.get(suffix) === producer) continue;
+					await announce(suffix, hops);
+				}
+
+				active = updated;
+			}
+		} finally {
 			dispose();
-			if (!broadcasts) break;
-
-			// Re-arm before writing, for the same reason as above.
-			changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
-				dispose = this.#broadcasts.changed(resolve);
-			});
-
-			// Rebuild who holds what.
-			// This is SLOW, but it's not worth optimizing because we often have just 1 broadcast anyway.
-			const updated = new Map<Path.Valid, broadcast.Producer>();
-			for (const [name, producer] of broadcasts) {
-				const suffix = Path.stripPrefix(msg.prefix, name);
-				if (suffix === null) continue; // Not our prefix.
-				updated.set(suffix, producer);
-			}
-
-			// Retract first, so a replacement reads as an end followed by a start.
-			for (const [suffix, producer] of active) {
-				if (updated.get(suffix) === producer) continue;
-				await retract(suffix);
-			}
-
-			// Announce anything new, including a path a different producer now holds. Lite05+
-			// reports our origin once via AnnounceOk, so the subscriber stamps it onto each hop
-			// chain; older versions stamp it here.
-			const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
-			for (const [suffix, producer] of updated) {
-				if (active.get(suffix) === producer) continue;
-				await announce(suffix, hops);
-			}
-
-			active = updated;
 		}
 	}
 
