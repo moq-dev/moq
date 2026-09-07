@@ -153,6 +153,52 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.close();
 });
 
+test("integration: lite carries a fractional latencyMax as a whole millisecond", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+
+	let resolveProducer: ((producer: TrackProducer) => void) | undefined;
+	const accepted = new Promise<TrackProducer>((resolve) => {
+		resolveProducer = resolve;
+	});
+	const serving = (async () => {
+		for (;;) {
+			const request = await broadcast.requested();
+			if (!request) return;
+			const producer = request.accept();
+			if (request.subscription.startGroup === 0) resolveProducer?.(producer);
+		}
+	})();
+
+	const remote = client.consume(Path.from("test"));
+	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
+	// nothing resubscribes. The publisher must see the budget rounded up instead.
+	const subscriber = remote.track("video").subscribe({ latencyMax: 38.75, startGroup: 0 });
+
+	// A failed subscribe never reaches the publisher, so race its closure to report the
+	// encode error rather than block until the suite times out.
+	const failed = Promise.resolve(subscriber.closed).then<never>((err) => {
+		throw err ?? new Error("subscription closed before the publisher saw it");
+	});
+
+	const producer = await Promise.race([accepted, failed]);
+	expect(producer.subscription.peek()?.latencyMax).toBe(39);
+
+	const updated = producer.subscription.changed();
+	subscriber.update({ latencyMax: 500.25, startGroup: 0 });
+	expect((await Promise.race([updated, failed]))?.latencyMax).toBe(501);
+
+	subscriber.close();
+	remote.close();
+	broadcast.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
 test("integration: lite applies initial and updated group bounds", async () => {
 	const GROUP_COUNT = 6;
 	const INITIAL_START_GROUP = 1;

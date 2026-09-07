@@ -40,8 +40,8 @@ fine.
 - The target starts from the catalog floor and converges as samples arrive;
   it only lowers gradually, so a viewer's buffer shrinks in steps of at most
   one chunk per interval and never underruns on a refinement.
-- `maxAge` on the wire is `delay + buffer` as today; #3478 makes the
-  fractional case safe on dev.
+- `maxAge` on the wire is `delay + buffer` as today; js/net rounds a
+  fractional value up, so a measured target needs no rounding here.
 
 ### Ring
 

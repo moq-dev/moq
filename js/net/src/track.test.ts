@@ -141,6 +141,24 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	expect(await next).toEqual({ priority: 7, ordered: true, latencyMax: 250, startGroup: 2, endGroup: 9 });
 });
 
+test("a fractional latencyMax is rounded up before the wire sees it", async () => {
+	const producer = new TrackProducer("test");
+
+	// Subscribers derive this from measurements (a jitter estimate scaled off RTT), so a
+	// fractional millisecond is expected. The wire encodes it as a varint, which throws on a
+	// non-integer, and rounding down would shorten a budget the subscriber asked for.
+	const track = producer.subscribe({ latencyMax: 38.75 });
+	expect(producer.subscription.peek()?.latencyMax).toBe(39);
+
+	const next = producer.subscription.changed();
+	track.update({ latencyMax: 500.25 });
+	expect((await next)?.latencyMax).toBe(501);
+
+	// The publisher half of the budget lands on the wire through TRACK_INFO, with the same hazard.
+	producer.accept({ latencyMax: 1000.5 });
+	expect((await producer.info()).latencyMax).toBe(1001);
+});
+
 test("multiple subscriber options aggregate like Rust", async () => {
 	const producer = new TrackProducer("test");
 	const bounded = producer.subscribe({ priority: 2, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });
