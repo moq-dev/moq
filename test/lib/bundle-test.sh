@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Regression test for the debug-bundle library.
+#
+# The library's whole job happens on the failure path, which is the path a green
+# run never takes: a bundle that is silently empty, unredacted, or unbounded
+# looks exactly like a healthy one until someone needs it. So each property is
+# driven here against synthetic processes rather than a real relay, which keeps
+# it fast enough to run on every change under test/.
+#
+#     ./bundle-test.sh
+set -euo pipefail
+
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(mktemp -d)
+trap 'rm -rf "$ROOT"' EXIT
+
+failures=0
+ok() { printf '  ok    %s\n' "$1"; }
+bad() {
+    printf '  FAIL  %s\n' "$1"
+    failures=$((failures + 1))
+}
+# check <description> <command...>: the command is the assertion.
+check() {
+    local desc=$1
+    shift
+    if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
+}
+
+# Each case runs in its own subshell so a `bundle_init` cannot leak into the
+# next one, under its own artifacts root unless CASE_ROOT shares one. The
+# bundle's path lands in $ROOT/<name>.path for the caller to inspect.
+run_case() {
+    local name=$1 body=$2
+    (
+        set -euo pipefail
+        export MOQ_QA_ARTIFACTS="${CASE_ROOT:-$ROOT/$name.d}"
+        # shellcheck source=/dev/null
+        source "$DIR/bundle.sh"
+        bundle_init selftest
+        bundle_rerun just test bundle
+        printf '%s\n' "$BUNDLE_DIR" >"$ROOT/$name.path"
+        "$body"
+    ) >"$ROOT/$name.out" 2>&1 || true
+    cat "$ROOT/$name.path"
+}
+
+# ── a passing run leaves nothing behind ─────────────────────────────────────
+pass_case() { bundle_finish 0; }
+bundle=$(run_case pass pass_case)
+check "a passing run deletes its bundle" test ! -d "$bundle"
+
+keep_case() { bundle_finish 0; }
+bundle=$(MOQ_QA_KEEP=1 run_case keep keep_case)
+check "MOQ_QA_KEEP retains a passing run" test -f "$bundle/manifest.json"
+
+# ── a failing run leaves a described bundle ─────────────────────────────────
+fail_case() {
+    bundle_endpoint relay "http://127.0.0.1:4443" moq-lite-05
+    bundle_capability browser-network "HAR only; WebTransport is invisible to it"
+    bundle_result "rust -> rust" fail 20 "no data before the timeout"
+    printf 'relay is up\n' >"$BUNDLE_WORK/relay.log"
+    bundle_finish 1
+}
+bundle=$(run_case fail fail_case)
+manifest="$bundle/manifest.json"
+check "a failing run retains its bundle" test -f "$manifest"
+check "per-process logs are retained" test -f "$bundle/work/relay.log"
+check "tool versions are recorded" test -f "$bundle/versions.txt"
+check "a teardown command is written" test -f "$bundle/teardown.sh"
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$manifest" >/dev/null 2>&1; then
+        ok "the manifest is valid JSON"
+    else
+        bad "the manifest is valid JSON"
+    fi
+fi
+for field in '"rerun"' '"run_id"' '"commit"' 'moq-lite-05' 'rust -> rust' 'WebTransport is invisible' 'core-dumps'; do
+    if grep -q -- "$field" "$manifest"; then ok "the manifest records $field"; else bad "the manifest records $field"; fi
+done
+
+# ── credentials never reach the bundle ──────────────────────────────────────
+# A JWT-shaped token, a token query parameter, an Authorization header, and URL
+# credentials: the four shapes a harness log can carry one in. The harnesses run
+# anonymous by design, so this is the floor under that, not a substitute for it.
+secret_case() {
+    {
+        echo "connecting to http://127.0.0.1:4443/demo?jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzbW9rZSJ9.c2lnbmF0dXJl"
+        echo "authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzbW9rZSJ9.c2lnbmF0dXJl"
+        echo "dialing https://smoke:hunter2@relay.example/anon"
+        echo "x-api-key: totally-not-a-secret-value"
+    } >"$BUNDLE_WORK/client.log"
+    bundle_finish 1
+}
+bundle=$(run_case secret secret_case)
+for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value; do
+    if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
+done
+check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
+
+# ── logs are bounded, with both ends kept ───────────────────────────────────
+bound_case() {
+    {
+        echo "FIRST-LINE"
+        head -c 200000 /dev/zero | tr '\0' 'x'
+        echo
+        echo "LAST-LINE"
+    } >"$BUNDLE_WORK/huge.log"
+    head -c 200000 /dev/zero >"$BUNDLE_WORK/capture.bin"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_LOG_CAP=4096 MOQ_QA_FILE_CAP=4096 run_case bound bound_case)
+size=$(wc -c <"$bundle/work/huge.log" | tr -d '[:space:]')
+check "an oversized log is bounded" test "$size" -lt 20000
+check "bounding keeps the head" grep -q FIRST-LINE "$bundle/work/huge.log"
+check "bounding keeps the tail" grep -q LAST-LINE "$bundle/work/huge.log"
+check "an oversized capture is dropped" test ! -f "$bundle/work/capture.bin"
+check "an oversized capture leaves its identity" test -f "$bundle/work/capture.bin.omitted"
+
+# ── a hung process is described before it is killed ─────────────────────────
+# The stack itself may be unavailable (ptrace_scope, no debugger, a hardened
+# runtime); the requirement is that the attempt is recorded and does not block.
+stack_case() {
+    sleep 120 &
+    hung=$!
+    bundle_process hung "$hung"
+    bundle_stack hung "$hung"
+    kill -KILL "$hung" 2>/dev/null || true
+    wait "$hung" 2>/dev/null || true
+    bundle_finish 1
+}
+started=$SECONDS
+bundle=$(run_case stack stack_case)
+check "stack capture is bounded" test "$((SECONDS - started))" -lt 90
+check "the hung process is described" test -s "$bundle/stacks/hung.txt"
+check "the owned process is recorded" grep -q '"name": "hung"' "$bundle/manifest.json"
+
+# ── teardown reaps only what the run owned ──────────────────────────────────
+teardown_case() {
+    sleep 120 &
+    mine=$!
+    bundle_process mine "$mine"
+    # A PID recorded under a command it no longer runs, standing in for one the
+    # kernel has since recycled: teardown has to leave it alone.
+    bundle_process stranger "$$" "a-command-this-pid-no-longer-runs"
+    printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
+mine=$(<"$bundle/mine.pid")
+check "a retained session is documented" test -f "$bundle/session.md"
+check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
+if kill -0 "$mine" 2>/dev/null; then
+    ok "a retained session leaves its processes running"
+    output=$(bash "$bundle/teardown.sh" 2>&1 || true)
+    if kill -0 "$mine" 2>/dev/null; then bad "teardown reaps the run's process"; else ok "teardown reaps the run's process"; fi
+    if grep -q 'reused by another process' <<<"$output"; then
+        ok "teardown skips a recycled pid"
+    else
+        bad "teardown skips a recycled pid"
+    fi
+    kill -KILL "$mine" 2>/dev/null || true
+else
+    bad "a retained session leaves its processes running"
+fi
+
+# ── a diagnostic rerun never overwrites the original failure ────────────────
+again_case() { bundle_finish 1; }
+export CASE_ROOT="$ROOT/shared"
+first=$(run_case first again_case)
+second=$(run_case second again_case)
+unset CASE_ROOT
+check "a rerun writes a new bundle" test "$first" != "$second"
+check "a rerun keeps the original bundle" test -f "$first/manifest.json"
+check "a rerun keeps its own bundle" test -f "$second/manifest.json"
+
+if ((failures > 0)); then
+    echo "bundle: $failures checks failed" >&2
+    exit 1
+fi
+echo "bundle: all checks passed"

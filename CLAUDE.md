@@ -29,7 +29,7 @@ Top-level only. Read the area-specific `CLAUDE.md` where one exists before worki
 - `/py/`, `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi`. See `rs/moq-ffi/CLAUDE.md` and `py/CLAUDE.md`.
 - `/cpp/` - C/C++ consumers of `libmoq`, including the OBS plugin.
 - `/demo/` - demos and test media. `just dev` runs a local relay, publisher, and web UI.
-- `/test/` - harnesses that span languages or need a server (`just test smoke`).
+- `/test/` - harnesses that span languages or need a server (`just test smoke`). A failed run leaves a debug bundle in `target/qa`; see `test/README.md`.
 - `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
 - `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
 - `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.

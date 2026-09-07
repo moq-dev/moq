@@ -66,6 +66,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    env:
+      # Out of target/, so the Rust cache does not carry bundles between runs,
+      # and at a fixed path so the upload below does not have to guess. The
+      # harness deletes its own bundle when it passes, so whatever survives to
+      # the upload step is exactly the failure. See test/README.md.
+      MOQ_QA_ARTIFACTS: ${{ github.workspace }}/qa-artifacts
+
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
@@ -101,3 +108,15 @@ jobs:
       - name: WASM
         run: nix develop --command just test wasm
         shell: bash -leo pipefail {0}
+
+      # A browser failure is the one nobody can reproduce from a log line, so
+      # the Playwright trace has to leave the runner. `just test fetch <run id>`
+      # pulls this down.
+      - name: Debug bundles
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qa-bundle-wasm
+          path: qa-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

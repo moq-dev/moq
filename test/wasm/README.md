@@ -85,6 +85,13 @@ The signature is the point. Excusing a case by name alone would retire its
 coverage, since an unrelated break in `consume`, `subscribe`, or frame copying
 would land green under the same marker.
 
+## Failures
+
+A failing run leaves a debug bundle in `target/qa`: each relay's log, a
+Playwright trace with DOM snapshots, a screenshot, the page's console
+transcript, and stacks for any relay still up. `MOQ_QA_RETAIN=1` leaves the
+relays running to attach to. See [../README.md](../README.md).
+
 ## Not covered
 
 The publish direction: `moq-wasm` binds the consume path only. When

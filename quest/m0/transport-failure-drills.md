@@ -41,5 +41,4 @@ test runner; it must not change the host's normal network path.
 ## Related
 
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - selects bounded scenarios by changed scope
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - stores timelines, seeds, and traces
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - provides Linux execution for privileged drills

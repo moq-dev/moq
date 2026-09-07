@@ -28,7 +28,6 @@ regression test per Root Cause First.
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
 - [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
 - [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - give concurrent worktrees explicit bases, endpoints, and process ownership
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - retain inspectable traces, logs, and rerun commands when QA fails
 - [Browser permission QA](/quest/m0/browser-permission-qa.md) - nothing covers what the publisher does when the user denies the camera or microphone
 - [Publisher audio unlock](/quest/m0/publish-audio-unlock.md) - the publisher's capture AudioContext stays suspended when the page had no gesture, so no audio is ever encoded
 - [Media QA on other engines](/quest/m0/browser-media-qa-engines.md) - the media output checks only run on the pinned Chromium

@@ -160,8 +160,17 @@ clients/
   c/subscribe.c           subscribe via rs/libmoq
 ```
 
+## Failures
+
+A failing run leaves a debug bundle in `target/qa`: the relay config and log,
+every client's log, per-cell timings, a Playwright trace and screenshot for a
+failing browser cell, stacks for anything that hung, and the exact command that
+reproduces the run. `MOQ_QA_RETAIN=1` leaves the relay and clients alive to
+attach to. See [../README.md](../README.md).
+
 ## CI
 
 `.github/workflows/smoke.yml` runs the full matrix nightly (and on demand, and on
 PRs that touch `test/smoke/`). A red cell means a real interop break in the
-current tree.
+current tree, and the job uploads its debug bundles; `just test fetch <run id>`
+downloads them.

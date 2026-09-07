@@ -41,6 +41,13 @@ jobs:
     # this is a safety net against a hung relay/client plus a cold first build.
     timeout-minutes: 60
 
+    env:
+      # Out of target/, so the Rust cache does not carry bundles between runs,
+      # and at a fixed path so the upload below does not have to guess. Each
+      # harness deletes its own bundle when it passes, so whatever survives to
+      # the upload step is exactly the failures. See test/README.md.
+      MOQ_QA_ARTIFACTS: ${{ github.workspace }}/qa-artifacts
+
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
@@ -99,3 +106,14 @@ jobs:
       - name: TS compliance
         run: nix develop --command just test ts
         shell: bash -leo pipefail {0}
+
+      # Nightly is the run nobody is watching, so its failures have to explain
+      # themselves without a rerun. `just test fetch <run id>` pulls this down.
+      - name: Debug bundles
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qa-bundle-smoke
+          path: qa-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

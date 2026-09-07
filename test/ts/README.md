@@ -224,6 +224,13 @@ than by malfunction; the census makes that visible instead of leaving it to be
 inferred from the code. Counts differ for a table that *did* survive because the
 exporter re-emits SI on its own repetition cadence rather than the source's.
 
+## Failures
+
+A failing round-trip leaves a debug bundle in `target/qa`: the relay, publisher,
+and subscriber logs, the source clip and the capture by SHA-256, stacks for
+anything still running, and the exact command that reproduces it. See
+[../README.md](../README.md).
+
 ## CI
 
 `.github/workflows/smoke.yml` runs `just test ts` after the interop

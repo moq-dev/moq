@@ -59,11 +59,19 @@ default $BASE="":
     	echo "test: nothing changed."
     fi
 
+    # The harnesses below are too slow and too dependency-hungry for a per-PR
+    # gate, but the debug bundle they all write into is neither, and it only
+    # runs on the failure path -- so nothing else would notice it breaking.
+    if echo "$files" | grep -qE '^test/(lib|smoke|wasm|ts)/'; then
+    	./lib/bundle-test.sh
+    fi
+
 # Run every language's unit tests, unscoped.
 all:
     just js test
     just rs test --workspace
     just py test
+    ./lib/bundle-test.sh
 
 # Cross-language media interop smoke test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only. Pass
@@ -114,3 +122,17 @@ ts *args:
 # Browser coverage for the @moq/wasm bindings.
 wasm *args:
     ./wasm/run.sh {{ args }}
+
+# Every harness writes one into target/qa when it fails. The library is what
+# bounds, redacts, and describes it; see README.md.
+
+# Self-test the debug-bundle library the harnesses share.
+bundle:
+    ./lib/bundle-test.sh
+
+# The bundles a failing CI job uploaded, so the same failure a reviewer sees can
+# be opened locally. Read-only: it views the run and downloads its artifacts.
+
+# Download a workflow run's debug bundles: `just test fetch 12345678901`.
+fetch run:
+    ./lib/fetch-ci.sh {{ run }}

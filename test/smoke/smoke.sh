@@ -18,6 +18,11 @@ SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$SMOKE_DIR/../.." && pwd)
 CLIENTS="$SMOKE_DIR/clients"
 
+# Every run writes into a debug bundle instead of a temp dir, so a failure keeps
+# its logs, configs, browser traces, and stacks. See test/README.md.
+# shellcheck source=../lib/bundle.sh disable=SC1091
+source "$WORKSPACE/test/lib/bundle.sh"
+
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
 TIMEOUT="${SMOKE_TIMEOUT:-20}"
@@ -27,6 +32,14 @@ PORT="${SMOKE_PORT:-4443}"
 URL="http://127.0.0.1:${PORT}"
 NEGATIVE=0
 MEDIA=0
+
+# Fault injection for the debug-bundle drills: each mode breaks the run in one
+# of the ways a real failure arrives, so the evidence path can be exercised on
+# demand rather than only when something is genuinely broken.
+#   browser     the browser subscriber fails an assertion mid-playback
+#   relay       the relay is killed while the matrix is running
+#   hang        no publisher starts, so every subscriber runs out its timeout
+FAULT="${MOQ_QA_FAULT:-}"
 
 # Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what a smoke test wants; the workload (320x240@30) is trivial either way.
@@ -88,6 +101,13 @@ done
     echo "error: port must be numeric (got '$PORT')" >&2
     exit 2
 }
+case "$FAULT" in
+    "" | browser | relay | hang) ;;
+    *)
+        echo "error: MOQ_QA_FAULT must be browser, relay, or hang (got '$FAULT')" >&2
+        exit 2
+        ;;
+esac
 
 # The media checks drive both roles from the browser client and never touch the matrix, so they
 # pick their own axes rather than accepting --publishers / --subscribers.
@@ -115,7 +135,17 @@ needs_js() {
     needs js || needs js-native-node || needs js-native-bun
 }
 
-TMP=$(mktemp -d)
+rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
+[[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
+bundle_init smoke
+bundle_rerun "${rerun[@]}"
+[[ -z "$FAULT" ]] || bundle_note "fault injection: MOQ_QA_FAULT=$FAULT"
+
+# The harness scratch lives in the bundle, so the per-process logs, the relay
+# config, and the timings are retained by construction. Build products go to the
+# scratch dir instead: they are large, and the binaries they came from are
+# recorded by identity below.
+TMP="$BUNDLE_WORK"
 RELAY_PID=""
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
@@ -147,10 +177,27 @@ kill_tree() {
 
 # shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
-    # Reap the last publisher too; subscribers self-terminate via their timeouts.
-    [[ -n "${PUB_PID:-}" ]] && kill_tree "$PUB_PID"
-    [[ -n "$RELAY_PID" ]] && kill_tree "$RELAY_PID"
-    rm -rf "$TMP"
+    local status=$?
+
+    # Whatever is still running here never finished: a relay that wedged, a
+    # publisher that stopped producing. Their stacks are the only thing left
+    # that says where, and reaping them is what destroys it, so read first.
+    if [[ "$status" -ne 0 ]]; then
+        [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
+        [[ -z "${PUB_PID:-}" ]] || bundle_stack publisher "$PUB_PID"
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+            bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
+        fi
+    fi
+
+    # A retained session is the whole point of MOQ_QA_RETAIN: the ports stay
+    # held and the processes stay attachable until teardown.sh runs.
+    if [[ "$status" -eq 0 ]] || ! bundle_retained; then
+        # Reap the last publisher too; subscribers self-terminate via their timeouts.
+        [[ -z "${PUB_PID:-}" ]] || kill_tree "$PUB_PID"
+        [[ -z "$RELAY_PID" ]] || kill_tree "$RELAY_PID"
+    fi
+    bundle_finish "$status"
 }
 trap cleanup EXIT
 
@@ -184,6 +231,10 @@ require_tools() {
 build_relay_cli() {
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
+    # qlog is a cargo feature, so capturing traces means building a different
+    # relay. Opt-in for that reason: it recompiles quinn with the qlog encoder,
+    # which a run that is only going to pass has no use for.
+    [[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
     echo "building moq-relay + moq-cli ($PROFILE)..."
     # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
     # an empty (debug) array under `set -u`.
@@ -194,6 +245,10 @@ build_relay_cli() {
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
     [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
+    # Which binaries the stacks and logs below came out of: a backtrace is only
+    # as useful as the symbols it can be matched against.
+    bundle_binary moq-relay "$RELAY"
+    bundle_binary moq-cli "$MOQ"
 }
 
 # Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
@@ -325,7 +380,7 @@ prepare_c() {
             *) os_libs+=("-l$entry") ;;
         esac
     done <"$native_libs"
-    C_SMOKE="$TMP/c-smoke"
+    C_SMOKE="$BUNDLE_SCRATCH/c-smoke"
     if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_SMOKE" >"$TMP/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
         sed 's/^/        /' "$TMP/c-compile.log" >&2 || true
@@ -360,7 +415,7 @@ prepare_gst() {
     # factory. Isolate discovery to our dir + a temp registry so a system-wide moq
     # plugin can't shadow it (mirrors rs/moq-gst/smoke.sh).
     if ! GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_PLUGIN_SYSTEM_PATH_1_0="" \
-        GST_REGISTRY_1_0="$TMP/gst-registry.bin" \
+        GST_REGISTRY_1_0="$BUNDLE_SCRATCH/gst-registry.bin" \
         gst-inspect-1.0 moq 2>/dev/null | grep -qE '^[[:space:]]+moqsrc:'; then
         mark_broken gst "moqsrc not exposed (plugin failed to load against this GStreamer)"
     fi
@@ -388,8 +443,14 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # smoke.toml is the source of truth; rewrite its port into a scratch copy so a
 # busy 4443 (a dev relay, a parallel run) doesn't require editing the committed file.
 sed "s/4443/${PORT}/g" "$SMOKE_DIR/smoke.toml" >"$TMP/relay.toml"
-"$RELAY" "$TMP/relay.toml" >"$TMP/relay.log" 2>&1 &
+relay_args=("$TMP/relay.toml")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG")
+"$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
+# The wire version is negotiated per session rather than pinned here, so the
+# relay log is what records which one each client ended up on.
+bundle_endpoint relay "$URL" "negotiated per session"
+bundle_process moq-relay "$RELAY_PID"
 for _ in $(seq 1 60); do
     curl -sf "$URL/certificate.sha256" >/dev/null 2>&1 && break
     sleep 0.5
@@ -433,7 +494,7 @@ start_publisher() {
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
             # WebCodecs (lazily, once a subscriber creates demand).
-            (cd "$CLIENTS/js" && bun driver.ts publish \
+            (cd "$CLIENTS/js" && MOQ_QA_LABEL="publish-js" bun driver.ts publish \
                 --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
             ;;
         *)
@@ -490,7 +551,7 @@ run_subscriber() {
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
             local n
-            n=$(GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$TMP/gst-run-registry.bin" \
+            n=$(GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$BUNDLE_SCRATCH/gst-run-registry.bin" \
                 timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
                 moqsrc name=s url="$URL" broadcast="$broadcast" \
                 s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
@@ -501,11 +562,12 @@ run_subscriber() {
             # Headless Chromium decodes and renders via WebCodecs, then drives
             # the real player's pause/resume controls. Browser publishers also
             # provide fake microphone input, so validate audio in that cell.
+            local label="${publisher:-none}-to-js"
             if [[ "$publisher" == "js" ]]; then
-                (cd "$CLIENTS/js" && bun driver.ts subscribe \
+                (cd "$CLIENTS/js" && MOQ_QA_LABEL="$label" bun driver.ts subscribe \
                     --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT" --expect-audio)
             else
-                (cd "$CLIENTS/js" && bun driver.ts subscribe \
+                (cd "$CLIENTS/js" && MOQ_QA_LABEL="$label" bun driver.ts subscribe \
                     --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
             fi
             ;;
@@ -535,6 +597,7 @@ run_round() {
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
+            bundle_result "$pub -> $sub" fail "" "subscriber client unavailable"
             overall=1
             continue
         fi
@@ -548,7 +611,27 @@ run_round() {
             # would exit the subshell before it recorded anything, and a failure is exactly
             # when the duration is worth reading.
             status=0
-            run_subscriber "$sub" "$broadcast" "$pub" || status=$?
+            run_subscriber "$sub" "$broadcast" "$pub" &
+            cell=$!
+            # A cell still running at STACK_AT is out of budget, and the client's
+            # own timeout is about to kill it. That kill is what erases where it
+            # was stuck, so read the stacks first.
+            #
+            # Not in the negative control, where every cell is supposed to run
+            # its timeout out, and not for the browser: it spends two budgets by
+            # design (startup, then the interaction checks), so a healthy cell is
+            # still running here, and its evidence is the Playwright trace rather
+            # than a backtrace through bun and a Chromium process tree.
+            watchdog=""
+            if [[ "$NEGATIVE" -eq 0 && "$sub" != js ]]; then
+                (
+                    sleep "$STACK_AT"
+                    bundle_stack "$pub-$sub" "$cell"
+                ) &
+                watchdog=$!
+            fi
+            wait "$cell" || status=$?
+            [[ -z "$watchdog" ]] || kill_tree "$watchdog"
             echo "$((SECONDS - started))" >"$TMP/$pub-$sub.secs"
             exit "$status"
         ) >"$TMP/$pub-$sub.log" 2>&1 &
@@ -570,9 +653,11 @@ run_round() {
         elapsed=$(cat "$TMP/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
         if [[ "$got" -eq "$want_pass" ]]; then
             echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"
+            bundle_result "$pub -> ${names[$i]}" pass "$elapsed"
             round_pass=1
         else
             echo "  FAIL  $pub -> ${names[$i]} (${elapsed}s of ${TIMEOUT}s)"
+            bundle_result "$pub -> ${names[$i]}" fail "$elapsed" "budget ${TIMEOUT}s"
             sed 's/^/        /' "$TMP/$pub-${names[$i]}.log" 2>/dev/null || true
             overall=1
         fi
@@ -612,6 +697,20 @@ run_media() {
     fi
 }
 
+# Stack a cell just under its own budget; awk because $TIMEOUT may be fractional.
+STACK_AT=$(awk -v t="$TIMEOUT" 'BEGIN { v = t - 2; if (v < 1) v = 1; printf "%.1f", v }')
+
+# The relay is killed mid-matrix, which is how a crash reaches the clients:
+# every in-flight session drops at once, with nothing in their own logs to say
+# why. The relay log and its stack are the only account of it.
+if [[ "$FAULT" == relay ]]; then
+    echo "=== fault injection: killing the relay in 3s ==="
+    (
+        sleep 3
+        kill -KILL "$RELAY_PID" 2>/dev/null || true
+    ) &
+fi
+
 if [[ "$MEDIA" -eq 1 ]]; then
     # Media output and lifecycle, browser to browser, against the deterministic fixture. The
     # negative controls below inject a defect and name the assertion that has to catch it; each
@@ -639,11 +738,18 @@ else
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do
                 echo "  FAIL  $pub -> $sub (publisher client unavailable)"
+                bundle_result "$pub -> $sub" fail "" "publisher client unavailable"
             done
             overall=1
             continue
         fi
-        start_publisher "$pub" "$broadcast"
+        if [[ "$FAULT" == hang ]]; then
+            echo "  (fault injection: no publisher, every subscriber will hang)"
+            PUB_PID=""
+        else
+            start_publisher "$pub" "$broadcast"
+            bundle_process "publisher-$pub" "$PUB_PID"
+        fi
         run_round "$pub" "$broadcast" "$PUB_PID"
     done
 fi

@@ -30,6 +30,12 @@ set -euo pipefail
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DIR/../.." && pwd)
 
+# Every run writes into a debug bundle instead of a temp dir, so a failure keeps
+# its logs, its capture, and the stacks of whatever was still running. See
+# test/README.md.
+# shellcheck source=../lib/bundle.sh disable=SC1091
+source "$WORKSPACE/test/lib/bundle.sh"
+
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
 DURATION="${TSC_DURATION:-20}"
@@ -119,6 +125,12 @@ analyze() {
 
 require_tools
 
+rerun=(just test ts --duration "$DURATION" --bitrate "$BITRATE" --port "$PORT")
+[[ -z "$SOURCE" ]] || rerun+=(--source "$SOURCE")
+[[ -z "$STRICT" ]] || rerun+=(--strict)
+[[ -z "$WITH_EIT" ]] || rerun+=(--with-eit)
+[[ -z "$LIVE" ]] || rerun+=(--live)
+
 # ── analyze-only: no relay, no build ────────────────────────────────────────
 if [[ -n "$ANALYZE_ONLY" ]]; then
     [[ -f "$ANALYZE_ONLY" ]] || {
@@ -140,11 +152,16 @@ TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Carg
 echo "### building moq-relay + moq-cli ($PROFILE)"
 flag=()
 [[ "$PROFILE" == "release" ]] && flag=(--release)
+# qlog is a cargo feature, so capturing traces means building a different relay.
+# Opt-in for that reason: it recompiles quinn with the qlog encoder.
+[[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
 (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
 RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 MOQ="$TARGET_BASE/$PROFILE/moq"
 
-TMP=$(mktemp -d)
+bundle_init ts
+bundle_rerun "${rerun[@]}"
+TMP="$BUNDLE_WORK"
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
 SRC_TS="$TMP/source.ts"
 SUB_TS="$TMP/sub.ts"
@@ -160,10 +177,23 @@ kill_tree() {
 
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
-    [[ -n "$SUB_PID" ]] && kill_tree "$SUB_PID"
-    [[ -n "$PUB_PID" ]] && kill_tree "$PUB_PID"
-    [[ -n "$RELAY_PID" ]] && kill_tree "$RELAY_PID"
-    rm -rf "$TMP"
+    local status=$?
+    # Anything still running here never finished, and the signals below are what
+    # erase where it was stuck, so read the stacks first.
+    if [[ "$status" -ne 0 ]]; then
+        [[ -z "$SUB_PID" ]] || bundle_stack subscriber "$SUB_PID"
+        [[ -z "$PUB_PID" ]] || bundle_stack publisher "$PUB_PID"
+        [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+            bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
+        fi
+    fi
+    if [[ "$status" -eq 0 ]] || ! bundle_retained; then
+        [[ -z "$SUB_PID" ]] || kill_tree "$SUB_PID"
+        [[ -z "$PUB_PID" ]] || kill_tree "$PUB_PID"
+        [[ -z "$RELAY_PID" ]] || kill_tree "$RELAY_PID"
+    fi
+    bundle_finish "$status"
 }
 trap cleanup EXIT
 
@@ -203,10 +233,20 @@ if [[ -n "$WITH_EIT" ]]; then
     mv "$TMP/source-eit.ts" "$SRC_TS"
 fi
 
+# Which binaries the stacks and logs came out of, and what was fed in: a
+# round-trip that behaves differently on a rerun is usually a different clip.
+bundle_binary moq-relay "$RELAY"
+bundle_binary moq-cli "$MOQ"
+bundle_fixture "$SRC_TS" source
+
 echo "### starting relay on 127.0.0.1:${PORT}"
 sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$TMP/relay.toml"
-"$RELAY" "$TMP/relay.toml" >"$TMP/relay.log" 2>&1 &
+relay_args=("$TMP/relay.toml")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG")
+"$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
+bundle_endpoint relay "$URL" "negotiated per session"
+bundle_process moq-relay "$RELAY_PID"
 for _ in $(seq 1 60); do
     curl -sf "$URL/certificate.sha256" >/dev/null 2>&1 && break
     sleep 0.5
@@ -306,6 +346,7 @@ if [[ -n "$LIVE" ]]; then
     if [[ "$GRADE_RC" -ne 0 ]]; then
         echo >&2
         echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
+        bundle_result timing fail "" "grader exited $GRADE_RC"
         dump_logs
         exit "$GRADE_RC"
     fi
@@ -318,9 +359,11 @@ if [[ -n "$LIVE" ]]; then
     if [[ "$PUB_RC" -ne 0 ]]; then
         echo >&2
         echo "error: the publisher exited $PUB_RC; the graded stream is not a whole round-trip" >&2
+        bundle_result timing fail "" "publisher exited $PUB_RC"
         dump_logs
         exit 1
     fi
+    bundle_result timing pass
     exit 0
 fi
 
@@ -357,9 +400,12 @@ echo
 # Pass the source so duration-fidelity can pin the exported stream's rate. A tiny
 # capture still parses, so the round-trip can fail here with a non-empty file;
 # dump the logs and publisher status so the failure is diagnosable, not a mystery.
+bundle_fixture "$SUB_TS" capture
 if ! analyze "$SUB_TS" "$SRC_TS"; then
     echo >&2
     echo "error: compliance analysis failed (see round-trip logs below)" >&2
+    bundle_result compliance fail
     dump_logs
     exit 1
 fi
+bundle_result compliance pass

@@ -7,7 +7,7 @@
  * @module
  */
 import { join } from "node:path";
-import { type Browser, chromium, type Page } from "playwright";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
 import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
 
 /**
@@ -95,7 +95,7 @@ export function launch(args: string[] = []): Promise<Browser> {
 }
 
 /** Open a page and start collecting its errors, echoing everything it logs. */
-export async function open(browser: Browser, url: string, label = "page"): Promise<[Page, BrowserErrors]> {
+export async function open(browser: Browser | BrowserContext, url: string, label = "page"): Promise<[Page, BrowserErrors]> {
 	const page = await browser.newPage();
 	const errors: BrowserErrors = { page: [], console: [] };
 	page.on("console", (message) => {

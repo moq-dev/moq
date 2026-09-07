@@ -92,6 +92,22 @@ jobs:
       - name: TS timing
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --live --duration 120
+        env:
+          # Out of target/, so the Rust cache does not carry bundles between
+          # runs, and at a fixed path so the upload below does not have to
+          # guess. See test/README.md.
+          MOQ_QA_ARTIFACTS: ${{ github.workspace }}/qa-artifacts
+
+      # A timing arm that fails at 3am is graded off a window nobody watched,
+      # so the capture and the logs have to leave the runner with it.
+      - name: Debug bundles
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qa-bundle-nightly
+          path: qa-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # `just rs windows` is the only thing that compiles moq-video's Media
   # Foundation capture/encode/decode, its D3D11 frames, and every

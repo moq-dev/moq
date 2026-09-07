@@ -37,4 +37,3 @@ verify stale-base and denied-metadata diagnostics without changing its refs.
 ## Related
 
 - [Verification preflight](/quest/m0/verification-preflight.md) - reports capabilities before expensive work
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - retains evidence after process cleanup

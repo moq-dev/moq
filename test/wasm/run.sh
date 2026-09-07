@@ -20,6 +20,11 @@ set -euo pipefail
 WASM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
 
+# Every run writes into a debug bundle instead of a temp dir, so a failure keeps
+# its relay logs, browser trace, and stacks. See test/README.md.
+# shellcheck source=../lib/bundle.sh disable=SC1091
+source "$WORKSPACE/test/lib/bundle.sh"
+
 TIMEOUT="${WASM_TIMEOUT:-30}"
 PORT="${WASM_PORT:-4460}"
 
@@ -68,17 +73,31 @@ if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT + ${#FLAVOURS[@]} - 1 > 
     exit 2
 fi
 
-TMP=$(mktemp -d)
+bundle_init wasm
+bundle_rerun just test wasm --timeout "$TIMEOUT"
+TMP="$BUNDLE_WORK"
 RELAY_PIDS=()
 
 # shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
-    local pid
-    for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-    done
-    rm -rf "$TMP"
+    local status=$? pid
+    # A relay still up here is one the run never finished with, and killing it
+    # is what erases where it was. Read the stacks before the signals.
+    if [[ "$status" -ne 0 ]]; then
+        for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
+            bundle_stack "relay-$pid" "$pid"
+        done
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+            bundle_capability qlog "requested, but the relays wrote no traces: this backend cannot capture them"
+        fi
+    fi
+    if [[ "$status" -eq 0 ]] || ! bundle_retained; then
+        for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        done
+    fi
+    bundle_finish "$status"
 }
 trap cleanup EXIT
 
@@ -100,9 +119,16 @@ echo "building @moq/wasm..."
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
+# qlog is a cargo feature, so capturing traces means building a different relay.
+# Opt-in for that reason: it recompiles quinn with the qlog encoder, which a run
+# that is only going to pass has no use for.
+[[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
 (cd "$WORKSPACE" && "${RUST_CARGO:-cargo}" build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
 TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
+# Which binary the stacks and logs below came out of: a backtrace is only as
+# useful as the symbols it can be matched against.
+bundle_binary moq-relay "$RELAY"
 
 cd "$WASM_DIR"
 bun install --frozen-lockfile
@@ -139,10 +165,19 @@ for flavour in "${FLAVOURS[@]}"; do
 
     args=("$WASM_DIR/relay.toml" --server-bind "127.0.0.1:${port}" --web-http-listen "127.0.0.1:${port}")
     [[ -z "$version_flag" ]] || args+=(--server-version "$version_flag")
+    # One directory per flavour, so a trace can be told apart by the protocol it
+    # negotiated rather than only by the connection id inside it.
+    [[ -z "${MOQ_QA_QLOG:-}" ]] || {
+        mkdir -p "$BUNDLE_QLOG/$name"
+        args+=(--server-quic-qlog "$BUNDLE_QLOG/$name")
+    }
 
     echo "starting $name relay on 127.0.0.1:${port}..."
     "$RELAY" "${args[@]}" >"$TMP/relay-$name.log" 2>&1 &
-    RELAY_PIDS+=($!)
+    relay_pid=$!
+    RELAY_PIDS+=("$relay_pid")
+    bundle_endpoint "$name" "$url" "$expected"
+    bundle_process "moq-relay-$name" "$relay_pid"
 
     # Polled tight rather than on a half-second tick: a relay binds in about
     # 130ms, so a coarse interval spends most of the wait asleep, three times over.
@@ -166,7 +201,13 @@ printf '[%s]\n' "$(
 
 # ── run ─────────────────────────────────────────────────────────────────────
 status=0
-bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" || status=$?
+MOQ_QA_LABEL=wasm bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" 2>&1 |
+    tee "$TMP/driver.log" || status=${PIPESTATUS[0]}
+if [[ $status -eq 0 ]]; then
+    bundle_result suite pass
+else
+    bundle_result suite fail "" "driver exited $status"
+fi
 
 if [[ $status -ne 0 ]]; then
     for flavour in "${FLAVOURS[@]}"; do
@@ -176,4 +217,4 @@ if [[ $status -ne 0 ]]; then
     done
 fi
 
-exit $status
+exit "$status"

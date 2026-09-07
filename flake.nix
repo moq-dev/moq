@@ -221,9 +221,20 @@
 
         # Developer workflow tooling not needed for builds: jq reads
         # `cargo metadata` in `just rs check-changed`.
-        devTools = with pkgs; [
-          jq
-        ];
+        #
+        # elfutils is what makes `eu-stack` available to the QA harnesses, which
+        # dump a hung relay or subscriber before its own timeout kills it (see
+        # test/lib/bundle.sh). Without it that capture records a missing tool on
+        # every Linux run, CI included, which is where the hang nobody watched
+        # happens. Darwin has /usr/bin/sample already and no eu-stack.
+        devTools =
+          with pkgs;
+          [
+            jq
+          ]
+          ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
+            elfutils
+          ];
 
         # Linters / formatters used by `just check` and `just fix`, which
         # guard each tool with `command -v` so they skip silently when the

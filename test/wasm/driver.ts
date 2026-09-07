@@ -8,11 +8,15 @@
  *
  *     bun driver.ts --relays relays.json [--timeout 30]
  *
+ * A failing run leaves a Playwright trace, a screenshot, and a HAR in
+ * $MOQ_QA_TRACE, which the debug bundle sets (see test/lib/bundle.sh).
+ *
  * @module
  */
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 import type { CaseResult, Config, RelayFixture } from "./src/main.ts";
 
 const { values } = parseArgs({
@@ -64,9 +68,47 @@ const browser = await chromium.launch({
 	headless: true,
 });
 
+const traceDir = process.env.MOQ_QA_TRACE;
+const label = process.env.MOQ_QA_LABEL ?? "wasm";
+
+// The trace carries the DOM snapshots, screenshots, and page errors a case
+// result cannot. HAR bodies are omitted: the session runs over WebTransport,
+// which neither the trace nor the HAR can see (that is what relay qlog is for),
+// so the bodies would be page assets and nothing else.
+const context = await browser.newContext(
+	traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
+);
+if (traceDir) {
+	await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+}
+
+// A trace is worth its megabytes only for a run that failed; a passing one
+// discards everything it recorded.
+async function saveTrace(page: Page | undefined, failed: boolean, log: string[]): Promise<void> {
+	if (!traceDir) {
+		await context.close().catch(() => {});
+		return;
+	}
+	if (failed) {
+		await context.tracing.stop({ path: join(traceDir, `${label}.trace.zip`) }).catch(() => {});
+		await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true }).catch(() => {});
+		await writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`).catch(() => {});
+	} else {
+		await context.tracing.stop().catch(() => {});
+	}
+	// The HAR is only written on close, so it has to happen either way.
+	await context.close().catch(() => {});
+	if (!failed) await rm(join(traceDir, `${label}.har`), { force: true }).catch(() => {});
+}
+
+// Every line the page printed, kept whether or not it was fatal: a case that
+// failed on a timeout usually explains itself in the lines before it.
+const transcript: string[] = [];
+
 let code = 1;
+let page: Page | undefined;
 try {
-	const page = await browser.newPage();
+	page = await context.newPage();
 
 	// A Rust panic reaches the console through `console_error_panic_hook` rather
 	// than rejecting anything, so it can leave every case green. Fail on it, and
@@ -75,10 +117,12 @@ try {
 	page.on("console", (message) => {
 		const text = message.text();
 		console.error(`[page] ${text}`);
+		transcript.push(`page: ${text}`);
 		if (text.includes("panicked at")) fatal.push(`panic: ${text}`);
 	});
 	page.on("pageerror", (error) => {
 		console.error(`[page error] ${error.message}`);
+		transcript.push(`pageerror: ${error.message}`);
 		fatal.push(`uncaught: ${error.message}`);
 	});
 
@@ -124,8 +168,10 @@ try {
 } catch (err) {
 	console.log(`  FAIL  ${err instanceof Error ? err.message : String(err)}`);
 } finally {
+	await saveTrace(page, code !== 0, transcript);
 	await browser.close().catch(() => {});
 	server.stop(true);
 }
 
+if (code !== 0 && traceDir) console.error(`browser trace: ${join(traceDir, `${label}.trace.zip`)}`);
 process.exit(code);

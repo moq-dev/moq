@@ -10,10 +10,16 @@
  *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang
  *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 [--expect-audio]
  *
+ * A failing subscriber leaves a Playwright trace, a screenshot, and a HAR in
+ * $MOQ_QA_TRACE, named by $MOQ_QA_LABEL. Both are set by the debug bundle (see
+ * test/lib/bundle.sh); without them nothing is recorded.
+ *
  * @module
  */
+import { rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
-import type { Page } from "playwright";
+import { type BrowserContext, type Page } from "playwright";
 import {
 	type BrowserErrors,
 	launch,
@@ -85,9 +91,49 @@ const browser = await launch([
 	"--autoplay-policy=no-user-gesture-required",
 ]);
 
+// Only the subscriber. The publisher streams until the orchestrator SIGKILLs
+// it, which is not an ending a trace or a HAR survives; its page errors reach
+// the bundle through the log the orchestrator already captures.
+const traceDir = role === "subscribe" ? process.env.MOQ_QA_TRACE : undefined;
+const label = process.env.MOQ_QA_LABEL ?? `${role}-${process.pid}`;
+
+// The HAR body content is omitted: the media never travels over HTTP anyway,
+// and a bundle that ships payloads is one nobody can upload. WebTransport is
+// invisible to both the trace and the HAR, which is what relay qlog is for.
+const context: BrowserContext = await browser.newContext(
+	traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
+);
+if (traceDir) {
+	await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+}
+
+let errors: BrowserErrors = { page: [], console: [] };
+
+// A trace is worth its megabytes only for a run that failed; a passing one
+// discards everything it recorded.
+async function saveTrace(page: Page | undefined, failed: boolean): Promise<void> {
+	if (!traceDir) {
+		await context.close().catch(() => {});
+		return;
+	}
+	if (failed) {
+		await context.tracing.stop({ path: join(traceDir, `${label}.trace.zip`) }).catch(() => {});
+		await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true }).catch(() => {});
+		const log = [...errors.page.map((e) => `page: ${e}`), ...errors.console.map((e) => `console: ${e}`)];
+		await writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`).catch(() => {});
+	} else {
+		await context.tracing.stop().catch(() => {});
+	}
+	// The HAR is only written on close, so it has to happen either way.
+	await context.close().catch(() => {});
+	if (!failed) await rm(join(traceDir, `${label}.har`), { force: true }).catch(() => {});
+}
+
 let code = 1;
+let page: Page | undefined;
+let failure: unknown;
 try {
-	const [page, errors] = await open(browser, pageUrl(server.origin, role, { url, broadcast }));
+	[page, errors] = await open(context, pageUrl(server.origin, role, { url, broadcast }));
 	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
@@ -117,6 +163,12 @@ try {
 		if (!playing) {
 			const state = await readPlayerState(page);
 			throw new Error(`timed out waiting for rendered video: ${JSON.stringify(state)}`);
+		}
+
+		// Fault injection for the debug-bundle drills: fail mid-playback, so the
+		// trace has a real session in it rather than an empty page.
+		if (process.env.MOQ_QA_FAULT === "browser") {
+			throw new Error("injected browser assertion failure (MOQ_QA_FAULT=browser)");
 		}
 
 		const interactionDeadline = Date.now() + timeoutMs;
@@ -163,8 +215,16 @@ try {
 		);
 		code = 0;
 	}
+} catch (err) {
+	failure = err;
 } finally {
+	await saveTrace(page, code !== 0);
 	await browser.close().catch(() => {});
 	server.stop();
 }
+
+if (failure !== undefined) {
+	console.error(failure instanceof Error ? (failure.stack ?? failure.message) : String(failure));
+}
+if (code !== 0 && traceDir) console.error(`browser trace: ${join(traceDir, `${label}.trace.zip`)}`);
 process.exit(code);
