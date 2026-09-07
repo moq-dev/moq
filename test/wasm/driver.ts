@@ -53,6 +53,10 @@ const server = Bun.serve({
 	},
 });
 
+// The page a human would open to reproduce what the headless run does. Printed
+// because the port is OS-assigned, so it is unguessable from outside.
+console.log(`endpoint: harness http://127.0.0.1:${server.port}/`);
+
 const config: Config = {
 	module: `http://127.0.0.1:${server.port}/wasm/moq.js`,
 	relays,

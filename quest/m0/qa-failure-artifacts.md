@@ -40,5 +40,4 @@ supports trace-based inspection; use the existing pinned Playwright dependency.
 
 ## Related
 
-- [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - owns run directories and process teardown
 - [qlog](/quest/m1/uring-qlog.md) - adds traces for the io_uring backend; other backends can ship first

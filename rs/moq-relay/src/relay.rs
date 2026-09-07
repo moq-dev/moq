@@ -144,8 +144,10 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health());
 
+		// `kind` so the QUIC line is distinguishable from the web listeners', which
+		// log the same way from `Web::serve` and may sit on a different port.
 		match addr {
-			Some(addr) => tracing::info!(%addr, "listening"),
+			Some(addr) => tracing::info!(%addr, kind = "quic", "listening"),
 			None => tracing::info!("listening (stream transports only)"),
 		}
 

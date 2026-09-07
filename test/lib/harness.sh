@@ -1,0 +1,293 @@
+# shellcheck shell=bash
+#
+# Shared plumbing for the harnesses under test/, so two of them can run at once
+# from two worktrees without testing or reaping each other's processes.
+#
+# Three things belong to a run and to nothing else:
+#
+#   - a private run directory holding every log, config, and scratch file
+#   - the ports it reserved, held for the whole run rather than probed and freed
+#   - the process groups it spawned, which are the only ones it ever signals
+#
+# Usage:
+#
+#     source "$(dirname "${BASH_SOURCE[0]}")/../lib/harness.sh"
+#     harness_begin smoke "just test smoke"
+#     harness_port relay
+#     harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
+#     harness_endpoint relay "http://127.0.0.1:$HARNESS_PORT"
+#
+# See test/README.md for the contract and the teardown rules.
+
+# Absolute path to this run's private directory. Every artifact goes here.
+HARNESS_RUN=""
+
+# The command that reproduces this run, printed when it fails or is retained.
+HARNESS_RERUN=""
+
+# PID of the group `harness_spawn` most recently started.
+HARNESS_PID=""
+
+# The port `harness_port` most recently reserved.
+HARNESS_PORT=""
+
+# Reservation directories this run holds, released on the way out.
+HARNESS_PORTS=()
+
+# Parallel arrays: the process group leaders this run spawned, their labels, and
+# whether each has been waited on. A group is signalled only while its state
+# reads `live`, which is what makes a recycled PID safe: once `wait` returns the
+# state flips to `done` and this run never names that number again.
+HARNESS_PIDS=()
+HARNESS_LABELS=()
+HARNESS_STATES=()
+
+# ── run identity ────────────────────────────────────────────────────────────
+
+# Start a run named NAME, reproducible with RERUN. Creates the run directory and
+# installs the teardown trap; every other function needs this called first.
+harness_begin() {
+    local name="$1" rerun="${2:-}"
+
+    # macOS sets TMPDIR with a trailing slash, which would print every path with a
+    # doubled separator.
+    local root="${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}}"
+    root="${root%/}"
+    [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test"
+    mkdir -p "$root"
+    HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
+    # A run directory holds relay configs and generated keys, so keep it to the
+    # owner even where the temp root itself is world-readable.
+    chmod 700 "$HARNESS_RUN"
+    HARNESS_RERUN="$rerun"
+
+    # Cancellation needs its own traps: children run in their own process groups
+    # (see `harness_spawn`), so a ^C aimed at this shell's group never reaches
+    # them, and teardown is the only thing that will.
+    trap harness_finish EXIT
+    trap 'harness_finish 130; exit 130' INT
+    trap 'harness_finish 143; exit 143' TERM
+
+    echo "run: $HARNESS_RUN"
+}
+
+# ── endpoints ───────────────────────────────────────────────────────────────
+
+# Where port reservations live. Shared across worktrees on purpose: the point is
+# that a run in one worktree cannot hand out a port another already took.
+harness_port_root() {
+    local root="${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}}"
+    root="${root%/}"
+    [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports"
+    echo "$root"
+}
+
+# Reserve a port for this run, held until it exits, and set HARNESS_PORT.
+#
+# `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
+# call fails, which is what an explicit SMOKE_PORT/WASM_PORT asks for; without it
+# the search walks up from MOQ_TEST_PORT_BASE.
+#
+# The answer lands in a variable rather than on stdout because `$(harness_port)`
+# would run it in a subshell, where the reservation it just took is recorded into
+# a copy of the table and never released by the run that owns it.
+#
+# Holding the reservation for the run's lifetime is the difference from probing:
+# a probe that finds a port free has already released it by the time the relay
+# binds, so two runs that probe together pick the same number. The reservation is
+# a directory, created with mkdir(2), so two runs racing for one cannot both win.
+# shellcheck disable=SC2034  # HARNESS_PORT is the result, read by the caller
+harness_port() {
+    local label="$1" wanted="${2:-}"
+    local root port last
+    root=$(harness_port_root)
+    mkdir -p "$root"
+
+    if [[ -n "$wanted" ]]; then
+        harness_port_take "$root" "$wanted" || {
+            echo "error: port $wanted ($label) is held by another run; see $root/$wanted" >&2
+            return 1
+        }
+        HARNESS_PORT="$wanted"
+        return 0
+    fi
+
+    port="${MOQ_TEST_PORT_BASE:-4500}"
+    last=$((port + 500))
+    while ((port <= last)); do
+        if harness_port_take "$root" "$port"; then
+            HARNESS_PORT="$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    echo "error: no free port for $label in ${MOQ_TEST_PORT_BASE:-4500}..$last (see $root)" >&2
+    return 1
+}
+
+# Claim one port. Private; `harness_port` is the entry point.
+harness_port_take() {
+    local root="$1" port="$2" owner
+    if ! mkdir "$root/$port" 2>/dev/null; then
+        # An owner that no longer exists left the reservation behind (SIGKILL, a
+        # crashed shell). Reclaim it rather than skipping the port forever; the
+        # retried mkdir is what stops two reclaimers from both taking it.
+        owner=$(cat "$root/$port/pid" 2>/dev/null || true)
+        if [[ -z "$owner" ]] || kill -0 "$owner" 2>/dev/null; then
+            return 1
+        fi
+        rm -rf "${root:?}/${port:?}"
+        mkdir "$root/$port" 2>/dev/null || return 1
+    fi
+    echo "$$" >"$root/$port/pid"
+    echo "$HARNESS_RUN" >"$root/$port/run"
+    HARNESS_PORTS+=("$root/$port")
+    return 0
+}
+
+# Record an endpoint this run stood up: `harness_endpoint <label> <url>`.
+# Printed as it happens and appended to the run's endpoints.txt, so a retained
+# session says what to open without rereading the script.
+harness_endpoint() {
+    local label="$1" url="$2"
+    printf '%s\t%s\n' "$label" "$url" >>"$HARNESS_RUN/endpoints.txt"
+    echo "endpoint: $label $url"
+}
+
+# Poll URL until it answers, up to SECONDS: `harness_ready <url> [seconds]`.
+# Tight interval on purpose; a relay binds in about 130ms, so a half-second tick
+# spends most of the wait asleep.
+harness_ready() {
+    local url="$1" seconds="${2:-30}" i
+    for ((i = 0; i < seconds * 20; i++)); do
+        curl -sf "$url" >/dev/null 2>&1 && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+# ── processes ───────────────────────────────────────────────────────────────
+
+# Spawn a command as its own process group, writing to LOG (or `-` to inherit
+# this shell's stdout/stderr): `harness_spawn <label> <log> <cmd...>`. Sets
+# HARNESS_PID to the group leader. CMD may be a shell function.
+#
+# Job control creates the group, and it is enabled only across the `&` so the
+# shell never prints its own "Killed" notice for a group we reaped on purpose.
+# The group is the unit of ownership: signalling it catches grandchildren that a
+# `pgrep -P` walk misses once they reparent.
+#
+# stdin is /dev/null because a background job in its own group that reads the
+# terminal takes SIGTTIN and stops. ffmpeg reads stdin for keyboard commands and
+# would do exactly that.
+harness_spawn() {
+    local label="$1" log="$2"
+    shift 2
+    set -m
+    if [[ "$log" == "-" ]]; then
+        "$@" </dev/null &
+    else
+        "$@" </dev/null >"$log" 2>&1 &
+    fi
+    HARNESS_PID=$!
+    set +m
+    HARNESS_PIDS+=("$HARNESS_PID")
+    HARNESS_LABELS+=("$label")
+    HARNESS_STATES+=("live")
+}
+
+# Index of PID in the spawn table; fails when this run never spawned it.
+harness_index() {
+    local pid="$1" i
+    for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
+        if [[ "${HARNESS_PIDS[$i]}" == "$pid" ]]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Wait for a spawned group leader and return its status: `harness_wait <pid>`.
+# Marks the entry done, so teardown will not signal a number the OS may reuse.
+harness_wait() {
+    local pid="$1" status=0 i
+    wait "$pid" || status=$?
+    if i=$(harness_index "$pid"); then
+        HARNESS_STATES[i]="done"
+    fi
+    return "$status"
+}
+
+# Kill a spawned group and reap it: `harness_reap <pid>`.
+#
+# SIGKILL rather than SIGTERM because moq-cli handles only SIGINT, so a polite
+# signal leaves it running; these are ephemeral test processes either way. A PID
+# this run did not spawn, or already waited on, is ignored: reaping may be called
+# twice, and the second call must not signal whatever now holds the number.
+harness_reap() {
+    local pid="$1" i
+    i=$(harness_index "$pid") || return 0
+    [[ "${HARNESS_STATES[$i]}" == live ]] || return 0
+    # The group first, so grandchildren go with it; the bare PID is the fallback
+    # for a job that somehow never became a group leader.
+    kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    HARNESS_STATES[i]="done"
+}
+
+# Reap every group this run still owns, newest first so clients go before the
+# relay they were talking to.
+harness_reap_all() {
+    local i
+    for ((i = ${#HARNESS_PIDS[@]} - 1; i >= 0; i--)); do
+        harness_reap "${HARNESS_PIDS[$i]}"
+    done
+}
+
+# ── teardown ────────────────────────────────────────────────────────────────
+
+# Release everything this run owns: `harness_finish [status]`, where the status
+# defaults to the one it inherits and is passed explicitly by the signal traps,
+# which have no failing command to inherit it from.
+#
+# Reached from the EXIT/INT/TERM traps, so it has to hold for a cancellation
+# during startup as well as a clean finish: nothing here assumes a process was
+# spawned or a port was ever reserved.
+harness_finish() {
+    local status=${1:-$?}
+    local reservation i
+    trap - EXIT INT TERM
+
+    # Name what is about to be force-reaped when the run is failing, so a hung
+    # child is attributable rather than just a process that stopped existing.
+    if ((status != 0)); then
+        for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
+            if [[ "${HARNESS_STATES[$i]}" == live ]]; then
+                echo "reaping: ${HARNESS_LABELS[$i]} (pid ${HARNESS_PIDS[$i]})" >&2
+            fi
+        done
+    fi
+
+    harness_reap_all
+
+    for reservation in ${HARNESS_PORTS[@]+"${HARNESS_PORTS[@]}"}; do
+        rm -rf "$reservation"
+    done
+    HARNESS_PORTS=()
+
+    [[ -n "$HARNESS_RUN" ]] || return "$status"
+
+    if [[ "${MOQ_TEST_KEEP:-0}" == 0 ]]; then
+        rm -rf "$HARNESS_RUN"
+    else
+        # The ports are already released and the children are gone, so a retained
+        # directory is evidence only. Say so rather than implying a live session.
+        echo "kept: $HARNESS_RUN (children reaped, ports released)" >&2
+        echo "remove it with: rm -rf $HARNESS_RUN" >&2
+    fi
+    if [[ -n "$HARNESS_RERUN" && ("$status" -ne 0 || "${MOQ_TEST_KEEP:-0}" != 0) ]]; then
+        echo "rerun: $HARNESS_RERUN" >&2
+    fi
+    return "$status"
+}

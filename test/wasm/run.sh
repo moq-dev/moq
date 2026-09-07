@@ -20,8 +20,13 @@ set -euo pipefail
 WASM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
 
+# Run directory, reserved ports, and process-group ownership. See test/README.md.
+# shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
+source "$WASM_DIR/../lib/harness.sh"
+
 TIMEOUT="${WASM_TIMEOUT:-30}"
-PORT="${WASM_PORT:-4460}"
+# Empty means "any reserved port per flavour"; WASM_PORT pins the first instead.
+PORT="${WASM_PORT:-}"
 
 # Cargo profile for the relay. Debug compiles faster, which is what a test
 # fixture wants; the workload is three connections and a few hundred KiB.
@@ -60,27 +65,15 @@ FLAVOURS=(
     "setup:moq-lite-02:moq-lite-02"
 )
 
-# The relays take PORT and the next few, so the whole span has to be bindable.
-# Port 0 is the trap worth naming: the relay would bind an arbitrary port while
-# this script polls 0 forever.
-if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT + ${#FLAVOURS[@]} - 1 > 65535)); then
-    echo "error: port must be 1024..$((65535 - ${#FLAVOURS[@]} + 1)) (got '$PORT')" >&2
+# WASM_PORT pins the first relay and the rest are reserved individually, so only
+# the first has to be a real port. Port 0 is the trap worth naming: the relay
+# would bind an arbitrary port while this script polls 0 forever.
+if [[ -n "$PORT" ]] && { [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT > 65535)); }; then
+    echo "error: port must be 1024..65535 (got '$PORT')" >&2
     exit 2
 fi
 
-TMP=$(mktemp -d)
-RELAY_PIDS=()
-
-# shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
-cleanup() {
-    local pid
-    for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-    done
-    rm -rf "$TMP"
-}
-trap cleanup EXIT
+harness_begin wasm "just test wasm --timeout $TIMEOUT"
 
 for tool in cargo bun; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -124,14 +117,20 @@ bun build src/main.ts --outdir dist --target browser >/dev/null
 cp index.html dist/index.html
 
 # ── relays ──────────────────────────────────────────────────────────────────
+# One reservation per flavour rather than a span from a fixed base: a span means
+# every concurrent run needs a different base, and nothing was handing them out.
 entries=()
-offset=0
+want="$PORT"
 for flavour in "${FLAVOURS[@]}"; do
     IFS=':' read -r name version_flag expected <<<"$flavour"
-    port=$((PORT + offset))
-    offset=$((offset + 1))
+    harness_port "$name" "$want"
+    port="$HARNESS_PORT"
+    # WASM_PORT pins only the first; the rest come from the reservation walk.
+    want=""
     url="http://127.0.0.1:${port}"
 
+    # The reservation covers other harness runs, not the rest of the machine, so
+    # still refuse a port some unrelated process is already serving on.
     if curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
         echo "error: something is already listening on 127.0.0.1:${port} (stale relay?)" >&2
         exit 1
@@ -141,20 +140,14 @@ for flavour in "${FLAVOURS[@]}"; do
     [[ -z "$version_flag" ]] || args+=(--server-version "$version_flag")
 
     echo "starting $name relay on 127.0.0.1:${port}..."
-    "$RELAY" "${args[@]}" >"$TMP/relay-$name.log" 2>&1 &
-    RELAY_PIDS+=($!)
+    harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" "$RELAY" "${args[@]}"
 
-    # Polled tight rather than on a half-second tick: a relay binds in about
-    # 130ms, so a coarse interval spends most of the wait asleep, three times over.
-    for _ in $(seq 1 600); do
-        curl -sf "$url/certificate.sha256" >/dev/null 2>&1 && break
-        sleep 0.05
-    done
-    if ! curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
+    if ! harness_ready "$url/certificate.sha256" 30; then
         echo "$name relay never became ready" >&2
-        sed 's/^/  relay: /' "$TMP/relay-$name.log" >&2 || true
+        sed 's/^/  relay: /' "$HARNESS_RUN/relay-$name.log" >&2 || true
         exit 1
     fi
+    harness_endpoint "$name" "$url"
 
     entries+=("{\"name\":\"$name\",\"url\":\"$url\",\"version\":\"$expected\"}")
 done
@@ -162,17 +155,21 @@ done
 printf '[%s]\n' "$(
     IFS=,
     echo "${entries[*]}"
-)" >"$TMP/relays.json"
+)" >"$HARNESS_RUN/relays.json"
 
 # ── run ─────────────────────────────────────────────────────────────────────
+# Spawned rather than run in the foreground so a SIGTERM lands while the shell is
+# in `wait`, where a trap can run: bash defers a trap until a foreground child
+# returns, which would leave Chromium behind for as long as the driver hangs.
 status=0
-bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" || status=$?
+harness_spawn driver - bun driver.ts --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
+harness_wait "$HARNESS_PID" || status=$?
 
 if [[ $status -ne 0 ]]; then
     for flavour in "${FLAVOURS[@]}"; do
         name="${flavour%%:*}"
         echo "── $name relay log ──" >&2
-        sed 's/^/  /' "$TMP/relay-$name.log" >&2 || true
+        sed 's/^/  /' "$HARNESS_RUN/relay-$name.log" >&2 || true
     done
 fi
 

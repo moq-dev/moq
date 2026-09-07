@@ -50,10 +50,150 @@ bench $BASE="":
     #!/usr/bin/env bash
     exec rs/scripts/bench.sh "$BASE"
 
+# A linked worktree's Git metadata does not live under its own root: the
+# per-worktree directory is `--git-dir` and everything shared (objects, remote
+# refs, the branch namespace) is under `--git-common-dir`, which for an agent
+# checkout is inside the main repository. Write access to the source tree
+# therefore says nothing about whether this checkout can fetch, branch, or
+# rebase; the answer is a property of those two directories, and finding out by
+# running `git fetch` and reading the error is the slow way.
+#
+# `check` reports; `setup` fetches, points the branch at its base, and records
+# the SHA it fetched under the per-worktree Git directory, where `check` reads it
+# back to say how stale the recorded base has become. Neither ever resets,
+# rebases, cleans, or checks anything out: a dirty tree is someone's work in
+# progress, and adopting a checkout must not be able to destroy it.
+#
+# BASE follows the same rule as the rest of the repo (see `_base`): `main`
+# unless the branch's upstream says otherwise.
+
+# Report a worktree's base, Git metadata access, and state; `setup` also fetches.
+worktree ACTION="check" $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ ACTION }}" in
+    	check | setup) ;;
+    	*)
+    		echo "usage: just worktree [check|setup] [BASE]" >&2
+    		exit 2
+    		;;
+    esac
+
+    root=$(git rev-parse --show-toplevel)
+    git_dir=$(cd "$(git rev-parse --git-dir)" && pwd)
+    common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+    branch=$(git branch --show-current || true)
+
+    # A written probe rather than `[[ -w ]]`: the directory can be readable and
+    # nominally writable while the sandbox, a read-only mount, or an ACL refuses
+    # the create, and it is the create that fetch and branch creation need.
+    access() {
+    	local dir="$1" probe
+    	[[ -d "$dir" ]] || { echo missing; return; }
+    	[[ -r "$dir" ]] || { echo denied; return; }
+    	probe="$dir/.moq-access-probe.$$"
+    	if (umask 077 && : > "$probe") 2>/dev/null; then
+    		rm -f "$probe"
+    		echo write
+    	else
+    		echo read-only
+    	fi
+    }
+
+    objects=$(access "$common_dir/objects")
+    heads=$(access "$common_dir/refs/heads")
+    worktree_meta=$(access "$git_dir")
+
+    echo "worktree:    $root"
+    echo "branch:      ${branch:-(detached)} $(git rev-parse --short HEAD)"
+    echo "git-dir:     $git_dir ($worktree_meta)"
+    echo "common-dir:  $common_dir"
+    echo "  fetch needs $common_dir/objects: $objects"
+    echo "  branch needs $common_dir/refs/heads: $heads"
+    echo "  rebase needs $git_dir and the worktree: $worktree_meta"
+
+    dirty=$(git status --porcelain | wc -l | tr -d ' ')
+    echo "dirty:       $dirty tracked/untracked path(s)"
+
+    base=$(just _base "$BASE")
+    stamp="$git_dir/moq-base"
+
+    if [[ "{{ ACTION }}" == setup ]]; then
+    	if [[ "$objects" != write ]]; then
+    		echo "error: cannot fetch; $common_dir/objects is $objects" >&2
+    		echo "       grant write access to the main repository's Git directory, not just this worktree" >&2
+    		exit 1
+    	fi
+    	git fetch --quiet origin
+    	# Only when unset: repointing an upstream someone chose would silently
+    	# change what `just check` scopes against.
+    	if [[ -n "$branch" ]] && ! git rev-parse --abbrev-ref '@{upstream}' > /dev/null 2>&1; then
+    		if [[ "$heads" == write ]]; then
+    			git branch --set-upstream-to "$base" "$branch"
+    		else
+    			echo "warning: cannot set upstream; $common_dir/refs/heads is $heads" >&2
+    		fi
+    	fi
+    	if [[ "$worktree_meta" == write ]]; then
+    		git rev-parse "$base" > "$stamp"
+    	fi
+    fi
+
+    if ! git rev-parse --verify --quiet "$base^{commit}" > /dev/null; then
+    	echo "base:        $base (NOT FETCHED; run 'just worktree setup')"
+    	exit 0
+    fi
+
+    head=$(git rev-parse "$base")
+    echo "base:        $base $(git rev-parse --short "$base")"
+    echo "upstream:    $(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || echo '(unset)')"
+    echo "behind:      $(git rev-list --count "HEAD..$base") commit(s)"
+
+    if [[ -f "$stamp" ]]; then
+    	recorded=$(cat "$stamp")
+    	if [[ "$recorded" == "$head" ]]; then
+    		echo "recorded:    $(git rev-parse --short "$recorded") (current)"
+    	else
+    		echo "recorded:    $(git rev-parse --short "$recorded") (STALE; $base has moved since setup)"
+    	fi
+    else
+    	echo "recorded:    (none; run 'just worktree setup')"
+    fi
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
     cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
+
+# Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
+# upstream is the branch it merges into, which is the base a `dev`-targeted
+# branch needs. `git push -u` repoints upstream at the branch's own remote copy,
+# which would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+# GITHUB_BASE_REF outranks the upstream because a PR checkout has no upstream
+# configured, and the branch being merged into is exactly the base GitHub is
+# asking about.
+#
+# Shared by `_changed` and `worktree`, so a checkout's scope and its reported
+# base can never disagree.
+
+# Print the ref this branch is based on.
+[private]
+_base $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    base="$BASE"
+    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
+    	base="origin/${GITHUB_BASE_REF}"
+    fi
+    if [[ -z "$base" ]]; then
+    	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
+    		base="origin/main"
+    	fi
+    fi
+    printf '%s\n' "$base"
 
 # Reports the base it picked on stderr, so a surprising scope is traceable.
 #
@@ -66,23 +206,7 @@ _changed $BASE $LIMIT=changed_max:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
-    # upstream is the branch it merges into, which is the base a `dev`-targeted
-    # branch needs. `git push -u` repoints upstream at the branch's own remote
-    # copy, which would diff HEAD against itself, so ignore that case (see
-    # CLAUDE.md). GITHUB_BASE_REF outranks the upstream because a PR checkout
-    # has no upstream configured, and the branch being merged into is exactly
-    # the base GitHub is asking about.
-    base="$BASE"
-    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
-    	base="origin/${GITHUB_BASE_REF}"
-    fi
-    if [[ -z "$base" ]]; then
-    	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-    	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
-    		base="origin/main"
-    	fi
-    fi
+    base=$(just _base "$BASE")
 
     merge_base=$(git merge-base "$base" HEAD) || {
     	echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
@@ -607,10 +731,29 @@ wasm:
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 
-# Delete build artifacts and caches, including per-language outputs and agent worktrees.
-clean:
+# Only this checkout by default. Agent worktrees each carry their own artifacts
+# now that the shared target dir is gone, and another agent is usually building
+# in one right now: `cargo clean` under a running build fails it, and there is no
+# way to tell a finished worktree from a busy one from out here. `just clean all`
+# is the explicit opt-in for a machine the caller knows is idle.
+#
+# Source is never touched either way, dirty or untracked: this deletes build
+# output, not work. Nothing here reaches a machine-wide store -- no Nix garbage
+# collection, no cargo/bun/uv home cache -- because those are shared with every
+# other checkout and rebuilding them costs far more than the space they hold.
+
+# Delete this checkout's build artifacts and caches; `all` includes agent worktrees.
+clean SCOPE="here":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    case "{{ SCOPE }}" in
+    	here | all) ;;
+    	*)
+    		echo "usage: just clean [here|all]" >&2
+    		exit 2
+    		;;
+    esac
 
     just rs clean
     just js clean
@@ -624,14 +767,15 @@ clean:
     rm -rf result .direnv
     find . -name .claude -prune -o -type d -name .wrangler -prune -exec rm -rf {} +
 
-    # Agent worktrees each carry their own artifacts now that the shared
-    # target dir is gone. Worktrees don't nest, so this recurses exactly one
-    # level. Tolerate stale worktrees on branches that predate this recipe.
-    for wt in .claude/worktrees/*/; do
-    	[ -f "${wt}justfile" ] || continue
-    	echo "==> cleaning ${wt}"
-    	(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
-    done
+    # Worktrees don't nest, so this recurses exactly one level. Tolerate stale
+    # worktrees on branches that predate this recipe.
+    if [[ "{{ SCOPE }}" == all ]]; then
+    	for wt in .claude/worktrees/*/; do
+    		[ -f "${wt}justfile" ] || continue
+    		echo "==> cleaning ${wt}"
+    		(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
+    	done
+    fi
 
 # Upgrade any tooling
 update:
