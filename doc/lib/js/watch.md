@@ -44,7 +44,7 @@ buffering indicator, an unsupported-codec warning, and a stats panel.
 ## Binding from a framework
 
 `import "@moq/watch/element"` registers `<moq-watch>` while the module
-evaluates, so a page that imports it at the top of a module always mounts an
+evaluates, so a browser-only entrypoint that imports it before mounting gets an
 upgraded element. `el.broadcast`, `el.video`, `el.audio`, `el.sync`, and
 `el.signals` are assigned by the constructor and readable right away.
 
@@ -61,10 +61,13 @@ el.broadcast.out.catalog.subscribe(handler);
 ```
 
 The browser upgrades the same node once the definition arrives, applying the
-attributes it already has, so the fix is to import the element statically or
-wait for the registration:
+attributes it already has. Use a static import in browser-only entrypoints.
+For SSR applications, run the following in a client-side mount hook, after
+the node exists. The element module needs browser globals and must not be
+imported during server rendering. Start the import before waiting for registration:
 
 ```ts
+await import("@moq/watch/element");
 await customElements.whenDefined("moq-watch");
 el.broadcast.out.catalog.subscribe(handler);
 ```
@@ -81,10 +84,11 @@ broadcast consumer, and decode JSON with
 import * as Json from "@moq/json";
 import { Hang } from "@moq/watch";
 
+// Run after the element module has loaded and the node has mounted.
 const el = document.querySelector("moq-watch");
+if (!el) throw new Error("Missing <moq-watch> element");
 
-// The element's own Effect, torn down with the element.
-el.signals.run((effect) => {
+const dispose = el.signals.run((effect) => {
     const catalog = effect.get(el.broadcast.out.catalog) as { metadata?: string[] } | undefined;
     const active = effect.get(el.broadcast.out.active);
 
@@ -104,6 +108,10 @@ el.signals.run((effect) => {
     });
 });
 ```
+
+Call `dispose()` from your framework's unmount cleanup when this subscription
+is no longer needed. Removing the element disables playback but keeps its
+effects open so the same node can reconnect.
 
 The effect re-runs whenever the catalog or the active broadcast changes, so a
 reconnect resubscribes on its own. A publisher that rewrites its catalog often
