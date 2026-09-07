@@ -560,6 +560,35 @@ test("Consumer drops a reneged straggler that the reset left on the cursor", asy
 	consumer.close();
 });
 
+test("Consumer preserves a new-epoch group after its first frame is consumed", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 30_000 as Time.Milli });
+	const previous = new Group.Producer(10);
+	previous.writeFrame({ payload: encodeLegacy(5_000_000 as Time.Micro), timestamp: Time.Timestamp.now() });
+	track.writeGroup(previous);
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(5_000_000 as Time.Micro);
+
+	const ambiguous = new Group.Producer(15);
+	track.writeGroup(ambiguous);
+	await settle();
+	writeGroupWithLegacyFrames(track, 20, [100_000 as Time.Micro]);
+	await settle();
+	ambiguous.writeFrame({ payload: encodeLegacy(50_000 as Time.Micro), timestamp: Time.Timestamp.now() });
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(50_000 as Time.Micro);
+
+	ambiguous.writeFrame({ payload: encodeLegacy(100_000 as Time.Micro), timestamp: Time.Timestamp.now() });
+	ambiguous.close();
+	await settle();
+	const remainder = await nextFrame(consumer);
+	expect(remainder?.group).toBe(15);
+	expect(remainder?.frame?.timestamp).toBe(100_000 as Time.Micro);
+	expect(remainder?.discontinuity).toBe(1);
+	previous.close();
+	consumer.close();
+});
+
 // Decode order dips below presentation order inside every group with B-frames. That is not a
 // rewind, so the live edge the detector compares against has to be the group's own.
 test("Consumer treats B-frame reordering within a group as continuous", async () => {

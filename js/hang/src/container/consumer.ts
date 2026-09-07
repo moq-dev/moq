@@ -18,6 +18,7 @@ interface Group {
 	consumer: Moq.Group.Consumer;
 	frames: Frame[]; // decode order
 	empty: boolean; // no wire frame was published, which declares a discontinuity
+	start?: Time.Micro; // First decoded timestamp, retained after delivery for epoch classification
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
@@ -231,6 +232,7 @@ export class Consumer {
 
 					if (!marker) index++;
 
+					group.start ??= frame.timestamp;
 					group.frames.push(frame);
 
 					if (group.latest === undefined || frame.timestamp > group.latest) {
@@ -432,7 +434,7 @@ export class Consumer {
 		// continuous, and it matches the prevMax the Reset below is built from.
 		if (group.consumer.sequence <= live.group) return;
 
-		const start = group.frames.at(0)?.timestamp;
+		const start = group.start;
 		if (start === undefined) return;
 
 		// A rewind is the timestamp going strictly backwards past the live edge. Anything at
@@ -447,8 +449,8 @@ export class Consumer {
 		// Drop buffered groups the boundary can already prove stale; keep ambiguous ones.
 		this.#groups = this.#groups.filter((g) => {
 			const verdict = reset.bySequence(g.consumer.sequence);
-			const first = g.frames.at(0);
-			const stale = verdict ?? (first !== undefined && reset.isStale(g.consumer.sequence, first.timestamp));
+			const start = g.start;
+			const stale = verdict ?? (start !== undefined && reset.isStale(g.consumer.sequence, start));
 			if (stale) {
 				g.consumer.close();
 				g.frames.length = 0;
@@ -485,9 +487,9 @@ export class Consumer {
 		const reset = this.#rewind.boundary;
 		if (!reset) return false;
 
-		const first = group.frames.at(0);
-		if (first === undefined) return false;
-		if (!reset.isStale(group.consumer.sequence, first.timestamp)) return false;
+		const start = group.start;
+		if (start === undefined) return false;
+		if (!reset.isStale(group.consumer.sequence, start)) return false;
 
 		this.#groups = this.#groups.filter((g) => g !== group);
 		group.consumer.close();
