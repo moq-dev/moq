@@ -89,10 +89,15 @@ const el = document.querySelector("moq-watch");
 if (!el) throw new Error("Missing <moq-watch> element");
 
 const dispose = el.signals.run((effect) => {
-    const catalog = effect.get(el.broadcast.out.catalog) as { metadata?: string[] } | undefined;
+    const catalog = effect.get(el.broadcast.out.catalog) as { metadata?: unknown } | undefined;
     const active = effect.get(el.broadcast.out.active);
 
-    const name = catalog?.metadata?.[0];
+    const metadata = catalog?.metadata;
+    if (metadata !== undefined &&
+        (!Array.isArray(metadata) || !metadata.every((name): name is string => typeof name === "string"))) {
+        throw new Error("Expected metadata to be an array of track names");
+    }
+    const name = metadata?.[0];
     if (!active || !name) return;
 
     const track = active.track(name).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
