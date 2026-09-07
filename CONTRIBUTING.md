@@ -32,12 +32,14 @@ just test smoke-core        # what the `smoke` lane runs
 | Lane | Runs | Selected by | Cost |
 |---|---|---|---|
 | `smoke` | `just test smoke-core`: rust and browser publish; rust, browser and C subscribe | any change reaching moq-relay, moq-cli, libmoq, moq-ffi or moq-gst through the dependency graph, or a `js/` package | ~10 min |
-| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, or the python client | ~25 min |
-| `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm, plus `js/wasm`, `test/wasm`, `.cargo/config.toml` | ~7 min |
+| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, or the python client | ~20 min |
+| `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm or moq-relay, plus `js/wasm`, `js/net`, `js/signals`, `test/wasm`, `.cargo/config.toml` | ~8 min |
 | `ts` | `just test ts`: the MPEG-TS exporter graded with TSDuck | any change reaching moq-mux or moq-cli, plus `test/ts` | ~5 min |
-| `windows` | `just rs windows`: a compile gate, not a device test | an edit to moq-video, moq-audio, moq-nvenc, moq-transcode, moq-native or moq-cli | ~12 min, uncached |
+| `windows` | `just rs windows`: a compile gate, not a device test | an edit to moq-video, moq-audio, moq-nvenc, moq-transcode, moq-native or moq-cli | ~13 min, uncached |
 | `macos` | `just rs macos`: same, for VideoToolbox and ScreenCaptureKit | an edit to moq-video or moq-audio | ~5 min, uncached |
 | `features` | `just rs features`: the `--all-features` and `--no-default-features` permutations | a manifest, a build script, or the toolchain pin | ~20 min |
+
+Costs are wall clock on a cold shared cache, measured on the run that added this table; every selected lane runs in parallel, so a diff selecting all seven finishes in the slowest one. Selection itself costs ~90s, which every pull request pays.
 
 The map lives in `.github/scripts/select.sh`, its fixtures in `select.test.sh`, and the aggregate in `gates.sh`. A lane is three things: an entry in the map, an output on gates.yml's `select` job, and a job whose id is the lane name. Miss one and `Gates` fails rather than passing quietly.
 

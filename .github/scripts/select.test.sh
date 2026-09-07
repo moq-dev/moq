@@ -61,6 +61,12 @@ relay='rs/moq-relay/src/web.rs'
 expect "$relay" smoke true
 expect "$relay" smoke_full false
 
+# The two lanes whose harness builds a relay and publishes from @moq/net. Neither
+# fixture is in moq-wasm's Cargo dependency graph, so the closure alone says no
+# and a break arriving through either would run nowhere.
+expect "$relay" wasm true
+expect 'js/net/src/connection.ts' wasm true
+
 # A platform backend. moq-video holds `#[cfg(target_os = ...)]` capture and
 # encode that no Linux job compiles, and it is a moq-cli dependency, so the
 # delivery path it feeds is worth proving too.

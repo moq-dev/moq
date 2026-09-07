@@ -13,10 +13,12 @@ name: WASM
 # (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not compile
 # at all.
 #
-# That is strictly wider than the `paths:` filter this replaced, which named
-# moq-net and kio directly and so ran on neither `js/net` (the publisher fixture)
-# nor `rs/moq-relay` (the server), both of which can break the bindings without
-# touching a file it listed.
+# The harness's own fixtures are in as well: run.sh builds a real `moq-relay` and
+# publishes from `@moq/net`. The `paths:` filter this replaced left both out on
+# purpose, because naming them would have launched a browser on a large share of
+# pull requests, and accepted that a break arriving through either lands on `main`
+# and shows up the next run. Selection makes them affordable: a diff reaching
+# either already runs the smoke lane, so this one runs beside it, not after it.
 
 permissions:
   contents: read

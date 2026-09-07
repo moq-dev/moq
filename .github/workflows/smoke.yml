@@ -33,8 +33,10 @@ concurrency:
   group: smoke-${{ inputs.matrix || 'full' }}-${{ github.ref }}
   cancel-in-progress: true
 
+# No id-token: nothing here authenticates over OIDC, and a called workflow cannot
+# ask for more than its caller grants, so an unused write would force gates.yml to
+# hand every lane the same.
 permissions:
-  id-token: write
   contents: read
 
 jobs:

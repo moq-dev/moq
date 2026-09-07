@@ -126,9 +126,17 @@ fi
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so every other gate
 # compiles it to nothing and `just rs wasm` only compiles it. This lane is the
-# only thing that runs it. The closure is exactly right here: the crate is a thin
-# wrapper, and what breaks it lives in what it depends on.
-if reaches moq-wasm || touches '^(js/wasm/|test/wasm/|\.cargo/config\.toml$)'; then
+# only thing that runs it.
+#
+# moq-relay and js/net are the harness's fixtures rather than the code under
+# test, and they are in anyway: test/wasm/run.sh builds a real relay and
+# publishes from @moq/net, and neither is in moq-wasm's Cargo dependency graph,
+# so a break arriving through either would otherwise reach `main` unrun. That is
+# what the paths filter this replaced deliberately gave up (a browser on a large
+# share of pull requests); the impact map buys it back, because those diffs run
+# the smoke lane alongside rather than after.
+if reaches moq-wasm moq-relay ||
+    touches '^(js/(wasm|net|signals)/|test/wasm/|\.cargo/config\.toml$)'; then
     selected[wasm]=true
 fi
 
