@@ -28,7 +28,6 @@ regression test per Root Cause First.
 - [#3326](/quest/m0/3326-moq-audio-held-resampler-frames-keep-their-source-timestamp.md) - moq-audio: held resampler frames keep their source timestamp
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - stop the headroom task after setup failure or the last owner drops
-- [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [Echo-delay test runtime](/quest/m0/aec-test-runtime.md) - keep the audio regression within the normal workspace test budget
 - [Go smoke client](/quest/m0/smoke-go-client.md) - the interop matrix has no Go client, so nothing in CI exercises the Go wrapper
 - [Auth expiry test](/quest/m0/auth-expiry-test-clock.md) - remove mixed-clock scheduling from the credential expiry regression

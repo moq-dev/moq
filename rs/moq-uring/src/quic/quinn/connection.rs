@@ -856,6 +856,11 @@ fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
 
 #[cfg(test)]
 mod tests {
+	// The parent's alias arrives through the glob below, which a build with both
+	// backend features on cannot tell apart from the quinn-proto crate itself.
+	#[cfg(feature = "noq")]
+	use noq_proto::Side;
+	#[cfg(not(feature = "noq"))]
 	use quinn_proto::Side;
 
 	use super::*;
