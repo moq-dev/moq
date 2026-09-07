@@ -1,17 +1,34 @@
 /**
- * Drives a headless Chromium (channel "chromium" for WebTransport + WebCodecs)
- * against the vite-built page (dist/). publish streams fake camera/microphone
- * input until killed; subscribe verifies rendered playback, pause/resume, and
- * optionally browser-to-browser audio.
+ * Drives a headless Chromium against the vite-built page (dist/) for the interop matrix. publish
+ * streams fake camera/microphone input until killed; subscribe verifies rendered playback,
+ * pause/resume, and optionally browser-to-browser audio.
+ *
+ * The publishers on the other side of the matrix are separate processes with no readiness signal,
+ * so this driver tolerates a slow announcement with one reload. `media.ts` is the strict path: it
+ * waits on an explicit publisher-ready state and never reloads.
  *
  *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang
  *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 [--expect-audio]
  *
  * @module
  */
-import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { chromium, type Page } from "playwright";
+import type { Page } from "playwright";
+import {
+	type BrowserErrors,
+	launch,
+	open,
+	type PlayerState,
+	POLL_INTERVAL_MS,
+	pageUrl,
+	readPlayerState,
+	SELECTORS,
+	serve,
+	sleep,
+	throwPageErrors,
+	waitForState,
+	waitForWatch,
+} from "./harness";
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -40,106 +57,7 @@ if (
 	process.exit(2);
 }
 
-type PlayerState = {
-	videoFrames: number;
-	videoTimestamp?: number;
-	painted: boolean;
-	audioBytes: number;
-	audioContext?: string;
-	hasAudio: boolean;
-	paused: boolean;
-	pausedAttribute: boolean;
-	controlLabel?: string;
-	centerPlayVisible: boolean;
-};
-
-type BrowserErrors = {
-	page: string[];
-	console: string[];
-};
-
-type WaitForStateProps = {
-	deadline: number;
-	description: string;
-	predicate: (state: PlayerState) => boolean;
-};
-
-// Keep the UI contract in one place so player markup changes fail clearly.
-const SELECTORS = {
-	watch: "moq-watch",
-	ui: "moq-watch-ui",
-	control: "button.control[aria-label]",
-	pauseControl: 'button.control[aria-label="Pause"]',
-	centerPlay: "button.center-play",
-} as const;
-const POLL_INTERVAL_MS = 100;
 const PAUSE_STABILITY_MS = 750;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitForWatch(page: Page): Promise<void> {
-	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
-	await page.locator(`${SELECTORS.watch}[data-smoke-ready]`).waitFor({ state: "attached" });
-}
-
-function throwPageErrors(errors: BrowserErrors): void {
-	const messages = [
-		...errors.page.map((error) => `page: ${error}`),
-		...errors.console.map((error) => `console: ${error}`),
-	];
-	if (messages.length > 0) throw new Error(messages.join("\n"));
-}
-
-async function readPlayerState(page: Page): Promise<PlayerState> {
-	return page.evaluate((selectors) => {
-		const watch = document.querySelector<HTMLElement>(selectors.watch);
-		const canvas = watch?.querySelector("canvas");
-		let painted = false;
-		if (canvas && canvas.width > 0 && canvas.height > 0) {
-			const pixels = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data;
-			if (pixels) {
-				// The smoke sources are test patterns. Sample at most about 1,000
-				// pixels and require actual color rather than the renderer's black fill.
-				const stride = Math.max(4, Math.floor(pixels.length / 4000) * 4);
-				for (let i = 0; i < pixels.length; i += stride) {
-					if (pixels[i] + pixels[i + 1] + pixels[i + 2] > 12) {
-						painted = true;
-						break;
-					}
-				}
-			}
-		}
-
-		const ui = document.querySelector(selectors.ui);
-		const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
-		const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
-
-		return {
-			videoFrames: Number(watch?.dataset.smokeVideoFrames ?? 0),
-			videoTimestamp: Number(watch?.dataset.smokeVideoTimestamp) || undefined,
-			painted,
-			audioBytes: Number(watch?.dataset.smokeAudioBytes ?? 0),
-			audioContext: watch?.dataset.smokeAudioContext || undefined,
-			hasAudio: watch?.dataset.smokeHasAudio === "true",
-			paused: watch?.dataset.smokePaused === "true",
-			pausedAttribute: watch?.hasAttribute("paused") ?? false,
-			controlLabel: control?.getAttribute("aria-label") ?? undefined,
-			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
-		};
-	}, SELECTORS);
-}
-
-async function waitForState(page: Page, errors: BrowserErrors, props: WaitForStateProps): Promise<PlayerState> {
-	let last = await readPlayerState(page);
-	while (Date.now() < props.deadline) {
-		throwPageErrors(errors);
-		if (props.predicate(last)) return last;
-		await sleep(POLL_INTERVAL_MS);
-		last = await readPlayerState(page);
-	}
-	throwPageErrors(errors);
-	throw new Error(`timed out waiting for ${props.description}: ${JSON.stringify(last)}`);
-}
 
 async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: number): Promise<PlayerState> {
 	let previous = await readPlayerState(page);
@@ -160,44 +78,16 @@ async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: n
 	throw new Error(`playback did not stop after pause: ${JSON.stringify(previous)}`);
 }
 
-// Serve the prebuilt page on localhost (a secure context, so WebTransport /
-// WebCodecs are enabled).
-const root = join(new URL(".", import.meta.url).pathname, "dist");
-const server = Bun.serve({
-	port: 0,
-	async fetch(req) {
-		let path = new URL(req.url).pathname;
-		if (path === "/") path = "/index.html";
-		const file = Bun.file(join(root, path));
-		if (await file.exists()) return new Response(file);
-		return new Response(Bun.file(join(root, "index.html"))); // SPA fallback
-	},
-});
-const pageUrl = `http://localhost:${server.port}/?role=${role}&url=${encodeURIComponent(url)}&broadcast=${encodeURIComponent(broadcast)}`;
-
-const browser = await chromium.launch({
-	channel: "chromium", // full Chromium (new headless); the headless shell lacks these APIs
-	headless: true,
-	args: [
-		"--use-fake-device-for-media-stream",
-		"--use-fake-ui-for-media-stream",
-		"--autoplay-policy=no-user-gesture-required",
-	],
-});
+const server = serve();
+const browser = await launch([
+	"--use-fake-device-for-media-stream",
+	"--use-fake-ui-for-media-stream",
+	"--autoplay-policy=no-user-gesture-required",
+]);
 
 let code = 1;
 try {
-	const page = await browser.newPage();
-	const errors: BrowserErrors = { page: [], console: [] };
-	page.on("console", (message) => {
-		console.error(`[page] ${message.text()}`);
-		if (message.type() === "error") errors.console.push(message.text());
-	});
-	page.on("pageerror", (error) => {
-		console.error(`[page error] ${error.message}`);
-		errors.page.push(error.message);
-	});
-	await page.goto(pageUrl, { waitUntil: "load" });
+	const [page, errors] = await open(browser, pageUrl(server.origin, role, { url, broadcast }));
 	if (role === "subscribe") await waitForWatch(page);
 
 	if (role === "publish") {
@@ -275,6 +165,6 @@ try {
 	}
 } finally {
 	await browser.close().catch(() => {});
-	server.stop(true);
+	server.stop();
 }
 process.exit(code);

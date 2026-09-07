@@ -3,5 +3,5 @@
 	"compilerOptions": {
 		"types": ["bun", "vite/client"]
 	},
-	"include": ["driver.ts", "src", "vite.config.ts", "../../../../js/common/worklet.d.ts"]
+	"include": ["driver.ts", "harness.ts", "media.ts", "src", "vite.config.ts", "../../../../js/common/worklet.d.ts"]
 }

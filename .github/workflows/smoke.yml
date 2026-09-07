@@ -88,6 +88,12 @@ jobs:
         run: nix develop --command just test smoke-negative
         shell: bash -leo pipefail {0}
 
+      # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
+      # the publication lifecycle, plus the negative controls that prove each assertion can fail.
+      - name: Media output and lifecycle
+        run: nix develop --command just test smoke-media
+        shell: bash -leo pipefail {0}
+
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance

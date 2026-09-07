@@ -17,6 +17,10 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 The browser publisher also sends fake microphone audio, which the browser
 subscriber checks end-to-end.
 
+`just test smoke-media` is a separate, browser-only run that asks a harder
+question: is the media a viewer gets actually advancing and in sync, and does the
+player survive the publication lifecycle. See [Media QA](#media-qa).
+
 ## Clients
 
 | Client | Source under test | Built with | Roles |
@@ -72,6 +76,9 @@ just test smoke --publishers rust,python --subscribers rust,c,js-native-bun
 
 # Negative control: no publisher, every subscriber must time out.
 just test smoke-negative
+
+# Browser-to-browser media output and lifecycle, plus its own negative controls.
+just test smoke-media
 ```
 
 Subscriber names: `rust`, `python`, `go`, `js` (browser), `js-native-node`,
@@ -80,15 +87,70 @@ Subscriber names: `rust`, `python`, `go`, `js` (browser), `js-native-node`,
 A client whose source build fails fails only its own matrix cells (see
 `mark_broken` in `smoke.sh`); it never aborts the rest of the run.
 
+## Media QA
+
+The matrix asks "did bytes arrive and did a pixel light up". That passes on a
+frozen picture, on silence, and on audio a second out of step, so
+`just test smoke-media` measures the media itself, browser to browser.
+
+The publisher is a fixture, not a fake camera: a canvas painting a frame counter
+as black/white blocks, and a tone stepping through a fixed frequency table. Both
+are indexed off one `AudioContext` clock, so the subscriber can read the frame it
+is presenting off the canvas, read the tone step off the player's own audio
+graph, and compare them. **Everything measured is browser output.** Nothing here
+observes a physical speaker or display; a run says the player emitted the right
+samples, not that a machine played them.
+
+Each run covers, against a real local relay:
+
+- **capabilities** - probes every platform API the player needs, and fails
+  naming what is missing rather than skipping a case.
+- **cold start** - the publisher reports when it is announced and encoding, then
+  a fresh page joins. No reload, unlike the matrix driver: a subscriber that
+  needs a second page load is an initialization bug, not a race.
+- **autoplay** - launched without `--autoplay-policy` or the fake-media flags, so
+  audio has to stay silent until a real click and start after it.
+- **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
+  **publisher stop and same-path republish**, and **late join**.
+- **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
+  `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
+  session is visible rather than merely invisible.
+
+Tolerances come from the fixture: video must present at half the fixture's 30fps
+or better and never go backwards, the tone must stand 15dB above the spectrum's
+median, and audio/video skew must stay within one 200ms tone step for 90% of
+samples. One step is the floor set by the analyser window straddling a step
+boundary and the canvas holding a frame up to one frame old.
+
+The run ends with negative controls. Each injects a defect in the fixture and
+names the assertion that has to catch it, and passes only by failing there:
+
+| Control | Must fail |
+|---|---|
+| tone muted at the source | `audio tone` |
+| picture frozen after the first frame | `video progress` |
+| tone table shifted 800ms ahead of the picture | `audio/video sync` |
+| the detached player's session never torn down | `resource baseline` |
+
+Not covered yet: other browser engines (the capability probe is the groundwork),
+camera/microphone permission denial, and any claim about physical playback.
+
 ## Layout
 
 ```text
-smoke.sh                  orchestrator: build clients, run the relay + matrix
+smoke.sh                  orchestrator: build clients, run the relay + matrix or media checks
 smoke.toml                relay config (anonymous, self-signed localhost)
 clients/
   python/smoke.py         publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
-  js/                      headless-Chromium publish/subscribe via @moq/watch + @moq/publish
+  js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
+    driver.ts             the interop matrix's browser publisher/subscriber
+    media.ts              the media output + lifecycle checks
+    harness.ts            shared Playwright plumbing
+    src/fixture.ts        the deterministic publisher (frame counter + stepped tone)
+    src/pattern.ts        how that fixture encodes itself into the picture and the audio
+    src/probe.ts          subscriber-side measurement, taken at the sinks
+    src/instrument.ts     live counts of the platform resources the page holds
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   c/subscribe.c           subscribe via rs/libmoq
 ```

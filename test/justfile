@@ -86,6 +86,15 @@ smoke-full:
 smoke-negative *args:
     ./smoke/smoke.sh --negative {{ args }}
 
+# Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
+# tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
+# republish, late join). Ends with negative controls that inject a frozen picture, silence, a
+# shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
+
+# headless Chromium cold-start headroom.
+smoke-media *args:
+    ./smoke/smoke.sh --media --timeout 30 {{ args }}
+
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
 # burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`

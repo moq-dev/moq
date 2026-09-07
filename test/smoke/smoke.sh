@@ -26,6 +26,7 @@ SIZE="${SMOKE_SIZE:-320x240}"
 PORT="${SMOKE_PORT:-4443}"
 URL="http://127.0.0.1:${PORT}"
 NEGATIVE=0
+MEDIA=0
 
 # Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what a smoke test wants; the workload (320x240@30) is trivial either way.
@@ -66,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             NEGATIVE=1
             shift
             ;;
+        --media)
+            MEDIA=1
+            shift
+            ;;
         *)
             echo "unknown arg: $1" >&2
             exit 2
@@ -83,6 +88,17 @@ done
     echo "error: port must be numeric (got '$PORT')" >&2
     exit 2
 }
+
+# The media checks drive both roles from the browser client and never touch the matrix, so they
+# pick their own axes rather than accepting --publishers / --subscribers.
+if [[ "$MEDIA" -eq 1 ]]; then
+    if [[ "$NEGATIVE" -eq 1 ]]; then
+        echo "error: --media and --negative are separate runs" >&2
+        exit 2
+    fi
+    PUBLISHERS="js"
+    SUBSCRIBERS="js"
+fi
 
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
@@ -576,7 +592,42 @@ run_round() {
     return 0
 }
 
-if [[ "$NEGATIVE" -eq 1 ]]; then
+# One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
+# assertion it names), so the exit code is the whole answer.
+run_media() {
+    local name="$1" log started status=0
+    shift
+    log="$TMP/media-${name// /-}.log"
+    started=$SECONDS
+    (cd "$CLIENTS/js" && bun media.ts --url "$URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
+    if [[ "$status" -eq 0 ]]; then
+        echo "  PASS  $name ($((SECONDS - started))s)"
+        # The measurements are the point even when nothing fails: a skew or frame rate creeping
+        # toward its bound is worth seeing before it crosses.
+        grep -E '^(  |=== )' "$log" || true
+    else
+        echo "  FAIL  $name ($((SECONDS - started))s)"
+        sed 's/^/        /' "$log" >&2 || true
+        overall=1
+    fi
+}
+
+if [[ "$MEDIA" -eq 1 ]]; then
+    # Media output and lifecycle, browser to browser, against the deterministic fixture. The
+    # negative controls below inject a defect and name the assertion that has to catch it; each
+    # passes only by failing there, which is what keeps the positive run from being vacuous.
+    if is_broken js; then
+        echo "  FAIL  media checks (browser client unavailable)"
+        overall=1
+    else
+        echo "=== media output and lifecycle ==="
+        run_media "media output + lifecycle"
+        run_media "control: frozen video" --fault frozen-video --cases none --expect-fail "video progress"
+        run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
+        run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
+        run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
+    fi
+elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
