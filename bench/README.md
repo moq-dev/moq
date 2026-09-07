@@ -52,3 +52,22 @@ work.
 
 Benchmark output is informational and machine-specific. Crashes, zero delivery,
 and invalid samples still fail the command.
+
+## Frame storage experiments
+
+Run from the repository root on the machine being measured:
+
+```sh
+cargo test --locked -p moq-net --example adaptive-frames
+cargo run --locked --release -p moq-net --example adaptive-frames > adaptive-frames.csv
+cargo run --locked --release -p moq-net --example frame-storage > frame-storage.csv
+```
+
+With Nix, prefix each command with `nix develop --command`.
+
+- [Adaptive prototype](adaptive-frames.md): first-frame-sized pages, capped growth, direct `BufMut` writes, and separate versus packed headers.
+- [Initial investigation](frame-storage.md): current-model measurements and isolated storage comparisons.
+
+The programs print CSV to stdout. Run each more than once on an otherwise idle machine, and record the commit, CPU, OS, and Rust version with the results. Keep release mode enabled. Timing includes the instrumentation wrapper with counting disabled; allocation counts are collected in separate untimed passes.
+
+Committed CSV files are historical local measurements, not expected test outputs. The initial measurements used `1e6c7ce0f` on `dev`; this PR targets `dev`. Rerunning the current-model comparison on this branch measures its own model revision, so do not label it an exact reproduction of the historical results. Neither experiment changes production storage or the wire format.
