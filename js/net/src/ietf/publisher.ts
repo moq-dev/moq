@@ -945,8 +945,14 @@ export class Publisher {
 			} catch {
 				// Stream might already be closed
 			}
+			request.stream.close();
+			return;
 		}
 		request.stream.close();
+		// Wait for transport acknowledgment before opening a replacement request.
+		// This assumes the peer processes the withdrawal by then; FIN acknowledgment
+		// does not itself acknowledge application processing across streams.
+		await request.stream.writer.closed;
 	}
 
 	/**

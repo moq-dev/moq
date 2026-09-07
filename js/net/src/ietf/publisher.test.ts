@@ -97,6 +97,71 @@ function publisher(transport: WebTransport, cluster?: Cluster.Hops): Publisher {
 	return new Publisher({ quic: transport, session, requiresSolicitation: false, cluster });
 }
 
+test.each(["acknowledged", "rejected"] as const)(
+	"a replacement waits until its predecessor's FIN is %s",
+	async (result) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const open = pair.server.createBidirectionalStream.bind(pair.server);
+		const closing = Promise.withResolvers<void>();
+		const acknowledged = Promise.withResolvers<void>();
+		let opened = 0;
+		pair.server.createBidirectionalStream = async (options) => {
+			const stream = await open(options);
+			if (++opened !== 1) return stream;
+			const writer = stream.writable.getWriter();
+			return {
+				readable: stream.readable,
+				writable: new WritableStream<Uint8Array>({
+					write: (chunk) => writer.write(chunk),
+					async close() {
+						await writer.close();
+						closing.resolve();
+						await acknowledged.promise;
+					},
+					abort: (reason) => writer.abort(reason),
+				}),
+			} as WebTransportBidirectionalStream;
+		};
+		const pub = publisher(pair.server);
+		const first = new BroadcastProducer();
+		const second = new BroadcastProducer();
+		const loop = pub.runPublishNamespaces();
+		try {
+			pub.publish(Path.from("replacement"), first);
+			const old = await nextStream(pair.client);
+			if (!old) throw new Error("missing initial advertisement");
+			expect(await readPublishNamespace(old)).toBe(Path.from("replacement"));
+			await acceptPublishNamespace(old);
+			first.close();
+			pub.publish(Path.from("replacement"), second);
+			await closing.promise;
+			const early = await nextStream(pair.client);
+			early?.abort(new Error("replacement arrived before acknowledgment"));
+			expect(early).toBeUndefined();
+			expect(opened).toBe(1);
+			if (result === "rejected") {
+				acknowledged.reject(new Error("FIN acknowledgment failed"));
+				await loop;
+				expect(opened).toBe(1);
+				return;
+			}
+			acknowledged.resolve();
+			const replacement = await nextStream(pair.client);
+			if (!replacement) throw new Error("missing replacement after acknowledgment");
+			expect(await readPublishNamespace(replacement)).toBe(Path.from("replacement"));
+			await acceptPublishNamespace(replacement);
+		} finally {
+			acknowledged.resolve();
+			first.close();
+			second.close();
+			pub.close();
+			await loop;
+			pair.client.close();
+			pair.server.close();
+		}
+	},
+);
+
 /**
  * Every advertisement waits a round trip for the peer's reply. A broadcast published in
  * that window has to survive it: the loop is not watching the signal while it waits, so
