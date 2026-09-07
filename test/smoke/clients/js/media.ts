@@ -152,13 +152,40 @@ async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, 
 	throw new Failure(assertion, `${description}: the presented frame is still advancing, now ${frame}`);
 }
 
+/** How many samples of the failing window to print, so a summary can be traced back to readings. */
+const TRACE_SAMPLES = 40;
+
+// One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
+// that frame belongs to, and how far the tone stood above the noise floor.
+function traceLine(sample: PlayerState, start: number): string {
+	const step = sample.frameId === undefined ? "?" : Pattern.expectedStep(sample.frameId);
+	const margin = sample.toneDb !== undefined && sample.noiseDb !== undefined ? sample.toneDb - sample.noiseDb : 0;
+	return (
+		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
+		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
+		`paused=${sample.paused}`
+	);
+}
+
 /**
  * Assert the window shows advancing, audible, synchronized media, and report what it measured.
  *
  * Every number here is read at a sink: the frame counter off the canvas the renderer paints, and
- * the tone off the graph root that feeds the speakers.
+ * the tone off the graph root that feeds the speakers. A failure prints the tail of the window it
+ * measured, so the summary can be traced back to the readings behind it.
  */
 function assertMedia(samples: PlayerState[], label: string): void {
+	try {
+		measure(samples, label);
+	} catch (err) {
+		const start = samples[0]?.at ?? 0;
+		console.error(`  ${label}: last ${Math.min(TRACE_SAMPLES, samples.length)} of ${samples.length} samples`);
+		for (const sample of samples.slice(-TRACE_SAMPLES)) console.error(traceLine(sample, start));
+		throw err;
+	}
+}
+
+function measure(samples: PlayerState[], label: string): void {
 	check(samples.length >= 10, "sampling", () => `${label}: only ${samples.length} samples in the window`);
 
 	const readable = samples.filter((s) => s.frameId !== undefined);
@@ -378,19 +405,28 @@ try {
 		// The chrome auto-hides while playing; pointer activity reveals the real control.
 		await player.dispatchEvent(SELECTORS.ui, "pointermove");
 		await player.locator(SELECTORS.ui).locator(SELECTORS.pauseControl).click();
-		const paused = await waitForState(player, playerErrors, {
+		await waitForState(player, playerErrors, {
 			deadline: Date.now() + SETTLE_MS,
 			assertion: "pause takes effect",
 			description: "the player to report itself paused",
 			predicate: (state) => state.paused && state.controlLabel === "Play",
 		});
 
+		// The frame the pause settled on, not the one showing when the flag flipped: a frame already
+		// scheduled for presentation still lands, and that is one frame, not playback continuing.
+		const paused = await waitFrozen(
+			player,
+			playerErrors,
+			"pause holds the picture",
+			"the presented frame never settled after pausing",
+		);
+
 		const held = await collect(player, playerErrors, 1500);
-		const moved = held.filter((s) => s.frameId !== undefined && s.frameId !== paused.frameId);
+		const moved = held.filter((s) => s.frameId !== undefined && s.frameId !== paused);
 		check(
 			moved.length === 0,
 			"pause holds the picture",
-			() => `presented frame moved from ${paused.frameId} to ${moved[moved.length - 1]?.frameId} while paused`,
+			() => `presented frame moved from ${paused} to ${moved[moved.length - 1]?.frameId} while paused`,
 		);
 		check(
 			held[held.length - 1]?.painted === true,
@@ -402,10 +438,10 @@ try {
 		const resumed = await waitForState(player, playerErrors, {
 			deadline: Date.now() + SETTLE_MS,
 			assertion: "resume takes effect",
-			description: "the presented frame to move past the paused one",
-			predicate: (state) => !state.paused && (state.frameId ?? 0) > (paused.frameId ?? 0),
+			description: `the presented frame to move past the ${paused} the pause held`,
+			predicate: (state) => !state.paused && (state.frameId ?? 0) > paused,
 		});
-		console.error(`  resumed ${(resumed.frameId ?? 0) - (paused.frameId ?? 0)} frames past the pause`);
+		console.error(`  resumed ${(resumed.frameId ?? 0) - paused} frames past the pause`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after resume");
 	}
 
