@@ -3305,6 +3305,7 @@ impl AnnounceConsumer {
 
 #[cfg(test)]
 mod tests {
+	use crate::Timescale;
 	use crate::coding::Decode;
 	use crate::group;
 
@@ -4180,6 +4181,68 @@ mod tests {
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
 		sub.assert_not_closed();
+	}
+
+	/// A track's immutable properties belong to whichever source is serving it.
+	/// The successor picks its own timescale, and a reader handed the
+	/// predecessor's would silently rescale every frame it is about to receive.
+	#[tokio::test]
+	async fn test_track_info_follows_the_serving_source() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		// Both routes share the first hop: interchangeable content.
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
+		let mut dynamic_a = source_a.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+		let mut dynamic_b = source_b.dynamic();
+		settle().await;
+		settle().await;
+
+		// Held for the whole test: the reader's handle is what keeps the logical
+		// track spliced across the failover instead of releasing it.
+		let track = broadcast.track("video").unwrap();
+
+		// A is dispatched the track and serves it on the default grid.
+		let querying = track.info();
+		let producer = accept_track(&mut dynamic_a, "video").await;
+		let info = tokio::time::timeout(std::time::Duration::from_secs(1), querying)
+			.await
+			.expect("timed out resolving the first source's info")
+			.unwrap();
+		assert_eq!(info.timescale, Timescale::default());
+
+		// A dies; B re-serves the same track on a microsecond grid.
+		producer.abort(Error::Dropped).unwrap();
+		source_a.abort(Error::Dropped).unwrap();
+		drop(dynamic_a);
+		settle().await;
+
+		let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic_b.requested_track())
+			.await
+			.expect("timed out waiting for a track request")
+			.expect("source closed");
+		let _producer = request.accept(track::Info::default().with_timescale(Timescale::MICRO));
+		settle().await;
+
+		let info = tokio::time::timeout(std::time::Duration::from_secs(1), track.info())
+			.await
+			.expect("timed out resolving the successor's info")
+			.unwrap();
+		assert_eq!(
+			info.timescale,
+			Timescale::MICRO,
+			"info must come from the source now serving the track"
+		);
 	}
 
 	/// Failover restores *every* subscribed track, not just one. A single-track

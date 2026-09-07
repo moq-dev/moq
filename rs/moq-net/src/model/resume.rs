@@ -457,26 +457,29 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for the track's [`track::Info`], resolved from the first segment.
+	/// Poll for the track's [`track::Info`], resolved from the newest segment.
+	///
+	/// The newest segment is the generation a reader is served: every future group
+	/// is written there and fetches route there. Resolving from an older one hands
+	/// a subscriber the predecessor's `timescale`, which silently rescales the
+	/// successor's frame timestamps rather than failing.
 	///
 	/// Stays pending until a segment exists and its track's info is known (the
 	/// serving session may not have accepted it yet).
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<track::Info>> {
-		// Wait for the first segment (or a terminal state), then poll its info.
-		let track = match ready!(self.state.poll(waiter, |state| {
-			if state.abort.is_some() || !state.segments.is_empty() {
-				Poll::Ready(
-					state
-						.abort
-						.clone()
-						.map_or_else(|| Ok(state.segments[0].track.clone()), Err),
-				)
-			} else {
-				Poll::Pending
-			}
-		})) {
+		// Wait for a segment (or a terminal state), then poll the newest one's info.
+		// The track is copied out of the guard: resolving it takes the underlying
+		// track's own lock.
+		let track = match ready!(
+			self.state
+				.poll(waiter, |state| match (&state.abort, state.segments.last()) {
+					(Some(err), _) => Poll::Ready(Err(err.clone())),
+					(None, Some(segment)) => Poll::Ready(Ok(segment.track.clone())),
+					(None, None) => Poll::Pending,
+				})
+		) {
 			Ok(res) => res?,
-			Err(state) => match (&state.abort, state.segments.first()) {
+			Err(state) => match (&state.abort, state.segments.last()) {
 				(Some(err), _) => return Poll::Ready(Err(err.clone())),
 				(None, Some(segment)) => segment.track.clone(),
 				// Closed without ever getting a segment: nothing will resolve this.
@@ -484,10 +487,19 @@ impl Consumer {
 			},
 		};
 
-		track.info().poll_ok(waiter)
+		if let Poll::Ready(info) = track.info().poll_ok(waiter) {
+			return Poll::Ready(info);
+		}
+
+		// The newest segment has not been accepted yet, so park on the segment list
+		// too: a takeover superseding it must re-resolve against the successor rather
+		// than answer with a generation nobody will read. Ready means the producer is
+		// gone and this segment is the last one, leaving only its info to wait on.
+		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
+		Poll::Pending
 	}
 
-	/// Return the track's [`track::Info`], resolved from the first segment.
+	/// Return the track's [`track::Info`], resolved from the newest segment.
 	#[cfg(test)]
 	pub async fn info(&self) -> Result<track::Info> {
 		kio::wait(|waiter| self.poll_info(waiter)).await
@@ -1250,7 +1262,11 @@ mod test {
 	use std::sync::Arc;
 
 	fn track_pair(name: &str) -> (track::Producer, track::Consumer) {
-		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, None);
+		track_pair_info(name, None)
+	}
+
+	fn track_pair_info(name: &str, info: impl Into<Option<track::Info>>) -> (track::Producer, track::Consumer) {
+		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, info.into());
 		let consumer = producer.consume();
 		(producer, consumer)
 	}
@@ -1472,8 +1488,14 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn info_from_first_segment() {
+	async fn info_from_newest_segment() {
 		let (_track_a, consumer_a) = track_pair("a");
+		let (_track_b, consumer_b) = track_pair_info(
+			"b",
+			track::Info::default()
+				.with_timescale(crate::Timescale::MICRO)
+				.with_priority(7),
+		);
 
 		let mut producer = Producer::new();
 		let consumer = producer.consume();
@@ -1484,6 +1506,36 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let info = consumer.info().now_or_never().unwrap().unwrap();
 		assert_eq!(info.timescale, crate::Timescale::default());
+
+		// A track republished on the path serves the successor's generation, so its
+		// info is the answer: the predecessor's timescale would silently rescale
+		// every frame timestamp the reader is about to receive.
+		producer.switch(&consumer_b, 1).unwrap();
+		let info = consumer.info().now_or_never().unwrap().unwrap();
+		assert_eq!(info.timescale, crate::Timescale::MICRO);
+		assert_eq!(info.priority, 7);
+	}
+
+	#[tokio::test]
+	async fn info_waits_for_a_takeover_superseding_an_unaccepted_segment() {
+		// An unaccepted request: it has a consumer, but no info yet.
+		let request = track::Request::new(Arc::new(broadcast::Info::default()), "a");
+		let consumer_a = request.consume();
+		let (_track_b, consumer_b) =
+			track_pair_info("b", track::Info::default().with_timescale(crate::Timescale::MICRO));
+
+		let mut producer = Producer::new();
+		let consumer = producer.consume();
+		producer.switch(&consumer_a, None).unwrap();
+
+		let info = consumer.info();
+		let mut info = std::pin::pin!(info);
+		assert!(futures::poll!(info.as_mut()).is_pending(), "info should wait");
+
+		// The takeover supersedes it, so the answer comes from the successor rather
+		// than staying parked on a generation nobody will read.
+		producer.switch(&consumer_b, 1).unwrap();
+		assert_eq!(info.await.unwrap().timescale, crate::Timescale::MICRO);
 	}
 
 	#[tokio::test]

@@ -1982,7 +1982,8 @@ impl Subscribing {
 				}))
 			}
 			SubscribingKind::Spliced(resume) => {
-				// Resolved from the first segment's track. The publisher's latency
+				// Resolved from the newest segment's track: the generation whose
+				// groups this subscription will carry. The publisher's latency
 				// window is applied to each per-session aggregate, not here.
 				let info = ready!(resume.poll_info(waiter))?;
 
