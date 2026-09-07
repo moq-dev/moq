@@ -47,6 +47,5 @@ the remaining nightly-only coverage in CONTRIBUTING.
 
 ## Related
 
-- [Go smoke client](/quest/m0/smoke-go-client.md) - fills a known missing matrix participant
 - [Merge evidence](/quest/m0/merge-verification-evidence.md) - checks freshness and completeness of selected results
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - supplies execution where hosted compile gates cannot

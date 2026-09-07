@@ -20,7 +20,9 @@ The published module ships prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm
 
 ## Local development
 
-`go/scripts/check.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, stages this module plus the wrapper into `dist/`, and runs `go build`/`go vet`/`go test`. It also runs `publish-wrapper.test.sh`, which drives the wrapper publisher against a scratch bare repo (no cargo, no network). Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
+`go/scripts/stage.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, and stages this module plus the wrapper into `dist/` with the wrapper wired to the local ffi by a `replace`. It prints the two staged module directories, so anything that needs to build Go against this checkout (`go/scripts/check.sh`, `test/smoke`) shares one staging path.
+
+`go/scripts/check.sh` stages that way and then runs `go build`/`go vet`/`go test`. It also runs `publish-wrapper.test.sh`, which drives the wrapper publisher against a scratch bare repo (no cargo, no network). Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
 
 The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --command just go check` needs no setup. Without Nix, install `uniffi-bindgen-go` once:
 

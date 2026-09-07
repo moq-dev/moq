@@ -73,12 +73,12 @@ all:
 smoke *args:
     ./smoke/smoke.sh {{ args }}
 
-# Full interop matrix: rust + python + browser publish; everyone subscribes
+# Full interop matrix: rust + python + go + browser publish; everyone subscribes
 # (incl. native node/bun JS, the C libmoq client, and the GStreamer moqsrc
 
 # plugin). --timeout 30 gives headless Chromium cold-start headroom.
 smoke-full:
-    ./smoke/smoke.sh --publishers rust,python,js --subscribers rust,python,js,js-native-node,js-native-bun,c,gst --timeout 30
+    ./smoke/smoke.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30
 
 # Negative control: no publisher, every subscriber must time out (proves the
 

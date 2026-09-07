@@ -104,6 +104,7 @@ RELAY_PID=""
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_SMOKE=""        # compiled C client binary (set in prepare)
+GO_SMOKE=""       # compiled Go client binary (set in prepare)
 GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
@@ -231,6 +232,45 @@ prepare_js() {
     fi
 }
 
+# Stage the Go modules from this checkout (go/scripts/stage.sh builds moq-ffi for
+# the host, regenerates the bindings, and wires the wrapper to them by replace),
+# then build the smoke client against that exact tree. The client is copied to a
+# scratch dir first so the committed go.mod keeps its placeholder require; every
+# dependency resolves to a local directory, so nothing hits the module proxy.
+prepare_go() {
+    have go || {
+        mark_broken go "go not found"
+        return
+    }
+    have uniffi-bindgen-go || {
+        mark_broken go "uniffi-bindgen-go not found (see go/ffi/README.md)"
+        return
+    }
+    echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
+    local staged ffi_pkg wrapper_pkg src="$TMP/go-client"
+    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$TMP/go-stage.log"); then
+        mark_broken go "go/scripts/stage.sh failed"
+        sed 's/^/        /' "$TMP/go-stage.log" >&2 || true
+        return
+    fi
+    ffi_pkg=$(printf '%s\n' "$staged" | sed -n 1p)
+    wrapper_pkg=$(printf '%s\n' "$staged" | sed -n 2p)
+    mkdir -p "$src"
+    cp "$CLIENTS/go/go.mod" "$CLIENTS/go/main.go" "$src/"
+    GO_SMOKE="$TMP/go-smoke"
+    if ! (
+        cd "$src"
+        export CGO_ENABLED=1 GOFLAGS=-mod=mod
+        go mod edit \
+            -replace="github.com/moq-dev/moq-go=$wrapper_pkg" \
+            -replace="github.com/moq-dev/moq-go-ffi=$ffi_pkg"
+        go build -o "$GO_SMOKE" .
+    ) >"$TMP/go-build.log" 2>&1; then
+        mark_broken go "go build failed"
+        sed 's/^/        /' "$TMP/go-build.log" >&2 || true
+    fi
+}
+
 # Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes moq.h to $TARGET_BASE/include and libmoq.a to the
 # profile dir.
@@ -318,6 +358,7 @@ echo "relay:   $RELAY"
 echo "moq-cli: $MOQ"
 
 needs python && prepare_python
+needs go && prepare_go
 needs_js && prepare_js
 needs c && prepare_c
 needs gst && prepare_gst
@@ -370,6 +411,9 @@ start_publisher() {
             (ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
                 publish --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
             ;;
+        go)
+            (ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+            ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
             # WebCodecs (lazily, once a subscriber creates demand).
@@ -410,6 +454,9 @@ run_subscriber() {
         python)
             "$PY" "$CLIENTS/python/smoke.py" \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            ;;
+        go)
+            "$GO_SMOKE" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
             "$C_SMOKE" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"

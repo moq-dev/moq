@@ -2,7 +2,7 @@ name: Smoke
 
 # Cross-language interop smoke test built from THIS checkout (not the published
 # packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
-# publish x subscribe matrix across rust / python / browser / native-js / c,
+# publish x subscribe matrix across rust / python / go / browser / native-js / c,
 # then the TS/IRD compliance harness over the exporter's output.
 on:
   # Manual on-demand runs.
@@ -21,6 +21,8 @@ on:
       # workspace membership that links the JS clients to source.
       - "test/justfile"
       - "package.json"
+      # The Go client builds against the modules this script stages.
+      - "go/scripts/**"
       - ".github/workflows/smoke.yml"
 
 concurrency:

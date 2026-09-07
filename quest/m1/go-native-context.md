@@ -30,6 +30,3 @@ should start this until that call is made.
 
 - The `context.Context` support in `kixelated/uniffi-bindgen-go` is published and pinned in `flake.nix`
 
-## Related
-
-- [Go smoke client](/quest/m0/smoke-go-client.md) - what would actually verify a change to the Go bindings
