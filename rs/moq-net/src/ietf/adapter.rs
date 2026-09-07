@@ -506,18 +506,30 @@ struct Namespaces {
 
 #[derive(Default)]
 struct NamespacesState {
-	outgoing: HashMap<PathOwned, VecDeque<RequestId>>,
-	incoming: HashMap<PathOwned, VecDeque<RequestId>>,
+	outgoing: HashMap<PathOwned, NamespaceRequests>,
+	incoming: HashMap<PathOwned, NamespaceRequests>,
 
 	/// request_id → the namespace that request advertised, one entry per request
 	/// including queued duplicates, so [`Namespaces::forget`] removes only that
 	/// request from its namespace. The two directions share this map because
 	/// moq-transport gives each peer its own request id space.
-	by_request: HashMap<RequestId, (Direction, PathOwned)>,
+	by_request: HashMap<RequestId, NamespaceRegistration>,
+}
+
+struct NamespaceRequests {
+	first: RequestId,
+	last: RequestId,
+}
+
+struct NamespaceRegistration {
+	direction: Direction,
+	namespace: PathOwned,
+	previous: Option<RequestId>,
+	next: Option<RequestId>,
 }
 
 impl NamespacesState {
-	fn map(&mut self, direction: Direction) -> &mut HashMap<PathOwned, VecDeque<RequestId>> {
+	fn map(&mut self, direction: Direction) -> &mut HashMap<PathOwned, NamespaceRequests> {
 		match direction {
 			Direction::Outgoing => &mut self.outgoing,
 			Direction::Incoming => &mut self.incoming,
@@ -534,8 +546,33 @@ impl Namespaces {
 	/// first stayed open, advertised for the life of the session.
 	fn register(&self, direction: Direction, namespace: PathOwned, request_id: RequestId) {
 		let mut state = self.state.lock().unwrap();
-		state.by_request.insert(request_id, (direction, namespace.clone()));
-		state.map(direction).entry(namespace).or_default().push_back(request_id);
+		if state.by_request.contains_key(&request_id) {
+			return;
+		}
+		let previous = match state.map(direction).entry(namespace.clone()) {
+			std::collections::hash_map::Entry::Occupied(mut entry) => {
+				Some(std::mem::replace(&mut entry.get_mut().last, request_id))
+			}
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				entry.insert(NamespaceRequests {
+					first: request_id,
+					last: request_id,
+				});
+				None
+			}
+		};
+		if let Some(previous) = previous {
+			state.by_request.get_mut(&previous).unwrap().next = Some(request_id);
+		}
+		state.by_request.insert(
+			request_id,
+			NamespaceRegistration {
+				direction,
+				namespace,
+				previous,
+				next: None,
+			},
+		);
 	}
 
 	fn get(&self, direction: Direction, namespace: &PathOwned) -> Option<RequestId> {
@@ -544,23 +581,33 @@ impl Namespaces {
 			.unwrap()
 			.map(direction)
 			.get(namespace)
-			.and_then(|requests| requests.front().copied())
+			.map(|requests| requests.first)
 	}
 
 	/// Release whatever a finished request holds, so its namespace can be advertised again.
 	fn forget(&self, request_id: RequestId) {
 		let mut state = self.state.lock().unwrap();
-		let Some((direction, namespace)) = state.by_request.remove(&request_id) else {
+		let Some(registration) = state.by_request.remove(&request_id) else {
 			return;
 		};
 
-		// Dispatch can accept a queued duplicate after the owner ends, so keep the
-		// oldest surviving registration reachable by namespace-keyed withdrawals.
-		let map = state.map(direction);
-		if let Some(requests) = map.get_mut(&namespace) {
-			requests.retain(|id| *id != request_id);
-			if requests.is_empty() {
-				map.remove(&namespace);
+		// Link around the removed request without scanning a burst of duplicates.
+		if let Some(previous) = registration.previous {
+			state.by_request.get_mut(&previous).unwrap().next = registration.next;
+		}
+		if let Some(next) = registration.next {
+			state.by_request.get_mut(&next).unwrap().previous = registration.previous;
+		}
+		let map = state.map(registration.direction);
+		if registration.previous.is_none() && registration.next.is_none() {
+			map.remove(&registration.namespace);
+		} else {
+			let requests = map.get_mut(&registration.namespace).unwrap();
+			if requests.first == request_id {
+				requests.first = registration.next.unwrap();
+			}
+			if requests.last == request_id {
+				requests.last = registration.previous.unwrap();
 			}
 		}
 	}
@@ -1564,6 +1611,37 @@ mod tests {
 			));
 			drop(third);
 			assert!(matches!(done(&shared, "cluster/ns", version), Route::Ignore));
+		}
+	}
+
+	#[test]
+	fn namespace_removal_preserves_links_in_every_order() {
+		for direction in [Direction::Incoming, Direction::Outgoing] {
+			for first in 0..4 {
+				for second in 0..4 {
+					for third in 0..4 {
+						if first == second || first == third || second == third {
+							continue;
+						}
+						let fourth = (0..4).find(|id| *id != first && *id != second && *id != third).unwrap();
+						let namespaces = Namespaces::default();
+						let name = crate::Path::new("ns");
+						for id in 0..4 {
+							namespaces.register(direction, name.clone(), RequestId(id));
+						}
+						let mut live = [true; 4];
+						for id in [first, second, third, fourth] {
+							namespaces.forget(RequestId(id));
+							live[id as usize] = false;
+							let expected = live.iter().position(|live| *live).map(|id| RequestId(id as u64));
+							assert_eq!(namespaces.get(direction, &name), expected);
+						}
+						let state = namespaces.state.lock().unwrap();
+						assert!(state.by_request.is_empty());
+						assert!(state.incoming.is_empty() && state.outgoing.is_empty());
+					}
+				}
+			}
 		}
 	}
 
