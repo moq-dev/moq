@@ -650,9 +650,10 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 			err,
 			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime {
 				track: 2,
-				decode_time: 4096,
-				previous: 4096,
-			})
+				decode_time,
+				previous,
+			}) if decode_time == moq_net::Timestamp::from_scale(4096, 44100).unwrap()
+				&& previous == decode_time
 		),
 		"expected a non-monotonic decode time, got {err:?}"
 	);
@@ -689,7 +690,8 @@ fn rejected_fragment_preserves_decode_time() {
 	assert!(matches!(
 		fmp4.decode(&audio_fragment(3500, 1024, 327)),
 		Err(crate::Error::Cmaf(
-			crate::container::fmp4::Error::NonMonotonicDecodeTime { previous: 4096, .. }
-		))
+			crate::container::fmp4::Error::NonMonotonicDecodeTime { decode_time, previous, .. }
+		)) if previous == moq_net::Timestamp::from_scale(4096, 44100).unwrap()
+			&& decode_time == moq_net::Timestamp::from_scale(3500, 44100).unwrap()
 	));
 }

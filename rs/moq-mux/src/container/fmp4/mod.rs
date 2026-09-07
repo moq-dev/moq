@@ -182,13 +182,16 @@ pub enum Error {
 	/// the same timestamp. ffmpeg writes one when `frag_every_frame` interleaves audio and
 	/// video; `-frag_duration` cuts just as finely and stamps the fragments correctly.
 	#[error(
-		"track {track}: fragment decode time {decode_time} does not advance past {previous}; \
+		"track {track}: fragment decode time {decode_time:?} does not advance past {previous:?}; \
 		 ffmpeg repeats a tfdt when frag_every_frame interleaves audio and video, use -frag_duration instead"
 	)]
 	NonMonotonicDecodeTime {
+		/// The track containing the rejected fragment.
 		track: u32,
-		decode_time: u64,
-		previous: u64,
+		/// The rejected fragment's decode time in the track's timescale.
+		decode_time: moq_net::Timestamp,
+		/// The preceding fragment's decode time in the track's timescale.
+		previous: moq_net::Timestamp,
 	},
 }
 

@@ -560,6 +560,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
 			// Every fragment restates its decode time, so a stale one puts two different samples
 			// on the same timestamp, which reads downstream as an undeclared hole.
@@ -568,15 +569,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			{
 				return Err(Error::NonMonotonicDecodeTime {
 					track: track_id,
-					decode_time: dts,
-					previous,
+					decode_time: Timestamp::new(dts, timescale)?,
+					previous: Timestamp::new(previous, timescale)?,
 				}
 				.into());
 			}
 
 			track.last_decode_time = Some(dts);
-
-			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
