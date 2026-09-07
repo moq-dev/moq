@@ -112,6 +112,14 @@ duration = "30s"                     # Cap how long a non-latest group is kept, 
 Unset, the cache is bounded only by each track's own retention window. The
 latest group of every track is always kept.
 
+`headroom` starts a background task that re-samples system memory every few
+seconds and resizes the pool. Embedders calling `CacheConfig::init` directly
+should know that the task is owned by the `cache::Pool` it resizes, not by the
+`Cache` struct or the `Relay`: it stops on its next tick once the last `Pool`
+clone drops. Handing the `Cache` to `Cluster::with_cache` therefore moves the
+task's lifetime onto the cluster, and keeping a `Pool` clone of your own keeps
+the task running for as long as you hold it.
+
 ## \[stats]
 
 ```toml

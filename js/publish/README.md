@@ -7,7 +7,7 @@
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Publish media to [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/net](../lite).
+Publish media to [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/net](../net).
 
 ## Installation
 
@@ -54,10 +54,7 @@ The simplest way to publish a stream:
     import "@moq/publish/element";
 </script>
 
-<moq-publish
-    url="https://relay.example.com/anon"
-    path="room/alice.hang"
-    audio video controls>
+<moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
     <video muted autoplay></video>
 </moq-publish>
 ```
@@ -72,29 +69,52 @@ The simplest way to publish a stream:
 | `muted`     | boolean | false    | Mute audio capture              |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
-| `announce`  | string  | `"source"` | When to publish: `"always"`, `"never"`, `"source"` (once a source is selected) |
+| `announce`  | string  | `"source"` | When to publish: `"always"`, `"never"`, `"source"` (once media is actually captured) |
+
+A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 
 ## JavaScript API
 
-For more control:
+For more control, `Broadcast` owns the network broadcast and the catalog. Renditions are
+registered by the encoders themselves, one per track name, so simulcast is just
+more encoders:
 
 ```typescript
 import * as Publish from "@moq/publish";
 
-const publish = new Publish.Broadcast(connection, {
+const connection = new Publish.Net.Connection.Reload({
+    url: new URL("https://relay.example.com/anon"),
     enabled: true,
-    name: "alice.hang",
-    video: { enabled: true },
-    audio: { enabled: true },
 });
 
-// Change source at runtime
-publish.source.camera.enabled.set(true);
+const broadcast = new Publish.Broadcast({
+    connection: connection.established,
+    enabled: true,
+    name: Publish.Net.Path.from("room/alice.hang"),
+});
+
+// Capture, then encode. Each encoder registers its rendition on the broadcast
+// and encodes only while someone is subscribed.
+const camera = new Publish.Source.Camera({ enabled: true });
+const capture = new Publish.Video.Capture({ source: camera.out.source });
+
+const hd = new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
+const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
+
+// Tune an encoder at any time; undefined fields are auto-sized.
+hd.config.set({ codec: "vp09.00.10.08", maxBitrate: 4_000_000 });
+
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const audio = new Publish.Audio.Encoder("audio", { broadcast, source: microphone.out.source, enabled: true });
+audio.volume.set(0.8);
 ```
+
+Serve application tracks alongside the media with `broadcast.net`, the
+underlying producer, and advertise them with `broadcast.catalog.mutate(...)`.
 
 ## UI Web Component
 
-`@moq/publish` includes a Web Component UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It is built on top of `@moq/signals` with no framework dependency.
+`@moq/publish` includes a Web Component UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone), audio/video toggles, a status badge, fullscreen, and a stats panel. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">
@@ -103,7 +123,7 @@ publish.source.camera.enabled.set(true);
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" path="room/alice.hang" audio video>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -113,13 +133,13 @@ The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>
 
 ## Features
 
-- **Camera & microphone** — Capture from user devices
-- **Screen sharing** — Capture display or window
-- **File playback** — Publish from a media file
-- **WebCodecs encoding** — Hardware-accelerated video and audio encoding
-- **Reactive state** — All properties are signals from `@moq/signals`
-- **Chat** — Publish text chat messages
-- **Location** — Publish peer position and window tracking
+- **Camera & microphone**: Capture from user devices
+- **Screen sharing**: Capture display or window
+- **File playback**: Publish from a media file
+- **WebCodecs encoding**: Hardware-accelerated video and audio encoding
+- **Reactive state**: All properties are signals from `@moq/signals`
+- **Simulcast**: Any number of renditions, each its own encoder and track
+- **Custom tracks**: Application tracks and catalog sections ride alongside the media
 
 ## License
 

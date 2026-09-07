@@ -23,7 +23,7 @@
 		"@tailwindcss/vite": "^4.3.2",
 		"esbuild": "^0.28.2",
 		"highlight.js": "^11.12.0",
-		"open": "^11.0.1",
+		"open": "^11.0.2",
 		"solid-element": "^1.9.2",
 		"solid-js": "^1.9.15",
 		"tailwindcss": "^4.1.13",

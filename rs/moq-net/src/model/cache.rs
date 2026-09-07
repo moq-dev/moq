@@ -136,6 +136,13 @@ impl Pool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}
 
+	/// A handle that reaches this budget without keeping it alive.
+	pub fn downgrade(&self) -> PoolWeak {
+		PoolWeak {
+			inner: Arc::downgrade(&self.inner),
+		}
+	}
+
 	/// Charge `n` more cached bytes.
 	pub(crate) fn add(&self, n: u64) {
 		self.inner.used.fetch_add(n, Ordering::Relaxed);
@@ -211,6 +218,32 @@ impl std::fmt::Debug for Pool {
 			.field("used", &self.used())
 			.field("capacity", &self.capacity())
 			.finish()
+	}
+}
+
+/// A handle to a [`Pool`] that does not keep the budget alive.
+///
+/// [`upgrade`](Self::upgrade) stops returning a [`Pool`] once every strong handle has
+/// dropped, which is how a background resizer learns the budget it manages is gone and
+/// nothing can cache into it any more.
+#[derive(Clone)]
+pub struct PoolWeak {
+	inner: std::sync::Weak<Inner>,
+}
+
+impl PoolWeak {
+	/// Recover a [`Pool`], or `None` once every strong handle has dropped.
+	pub fn upgrade(&self) -> Option<Pool> {
+		self.inner.upgrade().map(|inner| Pool { inner })
+	}
+}
+
+impl std::fmt::Debug for PoolWeak {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.upgrade() {
+			Some(pool) => pool.fmt(f),
+			None => f.debug_struct("PoolWeak").finish_non_exhaustive(),
+		}
 	}
 }
 
@@ -439,6 +472,21 @@ mod test {
 		assert_eq!(pool.used(), (1 << 40) + ENTRY_OVERHEAD);
 		drop(charge);
 		assert_eq!(pool.used(), 0);
+	}
+
+	#[test]
+	fn weak_follows_the_last_strong_handle() {
+		let pool = Pool::new(1000);
+		let clone = pool.clone();
+		let weak = pool.downgrade();
+
+		drop(pool);
+		let upgraded = weak.upgrade().expect("a strong handle remains");
+		assert!(upgraded.same_pool(&clone));
+
+		drop(upgraded);
+		drop(clone);
+		assert!(weak.upgrade().is_none());
 	}
 
 	#[test]

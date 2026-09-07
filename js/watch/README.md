@@ -7,7 +7,7 @@
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Subscribe to and render [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/net](../lite).
+Subscribe to and render [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/net](../net).
 
 ## Installation
 
@@ -54,25 +54,26 @@ The simplest way to watch a stream:
     import "@moq/watch/element";
 </script>
 
-<moq-watch
-    url="https://relay.example.com/anon"
-    name="room/alice.hang"
-    controls>
+<moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
     <canvas></canvas>
 </moq-watch>
 ```
 
 ### Attributes
 
-| Attribute | Type                                | Default  | Description                              |
-|-----------|-------------------------------------|----------|------------------------------------------|
-| `url`     | string                              | required | Relay server URL                         |
-| `name`    | string                              | required | Broadcast name/path                      |
-| `paused`  | boolean                             | false    | Pause playback                           |
-| `muted`   | boolean                             | false    | Mute audio                               |
-| `visible` | never, distance, or always          | `20%`    | When to download video (see below)       |
-| `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
-| `reload`  | boolean                             | true     | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
+| Attribute        | Type                       | Default       | Description                              |
+|------------------|----------------------------|---------------|------------------------------------------|
+| `url`            | string                     | required      | Relay server URL                         |
+| `name`           | string                     | required      | Broadcast name/path                      |
+| `paused`         | boolean                    | false         | Pause playback                           |
+| `muted`          | boolean                    | false         | Mute audio                               |
+| `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
+| `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
+| `reload`         | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
+| `latency`        | `real-time`, ms, `instant` | `real-time`   | Target latency. `instant` paints frames as they decode and disables audio. |
+| `latency-min`    | `real-time` or ms          | `real-time`   | The latency floor, opening a range instead of a single target. |
+| `latency-max`    | `real-time` or ms          | `real-time`   | The latency ceiling: buffer freely below it, skip ahead past it. |
+| `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
 position relative to the viewport:
@@ -87,25 +88,35 @@ Only the distance mode suspends video while the tab is hidden; `always` keeps do
 
 ## JavaScript API
 
-For more control:
+For more control, `Broadcast` fetches the catalog and follows the broadcast across reconnects.
+The rest of the pipeline is assembled around it: a `Source` picks a rendition,
+a `Decoder` decodes it, `Sync` paces both media clocks, and a `Renderer` /
+`Emitter` paints to a canvas and plays through WebAudio.
 
 ```typescript
 import * as Watch from "@moq/watch";
 
-const watch = new Watch.Broadcast(connection, {
+const connection = new Watch.Net.Connection.Reload({
+    url: new URL("https://relay.example.com/anon"),
     enabled: true,
-    name: "alice.hang",
-    video: { enabled: true },
-    audio: { enabled: true },
 });
 
-// Access the video stream
-watch.video.media.subscribe((stream) => {
-    if (stream) {
-        videoElement.srcObject = stream;
-    }
+const broadcast = new Watch.Broadcast({
+    connection: connection.established,
+    enabled: true,
+    name: Watch.Net.Path.from("room/alice.hang"),
 });
+
+const source = new Watch.Video.Source({ broadcast, supported: Watch.Video.Decoder.supported });
+const sync = new Watch.Sync({ connection: connection.established, video: source.out.jitter });
+const decoder = new Watch.Video.Decoder(source, sync, { enabled: true });
+
+// Video renders to a <canvas>; there is no MediaStream to assign.
+const renderer = new Watch.Video.Renderer(decoder, { canvas });
 ```
+
+Audio is the same shape: `Audio.Source` into `Audio.Decoder` into
+`Audio.Emitter`, sharing the one `Sync`.
 
 ## UI Web Component
 
@@ -128,11 +139,11 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` el
 
 ## Features
 
-- **WebCodecs decoding** — Hardware-accelerated video and audio decoding
-- **Reactive state** — All properties are signals from `@moq/signals`
-- **Chat** — Subscribe to text chat channels
-- **Location** — Peer location and window tracking
-- **Quality selection** — Switch between available renditions
+- **WebCodecs decoding**: Hardware-accelerated video and audio decoding
+- **Reactive state**: All properties are signals from `@moq/signals`
+- **Latency control**: A single target, or a range that buffers future-dated frames
+- **Quality selection**: Switch between available renditions
+- **Custom tracks**: Unknown catalog sections pass through, and `broadcast.out.active` subscribes your own tracks
 
 ## License
 

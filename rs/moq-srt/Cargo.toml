@@ -26,3 +26,7 @@ srt-tokio = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# Builds the synthetic broadcasts the egress tests mux back to TS.
+hang = { workspace = true }

@@ -29,8 +29,3 @@ the prerequisite that the origin must still be pristine.
 - Verify that configured cache settings reach the same origin used by serving,
   node discovery, and stats. Cover the API shape at compile time where possible
   and exercise publish/consume through a retained origin handle.
-
-## Related
-
-- [Cache governor lifetime](/quest/m0/cache-governor-lifetime.md) - the
-  headroom task needs an owner that survives moving or cloning the cluster

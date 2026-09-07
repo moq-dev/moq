@@ -23,6 +23,8 @@ moq --client-connect https://relay.example.com/anon --broadcast event.hang impor
 ```
 
 `--latency` sets the SRT receive buffer and doubles as the skip threshold on
-export. A `--connect` URL needs a `streamid` query or a path; a listener
+export. Export paces each SRT payload on the media clock, and re-anchors that
+pacing when the publisher rewinds, so a restarted timeline plays out from the
+live edge instead of stalling until it catches up. A `--connect` URL needs a `streamid` query or a path; a listener
 bridges one `--broadcast` and ignores the stream id it is offered. The
 library is [`moq-srt`](https://docs.rs/moq-srt).

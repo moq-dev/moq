@@ -46,10 +46,36 @@ drop the element and register your own encoders on a `Publish.Broadcast`.
 
 ## Custom tracks
 
-`broadcast.publishTrack(name, serve)` serves any application track per
-subscriber, and `broadcast.catalog.mutate(c => { c.yourSection = ... })`
-advertises it without touching the media sections. Encode JSON with
-`@moq/json`.
+`broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
+can serve its own tracks alongside the media. It is recreated on each
+(re)connection, so acquire it from an effect and reseed the track each time:
+
+```ts
+import * as Json from "@moq/json";
+
+signals.run((effect) => {
+    const net = effect.get(broadcast.net);
+    if (!net) return;
+
+    // A day-long retention so a late viewer still replays the last value.
+    const track = net.createTrack("meta.json", { latencyMax: 86_400_000 });
+    effect.cleanup(() => track.close());
+
+    const meta = new Json.Snapshot.Producer<Meta>({ track });
+    meta.update(current);
+});
+```
+
+`broadcast.catalog.mutate(c => { c.yourSection = ... })` advertises it without
+touching the media sections, which are folded in from the registered
+renditions. The catalog schema is loose, so an unknown root section passes
+through untouched; cast to name your own:
+
+```ts
+broadcast.catalog.mutate((catalog) => {
+    (catalog as Catalog.Root & { metadata?: string[] }).metadata = ["meta.json"];
+});
+```
 
 ## Without the element
 
@@ -57,12 +83,20 @@ advertises it without touching the media sections. Encode JSON with
 import * as Publish from "@moq/publish";
 
 const broadcast = new Publish.Broadcast({
-    connection,
+    connection,                                   // a Net.Connection.Established signal
     enabled: true,
-    name: "alice.hang",
-    video: { hd: { enabled: true }, sd: { enabled: true } },   // two renditions
-    audio: { enabled: true },
+    name: Publish.Net.Path.from("alice.hang"),
 });
+
+const camera = new Publish.Source.Camera({ enabled: true });
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const capture = new Publish.Video.Capture({ source: camera.out.source });
+
+// Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
+// encodes only while someone is subscribed.
+new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
+new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
+new Publish.Audio.Encoder("audio", { broadcast, source: microphone.out.source, enabled: true });
 ```
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).

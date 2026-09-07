@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
+use moq_mux::container::Frame;
 use moq_net::origin;
 use srt_tokio::access::{
 	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
@@ -76,6 +77,64 @@ impl SrtChunker {
 		let send_at = self.send_at.take()?;
 		debug_assert!(!self.buffer.is_empty());
 		Some((send_at, self.buffer.split().freeze()))
+	}
+}
+
+/// Turns the muxer's frames into SRT payloads stamped with the instant each
+/// should be transmitted at.
+///
+/// MPEG-TS is a continuous byte stream, so bytes that share a pacing instant are
+/// coalesced and sliced on a fixed boundary. A partial payload is flushed before
+/// the instant changes: one SRT message has only one TSBPD timestamp, so mixing
+/// frames would re-stamp the earlier bytes with the frame that completed the chunk.
+///
+/// Each payload is paced on the media clock: the [`Instant`] handed to `send` is
+/// the payload's origin time feeding the receiver's TSBPD, which reconstructs the
+/// inter-frame spacing from it. We don't know the live playhead when a subscriber
+/// attaches, so the pacer anchors it for us -- the newest frame is "now" and
+/// earlier frames map to proportionally earlier instants, re-anchoring whenever
+/// the media outruns wall-clock (a tune-in burst, a catch-up, or producer drift).
+/// The default zero lead is deliberate: the receiver owns the jitter buffer (the
+/// SRT latency parameter), so the sender adds no lookahead of its own.
+#[derive(Default)]
+struct Egress {
+	pacer: moq_mux::Pacer,
+	/// The first payload's send instant, the floor every later one is clamped up to
+	/// (see [`clamp_to_floor`]).
+	floor: Option<Instant>,
+	chunker: SrtChunker,
+	/// The muxer generation the pacer's anchor belongs to.
+	discontinuity: u64,
+}
+
+impl Egress {
+	/// Pace one muxer frame, returning the SRT payloads it completed.
+	///
+	/// `discontinuity` is the muxer's counter for `frame`. A change means the
+	/// publisher rewound and the muxer restarted its program clock, so the anchor
+	/// this pacer holds now belongs to a timeline that no longer exists: mapping the
+	/// new generation through it puts every frame of the rewound span before the
+	/// first packet, where the floor collapses all of them onto one instant and the
+	/// receiver sees the program stop until the media climbs back. Make the frame
+	/// the live edge instead, and pace the rest of the generation off it.
+	fn push(&mut self, frame: &Frame, discontinuity: u64, now: Instant) -> Vec<(Instant, bytes::Bytes)> {
+		if discontinuity == self.discontinuity {
+			let send_at = clamp_to_floor(self.pacer.pace(frame.timestamp, now), &mut self.floor);
+			return self.chunker.push(send_at, &frame.payload);
+		}
+
+		self.discontinuity = discontinuity;
+		// The old generation's tail keeps the instant it was paced at: it is media that
+		// already happened, and the new generation's stamp would claim otherwise.
+		let mut chunks = Vec::from_iter(self.chunker.flush());
+		let send_at = clamp_to_floor(self.pacer.hurry(frame.timestamp, now), &mut self.floor);
+		chunks.extend(self.chunker.push(send_at, &frame.payload));
+		chunks
+	}
+
+	/// Flush the final partial payload, if any.
+	fn flush(&mut self) -> Option<(Instant, bytes::Bytes)> {
+		self.chunker.flush()
 	}
 }
 
@@ -382,36 +441,17 @@ pub(crate) async fn serve_subscribe(
 		return Ok(());
 	};
 
-	// MPEG-TS is a continuous byte stream, so coalesce bytes that share a pacing
-	// instant and slice them on a fixed boundary. Flush a partial payload before the
-	// instant changes: one SRT message has only one TSBPD timestamp, so mixing frames
-	// here would re-stamp the earlier bytes with the frame that completed the chunk.
-	//
-	// Pace each payload on the media clock: the Instant handed to `send` is the
-	// payload's origin time feeding the receiver's TSBPD, which reconstructs the
-	// inter-frame spacing from it. We don't know the live playhead when a subscriber
-	// attaches, so the pacer anchors it for us -- the newest frame is "now" and
-	// earlier frames map to proportionally earlier instants, re-anchoring whenever
-	// the media outruns wall-clock (a tune-in burst, a catch-up, or producer
-	// drift). The default zero lead is deliberate: the receiver owns the jitter
-	// buffer (the SRT latency parameter), so the sender adds no lookahead of its
-	// own.
-	let mut pacer = moq_mux::Pacer::default();
-	// The first payload's send instant, the floor every later one is clamped up to
-	// (see `clamp_to_floor`).
-	let mut floor = None;
-	let mut chunker = SrtChunker::default();
+	let mut egress = Egress::default();
 	while let Some(frame) = subscriber.next().await? {
-		// Preserve the media-clock pacing for future frames, but never transmit a
-		// timestamp below the first packet's (see `floor` above).
-		let send_at = clamp_to_floor(pacer.pace(frame.timestamp, Instant::now()), &mut floor);
-
-		for chunk in chunker.push(send_at, &frame.payload) {
+		// Sample the muxer's generation alongside the frame it describes, so a
+		// publisher rewind re-anchors the pacing rather than mapping the new timeline
+		// through the old anchor.
+		for chunk in egress.push(&frame, subscriber.discontinuity(), Instant::now()) {
 			socket.send(chunk).await?;
 		}
 	}
 
-	if let Some(chunk) = chunker.flush() {
+	if let Some(chunk) = egress.flush() {
 		socket.send(chunk).await?;
 	}
 	socket.close().await?;
@@ -562,6 +602,16 @@ mod tests {
 		}
 	}
 
+	/// One muxer frame of `payload` bytes at `micros` of media time.
+	fn frame(micros: u64, payload: &[u8]) -> Frame {
+		Frame {
+			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			duration: None,
+			payload: Bytes::copy_from_slice(payload),
+			keyframe: false,
+		}
+	}
+
 	/// Regression: a reordered frame paced before the first packet must be clamped up
 	/// to it, not transmitted with an earlier SRT timestamp. Reproduces the tune-in
 	/// sequence a looping TS source triggers intermittently: a fast first delivery
@@ -594,6 +644,245 @@ mod tests {
 			"the reorder paces before the first packet without the clamp (the bug)"
 		);
 		assert_eq!(clamped, first, "the clamp holds it at the first packet's instant");
+	}
+
+	/// A reordered (B-frame) timestamp arrives on the same generation, so it must be
+	/// clamped to the first packet rather than re-anchored: treating every backwards
+	/// step as a rewind would drag the whole stream onto the reorder's instant.
+	#[test]
+	fn a_reorder_is_not_a_rewind() {
+		let start = Instant::now();
+		let mut egress = Egress::default();
+
+		let first = egress.push(&frame(1_400_000, &[1; SRT_PAYLOAD]), 0, start);
+		let edge = egress.push(
+			&frame(1_483_000, &[2; SRT_PAYLOAD]),
+			0,
+			start + Duration::from_millis(1),
+		);
+		let reorder = egress.push(
+			&frame(1_442_000, &[3; SRT_PAYLOAD]),
+			0,
+			start + Duration::from_millis(2),
+		);
+
+		assert_eq!(first[0].0, start, "the first payload anchors the connection");
+		assert_eq!(edge[0].0, start + Duration::from_millis(1), "the live edge re-anchors");
+		assert_eq!(reorder[0].0, first[0].0, "the reorder is clamped, not re-anchored");
+	}
+
+	/// The 33-bit PTS wrap lives in the TS packets the muxer writes, not in the media
+	/// timestamps it stamps its frames with, so it never bumps the generation counter
+	/// and pacing runs straight through it.
+	#[test]
+	fn the_33_bit_wrap_is_not_a_rewind() {
+		// 2^33 ticks of the 90 kHz TS clock, in microseconds: where a PTS wraps.
+		const WRAP: u64 = (1u64 << 33) * 100 / 9;
+		let start = Instant::now();
+		let mut egress = Egress::default();
+
+		let before = egress.push(&frame(WRAP - 25_000, &[1; SRT_PAYLOAD]), 0, start);
+		let after = egress.push(
+			&frame(WRAP + 25_000, &[2; SRT_PAYLOAD]),
+			0,
+			start + Duration::from_millis(50),
+		);
+
+		assert_eq!(before[0].0, start);
+		assert_eq!(
+			after[0].0,
+			start + Duration::from_millis(50),
+			"the wrap paces like any other 50ms step"
+		);
+	}
+
+	/// Regression for the SRT half of #2833: the muxer restarts its program clock on a
+	/// publisher rewind, so an egress that keeps its old anchor maps the whole rewound
+	/// span into the past, where the first-packet floor collapses it onto one instant.
+	/// The receiver then sees the program stop until the media climbs back to where it
+	/// left off, then the accumulated backlog arrive at once.
+	#[test]
+	fn a_rewind_re_anchors_the_pacing() {
+		const SLOT: Duration = Duration::from_millis(25);
+		let start = Instant::now();
+		let mut egress = Egress::default();
+
+		// Ten minutes into the program, on the muxer's 25ms grid.
+		let first = egress.push(&frame(600_000_000, &[1; SRT_PAYLOAD]), 0, start);
+		let second = egress.push(&frame(600_025_000, &[1; SRT_PAYLOAD]), 0, start + SLOT);
+		assert_eq!(first[0].0, start, "the first payload anchors the connection");
+		assert_eq!(second[0].0, start + SLOT);
+
+		// The publisher rewinds to the top of its source.
+		let mut now = start + 2 * SLOT;
+		let rewound = egress.push(&frame(0, &[2; SRT_PAYLOAD]), 1, now);
+		assert_eq!(rewound[0].0, now, "the new generation becomes the live edge");
+
+		// The grid slots that follow pace off the new anchor. Against the old one every
+		// one of them is ten minutes in the past and clamps to `start`, so the receiver
+		// gets the next ten minutes of program under a single timestamp.
+		for slot in 1..=8u64 {
+			now += SLOT;
+			let chunks = egress.push(&frame(slot * 25_000, &[3; SRT_PAYLOAD]), 1, now);
+			assert_eq!(chunks[0].0, now, "slot {slot} paces off the new anchor");
+		}
+	}
+
+	/// The old generation's buffered tail goes out under the instant it was paced at.
+	/// One SRT message carries one TSBPD timestamp, and the chunker only splits when
+	/// the instant changes, so the flush has to be explicit: a rewind paced within the
+	/// same clock tick would otherwise fold media that already played into the new
+	/// program's first payload.
+	#[test]
+	fn a_rewind_flushes_the_partial_chunk_first() {
+		const SLOT: Duration = Duration::from_millis(25);
+		let start = Instant::now();
+		let mut egress = Egress::default();
+
+		// A partial chunk buffered under the first generation, then a rewind paced at
+		// the very same instant.
+		assert!(egress.push(&frame(600_000_000, &[1; 188]), 0, start).is_empty());
+		let chunks = egress.push(&frame(0, &[2; SRT_PAYLOAD]), 1, start);
+		assert_eq!(chunks.len(), 2, "the old tail is its own payload");
+		assert_eq!(chunks[0].1.as_ref(), [1u8; 188].as_slice());
+		assert_eq!(chunks[1].1.as_ref(), [2u8; SRT_PAYLOAD].as_slice());
+
+		// And a tail paced earlier keeps that earlier instant rather than the rewind's.
+		assert!(egress.push(&frame(25_000, &[3; 188]), 1, start + SLOT).is_empty());
+		let chunks = egress.push(&frame(0, &[4; SRT_PAYLOAD]), 2, start + 2 * SLOT);
+		assert_eq!(chunks[0].0, start + SLOT, "the old tail keeps its own instant");
+		assert_eq!(chunks[0].1.as_ref(), [3u8; 188].as_slice());
+		assert_eq!(chunks[1].0, start + 2 * SLOT, "the new generation is the live edge");
+	}
+
+	/// End to end over a real SRT receiver: a publisher that rewinds ten minutes must
+	/// keep the program flowing, with the new generation stamped at the wall clock it
+	/// was muxed at rather than back at the connection's first packet.
+	///
+	/// The receiver's TSBPD releases each message at the origin instant the sender
+	/// stamped, so what it observes is exactly the pacing decision under test: with a
+	/// stale anchor the new generation carries the first packet's timestamp, which is
+	/// already a latency in the past by the time it is sent, so it is released at once
+	/// (or dropped as too late) instead of on the media clock.
+	#[tokio::test]
+	async fn a_publisher_rewind_keeps_an_srt_receiver_playing() {
+		use moq_mux::catalog::hang::Container as MuxContainer;
+		use moq_mux::container::{Producer, ts};
+		use moq_net::Timestamp;
+
+		// Short enough to keep the test quick, long enough that the release instants
+		// either side of the rewind are separated by more than clock noise.
+		const LATENCY: Duration = Duration::from_millis(300);
+		// Ten minutes in, the span from the controlled-rewind evidence on #2833.
+		const OFFSET: u64 = 600_000_000;
+
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("rewind", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let mut catalog = moq_mux::catalog::Producer::with_catalog(
+			&mut broadcast,
+			moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
+		)
+		.unwrap();
+		let track = broadcast
+			.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+			.unwrap();
+		{
+			let mut guard = catalog.lock();
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.container = hang::catalog::Container::Legacy;
+			guard.audio.renditions.insert(track.name().to_string(), config);
+		}
+		let mut producer = Producer::new(track, MuxContainer::Legacy);
+
+		// 100ms audio frames in one-second groups.
+		let mut write = |count: u64, offset: u64| {
+			for i in 0..count {
+				producer
+					.write(Frame {
+						timestamp: Timestamp::from_micros(offset + i * 100_000).unwrap(),
+						duration: None,
+						payload: Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
+						keyframe: i % 10 == 0,
+					})
+					.unwrap();
+				if i % 10 == 9 {
+					producer.cut(None).unwrap();
+				}
+			}
+		};
+
+		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let addr: SocketAddr = probe.local_addr().unwrap();
+		drop(probe);
+
+		let mut server = Server::bind(addr, LATENCY).await.unwrap();
+		let caller = tokio::spawn(async move {
+			SrtSocket::builder()
+				.call(addr, Some("#!::r=rewind,m=request"))
+				.await
+				.unwrap()
+		});
+
+		let Request::Subscribe(subscribe) = server.accept().await.expect("an SRT request") else {
+			panic!("m=request must create a subscribe request");
+		};
+		let consumer = origin.consume();
+		let egress = tokio::spawn(async move { subscribe.accept(&consumer, "rewind").await });
+		let mut receiver = caller.await.unwrap();
+
+		// Three seconds of program, then wait until the receiver is actually playing it
+		// so the rewind lands a real wall-clock distance after the first packet.
+		write(30, OFFSET);
+		let mut received = Vec::new();
+		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+			.await
+			.expect("the first payload never arrived")
+			.expect("the SRT egress closed early")
+			.unwrap();
+		received.push(first);
+
+		// The publisher restarts at the top of its source.
+		write(30, 0);
+
+		// Drain until the muxer flags the break, which it does exactly once, on the new
+		// generation's leading clock packet.
+		let boundary = loop {
+			let payload = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+				.await
+				.expect("the rewound generation never arrived")
+				.expect("the SRT egress closed before the rewind")
+				.unwrap();
+			received.push(payload);
+			if let Some(index) = received.iter().position(|(_, payload)| flags_a_break(payload)) {
+				break index;
+			}
+		};
+
+		assert!(boundary > 0, "the break cannot be in the connection's first payload");
+		assert!(
+			received[boundary].0 > received[0].0 + Duration::from_millis(100),
+			"the rewound generation must be stamped at the wall clock it was muxed at, \
+			 not back at the first packet ({:?} after it)",
+			received[boundary].0.saturating_duration_since(received[0].0),
+		);
+		assert!(
+			received[boundary].0 > received[boundary - 1].0,
+			"the new generation starts its own payload rather than joining the old tail's",
+		);
+
+		drop(receiver);
+		egress.abort();
+	}
+
+	/// Whether a payload carries a TS packet whose adaptation field sets
+	/// `discontinuity_indicator`: the muxer flags the new generation's leading clock
+	/// packet with it and nothing else.
+	fn flags_a_break(payload: &[u8]) -> bool {
+		payload
+			.chunks_exact(188)
+			.any(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0)
 	}
 
 	fn sid(s: &str) -> StreamId {

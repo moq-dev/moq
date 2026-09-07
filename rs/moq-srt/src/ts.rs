@@ -120,6 +120,17 @@ impl Subscriber {
 	pub async fn next(&mut self) -> Result<Option<Frame>> {
 		Ok(self.export.next().await?)
 	}
+
+	/// The muxer's generation counter for the frame [`next`](Self::next) just
+	/// returned, which increments each time the publisher rewinds its timeline.
+	///
+	/// The muxer restarts its program clock across that boundary, so a caller
+	/// pacing on the media timestamps has to drop its own anchor with it: sample
+	/// this after every frame and re-anchor when it changes, or the rewound span
+	/// maps into the past and the whole new generation collapses onto one instant.
+	pub fn discontinuity(&self) -> u64 {
+		self.export.discontinuity()
+	}
 }
 
 #[cfg(test)]

@@ -67,8 +67,19 @@ pub struct CacheConfig {
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
 /// age ceiling applied to every track.
+///
+/// The headroom governor, when configured, is owned by [`Self::pool`] rather than
+/// by this struct: it holds only a [`cache::PoolWeak`] and stops on its next tick
+/// once every [`cache::Pool`] clone has dropped. Handing this to
+/// [`Cluster::with_cache`](crate::Cluster::with_cache) therefore moves the
+/// governor's lifetime onto the cluster, and dropping this struct afterwards keeps
+/// it running. Conversely, holding a clone of [`Self::pool`] past the relay keeps
+/// the governor running too, deliberately: as long as anything can still cache into
+/// the budget, resizing it is still the right thing to do.
 pub struct Cache {
 	/// The shared byte-budget pool every session's groups register with.
+	///
+	/// Also what owns the headroom governor; see the type docs.
 	pub pool: cache::Pool,
 
 	/// Ceiling on how long a non-latest group is retained (the latest group of every
@@ -80,6 +91,10 @@ pub struct Cache {
 impl CacheConfig {
 	/// Resolve the size knobs into a shared [`cache::Pool`] and age ceiling,
 	/// spawning the headroom governor when configured. Requires a tokio runtime.
+	///
+	/// The governor stops with the pool it resizes, so a caller that drops the
+	/// returned [`Cache`] without attaching it (a setup step failing after this
+	/// point, say) leaves nothing sampling memory behind.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
 		let pool = match capacity {
@@ -91,7 +106,7 @@ impl CacheConfig {
 			let headroom = parse_limit(headroom)?;
 			anyhow::ensure!(headroom > 0, "cache headroom must be non-zero");
 			tracing::info!(?capacity, headroom, "cache governor enabled");
-			tokio::spawn(governor(pool.clone(), capacity, headroom));
+			tokio::spawn(governor(pool.downgrade(), capacity, headroom));
 		} else if let Some(capacity) = capacity {
 			tracing::info!(capacity, "cache capacity set");
 		}
@@ -139,13 +154,24 @@ fn total_memory() -> u64 {
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
 /// stay available: the cache grows into idle memory and shrinks (tracks evict
 /// their stalest groups as they write) when the rest of the system needs it.
-async fn governor(pool: cache::Pool, capacity: Option<u64>, headroom: u64) {
+///
+/// Weak on purpose. The pool is the one handle that reaches everything charging
+/// into the budget, so tying the task to it means the task ends when the last
+/// thing that could use the budget does, with no guard to route through the
+/// relay's construction shapes. Returns on the first tick after that.
+async fn governor(pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
 	let mut sys = sysinfo::System::new();
 	let mut interval = tokio::time::interval(GOVERNOR_INTERVAL);
 	interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
 	loop {
 		interval.tick().await;
+
+		let Some(pool) = pool.upgrade() else {
+			tracing::debug!("cache pool dropped; stopping governor");
+			return;
+		};
+
 		sys.refresh_memory();
 
 		let available = match sys.cgroup_limits() {
@@ -191,5 +217,103 @@ mod tests {
 		assert!(parse_limit("lots").is_err());
 		assert!(parse_limit("0%").is_err());
 		assert!(parse_limit("150%").is_err());
+	}
+
+	/// A config whose only knob is the headroom governor.
+	fn governed() -> CacheConfig {
+		CacheConfig {
+			headroom: Some("10%".to_string()),
+			..Default::default()
+		}
+	}
+
+	/// Spawned tasks currently alive in this test's runtime. The governor is the
+	/// only thing these tests spawn, so a delta of one is the governor.
+	fn spawned() -> usize {
+		tokio::runtime::Handle::current().metrics().num_alive_tasks()
+	}
+
+	/// Let every parked governor reach its next tick and finish stopping.
+	async fn settle() {
+		for _ in 0..3 {
+			tokio::time::advance(GOVERNOR_INTERVAL).await;
+			tokio::task::yield_now().await;
+		}
+	}
+
+	/// The prefix of [`crate::Relay::load`] that owns the cache: resolve it, then
+	/// hand it to a cluster whose construction can still fail.
+	fn attach(cache: &CacheConfig, cluster: crate::ClusterConfig) -> anyhow::Result<crate::Cluster> {
+		let cache = cache.init()?;
+		Ok(crate::Cluster::new(cluster)?.with_cache(cache))
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn governor_stops_when_pool_drops() {
+		let pool = cache::Pool::unbounded();
+		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+
+		settle().await;
+		assert!(!governor.is_finished(), "governor should run while the pool lives");
+
+		drop(pool);
+		governor.await.expect("governor should stop, not panic");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn governor_runs_while_any_pool_clone_lives() {
+		let pool = cache::Pool::unbounded();
+		let clone = pool.clone();
+		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+
+		drop(pool);
+		settle().await;
+		assert!(!governor.is_finished(), "a retained pool keeps the governor running");
+
+		drop(clone);
+		governor.await.expect("governor should stop, not panic");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn setup_failure_stops_governor() {
+		let before = spawned();
+
+		// `--cluster-id 0` is rejected, so the cache is dropped before it is attached.
+		let cluster = crate::ClusterConfig {
+			id: Some(0),
+			..Default::default()
+		};
+		assert!(attach(&governed(), cluster).is_err(), "cluster id 0 is rejected");
+
+		settle().await;
+		assert_eq!(spawned(), before, "a failed setup should not strand the governor");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn last_owner_drop_stops_governor() {
+		let before = spawned();
+		let cluster = attach(&governed(), crate::ClusterConfig::default()).unwrap();
+
+		settle().await;
+		assert_eq!(spawned(), before + 1, "the cluster should keep the governor running");
+
+		drop(cluster);
+		settle().await;
+		assert_eq!(spawned(), before, "the last cluster handle should stop the governor");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn extra_cluster_handle_keeps_governor() {
+		let before = spawned();
+		let cluster = attach(&governed(), crate::ClusterConfig::default()).unwrap();
+		let session = cluster.clone();
+
+		drop(cluster);
+		settle().await;
+		assert_eq!(spawned(), before + 1, "a surviving cluster clone keeps the governor");
+
+		drop(session);
+		settle().await;
+		assert_eq!(spawned(), before, "the last cluster handle should stop the governor");
 	}
 }
