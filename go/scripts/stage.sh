@@ -41,6 +41,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Absolute, because the paths below are printed for a caller in another
+# directory and fed to `go mod edit -replace`, which resolves a relative target
+# against the module being edited rather than the cwd.
+mkdir -p "$STAGE_PARENT"
+STAGE_PARENT=$(cd "$STAGE_PARENT" && pwd)
+
 command -v go >/dev/null 2>&1 || {
     echo "go stage: no go on PATH" >&2
     exit 1
