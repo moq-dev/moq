@@ -576,12 +576,39 @@ EOF
         "$remedy" 120 "$BOUNDED_ELAPSED"
 }
 
+# `cargo` on PATH is not the subcommands a suite invokes. `just rs check` runs
+# clippy, fmt, shear, and sort; `just rs test` runs nextest. A rustup install
+# without the clippy component, or without the two cargo extensions the dev
+# shell pins, compiles a crate fine and then dies partway through the suite this
+# command just called ready.
+probe_cargo_subcommand() {
+    local sub=$1 suites=$2 remedy=$3 cargo=${RUST_CARGO:-cargo}
+    if ! command -v "$cargo" >/dev/null 2>&1; then
+        record "probe.cargo-$sub" probe missing true "$suites" "$cargo is not on PATH" \
+            "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
+        return
+    fi
+    bounded 30 "$cargo" "$sub" --version
+    local status=$?
+    if ((status == 0)); then
+        record "probe.cargo-$sub" probe ok true "$suites" "$(first_line "$BOUNDED_OUT")" "" 30 "$BOUNDED_ELAPSED"
+        return
+    fi
+    record "probe.cargo-$sub" probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+        "cargo $sub is unavailable: $(error_line "$BOUNDED_OUT")" "$remedy" 30 "$BOUNDED_ELAPSED"
+}
+
 # Every relay, gateway, and harness test stands up a loopback endpoint, and a
 # sandbox that forbids bind fails all of them identically and late.
 probe_loopback() {
     local kind=$1 suites=$2
     if ! command -v bun >/dev/null 2>&1; then
-        record "probe.loopback-$kind" probe skip false "$suites" "bun is not installed, so the bind was not probed" "" 15 0
+        # `missing`, not an optional skip. Plain `smoke` still runs without bun,
+        # so clearing the bind here would let a strict run pass on a sandbox
+        # that forbids one, having never asked.
+        record "probe.loopback-$kind" probe missing true "$suites" \
+            "bun is not installed, so the bind could not be probed" \
+            "install bun so the bind can be probed, or enter the dev shell: nix develop" 15 0
         return
     fi
     local status script
@@ -864,6 +891,14 @@ self_test_incomplete() {
 
     PATH="$bin" MOQ_STRICT=1 "$SELF" --suite check >/dev/null 2>&1
     check 'strict refuses an incomplete scope' "$?" 1
+
+    # An unprobed capability is not a cleared one. Plain `smoke` runs without
+    # bun, but bun is what binds the probe socket, so reporting the bind as an
+    # optional skip would let a strict harness run pass on a sandbox that
+    # forbids one, having never asked.
+    out=$(PATH="$bin" MOQ_STRICT='' "$SELF" --json --suite smoke 2>/dev/null)
+    check 'an unprobed bind is not cleared' \
+        "$(printf '%s' "$out" | grep -c '"id":"probe.loopback-tcp","section":"probe","status":"missing"')" 1
 }
 
 # A diff touching the root justfile widens the real dispatch to `check-all`, so
@@ -1231,9 +1266,38 @@ else
     record probe.cargo-compile probe skip false "" "this scope compiles nothing" "" 120 0
 fi
 
-case " $SUITES " in
-    *" wasm "*) probe_cargo_compile cargo-wasm32 wasm wasm32-unknown-unknown ;;
-esac
+# The subcommands each Rust suite invokes, charged to the suite that invokes
+# them. The harnesses build and run, so they need none of these.
+CHECK_CARGO=""
+TEST_CARGO=""
+case " $CARGO_SUITES " in *" check "*) CHECK_CARGO="check" ;; esac
+case " $CARGO_SUITES " in *" test "*) TEST_CARGO="test" ;; esac
+if [ -n "$CHECK_CARGO" ]; then
+    probe_cargo_subcommand clippy "$CHECK_CARGO" "add the component: rustup component add clippy, or enter the dev shell: nix develop"
+    probe_cargo_subcommand fmt "$CHECK_CARGO" "add the component: rustup component add rustfmt, or enter the dev shell: nix develop"
+    probe_cargo_subcommand shear "$CHECK_CARGO" "install it: cargo install cargo-shear, or enter the dev shell: nix develop"
+    probe_cargo_subcommand sort "$CHECK_CARGO" "install it: cargo install cargo-sort, or enter the dev shell: nix develop"
+fi
+if [ -n "$TEST_CARGO" ]; then
+    probe_cargo_subcommand nextest "$TEST_CARGO" "install it: cargo install cargo-nextest, or enter the dev shell: nix develop"
+fi
+
+# `just rs wasm` cross-compiles moq-wasm, moq-mux, and moq-ffi for the target,
+# and `check-all` runs it unconditionally, so a widened check needs the target
+# as much as the wasm harness does. A narrow Rust scope reaches it only through
+# `just rs _wants-wasm`, which this cannot answer without running the package
+# selector, so it is not charged there.
+WASM_TARGET_SUITES=$(selected wasm)
+if [ "$CHANGED" = ALL ]; then
+    WASM_TARGET_SUITES="$(selected check) $WASM_TARGET_SUITES"
+    WASM_TARGET_SUITES=$(printf '%s' "$WASM_TARGET_SUITES" | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
+    WASM_TARGET_SUITES=${WASM_TARGET_SUITES% }
+fi
+if [ -n "$WASM_TARGET_SUITES" ]; then
+    probe_cargo_compile cargo-wasm32 "$WASM_TARGET_SUITES" wasm32-unknown-unknown
+else
+    record probe.cargo-wasm32 probe skip false "" "this scope compiles nothing for wasm32" "" 120 0
+fi
 
 if [ -n "$(selected check)" ]; then
     probe_nix_eval
