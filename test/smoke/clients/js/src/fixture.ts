@@ -17,7 +17,7 @@ import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
-import { OFFSET_STEPS } from "./contract";
+import { OFFSET_STEPS, SAMPLE_RATE } from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -31,9 +31,6 @@ const SCHEDULE_AHEAD = 2; // seconds
 
 /** Peak amplitude of the tone. Low enough to leave Opus headroom, high enough to dominate noise. */
 const AMPLITUDE = 0.5;
-
-/** Rate the tone is generated and captured at. Stated rather than probed, so the catalog is fixed. */
-const SAMPLE_RATE = 48000;
 
 // A canvas capture track is a MediaStreamTrack with requestFrame(); the publish types describe a
 // getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half

@@ -124,7 +124,15 @@ export function throwPageErrors(errors: BrowserErrors): void {
  *
  * Cutting a publisher off aborts the subscriptions reading it, and the player says so. That is the
  * correct behavior, not a fault, so a step that causes it drains the record rather than failing on
- * it. Only that step; everywhere else a page error is still fatal.
+ * it. Only that step; everywhere else a page error is still fatal, including the measurement window
+ * that follows every transition.
+ *
+ * This drains everything rather than an allowlist because the player gives a caller nothing to match
+ * on: an abort surfaces as `spawn error` plus whichever `Error` the session built, and a truncated
+ * group reaches the video decoder as the same bare `DOMException` a broken decoder would. Nothing is
+ * concealed - `open` echoes every console message and page error as it arrives - but during a
+ * transition the two are indistinguishable. Classifying them is
+ * `/quest/m0/js-teardown-error-classification.md`, which ends with tightening this.
  */
 export function drainPageErrors(errors: BrowserErrors): string[] {
 	return errors.page.splice(0).concat(errors.console.splice(0));

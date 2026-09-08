@@ -43,6 +43,9 @@ export type FixtureState = {
 	encodedFrames: number;
 };
 
+/** Rate the tone is generated and captured at. Stated rather than probed, so the catalog is fixed. */
+export const SAMPLE_RATE = 48000;
+
 // ── the subscriber's measurements ───────────────────────────────────────────
 
 /** How often the page takes a sample. Fast enough to see a 200ms tone step, cheap enough to sustain. */

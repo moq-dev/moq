@@ -40,7 +40,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { FAULTS, SAMPLE_MS } from "./src/contract";
+import { FAULTS, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
@@ -126,6 +126,9 @@ async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<P
 
 /** How long the presented frame must hold still to count as stopped. */
 const FROZEN_MS = 1000;
+
+/** How long the picture is watched after a pause settles, to prove it stays on the one frame. */
+const HELD_MS = 1500;
 
 /**
  * Wait until the presented frame stops moving, and return the frame it stopped on.
@@ -260,7 +263,10 @@ function measure(samples: PlayerState[], label: string): void {
 
 /** Probe every platform API the player needs, rather than assuming this engine has them. */
 async function capabilities(page: Page): Promise<void> {
-	const found = await page.evaluate(async () => {
+	// The fixture's own configuration, so the probe answers "can this browser run this fixture"
+	// rather than "can it run something like it".
+	const wanted = { sampleRate: SAMPLE_RATE, width: Pattern.WIDTH, height: Pattern.HEIGHT };
+	const found = await page.evaluate(async (wanted) => {
 		const has = (name: string) => typeof (globalThis as Record<string, unknown>)[name] === "function";
 		const probe = async (fn: () => Promise<{ supported?: boolean }>) => {
 			try {
@@ -279,16 +285,16 @@ async function capabilities(page: Page): Promise<void> {
 			MediaStreamTrackProcessor: has("MediaStreamTrackProcessor"),
 			"canvas.captureStream": typeof HTMLCanvasElement.prototype.captureStream === "function",
 			"encode avc1.42001f": await probe(() =>
-				VideoEncoder.isConfigSupported({ codec: "avc1.42001f", width: 320, height: 240 }),
+				VideoEncoder.isConfigSupported({ codec: "avc1.42001f", width: wanted.width, height: wanted.height }),
 			),
 			"encode opus": await probe(() =>
-				AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 }),
+				AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
 			),
 			"decode opus": await probe(() =>
-				AudioDecoder.isConfigSupported({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 }),
+				AudioDecoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
 			),
 		};
-	});
+	}, wanted);
 
 	for (const [name, ok] of Object.entries(found)) console.error(`  ${ok ? "yes" : "NO "}  ${name}`);
 
@@ -412,7 +418,7 @@ try {
 			"the presented frame never settled after pausing",
 		);
 
-		const held = await collect(player, playerErrors, 1500);
+		const held = await collect(player, playerErrors, HELD_MS);
 		const moved = held.filter((s) => s.frameId !== undefined && s.frameId !== paused);
 		check(
 			moved.length === 0,
@@ -465,9 +471,12 @@ try {
 	if (wants("detach")) {
 		console.error("=== detach and reattach ===");
 		const busy = await readPlayerState(player);
+		// Its own assertion name, not "resource baseline": the leaked-session control expects that one
+		// to fail, so sharing it would let broken instrumentation satisfy the control without the
+		// leaking detach ever running.
 		check(
 			busy.resources.transports + busy.resources.sockets > 0 && busy.resources.audioContexts > 0,
-			"resource baseline",
+			"resource instrumentation",
 			() => `the player holds nothing to release while playing: ${JSON.stringify(busy.resources)}`,
 		);
 
