@@ -132,20 +132,34 @@ done
 
 # The gate machinery itself matches no lane's own inputs, so a pull request
 # rewriting it would otherwise validate none of them.
+expect '.github/scripts/select.sh' smoke true
 expect '.github/scripts/select.sh' smoke_full true
 expect '.github/scripts/select.sh' wasm true
+expect 'test/justfile' smoke true
 expect 'test/justfile' smoke_full true
+
+# rs/justfile owns the platform and feature recipes, so a change to its command
+# lines has to execute those recipes rather than merely widening the Cargo
+# dependency closure.
+expect 'rs/justfile' windows true
+expect 'rs/justfile' macos true
+expect 'rs/justfile' features true
 
 # `just _changed` says ALL when the diff outgrew argv. Nothing is known about it,
 # so nothing is assumed.
 expect 'ALL' smoke_full true
 expect 'ALL' features true
 
-# The narrow and wide smoke lanes are the same harness at two widths; running
-# both would pay for the small matrix twice.
-for files in "$wire" "$ffi" 'ALL' 'test/justfile'; do
+# For ordinary source changes the wide matrix subsumes the narrow one. Gate
+# machinery and an unreasonably large diff deliberately run both, because the
+# core recipe and workflow input are themselves behavior under test.
+for files in "$wire" "$ffi"; do
     [[ "$(select_for "$files" | grep -c '^smoke\(_full\)\?=true$')" -eq 1 ]] ||
         fail "smoke and smoke_full must not both run for [$files]"
+done
+for files in 'ALL' 'test/justfile' '.github/scripts/select.sh'; do
+    [[ "$(select_for "$files" | grep -c '^smoke\(_full\)\?=true$')" -eq 2 ]] ||
+        fail "smoke and smoke_full must both run for [$files]"
 done
 
 # The aggregate catches a lane whose job is missing only once both are wired into

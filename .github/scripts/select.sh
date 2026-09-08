@@ -48,9 +48,6 @@ everything() {
     for lane in "${lanes[@]}"; do
         selected[$lane]=true
     done
-    # The two smoke lanes are the same harness at two widths, so the wide one
-    # subsumes the narrow one; running both would pay for the small matrix twice.
-    selected[smoke]=false
     emit
     exit 0
 }
@@ -64,7 +61,7 @@ fi
 # The gate machinery itself. A pull request that rewrites how lanes are selected
 # matches no lane's own inputs, so without this it would validate none of them.
 # Mirrors the root `justfile`'s "orchestration changed, check everything" rule.
-if grep -qE '^(\.github/(justfile|scripts/(select|gates)(\.test)?\.sh|workflows/(gates|smoke|wasm)\.yml)|justfile|test/justfile)$' <<<"$files"; then
+if grep -qE '^(\.github/(justfile|scripts/(select|gates)(\.test)?\.sh|workflows/(gates|smoke|wasm)\.yml)|justfile|rs/justfile|test/justfile)$' <<<"$files"; then
     everything
 fi
 
