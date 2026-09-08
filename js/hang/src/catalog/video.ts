@@ -56,9 +56,12 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.optional(z.boolean()),
 
-	// The maximum jitter before the next frame is emitted in milliseconds.
-	// The player's jitter buffer should be larger than this value.
+	// The maximum delay between a frame being ready and the publisher flushing it, in whole
+	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
 	// If not provided, the player should assume each frame is flushed immediately.
+	//
+	// This is the publisher's own structure (frame duration, segment size, B-frame reordering),
+	// never a measurement of the network. It only ever grows over the life of a stream.
 	//
 	// ex:
 	// - If each frame is flushed immediately, this would be 1000/fps.

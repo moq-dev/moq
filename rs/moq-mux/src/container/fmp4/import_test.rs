@@ -1051,3 +1051,80 @@ fn rejected_fragment_preserves_decode_time() {
 			&& decode_time == moq_net::Timestamp::from_scale(3500, 44100).unwrap()
 	));
 }
+
+/// Like [`audio_fragment`] but carrying `samples` samples, the shape a real segmenter emits.
+fn audio_fragment_samples(base_media_decode_time: u64, duration: u32, size: u32, samples: usize) -> Vec<u8> {
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 2,
+				default_sample_duration: Some(duration),
+				default_sample_size: Some(size),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt { base_media_decode_time }),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: vec![mp4_atom::TrunEntry::default(); samples],
+			}],
+			..Default::default()
+		}],
+	};
+
+	let mut buf = Vec::new();
+	moof.encode(&mut buf).unwrap();
+	mp4_atom::Mdat {
+		data: vec![0xAA; size as usize * samples],
+	}
+	.encode(&mut buf)
+	.unwrap();
+	buf
+}
+
+/// The whole fragment is one flush, so a consumer waits its full media span. A source whose
+/// fragments shrink (or whose last fragment holds a single sample) must not walk the advertised
+/// value back down: the publisher can emit a long fragment again at any point.
+#[test]
+fn fragment_span_never_shrinks() {
+	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let audio_jitter = |catalog: &crate::catalog::Producer| {
+		catalog
+			.snapshot()
+			.audio
+			.renditions
+			.values()
+			.next()
+			.expect("an audio rendition")
+			.jitter
+	};
+
+	// bbb's AAC track runs at 44100; eight 1024-sample frames span 8192 ticks (~186 ms).
+	fmp4.decode(&audio_fragment_samples(0, 1024, 327, 8)).unwrap();
+	let burst = audio_jitter(&catalog).expect("a fragment span is published");
+	assert!(
+		burst >= std::time::Duration::from_millis(180) && burst <= std::time::Duration::from_millis(190),
+		"the whole fragment is one flush: {burst:?}"
+	);
+
+	// A single-sample fragment spans one frame. Publishing that would tell a consumer to size its
+	// buffer for 23 ms when the next fragment is 186 ms again.
+	fmp4.decode(&audio_fragment_samples(8192, 1024, 327, 1)).unwrap();
+	assert_eq!(
+		audio_jitter(&catalog),
+		Some(burst),
+		"a shorter fragment lowered the jitter"
+	);
+
+	fmp4.finish().unwrap();
+	assert_eq!(audio_jitter(&catalog), Some(burst));
+}

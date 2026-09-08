@@ -97,6 +97,16 @@ impl<C: Container> Producer<C> {
 		self.estimator.reorder(delay);
 	}
 
+	/// Record that the frames just written arrived as one synchronous burst covering `span` of
+	/// media, raising the measured jitter to what a consumer waits between flushes.
+	///
+	/// Like [`reorder`](Self::reorder), the writes alone can't reveal this: a caller that unpacked a
+	/// fragment or a PES packet knows the frames went out together, and the timestamps inside only
+	/// say how tightly they are spaced.
+	pub fn flush(&mut self, span: moq_net::Timestamp) {
+		self.estimator.flush(span);
+	}
+
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///

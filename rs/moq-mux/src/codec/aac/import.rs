@@ -55,12 +55,13 @@ impl<E: CatalogExt> Import<E> {
 		self.track.track().demand()
 	}
 
-	/// Refine the single audio rendition in place, republishing the catalog.
+	/// Record that the frames just decoded went out as one burst covering `span` of media.
 	///
-	/// The TS importer uses this to set the synthesized `description` and an
-	/// audio-burst `jitter` once it knows them.
-	pub(crate) fn update_rendition(&mut self, f: impl FnOnce(&mut hang::catalog::AudioConfig)) {
-		self.rendition.update(f);
+	/// The TS importer cuts every ADTS frame of a PES into its own group in one pass, so the
+	/// catalog jitter has to describe the PES rather than the 23 ms frames inside it.
+	pub(crate) fn flush(&mut self, span: moq_net::Timestamp) {
+		self.track.flush(span);
+		self.estimate();
 	}
 
 	/// Finish the track, flushing the current group.

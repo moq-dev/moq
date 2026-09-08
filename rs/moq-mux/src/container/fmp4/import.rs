@@ -42,7 +42,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	select: Option<crate::select::Broadcast>,
 
 	// A lookup to tracks in the broadcast
-	tracks: HashMap<u32, Fmp4Track>,
+	tracks: HashMap<u32, Fmp4Track<E>>,
 
 	// Track ids skipped by `select`, so their moof fragments are ignored rather
 	// than treated as referencing an unknown track.
@@ -108,8 +108,29 @@ impl TrackKind {
 	}
 }
 
-struct Fmp4Track {
+/// The catalog entry for one imported track, whichever section it lives in.
+///
+/// Both arms are the same [`Rendition`](crate::catalog::Rendition) guard, so publishing what the
+/// estimator measured (and retiring the entry on drop) is the same code either way.
+enum Rendition<E: crate::catalog::hang::CatalogExt> {
+	Video(crate::catalog::VideoTrack<E>),
+	Audio(crate::catalog::AudioTrack<E>),
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
+	fn estimate(&mut self, estimate: crate::catalog::Estimate) {
+		match self {
+			Self::Video(rendition) => rendition.estimate(estimate),
+			Self::Audio(rendition) => rendition.estimate(estimate),
+		}
+	}
+}
+
+struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	kind: TrackKind,
+
+	/// The catalog entry, which owns the published bitrate and jitter and removes itself on drop.
+	rendition: Rendition<E>,
 
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
@@ -118,9 +139,6 @@ struct Fmp4Track {
 	// groups by hand (no `container::Producer`), so the recorder is fed directly at each
 	// keyframe fragment rather than through `with_recorder`.
 	recorder: Option<crate::timeline::Recorder>,
-
-	// The minimum buffer required for the track.
-	jitter: Option<Timestamp>,
 
 	// The last timestamp seen for this track.
 	last_timestamp: Option<Timestamp>,
@@ -138,15 +156,10 @@ struct Fmp4Track {
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
 
-	// Measures the track bitrate from fragment sizes, used only when the CMAF descriptor didn't
-	// declare one. Jitter comes from the fragment timing above, not this estimator.
+	// Measures the track's catalog jitter and bitrate. Each fragment is one flush, so its media
+	// span is what a consumer waits between them; the descriptor's own bitrate, when it declares
+	// one, still wins over what this measures.
 	estimator: Estimator,
-
-	// The last bitrate written to the catalog, so an unchanged one doesn't republish it.
-	bitrate: Option<u64>,
-
-	// Whether the descriptor left the bitrate unset, so the estimator should fill it.
-	detect_bitrate: bool,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -270,16 +283,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
+		let reserved = self
+			.initial_reservation
+			.clone()
+			.expect("the moov reservation is held until init returns");
 		let timeline = self.catalog.timeline();
-
-		// Clone the catalog to avoid the borrow checker.
-		let mut catalog = self.catalog.clone();
-		let mut catalog = catalog.lock();
 
 		// The tracks below enroll in the timeline, so advertise it in the same catalog update
 		// rather than publishing a second snapshot for it.
-		if catalog.timeline.is_none() && !moov.trak.is_empty() {
-			catalog.timeline = Some(timeline.section());
+		{
+			let mut catalog = self.catalog.lock();
+			if catalog.timeline.is_none() && !moov.trak.is_empty() {
+				catalog.timeline = Some(timeline.section());
+			}
 		}
 
 		for trak in &moov.trak {
@@ -321,18 +337,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// because the catalog is already locked here; the root section is advertised below.
 			let recorder = timeline.pacing_track(track.name())?;
 
-			let detect_bitrate = match kind {
+			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
+			// `estimate` as fragments arrive.
+			let rendition = match kind {
 				TrackKind::Video => {
 					let config = self.init_video(trak, &moov)?;
-					let detect = config.bitrate.is_none();
-					catalog.video.renditions.insert(track.name().to_string(), config);
-					detect
+					let mut rendition = reserved.video(track.name());
+					rendition.set(config);
+					Rendition::Video(rendition)
 				}
 				TrackKind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
-					let detect = config.bitrate.is_none();
-					catalog.audio.renditions.insert(track.name().to_string(), config);
-					detect
+					let mut rendition = reserved.audio(track.name());
+					rendition.set(config);
+					Rendition::Audio(rendition)
 				}
 			};
 
@@ -340,25 +358,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track_id,
 				Fmp4Track {
 					kind,
+					rendition,
 					track,
 					group: None,
 					segment: None,
 					recorder: Some(recorder),
-					jitter: None,
 					last_timestamp: None,
 					last_decode_time: None,
 					min_duration: None,
 					pending_sequence: None,
 					estimator: Estimator::new(),
-					bitrate: None,
-					detect_bitrate,
 				},
 			);
 		}
 
-		drop(catalog);
-
 		// The moov's full track set is declared now; release the reservation so the catalog publishes.
+		drop(reserved);
 		self.initial_reservation = None;
 
 		self.moov = Some(moov);
@@ -955,7 +970,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// Close the previous group for the bitrate estimator (used only when the
 				// descriptor didn't declare a bitrate).
 				track.estimator.cut(Some(timestamp));
-				sync_bitrate(&mut self.catalog, track)?;
 			}
 			let fragment_len = fragment_bytes.len();
 
@@ -983,33 +997,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				// All three share the track timescale (min/max are this fragment's frame
 				// timestamps, min_duration is derived from them).
-				let jitter = max.checked_sub(min)?.checked_add(min_duration)?;
-
-				if track.jitter.is_none_or(|j| jitter < j) {
-					track.jitter = Some(jitter);
-
-					let mut catalog = self.catalog.lock();
-
-					match track.kind {
-						TrackKind::Video => {
-							let config = catalog
-								.video
-								.renditions
-								.get_mut(track.track.name())
-								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
-							config.jitter = Some(jitter.into());
-						}
-						TrackKind::Audio => {
-							let config = catalog
-								.audio
-								.renditions
-								.get_mut(track.track.name())
-								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
-							config.jitter = Some(jitter.into());
-						}
-					}
-				}
+				let span = max.checked_sub(min)?.checked_add(min_duration)?;
+				track.estimator.flush(span);
 			}
+
+			track.rendition.estimate(track.estimator.estimate());
 		}
 
 		Ok(())
@@ -1021,7 +1013,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
-			sync_bitrate(&mut self.catalog, track)?;
+			track.rendition.estimate(track.estimator.estimate());
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -1033,27 +1025,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
-		self.unregister();
+		// Dropping each track's rendition retires its catalog entry.
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
 			let _ = track.track.abort(err.clone());
-		}
-	}
-
-	/// Drop every rendition this importer registered from the catalog.
-	fn unregister(&mut self) {
-		let mut catalog = self.catalog.lock();
-		for track in self.tracks.values() {
-			match track.kind {
-				TrackKind::Video => {
-					catalog.video.renditions.remove(track.track.name());
-				}
-				TrackKind::Audio => {
-					catalog.audio.renditions.remove(track.track.name());
-				}
-			}
 		}
 	}
 
@@ -1064,7 +1041,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
-			sync_bitrate(&mut self.catalog, track)?;
+			track.rendition.estimate(track.estimator.estimate());
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -1083,59 +1060,3 @@ fn is_sync_sample(flags: u32) -> bool {
 	depends_on_none && !non_sync
 }
 
-/// Advertise the measured bitrate when it moves, for a passthrough track whose CMAF descriptor
-/// didn't declare one.
-fn sync_bitrate<E: crate::catalog::hang::CatalogExt>(
-	catalog: &mut crate::catalog::Producer<E>,
-	track: &mut Fmp4Track,
-) -> Result<()> {
-	if !track.detect_bitrate {
-		return Ok(());
-	}
-	let Some(bitrate) = track.estimator.estimate().bitrate else {
-		return Ok(());
-	};
-	if track.bitrate == Some(bitrate) {
-		return Ok(());
-	}
-	track.bitrate = Some(bitrate);
-
-	set_detected_bitrate(catalog, track, bitrate)
-}
-
-/// Apply a measured bitrate to a track's catalog config, keeping the maximum seen.
-fn set_detected_bitrate<E: crate::catalog::hang::CatalogExt>(
-	catalog: &mut crate::catalog::Producer<E>,
-	track: &Fmp4Track,
-	bitrate: u64,
-) -> Result<()> {
-	let mut catalog = catalog.lock();
-	let field = match track.kind {
-		TrackKind::Video => {
-			&mut catalog
-				.video
-				.renditions
-				.get_mut(track.track.name())
-				.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?
-				.bitrate
-		}
-		TrackKind::Audio => {
-			&mut catalog
-				.audio
-				.renditions
-				.get_mut(track.track.name())
-				.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?
-				.bitrate
-		}
-	};
-	if field.is_none_or(|current| bitrate > current) {
-		*field = Some(bitrate);
-	}
-	Ok(())
-}
-
-impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		self.unregister();
-	}
-}
