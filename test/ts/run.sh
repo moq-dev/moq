@@ -150,7 +150,7 @@ fi
 # a missing TSDuck still leaves the run identity and the toolchain behind for
 # the upload to collect. Same order as the smoke and WASM harnesses.
 bundle_init ts
-bundle_rerun "${rerun[@]}"
+bundle_rerun env "TSC_PROFILE=$PROFILE" "${rerun[@]}"
 TMP="$BUNDLE_WORK"
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
 SRC_TS="$TMP/source.ts"
@@ -174,7 +174,7 @@ cleanup() {
         [[ -z "$SUB_PID" ]] || bundle_stack subscriber "$SUB_PID"
         [[ -z "$PUB_PID" ]] || bundle_stack publisher "$PUB_PID"
         [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
         fi
     fi
@@ -257,7 +257,7 @@ bundle_fixture "$SRC_TS" source
 echo "### starting relay on 127.0.0.1:${PORT}"
 sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$TMP/relay.toml"
 relay_args=("$TMP/relay.toml")
-[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG_LIVE")
 "$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
 bundle_endpoint relay "$URL" "negotiated per session"

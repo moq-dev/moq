@@ -42,13 +42,14 @@ BUNDLE_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUNDLE_WORKSPACE=$(cd "$BUNDLE_LIB_DIR/../.." && pwd)
 
 # Set by bundle_init.
-BUNDLE_DIR=""     # the run's directory
-BUNDLE_WORK=""    # retained scratch: logs, configs, captures
-BUNDLE_SCRATCH="" # never retained: compiled fixtures, plugin registries
-BUNDLE_TRACE=""   # browser traces, HARs, screenshots
-BUNDLE_QLOG=""    # relay qlog traces, when captured
-BUNDLE_META=""    # jsonl fragments assembled into manifest.json
-BUNDLE_LIVE=""    # live retained logs, outside the uploadable bundle
+BUNDLE_DIR=""       # the run's directory
+BUNDLE_WORK=""      # retained scratch: logs, configs, captures
+BUNDLE_SCRATCH=""   # never retained: compiled fixtures, plugin registries
+BUNDLE_TRACE=""     # browser traces, HARs, screenshots
+BUNDLE_QLOG=""      # bounded qlog snapshot inside the uploadable bundle
+BUNDLE_QLOG_LIVE="" # live relay qlogs outside the uploadable bundle
+BUNDLE_META=""      # jsonl fragments assembled into manifest.json
+BUNDLE_LIVE=""      # live retained logs, outside the uploadable bundle
 BUNDLE_HARNESS=""
 BUNDLE_RUN_ID=""
 
@@ -130,8 +131,9 @@ bundle_init() {
     BUNDLE_QLOG="$BUNDLE_DIR/qlog"
     BUNDLE_META="$BUNDLE_DIR/.meta"
     BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_QLOG_LIVE="$BUNDLE_LIVE/qlog"
     mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
-        "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
+        "$BUNDLE_QLOG_LIVE" "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
 
     # The drivers write browser traces here without knowing the layout.
     export MOQ_QA_BUNDLE="$BUNDLE_DIR"
@@ -642,12 +644,19 @@ bundle_finish() {
     [[ -n "$BUNDLE_DIR" && -d "$BUNDLE_DIR" ]] || return "$status"
 
     if [[ "$status" -eq 0 && -z "${MOQ_QA_KEEP:-}" ]]; then
-        rm -rf "$BUNDLE_DIR"
+        rm -rf "$BUNDLE_DIR" "$BUNDLE_LIVE"
         rmdir "$(dirname "$BUNDLE_DIR")" 2>/dev/null || true
+        rmdir "$(dirname "$BUNDLE_LIVE")" 2>/dev/null || true
         return 0
     fi
 
     rm -rf "$BUNDLE_SCRATCH"
+    # Relays always write outside the upload tree. Copy a failure-time snapshot
+    # in for bounding and redaction; retained relays can create later files
+    # without bypassing that one-time sweep.
+    if find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
+        cp -R "$BUNDLE_QLOG_LIVE/." "$BUNDLE_QLOG/"
+    fi
     # An empty trace/qlog dir is a claim that nothing was captured, which the
     # capability records already make in words. Drop it so it isn't mistaken
     # for a capture that came back blank.
@@ -661,12 +670,10 @@ bundle_finish() {
         mv "$BUNDLE_WORK" "$BUNDLE_LIVE/work"
         mkdir -p "$BUNDLE_WORK"
         cp -R "$BUNDLE_LIVE/work/." "$BUNDLE_WORK/"
-        if [[ -d "$BUNDLE_QLOG" ]]; then
-            mv "$BUNDLE_QLOG" "$BUNDLE_LIVE/qlog"
-            mkdir -p "$BUNDLE_QLOG"
-            cp -R "$BUNDLE_LIVE/qlog/." "$BUNDLE_QLOG/"
-        fi
         _bundle_session
+    else
+        rm -rf "$BUNDLE_LIVE"
+        rmdir "$(dirname "$BUNDLE_LIVE")" 2>/dev/null || true
     fi
     _bundle_teardown_script
     _bundle_manifest "$status"

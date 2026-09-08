@@ -139,7 +139,7 @@ qlog_cap_case() {
     local i
     for ((i = 0; i < 20; i++)); do
         printf '\036{"time":%d,"name":"transport:packet_sent"}\n' "$i"
-    done >"$BUNDLE_QLOG/relay.sqlog"
+    done >"$BUNDLE_QLOG_LIVE/relay.sqlog"
     bundle_finish 1
 }
 bundle=$(MOQ_QA_LOG_CAP=128 MOQ_QA_FILE_CAP=8192 run_case qlog-cap qlog_cap_case)
@@ -229,10 +229,10 @@ teardown_case() {
     # The argument exercises a credential-shaped command without exposing it in
     # teardown.sh. Ownership is checked by process birth identity instead.
     : >"$BUNDLE_WORK/live.log"
-    : >"$BUNDLE_QLOG/live.qlog"
+    : >"$BUNDLE_QLOG_LIVE/live.qlog"
     mkfifo "$ROOT/continue" "$ROOT/written"
     exec 9>>"$BUNDLE_WORK/live.log"
-    exec 10>>"$BUNDLE_QLOG/live.qlog"
+    exec 10>>"$BUNDLE_QLOG_LIVE/live.qlog"
     python3 -c 'import os,sys,time
 with open(sys.argv[1], "rb", buffering=0) as ready:
  ready.read(1)
@@ -271,6 +271,8 @@ check "the teardown script contains no recorded secret" sh -c '! grep -q teardow
     "$bundle/teardown.sh"
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
+printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
+check "future retained qlogs stay outside the uploadable bundle" test ! -e "$bundle/qlog/later.sqlog"
 before_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
 before_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
 printf 'continue\n' >"$ROOT/continue"

@@ -89,7 +89,7 @@ cleanup() {
         for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
             bundle_stack "relay-$pid" "$pid"
         done
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relays wrote no traces: this backend cannot capture them"
         fi
     fi
@@ -177,8 +177,8 @@ for flavour in "${FLAVOURS[@]}"; do
     # One directory per flavour, so a trace can be told apart by the protocol it
     # negotiated rather than only by the connection id inside it.
     [[ -z "${MOQ_QA_QLOG:-}" ]] || {
-        mkdir -p "$BUNDLE_QLOG/$name"
-        args+=(--server-quic-qlog "$BUNDLE_QLOG/$name")
+        mkdir -p "$BUNDLE_QLOG_LIVE/$name"
+        args+=(--server-quic-qlog "$BUNDLE_QLOG_LIVE/$name")
     }
 
     echo "starting $name relay on 127.0.0.1:${port}..."

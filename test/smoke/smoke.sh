@@ -195,7 +195,7 @@ cleanup() {
     if [[ "$status" -ne 0 ]]; then
         [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
         [[ -z "${PUB_PID:-}" ]] || bundle_stack publisher "$PUB_PID"
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
         fi
     fi
@@ -475,7 +475,7 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # busy 4443 (a dev relay, a parallel run) doesn't require editing the committed file.
 sed "s/4443/${PORT}/g" "$SMOKE_DIR/smoke.toml" >"$TMP/relay.toml"
 relay_args=("$TMP/relay.toml")
-[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG_LIVE")
 "$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
 # The wire version is negotiated per session rather than pinned here, so the
