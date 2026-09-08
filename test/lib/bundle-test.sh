@@ -225,11 +225,14 @@ qlog_cap_case() {
     for ((i = 0; i < 20; i++)); do
         printf '\036{"time":%d,"name":"transport:packet_sent"}\n' "$i"
     done >"$BUNDLE_QLOG_LIVE/relay.sqlog"
+    printf '\036{"time":20,"name":"partial' >>"$BUNDLE_QLOG_LIVE/relay.sqlog"
     bundle_finish 1
 }
 bundle=$(MOQ_QA_LOG_CAP=128 MOQ_QA_FILE_CAP=8192 run_case qlog-cap qlog_cap_case)
 count=$(LC_ALL=C tr -cd '\036' <"$bundle/qlog/relay.sqlog" | wc -c | tr -d '[:space:]')
 check "qlog byte caps preserve complete JSON-SEQ records" test "$count" -eq 20
+check "a live qlog snapshot drops its incomplete final record" \
+    sh -c '! grep -q partial "$1"' _ "$bundle/qlog/relay.sqlog"
 
 manifest_cap_case() {
     bundle_note "the manifest must remain structured even below its own size"

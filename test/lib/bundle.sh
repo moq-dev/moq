@@ -726,6 +726,25 @@ bundle_retained() {
     [[ "${MOQ_QA_RETAIN:-}" == "1" ]]
 }
 
+# Trim qlog snapshots to the last newline completed by the relay. JSON-SEQ uses
+# that newline to terminate each record, so a copy that reached a live file's
+# current EOF mid-write must not publish its partial final record.
+_bundle_complete_qlogs() {
+    local root="$1" list="$BUNDLE_META/qlog-snapshot-files" file tmp line
+    find "$root" -type f \( -name '*.qlog' -o -name '*.sqlog' \) -print0 >"$list" || return 1
+    while IFS= read -r -d '' file; do
+        tmp="$file.complete"
+        while IFS= read -r line; do
+            printf '%s\n' "$line"
+        done <"$file" >"$tmp"
+        if [[ -s "$tmp" ]]; then
+            mv "$tmp" "$file"
+        else
+            rm -f "$tmp" "$file"
+        fi
+    done <"$list"
+}
+
 # Snapshot a directory that a retained process may still be mutating. Build the
 # copy under excluded metadata and expose it to the upload tree only after the
 # whole copy succeeds. A concurrent rename or removal therefore leaves a plain
@@ -733,10 +752,12 @@ bundle_retained() {
 _bundle_snapshot_live() {
     local source="$1" destination="$2" label="$3"
     local snapshot="$BUNDLE_META/snapshot-$label"
-    find "$source" -type f -print -quit | grep -q . || return 0
     rm -rf "$snapshot"
     mkdir -p "$snapshot"
-    if cp -R "$source/." "$snapshot/" && rm -rf "$destination" && mv "$snapshot" "$destination"; then
+    if cp -R "$source/." "$snapshot/" &&
+        { [[ "$label" != qlog ]] || _bundle_complete_qlogs "$snapshot"; } &&
+        rm -rf "$destination" &&
+        mv "$snapshot" "$destination"; then
         return 0
     fi
     rm -rf "$snapshot" "$destination"
