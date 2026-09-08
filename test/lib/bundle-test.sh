@@ -447,6 +447,7 @@ check "the owned process is recorded" grep -q '"name": "hung"' "$bundle/manifest
 wrapper_stack_case() {
     sleep 120 &
     hung=$!
+    bundle_process wrapper "$hung"
     bundle_stack wrapper "$hung" wrapper
     kill -KILL "$hung" 2>/dev/null || true
     wait "$hung" 2>/dev/null || true
@@ -455,6 +456,19 @@ wrapper_stack_case() {
 bundle=$(run_case wrapper-stack wrapper_stack_case)
 check "a childless wrapper stack identifies the harness shell" \
     grep -q "this is the harness shell" "$bundle/stacks/wrapper.txt"
+
+recycled_stack_case() {
+    sleep 120 &
+    hung=$!
+    bundle_process recycled "$hung"
+    printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$hung"
+    bundle_stack recycled "$hung"
+    kill -KILL "$hung" 2>/dev/null || true
+    wait "$hung" 2>/dev/null || true
+    bundle_finish 1
+}
+bundle=$(run_case recycled-stack recycled_stack_case)
+check "a recycled process receives no debugger attachment" test ! -e "$bundle/stacks/recycled.txt"
 
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
@@ -525,19 +539,20 @@ wrapper_child=$(<"$bundle/wrapper-child.pid")
 unowned=$(<"$bundle/unowned.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
+# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
+live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
+private_teardown="$live/teardown.sh"
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
     "$bundle/teardown.sh"
 check "surviving groups carry a member birth identity" \
-    grep -q "reap_group $wrapper " "$bundle/teardown.sh"
+    grep -q "reap_group $wrapper " "$private_teardown"
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a group without a verified leader acquires no witness" sh -c \
-    '! grep -q "reap_group $1 " "$2"' _ "$unowned" "$bundle/teardown.sh"
+    '! grep -q "reap_group $1 " "$2"' _ "$unowned" "$private_teardown"
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a process without a verified birth identity is omitted from the session" sh -c \
     '! grep -q "pid $1 " "$2"' _ "$unowned" "$bundle/session.md"
-# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
-live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
 check "future retained qlogs stay outside the uploadable bundle" test ! -e "$bundle/qlog/later.sqlog"
@@ -643,6 +658,27 @@ else
 fi
 bash "$bundle/teardown.sh" >/dev/null
 check "retained teardown releases its port reservation" test ! -d "$port_root/4557"
+
+sensitive_path_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    # shellcheck disable=SC2034 # Sourced harness functions consume this path.
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_port sensitive 4560
+    harness_spawn sensitive "$BUNDLE_WORK/sensitive.log" sleep 120
+    harness_retain_ports
+    bundle_finish 1
+}
+CASE_ROOT="$ROOT/token=opaque-artifact-path/artifacts"
+bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$ROOT/secret=opaque-reservation-path/ports" \
+    run_case sensitive-path sensitive_path_case)
+unset CASE_ROOT
+if grep -Erq -- 'opaque-artifact-path|opaque-reservation-path' "$bundle"; then
+    bad "the uploadable bundle excludes sensitive teardown paths"
+else
+    ok "the uploadable bundle excludes sensitive teardown paths"
+fi
+bash "$bundle/teardown.sh" >/dev/null
 
 leaderless_case() {
     # shellcheck source=/dev/null

@@ -311,26 +311,39 @@ _bundle_descendants() {
 }
 
 bundle_stack() {
-    local name=$1 pid=$2 wrapper=${3:-}
+    local name=$1 pid=$2 wrapper=${3:-} start_file wanted current
     [[ -n "$BUNDLE_DIR" ]] || return 0
     [[ "${MOQ_QA_STACKS:-1}" != "0" ]] || return 0
-    kill -0 "$pid" 2>/dev/null || return 0
+    start_file="$BUNDLE_META/process-starts/$pid"
+    [[ -f "$start_file" ]] || return 0
+    wanted=$(<"$start_file")
+    current=$(_bundle_process_start "$pid" || true)
+    [[ -n "$current" && "$current" == "$wanted" ]] || return 0
 
     # The whole tree, not just the named process: a cell is a shell wrapping a
     # `timeout` wrapping the client, and the client is the one that is stuck.
     # Capped, because attaching costs a second each and a tree can be a browser.
-    local out="$BUNDLE_DIR/stacks/$name.txt" target walked=0 left="${MOQ_QA_STACK_MAX:-8}"
+    local out="$BUNDLE_DIR/stacks/$name.txt" target target_start walked=0 left="${MOQ_QA_STACK_MAX:-8}"
     for target in $(_bundle_descendants "$pid"); do
         if ((left-- <= 0)); then
             printf 'stopped after %s processes (MOQ_QA_STACK_MAX)\n' "${MOQ_QA_STACK_MAX:-8}" >>"$out"
             break
         fi
-        kill -0 "$target" 2>/dev/null || continue
+        target_start=$(_bundle_process_start "$target" || true)
+        [[ -n "$target_start" ]] || continue
+        current=$(_bundle_process_start "$pid" || true)
+        [[ -n "$current" && "$current" == "$wanted" ]] || break
+        current=$(_bundle_process_start "$target" || true)
+        [[ -n "$current" && "$current" == "$target_start" ]] || continue
         walked=$((walked + 1))
         {
             printf '=== %s pid %s ===\n' "$name" "$target"
             ps -o pid=,command= -p "$target" 2>/dev/null || true
         } >>"$out"
+        current=$(_bundle_process_start "$pid" || true)
+        [[ -n "$current" && "$current" == "$wanted" ]] || break
+        current=$(_bundle_process_start "$target" || true)
+        [[ -n "$current" && "$current" == "$target_start" ]] || continue
         _bundle_stack_one "$target" >>"$out" 2>&1
     done
 
@@ -520,7 +533,7 @@ _bundle_redact_stream() {
     # worth having.
     LC_ALL=C sed -E \
         -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
-        -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
+        -e "s#(^|[?&/[:space:]\"])(($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1\2<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
         LC_ALL=C awk '
             function closing_quote(text,    i, ch, slashes) {
@@ -633,10 +646,6 @@ _bundle_sweep() {
     local log_cap="${MOQ_QA_LOG_CAP:-2097152}" file_cap="${MOQ_QA_FILE_CAP:-8388608}" file
     local withheld=0
     while IFS= read -r -d '' file; do
-        # This script is generated from already-redacted command values. A
-        # second textual rewrite could remove printf %q escaping and make it
-        # unparseable, leaving the retained processes alive.
-        [[ "$file" == "$BUNDLE_DIR/teardown.sh" ]] && continue
         case "$file" in
             *.trace.zip | *.png)
                 # Playwright traces contain request metadata, while screenshots
@@ -770,6 +779,25 @@ _bundle_session() {
 # Reaps only what this run recorded. The process start time is re-checked before
 # the signal, because a PID freed since the run is somebody else's process now.
 _bundle_teardown_script() {
+    local target=""
+    if [[ -d "$BUNDLE_LIVE" && "$BUNDLE_SESSION_RETAINED" -eq 1 ]]; then
+        target="$BUNDLE_LIVE/teardown.sh"
+    fi
+    cat >"$BUNDLE_DIR/teardown.sh" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -uo pipefail
+bundle_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+run=${bundle_dir##*/}
+root=${bundle_dir%/*}
+teardown="${root}-live/$run/teardown.sh"
+if [[ ! -x "$teardown" ]]; then
+    echo "no retained session is available for this bundle" >&2
+    exit 1
+fi
+exec bash "$teardown"
+LAUNCHER
+    chmod +x "$BUNDLE_DIR/teardown.sh"
+    [[ -n "$target" ]] || return 0
     {
         printf '#!/usr/bin/env bash\n'
         printf '# Teardown for the retained %s run %s.\n' "$BUNDLE_HARNESS" "$BUNDLE_RUN_ID"
@@ -857,8 +885,8 @@ PRELUDE
             printf 'rm -rf -- %q\n' "$BUNDLE_LIVE"
             printf 'rmdir %q 2>/dev/null || true\n' "$(dirname "$BUNDLE_LIVE")"
         fi
-    } >"$BUNDLE_DIR/teardown.sh"
-    chmod +x "$BUNDLE_DIR/teardown.sh"
+    } >"$target"
+    chmod +x "$target"
 }
 
 # ── finish ──────────────────────────────────────────────────────────────────
