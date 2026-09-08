@@ -667,15 +667,15 @@ probe_gstreamer_devel() {
             "pkg-config is missing, so GStreamer metadata was not probed" "" 10 0
         return
     fi
-    bounded 10 pkg-config --exists gstreamer-1.0
+    bounded 10 pkg-config --atleast-version=1.14 gstreamer-1.0
     status=$?
     if ((status == 0)); then
         record behavior.gstreamer-devel behavior ok true "$suites" \
-            "pkg-config resolves gstreamer-1.0 development metadata" "" 10 "$BOUNDED_ELAPSED"
+            "pkg-config resolves GStreamer 1.14+ development metadata" "" 10 "$BOUNDED_ELAPSED"
     else
         record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-            "pkg-config cannot resolve gstreamer-1.0 development metadata" \
-            "install the GStreamer development package that provides gstreamer-1.0.pc" 10 "$BOUNDED_ELAPSED"
+            "pkg-config cannot resolve GStreamer 1.14+ development metadata" \
+            "install GStreamer 1.14+ development metadata that provides gstreamer-1.0.pc" 10 "$BOUNDED_ELAPSED"
     fi
 }
 
