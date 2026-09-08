@@ -439,18 +439,14 @@ where
 			// authorization or a drain says so, and only an unroutable path means the
 			// broadcast is not here.
 			Err(err) => {
-				return self
-					.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
-					.await;
+				return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await;
 			}
 		};
 
 		let track = match broadcast.track(&msg.track_name) {
 			Ok(track) => track,
 			Err(err) => {
-				return self
-					.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
-					.await;
+				return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await;
 			}
 		};
 
@@ -465,9 +461,7 @@ where
 			match track.subscribe(subscription.clone()).await {
 				Ok(subscribed) => (track, subscribed),
 				Err(err) => {
-					return self
-						.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
-						.await;
+					return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await;
 				}
 			}
 		};
@@ -591,10 +585,10 @@ where
 		&self,
 		mut stream: Stream<S, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_subscribe_error(&mut stream.writer, request_id, condition, reason)
+		self.write_subscribe_error(&mut stream.writer, request_id, err, reason)
 			.await?;
 
 		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
@@ -607,10 +601,10 @@ where
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(condition, request::Kind::Subscribe, self.version);
+		let error_code = request::to_code(err, request::Kind::Subscribe, self.version);
 
 		match self.version {
 			Version::Draft14 => {
@@ -903,12 +897,7 @@ where
 		let _subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
 				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						request::Condition::NotSupported,
-						"not supported",
-					)
+					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
 					.await;
 			}
 			FetchType::RelativeJoining {
@@ -917,24 +906,14 @@ where
 			} => {
 				if group_offset != 0 {
 					return self
-						.reject_fetch(
-							stream,
-							msg.request_id,
-							request::Condition::NotSupported,
-							"not supported",
-						)
+						.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
 						.await;
 				}
 				subscriber_request_id
 			}
 			FetchType::AbsoluteJoining { .. } => {
 				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						request::Condition::NotSupported,
-						"not supported",
-					)
+					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
 					.await;
 			}
 		};
@@ -995,10 +974,10 @@ where
 		&self,
 		mut stream: Stream<S, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_fetch_error(&mut stream.writer, request_id, condition, reason)
+		self.write_fetch_error(&mut stream.writer, request_id, err, reason)
 			.await?;
 
 		let _ = stream.writer.close().await;
@@ -1009,10 +988,10 @@ where
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(condition, request::Kind::Fetch, self.version);
+		let error_code = request::to_code(err, request::Kind::Fetch, self.version);
 
 		match self.version {
 			Version::Draft14 => {

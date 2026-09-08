@@ -861,7 +861,7 @@ where
 			self.write_error(
 				&mut stream,
 				request_id,
-				request::Condition::Uninterested,
+				&Error::Unroutable,
 				"route loops through this relay",
 			)
 			.await?;
@@ -878,7 +878,7 @@ where
 				}
 			}
 			Err(err) => {
-				self.write_error(&mut stream, request_id, (&err).into(), &err.to_string())
+				self.write_error(&mut stream, request_id, &err, &err.to_string())
 					.await?;
 				let _ = stream.writer.close().await;
 				return Ok(());
@@ -1028,7 +1028,7 @@ where
 		self.write_publish_error(
 			&mut stream,
 			msg.request_id,
-			request::Condition::NotSupported,
+			&Error::Unsupported,
 			"PUBLISH is not supported",
 		)
 		.await?;
@@ -1068,10 +1068,10 @@ where
 		&self,
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(condition, request::Kind::PublishNamespace, self.version);
+		let error_code = request::to_code(err, request::Kind::PublishNamespace, self.version);
 
 		match self.version {
 			Version::Draft14 => {
@@ -1118,10 +1118,10 @@ where
 		&self,
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
-		condition: request::Condition,
+		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(condition, request::Kind::Publish, self.version);
+		let error_code = request::to_code(err, request::Kind::Publish, self.version);
 
 		match self.version {
 			Version::Draft14 => {
