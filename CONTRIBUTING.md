@@ -45,6 +45,10 @@ Costs are wall clock on a cold shared cache, measured on the run that added this
 
 The map lives in `.github/scripts/select.sh`, its fixtures in `select.test.sh`, and the aggregate in `gates.sh`. A lane is three things: an entry in the map, an output on gates.yml's `select` job, and a job whose id is the lane name. Miss one and `Gates` fails rather than passing quietly.
 
+Every test suite must run in CI, at least nightly. The Nightly workflow runs
+Rust doctests, Loom, drill sensitivity, and all four fuzz targets (five minutes
+each); ordinary fuzz regression replay stays in the PR test suite.
+
 Deliberately still nightly, and so landing on `main` rather than in review:
 
 - Swift, Kotlin, and Dart. The interop matrix has no client for any of them, so no aggregate result covers those bindings however green it is. Go is covered, but only by `smoke_full`.

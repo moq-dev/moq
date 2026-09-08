@@ -9,7 +9,7 @@ The host's normal network path is never touched.
 
 ## Plan
 
-`test/drill` already owns the scenarios; this quest
+`test/drill` already owns the scenarios and the sensitivity proof; this quest
 only adds the impaired path they run on. The drills drive real QUIC over
 loopback inside one process, so a private network namespace with `netem` on its
 own `lo` impairs them unmodified: no veth pair, no proxy, and no way to reach

@@ -1,0 +1,13 @@
+# drill: cancel_under_backpressure_releases_the_reader
+# expect: the cancelled subscriber's broadcast never closed
+#
+# Removes the release a subscribing session performs when it ends: the
+# `Announced` collection owns the guards that abort every broadcast the session
+# fed. Preventing that local from dropping keeps every handle downstream of it
+# alive forever, including when cancellation drops the future at an await.
+diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+--- a/rs/moq-net/src/lite/subscriber.rs
++++ b/rs/moq-net/src/lite/subscriber.rs
+@@ -269 +269 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
+-		let mut announced = Announced::default();
++		let mut announced = std::mem::ManuallyDrop::new(Announced::default());

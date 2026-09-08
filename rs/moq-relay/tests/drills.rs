@@ -12,8 +12,9 @@
 //! nothing publishing must report failure, so a drill that passes because no
 //! data ever moved cannot hide here.
 //!
-//! See `test/drill/README.md` for the recipe and the loom/fuzz cases covering
-//! the primitives underneath.
+//! See `test/drill/README.md` for the recipe, the sensitivity proof that each
+//! drill fails when its recovery behavior is removed, and the loom/fuzz cases
+//! covering the primitives underneath.
 #![cfg(all(feature = "quinn", feature = "websocket"))]
 
 use std::time::Duration;

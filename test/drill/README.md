@@ -7,11 +7,13 @@ under a name it already used.
 
 The drills themselves are ordinary Rust integration tests in
 `rs/moq-relay/tests/drills.rs`, so `just test` already runs them whenever
-moq-relay or anything under it changes. This directory holds the focused recipe.
+moq-relay or anything under it changes. This directory holds the focused recipe
+and the sensitivity proof.
 
 ```bash
 just test drill                 # the drills, plus the negative control
 just test drill relay_killed    # one of them
+just test drill-sensitivity     # prove each drill fails without its fix
 ```
 
 ## What each drill does
@@ -53,6 +55,36 @@ A dropped runtime sends no `CONNECTION_CLOSE`, exactly like a killed process, so
 the clients discover the loss through the QUIC idle timeout. The drills set that
 to two seconds (and the keep-alive well inside it), which is what keeps a crash
 bounded rather than fast.
+
+## Sensitivity
+
+The Nightly workflow runs all mutations, so patches that stop applying and drills
+that stop detecting their recovery failures fail CI.
+
+`sensitivity.sh` removes one recovery behavior at a time and requires the drill
+covering it to fail. Each mutation is a patch under `mutations/`, applied to a
+disposable copy of the tree; the checkout it runs from is never modified.
+
+```bash
+just test drill-sensitivity --list
+just test drill-sensitivity reconnect-linger-disabled
+```
+
+| Mutation | Removes | Drill that must fail |
+|---|---|---|
+| `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader` |
+| `reconnect-linger-disabled` | the linger window that carries a broadcast across a reconnect | `relay_killed_mid_group_aborts_then_resumes` |
+| `relay-linger-never-expires` | the end of the relay's linger window for a vanished publisher | `interrupted_publisher_republishes_new_content` |
+
+A mutated tree that fails to compile is a failure of the proof, not a pass: a
+compile error shows the patch touched something, not that the drill was
+watching. So is a drill that fails for a reason other than the one its mutation
+names, which is why each patch declares the message its failure must carry.
+The script runs every drill through nextest, whose process-level timeout also
+terminates a mutation that wedges outside the drill's own Tokio timeouts.
+
+Adding one: write the patch (a `git diff` of the behavior removed), give it the
+two headers, and add a row above.
 
 ## What is underneath
 

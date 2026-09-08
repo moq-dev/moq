@@ -38,5 +38,5 @@ Plain custom elements on `@moq/signals`, no framework. Attributes are the public
 - ESM only. Match the import style of the file you're editing.
 - Document every export and add a `@module` block to each entrypoint; JSR builds docs from them. Deprecated exports are marked `@internal` or dropped from the entrypoint, never annotated "use X".
 - `bun` for everything. Biome formats and lints (repo-root `biome.jsonc`). Tests are `*.test.ts` under `bun test`.
-- `just js check` type-checks, lints, and builds; the build is part of `check` because declaration emit catches errors `--noEmit` misses. It also runs `knip`: importing a package a manifest does not declare works here through hoisting and breaks for a consumer.
+- `just js check` type-checks, lints, and builds; the build is part of `check` because declaration emit catches errors `--noEmit` misses. It also runs `common/deps.ts`: importing a `@moq/*` package a manifest does not declare works here through hoisting and breaks for a consumer.
 - For UI or playback changes, run `just dev` and exercise it in a real browser; WebTransport and WebCodecs only fail at runtime. `<moq-watch>` renders black in a background tab: set `visible="always"` or bring the window frontmost.

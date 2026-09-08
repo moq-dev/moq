@@ -9,7 +9,7 @@ Config structs are clap `Parser`s that also load from TOML, with the `moq-native
 
 # Testing
 
-`tests/drills.rs` disrupts a live session through a real relay over real QUIC: a cancelled reader with a backlog, the relay dying mid-group, and a publisher republishing a name it lost. Each drill records that its fault activated and requires a terminal result rather than a clean finish or a hang. `test/drill/README.md` covers the recipe and the loom and fuzz cases underneath.
+`tests/drills.rs` disrupts a live session through a real relay over real QUIC: a cancelled reader with a backlog, the relay dying mid-group, and a publisher republishing a name it lost. Each drill records that its fault activated and requires a terminal result rather than a clean finish or a hang. `test/drill/README.md` covers the recipe and the sensitivity proof; add a mutation there for any recovery behavior a new drill grades.
 
 # Semver
 

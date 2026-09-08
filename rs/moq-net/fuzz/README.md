@@ -12,6 +12,9 @@ just rs fuzz lite
 The targets are `lite`, `ietf`, `varint`, and `path`. Extra arguments pass through to
 libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
 
+The Nightly workflow runs every target for five minutes and uploads failure inputs
+as workflow artifacts.
+
 ## How it fits together
 
 The target bodies are not in `fuzz_targets/`; they are in `moq-net`'s hidden `fuzz`
