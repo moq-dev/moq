@@ -61,7 +61,8 @@ tools_for_files() {
     # `_check-common` runs on every invocation, so its tools are unconditional.
     tools="actionlint bun jq nix nixfmt shellcheck shfmt taplo"
     scoped '^(quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools="$tools cargo envsubst"
-    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)' && tools="$tools uv"
+    # Maturin compiles moq-ffi during both Python check and test.
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)' && tools="$tools cargo uv"
     # Kotlin's generator builds the Rust FFI before Gradle compiles the wrapper.
     scoped '^(kt/|rs/moq-ffi/)' && tools="$tools cargo rustc gradle java"
     # cargo because `go check` builds moq-ffi for the host, and skips on a
@@ -340,6 +341,48 @@ cargo_suites() {
     done
     out=$(printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
     printf '%s' "${out% }"
+}
+
+# Print the selected suites whose real build step honors RUST_CARGO. Other
+# Cargo callers use literal `cargo`, notably Python/maturin and Dart.
+rust_cargo_suites() {
+    local changed=$1 packages=$2 out=""
+    out=$(selected wasm)
+    if [ -n "$packages" ]; then
+        out="$out $(selected 'check test')"
+    fi
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(go/|kt/|cpp/obs/|rs/libmoq/|flake\.nix$)'; then
+        out="$out $(selected check)"
+    fi
+    printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Print selected suites that compile through literal Cargo. Every Cargo-backed
+# check has at least one literal invocation; Python tests and Smoke do too.
+literal_cargo_suites() {
+    local changed=$1 out=""
+    if tools_for_files "$changed" | grep -qx cargo; then
+        out=$(selected check)
+    fi
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+        out="$out $(selected test)"
+    fi
+    out="$out $(selected 'smoke smoke-full')"
+    printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Print selected suites that run maturin from py/moq-ffi. A relative Cargo
+# target directory is resolved there, not from the repository root.
+python_cargo_suites() {
+    local changed=$1 out=""
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+        out=$(selected 'check test')
+    fi
+    out="$out $(selected smoke-full)"
+    printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
 # Print check when the changed-file predicate for the real `_flake` recipe
@@ -734,6 +777,17 @@ EOF
         { [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] || [ "$CARGO_PROBE_EXPLICIT_TARGET" = false ]; }
 }
 
+# True when an override resolves to an executable file from the same working
+# directory as its harness. Relative Smoke overrides are interpreted from test/.
+executable_override() {
+    local value=$1 cwd=$2 candidate
+    case $value in
+        /*) candidate=$value ;;
+        *) candidate=$cwd/$value ;;
+    esac
+    [ -x "$candidate" ] && [ ! -d "$candidate" ]
+}
+
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
@@ -744,6 +798,22 @@ probe_harness_cargo_target() {
             "CARGO_TARGET_DIR is explicitly empty, which Cargo refuses" \
             "unset CARGO_TARGET_DIR or set it to a non-empty path" 30 0
         return
+    fi
+    if [ "$id" = smoke ]; then
+        local name value
+        for name in RELAY_BIN MOQ_BIN; do
+            case $name in
+                RELAY_BIN) value=${RELAY_BIN:-} ;;
+                MOQ_BIN) value=${MOQ_BIN:-} ;;
+            esac
+            [ -n "$value" ] || continue
+            if ! executable_override "$value" "$REPO/test"; then
+                record "behavior.$id-artifact-layout" behavior missing true "$suites" \
+                    "$name is not an executable file from $REPO/test: $value" \
+                    "set $name to an executable path as resolved from $REPO/test" 30 0
+                return
+            fi
+        done
     fi
     if [ "$id" = wasm ] && [ -n "${RELAY_BIN:-}" ]; then
         case $RELAY_BIN in
@@ -1530,6 +1600,18 @@ self_test_ownership() {
         "$(cargo_suites 'go/wrapper/moq/lib.go' '')" check
     check 'a Rust diff uses Cargo under both' \
         "$(cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
+    check 'a Python diff compiles with literal Cargo' \
+        "$(literal_cargo_suites 'py/moq-rs/src/lib.py')" 'check test'
+    check 'a Python diff does not inherit RUST_CARGO' \
+        "$(rust_cargo_suites 'py/moq-rs/src/lib.py' '')" ''
+    check 'a Dart diff compiles with literal Cargo' \
+        "$(literal_cargo_suites 'dart/moq/lib.dart')" check
+    check 'a Dart diff does not inherit RUST_CARGO' \
+        "$(rust_cargo_suites 'dart/moq/lib.dart' '')" ''
+    check 'a Rust diff compiles with configured Cargo' \
+        "$(rust_cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
+    check 'Python Cargo target context follows its selected scope' \
+        "$(python_cargo_suites 'py/moq-rs/src/lib.py')" 'check test'
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
     check 'Cargo home prefers its override' "$(HOME=/home CARGO_HOME=/cargo cargo_home)" /cargo
@@ -1674,6 +1756,7 @@ self_test() {
     check 'tools rust' "$(tools_for_files 'rs/moq-net/src/lib.rs' | grep -c '^cargo$')" 1
     check 'tools Kotlin needs Cargo' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^cargo$')" 1
     check 'tools Kotlin needs rustc' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^rustc$')" 1
+    check 'tools Python needs Cargo' "$(tools_for_files 'py/moq-rs/src/lib.py' | grep -c '^cargo$')" 1
     check 'tools ffi pulls go' "$(tools_for_files 'rs/moq-ffi/src/lib.rs' | grep -c '^go$')" 1
     check 'tools ALL pulls gradle' "$(tools_for_files ALL | grep -c '^gradle$')" 1
     check 'tools js only' "$(tools_for_files 'js/hang/src/index.ts' | grep -c '^cargo$')" 0
@@ -1700,6 +1783,12 @@ self_test() {
     ln -sf "$(command -v env)" "$SCRATCH/compiler dir/c compiler"
     check 'relative C compiler resolves from smoke cwd' \
         "$(command_path "$SCRATCH/compiler dir" './c compiler')" './c compiler'
+    mkdir -p "$SCRATCH/smoke-cwd/bin"
+    ln -sf "$(command -v env)" "$SCRATCH/smoke-cwd/bin/tool"
+    executable_override bin/tool "$SCRATCH/smoke-cwd"
+    check 'relative Smoke override resolves from its cwd' "$?" 0
+    executable_override bin "$SCRATCH/smoke-cwd"
+    check 'Smoke override rejects a directory' "$?" 1
     check 'dynamic pkg-config stays out of tool words' "$(tools_for_suite smoke-full | grep -c 'pkg-config')" 0
     check 'pkg-config target override wins' \
         "$(PKG_CONFIG_doctor_test_host=/target HOST_PKG_CONFIG=/host PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" /target
@@ -2007,16 +2096,9 @@ if ((RUST_SELECT_STATUS != 0)); then
     RUST_PACKAGES=""
 fi
 CARGO_SUITES=$(cargo_suites "$CHANGED" "$RUST_PACKAGES")
-CARGO_SMOKE_SUITES=""
-CARGO_RUST_SUITES=""
-for suite in $CARGO_SUITES; do
-    case $suite in
-        smoke | smoke-full) CARGO_SMOKE_SUITES="$CARGO_SMOKE_SUITES $suite" ;;
-        *) CARGO_RUST_SUITES="$CARGO_RUST_SUITES $suite" ;;
-    esac
-done
-CARGO_SMOKE_SUITES=${CARGO_SMOKE_SUITES# }
-CARGO_RUST_SUITES=${CARGO_RUST_SUITES# }
+CARGO_RUST_SUITES=$(rust_cargo_suites "$CHANGED" "$RUST_PACKAGES")
+CARGO_LITERAL_SUITES=$(literal_cargo_suites "$CHANGED")
+PYTHON_CARGO_SUITES=$(python_cargo_suites "$CHANGED")
 
 # A successful narrow selection exercised the same awk behavior as this
 # fixture. A failed selection is already recorded above with its real output,
@@ -2029,6 +2111,16 @@ else
 fi
 
 probe_writable scratch "${TMPDIR:-/tmp}" "$SUITES"
+
+if [ -n "$PYTHON_CARGO_SUITES" ] && [ -n "${CARGO_TARGET_DIR:-}" ] &&
+    [ "${CARGO_TARGET_DIR#/}" = "$CARGO_TARGET_DIR" ]; then
+    record behavior.python-target-dir behavior degraded true "$PYTHON_CARGO_SUITES" \
+        "CARGO_TARGET_DIR is relative, but maturin resolves it from $REPO/py/moq-ffi" \
+        "use an absolute CARGO_TARGET_DIR for Python builds" 5 0
+else
+    record behavior.python-target-dir behavior skip false "" \
+        "no selected Python build has a context-dependent Cargo target directory" "" 5 0
+fi
 
 if [ -n "$CARGO_SUITES" ]; then
     if [ -z "$TARGET_DIR" ]; then
@@ -2055,10 +2147,10 @@ if [ -n "$CARGO_RUST_SUITES" ]; then
 else
     record probe.cargo-compile probe skip false "" "no selected Rust recipe compiles for this scope" "" 120 0
 fi
-if [ -n "$CARGO_SMOKE_SUITES" ]; then
-    probe_cargo_compile cargo-smoke "$CARGO_SMOKE_SUITES" "" cargo
+if [ -n "$CARGO_LITERAL_SUITES" ]; then
+    probe_cargo_compile cargo-literal "$CARGO_LITERAL_SUITES" "" cargo
 else
-    record probe.cargo-smoke probe skip false "" "no selected Smoke suite compiles for this scope" "" 120 0
+    record probe.cargo-literal probe skip false "" "no selected recipe compiles with literal Cargo" "" 120 0
 fi
 
 # The subcommands each Rust suite invokes, charged to the suite that invokes
