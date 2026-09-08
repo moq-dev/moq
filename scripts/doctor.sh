@@ -347,7 +347,7 @@ cargo_suites() {
 # Cargo callers use literal `cargo`, notably Python/maturin and Dart.
 rust_cargo_suites() {
     local changed=$1 packages=$2 out=""
-    out=$(selected wasm)
+    out=$(selected 'smoke-full wasm')
     if [ -n "$packages" ]; then
         out="$out $(selected 'check test')"
     fi
@@ -363,7 +363,7 @@ rust_cargo_suites() {
 literal_cargo_suites() {
     local changed=$1 out=""
     if [ "$changed" = ALL ] ||
-        printf '%s\n' "$changed" | grep -qE '^(py/|dart/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+        printf '%s\n' "$changed" | grep -qE '^(py/|dart/|quest/|rs/quest/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
         out=$(selected check)
     fi
     if [ "$changed" = ALL ] ||
@@ -372,6 +372,27 @@ literal_cargo_suites() {
     fi
     out="$out $(selected 'smoke smoke-full')"
     printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Go and Kotlin build with configured Cargo, then locate the result with
+# literal Cargo metadata and an unqualified host layout.
+binding_cargo_suites() {
+    local changed=$1
+    [ -n "$(selected check)" ] || return
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(go/|kt/|rs/moq-ffi/)'; then
+        printf 'check\n'
+    fi
+}
+
+# Dart always reads target/<host>/release below the workspace.
+dart_cargo_suites() {
+    local changed=$1
+    [ -n "$(selected check)" ] || return
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(dart/|rs/moq-ffi/)'; then
+        printf 'check\n'
+    fi
 }
 
 # Print selected suites that run maturin from py/moq-ffi. A relative Cargo
@@ -830,6 +851,13 @@ probe_harness_cargo_target() {
             layout_suites=${layout_suites# }
         fi
     fi
+    if [ "$id" = smoke ] && [ -n "$layout_suites" ] && [ -n "${CARGO_TARGET_DIR:-}" ] &&
+        [ "${CARGO_TARGET_DIR#/}" = "$CARGO_TARGET_DIR" ]; then
+        record "behavior.$id-artifact-layout" behavior degraded true "$layout_suites" \
+            "CARGO_TARGET_DIR is relative, but Smoke resolves metadata after changing to $REPO/test" \
+            "use an absolute CARGO_TARGET_DIR for Smoke" 30 0
+        return
+    fi
     if [ "$id" = wasm ] && [ -n "${RELAY_BIN:-}" ]; then
         case $RELAY_BIN in
             /*)
@@ -872,8 +900,8 @@ probe_harness_cargo_target() {
     if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] && [ "$relay_override" = 0 ]; then
         if [ -n "$layout_suites" ]; then
             record "behavior.$id-artifact-layout" behavior degraded true "$layout_suites" \
-                "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
-                "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
+                "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the selected recipes read target directly" \
+                "unset Cargo build.target, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
             return
         fi
         record "behavior.$id-artifact-layout" behavior ok true "$suites" \
@@ -1626,6 +1654,8 @@ self_test_ownership() {
         "$(rust_cargo_suites 'py/moq-rs/src/lib.py' '')" ''
     check 'a Dart diff compiles with literal Cargo' \
         "$(literal_cargo_suites 'dart/moq/lib.dart')" check
+    check 'a quest diff compiles with literal Cargo' \
+        "$(literal_cargo_suites 'quest/m0/example.md')" check
     check 'a Go diff does not compile with literal Cargo' \
         "$(literal_cargo_suites 'go/wrapper/moq/lib.go')" ''
     check 'a Dart diff does not inherit RUST_CARGO' \
@@ -1634,6 +1664,14 @@ self_test_ownership() {
         "$(rust_cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
     check 'Python Cargo target context follows its selected scope' \
         "$(python_cargo_suites 'py/moq-rs/src/lib.py')" 'check test'
+    check 'Go uses the mixed Cargo artifact layout' \
+        "$(binding_cargo_suites 'go/wrapper/moq/lib.go')" check
+    check 'Dart uses its fixed artifact layout' \
+        "$(dart_cargo_suites 'dart/moq/lib.dart')" check
+    SUITES=smoke-full
+    check 'smoke-full compiles Go with configured Cargo' \
+        "$(rust_cargo_suites 'doc/a.md' '')" smoke-full
+    SUITES="check test"
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
     check 'Cargo home prefers its override' "$(HOME=/home CARGO_HOME=/cargo cargo_home)" /cargo
@@ -1883,6 +1921,12 @@ EOF
         CARGO_BUILD_TARGET=$host RELAY_BIN="$(command -v env)" MOQ_BIN="$(command -v env)" \
             probe_harness_cargo_target smoke smoke cargo
         check 'Smoke overrides bypass explicit host layout' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
+        CARGO_TARGET_DIR=relative probe_harness_cargo_target smoke smoke cargo
+        check 'Smoke rejects a relative target when it needs artifacts' \
+            "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
+        probe_harness_cargo_target bindings check "$SCRATCH/cargo-wrapper"
+        check 'bindings reject a configured Cargo target layout' \
+            "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -2113,6 +2157,26 @@ if [ -n "$WASM_CARGO_SUITES" ]; then
     probe_harness_cargo_target wasm "$WASM_CARGO_SUITES" "${RUST_CARGO:-cargo}"
 else
     record behavior.wasm-artifact-layout behavior skip false "" "wasm is not selected" "" 30 0
+fi
+
+BINDING_CARGO_SUITES=$(binding_cargo_suites "$CHANGED")
+if [ -n "$BINDING_CARGO_SUITES" ]; then
+    probe_harness_cargo_target bindings "$BINDING_CARGO_SUITES" "${RUST_CARGO:-cargo}"
+else
+    record behavior.bindings-artifact-layout behavior skip false "" \
+        "no selected Go or Kotlin build combines configured Cargo with literal metadata" "" 30 0
+fi
+
+DART_CARGO_SUITES=$(dart_cargo_suites "$CHANGED")
+if [ -z "$DART_CARGO_SUITES" ]; then
+    record behavior.dart-artifact-layout behavior skip false "" "no Dart check is selected" "" 5 0
+elif [ "${CARGO_TARGET_DIR+x}" = x ] && [ "$CARGO_TARGET_DIR" != "$REPO/target" ]; then
+    record behavior.dart-artifact-layout behavior degraded true "$DART_CARGO_SUITES" \
+        "Dart reads $REPO/target/<host>/release, but CARGO_TARGET_DIR is ${CARGO_TARGET_DIR:-empty}" \
+        "unset CARGO_TARGET_DIR or set it to $REPO/target for Dart checks" 5 0
+else
+    record behavior.dart-artifact-layout behavior ok true "$DART_CARGO_SUITES" \
+        "Dart's fixed workspace target directory matches Cargo" "" 5 0
 fi
 
 # Ask the Rust selector once. Its result drives the Cargo, wasm-target, and
