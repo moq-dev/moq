@@ -49,7 +49,3 @@ required scope; a diagnostic run can still report all independent results.
 The setup entry point follows the documented
 [Codex local environments](https://learn.chatgpt.com/docs/environments/local-environment)
 mechanism; verify the installed app's generated configuration when implementing.
-
-## Related
-
-- [Merge evidence](/quest/m0/merge-verification-evidence.md) - records unavailable checks alongside executed results
