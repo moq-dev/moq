@@ -101,6 +101,18 @@ worktree ACTION="check" $BASE="":
     	fi
     }
 
+    # A directory git will create on demand is only as writable as the parent it
+    # would be created in, so probe that instead of reporting it missing.
+    access_or_parent() {
+    	local dir="$1" result
+    	result=$(access "$dir")
+    	if [[ "$result" == missing ]]; then
+    		access "$(dirname "$dir")"
+    	else
+    		echo "$result"
+    	fi
+    }
+
     objects=$(access "$common_dir/objects")
     heads=$(access "$common_dir/refs/heads")
     worktree_meta=$(access "$git_dir")
@@ -109,12 +121,19 @@ worktree ACTION="check" $BASE="":
     # not in the branch's ref. Probing refs/heads for it would refuse on a
     # writable config and, worse, proceed on a read-only one.
     config=$(access "$common_dir")
+    # A fetch writes three places, not one: objects, the remote-tracking refs it
+    # updates (with their lock files), and FETCH_HEAD in the per-worktree
+    # directory. Checking only the object store promises a diagnosis and then
+    # hands the caller a raw git error from whichever of the other two is denied.
+    remotes=$(access_or_parent "$common_dir/refs/remotes")
 
     echo "worktree:    $root"
     echo "branch:      ${branch:-(detached)} $(git rev-parse --short HEAD)"
     echo "git-dir:     $git_dir ($worktree_meta)"
     echo "common-dir:  $common_dir ($config)"
     echo "  fetch needs $common_dir/objects: $objects"
+    echo "             $common_dir/refs/remotes: $remotes"
+    echo "             $git_dir (FETCH_HEAD): $worktree_meta"
     echo "  branch needs $common_dir/refs/heads: $heads"
     echo "  upstream needs $common_dir/config: $config"
     echo "  rebase needs $git_dir and the worktree: $worktree_meta"
@@ -126,8 +145,12 @@ worktree ACTION="check" $BASE="":
     stamp="$git_dir/moq-base"
 
     if [[ "{{ ACTION }}" == setup ]]; then
-    	if [[ "$objects" != write ]]; then
-    		echo "error: cannot fetch; $common_dir/objects is $objects" >&2
+    	blocked=""
+    	[[ "$objects" == write ]] || blocked="$blocked $common_dir/objects ($objects)"
+    	[[ "$remotes" == write ]] || blocked="$blocked $common_dir/refs/remotes ($remotes)"
+    	[[ "$worktree_meta" == write ]] || blocked="$blocked $git_dir ($worktree_meta)"
+    	if [[ -n "$blocked" ]]; then
+    		echo "error: cannot fetch;$blocked" >&2
     		echo "       grant write access to the main repository's Git directory, not just this worktree" >&2
     		exit 1
     	fi
