@@ -24,6 +24,22 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// fill a group's cache.
 pub const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
+/// Slots `VecDeque` rounds a group's first frame up to.
+///
+/// A `RawVec` detail rather than a knob, so it is asserted rather than trusted: std
+/// handing out more would silently undercharge every cached group.
+const FRAME_SLOTS: usize = 4;
+
+/// Heap one cached group costs beyond its frame payloads, excluding the track-side
+/// bookkeeping in [`track::CACHE_OVERHEAD`].
+///
+/// A group is one kio channel (allocated whether or not anything ever parks on it), the
+/// `Alive` its producer clones share, and the frame slots the first write rounds up to.
+/// Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is derived rather than
+/// measured.
+pub(crate) const CACHE_OVERHEAD: u64 =
+	kio::footprint::<GroupState>() as u64 + cache::arc_bytes::<Alive>() + (FRAME_SLOTS * size_of::<Frame>()) as u64;
+
 /// A group contains a sequence number because they can arrive out of order.
 ///
 /// You can use [track::Producer::append_group] if you just want to +1 the sequence number.
@@ -911,6 +927,22 @@ mod test {
 	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	use futures::FutureExt;
+
+	/// [`FRAME_SLOTS`] is std's rounding, not ours, so measure it: a larger real value
+	/// would undercharge every cached group without touching a line of this crate.
+	#[test]
+	fn one_frame_fits_the_charged_slots() {
+		let mut frames: VecDeque<Frame> = VecDeque::new();
+		frames.push_back(Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::new(),
+		});
+		let capacity = frames.capacity();
+		assert!(
+			capacity <= FRAME_SLOTS,
+			"a one-frame deque now allocates {capacity} slots"
+		);
+	}
 
 	#[test]
 	fn basic_frame_reading() {

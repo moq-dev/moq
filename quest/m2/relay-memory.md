@@ -36,5 +36,4 @@ degree and adds a second, more specific route per carried broadcast.
 ## Related
 
 - [Routes per broadcast gauge](/quest/m2/route-gauge.md) - the operator-facing count, shippable on its own
-- [Group charge](/quest/m0/group-charge.md) - the group cache charges what a cached group really costs; a group holds one of the same state cells
 - [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost

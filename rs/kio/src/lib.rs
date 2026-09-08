@@ -58,6 +58,23 @@ pub use shared::Shared;
 pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
+/// Heap bytes a [`Producer`] and its [`Consumer`]s share, for callers budgeting memory.
+///
+/// A channel owns two allocations regardless of how it is used: the state cell holding
+/// `T`, its mutex, and the three waiter lists, plus the reference counts beside it. Both
+/// are sized at compile time, so a caller charging per channel can derive its constant
+/// from this rather than measuring a process and pasting the number.
+///
+/// Excludes anything `T` allocates on its own.
+pub const fn footprint<T>() -> usize {
+	allocation::<sync::Mutex<State<T>>>() + allocation::<Counts>()
+}
+
+/// Bytes an `Arc<T>` allocation occupies: the value behind the two reference counts.
+const fn allocation<T>() -> usize {
+	2 * size_of::<usize>() + size_of::<T>()
+}
+
 /// The channel closed before the awaited condition held.
 ///
 /// The `async` methods report closure with this instead of handing back a [`Ref`],

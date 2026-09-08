@@ -237,6 +237,16 @@ struct Slot {
 	stamp: u32,
 }
 
+/// Heap the track keeps per cached group, excluding the group itself
+/// ([`group::CACHE_OVERHEAD`]).
+///
+/// One [`Slot`] under its sequence in `lookup`, plus a hint in each of `arrival` and
+/// `evict`. Doubled because both containers run half empty in the worst case: a
+/// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
+/// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
+/// derived rather than measured.
+pub(crate) const CACHE_OVERHEAD: u64 = 2 * (size_of::<u64>() + size_of::<Slot>() + 2 * size_of::<(u64, u32)>()) as u64;
+
 /// The registered subscriptions, aggregated by the producer.
 type Subscriptions = Vec<kio::Consumer<Subscription>>;
 
@@ -4808,7 +4818,11 @@ mod test {
 		assert!(consumer.peek_group(2).is_some(), "latest group survives");
 		// Steady state carries the protected live edge plus the just-demoted group
 		// (debt is charged before the demotion, so eviction lags one append).
-		assert!(pool.used() <= 21_000, "usage hovers near capacity: {}", pool.used());
+		assert!(
+			pool.used() <= 2 * (10_000 + cache::ENTRY_OVERHEAD),
+			"usage hovers near capacity: {}",
+			pool.used()
+		);
 
 		// A fresh subscriber skips the evicted groups entirely.
 		let mut subscriber = producer.subscribe(None);

@@ -27,15 +27,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::track::TrackState;
+use super::group;
+use super::track::{self, TrackState};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
-/// Covers the group/track slot allocations so a track producing many tiny groups
-/// (e.g. one frame per group) is billed roughly for its real footprint instead of
-/// just its payload bytes. Also bounds the live group count (`used / 256`), which
-/// keeps the access-time sum below u64 (see [`TICK_MS`]).
-const ENTRY_OVERHEAD: u64 = 256;
+/// A group that holds one small frame is almost entirely bookkeeping: the kio channel
+/// carrying its state, the containers the track indexes it by, and the frame slots
+/// themselves dwarf a chat-sized payload. Billing payload alone lets such a track cache
+/// millions of groups while the pool believes it is inside budget, so the process is
+/// killed before anything is evicted.
+///
+/// Derived from `size_of` rather than pasted from a measured process, so it follows the
+/// structs instead of rotting: each half lives beside the types it sizes, in
+/// [`group::CACHE_OVERHEAD`] and [`track::CACHE_OVERHEAD`]. It excludes what the
+/// allocator rounds up and what a group with many frames grows into, both of which only
+/// matter for shapes payload already dominates.
+///
+/// Also bounds the live group count (`used / ENTRY_OVERHEAD`), which keeps the
+/// access-time sum below u64 (see [`TICK_MS`]).
+pub(crate) const ENTRY_OVERHEAD: u64 = group::CACHE_OVERHEAD + track::CACHE_OVERHEAD;
+
+/// Bytes an `Arc<T>` allocation occupies: the value behind its two reference counts.
+pub(crate) const fn arc_bytes<T>() -> u64 {
+	(2 * size_of::<usize>() + size_of::<T>()) as u64
+}
 
 /// Sub-tick boosts applied to the last-access stamp, breaking ties within one
 /// coarse tick: a frame write outranks merely-inserted content, and a read (a
@@ -48,7 +64,7 @@ const READ_BOOST: u64 = 2;
 /// Coarse ticks keep the count-weighted timestamp sum far from u64 overflow: the
 /// sum is bounded by `elapsed_ticks * live_groups`, live groups are bounded by
 /// `used / ENTRY_OVERHEAD`, and twenty years of ticks (6.3e9) times a 64 GiB
-/// target's worst-case ~270M groups is ~1.7e18, a tenth of `u64::MAX`. A
+/// target's worst case of ~70M groups is ~4.5e17, a fortieth of `u64::MAX`. A
 /// byte-weighted mean would overflow u64 even at whole-second ticks, which is why
 /// the mean is count-weighted.
 const TICK_MS: u64 = 100;
@@ -95,9 +111,10 @@ impl Default for Inner {
 impl Pool {
 	/// Create a pool with a byte target that tracks evict toward as they write.
 	///
-	/// The budget counts frame payload bytes (plus a small fixed overhead per
-	/// group), not process RSS, and is a convergence target rather than a hard
-	/// limit; leave headroom when sizing it from real memory.
+	/// The budget counts frame payload bytes plus a fixed cost per cached group, which
+	/// is most of what a group carrying one small frame occupies. It is not process
+	/// RSS, and it is a convergence target rather than a hard limit; leave headroom
+	/// when sizing it from real memory.
 	pub fn new(capacity: u64) -> Self {
 		let pool = Self::default();
 		pool.inner.capacity.store(capacity, Ordering::Relaxed);
@@ -491,7 +508,7 @@ mod test {
 
 	#[test]
 	fn accrue_none_under_capacity() {
-		let pool = Pool::new(1000);
+		let pool = Pool::new(ENTRY_OVERHEAD + 1000);
 		let mut charge = charge(&pool);
 		charge.add(500);
 		assert_eq!(pool.accrue(100), None);
