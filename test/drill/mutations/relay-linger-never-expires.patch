@@ -1,0 +1,21 @@
+# drill: interrupted_publisher_republishes_new_content
+# expect: the interrupted publisher: no announcement change
+#
+# Removes the end of the relay's linger window. The window itself is the feature
+# (a publisher that reconnects into it resumes seamlessly), but a window that
+# never expires leaves a name announced that nothing serves, so subscribers wait
+# on a dead broadcast instead of being told it is gone.
+diff --git a/rs/moq-relay/src/cluster.rs b/rs/moq-relay/src/cluster.rs
+index c7408bc7f..0c3a3f1b9 100644
+--- a/rs/moq-relay/src/cluster.rs
++++ b/rs/moq-relay/src/cluster.rs
+@@ -26,7 +26,8 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+ /// losing its last publisher before unannouncing. Long enough for a publisher
+ /// restart or a brief network blip to resume seamlessly, short enough that a
+ /// genuinely-gone broadcast unannounces promptly.
+-const DEFAULT_LINGER: Duration = Duration::from_secs(5);
++// MUTATION: a window that never expires, so a vanished publisher stays announced.
++const DEFAULT_LINGER: Duration = Duration::from_secs(24 * 60 * 60);
+ 
+ /// How long a peer must stay unannounced before we abort the dial. Must clear the
+ /// "prefer shorter hop" re-announce flap (which arrives as
