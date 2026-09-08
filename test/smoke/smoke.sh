@@ -116,6 +116,10 @@ if [[ "$MEDIA" -eq 1 ]]; then
         echo "error: --media and --negative are separate runs" >&2
         exit 2
     fi
+    if [[ -n "$FAULT" ]]; then
+        echo "error: MOQ_QA_FAULT only applies to the interop matrix, not --media" >&2
+        exit 2
+    fi
     PUBLISHERS="js"
     SUBSCRIBERS="js"
 fi
@@ -137,6 +141,7 @@ needs_js() {
 
 rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
 [[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
+[[ "$MEDIA" -eq 0 ]] || rerun+=(--media)
 bundle_init smoke
 if [[ -n "$FAULT" ]]; then
     bundle_rerun env "MOQ_QA_FAULT=$FAULT" "${rerun[@]}"
