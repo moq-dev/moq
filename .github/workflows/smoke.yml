@@ -100,6 +100,7 @@ jobs:
         if: inputs.matrix != 'core'
         run: nix develop --command just test smoke-negative
         shell: bash -leo pipefail {0}
+
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle

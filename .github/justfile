@@ -23,7 +23,7 @@ select $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "$FILES" ]]; then
-    	FILES=$(just _changed "")
+        FILES=$(just _changed "")
     fi
     printf '%s' "$FILES" | {{ source_directory() }}/scripts/select.sh
 
