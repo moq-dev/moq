@@ -21,11 +21,16 @@ non-conformant, not a gap in this repo.
 
 - `race_transport_connect` in `rs/moq-native/src/client.rs` returns on
   `err.is_auth()` from either arm. Record an auth error like any other failure
-  and keep polling the other arm; when both are done, report the auth error if
-  either arm produced one, since a genuine bad token fails both. Flip
+  and keep polling the other arm. When both are done, the result is an auth
+  error only if both arms rejected authentication; otherwise report the
+  non-auth failure, which stays retryable, because `Reconnect::run` exits on
+  `is_auth()` and a fallback endpoint that answers every non-WebTransport
+  request with 403 must not stop the client from retrying a QUIC dial that
+  merely failed transiently. Flip
   `race_transport_connect_stops_on_quic_auth_error` and add: WebSocket 403 then
-  QUIC success connects; both arms refusing reports Forbidden; a QUIC failure
-  after a WebSocket 403 reports Forbidden, not the QUIC error.
+  QUIC success connects; both arms refusing reports Forbidden; a transient QUIC
+  failure after a WebSocket 403 reports the QUIC error and the reconnect loop
+  retries.
 - `MoqClient` in `rs/moq-ffi/src/session.rs` gains `set_websocket_enabled` and
   `set_websocket_delay` beside `set_tls_disable_verify`, mapping onto
   `websocket::Client::{enabled, delay}`. libmoq already exports

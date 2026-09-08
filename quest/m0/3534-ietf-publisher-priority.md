@@ -44,7 +44,11 @@ Steps:
   where it reads the timescale today. The decoder resolves an absent flag to the
   track's declared default first and only then to the draft's fallback; confirm
   that fallback against each negotiated draft's text instead of keeping 128 by
-  assumption, and cite the section in the type's docs.
+  assumption, and cite the section in the type's docs. On the subscriber the
+  header value is decoded and then dropped: the model has no per-group
+  priority, so an explicit subgroup value that disagrees with the track's
+  declared priority never overrides `track::Info::priority`, and a test pins
+  that a conflicting header leaves the track's priority unchanged.
 - Mirror in `js/net/src/ietf/publisher.ts`, `object.ts`, and `properties.ts`.
 - Tests: 0x21 round-trips on SUBSCRIBE_OK on every draft that carries the
   block and is absent from the bytes on the ones that do not; a lite-ingested track
