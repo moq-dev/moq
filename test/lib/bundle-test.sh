@@ -33,7 +33,12 @@ check() {
 }
 
 mode() {
-    stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+    local result
+    if result=$(stat -c %a "$1" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        stat -f %Lp "$1"
+    fi
 }
 
 # Each case runs in its own subshell so a `bundle_init` cannot leak into the
