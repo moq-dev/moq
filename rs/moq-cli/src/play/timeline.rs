@@ -24,9 +24,9 @@ pub(super) struct Presentation {
 	delay: Duration,
 	/// Whether the speaker owns the anchor.
 	speaker: bool,
-	/// Set when the speaker restarts on a new timeline, so the next audio frame
-	/// pins the anchor outright instead of pacing against media it will never
-	/// play.
+	/// Set when the speaker restarts on a new timeline mid-track, so the next
+	/// audio frame pins the anchor outright instead of pacing against media it
+	/// will never play.
 	restart: bool,
 }
 
@@ -73,8 +73,13 @@ impl Presentation {
 			.and_then(|at| at.checked_sub(self.delay))
 			.unwrap_or(now);
 
+		// Taking ownership re-pins outright rather than pacing. Whatever set the
+		// anchor before is either video, which the speaker cannot follow, or a
+		// track that has since ended, and a timestamp that maps into the past under
+		// that anchor would never re-anchor on its own: the sink would play now
+		// while the picture stayed on a timeline nothing is feeding.
 		let before = self.pacer.due(timestamp);
-		let after = if std::mem::take(&mut self.restart) {
+		let after = if !self.speaker || std::mem::take(&mut self.restart) {
 			self.pacer.hurry(timestamp, edge)
 		} else {
 			self.pacer.pace(timestamp, edge)
@@ -93,6 +98,10 @@ impl Presentation {
 
 	/// The audio track stopped, so nothing holds playback to the speaker's
 	/// cadence any more and video takes the anchor back.
+	///
+	/// A replacement rendition takes ownership again on its first frame, and
+	/// re-pins there: it is a track boundary, so its timestamps are not
+	/// necessarily continuous with what just ended.
 	pub(super) fn stopped(&mut self) {
 		self.speaker = false;
 	}
@@ -256,6 +265,26 @@ mod tests {
 		let now = start + Duration::from_millis(500);
 		presentation.audio(Duration::from_millis(1_500), Duration::from_millis(40), now);
 		assert_eq!(presentation.due(ms(1_500)), Some(now + Duration::from_millis(40)));
+	}
+
+	/// Video usually anchors first, and audio's first frame can sit behind that
+	/// anchor. Pacing it would map it into the past, which never re-anchors, so
+	/// the sink would play now while the picture stayed on video's timeline.
+	#[test]
+	fn the_speaker_re_anchors_when_it_takes_over() {
+		let start = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		presentation.video(ms(4_000), start);
+
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		assert_eq!(presentation.due(ms(1_000)), Some(start + DELAY));
+
+		// A replacement rendition is a track boundary too: its timestamps need not
+		// continue the one that just ended.
+		presentation.stopped();
+		let now = start + Duration::from_millis(20);
+		presentation.audio(Duration::from_millis(200), DELAY, now);
+		assert_eq!(presentation.due(ms(200)), Some(now + DELAY));
 	}
 
 	/// A hole too large to play through drops the buffered audio and starts a new
