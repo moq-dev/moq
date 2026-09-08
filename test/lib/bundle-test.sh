@@ -125,6 +125,7 @@ secret_case() {
         # An opaque bearer credential: the secret is the second word, so a
         # pattern that stops at the first space ships it.
         echo "Authorization: Bearer opaque-bearer-credential"
+        echo 'Cookie: session=\"opaque-plain-escaped-secret\"'
         echo "Proxy-Authorization: Basic opaque-proxy-credential"
         echo 'set-cookie: session=opaque-cookie-value; Path=/'
         # Upper case, because BSD sed has no case-insensitive substitution and a
@@ -152,19 +153,24 @@ HAR
   }
 }
 HAR
+    printf '%s\n' '{"headers":[{"name":"Accept","value":"text/html"},{"name":"Authorization","value":"Bearer opaque-compact-har-secret"},{"name":"Cookie","value":"opaque-compact-cookie-secret"}]}' \
+        >"$BUNDLE_TRACE_LIVE/compact.har"
     printf 'request?token=opaque-trace-secret\n' >"$BUNDLE_TRACE_LIVE/browser.trace.zip"
     printf '\211PNG\r\n\032\nrendered token=opaque-screenshot-secret\n' >"$BUNDLE_TRACE_LIVE/browser.png"
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
-    opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential \
-    opaque-har-credential opaque-escaped-cookie-secret opaque-keyed-json-secret \
+    opaque-bearer-credential opaque-plain-escaped-secret opaque-proxy-credential \
+    opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
+    opaque-compact-har-secret opaque-compact-cookie-secret opaque-keyed-json-secret \
     opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
 check "redaction keeps escaped-string HAR valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/cookies.har"
+check "redaction keeps compact multi-header HAR valid" python3 -c \
+    'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/compact.har"
 check "redaction keeps escaped keyed-header JSON valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/work/keyed.json"
 check "an uploadable bundle excludes Playwright trace archives" test ! -f "$bundle/trace/browser.trace.zip"
@@ -323,6 +329,16 @@ else
     ok "a malformed retain toggle is refused"
 fi
 check "a malformed retain toggle retains no partial bundle" test ! -d "$ROOT/invalid-retain.d"
+
+sleep 120 &
+identity_first=$!
+sleep 120 &
+identity_second=$!
+first_start=$("$DIR/process-start.py" "$identity_first")
+second_start=$("$DIR/process-start.py" "$identity_second")
+check "same-second processes have distinct birth identities" test "$first_start" != "$second_start"
+kill "$identity_first" "$identity_second" 2>/dev/null || true
+wait "$identity_first" "$identity_second" 2>/dev/null || true
 
 # ── a hung process is described before it is killed ─────────────────────────
 # The stack itself may be unavailable (ptrace_scope, no debugger, a hardened

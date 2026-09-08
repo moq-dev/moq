@@ -57,6 +57,10 @@ BUNDLE_RUN_ID=""
 
 _bundle_have() { command -v "$1" >/dev/null 2>&1; }
 
+_bundle_process_start() {
+    "$BUNDLE_LIB_DIR/process-start.py" "$1" 2>/dev/null
+}
+
 # JSON string escaping for every byte Bash can store. Bash variables cannot
 # contain NUL; the remaining JSON control bytes are emitted as Unicode escapes.
 _bundle_json() {
@@ -252,7 +256,7 @@ bundle_binary() {
 bundle_process() {
     local command="${3:-}" started
     [[ -n "$command" ]] || command=$(ps -o command= -p "$2" 2>/dev/null | head -n 1 || true)
-    started=$(ps -o lstart= -p "$2" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    started=$(_bundle_process_start "$2" || true)
     [[ -z "$started" ]] || printf '%s' "$started" >"$BUNDLE_META/process-starts/$2"
     _bundle_record processes \
         "{ \"name\": $(_bundle_json "$1"), \"pid\": $2, \"command\": $(_bundle_json "$command") }"
@@ -494,7 +498,6 @@ _bundle_redact_stream() {
     LC_ALL=C sed -E \
         -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
         -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
-        -e "s#(($_BUNDLE_RE_HEADERS)[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
         LC_ALL=C awk '
             function closing_quote(text,    i, ch, slashes) {
@@ -510,12 +513,11 @@ _bundle_redact_stream() {
                 }
                 return 0
             }
-            function redact_value(    start, tail, quote) {
-                if (!match($0, /"value"[[:space:]]*:[[:space:]]*"/)) return
-                start = RSTART + RLENGTH
-                tail = substr($0, start)
-                quote = closing_quote(tail)
-                if (quote) $0 = substr($0, 1, start - 1) "<redacted>" substr(tail, quote)
+            function redact_plain(    lower) {
+                lower = tolower($0)
+                if (match(lower, /^[[:space:]]*(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
+                    $0 = substr($0, 1, RSTART + RLENGTH - 1) "<redacted>"
+                }
             }
             function redact_keyed(    rest, out, start, tail, quote) {
                 rest = $0
@@ -534,18 +536,44 @@ _bundle_redact_stream() {
                 }
                 $0 = out rest
             }
+            function redact_har(    rest, out, lower, name_at, name_len, value_at, value_len, token, tail, quote) {
+                rest = $0
+                out = ""
+                while (length(rest)) {
+                    lower = tolower(rest)
+                    name_at = match(lower, /"name"[[:space:]]*:[[:space:]]*"[^"]*"/)
+                    name_len = RLENGTH
+                    value_at = match(lower, /"value"[[:space:]]*:[[:space:]]*"/)
+                    value_len = RLENGTH
+                    if (!name_at && !value_at) {
+                        out = out rest
+                        break
+                    }
+                    if (name_at && (!value_at || name_at < value_at)) {
+                        token = substr(rest, name_at, name_len)
+                        sensitive = tolower(token) ~ /"(proxy-authorization|authorization|set-cookie|cookie|x-api-key)"[[:space:]]*$/
+                        out = out substr(rest, 1, name_at + name_len - 1)
+                        rest = substr(rest, name_at + name_len)
+                        continue
+                    }
+                    out = out substr(rest, 1, value_at + value_len - 1)
+                    tail = substr(rest, value_at + value_len)
+                    quote = closing_quote(tail)
+                    if (!quote) {
+                        out = out (sensitive ? "<redacted>" : tail)
+                        rest = ""
+                        break
+                    }
+                    out = out (sensitive ? "<redacted>" : substr(tail, 1, quote - 1)) substr(tail, quote, 1)
+                    rest = substr(tail, quote + 1)
+                    sensitive = 0
+                }
+                $0 = out
+            }
             {
+                redact_plain()
                 redact_keyed()
-                lower = tolower($0)
-                if (sensitive) {
-                    redact_value()
-                    if (lower ~ /"value"[[:space:]]*:/) sensitive = 0
-                }
-                if (lower ~ /"name"[[:space:]]*:[[:space:]]*"(proxy-authorization|authorization|set-cookie|cookie|x-api-key)"/) {
-                    sensitive = 1
-                    redact_value()
-                    if (lower ~ /"value"[[:space:]]*:/) sensitive = 0
-                }
+                redact_har()
                 print
             }
         '
@@ -668,8 +696,7 @@ _bundle_session() {
                 start_file="$BUNDLE_META/process-starts/$pid"
                 [[ -f "$start_file" ]] || continue
                 wanted=$(<"$start_file")
-                current=$(ps -o lstart= -p "$pid" 2>/dev/null |
-                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                current=$(_bundle_process_start "$pid" || true)
                 [[ -n "$current" && "$current" == "$wanted" ]] || continue
                 # shellcheck disable=SC2016  # backticks are Markdown here, not a subshell
                 printf -- '- %s: pid %s -- attach with `lldb -p %s` or `gdb -p %s`\n' "$name" "$pid" "$pid" "$pid"
@@ -706,7 +733,7 @@ reap() {
         echo "pid $pid: leader gone"
         return
     fi
-    started=$(ps -o lstart= -p "$pid" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    started=$(process_start "$pid" || true)
     if [[ -z "$started" || "$started" != "$want" ]]; then
         echo "pid $pid: reused by another process, skipping"
         return
@@ -717,7 +744,7 @@ reap() {
 
 reap_group() {
     local group="$1" witness="$2" want="$3" started current_group
-    started=$(ps -o lstart= -p "$witness" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    started=$(process_start "$witness" || true)
     current_group=$(ps -o pgid= -p "$witness" 2> /dev/null | tr -d '[:space:]' || true)
     if [[ -z "$started" || "$started" != "$want" || "$current_group" != "$group" ]]; then
         echo "group $group: recorded member $witness is gone or reused, skipping"
@@ -728,26 +755,24 @@ reap_group() {
 }
 
 PRELUDE
+        printf 'process_start() { %q "$1" 2>/dev/null; }\n\n' "$BUNDLE_LIB_DIR/process-start.py"
         local start_file pid pid_start current_start member member_start members
         for start_file in "$BUNDLE_META/process-starts"/*; do
             [[ -f "$start_file" ]] || continue
             pid=${start_file##*/}
             pid_start=$(<"$start_file")
             printf 'reap %s %q\n' "$pid" "$pid_start"
-            current_start=$(ps -o lstart= -p "$pid" 2>/dev/null |
-                sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+            current_start=$(_bundle_process_start "$pid" || true)
             [[ -n "$current_start" && "$current_start" == "$pid_start" ]] || continue
             members=$(ps -axo pid=,pgid= 2>/dev/null | awk -v group="$pid" '$2 == group { print $1 }' || true)
             for member in $members; do
                 [[ "$member" != "$pid" ]] || continue
-                member_start=$(ps -o lstart= -p "$member" 2>/dev/null |
-                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                member_start=$(_bundle_process_start "$member" || true)
                 [[ -n "$member_start" ]] || continue
                 # The recorded leader proves this is still our group. Re-check
                 # after observing the member so an exited leader and recycled
                 # PGID cannot turn an unrelated process into a trusted witness.
-                current_start=$(ps -o lstart= -p "$pid" 2>/dev/null |
-                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                current_start=$(_bundle_process_start "$pid" || true)
                 [[ -n "$current_start" && "$current_start" == "$pid_start" ]] || continue
                 printf 'reap_group %s %s %q\n' "$pid" "$member" "$member_start"
             done
