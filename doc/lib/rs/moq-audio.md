@@ -30,7 +30,10 @@ Highlights:
 ```rust
 let mut audio = moq_audio::decode::Consumer::new(&broadcast, &rendition, "audio", Default::default()).await?;
 let engine = moq_audio::playback::Engine::open(Default::default()).await?;
-let mut sink = engine.sink(moq_audio::playback::Input { sample_rate: audio.sample_rate(), channels: audio.channels(), ..Default::default() })?;
+let mut input = moq_audio::playback::Input::default();
+input.sample_rate = audio.sample_rate();
+input.channels = audio.channels();
+let mut sink = engine.sink(input)?;
 while let Some(frame) = audio.read().await? {
     sink.write(&frame.data)?;
 }

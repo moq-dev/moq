@@ -18,7 +18,7 @@ use winit::window::{Window, WindowId};
 use super::args::Args;
 use super::layout::fit;
 use super::media::Media;
-use super::timeline::{Clock, timestamp};
+use super::timeline::Presentation;
 
 /// How early a frame may be shown rather than waiting another wakeup for it.
 /// Under a display's frame interval, so it can't be seen, but enough that timer
@@ -57,7 +57,7 @@ pub fn run(
 		.context("failed to create the playback event loop")?;
 	let proxy = event_loop.create_proxy();
 	let video = Arc::new(Mutex::new(VecDeque::new()));
-	let audio_clock = Arc::new(Mutex::new(None));
+	let presentation = Arc::new(Mutex::new(Presentation::new(args.delay.into_std())));
 	// Signals the decoder that the presenter took a frame, so it can hand over
 	// the next one instead of dropping it.
 	let drained = Arc::new(tokio::sync::Notify::new());
@@ -68,7 +68,7 @@ pub fn run(
 			broadcast: broadcast.clone(),
 			args,
 			video: video.clone(),
-			audio_clock: audio_clock.clone(),
+			presentation: presentation.clone(),
 			drained: drained.clone(),
 			proxy: proxy.clone(),
 		}
@@ -89,7 +89,7 @@ pub fn run(
 	} else {
 		format!("moq play: {broadcast}")
 	};
-	let mut app = App::new(title, video, audio_clock, drained);
+	let mut app = App::new(title, video, presentation, drained);
 	let result = event_loop.run_app(&mut app).context("playback event loop failed");
 	media.abort();
 	network.abort();
@@ -118,9 +118,8 @@ async fn watch_network(mut tasks: tokio::task::JoinSet<anyhow::Result<()>>, prox
 struct App {
 	title: String,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-	audio_clock: Arc<Mutex<Option<Clock>>>,
+	presentation: Arc<Mutex<Presentation>>,
 	drained: Arc<tokio::sync::Notify>,
-	video_clock: Option<Clock>,
 	display: Option<Display>,
 	next_redraw: Option<Instant>,
 	/// The media tasks are done. Keep presenting whatever they left queued, then
@@ -135,15 +134,14 @@ impl App {
 	fn new(
 		title: String,
 		video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-		audio_clock: Arc<Mutex<Option<Clock>>>,
+		presentation: Arc<Mutex<Presentation>>,
 		drained: Arc<tokio::sync::Notify>,
 	) -> Self {
 		Self {
 			title,
 			video,
-			audio_clock,
+			presentation,
 			drained,
-			video_clock: None,
 			display: None,
 			next_redraw: None,
 			ending: false,
@@ -157,26 +155,23 @@ impl App {
 			return Ok(());
 		};
 		let mut video = self.video.lock().unwrap();
-		let audio_clock = *self.audio_clock.lock().unwrap();
+		let presentation = self.presentation.lock().unwrap();
 
-		if self.video_clock.is_none()
-			&& audio_clock.is_none()
-			&& let Some(frame) = video.front()
-		{
-			self.video_clock = Some(Clock {
-				media: timestamp(frame.timestamp),
-				wall: Instant::now(),
-			});
-		}
-		let clock = audio_clock.or(self.video_clock);
-		let now = clock.map(Clock::now);
+		// The clock is re-read here rather than cached with the frame: another
+		// track re-anchoring moves the whole queue's schedule, and a deadline
+		// computed on arrival would present all of it that far late. A frame with
+		// no deadline at all has nothing to wait for, since nothing has anchored
+		// the clock yet.
+		let cutoff = Instant::now() + VIDEO_EARLY_TOLERANCE;
 		let mut due = None;
-		while video.front().is_some_and(|frame| {
-			now.is_none_or(|now| timestamp(frame.timestamp) <= now.saturating_add(VIDEO_EARLY_TOLERANCE))
-		}) {
+		while video
+			.front()
+			.is_some_and(|frame| presentation.due(frame.timestamp).is_none_or(|at| at <= cutoff))
+		{
 			due = video.pop_front();
 		}
-		let next_timestamp = video.front().map(|frame| timestamp(frame.timestamp));
+		let next_redraw = video.front().and_then(|frame| presentation.due(frame.timestamp));
+		drop(presentation);
 		let popped = due.is_some();
 		drop(video);
 
@@ -190,13 +185,9 @@ impl App {
 		}
 		let presented = display.present()?;
 
-		// `checked_add`: the wait comes from a wire timestamp, and adding a bogus
-		// one to an `Instant` panics rather than saturating. No deadline just means
-		// the next frame waits for a media wakeup instead.
-		self.next_redraw = match (clock, next_timestamp) {
-			(Some(clock), Some(next)) => Instant::now().checked_add(next.saturating_sub(clock.now())),
-			_ => None,
-		};
+		// No deadline means the queue is empty, so the next frame waits for a media
+		// wakeup instead.
+		self.next_redraw = next_redraw;
 
 		// A rebuilt surface still owes us the frame we just drew, and nothing else
 		// will ask for it: a stalled live stream has no next frame to trigger one,

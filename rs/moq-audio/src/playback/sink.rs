@@ -12,23 +12,28 @@ use super::mixer::{self, BUS_CHANNELS, Gain};
 use crate::resample::remix;
 use crate::{Error, Format};
 
-/// Audio buffered between [`Sink::write`] and the speaker.
+/// Default for [`Input::latency`]: audio buffered between [`Sink::write`] and
+/// the speaker.
 ///
 /// This is the price of surviving jitter: the device pulls on a fixed clock, so
 /// a late write is a dropout. 50 ms rides out a stalled network read without
 /// being audible as delay.
-const LATENCY: f64 = 0.05;
+const LATENCY: Duration = Duration::from_millis(50);
 
-/// Ceiling on that buffer. A writer that runs ahead (a decoder catching up after
-/// a pause) parks samples here instead of losing them.
-const CAPACITY: f64 = 3.0;
+/// Headroom above [`Input::latency`]. A writer that runs ahead (a decoder
+/// catching up after a pause) parks samples here instead of losing them.
+const HEADROOM: f64 = 3.0;
 
 /// The PCM layout a [`Sink`] accepts.
 ///
 /// The playback counterpart to [`encode::Input`](crate::encode::Input): it
 /// describes the buffers you hand in, not the device, which is free to run at
 /// its own rate and channel count.
+///
+/// `#[non_exhaustive]`: construct via [`Input::default`] and set fields, so new
+/// options can be added without breaking callers.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Input {
 	/// How samples are packed in each buffer.
 	pub format: Format,
@@ -38,6 +43,17 @@ pub struct Input {
 	/// Channels per frame. Mono is duplicated and stereo passed through; more
 	/// than two is rejected, since downmixing is not implemented.
 	pub channels: u32,
+
+	/// How much audio to hold between [`Sink::write`] and the speaker (default:
+	/// 50 ms).
+	///
+	/// The device pulls on its own clock, so this is the jitter a late write may
+	/// absorb without a dropout, and it is also delay: the sample handed over now
+	/// sounds this much later. A player that presents video against a playout
+	/// delay sets this to match, so the sink is where that delay lives rather
+	/// than something the picture has to be held back for separately. Must be
+	/// non-zero: a ring with no depth can never be read from.
+	pub latency: Duration,
 }
 
 impl Default for Input {
@@ -46,11 +62,18 @@ impl Default for Input {
 			format: Format::F32,
 			sample_rate: 48_000,
 			channels: 2,
+			latency: LATENCY,
 		}
 	}
 }
 
 impl Input {
+	/// The longest [`latency`](Self::latency) a sink accepts. Well past any
+	/// playout delay worth presenting, and it bounds the ring the device thread
+	/// walks. Public so a caller taking the depth from its own configuration can
+	/// refuse an impossible one before it opens a device.
+	pub const LATENCY_MAX: Duration = Duration::from_secs(10);
+
 	fn validate(&self) -> Result<(), Error> {
 		if self.sample_rate == 0 {
 			return Err(Error::Unsupported("sample rate must be > 0".into()));
@@ -59,6 +82,13 @@ impl Input {
 			return Err(Error::Unsupported(format!(
 				"playback accepts mono or stereo input (got {} channels)",
 				self.channels
+			)));
+		}
+		if self.latency.is_zero() || self.latency > Self::LATENCY_MAX {
+			return Err(Error::Unsupported(format!(
+				"playback latency must be non-zero and at most {:?} (got {:?})",
+				Self::LATENCY_MAX,
+				self.latency
 			)));
 		}
 		Ok(())
@@ -130,8 +160,9 @@ impl Sink {
 	///
 	/// The pacing signal for A/V sync: the sample playing right now was written
 	/// at roughly `last_timestamp - buffered()`, so a video clock can steer
-	/// against it. It settles near 50 ms once playback is running, climbs when
-	/// the writer runs ahead, and falls toward zero when it falls behind.
+	/// against it. It settles near [`Input::latency`] once playback is running,
+	/// climbs when the writer runs ahead, and falls toward zero when it falls
+	/// behind.
 	pub fn buffered(&self) -> Duration {
 		Duration::from_secs_f64(self.prod.lock().unwrap().occupied_seconds().max(0.0))
 	}
@@ -216,6 +247,8 @@ pub(super) struct Registration {
 	pub(super) id: u64,
 	/// The caller's rate, which is the input side of the channel.
 	rate: u32,
+	/// The depth the rebuilt channel has to keep, from the caller's [`Input`].
+	latency: Duration,
 	prod: Arc<Mutex<ResamplingProd<f32>>>,
 	gain: Arc<Gain>,
 	/// The consumer waiting to be handed to a mixer. Taken once it is attached,
@@ -252,7 +285,7 @@ impl Registration {
 	/// Re-create the channel for a device now running at `rate`, swapping the
 	/// producer the caller's [`Sink`] writes into.
 	pub(super) fn rebuild(&mut self, rate: u32) {
-		let (prod, cons) = channel(self.rate, rate);
+		let (prod, cons) = channel(self.rate, rate, self.latency);
 		*self.prod.lock().unwrap() = prod;
 		self.pending = Some(cons);
 	}
@@ -269,7 +302,7 @@ pub(super) fn new(
 ) -> Result<(Sink, Registration), Error> {
 	input.validate()?;
 
-	let (prod, cons) = channel(input.sample_rate, rate);
+	let (prod, cons) = channel(input.sample_rate, rate, input.latency);
 	let prod = Arc::new(Mutex::new(prod));
 	let gain = Arc::new(Gain::new());
 
@@ -286,6 +319,7 @@ pub(super) fn new(
 	let registration = Registration {
 		id,
 		rate: sink.input.sample_rate,
+		latency: sink.input.latency,
 		prod,
 		gain,
 		pending: Some(cons),
@@ -296,7 +330,8 @@ pub(super) fn new(
 
 /// The ring buffer between a writer and the audio thread, resampling the
 /// caller's rate to the device's.
-fn channel(from: u32, to: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
+fn channel(from: u32, to: u32, latency: Duration) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
+	let latency = latency.as_secs_f64();
 	resampling_channel::<f32>(
 		BUS_CHANNELS,
 		from,
@@ -305,8 +340,8 @@ fn channel(from: u32, to: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 		// staging buffer.
 		true,
 		ResamplingChannelConfig {
-			latency_seconds: LATENCY,
-			capacity_seconds: CAPACITY,
+			latency_seconds: latency,
+			capacity_seconds: latency + HEADROOM,
 			// Correct drift by resampling rather than by jumping, so a clock
 			// that is slightly off doesn't tick audibly.
 			underflow_autocorrect_percent_threshold: Some(25.0),
@@ -349,5 +384,25 @@ mod tests {
 			};
 			input.validate().unwrap();
 		}
+	}
+
+	/// A ring with no depth can never be read from, and one deeper than the
+	/// device could ever drain is a delay nobody asked for.
+	#[test]
+	fn rejects_a_latency_it_cannot_buffer() {
+		for latency in [Duration::ZERO, Input::LATENCY_MAX + Duration::from_secs(1)] {
+			let input = Input {
+				latency,
+				..Default::default()
+			};
+			assert!(matches!(input.validate(), Err(Error::Unsupported(_))), "{latency:?}");
+		}
+
+		Input {
+			latency: Input::LATENCY_MAX,
+			..Default::default()
+		}
+		.validate()
+		.unwrap();
 	}
 }

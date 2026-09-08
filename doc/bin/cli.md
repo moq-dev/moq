@@ -64,15 +64,25 @@ boundary, so old-timeline frames cannot advance the new clock.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
+moq ... play --delay 500ms          # trade latency for a jittery link
 ```
 
 Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
 the platform hardware decoder where available. `--video-name` and
-`--audio-name` pick a rendition; `--max-age` (default 500 ms) bounds how
-far a stalled group may lag before it is skipped. Each role follows the catalog
-for as long as it lasts, so a publisher that retires the rendition being played
-ends that track and the role picks a replacement. Playback is behind the
-`play` feature, since it pulls in windowing and audio-device dependencies:
+`--audio-name` pick a rendition.
+
+Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
+trails the live edge, which is both the jitter a late frame may absorb and the
+point past which a stalled group is skipped. The speaker holds the delay, with a
+50 ms floor under it, and the picture is scheduled against where the speaker
+actually is. While video owns the clock, a frame arriving earlier than predicted
+pulls playback forward, so a late start catches up to live instead of staying
+behind it. Once the speaker owns the clock, video follows the speaker instead.
+
+Each role follows the catalog for as long as it lasts, so a publisher that
+retires the rendition being played ends that track and the role picks a
+replacement. Playback is behind the `play` feature, since it pulls in windowing
+and audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
