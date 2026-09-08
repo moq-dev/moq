@@ -112,6 +112,16 @@ harness_port_root() {
     echo "$root"
 }
 
+# True when PORT is a number a test can bind: `harness_valid_port <port>`.
+#
+# The reservation is a directory named after the port, so this guards the
+# filesystem as much as the socket: an unchecked `../../name` would create a
+# directory outside the reservation root that teardown then removes.
+harness_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((port >= 1024 && port <= 65535))
+}
+
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
@@ -134,6 +144,10 @@ harness_port() {
     mkdir -p "$root"
 
     if [[ -n "$wanted" ]]; then
+        harness_valid_port "$wanted" || {
+            echo "error: port for $label must be 1024..65535 (got '$wanted')" >&2
+            return 1
+        }
         harness_port_take "$root" "$wanted" || {
             echo "error: port $wanted ($label) is held by another run; see $root/$wanted" >&2
             return 1
@@ -145,10 +159,10 @@ harness_port() {
     port="${MOQ_TEST_PORT_BASE:-4500}"
     # A base outside the port range would hand out numbers no socket can bind, and
     # the run would report it much later as a relay that never became ready.
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1024 || port > 65535)); then
+    harness_valid_port "$port" || {
         echo "error: MOQ_TEST_PORT_BASE must be 1024..65535 (got '$port')" >&2
         return 1
-    fi
+    }
     last=$((port + 500))
     ((last <= 65535)) || last=65535
     while ((port <= last)); do

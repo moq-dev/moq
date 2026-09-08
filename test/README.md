@@ -37,6 +37,12 @@ machine, so each harness still refuses a port something unrelated is already
 serving on. Pinning a port (`SMOKE_PORT`, `WASM_PORT`, `TSC_PORT`, `--port`) takes
 that exact one or fails.
 
+Every port, pinned or walked to from `MOQ_TEST_PORT_BASE`, has to be 1024..65535
+before a reservation is created. A reservation is a directory named after the
+port, so the check keeps a malformed value from naming somewhere else on the
+filesystem, and it refuses an unbindable number up front instead of after the
+build, as a relay that never became ready.
+
 **Process groups.** Every child is spawned as its own process group leader, and
 teardown signals the group. A group catches grandchildren -- ffmpeg behind a
 pipe, Chromium behind Playwright, `tsp` behind `timeout` -- including ones that
@@ -84,3 +90,9 @@ just worktree setup    # fetch, set the branch upstream, record the base SHA
 
 `setup` never resets, rebases, or cleans, so it is safe to run against a checkout
 with work in progress.
+
+The upstream is the only place the base survives, so `setup BASE` fails when it
+cannot be written -- a detached HEAD has no branch to hang it on, and the shared
+config may be read-only. Left as a warning, `just check` would go on scoping
+against `origin/main` while setup reported success. Without a `BASE`, that
+fallback is what would have been written anyway, so it warns instead.

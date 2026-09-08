@@ -156,3 +156,18 @@ See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 [log]
 level = "info"                       # RUST_LOG overrides this.
 ```
+
+At `info` the relay logs one `listening` record per listener as it binds, each
+carrying the bound address and a `kind` naming the listener:
+
+```
+INFO listening addr=[::]:4443 kind=quic
+INFO listening addr=[::]:4443 kind=http
+INFO listening addr=[::]:8443 kind=https
+```
+
+`addr` is the address the socket bound, not the one configured, so a `listen`
+port of `0` reports the port the OS picked. That is the only way to learn it
+from outside the process, and the QUIC and TCP ports are chosen independently.
+A relay with no `[server]` UDP socket logs `listening (stream transports only)`
+instead of the `quic` line.

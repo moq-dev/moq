@@ -169,18 +169,27 @@ worktree ACTION="check" $BASE="":
     	# `git push -u` leaves behind and which says nothing about what the branch
     	# merges into), and a base the caller named on the command line.
     	upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || true)
-    	if [[ -n "$branch" ]] &&
-    		{ [[ -z "$upstream" ]] || [[ "$upstream" == */"$branch" ]] || [[ -n "$BASE" ]]; }; then
-    		if [[ "$config" == write ]]; then
+    	# Two things stop the write, and they fail identically: a detached HEAD has
+    	# no branch to hang an upstream on, and the config it lands in may be
+    	# read-only. Skipping either silently would report a setup that recorded
+    	# the caller's base while `just check` still scoped against origin/main.
+    	blocker=""
+    	if [[ -z "$branch" ]]; then
+    		blocker="HEAD is detached"
+    	elif [[ "$config" != write ]]; then
+    		blocker="$common_dir/config is $config"
+    	fi
+    	if [[ -z "$upstream" ]] || [[ "$upstream" == */"$branch" ]] || [[ -n "$BASE" ]]; then
+    		if [[ -z "$blocker" ]]; then
     			git branch --set-upstream-to "$base" "$branch"
     		elif [[ "$base" == origin/main ]]; then
     			# Nothing is lost: with no upstream `_base` falls back to
     			# origin/main, which is what this would have written.
-    			echo "warning: cannot record the upstream; $common_dir/config is $config" >&2
+    			echo "warning: cannot record the upstream; $blocker" >&2
     		else
     			# The upstream is the only place this choice survives, so a setup
     			# that could not write it did not do what it was asked.
-    			echo "error: cannot set the upstream to $base; $common_dir/config is $config" >&2
+    			echo "error: cannot set the upstream to $base; $blocker" >&2
     			echo "       the branch would keep scoping against origin/main" >&2
     			exit 1
     		fi
