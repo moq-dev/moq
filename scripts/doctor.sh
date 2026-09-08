@@ -290,22 +290,31 @@ valid_harness_port() {
     [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((${#port} <= 5)) && ((port >= 1024 && port <= 65535))
 }
 
-# True when an allocator base leaves room for COUNT distinct valid ports.
+# True when an allocator base leaves COUNT candidates after excluding a pinned
+# port already reserved inside its 501-port search window.
 valid_harness_port_span() {
-    local port=$1 count=$2
-    valid_harness_port "$port" && ((port <= 65536 - count))
+    local port=$1 count=$2 excluded=${3:-} last available
+    valid_harness_port "$port" || return 1
+    last=$((port + 500))
+    ((last <= 65535)) || last=65535
+    available=$((last - port + 1))
+    if [ -n "$excluded" ] && valid_harness_port "$excluded" &&
+        ((excluded >= port && excluded <= last)); then
+        available=$((available - 1))
+    fi
+    ((available >= count))
 }
 
 # Record whether one harness port setting can supply the required slots.
 probe_harness_port() {
-    local id=$1 name=$2 value=$3 slots=$4 suites=$5
-    if valid_harness_port_span "$value" "$slots"; then
+    local id=$1 name=$2 value=$3 slots=$4 suites=$5 excluded=${6:-}
+    if valid_harness_port_span "$value" "$slots" "$excluded"; then
         record "behavior.$id" behavior ok true "$suites" \
             "$name=$value leaves at least $slots valid allocator slots" "" 5 0
     else
         record "behavior.$id" behavior degraded true "$suites" \
             "$name=$value does not leave $slots valid allocator slots" \
-            "set $name between 1024 and $((65536 - slots))" 5 0
+            "choose a valid base whose allocator range has $slots slots outside the pinned port" 5 0
     fi
 }
 
@@ -648,6 +657,26 @@ EOF
         return
     fi
     record behavior.awk-select behavior ok true "$suites" "awk selects a multi-crate diff" "" 10 "$BOUNDED_ELAPSED"
+}
+
+# Verify the native metadata the requested GStreamer smoke client links against.
+probe_gstreamer_devel() {
+    local suites=$1 status
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        record behavior.gstreamer-devel behavior skip false "$suites" \
+            "pkg-config is missing, so GStreamer metadata was not probed" "" 10 0
+        return
+    fi
+    bounded 10 pkg-config --exists gstreamer-1.0
+    status=$?
+    if ((status == 0)); then
+        record behavior.gstreamer-devel behavior ok true "$suites" \
+            "pkg-config resolves gstreamer-1.0 development metadata" "" 10 "$BOUNDED_ELAPSED"
+    else
+        record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+            "pkg-config cannot resolve gstreamer-1.0 development metadata" \
+            "install the GStreamer development package that provides gstreamer-1.0.pc" 10 "$BOUNDED_ELAPSED"
+    fi
 }
 
 # Print the nearest existing directory at or above a requested path. Cargo
@@ -1277,6 +1306,10 @@ self_test_ownership() {
     check 'three wasm allocator slots reject a short range' "$?" 1
     valid_harness_port_span 65534 2
     check 'a pinned wasm run needs only two allocator slots' "$?" 0
+    valid_harness_port_span 65534 2 65534
+    check 'a pinned port inside the wasm allocator range consumes a slot' "$?" 1
+    valid_harness_port_span 65534 2 60000
+    check 'a pinned port outside the wasm allocator range consumes no slot' "$?" 0
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
@@ -1617,6 +1650,13 @@ else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
 fi
 
+SMOKE_FULL_SUITES=$(selected smoke-full)
+if [ -n "$SMOKE_FULL_SUITES" ]; then
+    probe_gstreamer_devel "$SMOKE_FULL_SUITES"
+else
+    record behavior.gstreamer-devel behavior skip false "" "smoke-full is not selected" "" 10 0
+fi
+
 # Ask the Rust selector once. Its result drives the Cargo, wasm-target, and
 # test-bind probes; using check's broader tool list for those is what made a
 # Go-only test pay for work it never dispatches. A failed selector is itself a
@@ -1730,7 +1770,7 @@ if [ -n "$LOCK_SUITES" ]; then
         WASM_BASE_SLOTS=3
         [ -n "${WASM_PORT:-}" ] && WASM_BASE_SLOTS=2
         probe_harness_port harness-port-base-wasm MOQ_TEST_PORT_BASE \
-            "${MOQ_TEST_PORT_BASE:-4500}" "$WASM_BASE_SLOTS" "$WASM_BASE_SUITES"
+            "${MOQ_TEST_PORT_BASE:-4500}" "$WASM_BASE_SLOTS" "$WASM_BASE_SUITES" "${WASM_PORT:-}"
     else
         record behavior.harness-port-base-wasm behavior skip false "" "wasm is not selected" "" 5 0
     fi
