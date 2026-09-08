@@ -1098,12 +1098,14 @@ mod tests {
 		})
 		.await;
 
-		// Resolving the info waits for the transcoder to accept the track, so the
-		// resize below cannot land first and retire the rung out from under a
-		// request that was never served. That is correct behavior (the rendition is
-		// gone), just not what this test is about.
+		// Resolving the info waits for the transcoder to accept the track. Then
+		// wait until the live path has claimed group 0, so the fetch below can only
+		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
 		rung.info().await.unwrap();
+		while rung.latest() != Some(0) {
+			tokio::task::yield_now().await;
+		}
 		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 
 		// Group 0 is still being written from a source group that is still open, so
