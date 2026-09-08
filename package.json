@@ -2,9 +2,10 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@babel/parser": "^7.29.7",
 		"@biomejs/biome": "^2.5.11",
 		"concurrently": "^10.0.5",
+		"esbuild": "^0.28.2",
+		"knip": "^6.35.0",
 		"markdown-extensions": "^2.0.0",
 		"publint": "^0.3.24",
 		"remark-cli": "^12.0.1",
@@ -15,7 +16,8 @@
 		"remark-lint-no-undefined-references": "^5.0.2",
 		"remark-preset-lint-consistent": "^6.0.1",
 		"remark-preset-lint-recommended": "^7.0.1",
-		"remark-stringify": "^11.0.0"
+		"remark-stringify": "^11.0.0",
+		"vite": "^8.2.2"
 	},
 	"private": true,
 	"scripts": {

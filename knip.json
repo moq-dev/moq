@@ -1,0 +1,9 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"include": ["unlisted", "unresolved"],
+	"workspaces": {
+		".": {
+			"entry": ["js/common/*.ts"]
+		}
+	}
+}

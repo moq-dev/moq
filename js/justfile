@@ -9,7 +9,7 @@ set working-directory := '.'
 # Paths a JS check depends on: every bun workspace (they are not all under js/,
 # see the root package.json) plus the config shared by all of them. `check`,
 # `fix`, and `ci` all skip themselves when a diff misses this.
-scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|test/wasm/|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|test/wasm/|package\.json$|bun\.lock(b)?$|biome\.jsonc$|knip\.json$)'
 
 # Run all checks by default.
 default:
@@ -30,8 +30,9 @@ install:
 # surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
 # break a JSR/npm publish. It costs about 20s for every package.
 
-# `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
-# workspace import through hoisting, so nothing else in `check` notices one.
+# `knip` runs first and cheaply: bundlers resolve an undeclared import through
+# hoisting, so nothing else in `check` notices one until a published consumer
+# with a stricter resolver gets `undefined`.
 
 # Lint, type-check, biome-format, and build all packages.
 check $FILES="":
@@ -42,7 +43,7 @@ check $FILES="":
     	exit 0
     fi
     bun install --frozen-lockfile
-    bun common/deps.ts
+    bun knip
     if tty -s; then
     	bun run --filter='*' --elide-lines=0 check
     else
@@ -71,7 +72,6 @@ test $FILES="":
     	exit 0
     fi
     bun install --frozen-lockfile
-    bun test common/deps.test.ts
     if tty -s; then
         bun run --filter='*' --elide-lines=0 test
     else
