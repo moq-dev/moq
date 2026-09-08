@@ -54,7 +54,7 @@ run_case() {
         source "$DIR/bundle.sh"
         bundle_init selftest
         bundle_rerun just test bundle
-        printf '%s\n' "$BUNDLE_DIR" >"$ROOT/$name.path"
+        printf '%s\n' "$BUNDLE_FINAL" >"$ROOT/$name.path"
         "$body"
     ) >"$ROOT/$name.out" 2>&1 || true
     cat "$ROOT/$name.path"
@@ -79,7 +79,7 @@ mkdir -p "$relative_cwd"
     # shellcheck source=/dev/null
     source "$DIR/bundle.sh"
     bundle_init selftest
-    printf '%s\n' "$BUNDLE_DIR" >"$ROOT/relative.path"
+    printf '%s\n' "$BUNDLE_FINAL" >"$ROOT/relative.path"
     cd "$DIR"
     bundle_finish 1 || true
 ) >"$ROOT/relative.out" 2>&1
@@ -89,6 +89,8 @@ check "directory changes preserve a relative-root bundle" test -f "$bundle/manif
 
 # ── a failing run leaves a described bundle ─────────────────────────────────
 fail_case() {
+    printf '%s\n' "$BUNDLE_DIR" >"$ROOT/fail-stage.path"
+    [[ ! -e "$BUNDLE_FINAL" ]] && : >"$ROOT/fail-final-hidden"
     bundle_endpoint relay "http://127.0.0.1:4443" moq-lite-05
     bundle_capability browser-network "HAR only; WebTransport is invisible to it"
     bundle_result "rust -> rust" fail 20 "no data before the timeout"
@@ -98,6 +100,12 @@ fail_case() {
 }
 bundle=$(run_case fail fail_case)
 manifest="$bundle/manifest.json"
+stage=$(<"$ROOT/fail-stage.path")
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "an in-progress bundle stays outside the upload root" \
+    sh -c 'case "$1" in "$2"/*) exit 1;; esac' _ "$stage" "$ROOT/fail.d"
+check "an in-progress bundle is hidden until finalization" test -f "$ROOT/fail-final-hidden"
+check "the private staging directory is removed after publication" test ! -e "$stage"
 check "a failing run retains its bundle" test -f "$manifest"
 check "a bundle is private to its owner" test "$(mode "$bundle")" = 700
 check "per-process logs are retained" test -f "$bundle/work/relay.log"

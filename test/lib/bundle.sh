@@ -43,7 +43,8 @@ BUNDLE_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUNDLE_WORKSPACE=$(cd "$BUNDLE_LIB_DIR/../.." && pwd)
 
 # Set by bundle_init.
-BUNDLE_DIR=""        # the run's directory
+BUNDLE_DIR=""        # private staging directory while the run is active
+BUNDLE_FINAL=""      # uploadable directory, published only after finalization
 BUNDLE_WORK=""       # live logs and configs, always outside the upload tree
 BUNDLE_SCRATCH=""    # never retained: compiled fixtures, plugin registries
 BUNDLE_TRACE=""      # swept browser-capture snapshot in the uploadable bundle
@@ -141,19 +142,22 @@ bundle_init() {
     # Harnesses change directories while they run. Resolve the caller's root
     # once so every later write and cleanup still names the directory created
     # here rather than a same-named path under the new working directory.
-    mkdir -p "$root"
+    local stage_root="${root}-incomplete"
+    mkdir -p "$root" "$stage_root"
     root=$(cd "$root" && pwd -P)
+    stage_root=$(cd "$stage_root" && pwd -P)
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the
     # failure the first was kept for.
     local stamp suffix=1
     stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     BUNDLE_RUN_ID="$stamp"
-    while [[ -e "$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID" ]]; do
+    while [[ -e "$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID" || -e "$stage_root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID" ]]; do
         BUNDLE_RUN_ID="$stamp-$suffix"
         suffix=$((suffix + 1))
     done
-    BUNDLE_DIR="$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_FINAL="$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_DIR="$stage_root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     BUNDLE_WORK="$BUNDLE_LIVE/work"
     BUNDLE_SCRATCH="$BUNDLE_DIR/scratch"
@@ -772,7 +776,7 @@ _bundle_session() {
         fi
         printf '\n## Teardown\n\n'
         # shellcheck disable=SC2016  # backticks are Markdown here, not a subshell
-        printf '```bash\nbash %s/teardown.sh\n```\n' "$BUNDLE_DIR"
+        printf '```bash\nbash %s/teardown.sh\n```\n' "$BUNDLE_FINAL"
     } >"$file"
 }
 
@@ -945,8 +949,9 @@ _bundle_snapshot_live() {
 
 # bundle_finish <status>: keep or drop the bundle, and say which.
 #
-# Returns the status it was given, so `trap 'bundle_finish $?' EXIT` neither
-# masks a failure nor invents one.
+# Returns the status it was given unless publishing the finalized bundle fails.
+# The upload root never contains an in-progress directory, so cancellation
+# cannot expose files that final redaction did not reach.
 bundle_finish() {
     local status=${1:-0}
     [[ -n "$BUNDLE_DIR" && -d "$BUNDLE_DIR" ]] || return "$status"
@@ -954,6 +959,7 @@ bundle_finish() {
     if [[ "$status" -eq 0 && -z "${MOQ_QA_KEEP:-}" ]]; then
         rm -rf "$BUNDLE_DIR" "$BUNDLE_LIVE"
         rmdir "$(dirname "$BUNDLE_DIR")" 2>/dev/null || true
+        rmdir "$(dirname "$BUNDLE_FINAL")" 2>/dev/null || true
         rmdir "$(dirname "$BUNDLE_LIVE")" 2>/dev/null || true
         return 0
     fi
@@ -984,6 +990,15 @@ bundle_finish() {
     # After the manifest, so the sweep redacts that too: it carries the rerun
     # command and every endpoint URL.
     _bundle_sweep
+
+    local stage_parent
+    stage_parent=$(dirname "$BUNDLE_DIR")
+    if ! mv "$BUNDLE_DIR" "$BUNDLE_FINAL"; then
+        echo "error: could not publish finalized debug bundle at $BUNDLE_FINAL" >&2
+        return 1
+    fi
+    BUNDLE_DIR="$BUNDLE_FINAL"
+    rmdir "$stage_parent" 2>/dev/null || true
 
     {
         printf '\n── debug bundle ─────────────────────────────────────────────\n'
