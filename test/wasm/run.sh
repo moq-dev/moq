@@ -24,6 +24,10 @@ WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$WASM_DIR/../lib/harness.sh"
 
+# Captured before the parse below consumes it, so the rerun command carries every
+# flag this run was actually given.
+RERUN="just test wasm$(harness_argv "$@")"
+
 TIMEOUT="${WASM_TIMEOUT:-30}"
 # Empty means "any reserved port per flavour"; WASM_PORT pins the first instead.
 PORT="${WASM_PORT:-}"
@@ -73,7 +77,7 @@ if [[ -n "$PORT" ]] && { [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT > 
     exit 2
 fi
 
-harness_begin wasm "just test wasm --timeout $TIMEOUT"
+harness_begin wasm "$RERUN"
 
 for tool in cargo bun; do
     command -v "$tool" >/dev/null 2>&1 || {

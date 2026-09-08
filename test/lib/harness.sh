@@ -44,6 +44,15 @@ HARNESS_STATES=()
 
 # ── run identity ────────────────────────────────────────────────────────────
 
+# Print the caller's own argv, requoted so it can be pasted back: pass it "$@"
+# from the top of the script, before anything consumes it. Reconstructing the
+# flags from parsed variables instead is how a rerun command quietly drops the
+# ones nobody remembered to add back.
+harness_argv() {
+    [[ $# -gt 0 ]] || return 0
+    printf ' %q' "$@"
+}
+
 # Start a run named NAME, reproducible with RERUN. Creates the run directory and
 # installs the teardown trap; every other function needs this called first.
 harness_begin() {
@@ -127,16 +136,22 @@ harness_port() {
 
 # Claim one port. Private; `harness_port` is the entry point.
 harness_port_take() {
-    local root="$1" port="$2" owner
+    local root="$1" port="$2" owner aside
     if ! mkdir "$root/$port" 2>/dev/null; then
         # An owner that no longer exists left the reservation behind (SIGKILL, a
-        # crashed shell). Reclaim it rather than skipping the port forever; the
-        # retried mkdir is what stops two reclaimers from both taking it.
+        # crashed shell). Reclaim it rather than skipping the port forever.
         owner=$(cat "$root/$port/pid" 2>/dev/null || true)
         if [[ -z "$owner" ]] || kill -0 "$owner" 2>/dev/null; then
             return 1
         fi
-        rm -rf "${root:?}/${port:?}"
+        # Renaming it away is the ownership transition, and rename(2) is atomic:
+        # of two reclaimers that both saw the dead owner, exactly one moves the
+        # directory and the loser fails with the source already gone. Deleting it
+        # in place is not enough -- the loser's `rm -rf` would land after the
+        # winner had already recreated the reservation, and both would proceed.
+        aside="$root/.stale-$port-$$"
+        mv "$root/$port" "$aside" 2>/dev/null || return 1
+        rm -rf "${aside:?}"
         mkdir "$root/$port" 2>/dev/null || return 1
     fi
     echo "$$" >"$root/$port/pid"
@@ -233,10 +248,16 @@ harness_index() {
 }
 
 # Wait for a spawned group leader and return its status: `harness_wait <pid>`.
-# Marks the entry done, so teardown will not signal a number the OS may reuse.
+#
+# The leader finishing does not mean the group did: a launcher that dies while
+# the browser it started keeps running leaves a survivor with no parent left to
+# walk down from. So sweep the rest of the group before retiring the entry, which
+# is also the last moment it is safe to name: a process group id stays reserved
+# while any member lives, and becomes reusable the instant the last one exits.
 harness_wait() {
     local pid="$1" status=0 i
     wait "$pid" || status=$?
+    kill -KILL -- -"$pid" 2>/dev/null || true
     if i=$(harness_index "$pid"); then
         HARNESS_STATES[i]="done"
     fi

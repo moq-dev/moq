@@ -34,6 +34,10 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 
+# Captured before the parse below consumes it, so the rerun command carries the
+# source capture, mux rate, EIT fixture, and analyzer thresholds this run used.
+RERUN="just test ts$(harness_argv "$@")"
+
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
 DURATION="${TSC_DURATION:-20}"
@@ -136,7 +140,7 @@ fi
 # ── round-trip capture ──────────────────────────────────────────────────────
 # Only the round-trip stands anything up, so `--analyze-only` above needs no run
 # directory, no reserved port, and nothing to reap.
-harness_begin ts "just test ts --duration $DURATION${LIVE:+ --live}${STRICT:+ --strict}"
+harness_begin ts "$RERUN"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')

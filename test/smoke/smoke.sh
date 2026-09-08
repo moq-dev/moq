@@ -22,6 +22,10 @@ CLIENTS="$SMOKE_DIR/clients"
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$SMOKE_DIR/../lib/harness.sh"
 
+# Captured before the parse below consumes it, so the rerun command carries every
+# flag this run was actually given.
+RERUN="just test smoke$(harness_argv "$@")"
+
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
 TIMEOUT="${SMOKE_TIMEOUT:-20}"
@@ -120,8 +124,6 @@ needs_js() {
     needs js || needs js-native-node || needs js-native-bun
 }
 
-RERUN="just test smoke --publishers $PUBLISHERS --subscribers $SUBSCRIBERS --timeout $TIMEOUT"
-[[ "$NEGATIVE" -eq 1 ]] && RERUN="$RERUN --negative"
 harness_begin smoke "$RERUN"
 
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
