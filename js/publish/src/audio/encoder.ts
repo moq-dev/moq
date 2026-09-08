@@ -195,14 +195,23 @@ export class Encoder {
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
+		// The pipeline outlives any one subscription: it is built as soon as capture runs and
+		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
+		// swap would close the AudioEncoder, which discards every chunk the codec still holds, and
+		// would restart the framer mid-frame, so the output fell permanently behind its input.
+		effect.run((effect) => {
+			const enabled = effect.get(this.in.enabled);
+			const worklet = effect.get(this.#worklet);
+			if (!enabled || !worklet) return;
+
+			this.#encode(rendition.track, worklet, effect);
+		});
+
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const worklet = effect.get(this.#worklet);
 			const track = effect.get(rendition.track);
 			effect.set(this.#out.active, enabled && !!worklet && !!track, false);
-			if (!enabled || !worklet || !track) return;
-
-			this.#encode(track, worklet, effect);
 		});
 	}
 
@@ -395,9 +404,9 @@ export class Encoder {
 		}
 	}
 
-	// Encode captured audio frames into the track producer. The broadcast owns the track's lifetime, so
-	// this only aborts it on a fatal encoder error, never on teardown.
-	#encode(track: Moq.Track.Producer, worklet: AudioWorkletNode, effect: Effect): void {
+	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
+	// track's lifetime, so this only aborts it on a fatal encoder error, never on teardown.
+	#encode(track: Getter<Moq.Track.Producer | undefined>, worklet: AudioWorkletNode, effect: Effect): void {
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
@@ -426,14 +435,14 @@ export class Encoder {
 
 						// Each audio frame is its own group so the relay can forward it without
 						// waiting for a group boundary. Loss is handled by the codec's PLC.
-						track.writeFrame({
+						track.peek()?.writeFrame({
 							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
 							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
 						});
 					},
 					error: (err) => {
 						console.error("encoder error", err);
-						track.close(err);
+						track.peek()?.close(err);
 					},
 				});
 				effect.cleanup(() => encoder.close());
@@ -452,6 +461,10 @@ export class Encoder {
 					}
 
 					for (const data of framer.push(captured)) {
+						// The demand gate. The framer still consumes every sample so its timestamps stay
+						// on the capture clock, but there is nowhere to send a chunk with no subscriber.
+						if (!track.peek()) continue;
+
 						const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 						const joined = new Float32Array(joinedLength);
 

@@ -81,9 +81,12 @@ function installFakeWebAudio() {
 	};
 }
 
-function installEncodingHarness(description: Uint8Array) {
+// `pipeline` is how many frames the fake codec holds before emitting, modelling the WebCodecs
+// contract that close() discards everything still in flight.
+function installEncodingHarness(description: Uint8Array, pipeline = 0) {
 	let worklet: FakeAudioWorkletNode | undefined;
 	let audioEncoders = 0;
+	let encodeCalls = 0;
 
 	class FakePort extends EventTarget {
 		start(): void {}
@@ -154,6 +157,8 @@ function installEncodingHarness(description: Uint8Array) {
 
 	class FakeAudioEncoder {
 		readonly #output: EncodedAudioChunkOutputCallback;
+		#inflight: number[] = [];
+		#closed = false;
 
 		constructor(init: AudioEncoderInit) {
 			audioEncoders++;
@@ -163,30 +168,43 @@ function installEncodingHarness(description: Uint8Array) {
 		configure(_config: AudioEncoderConfig): void {}
 
 		encode(frame: AudioData): void {
-			const storage = new Uint8Array(description.byteLength + 2);
-			storage.set(description, 1);
-			const view = new DataView(storage.buffer, 1, description.byteLength);
-			const chunk = {
-				type: "key",
-				timestamp: frame.timestamp,
-				byteLength: 1,
-				copyTo: (buffer: Uint8Array) => {
-					buffer[0] = 0;
-				},
-			} as EncodedAudioChunk;
-
-			const metadata = {
-				decoderConfig: {
-					codec: "opus",
-					sampleRate: 48_000,
-					numberOfChannels: 1,
-					description: view,
-				},
-			};
-			queueMicrotask(() => this.#output(chunk, metadata));
+			encodeCalls++;
+			this.#inflight.push(frame.timestamp);
+			queueMicrotask(() => this.#drain());
 		}
 
-		close(): void {}
+		#drain(): void {
+			if (this.#closed) return;
+
+			while (this.#inflight.length > pipeline) {
+				const timestamp = this.#inflight.shift() as number;
+				const storage = new Uint8Array(description.byteLength + 2);
+				storage.set(description, 1);
+				const view = new DataView(storage.buffer, 1, description.byteLength);
+				const chunk = {
+					type: "key",
+					timestamp,
+					byteLength: 1,
+					copyTo: (buffer: Uint8Array) => {
+						buffer[0] = 0;
+					},
+				} as EncodedAudioChunk;
+
+				this.#output(chunk, {
+					decoderConfig: {
+						codec: "opus",
+						sampleRate: 48_000,
+						numberOfChannels: 1,
+						description: view,
+					},
+				});
+			}
+		}
+
+		close(): void {
+			this.#closed = true;
+			this.#inflight.length = 0;
+		}
 	}
 
 	class FakeAudioDecoder {}
@@ -213,6 +231,9 @@ function installEncodingHarness(description: Uint8Array) {
 		},
 		get audioEncoders() {
 			return audioEncoders;
+		},
+		get encodeCalls() {
+			return encodeCalls;
 		},
 		[Symbol.dispose]() {
 			for (const [name, original] of originals) {
@@ -366,4 +387,152 @@ test("publishes the Opus decoder description reported by the encoder", async () 
 
 	encoder.close();
 	await settle();
+});
+
+const OPUS_DESCRIPTION = Uint8Array.from([
+	0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, 0x01, 0x01, 0x38, 0x01, 0x80, 0xbb, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+const QUANTUM_SAMPLES = 128; // What an AudioWorkletProcessor hands us per render quantum.
+const OPUS_FRAME_SAMPLES = 960; // 20ms at 48kHz.
+const SAMPLE_RATE = 48_000;
+const FRAME_MICROS = (OPUS_FRAME_SAMPLES / SAMPLE_RATE) * 1_000_000;
+
+// Drives the encoder from a fake capture worklet, recording the timestamp of every chunk written to
+// the track. `pipeline` is how many frames the fake codec holds in flight.
+function encoding(pipeline: number) {
+	const harness = installEncodingHarness(OPUS_DESCRIPTION, pipeline);
+	const written: number[] = [];
+
+	const newTrack = () =>
+		({
+			writeFrame: (frame: { timestamp: { as(scale: number): number } }) => {
+				written.push(frame.timestamp.as(1_000_000));
+			},
+			close: () => {},
+		}) as unknown as never;
+
+	const track = new Signal<unknown>(undefined);
+	const rendition = {
+		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
+		track,
+		close: () => {},
+	};
+
+	const encoder = new Encoder("audio", {
+		enabled: true,
+		source: new Signal(fakeSource()) as never,
+		broadcast: new Signal({ audio: () => rendition }) as never,
+	});
+
+	let timestamp = 0;
+	const quanta = (count: number) => {
+		for (let i = 0; i < count; i++) {
+			harness.worklet?.port.emit({ timestamp, channels: [new Float32Array(QUANTUM_SAMPLES)] });
+			timestamp += Math.round((QUANTUM_SAMPLES / SAMPLE_RATE) * 1_000_000);
+		}
+	};
+
+	return {
+		harness,
+		encoder,
+		written,
+		quanta,
+		// The capture timestamp the next quantum carries.
+		now: () => timestamp,
+		subscribe: () => track.set(newTrack()),
+		unsubscribe: () => track.set(undefined),
+		[Symbol.dispose]() {
+			encoder.close();
+			harness[Symbol.dispose]();
+		},
+	};
+}
+
+// Every chunk lands one Opus frame after the last, with no gap and no repeat.
+function contiguous(written: number[]): boolean {
+	return written.every((timestamp, i) => i === 0 || timestamp - written[i - 1] === FRAME_MICROS);
+}
+
+// Regression: a subscriber churn (the relay aborts the track, then accepts a replacement) used to
+// rebuild the AudioEncoder, because #encode subscribed to the track producer. Closing a WebCodecs
+// encoder discards everything the codec still holds, and the replacement started a fresh framer
+// mid-frame, so the output permanently fell behind its input by the frames lost at every churn.
+test("keeps one encoder and every chunk across a subscriber churn", async () => {
+	using session = encoding(1);
+	session.subscribe();
+	await settle();
+
+	// The first quantum only reports the captured format; encoding starts after it.
+	session.quanta(1);
+	await settle();
+
+	// 155 quanta is 19840 samples: 20 whole Opus frames plus a partial one the framer still holds.
+	session.quanta(155);
+	await settle();
+
+	// A second subscriber supersedes the first: the broadcast closes the old producer and swaps in
+	// the new one without ever clearing the signal.
+	session.subscribe();
+	await settle();
+
+	session.quanta(155);
+	await settle();
+
+	// 310 quanta is 39680 samples, so 41 whole Opus frames, one of which the codec still holds.
+	expect(session.harness.encodeCalls).toBe(41);
+	expect(session.written.length).toBe(40);
+	expect(contiguous(session.written)).toBe(true);
+	expect(session.harness.audioEncoders).toBe(1);
+});
+
+// The churn-free baseline: nothing may go missing on a steady subscription either.
+test("emits a chunk for every input frame on a steady subscription", async () => {
+	using session = encoding(1);
+	session.subscribe();
+	await settle();
+
+	session.quanta(1);
+	await settle();
+
+	session.quanta(310);
+	await settle();
+
+	expect(session.harness.encodeCalls).toBe(41);
+	expect(session.written.length).toBe(40);
+	expect(contiguous(session.written)).toBe(true);
+	expect(session.harness.audioEncoders).toBe(1);
+});
+
+// The demand gate still holds: with nobody subscribed we do not encode. The framer keeps consuming
+// samples though, so the first chunk after a subscriber arrives carries the capture clock rather
+// than resuming where the last subscriber left off.
+test("does not encode without a subscriber, and resumes on the capture clock", async () => {
+	using session = encoding(1);
+	await settle();
+
+	session.quanta(1);
+	await settle();
+
+	// The framer starts here: the quantum above only reported the captured format.
+	const origin = session.now();
+
+	session.quanta(155);
+	await settle();
+	expect(session.harness.encodeCalls).toBe(0);
+	expect(session.written.length).toBe(0);
+
+	session.subscribe();
+	await settle();
+
+	session.quanta(155);
+	await settle();
+
+	// Only the 20 frames captured while subscribed are encoded, and the first of them starts 20
+	// frames into the capture clock rather than back at the origin.
+	expect(session.harness.encodeCalls).toBe(21);
+	expect(session.written.length).toBe(20);
+	expect(session.written[0]).toBe(origin + 20 * FRAME_MICROS);
+	expect(contiguous(session.written)).toBe(true);
+	expect(session.harness.audioEncoders).toBe(1);
 });
