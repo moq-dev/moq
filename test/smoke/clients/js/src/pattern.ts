@@ -58,10 +58,21 @@ export const STEP_BASE_HZ = 500;
 /** Frequency gap between adjacent tone steps. Wide enough to separate under Opus and an FFT bin. */
 export const STEP_GAP_HZ = 140;
 
-/** The tone frequency for a step index. */
+/** The tone frequency for a step index, which wraps at {@link STEPS}. */
 export function stepFrequency(step: number): number {
 	return STEP_BASE_HZ + (step % STEPS) * STEP_GAP_HZ;
 }
+
+/**
+ * The band the tone table occupies, with half a step of margin on each side.
+ *
+ * Stated rather than derived from `stepFrequency(STEPS)`, which wraps back to the base and would
+ * narrow the search to step 0 alone.
+ */
+export const BAND = {
+	lowHz: STEP_BASE_HZ - STEP_GAP_HZ / 2,
+	highHz: STEP_BASE_HZ + (STEPS - 0.5) * STEP_GAP_HZ,
+};
 
 /** The tone step a painted frame belongs to, i.e. what a synchronized subscriber must be hearing. */
 export function expectedStep(frameId: number): number {

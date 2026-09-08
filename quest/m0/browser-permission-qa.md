@@ -27,6 +27,11 @@ matrix, which grants everything up front.
   reloading the page.
 - Publish what the case cannot claim: a fake device is not a real one, and a
   headless permission decision is not a user clicking a prompt.
+- Assert the audio gesture gate while there. `media.ts` clicks both pages and
+  requires audio afterwards, but does not assert silence beforehand: Chromium
+  enforces the gate on the fixture page and has been seen not enforcing it on the
+  player's, whose graph is built a second later. Find what actually decides it,
+  then assert the gate rather than only exercising it.
 
 ## Related
 

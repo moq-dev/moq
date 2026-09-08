@@ -14,7 +14,7 @@
  * @module
  */
 import type MoqWatch from "@moq/watch/element";
-import { SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
+import { AUDIBLE_RMS, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
 import { resources } from "./instrument";
 import * as Pattern from "./pattern";
 
@@ -34,8 +34,8 @@ function analyze(analyser: AnalyserNode, spectrum: Float32Array<ArrayBuffer>, wa
 	analyser.getFloatTimeDomainData(wave);
 
 	const binHz = analyser.context.sampleRate / analyser.fftSize;
-	const first = Math.max(1, Math.floor((Pattern.STEP_BASE_HZ - Pattern.STEP_GAP_HZ) / binHz));
-	const last = Math.min(spectrum.length - 1, Math.ceil(Pattern.stepFrequency(Pattern.STEPS) / binHz));
+	const first = Math.max(1, Math.floor(Pattern.BAND.lowHz / binHz));
+	const last = Math.min(spectrum.length - 1, Math.ceil(Pattern.BAND.highHz / binHz));
 
 	let peak = first;
 	for (let i = first; i <= last; i++) {
@@ -48,13 +48,20 @@ function analyze(analyser: AnalyserNode, spectrum: Float32Array<ArrayBuffer>, wa
 	const toneDb = spectrum[peak];
 	const noiseDb = median(spectrum);
 	const toneHz = peak * binHz;
+	const rms = Math.sqrt(energy / wave.length);
+
+	// Amplitude first, then shape. Digital silence puts most of the spectrum at -Infinity, which
+	// makes any finite peak stand infinitely far "above the floor": the dB margin alone would call
+	// silence a tone. The waveform cannot be argued with, so it decides whether there is audio at
+	// all, and the margin only decides whether that audio is the fixture's tone.
+	const audible = rms >= AUDIBLE_RMS && Number.isFinite(toneDb) && Number.isFinite(noiseDb);
 
 	return {
 		toneHz,
 		toneDb,
 		noiseDb,
-		rms: Math.sqrt(energy / wave.length),
-		toneStep: toneDb - noiseDb >= TONE_FLOOR_DB ? Pattern.nearestStep(toneHz) : undefined,
+		rms,
+		toneStep: audible && toneDb - noiseDb >= TONE_FLOOR_DB ? Pattern.nearestStep(toneHz) : undefined,
 	};
 }
 

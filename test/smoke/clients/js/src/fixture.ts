@@ -106,12 +106,19 @@ export class Fixture {
 		});
 		this.#signals.cleanup(() => video.close());
 
+		// Handed to the encoder only once this page has user activation. The encoder builds its own
+		// capture AudioContext the moment a source appears and never resumes it, so one built before
+		// the first gesture stays suspended and no audio is ever captured. See
+		// /quest/m0/publish-audio-unlock.md; until that lands, giving it the source late is what keeps
+		// this fixture measuring the player rather than that gap.
+		const audioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
+
 		// A MediaStreamAudioDestinationNode track reports no rate or channel count of its own, and the
 		// encoder would otherwise fall back to whatever the graph defaults to.
 		const audio = new Publish.Audio.Encoder("audio", {
 			broadcast,
 			enabled: true,
-			source: { track: audioTrack, kind: "music" },
+			source: audioSource,
 			sampleRate: SAMPLE_RATE,
 			channelCount: 1,
 		});
@@ -129,6 +136,7 @@ export class Fixture {
 			oscillator.start(start);
 			this.#runTone(oscillator, start, fault);
 			this.#runPicture(ctx, videoTrack, start, fault);
+			audioSource.set({ track: audioTrack, kind: "music" });
 		};
 		const unlock = () => void this.#audio.resume().catch(() => {});
 

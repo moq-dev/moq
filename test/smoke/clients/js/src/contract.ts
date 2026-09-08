@@ -51,6 +51,15 @@ export const SAMPLE_MS = 50;
 /** How far the tone peak must stand above the spectrum's median for the tone to count as present. */
 export const TONE_FLOOR_DB = 15;
 
+/**
+ * Waveform level below which the playback sink counts as silent.
+ *
+ * The fixture's tone reaches the graph root at about 0.35 rms, so this is an order of magnitude of
+ * headroom. It exists because a dB margin alone cannot tell silence from a tone: with most of the
+ * spectrum at -Infinity, any finite peak stands infinitely above the floor.
+ */
+export const AUDIBLE_RMS = 0.02;
+
 /** Live instances of each resource the page's wrappers count. */
 export type Resources = {
 	/** Open `WebTransport` sessions, i.e. connections to the relay. */

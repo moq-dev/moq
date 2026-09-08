@@ -108,8 +108,11 @@ Each run covers, against a real local relay:
 - **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
   needs a second page load is an initialization bug, not a race.
-- **autoplay** - launched without `--autoplay-policy` or the fake-media flags, so
-  audio has to stay silent until a real click and start after it.
+- **user gesture** - launched with no Chromium flags at all: no fake camera, no
+  fake permission prompt, no autoplay override. Both pages are clicked and both
+  must carry audio afterwards. The run does not assert silence beforehand:
+  Chromium enforces the gate on the fixture page and has been seen not enforcing
+  it on the player's, so that assertion would measure the browser.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
   **publisher stop and same-path republish**, and **late join**.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
@@ -133,7 +136,8 @@ names the assertion that has to catch it, and passes only by failing there:
 | the detached player's session never torn down | `resource baseline` |
 
 Not covered yet: other browser engines (the capability probe is the groundwork),
-camera/microphone permission denial, and any claim about physical playback.
+camera/microphone permission denial, asserting the gesture gate rather than only
+exercising it, and any claim about physical playback.
 
 ## Layout
 

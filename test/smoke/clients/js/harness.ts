@@ -119,6 +119,17 @@ export function throwPageErrors(errors: BrowserErrors): void {
 	if (messages.length > 0) throw new Error(messages.join("\n"));
 }
 
+/**
+ * Take and clear what the page has reported, for a step that breaks the stream on purpose.
+ *
+ * Cutting a publisher off aborts the subscriptions reading it, and the player says so. That is the
+ * correct behavior, not a fault, so a step that causes it drains the record rather than failing on
+ * it. Only that step; everywhere else a page error is still fatal.
+ */
+export function drainPageErrors(errors: BrowserErrors): string[] {
+	return errors.page.splice(0).concat(errors.console.splice(0));
+}
+
 /** Wait until the player element exists and has published its first sample. */
 export async function waitForWatch(page: Page): Promise<void> {
 	await page.evaluate((tag) => customElements.whenDefined(tag), SELECTORS.watch);
@@ -184,6 +195,8 @@ export type WaitProps<T> = {
 	predicate: (state: T) => boolean;
 	/** Assertion name for the timeout, when the wait itself is the check. Defaults to "timeout". */
 	assertion?: string;
+	/** Drain the page's errors instead of failing on them. See {@link drainPageErrors}. */
+	tolerateErrors?: boolean;
 };
 
 /** Poll `read` until `predicate` holds, the deadline passes, or the page reports an error. */
@@ -195,14 +208,15 @@ export async function waitFor<T>(
 ): Promise<T> {
 	let last: T | undefined;
 	while (Date.now() < props.deadline) {
-		throwPageErrors(errors);
+		if (props.tolerateErrors) drainPageErrors(errors);
+		else throwPageErrors(errors);
 		// The page may not have sampled yet; that is indistinguishable from "not there yet" and the
 		// deadline is what decides, so keep polling rather than failing on the first read.
 		last = await read(page).catch(() => undefined);
 		if (last !== undefined && props.predicate(last)) return last;
 		await sleep(POLL_INTERVAL_MS);
 	}
-	throwPageErrors(errors);
+	if (!props.tolerateErrors) throwPageErrors(errors);
 	throw new Failure(props.assertion ?? "timeout", `waiting for ${props.description}: ${JSON.stringify(last)}`);
 }
 
