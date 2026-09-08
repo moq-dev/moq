@@ -105,7 +105,6 @@ tools_for_suite() {
             printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
             printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
             printf '%s\n' "${CC:-cc}"
-            printf '%s\n' "${PKG_CONFIG:-pkg-config}"
             ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
@@ -660,22 +659,72 @@ EOF
     record behavior.awk-select behavior ok true "$suites" "awk selects a multi-crate diff" "" 10 "$BOUNDED_ELAPSED"
 }
 
+# Print the same target-qualified environment value pkg-config-rs selects.
+targeted_env() {
+    local base=$1 target=$2 host=$3 kind name value
+    if [ "$host" = "$target" ]; then
+        kind=HOST
+    else
+        kind=TARGET
+    fi
+    for name in "${base}_${target}" "${base}_${target//-/_}" "${kind}_${base}" "$base"; do
+        if value=$(printenv "$name" 2>/dev/null); then
+            printf '%s\n' "$value"
+            return
+        fi
+    done
+    return 1
+}
+
 # Verify the native metadata the requested GStreamer smoke client links against.
 probe_gstreamer_devel() {
-    local suites=$1 status pkg_config=${PKG_CONFIG:-pkg-config}
-    if ! command -v "$pkg_config" >/dev/null 2>&1; then
-        record behavior.gstreamer-devel behavior skip false "$suites" \
-            "$pkg_config is missing, so GStreamer metadata was not probed" "" 10 0
+    local suites=$1 status host target pkg_config source display base value rustc_exe=${RUSTC-rustc}
+    local pkg_env=(env)
+    if ! command -v "$rustc_exe" >/dev/null 2>&1; then
+        record behavior.gstreamer-devel behavior missing true "$suites" \
+            "Cargo's rustc executable is missing: ${rustc_exe:-<empty RUSTC override>}" \
+            "install the configured rustc executable, or enter the dev shell: nix develop" 10 0
         return
     fi
-    bounded 10 "$pkg_config" --atleast-version=1.14 gstreamer-1.0
+    bounded 10 "$rustc_exe" -vV
+    status=$?
+    host=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/^host: //p')
+    if ((status != 0)) || [ -z "$host" ]; then
+        record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+            "rustc could not report Cargo's host target: $(error_line "$BOUNDED_OUT")" \
+            "use the dev shell's Rust toolchain: nix develop" 10 "$BOUNDED_ELAPSED"
+        return
+    fi
+    target=${CARGO_BUILD_TARGET:-$host}
+    if pkg_config=$(targeted_env PKG_CONFIG "$target" "$host"); then
+        source="Cargo's target-qualified pkg-config override"
+    elif command -v pkg-config >/dev/null 2>&1; then
+        pkg_config=pkg-config
+        source="Cargo's default pkg-config executable"
+    else
+        pkg_config=pkgconf
+        source="Cargo's pkgconf fallback"
+    fi
+    display=${pkg_config:-'<empty pkg-config override>'}
+    if ! command -v "$pkg_config" >/dev/null 2>&1; then
+        record behavior.gstreamer-devel behavior missing true "$suites" \
+            "$source is missing: $display" \
+            "install the configured pkg-config executable, or enter the dev shell: nix develop" 10 0
+        return
+    fi
+    for base in PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR; do
+        if value=$(targeted_env "$base" "$target" "$host"); then
+            pkg_env+=("$base=$value")
+        fi
+    done
+    bounded 10 "${pkg_env[@]}" "$pkg_config" --atleast-version=1.14 gstreamer-1.0
     status=$?
     if ((status == 0)); then
         record behavior.gstreamer-devel behavior ok true "$suites" \
-            "$pkg_config resolves GStreamer 1.14+ development metadata" "" 10 "$BOUNDED_ELAPSED"
+            "$display resolves GStreamer 1.14+ development metadata" "" 10 "$BOUNDED_ELAPSED"
     else
         record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-            "$pkg_config cannot resolve GStreamer 1.14+ development metadata" \
+            "$display cannot resolve GStreamer 1.14+ development metadata" \
             "install GStreamer 1.14+ development metadata that provides gstreamer-1.0.pc" 10 "$BOUNDED_ELAPSED"
     fi
 }
@@ -1160,7 +1209,7 @@ emit_json() {
 posix_path() {
     local bin=$1 tool path
     mkdir -p "$bin"
-    for tool in awk bash cat cut df dirname env git grep mktemp rm sed sleep sort tr; do
+    for tool in awk bash cat cut df dirname env git grep mktemp printenv rm sed sleep sort tr; do
         path=$(command -v "$tool" 2>/dev/null)
         if [ -z "$path" ]; then
             printf 'doctor: self-test: skipping a bare-PATH run, no %s\n' "$tool" >&2
@@ -1442,8 +1491,13 @@ self_test() {
     check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
-    check 'smoke-full needs configured pkg-config' "$(tools_for_suite smoke-full | grep -Fxc "${PKG_CONFIG:-pkg-config}")" 1
-    check 'smoke-full honors pkg-config override' "$(PKG_CONFIG=/tmp/custom-pkg-config tools_for_suite smoke-full | grep -Fxc '/tmp/custom-pkg-config')" 1
+    check 'dynamic pkg-config stays out of tool words' "$(tools_for_suite smoke-full | grep -c 'pkg-config')" 0
+    check 'pkg-config target override wins' \
+        "$(PKG_CONFIG_doctor_test_host=/target HOST_PKG_CONFIG=/host PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" /target
+    check 'pkg-config host override wins generic' \
+        "$(HOST_PKG_CONFIG='/host pkg-config' PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" '/host pkg-config'
+    check 'pkg-config target kind wins generic' \
+        "$(TARGET_PKG_CONFIG=/cross PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-target doctor-test-host)" /cross
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
     self_test_process_state
