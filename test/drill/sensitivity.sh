@@ -90,6 +90,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+for want in "${SELECTED[@]}"; do
+    if [[ ! -f "$MUTATIONS/$want.patch" ]]; then
+        echo "error: unknown mutation $want" >&2
+        list >&2
+        exit 2
+    fi
+done
+
 # Copy the tree as it stands (tracked plus untracked-but-not-ignored) into a
 # fresh directory. Listing the files rather than copying the directory is what
 # keeps target/, node_modules, and the rest of the ignored bulk out of the copy.
@@ -99,13 +107,14 @@ snapshot() {
         tar -xf - -C "$dest"
 }
 
-# Run one drill in `dir`, writing its output to `log`, and print the exit status.
+# Run one drill under nextest's process-level timeout, writing its output to
+# `log`, and print the exit status.
 run_drill() {
     local dir="$1" drill="$2" log="$3"
     local status=0
     (
         cd "$dir"
-        "$CARGO" test --locked -p moq-relay --test drills "$drill" -- --exact --test-threads 1 --nocapture
+        "$CARGO" nextest run --locked -p moq-relay --test drills -E "test(=$drill)" --test-threads 1
     ) >"$log" 2>&1 || status=$?
     echo "$status"
 }
@@ -160,11 +169,11 @@ for patch in "$MUTATIONS"/*.patch; do
     if [[ "$status" == 0 ]]; then
         echo "  FAIL: $drill still passed with '$name' applied; it is not watching this behavior" >&2
         failed=$((failed + 1))
-    elif grep -qE 'error(\[[A-Z0-9]+\])?: |could not compile' "$log"; then
+    elif grep -qE 'error\[[A-Z0-9]+\]: |could not compile' "$log"; then
         echo "  FAIL: '$name' broke the build, which is not behavioral proof" >&2
-        grep -E 'error(\[[A-Z0-9]+\])?: ' "$log" | head -5 >&2
+        grep -E 'error\[[A-Z0-9]+\]: ' "$log" | head -5 >&2
         failed=$((failed + 1))
-    elif ! grep -q 'test result: FAILED' "$log"; then
+    elif ! grep -qE "(FAIL|TIMEOUT).*moq-relay::drills $drill" "$log"; then
         echo "  FAIL: '$name' never got as far as running $drill" >&2
         tail -20 "$log" >&2
         failed=$((failed + 1))

@@ -1,21 +1,13 @@
 # drill: cancel_under_backpressure_releases_the_reader
 # expect: the cancelled subscriber's broadcast never closed
 #
-# Removes the release a subscribing session performs when it ends: the broadcasts
-# it fed close because that session held the only producers. Leaking one clone is
-# enough to keep every handle downstream of it alive forever, which is the
-# "parked clone that keeps something alive" bug the drill exists to catch.
+# Removes the release a subscribing session performs when it ends: the
+# `Announced` collection owns the guards that abort every broadcast the session
+# fed. Preventing that local from dropping keeps every handle downstream of it
+# alive forever, including when cancellation drops the future at an await.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 26733d4d8..23b65d697 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -540,6 +540,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
- 		// Serve the origin's track requests for this source in the background; the
- 		// announce loop keeps the producer so an unannounce can finish it.
- 		self.tasks.push(self.clone().run_source(path.clone(), source.dynamic()));
-+		// MUTATION: hold a clone of the broadcast this session feeds past the end
-+		// of the session, so nothing it produced is ever released.
-+		std::mem::forget(source.clone());
- 		announced.attach(path, AnnouncedRoute::new(source, publisher));
- 
- 		Ok(true)
+@@ -269 +269 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
+-		let mut announced = Announced::default();
++		let mut announced = std::mem::ManuallyDrop::new(Announced::default());

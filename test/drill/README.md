@@ -77,6 +77,8 @@ A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
 watching. So is a drill that fails for a reason other than the one its mutation
 names, which is why each patch declares the message its failure must carry.
+The script runs every drill through nextest, whose process-level timeout also
+terminates a mutation that wedges outside the drill's own Tokio timeouts.
 
 Adding one: write the patch (a `git diff` of the behavior removed), give it the
 two headers, and add a row above.
