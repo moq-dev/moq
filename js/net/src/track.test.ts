@@ -159,6 +159,18 @@ test("a fractional latencyMax is rounded up before the wire sees it", async () =
 	expect((await producer.info()).latencyMax).toBe(1001);
 });
 
+test("a latencyMax that is not a duration is refused, not rounded into one", () => {
+	const producer = new TrackProducer("test");
+
+	// The wire carries an unsigned varint, so rounding these would encode a budget the
+	// caller never asked for: -0.5 would ceil to zero and silently take the live edge.
+	expect(() => producer.subscribe({ latencyMax: -0.5 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ latencyMax: -100 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ latencyMax: Number.NaN })).toThrow(RangeError);
+	expect(() => producer.subscribe({ latencyMax: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+	expect(() => producer.accept({ latencyMax: -0.5 })).toThrow(RangeError);
+});
+
 test("multiple subscriber options aggregate like Rust", async () => {
 	const producer = new TrackProducer("test");
 	const bounded = producer.subscribe({ priority: 2, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });

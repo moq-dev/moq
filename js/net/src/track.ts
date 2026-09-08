@@ -59,7 +59,8 @@ export interface Info {
 	 * Publisher Max Latency: the maximum age (milliseconds) of a non-latest group before
 	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
 	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
-	 * Rounded up to a whole millisecond by {@link infoDefaults}.
+	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
+	 * or non-finite value.
 	 */
 	latencyMax: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
@@ -71,13 +72,24 @@ export interface Info {
 	ordered: boolean;
 }
 
+// Normalize a latency budget for the wire, which carries it as an unsigned varint.
+//
+// Callers derive it from measurements (a jitter estimate scaled off RTT), so a fractional
+// millisecond is expected; ceil rather than round, because a budget shortened by rounding
+// skips a group the subscriber still wants. Anything that is not a duration is refused
+// here, where the field is named, rather than deep in the encoder.
+function latencyMaxMillis(value: number): number {
+	if (!Number.isFinite(value) || value < 0) {
+		throw new RangeError(`latencyMax must be a non-negative number of milliseconds: ${value}`);
+	}
+	return Math.ceil(value);
+}
+
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: info.timescale ?? Timescale.MILLI,
-		// Ceil, not round: the wire carries a varint, and a budget rounded down evicts a
-		// group the publisher promised to retain.
-		latencyMax: Math.ceil(info.latencyMax ?? DEFAULT_LATENCY_MAX_MS),
+		latencyMax: latencyMaxMillis(info.latencyMax ?? DEFAULT_LATENCY_MAX_MS),
 		priority: info.priority ?? 0,
 		ordered: info.ordered ?? false,
 	};
@@ -94,7 +106,8 @@ export interface Subscription {
 	ordered?: boolean;
 	/**
 	 * Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`.
-	 * Rounded up to a whole millisecond, so a value derived from a measurement is never shortened.
+	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
+	 * shortened. A negative or non-finite value is refused.
 	 */
 	latencyMax?: number;
 	/** First group the publisher should deliver, or omit to start at the latest group. */
@@ -109,10 +122,7 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	return {
 		priority: subscription.priority ?? 0,
 		ordered: subscription.ordered ?? false,
-		// Ceil, not round: the wire carries a varint, and a budget rounded down can skip a
-		// group the subscriber still wants. Callers derive this from measurements (a jitter
-		// estimate scaled off RTT), so a fractional millisecond is expected here.
-		latencyMax: Math.ceil(subscription.latencyMax ?? 0),
+		latencyMax: latencyMaxMillis(subscription.latencyMax ?? 0),
 		startGroup: subscription.startGroup,
 		endGroup: subscription.endGroup,
 	};
