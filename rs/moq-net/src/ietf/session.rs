@@ -711,7 +711,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::RequestOk::default()).await.unwrap();
 		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {

@@ -13,13 +13,15 @@ import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { FetchHeader } from "./fetch.ts";
 import { Group as GroupMessage } from "./object.ts";
+import type { MessageLocation } from "./parameters.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
+import { Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
-import { ALPN, Version } from "./version.ts";
+import { TRACK_STATUS_ERROR_ID, TRACK_STATUS_OK_ID, TrackStatusRequest } from "./track.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -1164,5 +1166,84 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 		group.close();
 		fx.close();
 		client.close();
+	}
+});
+
+/** Every draft this publisher speaks, so a per-version reply cannot regress on one. */
+const VERSIONS = [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+] as const;
+
+/** Send a TRACK_STATUS on a fresh bidi stream and hand back what the peer reads. */
+async function runTrackStatus(
+	version: IetfVersion,
+	namespace: string,
+	frames: number,
+): Promise<{ typeId: number; largest?: MessageLocation; close: () => void }> {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
+	const pub = new Publisher({ quic: pair.server, session, requiresSolicitation: false });
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	pub.publish(Path.from("test"), broadcast);
+	if (frames > 0) writeGroup(track, frames);
+
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("publisher never accepted the track status stream");
+
+	void pub.runTrackStatusRequest(
+		new TrackStatusRequest({ requestId: 7n, trackNamespace: Path.from(namespace), trackName: "video" }),
+		server,
+	);
+
+	const typeId = await client.reader.u53();
+	const close = () => {
+		pub.close();
+		client.close();
+	};
+
+	// draft-14 answers with a SUBSCRIBE_OK body under its own type; draft-15 folded both the
+	// success and the refusal into REQUEST_OK / REQUEST_ERROR.
+	if (typeId === TRACK_STATUS_OK_ID) {
+		return { typeId, largest: (await SubscribeOk.decode(client.reader, version)).largest, close };
+	}
+	if (typeId === RequestOk.id) {
+		return { typeId, largest: (await RequestOk.decode(client.reader, version)).largest, close };
+	}
+
+	// Drained even though the test only checks the type: a body left buffered rejects when
+	// the stream is closed, which reports as a failure of whatever ran last.
+	if (typeId === TRACK_STATUS_ERROR_ID) await SubscribeError.decode(client.reader, version);
+	else await RequestError.decode(client.reader, version);
+	return { typeId, close };
+}
+
+test("a track status answers with the live edge on every draft", async () => {
+	for (const version of VERSIONS) {
+		const { typeId, largest, close } = await runTrackStatus(version, "test", 2);
+		try {
+			expect(typeId).toBe(version === Version.DRAFT_14 ? TRACK_STATUS_OK_ID : RequestOk.id);
+			expect(largest).toEqual({ groupId: 0n, objectId: 1n });
+		} finally {
+			close();
+		}
+	}
+});
+
+test("a track status for a missing broadcast is refused on every draft", async () => {
+	for (const version of VERSIONS) {
+		const { typeId, close } = await runTrackStatus(version, "missing", 0);
+		try {
+			expect(typeId).toBe(version === Version.DRAFT_14 ? TRACK_STATUS_ERROR_ID : RequestError.id);
+		} finally {
+			close();
+		}
 	}
 });

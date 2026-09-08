@@ -2,12 +2,10 @@
 
 use std::borrow::Cow;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Filter, GroupOrder, Parameters, RequestId},
+	ietf::{Filter, GroupOrder, RequestId},
 };
 
 use super::Message;
@@ -15,9 +13,24 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
+/// TRACK_STATUS_OK (0x0e), the draft-14 answer to a successful TRACK_STATUS.
+///
+/// The body is byte-identical to SUBSCRIBE_OK, with Track Alias 0, so [`super::SubscribeOk`]
+/// encodes it and only the type differs. Draft-15 and later answer with REQUEST_OK instead,
+/// which is why 0x0e is free to mean NAMESPACE_DONE from draft-16 on.
+pub const TRACK_STATUS_OK_ID: u64 = 0x0e;
+
+/// TRACK_STATUS_ERROR (0x0f), the draft-14 refusal of a TRACK_STATUS.
+///
+/// The body is byte-identical to SUBSCRIBE_ERROR. Draft-15 and later refuse with
+/// REQUEST_ERROR instead.
+pub const TRACK_STATUS_ERROR_ID: u64 = 0x0f;
+
 /// TrackStatus message (0x0d)
-/// v14: own format (TrackStatusRequest-like with subscribe fields)
-/// v15: same wire format as SUBSCRIBE. Response is REQUEST_OK.
+///
+/// The format is identical to SUBSCRIBE on every draft: subscribe fields inline on v14,
+/// parameters from v15 on. The publisher answers as if it were a SUBSCRIBE that creates no
+/// subscription state and delivers no objects.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
 	pub request_id: RequestId,
@@ -42,7 +55,7 @@ impl Message for TrackStatus<'_> {
 				GroupOrder::Descending.encode(w, version)?;
 				false.encode(w, version)?; // forward
 				Filter::NextObject.encode(w, version)?; // filter
-				0u8.encode(w, version)?; // no parameters
+				encode_params!(w, version,);
 			}
 			_ => {
 				encode_params!(w, version,);
@@ -64,8 +77,11 @@ impl Message for TrackStatus<'_> {
 				let _subscriber_priority = u8::decode(r, version)?;
 				let _group_order = GroupOrder::decode(r, version)?;
 				let _forward = bool::decode(r, version)?;
-				let _filter_type = u64::decode(r, version)?;
-				let _params = Parameters::decode(r, version)?;
+				// The whole filter, not just its tag: an absolute filter carries a Start
+				// Location and an End Group after it, and skipping those desyncs the
+				// parameters that follow.
+				let _filter = Filter::decode(r, version)?;
+				decode_params!(r, version,);
 			}
 			_ => {
 				decode_params!(r, version,);
@@ -77,28 +93,6 @@ impl Message for TrackStatus<'_> {
 			track_namespace,
 			track_name,
 		})
-	}
-}
-
-#[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
-#[repr(u64)]
-pub enum TrackStatusCode {
-	InProgress = 0x00,
-	NotFound = 0x01,
-	NotAuthorized = 0x02,
-	Ended = 0x03,
-}
-
-impl Encode<Version> for TrackStatusCode {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		u64::from(*self).encode(w, version)?;
-		Ok(())
-	}
-}
-
-impl Decode<Version> for TrackStatusCode {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
@@ -178,6 +172,33 @@ mod tests {
 		let decoded: TrackStatus = decode_message(&encoded, Version::Draft16).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	/// The draft-14 format is SUBSCRIBE's, so a subscribe-shaped request has to decode as one.
+	/// An absolute filter carries a Start Location and an End Group after its tag, and reading
+	/// only the tag used to desync the parameters that follow.
+	#[test]
+	fn test_track_status_v14_decodes_an_absolute_filter() {
+		let msg = crate::ietf::Subscribe {
+			request_id: RequestId(3),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter: Filter::Absolute {
+				start: crate::ietf::Location { group: 4, object: 5 },
+				end: Some(crate::ietf::EndLocation { group: 9, object: None }),
+			},
+			fill: None,
+			properties_wanted: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(3));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
 		assert_eq!(decoded.track_name, "video");
 	}

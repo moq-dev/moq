@@ -1033,12 +1033,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
+						..Default::default()
 					})
 					.await?;
 			}
 			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				stream.writer.encode(&ietf::RequestOk::default()).await?;
 			}
 		}
 		Ok(())
@@ -2336,7 +2337,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::RequestOk::default()).await.unwrap();
 		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {

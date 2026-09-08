@@ -20,7 +20,7 @@ import {
 	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
-import { TrackStatus, TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_ID, TRACK_STATUS_OK_ID, TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // v14 message map — IDs that have different meanings in v15 are handled specially
@@ -39,7 +39,11 @@ const MessagesV14 = {
 	[PublishDone.id]: PublishDone,
 	[PublishNamespaceCancel.id]: PublishNamespaceCancel,
 	[TrackStatusRequest.id]: TrackStatusRequest,
-	[TrackStatus.id]: TrackStatus,
+	// draft-14 answers TRACK_STATUS with TRACK_STATUS_OK / TRACK_STATUS_ERROR, whose bodies
+	// are byte-identical to SUBSCRIBE_OK / SUBSCRIBE_ERROR. Draft-15 folded both into
+	// REQUEST_OK / REQUEST_ERROR, which is why 0x0e is free to mean NAMESPACE_DONE later.
+	[TRACK_STATUS_OK_ID]: SubscribeOk,
+	[TRACK_STATUS_ERROR_ID]: SubscribeError,
 	[GoAway.id]: GoAway,
 	[Fetch.id]: Fetch,
 	[FetchCancel.id]: FetchCancel,

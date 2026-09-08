@@ -202,9 +202,11 @@ pub struct SubscribeOk {
 	/// The largest Location in the track (LARGEST_OBJECT, 0x09), which the spec requires
 	/// once the track has content. It is what a subscriber sizes a fill against.
 	///
-	/// Encoded on draft-20 only: the parameter is legal on earlier drafts too, but peers
-	/// built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
-	/// session, so emitting it there would break existing deployments over a hint.
+	/// Draft-14 carries it as the Content Exists flag and the Largest Location fields that
+	/// follow it, which every peer parses. From draft-15 on it is the LARGEST_OBJECT
+	/// parameter, and there it is encoded on draft-20 only: the parameter is legal earlier
+	/// too, but peers built before we sent it reject an unexpected SUBSCRIBE_OK parameter by
+	/// closing the session, so emitting it there would break existing deployments over a hint.
 	pub largest: Option<Location>,
 
 	/// Metadata about the track, sent as Track Properties (draft-17+).
@@ -231,7 +233,13 @@ impl Message for SubscribeOk {
 					.group_order
 					.unwrap_or(GroupOrder::Ascending)
 					.encode(w, version)?;
-				false.encode(w, version)?; // no content
+				match self.largest {
+					Some(largest) => {
+						true.encode(w, version)?; // content exists
+						largest.encode(w, version)?;
+					}
+					None => false.encode(w, version)?,
+				}
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
@@ -269,6 +277,7 @@ impl Message for SubscribeOk {
 		};
 		let track_alias = u64::decode(r, version)?;
 		let mut properties = Properties::default();
+		let mut largest = None;
 
 		match version {
 			Version::Draft14 => {
@@ -280,8 +289,7 @@ impl Message for SubscribeOk {
 				properties.group_order = Some(GroupOrder::decode(r, version)?.any_to_descending());
 
 				if bool::decode(r, version)? {
-					let _group = u64::decode(r, version)?;
-					let _object = u64::decode(r, version)?;
+					largest = Some(Location::decode(r, version)?);
 				}
 
 				let _params = Parameters::decode(r, version)?;
@@ -311,7 +319,7 @@ impl Message for SubscribeOk {
 		Ok(Self {
 			request_id,
 			track_alias,
-			largest: None,
+			largest,
 			properties,
 		})
 	}

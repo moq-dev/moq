@@ -12,6 +12,7 @@ import * as Cluster from "./cluster.ts";
 import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
+import type { MessageLocation } from "./parameters.ts";
 import { fromWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone } from "./publish.ts";
@@ -24,7 +25,7 @@ import {
 	SubscribeNamespaceEntryDone,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
-import { TrackStatus, type TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_ID, TRACK_STATUS_OK_ID, type TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -957,31 +958,84 @@ export class Publisher {
 	}
 
 	/**
-	 * Handles an incoming TRACK_STATUS_REQUEST on a bidi stream.
+	 * Handles an incoming TRACK_STATUS on a bidi stream.
+	 *
+	 * The draft says to treat it exactly like a SUBSCRIBE that creates no subscription state
+	 * and delivers no objects, so it resolves the track the same way and answers with what a
+	 * SUBSCRIBE_OK would have carried: the live edge as LARGEST_OBJECT, plus the track
+	 * properties. The subscription exists only long enough to read that edge.
 	 *
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		const version = this.#session.version;
+		const broadcast = this.#broadcasts.peek()?.get(msg.trackNamespace);
+
+		if (!broadcast) {
+			await this.#rejectTrackStatus(msg, stream, "Broadcast not found");
+			return;
+		}
+
+		const track = broadcast.subscribe(msg.trackName);
+		let largest: MessageLocation | undefined;
+		let properties: Properties.Properties;
+		try {
+			properties = { timescale: (await track.info()).timescale, groupOrder: Properties.DESCENDING };
+			const edge = liveEdge(track);
+			largest = edge.largest && { groupId: edge.largest.group, objectId: edge.largest.object };
+		} catch (err) {
+			await this.#rejectTrackStatus(msg, stream, reason(err));
+			return;
+		} finally {
+			// A TRACK_STATUS delivers nothing, so the subscription is done the moment the edge
+			// is read.
+			track.close();
+		}
 
 		if (version === Version.DRAFT_14) {
-			// v14: respond with TrackStatus (0x0E = TRACK_STATUS_OK)
-			await stream.writer.u53(TrackStatus.id);
-			const status = new TrackStatus({
-				trackNamespace: msg.trackNamespace,
-				trackName: msg.trackName,
-				statusCode: TrackStatus.STATUS_NOT_FOUND,
-				lastGroupId: 0n,
-				lastObjectId: 0n,
-			});
-			await status.encode(stream.writer, version);
+			// draft-14's TRACK_STATUS_OK is a SUBSCRIBE_OK body with Track Alias 0. Draft-15
+			// folded it into REQUEST_OK, which is why 0x0e is free to mean NAMESPACE_DONE later.
+			await stream.writer.u53(TRACK_STATUS_OK_ID);
+			await new SubscribeOk({ requestId: msg.requestId, trackAlias: 0n, largest, properties }).encode(
+				stream.writer,
+				version,
+			);
 		} else {
-			// v15+: respond with RequestOk (0x07)
 			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({
+			await new RequestOk({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-			});
-			await ok.encode(stream.writer, version);
+				// LARGEST_OBJECT is the whole answer here, so unlike SUBSCRIBE_OK it goes out on
+				// every draft: a peer that asked for the status and got an empty REQUEST_OK
+				// learned nothing.
+				largest,
+				properties,
+			}).encode(stream.writer, version);
+		}
+		stream.close();
+	}
+
+	/**
+	 * Refuse a TRACK_STATUS, ending its stream.
+	 *
+	 * draft-14 has a refusal per request type, all sharing the SUBSCRIBE_ERROR body; draft-15
+	 * folded them into REQUEST_ERROR.
+	 */
+	async #rejectTrackStatus(msg: TrackStatusRequest, stream: Stream, reasonPhrase: string) {
+		const version = this.#session.version;
+
+		if (version === Version.DRAFT_14) {
+			await stream.writer.u53(TRACK_STATUS_ERROR_ID);
+			await new SubscribeError({ requestId: msg.requestId, errorCode: 404, reasonPhrase }).encode(
+				stream.writer,
+				version,
+			);
+		} else {
+			await stream.writer.u53(RequestError.id);
+			await new RequestError({
+				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+				errorCode: 404,
+				reasonPhrase,
+			}).encode(stream.writer, version);
 		}
 		stream.close();
 	}

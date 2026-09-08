@@ -7,6 +7,7 @@ import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
 import { Parameters, SetupOptions } from "./parameters.ts";
+import * as Properties from "./properties.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -409,23 +410,31 @@ test("TrackStatusRequest: round trip", async () => {
 	expect(decoded.trackName).toBe("main");
 });
 
-test("TrackStatus v14: round trip", async () => {
-	const msg = new Track.TrackStatus({
-		trackNamespace: Path.from("test"),
-		trackName: "status",
-		statusCode: 200,
-		lastGroupId: 42n,
-		lastObjectId: 100n,
+// draft-14's TRACK_STATUS_OK is a SUBSCRIBE_OK body under a different type, so the largest
+// Location the publisher answers with has to survive that round trip.
+test("TrackStatusOk v14: round trip", async () => {
+	const msg = new Subscribe.SubscribeOk({
+		requestId: 0n,
+		trackAlias: 0n,
+		largest: { groupId: 42n, objectId: 100n },
 	});
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Track.TrackStatus.decode, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
 
-	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
-	expect(decoded.trackName).toBe("status");
-	expect(decoded.statusCode).toBe(200);
-	expect(decoded.lastGroupId).toBe(42n);
-	expect(decoded.lastObjectId).toBe(100n);
+	expect(decoded.requestId).toBe(0n);
+	expect(decoded.trackAlias).toBe(0n);
+	expect(decoded.largest).toEqual({ groupId: 42n, objectId: 100n });
+});
+
+// An empty track answers with Content Exists = 0 and no Location at all.
+test("TrackStatusOk v14: round trip without content", async () => {
+	const msg = new Subscribe.SubscribeOk({ requestId: 0n, trackAlias: 0n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+
+	expect(decoded.largest).toBeUndefined();
 });
 
 // Validation tests
@@ -752,6 +761,39 @@ test("SubscribeOk v17: no requestId", async () => {
 
 	expect(decoded.requestId).toBe(undefined);
 	expect(decoded.trackAlias).toBe(42n);
+});
+
+// A TRACK_STATUS_OK's whole answer rides in REQUEST_OK: the LARGEST_OBJECT parameter on
+// every draft, and the Track Properties block from draft-18 on.
+test.each([Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20])(
+	"RequestOk %s: carries largest and properties",
+	async (version) => {
+		const msg = new RequestOk({
+			largest: { groupId: 7n, objectId: 1n },
+			properties: { timescale: Timescale.MICRO, groupOrder: Properties.DESCENDING },
+		});
+
+		const encoded = await encodeVersioned(msg, version);
+		const decoded = await decodeVersioned(encoded, RequestOk.decode, version);
+
+		expect(decoded.largest).toEqual({ groupId: 7n, objectId: 1n });
+		expect(decoded.properties).toEqual({ timescale: Timescale.MICRO, groupOrder: Properties.DESCENDING });
+	},
+);
+
+// Draft-17's REQUEST_OK has no Track Properties field (draft-18 added it), so the block is
+// dropped rather than written as trailing bytes the peer would fault the message for.
+test("RequestOk v17: drops properties", async () => {
+	const msg = new RequestOk({
+		largest: { groupId: 7n, objectId: 1n },
+		properties: { timescale: Timescale.MICRO },
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_17);
+
+	expect(decoded.largest).toEqual({ groupId: 7n, objectId: 1n });
+	expect(decoded.properties).toEqual({});
 });
 
 test("RequestOk v17: no requestId", async () => {

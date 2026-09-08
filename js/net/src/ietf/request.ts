@@ -1,8 +1,18 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { Parameters } from "./parameters.ts";
+import { type MessageLocation, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+/**
+ * Whether this draft puts a Track Properties block at the end of REQUEST_OK.
+ *
+ * Draft-18 added it (#1576). Draft-17 has none, and the drafts before it never named the
+ * block outside SUBSCRIBE_OK.
+ */
+function hasProperties(version: IetfVersion): boolean {
+	return version >= Version.DRAFT_18;
+}
 
 export class MaxRequestId {
 	static id = 0x15;
@@ -64,9 +74,37 @@ export class RequestOk {
 	requestId: bigint | undefined;
 	parameters: Parameters;
 
-	constructor({ requestId, parameters = new Parameters() }: { requestId?: bigint; parameters?: Parameters }) {
+	/**
+	 * The largest Location in the track (LARGEST_OBJECT).
+	 *
+	 * Only a TRACK_STATUS_OK carries it, where it is the whole answer; the draft forbids it
+	 * in every other REQUEST_OK we send.
+	 */
+	largest: MessageLocation | undefined;
+
+	/**
+	 * Metadata about the track, sent as Track Properties (draft-18+).
+	 *
+	 * Only a TRACK_STATUS_OK carries them; the draft requires the block to be empty in every
+	 * other REQUEST_OK, and draft-17 has no such field at all.
+	 */
+	properties: Properties.Properties;
+
+	constructor({
+		requestId,
+		parameters = new Parameters(),
+		largest,
+		properties,
+	}: {
+		requestId?: bigint;
+		parameters?: Parameters;
+		largest?: MessageLocation;
+		properties?: Properties.Properties;
+	}) {
 		this.requestId = requestId;
 		this.parameters = parameters;
+		this.largest = largest;
+		this.properties = properties ?? {};
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -74,7 +112,11 @@ export class RequestOk {
 			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
 			await w.u62(this.requestId);
 		}
+		if (this.largest !== undefined) this.parameters.largest = this.largest;
 		await this.parameters.encode(w, version);
+
+		// Track Properties are the final field, so nothing may follow.
+		if (hasProperties(version)) await Properties.encode(w, this.properties, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -87,8 +129,8 @@ export class RequestOk {
 				? await r.u62()
 				: undefined;
 		const parameters = await Parameters.decode(r, version);
-		await Properties.decode(r, version);
-		return new RequestOk({ requestId, parameters });
+		const properties = hasProperties(version) ? await Properties.decode(r, version) : {};
+		return new RequestOk({ requestId, parameters, largest: parameters.largest, properties });
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<RequestOk> {

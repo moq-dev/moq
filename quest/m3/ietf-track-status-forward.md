@@ -22,13 +22,9 @@ pulled for a request that delivers none.
   advertiser may answer for a path it has not started.
 - Measure: a status request against an unserved broadcast attaches no route
   and moves no groups; a request against a served one is answered locally.
-- This is the follow-up to the truthful answer in
-  [TRACK_STATUS](/quest/m0/3492-ietf-track-status.md); a written verdict that
-  the forwarding is not worth a lite message is a valid outcome.
-
-## Required
-
-- [TRACK_STATUS](/quest/m0/3492-ietf-track-status.md) - the local answer this forwards when it cannot give one
+- This is the follow-up to the local answer the publisher already gives, which
+  subscribes to read the live edge; a written verdict that the forwarding is
+  not worth a lite message is a valid outcome.
 
 ## Related
 

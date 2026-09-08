@@ -501,8 +501,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				.maybe_boxed()
 			}
 			ietf::TrackStatus::ID => {
-				tracing::warn!("TrackStatus not supported");
-				async {}.maybe_boxed()
+				let msg = ietf::TrackStatus::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(message = ?msg, "received track status");
+				async move {
+					if let Err(err) = this.run_track_status_stream(stream, msg).await {
+						tracing::debug!(%err, "track status stream error");
+					}
+				}
+				.maybe_boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
@@ -678,6 +687,128 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		res
 	}
 
+	/// Handle a TRACK_STATUS on its bidi stream.
+	///
+	/// The draft says to treat it exactly like a SUBSCRIBE that creates no subscription state
+	/// and delivers no objects, so it resolves the track the same way and answers with what a
+	/// SUBSCRIBE_OK would have carried: the live edge as LARGEST_OBJECT, plus the track
+	/// properties. The subscription exists only long enough to read that edge.
+	async fn run_track_status_stream(
+		self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::TrackStatus<'_>,
+	) -> Result<(), Error> {
+		let request_id = msg.request_id;
+		let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
+
+		tracing::info!(id = %request_id, broadcast = %absolute, track = %msg.track_name, "track status");
+
+		let broadcast = match self
+			.serving_origin()
+			.await
+			.request_broadcast(&msg.track_namespace)
+			.await
+		{
+			Ok(broadcast) => broadcast,
+			Err(_) => {
+				return self
+					.reject_track_status(stream, request_id, 404, "Broadcast not found")
+					.await;
+			}
+		};
+
+		let track = match broadcast.track(&msg.track_name) {
+			Ok(track) => track,
+			Err(err) => {
+				return self
+					.reject_track_status(stream, request_id, 404, &err.to_string())
+					.await;
+			}
+		};
+
+		// On a routed broadcast the live edge only becomes readable once a subscription's
+		// demand attaches a route, so subscribe before snapshotting it. The subscription is
+		// dropped as soon as the edge is read: a TRACK_STATUS delivers nothing.
+		let subscribed = match track.subscribe(Subscription::default()).await {
+			Ok(subscribed) => subscribed,
+			Err(err) => {
+				return self
+					.reject_track_status(stream, request_id, 404, &err.to_string())
+					.await;
+			}
+		};
+
+		let edge = live_edge(&track);
+		let properties = ietf::Properties {
+			timescale: Some(subscribed.info().timescale),
+			group_order: Some(GroupOrder::Descending),
+		};
+		drop(subscribed);
+
+		match self.version {
+			// Draft-14 answers with TRACK_STATUS_OK, whose body is a SUBSCRIBE_OK with Track
+			// Alias 0. Draft-15 folded it into REQUEST_OK, which is why 0x0e is free to mean
+			// NAMESPACE_DONE from draft-16 on.
+			Version::Draft14 => {
+				stream.writer.encode(&ietf::TRACK_STATUS_OK_ID).await?;
+				stream
+					.writer
+					.encode(&ietf::SubscribeOk {
+						request_id: Some(request_id),
+						track_alias: 0,
+						largest: edge.largest,
+						properties,
+					})
+					.await?;
+			}
+			_ => {
+				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestOk {
+						request_id: match self.version {
+							Version::Draft15 | Version::Draft16 => Some(request_id),
+							_ => None,
+						},
+						// LARGEST_OBJECT is the whole answer here, so unlike SUBSCRIBE_OK it goes
+						// out on every draft: a peer that asked for the status and got an empty
+						// REQUEST_OK learned nothing.
+						largest: edge.largest,
+						properties,
+					})
+					.await?;
+			}
+		}
+
+		// The reply is the whole response, so it needs the acknowledgement: the writer resets on
+		// drop, and a reset discards what the peer has not read yet.
+		let _ = stream.writer.close().await;
+
+		Ok(())
+	}
+
+	/// Reject a TRACK_STATUS, ending the request stream. See [`Self::reject_subscribe`] for
+	/// why the close is not optional.
+	async fn reject_track_status(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		self.write_request_error(
+			&mut stream.writer,
+			ietf::TRACK_STATUS_ERROR_ID,
+			request_id,
+			error_code,
+			reason,
+		)
+		.await?;
+
+		let _ = stream.writer.close().await;
+		Ok(())
+	}
+
 	/// Reject a SUBSCRIBE, ending the request stream.
 	///
 	/// Takes the whole stream because delivering the error is the other half of the job:
@@ -691,25 +822,36 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		error_code: u64,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_subscribe_error(&mut stream.writer, request_id, error_code, reason)
-			.await?;
+		self.write_request_error(
+			&mut stream.writer,
+			ietf::SubscribeError::ID,
+			request_id,
+			error_code,
+			reason,
+		)
+		.await?;
 
 		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
 		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
-	/// Write a subscribe error on the bidi stream writer.
-	async fn write_subscribe_error(
+	/// Write a request error on the bidi stream writer.
+	///
+	/// Draft-14 has a message type per request kind, all sharing the SUBSCRIBE_ERROR body, so
+	/// the caller names the one its request answers; draft-15 and later fold them all into
+	/// REQUEST_ERROR.
+	async fn write_request_error(
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
+		draft14_id: u64,
 		request_id: RequestId,
 		error_code: u64,
 		reason: &str,
 	) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
-				writer.encode(&ietf::SubscribeError::ID).await?;
+				writer.encode(&draft14_id).await?;
 				writer
 					.encode(&ietf::SubscribeError {
 						request_id,
@@ -1270,12 +1412,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
+						..Default::default()
 					})
 					.await?;
 			}
 			_ => {
 				writer.encode(&ietf::RequestOk::ID).await?;
-				writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				writer.encode(&ietf::RequestOk::default()).await?;
 			}
 		}
 		Ok(())
@@ -1733,12 +1876,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(msg.request_id),
+						..Default::default()
 					})
 					.await?;
 			}
 			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				stream.writer.encode(&ietf::RequestOk::default()).await?;
 			}
 		}
 
@@ -2355,6 +2499,174 @@ mod serve_tests {
 			filter,
 			fill,
 			properties_wanted: true,
+		}
+	}
+
+	/// Every draft this publisher speaks, so a per-version reply cannot regress on one.
+	const VERSIONS: [Version; 7] = [
+		Version::Draft14,
+		Version::Draft15,
+		Version::Draft16,
+		Version::Draft17,
+		Version::Draft18,
+		Version::Draft19,
+		Version::Draft20,
+	];
+
+	/// `create_broadcast` registers the broadcast from a spawned task, so a lookup before
+	/// the runtime has run it 404s.
+	async fn registered() {
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+	}
+
+	fn track_status(namespace: &'static str) -> ietf::TrackStatus<'static> {
+		ietf::TrackStatus {
+			request_id: RequestId(REQUEST_ID),
+			track_namespace: crate::Path::new(namespace),
+			track_name: "video".into(),
+		}
+	}
+
+	/// The message type that answers a successful TRACK_STATUS on this draft.
+	fn track_status_ok_id(version: Version) -> u64 {
+		match version {
+			Version::Draft14 => ietf::TRACK_STATUS_OK_ID,
+			_ => ietf::RequestOk::ID,
+		}
+	}
+
+	/// Peel the type id off a reply and decode the LARGEST_OBJECT it carries, whichever
+	/// message shape this draft uses.
+	fn decode_track_status_ok(writes: &[u8], version: Version) -> Option<Location> {
+		use crate::coding::Decode as _;
+
+		let mut buf = bytes::Bytes::copy_from_slice(writes);
+		let id = u64::decode(&mut buf, version).unwrap();
+		assert_eq!(id, track_status_ok_id(version), "{version}: wrong reply type");
+
+		match version {
+			Version::Draft14 => ietf::SubscribeOk::decode(&mut buf, version).unwrap().largest,
+			_ => ietf::RequestOk::decode(&mut buf, version).unwrap().largest,
+		}
+	}
+
+	/// A published track answers TRACK_STATUS with its live edge on every draft, and the
+	/// answer survives the trip: `Writer` resets on drop, and a reset discards bytes the peer
+	/// has not read, which is what left a draft-14/15 peer waiting out its timeout.
+	#[tokio::test]
+	async fn track_status_answers_with_the_live_edge() {
+		for version in VERSIONS {
+			let mut h = serve(version);
+
+			let mut group = h.track.create_group(group::Info { sequence: 7 }).unwrap();
+			group.write_frame(timestamp(), b"a".as_slice()).unwrap();
+			group.write_frame(timestamp(), b"b".as_slice()).unwrap();
+
+			registered().await;
+
+			let stream = Stream::open(&h.session, version).await.unwrap();
+			h.publisher
+				.clone()
+				.run_track_status_stream(stream, track_status("room"))
+				.await
+				.unwrap();
+
+			let writes = h.log.writes.lock().unwrap().clone();
+			assert!(!writes.is_empty(), "{version}: nothing was sent");
+			assert_eq!(
+				decode_track_status_ok(&writes, version),
+				Some(Location { group: 7, object: 1 }),
+				"{version}: wrong live edge"
+			);
+			assert!(
+				h.log.resets().is_empty(),
+				"{version}: stream reset, discarding the reply"
+			);
+		}
+	}
+
+	/// A track with no objects yet answers too, saying only that it has none.
+	#[tokio::test]
+	async fn track_status_answers_an_empty_track() {
+		for version in VERSIONS {
+			let h = serve(version);
+			registered().await;
+
+			let stream = Stream::open(&h.session, version).await.unwrap();
+			h.publisher
+				.clone()
+				.run_track_status_stream(stream, track_status("room"))
+				.await
+				.unwrap();
+
+			let writes = h.log.writes.lock().unwrap().clone();
+			assert_eq!(
+				decode_track_status_ok(&writes, version),
+				None,
+				"{version}: invented an edge"
+			);
+			assert!(
+				h.log.resets().is_empty(),
+				"{version}: stream reset, discarding the reply"
+			);
+		}
+	}
+
+	/// A TRACK_STATUS for a path nothing publishes is refused, rather than dropped.
+	#[tokio::test]
+	async fn track_status_for_a_missing_broadcast_is_refused() {
+		use crate::coding::Decode as _;
+
+		for version in VERSIONS {
+			let h = serve(version);
+			registered().await;
+
+			let stream = Stream::open(&h.session, version).await.unwrap();
+			h.publisher
+				.clone()
+				.run_track_status_stream(stream, track_status("nothing/here"))
+				.await
+				.unwrap();
+
+			let writes = h.log.writes.lock().unwrap().clone();
+			assert!(!writes.is_empty(), "{version}: nothing was sent");
+
+			let mut buf = bytes::Bytes::copy_from_slice(&writes);
+			let id = u64::decode(&mut buf, version).unwrap();
+			let expected = match version {
+				Version::Draft14 => ietf::TRACK_STATUS_ERROR_ID,
+				_ => ietf::RequestError::ID,
+			};
+			assert_eq!(id, expected, "{version}: wrong refusal type");
+			assert!(
+				h.log.resets().is_empty(),
+				"{version}: stream reset, discarding the error"
+			);
+		}
+	}
+
+	/// The whole dispatch path, not just the handler: the request used to be logged and
+	/// dropped without ever being decoded, so nothing reached the peer at all.
+	#[tokio::test]
+	async fn track_status_is_dispatched_off_its_stream() {
+		use crate::coding::Encode as _;
+
+		for version in VERSIONS {
+			let h = serve(version);
+			registered().await;
+
+			let mut body = bytes::BytesMut::new();
+			track_status("room").encode_msg(&mut body, version).unwrap();
+
+			let stream = Stream::open(&h.session, version).await.unwrap();
+			h.publisher
+				.handle_stream(ietf::TrackStatus::ID, body.freeze(), stream)
+				.unwrap()
+				.await;
+
+			let writes = h.log.writes.lock().unwrap().clone();
+			assert!(!writes.is_empty(), "{version}: the request was dropped");
+			assert_eq!(decode_track_status_ok(&writes, version), None);
 		}
 	}
 
@@ -3013,6 +3325,7 @@ mod tests {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(RequestId(1)),
+						..Default::default()
 					})
 					.await
 					.unwrap();
@@ -3020,7 +3333,7 @@ mod tests {
 			// Draft-17+ dropped the request id: the response rides the request's stream.
 			_ => {
 				writer.encode(&ietf::RequestOk::ID).await.unwrap();
-				writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+				writer.encode(&ietf::RequestOk::default()).await.unwrap();
 			}
 		}
 

@@ -194,9 +194,11 @@ export class SubscribeOk {
 	 * The largest Location in the track (LARGEST_OBJECT), which the draft requires once the
 	 * track has content. It is what a subscriber sizes a fill against.
 	 *
-	 * Encoded on draft-20 only: the parameter is legal on earlier drafts too, but peers built
-	 * before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the session,
-	 * so emitting it there would break existing deployments over a hint.
+	 * Draft-14 carries it as the Content Exists flag and the Largest Location fields that
+	 * follow it, which every peer parses. From draft-15 on it is the LARGEST_OBJECT parameter,
+	 * and there it is encoded on draft-20 only: the parameter is legal earlier too, but peers
+	 * built before we sent it reject an unexpected SUBSCRIBE_OK parameter by closing the
+	 * session, so emitting it there would break existing deployments over a hint.
 	 */
 	largest: MessageLocation | undefined;
 
@@ -236,7 +238,13 @@ export class SubscribeOk {
 		if (version === Version.DRAFT_14) {
 			await w.u62(0n); // expires = 0
 			await w.u8(this.properties.groupOrder ?? GROUP_ORDER);
-			await w.bool(false); // content exists = false
+			if (this.largest !== undefined) {
+				await w.bool(true); // content exists
+				await w.u62(this.largest.groupId);
+				await w.u62(this.largest.objectId);
+			} else {
+				await w.bool(false);
+			}
 			await w.u53(0); // no parameters
 		} else {
 			// v15+: just parameters after track_alias
