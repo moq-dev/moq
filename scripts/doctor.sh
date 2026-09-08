@@ -130,14 +130,23 @@ BOUNDED_OUT=""
 BOUNDED_ELAPSED=0
 
 # Run a command with a budget in seconds. Returns its status, or 124 on timeout.
+#
+# Monitor mode puts the child in its own process group, so the timeout can
+# signal the whole tree. Killing the immediate PID alone leaves the descendants
+# that actually cost something -- a cargo build, a Chromium, a `sh -c` wrapper's
+# real work -- running past the budget and writing into caches after the report
+# is out. TERM then KILL, because a process that ignores TERM would otherwise
+# hold the `wait` past the same budget.
 bounded() {
     local budget=$1
     shift
     local pid ticks=0 limit=$((budget * 10)) status
 
     BOUNDED_OUT=""
+    set -m
     "$@" >"$BOUNDED_TMP" 2>&1 &
     pid=$!
+    set +m
 
     while ((ticks < limit)); do
         kill -0 "$pid" 2>/dev/null || break
@@ -146,7 +155,15 @@ bounded() {
     done
 
     if kill -0 "$pid" 2>/dev/null; then
-        kill -TERM "$pid" 2>/dev/null
+        kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+        # A short grace period for a clean exit, then the signal that cannot be
+        # ignored. Bounded itself: the budget is a budget.
+        ticks=0
+        while ((ticks < 20)) && kill -0 "$pid" 2>/dev/null; do
+            sleep 0.1
+            ticks=$((ticks + 1))
+        done
+        kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
         BOUNDED_ELAPSED=$budget
         BOUNDED_OUT=$(cat "$BOUNDED_TMP" 2>/dev/null)
@@ -487,11 +504,15 @@ probe_playwright() {
     # No pre-check for node_modules: bun hoists workspace dependencies to the
     # repository root, so the package a harness resolves is not necessarily next
     # to it. Launching is the only question that matters anyway.
+    #
+    # `channel: "chromium"` because that is what both harnesses launch: the
+    # default headless shell has no WebTransport, so probing it would report ok
+    # on an install the suites cannot use.
     local status
     bounded 60 env PLAYWRIGHT_DIR="$dir" bun -e '
 		process.chdir(Bun.env.PLAYWRIGHT_DIR);
 		const { chromium } = await import("playwright");
-		const browser = await chromium.launch({ headless: true });
+		const browser = await chromium.launch({ channel: "chromium", headless: true });
 		await browser.close();
 		console.log("ok");
 	'
@@ -760,9 +781,42 @@ self_test() {
     bounded 5 sh -c 'exit 3'
     check 'bounded propagates status' "$?" 3
 
-    bounded 1 sh -c 'sleep 30'
+    # A grandchild that outlives the budget is the failure worth testing: the
+    # immediate PID is a wrapper, and the cargo build or Chromium underneath it
+    # is what keeps burning the machine after doctor has already reported.
+    # shellcheck disable=SC2016  # $! and $GRANDCHILD belong to the inner shell.
+    bounded 1 env GRANDCHILD="$SCRATCH/grandchild" sh -c 'sleep 30 & echo $! > "$GRANDCHILD"; wait'
     check 'bounded timeout' "$?" 124
     check 'bounded timeout elapsed' "$BOUNDED_ELAPSED" 1
+
+    local orphan ticks=0
+    orphan=$(cat "$SCRATCH/grandchild" 2>/dev/null)
+    # Signal delivery and reaping are asynchronous, so give them a moment before
+    # calling it a leak.
+    while ((ticks < 20)) && kill -0 "$orphan" 2>/dev/null; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    check 'bounded kills the process tree' \
+        "$(kill -0 "$orphan" 2>/dev/null && printf alive || printf gone)" gone
+
+    # Only the suites this run selected are blocked. A probe declares every
+    # suite it serves, and counting an unselected one would fail a strict run
+    # whose own capabilities are all present.
+    local saved_suites=$SUITES
+    SUITES="smoke"
+    check 'selected drops unselected suites' "$(selected 'check test')" ''
+    check 'selected keeps selected suites' "$(selected 'smoke wasm')" 'smoke'
+    SUITES=$saved_suites
+
+    # Malformed input is refused, not defaulted: a typo that quietly runs the
+    # default scope reports a plausible answer to a question nobody asked.
+    "$SELF" --suite nonsense >/dev/null 2>&1
+    check 'unknown suite is refused' "$?" 2
+    "$SELF" --suite >/dev/null 2>&1
+    check 'bare --suite is refused' "$?" 2
+    "$SELF" --base >/dev/null 2>&1
+    check 'bare --base is refused' "$?" 2
 
     check 'classify timeout' "$(classify 124 '')" timeout
     check 'classify denied' "$(classify 1 'bind: Operation not permitted')" denied
@@ -805,11 +859,31 @@ while (($#)); do
         --strict) STRICT=1 ;;
         --base)
             shift
-            BASE=${1:-}
+            [ $# -gt 0 ] || {
+                printf 'doctor: --base needs a git ref\n' >&2
+                exit 2
+            }
+            BASE=$1
             ;;
         --suite)
             shift
-            SUITES="$SUITES ${1:-}"
+            # Refused rather than defaulted: a typo that runs the default scope
+            # and reports it as the requested one is a plausible, wrong answer,
+            # and a wrong answer is what this whole command exists to prevent.
+            [ $# -gt 0 ] || {
+                printf 'doctor: --suite needs a name\n' >&2
+                usage
+                exit 2
+            }
+            case $1 in
+                all | check | smoke | test | wasm) ;;
+                *)
+                    printf 'doctor: unknown suite: %s\n' "$1" >&2
+                    usage
+                    exit 2
+                    ;;
+            esac
+            SUITES="$SUITES $1"
             ;;
         --tools)
             shift
@@ -916,13 +990,23 @@ done
 probe_bun_yaml
 probe_awk_select
 
-probe_writable target "$TARGET_DIR" "check test"
 probe_writable scratch "${TMPDIR:-/tmp}" "$SUITES"
-probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "check test"
-probe_disk "$TARGET_DIR" "check test"
+
+# Everything Rust hangs off the same question `_tools` already answered: does
+# this scope dispatch cargo at all? A docs-only diff compiles nothing, and
+# reporting its `check` and `test` blocked on a missing toolchain would be a
+# confident wrong answer.
+if printf '%s\n' "$TOOL_LIST" | grep -qx cargo; then
+    probe_writable target "$TARGET_DIR" "check test"
+    probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "check test"
+    probe_disk "$TARGET_DIR" "check test"
+    probe_cargo_compile
+else
+    record storage.target storage skip false "" "this scope compiles nothing" "" 5 0
+    record probe.cargo-compile probe skip false "" "this scope compiles nothing" "" 120 0
+fi
 
 probe_nix_eval
-probe_cargo_compile
 case " $SUITES " in
     *" test "* | *" smoke "* | *" wasm "*)
         probe_loopback tcp
@@ -934,9 +1018,12 @@ case " $SUITES " in *" wasm "*) probe_playwright wasm "$REPO/test/wasm" ;; esac
 
 probe_github
 
-# Tally. A required check that is not ok blocks every suite it names; a check
-# that names no suite (the session hook, GitHub access) is reported and never
-# blocks, so a diagnostic run still returns all the independent results.
+# Tally. A required check that is not ok blocks the selected suites it names,
+# and only those: a probe declares every suite it serves, so a nix-eval failure
+# declared for `check` must not fail a `--strict --suite smoke` run whose own
+# capabilities are all there. A check naming no selected suite is reported and
+# never blocks, which is how a diagnostic run still returns every independent
+# result.
 N_OK=0
 N_MISSING=0
 N_DENIED=0
@@ -957,8 +1044,10 @@ for ((i = 0; i < ${#R_ID[@]}; i++)); do
     [ "${R_STATUS[$i]}" = ok ] && continue
     [ "${R_STATUS[$i]}" = skip ] && continue
     [ "${R_REQUIRED[$i]}" = true ] || continue
+    blocks=$(selected "${R_SUITES[$i]}")
+    [ -n "$blocks" ] || continue
     FAILED=$((FAILED + 1))
-    BLOCKED="$BLOCKED $(selected "${R_SUITES[$i]}")"
+    BLOCKED="$BLOCKED $blocks"
 done
 BLOCKED_SUITES=$(printf '%s' "$BLOCKED" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
 BLOCKED_SUITES=${BLOCKED_SUITES% }
