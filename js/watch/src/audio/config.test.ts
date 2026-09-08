@@ -64,6 +64,13 @@ test("an advertised jitter of zero falls back to the codec frame duration", () =
 	expect(playbackJitter(config({ jitter: 60 }))).toBe(Time.Milli(63));
 });
 
+test("AAC and MP3 jitter follows their codec frame sizes", () => {
+	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBe(Time.Milli(25));
+	expect(playbackJitter(config({ codec: "mp4a.40.2", sampleRate: 24000 }))).toBe(Time.Milli(49));
+	expect(playbackJitter(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Time.Milli(27));
+	expect(playbackJitter(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Time.Milli(30));
+});
+
 test("an unknown codec without advertised jitter only reserves the worklet quantum", () => {
 	expect(playbackJitter(config({ codec: "flac", jitter: 0 }))).toBe(Time.Milli(3));
 });

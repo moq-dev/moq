@@ -3,6 +3,11 @@ import { Time } from "@moq/net";
 
 // AudioWorklet always renders in 128-sample quanta.
 const WORKLET_QUANTUM = 128;
+const OPUS_FRAME_DURATION_MS = 20;
+const AAC_LC_FRAME_SAMPLES = 1024;
+const MP3_MPEG1_FRAME_SAMPLES = 1152;
+const MP3_MPEG2_FRAME_SAMPLES = 576;
+const MP3_MPEG1_MIN_SAMPLE_RATE = 32000;
 
 /** The catalog fields that determine the demuxer and WebCodecs decoder instance. */
 export type DecoderConfig = Pick<
@@ -46,17 +51,18 @@ export function playbackJitter(config: Catalog.AudioConfig): Time.Milli {
 function defaultJitter(config: Catalog.AudioConfig): number | undefined {
 	if (config.codec.startsWith("opus")) {
 		// Opus supports 2.5–60ms but 20ms is the real-time default.
-		return 20;
+		return OPUS_FRAME_DURATION_MS;
 	}
 
 	if (config.codec.startsWith("mp4a")) {
 		// 1024 samples for LC-AAC; HE-AAC/AAC-LD use different sizes.
-		return Math.ceil((1024 / config.sampleRate) * 1000);
+		return Math.ceil((AAC_LC_FRAME_SAMPLES / config.sampleRate) * 1000);
 	}
 
 	if (config.codec === "mp3") {
 		// 1152 samples per frame for MPEG-1 Layer III; MPEG-2/2.5 use 576.
-		const samples = config.sampleRate >= 32000 ? 1152 : 576;
+		const samples =
+			config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
 		return Math.ceil((samples / config.sampleRate) * 1000);
 	}
 
