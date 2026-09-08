@@ -43,6 +43,9 @@ HARNESS_PORTS=()
 HARNESS_PIDS=()
 HARNESS_LABELS=()
 HARNESS_STATES=()
+HARNESS_STARTS=()
+HARNESS_WITNESSES=()
+HARNESS_WITNESS_STARTS=()
 
 # Process groups that support the run but must never outlive finalization. A retained session keeps
 # its debuggable fixtures, not delayed writers that could mutate the uploadable evidence afterward.
@@ -300,22 +303,44 @@ harness_exited() {
 # stdin is /dev/null because a background job in its own group that reads the
 # terminal takes SIGTTIN and stops. ffmpeg reads stdin for keyboard commands and
 # would do exactly that.
+_harness_supervise() {
+    local ready="$1" status=0
+    shift
+    sleep 2147483647 &
+    printf '%s\n' "$!" >"$ready"
+    "$@" || status=$?
+    return "$status"
+}
+
 harness_spawn() {
-    local label="$1" log="$2"
+    local label="$1" log="$2" ready witness started witness_started
     shift 2
+    mkdir -p "$HARNESS_RUN/.harness"
+    ready="$HARNESS_RUN/.harness/witness-$$-${#HARNESS_PIDS[@]}"
+    mkfifo "$ready"
     set -m
     if [[ "$log" == "-" ]]; then
-        "$@" </dev/null &
+        _harness_supervise "$ready" "$@" </dev/null &
     else
-        "$@" </dev/null >"$log" 2>&1 &
+        _harness_supervise "$ready" "$@" </dev/null >"$log" 2>&1 &
     fi
     HARNESS_PID=$!
     set +m
+    read -r witness <"$ready"
+    rm -f "$ready"
+    started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
+    witness_started=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
     HARNESS_PIDS+=("$HARNESS_PID")
     HARNESS_LABELS+=("$label")
     HARNESS_STATES+=("live")
+    HARNESS_STARTS+=("$started")
+    HARNESS_WITNESSES+=("$witness")
+    HARNESS_WITNESS_STARTS+=("$witness_started")
     if declare -F bundle_process >/dev/null 2>&1; then
         bundle_process "$label" "$HARNESS_PID"
+    fi
+    if declare -F bundle_group_witness >/dev/null 2>&1; then
+        bundle_group_witness "$label" "$HARNESS_PID" "$witness" "$witness_started"
     fi
 }
 
@@ -341,6 +366,19 @@ harness_index() {
     return 1
 }
 
+# True while the exact leader or its stable in-group witness still proves group ownership.
+harness_group_owned() {
+    local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" current group
+    current=$("$HARNESS_LIB/process-start.py" "$pid" 2>/dev/null || true)
+    if [[ -n "$current" && "$current" == "${HARNESS_STARTS[$i]}" ]]; then
+        return 0
+    fi
+    current=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
+    [[ -n "$current" && "$current" == "${HARNESS_WITNESS_STARTS[$i]}" ]] || return 1
+    group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)
+    [[ "$group" == "$pid" ]]
+}
+
 # Wait for a spawned group leader and return its status: `harness_wait <pid>`.
 #
 # The leader finishing does not mean the group did: a launcher that dies while
@@ -351,8 +389,8 @@ harness_index() {
 harness_wait() {
     local pid="$1" status=0 i
     wait "$pid" || status=$?
-    kill -KILL -- -"$pid" 2>/dev/null || true
     if i=$(harness_index "$pid"); then
+        harness_group_owned "$i" && kill -KILL -- -"$pid" 2>/dev/null || true
         HARNESS_STATES[i]="done"
     fi
     return "$status"
@@ -370,7 +408,9 @@ harness_reap() {
     [[ "${HARNESS_STATES[$i]}" == live ]] || return 0
     # The group first, so grandchildren go with it; the bare PID is the fallback
     # for a job that somehow never became a group leader.
-    kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    if harness_group_owned "$i"; then
+        kill -KILL -- -"$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
     HARNESS_STATES[i]="done"
 }
@@ -409,9 +449,9 @@ harness_retain_ports() {
     for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
         [[ "${HARNESS_STATES[$i]}" == live ]] || continue
         pid=${HARNESS_PIDS[$i]}
-        # A live table entry is not ownership: a child can exit before it is waited, and its PID or
-        # process-group ID can be reused. Retain only the exact process identity recorded at spawn.
-        if declare -F bundle_process_owned >/dev/null 2>&1 && bundle_process_owned "$pid"; then
+        # A live table entry is not ownership: retain only a group whose exact leader or stable
+        # witness still has the birth identity recorded at spawn.
+        if harness_group_owned "$i"; then
             if declare -F bundle_retain_session >/dev/null 2>&1; then
                 bundle_retain_session
             fi

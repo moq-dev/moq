@@ -270,6 +270,12 @@ bundle_process() {
         "{ \"name\": $(_bundle_json "$1"), \"pid\": $2, \"command\": $(_bundle_json "$command") }"
 }
 
+# Record a stable process-group witness for retained teardown after the leader exits.
+bundle_group_witness() {
+    _bundle_record group-witnesses \
+        "{ \"name\": $(_bundle_json "$1"), \"group\": $2, \"pid\": $3, \"started\": $(_bundle_json "$4") }"
+}
+
 # Record an exact port reservation for retained-session teardown. This stays
 # out of the manifest because it is local allocator bookkeeping, not evidence.
 bundle_reservation() {
@@ -708,7 +714,7 @@ _bundle_manifest() {
         printf '  "status": %s,\n' "$status"
         printf '  "rerun": %s,\n' "$(_bundle_json "${rerun%$'\n'}")"
         local section
-        for section in capabilities endpoints binaries fixtures processes results notes; do
+        for section in capabilities endpoints binaries fixtures processes group-witnesses results notes; do
             _bundle_section "$section"
             printf ',\n'
         done
@@ -744,6 +750,16 @@ _bundle_session() {
                 # shellcheck disable=SC2016  # backticks are Markdown here, not a subshell
                 printf -- '- %s: pid %s -- attach with `lldb -p %s` or `gdb -p %s`\n' "$name" "$pid" "$pid" "$pid"
             done <"$BUNDLE_META/processes.jsonl"
+        fi
+        if [[ -f "$BUNDLE_META/group-witnesses.jsonl" ]]; then
+            while IFS= read -r line; do
+                pid=$(printf '%s' "$line" | sed -n 's/.*"pid": \([0-9]*\).*/\1/p')
+                name=$(printf '%s' "$line" | sed -n 's/.*"name": "\([^"]*\)".*/\1/p')
+                wanted=$(printf '%s' "$line" | sed -n 's/.*"started": "\([^"]*\)".*/\1/p')
+                current=$(_bundle_process_start "$pid" || true)
+                [[ -n "$current" && "$current" == "$wanted" ]] || continue
+                printf -- '- %s group witness: pid %s\n' "$name" "$pid"
+            done <"$BUNDLE_META/group-witnesses.jsonl"
         fi
         printf '\n## Teardown\n\n'
         # shellcheck disable=SC2016  # backticks are Markdown here, not a subshell
@@ -821,6 +837,16 @@ PRELUDE
                 printf 'reap_group %s %s %q\n' "$pid" "$member" "$member_start"
             done
         done
+        local line group witness witness_start
+        if [[ -f "$BUNDLE_META/group-witnesses.jsonl" ]]; then
+            while IFS= read -r line; do
+                group=$(printf '%s' "$line" | sed -n 's/.*"group": \([0-9]*\).*/\1/p')
+                witness=$(printf '%s' "$line" | sed -n 's/.*"pid": \([0-9]*\).*/\1/p')
+                witness_start=$(printf '%s' "$line" | sed -n 's/.*"started": "\([^"]*\)".*/\1/p')
+                [[ -n "$group" && -n "$witness" && -n "$witness_start" ]] || continue
+                printf 'reap_group %s %s %q\n' "$group" "$witness" "$witness_start"
+            done <"$BUNDLE_META/group-witnesses.jsonl"
+        fi
         local reservation
         if [[ -f "$BUNDLE_META/reservations.txt" ]]; then
             while IFS= read -r reservation; do
@@ -846,15 +872,6 @@ bundle_retained() {
 # Mark that the harness found an owned process worth retaining.
 bundle_retain_session() {
     BUNDLE_SESSION_RETAINED=1
-}
-
-# Return whether a process still has the birth identity this bundle recorded.
-bundle_process_owned() {
-    local pid="$1" start_file="$BUNDLE_META/process-starts/$1" wanted current
-    [[ -f "$start_file" ]] || return 1
-    wanted=$(<"$start_file")
-    current=$(_bundle_process_start "$pid" || true)
-    [[ -n "$current" && "$current" == "$wanted" ]]
 }
 
 # Trim qlog snapshots to the last newline completed by the relay. JSON-SEQ uses

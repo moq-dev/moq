@@ -644,6 +644,40 @@ fi
 bash "$bundle/teardown.sh" >/dev/null
 check "retained teardown releases its port reservation" test ! -d "$port_root/4557"
 
+leaderless_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    # shellcheck disable=SC2034 # Sourced harness functions consume this path.
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_port leaderless 4559
+    mkfifo "$ROOT/leaderless-ready"
+    # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+    harness_spawn leaderless "$BUNDLE_WORK/leaderless.log" bash -c \
+        'sleep 120 & printf "%s\n" "$!" >"$1"' _ "$ROOT/leaderless-ready"
+    leader=$HARNESS_PID
+    read -r child <"$ROOT/leaderless-ready"
+    wait "$leader" 2>/dev/null || true
+    harness_retain_ports
+    printf '%s\n' "$child" >"$BUNDLE_DIR/leaderless-child.pid"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case leaderless leaderless_case)
+child=$(<"$bundle/leaderless-child.pid")
+check "a verified witness retains a leaderless group" test -f "$bundle/session.md"
+check "a leaderless retained group keeps its port reservation" test -f "$port_root/4559/retained"
+if running "$child"; then
+    ok "a leaderless child survives for retained debugging"
+else
+    bad "a leaderless child survives for retained debugging"
+fi
+bash "$bundle/teardown.sh" >/dev/null
+if running "$child"; then
+    bad "retained teardown reaps a leaderless child"
+else
+    ok "retained teardown reaps a leaderless child"
+fi
+check "leaderless teardown releases its port reservation" test ! -d "$port_root/4559"
+
 unowned_port_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
@@ -651,10 +685,18 @@ unowned_port_case() {
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port unowned 4558
     harness_spawn reused "$BUNDLE_WORK/reused.log" sleep 120
-    printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$HARNESS_PID"
+    leader_start=${HARNESS_STARTS[0]}
+    witness_start=${HARNESS_WITNESS_STARTS[0]}
+    HARNESS_STARTS[0]='Mon Jan  1 00:00:00 1900'
+    HARNESS_WITNESS_STARTS[0]='Mon Jan  1 00:00:00 1900'
     if harness_retain_ports; then
+        HARNESS_STARTS[0]=$leader_start
+        HARNESS_WITNESS_STARTS[0]=$witness_start
+        harness_reap_all
         return 1
     fi
+    HARNESS_STARTS[0]=$leader_start
+    HARNESS_WITNESS_STARTS[0]=$witness_start
     harness_reap_all
     harness_release_ports
     printf '%s\n' "$BUNDLE_LIVE" >"$BUNDLE_DIR/live.path"
