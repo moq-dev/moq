@@ -37,9 +37,7 @@ Once complete, create, update, or delete the relevant quests and questlines.
 
 Commit and make a PR then:
 
-- Monitor it for CI failures and reviews.
-- Address any automated review findings (Codex/CodeRabbit) you agree with. Turn down any you disagree with with a comment.
-- Push any changes you made to the PR, updating the summary if needed.
-- Repeat at most once, avoiding a loop of back-and-forth review/feedback cycles.
+- Monitor it for CI failures and the automatic reviews. Never request a review.
+- Address any findings you agree with, turn down the rest with a comment, and push once. If the next review still has findings, stop and report.
 
 Merge the PR when ready.

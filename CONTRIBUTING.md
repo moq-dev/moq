@@ -61,10 +61,9 @@ Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commi
 
 # Reviews
 
-Codex and CodeRabbit automatically review PRs.
+Codex and CodeRabbit review every push on their own. Never request a review; an @codex or @coderabbitai mention is banned.
 CodeRabbit may be rate-limited, treat it as optional.
 
-Address review comments or leave a comment if you disagree with a suggestion.
-Repeat at most once without user intervention, avoiding a loop of back-and-forth review/feedback cycles.
-Never manually request a review.
-If a review comment is out of scope or not relevant to the PR, make or update a follow-up quest.
+Fix the findings you agree with, reply to the ones you do not, and push once.
+If the next automatic review still has findings, stop and report to the user.
+If a finding is out of scope, make or update a follow-up quest.

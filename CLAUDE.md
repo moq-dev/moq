@@ -20,21 +20,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 WebSocket, TLS, UDS, etc are fallback transports via qmux. Reliable transports can't shed load during congestion.
 
-# Structure
+# Guides
 
-Top-level only. Read the area-specific `CLAUDE.md` where one exists before working there.
-
-- `/rs/` - Rust crates, published as `moq-*`. See `rs/CLAUDE.md`.
-- `/js/` - TypeScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
-- `/py/`, `/swift/`, `/kt/`, `/go/`, `/dart/` - language wrappers over `rs/moq-ffi`. See `rs/moq-ffi/CLAUDE.md` and `py/CLAUDE.md`.
-- `/cpp/` - C/C++ consumers of `libmoq`, including the OBS plugin.
-- `/demo/` - demos and test media. `just dev` runs a local relay, publisher, and web UI.
-- `/test/` - harnesses that span languages or need a server (`just test smoke`).
-- `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
-- `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
-- `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.
-
-Changes ripple across languages. Follow the Cross-Package Sync checklist below.
+Area guides live beside the code as nested `CLAUDE.md` files (the root `AGENTS.md` is a symlink). Read the one for the area you touch. Changes ripple across languages; follow the Cross-Package Sync checklist below. Prefer a quest under `quest/` over a GitHub issue for work needing durable scope.
 
 # Libraries
 
@@ -56,32 +44,39 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` on `dev` instead. Additive changes stay on `main`.
 - Let the type system make misuse unrepresentable: enums over strings, `Duration` over seconds, terminal operations consume `self`, cleanup in `Drop` rather than a `close()` the caller can forget.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
-- Take slices in, return owned values. Avoid 4+ args; use a struct.
-- Name by role, not today's implementation. Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
+- Avoid 4+ args; use a struct or object.
+- Name by role, not today's implementation.
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
+- Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
+- Document every exported symbol in one plain line, the way you'd say it out loud.
 
 # Required
 
-- Dig into the root cause and fix it at the source. Never work around it in the caller.
-- Never add retries, sleeps, lingers, or arbitrary timeouts to paper over a race. Fail fast with the real error.
-- Error on unsupported or malformed input rather than warn and continue. Warn-then-ignore is banned: supported or refused.
-- Reproduce bugs before fixing them. Add a regression test when one is easy.
+- Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout.
+- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
+- Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
-- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn. Propose a course change, or abandon the PR, rather than finish a half-solution.
-- When taking over someone's PR, build on their commits so they keep credit.
+- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
+- Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
+- All tests need to be wired into CI, at least a nightly.
+- Never edit a `CLAUDE.md`, `CONTRIBUTING.md`, or skill without being prompted, and read `PROMPTING.md` first.
+- No em dashes.
+- Match the existing conventions, patterns, and naming when possible.
+- Fix any outdated docs and comments inline; don't add a separate PR for it.
 
 # Guidelines
 
-- New dependencies use the newest stable version. Prefer a maintained crate over hand-rolling non-core functionality.
+- Prefer a maintained crate over hand-rolling non-core functionality.
+- New dependencies use the newest stable version.
 - Do not bump package versions unless asked. Releases are cut separately.
-- No em dashes.
-- Document every exported symbol in one plain line, the way you'd say it out loud. Comments inside code only explain the non-obvious why, and describe the current state, never history.
-- Inline simple helpers. Question whether functionality is needed at all before adding it.
-- Match the existing conventions, patterns, and naming.
-- These `CLAUDE.md` files (the root `AGENTS.md` is a symlink) are stateless instructions: minimal, situational, no history, no file links. If a missing line here would have saved you cycles, suggest it.
+- Comments should explain the non-obvious why, and never the history.
+- Inline simple helpers.
+- Question whether functionality is needed at all before adding it.
 - Deleting code is better than adding code.
-- Suggest follow up sessions and quests.
+- Suggest follow up sessions and quests when finished, interactively prompting the user.
+- Prefer the simple solution.
+- Say it once, in the fewest words that hold up.
 
 # Development
 
@@ -99,7 +94,7 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages. Run `just fix` before committing. CI runs the same `check` and `test`.
 
-See `CONTRIBUTING.md` before making or merging a PR .
+See `CONTRIBUTING.md` before making or merging a PR.
 
 # Cross-Package Sync
 
