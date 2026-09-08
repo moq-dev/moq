@@ -32,6 +32,5 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 
 ## Related
 
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - preserve state through delayed terminal callbacks
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path

@@ -4,7 +4,7 @@
 // status callback's orderings can be forced instead of waited for. Everything
 // here is timing-sensitive in production: a terminal callback arrives on the
 // libmoq runtime thread at a moment we don't control, possibly during Start(),
-// during a restart, or during destruction.
+// during a restart, during destruction, or long after it.
 //
 // Run with `just obs test`. This is not part of the plugin build.
 #include <atomic>
@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <obs.h>
@@ -544,7 +545,7 @@ int main()
 	printf("terminal before connect returns: ok\n");
 
 	// A frontend that stops the output straight from the stop signal re-enters
-	// Stop() on the libmoq thread. It must not deadlock against session_mutex.
+	// Stop() on the libmoq thread. It must not deadlock against the session state lock.
 	{
 		reset();
 		MoQOutput o(nullptr, out);
@@ -564,9 +565,9 @@ int main()
 	}
 	printf("re-entrant Stop from the signal: ok\n");
 
-	// The destructor waits for the terminal callback. It must return on the
-	// callback rather than the bounded-wait timeout, and the callback must not
-	// signal an output that is being destroyed.
+	// Teardown must not wait on the libmoq runtime at all. The callback holds its
+	// own reference to the shared state, so a terminal parked past any bound the
+	// destructor could have afforded lands on state that is still there.
 	{
 		reset();
 		auto o = new MoQOutput(nullptr, out);
@@ -576,22 +577,96 @@ int main()
 		auto ud = g_user_data;
 		g_on_status = nullptr;
 
-		std::thread late([cb, ud] {
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		// Stands in for a libmoq runtime wedged for longer than teardown could ever
+		// wait: the terminal is not delivered until after the output is gone.
+		std::atomic<bool> parked{false};
+		std::atomic<bool> released{false};
+		std::thread late([cb, ud, &parked, &released] {
+			parked = true;
+			if (!spinUntil(released))
+				return;
 			cb(ud, -34);
 		});
+		CHECK(spinUntil(parked));
+
 		auto start = std::chrono::steady_clock::now();
 		delete o;
 		auto elapsed = std::chrono::steady_clock::now() - start;
+		released = true;
 		late.join();
-		CHECK(elapsed > std::chrono::milliseconds(100));
-		// Comfortably under the destructor's own 2s bounded wait, so this fails if
-		// teardown returned on that timeout instead of on the callback.
-		CHECK(elapsed < std::chrono::milliseconds(1500));
+
+		// Teardown used to block for a two-second bound and then free the output
+		// anyway, leaving this terminal to write through a dangling pointer.
+		CHECK(elapsed < std::chrono::milliseconds(500));
+		// The output is detached, so the terminal reports nothing; the only signal
+		// is the destructor's own stop.
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
 	}
-	printf("terminal during destruction: ok\n");
+	printf("terminal held past destruction: ok\n");
+
+	// Teardown starting while a callback is already inside an OBS call. Detaching
+	// has to wait for that call to return, or the output is freed under it.
+	{
+		reset();
+		g_stall_last_error = true;
+		auto o = new MoQOutput(nullptr, out);
+		CHECK(o->Start());
+		fire(1); // connected, so the terminal reports a disconnect
+		auto cb = g_on_status;
+		auto ud = g_user_data;
+		g_on_status = nullptr;
+
+		std::thread terminal([cb, ud] { cb(ud, -34); });
+		CHECK(spinUntil(g_in_report_window));
+		delete o;
+		terminal.join();
+
+		CHECK(signalCount() == 2);
+		CHECK(signalAt(0).code == OBS_OUTPUT_DISCONNECTED);
+		CHECK(signalAt(1).code == OBS_OUTPUT_SUCCESS);
+	}
+	printf("teardown during an OBS call: ok\n");
+
+	// Superseded attempts whose terminals are still parked when the output is
+	// destroyed. Each keeps the shared state alive on its own, so releasing them
+	// after teardown, in any order, reaches nothing that is gone.
+	{
+		reset();
+		auto o = new MoQOutput(nullptr, out);
+		std::vector<std::pair<void (*)(void *, int32_t), void *>> parked;
+		for (int i = 0; i < 3; i++) {
+			CHECK(o->Start());
+			CHECK(g_on_status != nullptr);
+			parked.push_back({g_on_status, g_user_data});
+			g_on_status = nullptr;
+			o->Stop(false); // supersedes the attempt without delivering its terminal
+		}
+		delete o;
+		for (auto &[cb, ud] : parked)
+			cb(ud, -34);
+		// One SUCCESS from the destructor's own Stop(). Every parked terminal is
+		// superseded, so none of them reports.
+		CHECK(signalCount() == 1);
+		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
+	}
+	printf("superseded terminals outliving the output: ok\n");
+
+	// A startup that failed on the libmoq thread, with the output destroyed before
+	// the terminal has run. Whichever order they land in, nothing reports after
+	// the destructor's stop.
+	{
+		reset();
+		g_connect_fires_terminal_threaded = true;
+		auto o = new MoQOutput(nullptr, out);
+		o->Start(); // races the terminal, so either answer is legitimate
+		delete o;
+		if (g_connect_terminal_thread.joinable())
+			g_connect_terminal_thread.join();
+		CHECK(signalCount() >= 1);
+		CHECK(signalAt(signalCount() - 1).code == OBS_OUTPUT_SUCCESS);
+	}
+	printf("failed startup outliving the output: ok\n");
 
 	// OBS restarts a reconnecting output by calling start again with no stop in
 	// between, so Start() has to drop the previous attempt itself.
@@ -834,7 +909,7 @@ int main()
 
 	// A stale terminal callback overlapping the next Start(), which rewrites the
 	// members the callback used to read. Exercises the interleaving; note it is
-	// not a proven detector, since session_mutex tends to order the two in
+	// not a proven detector, since the session state lock tends to order the two in
 	// practice even when nothing guarantees it.
 	{
 		reset();

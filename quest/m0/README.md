@@ -22,7 +22,6 @@ regression test per Root Cause First.
 - [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - moq-mux: catalog jitter is the publisher's maximum flush span, never a running minimum
 - [Audio identity](/quest/m0/3479-watch-audio-identity.md) - js/watch: a catalog republish rebuilds the audio graph only when the decoder identity changes
 - [Encoder lag](/quest/m0/publish-audio-encoder-lag.md) - js/publish: AudioEncoder output falls behind its input after a subscriber churn
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - keep output state alive through delayed terminal callbacks
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
 - [#3361](/quest/m0/3361-js-every-moq-package-a-package-imports-is-declared.md) - js: every @moq package a package imports is a declared dependency

@@ -16,5 +16,4 @@ The MoQ source loads and plays supported video without directly linking FFmpeg l
 
 ## Related
 
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - the new consumer must not inherit timeout-based ownership assumptions
 - [VP8/VP9 decoding](/quest/m2/obs-moq-video/vpx.md) - restores deferred codec coverage independently

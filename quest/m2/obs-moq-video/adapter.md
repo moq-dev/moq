@@ -18,6 +18,3 @@ One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-vid
 - [Encoder presets](/quest/m2/obs-moq-video/presets.md) - common policy
 - [Audio publishing](/quest/m2/obs-moq-video/audio-publish.md) - both adapters are needed for the combined opt-in UI
 
-## Related
-
-- [OBS callback lifetime](/quest/m0/obs-session-callback-lifetime.md) - preserve output ownership through delayed completion
