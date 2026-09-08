@@ -19,7 +19,10 @@ process_exited() {
     if [[ -n "$state" ]]; then
         [[ "$state" == Z* ]]
     else
-        ! kill -0 "$1" 2>/dev/null
+        if kill -0 "$1" 2>/dev/null; then
+            return 1
+        fi
+        return 0
     fi
 }
 
