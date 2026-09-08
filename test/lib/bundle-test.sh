@@ -505,6 +505,7 @@ while True:
     cp "$ROOT/wrapper-child" "$BUNDLE_DIR/wrapper-child.pid"
     printf '%s\n' "$unowned" >"$BUNDLE_DIR/unowned.pid"
     cp "$ROOT/unowned-child" "$BUNDLE_DIR/unowned-child.pid"
+    bundle_retain_session
     bundle_finish 1
 }
 # `kill -0` is not "is it running": it succeeds on a zombie, and the case above
@@ -624,6 +625,9 @@ retained_port_case() {
 port_root="$ROOT/ports"
 bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case retained-port retained_port_case)
 check "a retained session marks its port reservation" test -f "$port_root/4557/retained"
+# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
+live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
+check "a live evidence directory is private to its owner" test "$(mode "$live")" = 700
 if (
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
@@ -650,13 +654,14 @@ unowned_port_case() {
         return 1
     fi
     harness_release_ports
+    printf '%s\n' "$BUNDLE_LIVE" >"$BUNDLE_DIR/live.path"
     bundle_finish 1
 }
 bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case unowned-port unowned_port_case)
 check "a retained failure without live processes releases its port" test ! -d "$port_root/4558"
-# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
-live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
-check "a live evidence directory is private to its owner" test "$(mode "$live")" = 700
+check "a retained failure without live processes has no session" test ! -e "$bundle/session.md"
+live=$(<"$bundle/live.path")
+check "a retained failure without live processes removes its live tree" test ! -d "$live"
 
 # A retained fixture may keep writing only into the private live tree. Auxiliary stack watchdogs
 # target the uploadable snapshot, so they must be gone before its final redaction pass completes.
@@ -668,6 +673,7 @@ auxiliary_case() {
     harness_spawn retained "$BUNDLE_WORK/retained.log" sleep 120
     retained=$HARNESS_PID
     mkfifo "$ROOT/auxiliary-ready" "$ROOT/auxiliary-go"
+    # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     harness_spawn_auxiliary late-stack - bash -c \
         'printf "ready\n" >"$1"; IFS= read -r _ <"$2"; printf "%s\n" "Authorization: Bearer late-watchdog-secret" >"$3/stacks/late.txt"' \
         _ "$ROOT/auxiliary-ready" "$ROOT/auxiliary-go" "$BUNDLE_DIR"

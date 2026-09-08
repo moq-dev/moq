@@ -54,6 +54,7 @@ BUNDLE_META=""       # jsonl fragments assembled into manifest.json
 BUNDLE_LIVE=""       # live retained logs, outside the uploadable bundle
 BUNDLE_HARNESS=""
 BUNDLE_RUN_ID=""
+BUNDLE_SESSION_RETAINED=0 # whether the harness proved that an owned process survived
 
 _bundle_have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -102,6 +103,7 @@ _bundle_record() {
 # bundle_init <harness>: create the run's directory and seed its identity.
 bundle_init() {
     BUNDLE_HARNESS=$1
+    BUNDLE_SESSION_RETAINED=0
     local root="${MOQ_QA_ARTIFACTS:-${MOQ_TEST_RUNS:-$BUNDLE_WORKSPACE/target/qa}}"
     if [[ -n "${MOQ_TEST_KEEP:-}" && -z "${MOQ_QA_KEEP:-}" ]]; then
         MOQ_QA_KEEP="$MOQ_TEST_KEEP"
@@ -841,6 +843,11 @@ bundle_retained() {
     [[ "${MOQ_QA_RETAIN:-}" == "1" ]]
 }
 
+# Mark that the harness found an owned process worth retaining.
+bundle_retain_session() {
+    BUNDLE_SESSION_RETAINED=1
+}
+
 # Trim qlog snapshots to the last newline completed by the relay. JSON-SEQ uses
 # that newline to terminate each record, so a copy that reached a live file's
 # current EOF mid-write must not publish its partial final record.
@@ -909,7 +916,7 @@ bundle_finish() {
     # for a capture that came back blank.
     rmdir "$BUNDLE_TRACE" "$BUNDLE_QLOG" "$BUNDLE_DIR/stacks" 2>/dev/null || true
 
-    if bundle_retained && [[ "$status" -ne 0 ]]; then
+    if bundle_retained && [[ "$status" -ne 0 && "$BUNDLE_SESSION_RETAINED" -eq 1 ]]; then
         # Processes continue writing to BUNDLE_LIVE while the uploadable
         # snapshots remain immutable, bounded, and redacted.
         _bundle_session

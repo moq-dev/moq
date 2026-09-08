@@ -410,6 +410,9 @@ harness_retain_ports() {
         [[ "${HARNESS_STATES[$i]}" == live ]] || continue
         pid=${HARNESS_PIDS[$i]}
         if ! harness_exited "$pid" || kill -0 -- -"$pid" 2>/dev/null; then
+            if declare -F bundle_retain_session >/dev/null 2>&1; then
+                bundle_retain_session
+            fi
             for reservation in ${HARNESS_PORTS[@]+"${HARNESS_PORTS[@]}"}; do
                 : >"$reservation/retained"
                 bundle_reservation "$reservation"
