@@ -130,6 +130,21 @@ fi
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
 
+if [[ "$NEGATIVE" -eq 1 && -n "$FAULT" ]]; then
+    echo "error: MOQ_QA_FAULT and --negative are separate failure drills" >&2
+    exit 2
+fi
+if [[ "$FAULT" == browser ]]; then
+    has_browser_subscriber=0
+    for sub in "${SUB_LIST[@]}"; do
+        [[ "$sub" == js ]] && has_browser_subscriber=1
+    done
+    if [[ "$has_browser_subscriber" -eq 0 ]]; then
+        echo "error: MOQ_QA_FAULT=browser requires --subscribers to include js" >&2
+        exit 2
+    fi
+fi
+
 needs() {
     # needs <lang>: true if <lang> appears in either list.
     local lang="$1" x

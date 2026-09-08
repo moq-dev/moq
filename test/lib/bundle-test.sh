@@ -125,6 +125,7 @@ secret_case() {
         # An opaque bearer credential: the secret is the second word, so a
         # pattern that stops at the first space ships it.
         echo "Authorization: Bearer opaque-bearer-credential"
+        echo 'Authorization: Bearer "opaque-quoted-bearer-secret"'
         echo 'Cookie: session=\"opaque-plain-escaped-secret\"'
         echo '> Authorization: Bearer opaque-prefixed-request-secret'
         echo '< Set-Cookie: session=opaque-prefixed-response-secret'
@@ -142,6 +143,8 @@ HAR
     } >"$BUNDLE_WORK/client.log"
     printf '%s\n' '{"Authorization":"Bearer \"opaque-keyed-json-secret\""}' \
         >"$BUNDLE_WORK/keyed.json"
+    printf '%s\n' '{"note":"Authorization: Bearer opaque-json-note-secret","status":"kept"}' \
+        >"$BUNDLE_WORK/note.json"
     cat >"$BUNDLE_TRACE_LIVE/cookies.har" <<'HAR'
 {
   "log": {
@@ -152,7 +155,13 @@ HAR
         ],
         "cookies": [
           {"name": "session", "value": "opaque-cookie-object-secret"}
-        ]
+        ],
+        "queryString": [
+          {"name": "token", "value": "opaque-har-query-secret"}
+        ],
+        "postData": {"params": [
+          {"name": "access_token", "value": "opaque-har-form-secret"}
+        ]}
       }
     }]
   }
@@ -166,11 +175,11 @@ HAR
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
-    opaque-bearer-credential opaque-plain-escaped-secret opaque-prefixed-request-secret \
+    opaque-bearer-credential opaque-quoted-bearer-secret opaque-plain-escaped-secret opaque-prefixed-request-secret \
     opaque-prefixed-response-secret opaque-proxy-credential \
     opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
     opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
-    opaque-keyed-json-secret \
+    opaque-keyed-json-secret opaque-json-note-secret opaque-har-query-secret opaque-har-form-secret \
     opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
@@ -180,6 +189,9 @@ check "redaction keeps compact multi-header HAR valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/compact.har"
 check "redaction keeps escaped keyed-header JSON valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/work/keyed.json"
+check "redaction keeps embedded plain-header JSON valid" python3 -c \
+    'import json,sys; data=json.load(open(sys.argv[1])); assert data["status"] == "kept"' \
+    "$bundle/work/note.json"
 check "an uploadable bundle excludes Playwright trace archives" test ! -f "$bundle/trace/browser.trace.zip"
 check "a withheld Playwright trace keeps its identity" grep -q '^sha256: ' \
     "$bundle/trace/browser.trace.zip.withheld"

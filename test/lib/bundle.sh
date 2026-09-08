@@ -464,7 +464,7 @@ _bundle_redact() {
     if [[ "$file" == *.har ]]; then
         if ! "$BUNDLE_LIB_DIR/redact-har.py" <"$file" >"$har_tmp" 2>/dev/null; then
             rm -f "$har_tmp"
-            _bundle_withhold "$file" "the HAR parser could not safely redact cookie objects"
+            _bundle_withhold "$file" "the HAR parser could not safely redact credential objects"
             return 1
         fi
         source="$har_tmp"
@@ -522,10 +522,27 @@ _bundle_redact_stream() {
                 }
                 return 0
             }
-            function redact_plain(    lower) {
+            function inside_quote(text,    i, ch, slashes, quoted) {
+                slashes = 0
+                quoted = 0
+                for (i = 1; i <= length(text); i++) {
+                    ch = substr(text, i, 1)
+                    if (ch == "\\") {
+                        slashes++
+                    } else {
+                        if (ch == "\"" && slashes % 2 == 0) quoted = !quoted
+                        slashes = 0
+                    }
+                }
+                return quoted
+            }
+            function redact_plain(    lower, start, tail, quote) {
                 lower = tolower($0)
                 if (match(lower, /(^|[^[:alnum:]-])(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
-                    $0 = substr($0, 1, RSTART + RLENGTH - 1) "<redacted>"
+                    start = RSTART + RLENGTH
+                    tail = substr($0, start)
+                    quote = inside_quote(substr($0, 1, RSTART)) ? closing_quote(tail) : 0
+                    $0 = substr($0, 1, start - 1) "<redacted>" (quote ? substr(tail, quote) : "")
                 }
             }
             function redact_keyed(    rest, out, start, tail, quote) {
