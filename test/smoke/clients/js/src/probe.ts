@@ -14,65 +14,12 @@
  * @module
  */
 import type MoqWatch from "@moq/watch/element";
-import { type Resources, resources } from "./instrument";
+import { SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
+import { resources } from "./instrument";
 import * as Pattern from "./pattern";
-
-/** How often the page takes a sample. Fast enough to see a 200ms tone step, cheap enough to sustain. */
-export const SAMPLE_MS = 50;
 
 /** FFT window used to identify the tone. 2048 bins at 48kHz is ~23Hz wide and ~43ms long. */
 const FFT_SIZE = 2048;
-
-/** How far the tone peak must stand above the spectrum's median for the tone to count as present. */
-export const TONE_FLOOR_DB = 15;
-
-/** One measurement of both sinks. */
-export type Sample = {
-	/** Monotonic counter, so a driver can tell a fresh sample from a repeat of the last one. */
-	seq: number;
-	/** `performance.now()` when the sample was taken. */
-	at: number;
-
-	/** Whether the canvas holds anything but the renderer's black fill. */
-	painted: boolean;
-	/** The fixture frame counter read out of the canvas, absent when the picture is not the fixture. */
-	frameId?: number;
-	/** Gap between the fixture's reference blocks, 0-255. Absent when the picture is not the fixture. */
-	contrast?: number;
-	/** Frames the decoder has produced. */
-	videoFrames: number;
-	/** Presentation timestamp of the painted frame, in milliseconds. */
-	videoTimestamp?: number;
-
-	/** Whether the catalog offers audio at all. */
-	hasAudio: boolean;
-	/** Encoded audio bytes received. */
-	audioBytes: number;
-	/** `AudioContext.state`, absent until the graph exists. */
-	audioContext?: string;
-	/** Playback timestamp reported by the render worklet, in milliseconds. */
-	audioTimestamp?: number;
-	/** Whether the audio buffer is waiting to refill. */
-	audioStalled: boolean;
-	/** Peak frequency in the tone band, absent until the graph exists. */
-	toneHz?: number;
-	/** The tone step that peak names, absent when no tone stands above the floor. */
-	toneStep?: number;
-	/** Level of the tone peak, in dB. */
-	toneDb?: number;
-	/** Median level across the spectrum, in dB: the floor the tone has to beat. */
-	noiseDb?: number;
-	/** Root mean square of the graph root's output over the analyser window. */
-	rms?: number;
-
-	/** Whether the player is paused. */
-	paused: boolean;
-	/** Whether the `paused` attribute is reflected onto the element. */
-	pausedAttribute: boolean;
-
-	/** Platform resources the page still holds. See {@link Resources}. */
-	resources: Resources;
-};
 
 // Median of a copy, used as the spectrum's noise floor. Median rather than mean so the tone itself
 // (a handful of bins) does not lift the floor it is being compared against.

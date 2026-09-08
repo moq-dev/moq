@@ -147,6 +147,7 @@ clients/
     driver.ts             the interop matrix's browser publisher/subscriber
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
+    src/contract.ts       what the page and its drivers agree on, free of browser imports
     src/fixture.ts        the deterministic publisher (frame counter + stepped tone)
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
     src/probe.ts          subscriber-side measurement, taken at the sinks

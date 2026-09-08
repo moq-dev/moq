@@ -8,10 +8,7 @@
  */
 import { join } from "node:path";
 import { type Browser, chromium, type Page } from "playwright";
-import { CONTROL, type SmokeControl } from "./src/control";
-import type { FixtureState } from "./src/fixture";
-import type { Resources } from "./src/instrument";
-import type { Sample } from "./src/probe";
+import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
 
 /**
  * A failed check, named after the property it was measuring.

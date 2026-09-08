@@ -3,8 +3,8 @@
 // media-output and lifecycle checks) poll the state each role mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
-import { publish } from "./control";
-import { FAULTS, type Fault, Fixture } from "./fixture";
+import { FAULTS, type Fault, publish } from "./contract";
+import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
 
 const params = new URLSearchParams(location.search);

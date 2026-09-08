@@ -12,17 +12,7 @@
  * @module
  */
 
-/** Live instances of each wrapped resource. */
-export type Resources = {
-	/** Open {@link WebTransport} sessions, i.e. connections to the relay. */
-	transports: number;
-	/** Open {@link WebSocket}s: the transport a connection falls back to when QUIC loses the race. */
-	sockets: number;
-	/** Unclosed {@link AudioContext}s, i.e. audio graphs and their render threads. */
-	audioContexts: number;
-	/** Unterminated {@link Worker}s. */
-	workers: number;
-};
+import type { Resources } from "./contract";
 
 const live: Resources = { transports: 0, sockets: 0, audioContexts: 0, workers: 0 };
 

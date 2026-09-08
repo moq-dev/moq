@@ -39,9 +39,8 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { FAULTS } from "./src/fixture";
+import { FAULTS, SAMPLE_MS } from "./src/contract";
 import * as Pattern from "./src/pattern";
-import { SAMPLE_MS } from "./src/probe";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
 const CASES = ["pause", "rejoin", "detach", "republish", "late-join"] as const;

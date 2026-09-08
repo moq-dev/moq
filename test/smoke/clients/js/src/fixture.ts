@@ -16,24 +16,9 @@ import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
+import type { Fault, FixtureState } from "./contract";
+import { OFFSET_STEPS } from "./contract";
 import * as Pattern from "./pattern";
-
-/** A deliberate defect, used to prove an assertion can fail. */
-export type Fault =
-	/** Publish the pattern faithfully. */
-	| "none"
-	/** Mute the tone, leaving the audio track encoding digital silence. */
-	| "silent-audio"
-	/** Keep painting frame 0, so the picture never advances. */
-	| "frozen-video"
-	/** Run the tone table ahead of the picture by {@link OFFSET_STEPS}. */
-	| "audio-offset";
-
-/** How far `audio-offset` shifts the tone table. Larger than the tolerance, smaller than half a cycle. */
-export const OFFSET_STEPS = 4;
-
-/** Every recognized {@link Fault}, for argument validation. */
-export const FAULTS: readonly Fault[] = ["none", "silent-audio", "frozen-video", "audio-offset"];
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
 const MAX_BITRATE = 1_000_000;
@@ -54,22 +39,6 @@ const SAMPLE_RATE = 48000;
 // getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half
 // is ever touched at runtime.
 type CanvasSource = Publish.Video.Source & Pick<CanvasCaptureMediaStreamTrack, "requestFrame">;
-
-/** What the fixture publishes about itself, mirrored onto the host element's dataset. */
-export type FixtureState = {
-	/** The frame counter most recently painted, or -1 before the clock starts. */
-	frameId: number;
-	/** `AudioContext.state`. The pattern clock cannot start until this is "running". */
-	audioState: AudioContextState;
-	/** True once the broadcast is announced with both a video and an audio config in its catalog. */
-	ready: boolean;
-	/** True while a subscriber is pulling video, i.e. the encoder's demand gate is open. */
-	videoActive: boolean;
-	/** True while a subscriber is pulling audio. */
-	audioActive: boolean;
-	/** Frames the encoder has produced. */
-	encodedFrames: number;
-};
 
 /**
  * A running fixture publisher.
