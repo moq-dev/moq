@@ -595,6 +595,8 @@ printf '%s\n' \
     'with open(os.environ["MOCK_GUARD_MARKER"], "w", encoding="utf-8") as marker:' \
     '    marker.write(f"{group} {os.getpid()}\n")' \
     '    marker.flush()' \
+    'if os.environ["MOCK_GUARD_SIGNAL"] == "1":' \
+    '    os.kill(os.getppid(), signal.SIGTERM)' \
     'while True:' \
     '    signal.pause()' >"$ROOT/startup-lib/group-guard.py"
 chmod +x "$ROOT/startup-lib/group-guard.py"
@@ -606,14 +608,16 @@ startup_cancel_case() {
     bash -c '
         source "$1"
         HARNESS_LIB=$2
-        export MOCK_GUARD_MARKER=$3 MOCK_GUARD_JOIN=$5
+        export MOCK_GUARD_MARKER=$3 MOCK_GUARD_JOIN=$5 MOCK_GUARD_SIGNAL=$6
         MOQ_TEST_RUNS=$4 harness_begin startup-cancel "just test bundle"
         harness_spawn pending "$HARNESS_RUN/pending.log" sleep 120
-    ' _ "$DIR/harness.sh" "$ROOT/startup-lib" "$marker" "$runs" "$join" \
+    ' _ "$DIR/harness.sh" "$ROOT/startup-lib" "$marker" "$runs" "$join" "$((1 - join))" \
         >"$ROOT/startup-cancel-$name.out" 2>&1 &
     local shell=$! leader guard status=0
     read -r leader guard <"$marker"
-    kill -TERM "$shell"
+    if ((join)); then
+        kill -TERM "$shell"
+    fi
     wait "$shell" || status=$?
     check "cancellation $name exits with the signal status" test "$status" -eq 143
     check "cancellation $name reaps the provisional leader" stopped "$leader"

@@ -48,6 +48,12 @@ HARNESS_WITNESSES=()
 HARNESS_WITNESS_STARTS=()
 HARNESS_GUARDED=()
 
+# Signals are deferred only across the two launch-and-register command pairs.
+# The child PID is not available until after `&`, so this closes the otherwise
+# unobservable boundary before cleanup can record what it must reap.
+HARNESS_REGISTERING=0
+HARNESS_SIGNAL_STATUS=0
+
 # Process groups that support the run but must never outlive finalization. A retained session keeps
 # its debuggable fixtures, not delayed writers that could mutate the uploadable evidence afterward.
 HARNESS_AUXILIARIES=()
@@ -118,9 +124,11 @@ harness_begin() {
     # Cancellation needs its own traps: children run in their own process groups
     # (see `harness_spawn`), so a ^C aimed at this shell's group never reaches
     # them, and teardown is the only thing that will.
+    HARNESS_REGISTERING=0
+    HARNESS_SIGNAL_STATUS=0
     trap harness_finish EXIT
-    trap 'harness_finish 130; exit 130' INT
-    trap 'harness_finish 143; exit 143' TERM
+    trap '_harness_signal 130' INT
+    trap '_harness_signal 143' TERM
 
     echo "run: $HARNESS_RUN"
 }
@@ -289,6 +297,26 @@ harness_exited() {
 
 # ── processes ───────────────────────────────────────────────────────────────
 
+_harness_signal() {
+    local status="$1"
+    if ((HARNESS_REGISTERING)); then
+        HARNESS_SIGNAL_STATUS=$status
+        return
+    fi
+    harness_finish "$status"
+    exit "$status"
+}
+
+_harness_registered() {
+    local status
+    HARNESS_REGISTERING=0
+    status=$HARNESS_SIGNAL_STATUS
+    ((status)) || return 0
+    HARNESS_SIGNAL_STATUS=0
+    harness_finish "$status"
+    exit "$status"
+}
+
 # Spawn a command as its own process group, writing to LOG (or `-` to inherit
 # this shell's stdout/stderr): `harness_spawn <label> <log> <cmd...>`. Sets
 # HARNESS_PID to the group leader. CMD may be a shell function.
@@ -322,6 +350,7 @@ harness_spawn() {
     go="$HARNESS_RUN/.harness/go-$$-${#HARNESS_PIDS[@]}"
     guard_ready="$HARNESS_RUN/.harness/guard-$$-${#HARNESS_PIDS[@]}"
     mkfifo "$ready" "$go" "$guard_ready"
+    HARNESS_REGISTERING=1
     set -m
     if [[ "$log" == "-" ]]; then
         _harness_supervise "$ready" "$go" "$@" </dev/null &
@@ -340,12 +369,15 @@ harness_spawn() {
     HARNESS_WITNESSES+=("")
     HARNESS_WITNESS_STARTS+=("")
     HARNESS_GUARDED+=(0)
+    _harness_registered
     read -r _ <"$ready"
     started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
     HARNESS_STARTS[i]="$started"
+    HARNESS_REGISTERING=1
     "$HARNESS_LIB/group-guard.py" "$HARNESS_PID" "$guard_ready" >/dev/null 2>&1 &
     witness=$!
     HARNESS_WITNESSES[i]="$witness"
+    _harness_registered
     if ! read -r guard_status <"$guard_ready" || [[ "$guard_status" != ok ]]; then
         kill -KILL "$witness" 2>/dev/null || true
         if harness_group_owned "$i"; then
