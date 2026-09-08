@@ -65,6 +65,7 @@ cargo run --locked --release -p moq-net --example frame-storage > frame-storage.
 
 With Nix, prefix each command with `nix develop --command`.
 
+- [A/V-sized matrix](av-frames.md): 100 B through 1 MiB, live fanout, and retained storage.
 - [Production integration](adaptive-net.md): adaptive allocation in moq-net with before/after measurements.
 - [Adaptive prototype](adaptive-frames.md): first-frame-sized pages, capped growth, direct `BufMut` writes, and separate versus packed headers.
 - [Initial investigation](frame-storage.md): current-model measurements and isolated storage comparisons.

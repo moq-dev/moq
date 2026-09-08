@@ -49,6 +49,8 @@ nix develop --command cargo run --locked --release -p moq-net --example adaptive
 
 To alternate runs without compiling between samples, copy each built `target/release/examples/frame-storage` binary to a distinct temporary path first. Keep the workload source and lockfile identical for an allocation-only comparison. These examples collect allocations in untimed passes; requested bytes are cumulative allocation requests, not peak or retained memory.
 
+The expanded [A/V-sized matrix](av-frames.md) adds live fanout, larger frames, and retained-storage measurements with fresh processes per case.
+
 ## Next decision
 
 Profile the real chunked-frame path before expanding the storage design. Page ownership introduces refcount work and tail transfers that can outweigh a cheap small allocation on this allocator. The next step should demonstrate a win on the production path, including live readers and fanout, before removing per-frame ownership or changing header storage. This PR supplies a concrete implementation and a reproducible counterexample to assuming that fewer allocations automatically means faster delivery.
