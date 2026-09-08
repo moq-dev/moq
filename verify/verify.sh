@@ -96,13 +96,29 @@ binary_provenance() {
         return
     fi
 
-    local target dir resolved
+    local target dir leaf link resolved hops=0
     target="${CARGO_TARGET_DIR:-$ROOT/target}"
     if ! dir=$(cd "$(dirname -- "$path")" && pwd -P); then
         echo external
         return
     fi
-    resolved="$dir/$(basename -- "$path")"
+    leaf=$(basename -- "$path")
+
+    # The leaf is followed too, not just its directory. A symlink sitting in
+    # the target directory and pointing at a binary from somewhere else is
+    # external evidence, and resolving only the directory would call it ours.
+    # By hand rather than `readlink -f`, which is GNU-only on older macOS.
+    while [[ -L "$dir/$leaf" ]] && ((hops < 32)); do
+        hops=$((hops + 1))
+        link=$(readlink -- "$dir/$leaf")
+        [[ $link == /* ]] || link="$dir/$link"
+        if ! dir=$(cd "$(dirname -- "$link")" && pwd -P); then
+            echo external
+            return
+        fi
+        leaf=$(basename -- "$link")
+    done
+    resolved="$dir/$leaf"
 
     if [[ -d $target ]] && target=$(cd "$target" && pwd -P) && [[ $resolved == "$target"/* ]]; then
         echo checkout
@@ -334,13 +350,16 @@ grade_receipt() {
     # A receipt that cannot be read is reported as one, never skipped: dropping
     # it would turn a truncated or half-written file into "nothing was claimed",
     # which is the one answer a wrapper like this must never give by accident.
-    # Every field the grading filter dereferences is checked, not just a couple:
-    # a receipt from an older schema would otherwise abort jq mid-array and be
+    # Every field the grading filter dereferences is checked by type, not just
+    # by presence: a receipt from an older schema, or one hand-edited into a
+    # string where a number belongs, would otherwise abort jq mid-array and be
     # dropped from a list whose whole point is being exhaustive.
-    if ! jq -e 'has("lane") and has("exit_status") and has("finished_epoch")
-        and (.binaries | type == "array")
-        and (.source | type == "object" and has("head") and has("base")
-            and has("base_head") and has("digest") and has("digest_after"))' \
+    if ! jq -e '(.lane | type == "string") and (.kind | type == "string")
+        and (.exit_status | type == "number") and (.finished_epoch | type == "number")
+        and (.binaries | type == "array" and all(.[]; type == "object"))
+        and (.source | type == "object"
+            and ([.head, .base, .base_head, .digest, .digest_after]
+                | all(type == "string")))' \
         >/dev/null 2>&1 <"$file"; then
         jq -n --arg lane "$(basename -- "${file%.json}")" \
             '{lane: $lane, kind: "unknown", verdict: "unreadable",
@@ -563,11 +582,19 @@ cmd_classify() {
                 url: (attempts($runs; .) | last | .html_url)
               })) as $extra
         | .pr.headRefOid as $head
+        # A receipt names the base it selected, which `status` can only check
+        # against the same name. Retargeting a pull request leaves the head
+        # alone and changes what the candidate merges into, and the scope every
+        # local lane ran was picked against the old one. A receipt records a
+        # local ref (origin/main) where GitHub reports a branch name (main).
+        | .pr.baseRefName as $base
         | ((.receipts // []) | map({
             lane: .lane,
             kind: .kind,
             verdict: .verdict,
             state: (if .source.head != $head then "different-head"
+                    elif ((.source.base // "") | . != $base and (endswith("/" + $base) | not))
+                        then "different-base"
                     elif .verdict == "pass" then "current"
                     else .verdict end)
           })) as $evidence

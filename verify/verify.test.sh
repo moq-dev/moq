@@ -26,6 +26,18 @@ run() {
     (cd "$FIXTURE" && PATH="$FIXTURE/bin:$PATH" "$VERIFY" "$@")
 }
 
+# `run` with extra environment for that one invocation, given as leading
+# NAME=VALUE arguments. `env` rather than `export`, so a binary override cannot
+# leak into the case after it.
+run_with() {
+    local environment=()
+    while [[ ${1-} == *=* ]]; do
+        environment+=("$1")
+        shift
+    done
+    (cd "$FIXTURE" && PATH="$FIXTURE/bin:$PATH" env "${environment[@]}" "$VERIFY" "$@")
+}
+
 # The verdict `status` currently assigns to the only stored receipt.
 verdict() {
     run status --json | jq -r '.[0].verdict'
@@ -105,7 +117,7 @@ rm "$FIXTURE/mixed.txt"
 [[ "$(verdict)" == fail ]] || fail "a failing command must record a failure"
 
 # A binary this checkout cannot account for is exploratory, never a pass.
-(export RELAY_BIN="$FIXTURE/bin/just" && run record local demo "" -- true) >/dev/null 2>&1 ||
+run_with RELAY_BIN="$FIXTURE/bin/just" record local demo "" -- true >/dev/null 2>&1 ||
     fail "an overridden binary must still record"
 [[ "$(verdict)" == exploratory ]] || fail "an unknown binary must be exploratory"
 ! run status >/dev/null 2>&1 || fail "exploratory evidence must not exit zero"
@@ -122,6 +134,28 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/bin/just"
 rm "$FIXTURE/bin/just"
 [[ "$(verdict)" == stale ]] || fail "a deleted override must invalidate the receipt"
 write_stub
+
+# Provenance follows the leaf, not just its directory: a symlink parked in the
+# target directory and pointing somewhere else is still someone else's binary,
+# and resolving only the directory would credit this checkout with it.
+rm -rf "${FIXTURE:?}/.verify"
+mkdir -p "$FIXTURE/target/debug" "$FIXTURE/elsewhere"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/elsewhere/relay"
+ln -s "$FIXTURE/elsewhere/relay" "$FIXTURE/target/debug/relay"
+run_with CARGO_TARGET_DIR="$FIXTURE/target" RELAY_BIN="$FIXTURE/target/debug/relay" \
+    record local demo "" -- true >/dev/null 2>&1 || fail "a symlinked override must record"
+[[ "$(run status --json | jq -r '.[0].binaries[0].provenance')" == external ]] ||
+    fail "a symlink out of the target directory must be external"
+[[ "$(verdict)" == exploratory ]] || fail "a symlinked external binary must be exploratory"
+
+# ...while a binary that really is in there is the checkout's own.
+cp "$FIXTURE/elsewhere/relay" "$FIXTURE/target/debug/own"
+run_with CARGO_TARGET_DIR="$FIXTURE/target" RELAY_BIN="$FIXTURE/target/debug/own" \
+    record local demo "" -- true >/dev/null 2>&1 || fail "a checkout override must record"
+[[ "$(run status --json | jq -r '.[0].binaries[0].provenance')" == checkout ]] ||
+    fail "a binary inside the target directory must be the checkout's"
+[[ "$(verdict)" == pass ]] || fail "a binary built here must not be exploratory"
+rm -rf "${FIXTURE:?}/target" "${FIXTURE:?}/elsewhere"
 
 # A docs-only change is reported at its own size: the wrapper adds no work.
 rm -rf "${FIXTURE:?}/.verify"
@@ -150,6 +184,14 @@ run record static docs "" -- true --show check >/dev/null 2>&1 ||
 echo '{"lane": "docs", "source": {}}' >"$FIXTURE/.verify/docs.json"
 [[ "$(verdict)" == unreadable ]] || fail "a partial receipt must be reported, not dropped"
 
+# Every key present with the wrong type is the same problem one step later: the
+# age arithmetic aborts jq, and an exhaustive list loses an entry.
+rm -rf "${FIXTURE:?}/.verify"
+run record static docs "" -- true >/dev/null 2>&1 || fail "recording must succeed"
+jq '.finished_epoch = "recently"' "$FIXTURE/.verify/docs.json" >"$FIXTURE/.verify/docs.tmp"
+mv "$FIXTURE/.verify/docs.tmp" "$FIXTURE/.verify/docs.json"
+[[ "$(verdict)" == unreadable ]] || fail "a wrongly typed receipt must be reported, not dropped"
+
 # Everything below grades gathered pull request state, with no network: a
 # required result that is absent, cancelled, skipped, or unfinished must never
 # read as green, and neither must evidence recorded against another head.
@@ -174,7 +216,8 @@ green=$(
             {name: "Test", status: "completed", conclusion: "success", started_at: "1"}
         ],
         statuses: [],
-        receipts: [{lane: "check", kind: "static", verdict: "pass", source: {head: "head1"}}]
+        receipts: [{lane: "check", kind: "static", verdict: "pass",
+            source: {head: "head1", base: "origin/main"}}]
     }'
 )
 
@@ -202,6 +245,14 @@ failed_lane='.checks += [{name: "Smoke", status: "completed", conclusion: "failu
     fail "a required result on this head must stand without a local receipt"
 [[ "$(grade '.receipts[0].source.head = "other"')" == stale ]] ||
     fail "evidence from another head must be stale"
+
+# Retargeting a pull request leaves the head alone and changes what the
+# candidate merges into, so the scope every local lane ran was picked against a
+# base that is no longer the one in question.
+[[ "$(grade '.receipts[0].source.base = "origin/dev"')" == stale ]] ||
+    fail "evidence recorded against another base must be stale"
+[[ "$(grade '.receipts[0].source.base = "main"')" == green ]] ||
+    fail "a base recorded without its remote must still match"
 [[ "$(grade '.pr.mergeable = "CONFLICTING"')" == failed ]] || fail "a conflicting candidate must block"
 [[ "$(grade '.pr.reviewDecision = "CHANGES_REQUESTED"')" == failed ]] || fail "requested changes must block"
 [[ "$(grade '.pr.isDraft = true')" == incomplete ]] || fail "a draft must not be green"

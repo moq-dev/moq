@@ -59,7 +59,9 @@ A receipt carries exactly one, and no report merges two:
 prebuilt relay or CLI. Either one relabels the run `binary` and records the
 binary's digest and provenance. A binary from outside this checkout's target
 directory is `external`, and evidence from it grades `exploratory`: useful for
-investigating, never a merge credential.
+investigating, never a merge credential. Symlinks are followed to the end, so
+parking a link to someone else's build under `target/` does not make it this
+checkout's.
 
 Record what this repository cannot run itself the same way, so it grades under
 the same rules:
@@ -117,7 +119,9 @@ Having no local receipt at all is not staleness. A required result that passed
 on this exact head is stronger evidence than a local run, so the record says it
 is hosted-only and stays green. A receipt describing a *different* head is
 staleness, because it invites a reader to credit this candidate with what
-another one proved.
+another one proved. So is a receipt describing a different *base*: retargeting a
+pull request leaves the head alone and changes what the candidate merges into,
+and every local lane picked its scope against the base it recorded.
 
 `mergeable` comes back `UNKNOWN` on the first request for a pull request GitHub
 has not compared recently; it computes the answer in the background and returns
