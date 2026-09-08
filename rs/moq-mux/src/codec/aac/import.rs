@@ -90,6 +90,15 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Mark a break in the timeline by publishing an empty group. To bound the closing
+	/// group's final frame first, [`cut(end)`](Self::cut) before this. See
+	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
+	pub fn discontinuity(&mut self) -> crate::Result<()> {
+		self.track.discontinuity()?;
+		self.estimate();
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;

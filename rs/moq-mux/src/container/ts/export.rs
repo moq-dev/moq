@@ -392,6 +392,11 @@ impl<E: catalog::Catalog> Export<E> {
 						self.tracks.get_mut(&name).unwrap().pending = Some(pending);
 						continue;
 					}
+					// A backwards boundary fences its peers, so one program break costs one
+					// reset however many tracks cross it. A forward one cannot: the marker is
+					// local to its track, and a peer's marker for this same break looks exactly
+					// like its own later gap, so each is taken at face value and the program
+					// re-anchors for it. Telling them apart needs a boundary the wire carries.
 					self.rewind(backwards);
 				}
 				let track = self.tracks.get_mut(&name).unwrap();

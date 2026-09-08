@@ -25,8 +25,8 @@ audio half is visible, late, through #3372's resync line.
   indicator and skips the PCR bytes; parse the PCR there. `last_pts` advances
   on video PES only and freezes with the very stream this must catch. Record
   the clock at each access unit in `flush`; the gap is the current clock
-  minus that mark. Land the adaptation-field parse once, shared with
-  [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md).
+  minus that mark. Reuse the `discontinuity_indicator` helper the timebase-break
+  path already shares with duplicate detection.
 - Surface: `rs/moq-cli/src/publish.rs` `log_stats` gains a line for a stream
   whose count stopped advancing across a sample, distinct from the audio
   resync message. The SRT gateway reports nothing today; that surface is
@@ -47,4 +47,3 @@ audio half is visible, late, through #3372's resync line.
 - [SRT import stats](/quest/m2/srt-import-stats.md) - the same rows read from the SRT gateway
 - [#1838](/quest/m3/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring model that subsumes this as `PID_error`
 - [Publisher stats](/quest/m2/qos/publisher-stats.md) - where per-rendition liveness would ride the catalog
-- [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md) - shares the adaptation-field parse
