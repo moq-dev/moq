@@ -123,3 +123,4 @@ already claims its top end "intentionally reaches the raised
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
+- [Control timeout code](/quest/m1/control-timeout-code.md) - the other condition whose wire code is under review

@@ -28,6 +28,7 @@ with the current dev tree before starting.
 - [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence is the discontinuity unless the boundary proves continuity; no marker has to arrive
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
+- [Control timeout code](/quest/m1/control-timeout-code.md) - a request stream the peer never answered stops claiming its content was late
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, announce/unannounce on the broadcast, and dynamic(prefix, route) with one meaning
