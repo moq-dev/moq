@@ -9,13 +9,10 @@ most, and today `rs/moq-srt/src/ts.rs` only calls `decode`.
 
 ## Plan
 
-- Add a `stats` forwarder to `ContainerImpl` in
-  `rs/moq-mux/src/import/container.rs`, so every container importer exposes
-  its stats through one shape rather than the TS-specific enum arm
-  `rs/moq-cli/src/publish.rs` carries today. Containers without counters
-  return an empty report, not `None`.
-- `rs/moq-srt` polls it on the same cadence as the CLI and logs the same
-  lines, so the two front doors read alike.
+- Poll `self.importer.stats()` on the SRT publisher's existing
+  `ts::Import<ts::Ext>` at the same cadence as the CLI.
+- Share the logging presentation with `rs/moq-cli/src/publish.rs` where
+  needed so the two front doors report the same rows.
 - Test: the SRT harness feeds the suppressed-PID stimulus from the TS
   liveness quest and asserts the gateway reports the stalled row.
 

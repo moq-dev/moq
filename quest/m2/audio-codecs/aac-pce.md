@@ -10,7 +10,7 @@ both map to stereo with a warning.
 ## Plan
 
 The ADTS and ASC importers in `rs/moq-mux/src/codec/aac` map
-`channel_config == 0` and the reserved values 13 to 15 to stereo and warn.
+`channel_config == 0` and every value from 8 to 15 to stereo and warn.
 Warn-then-continue is banned: supported or refused.
 
 - ASC: with `channel_config == 0` the GASpecificConfig carries a
@@ -20,9 +20,12 @@ Warn-then-continue is banned: supported or refused.
 - ADTS: channel_config 0 means the PCE is in the first raw data block. Parse
   it there, once per track, the same way the HE-AAC sniff reads the first
   block's fill elements.
-- Reserved values are `Error::Unsupported`.
+- Give every ASC configuration from 8 to 15 an explicit disposition: implement
+  any supported channel mapping and return `Error::Unsupported` for every
+  remaining value, including reserved configurations.
 - Regression: an ASC fixture with a PCE reports its real count; an ADTS
-  fixture with an in-band PCE does too; a reserved value is refused; the
+  fixture with an in-band PCE does too; each value from 8 to 15 has its
+  supported count asserted or is refused; the
   common configurations 1 to 7 are unchanged.
 
 ## Related
