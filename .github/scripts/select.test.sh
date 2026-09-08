@@ -132,6 +132,13 @@ expect "$shared_harness" smoke false
 expect "$shared_harness" wasm true
 expect "$shared_harness" ts true
 
+# Port reservation is a separate helper executed by the shared harness. Cover
+# the directory so adding or changing another shared helper cannot bypass every
+# consumer lane.
+expect 'test/lib/reserve.sh' smoke_full true
+expect 'test/lib/reserve.sh' wasm true
+expect 'test/lib/reserve.sh' ts true
+
 # The TS round trip rewrites the smoke relay config before launching it.
 expect 'test/smoke/smoke.toml' ts true
 
@@ -147,6 +154,11 @@ done
 expect '.github/scripts/select.sh' smoke true
 expect '.github/scripts/select.sh' smoke_full true
 expect '.github/scripts/select.sh' wasm true
+expect '.github/actions/rust-cache/action.yml' smoke true
+expect '.github/actions/rust-cache/action.yml' smoke_full true
+expect '.github/actions/rust-cache/action.yml' wasm true
+expect '.github/actions/rust-cache/action.yml' ts true
+expect '.github/actions/rust-cache/action.yml' features true
 expect 'test/justfile' smoke true
 expect 'test/justfile' smoke_full true
 

@@ -61,7 +61,7 @@ fi
 # The gate machinery itself. A pull request that rewrites how lanes are selected
 # matches no lane's own inputs, so without this it would validate none of them.
 # Mirrors the root `justfile`'s "orchestration changed, check everything" rule.
-if grep -qE '^(\.github/(justfile|scripts/(select|gates)(\.test)?\.sh|workflows/(gates|smoke|wasm)\.yml)|justfile|rs/justfile|test/justfile)$' <<<"$files"; then
+if grep -qE '^(\.github/(actions/rust-cache/.*|justfile|scripts/(select|gates)(\.test)?\.sh|workflows/(gates|smoke|wasm)\.yml)|justfile|rs/justfile|test/justfile)$' <<<"$files"; then
     everything
 fi
 
@@ -100,7 +100,7 @@ touches() {
 # paths. Nothing in the Cargo or bun graph names it, so without this a lock bump
 # selects no lane at all.
 shell='^flake\.(nix|lock)$'
-harness='^test/lib/harness\.sh$'
+harness='^test/lib/'
 
 # The full interop matrix, per the Cross-Package Sync rule in CLAUDE.md: wire,
 # FFI, and gateway changes run every publisher against every subscriber.
