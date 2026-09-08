@@ -751,6 +751,7 @@ probe_c_compiler() {
         return
     fi
     case $path in /*) display=$path ;; *) display="$REPO/test/$path" ;; esac
+    # shellcheck disable=SC2016 # The child shell expands its positional parameters.
     bounded 10 bash -c 'cd "$1" && exec "$2" --version' _ "$REPO/test" "$cc"
     status=$?
     version=$(first_line "$BOUNDED_OUT")
@@ -1724,7 +1725,7 @@ self_test_ownership() {
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
     check 'Cargo home prefers its override' "$(HOME=/home CARGO_HOME=/cargo cargo_home)" /cargo
-    check 'Cargo home falls back to HOME' "$(HOME=/home CARGO_HOME= cargo_home)" /home/.cargo
+    check 'Cargo home falls back to HOME' "$(HOME=/home CARGO_HOME='' cargo_home)" /home/.cargo
     (
         unset HOME CARGO_HOME
         cargo_home >/dev/null
@@ -1960,7 +1961,7 @@ EOF
 
         RUST_CARGO=/no/such/wrapper probe_cargo_compile smoke-cargo smoke "" cargo
         check 'smoke compile uses literal Cargo' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
-        CARGO_TARGET_DIR= probe_cargo_compile empty-target wasm ""
+        CARGO_TARGET_DIR='' probe_cargo_compile empty-target wasm ""
         check 'empty Cargo target directory is refused' "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
         CARGO_TARGET_DIR=relative RELAY_BIN="$(command -v env)" \
             probe_harness_cargo_target wasm wasm cargo
