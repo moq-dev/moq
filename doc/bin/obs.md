@@ -33,6 +33,16 @@ OBS Studio install.
   **About** lists plugin and libmoq versions, documentation links, and available
   video encoders.
 
+## Source audio
+
+MoQ Source receives the first audio rendition alongside video. Audio decoding uses
+`moq-audio` through libmoq and supports Opus and AAC-LC in mono or stereo.
+HE-AAC and multichannel audio are unsupported. Broadcasts without an audio
+rendition remain video-only.
+
+Audio reaches OBS as 48 kHz stereo float PCM with the broadcast presentation
+timestamps. OBS mixes it with the scene's other audio sources.
+
 ## Source quality and moq-transcode
 
 OBS publishes **one** hang mezzanine. It does not encode a viewer ladder inside

@@ -19,8 +19,6 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/samplefmt.h>
 #include "moq.h"
 }
 
@@ -64,66 +62,8 @@ static AVCodecID codec_string_to_id(const char *codec, size_t len)
 	return AV_CODEC_ID_NONE;
 }
 
-// Map an audio codec string from moq_audio_config to an FFmpeg codec ID. Catalog codec strings follow the
-// WebCodecs registry: "mp4a.40.2" (AAC-LC), "mp4a.40.5"/"mp4a.40.29" (HE-AAC v1/v2), "opus".
-static AVCodecID audio_codec_string_to_id(const char *codec, size_t len)
-{
-	if (!codec || len == 0)
-		return AV_CODEC_ID_NONE;
-	if ((len >= 4 && strncasecmp(codec, "mp4a", 4) == 0) || (len >= 3 && strncasecmp(codec, "aac", 3) == 0))
-		return AV_CODEC_ID_AAC;
-	if (len >= 4 && strncasecmp(codec, "opus", 4) == 0)
-		return AV_CODEC_ID_OPUS;
-	return AV_CODEC_ID_NONE;
-}
-
-// Map an FFmpeg sample format to the OBS audio format OBS ingests directly (obs_source_output_audio
-// converts to the mixer format itself).
-static enum audio_format av_sample_fmt_to_obs(enum AVSampleFormat fmt)
-{
-	switch (fmt) {
-	case AV_SAMPLE_FMT_U8:
-		return AUDIO_FORMAT_U8BIT;
-	case AV_SAMPLE_FMT_S16:
-		return AUDIO_FORMAT_16BIT;
-	case AV_SAMPLE_FMT_S32:
-		return AUDIO_FORMAT_32BIT;
-	case AV_SAMPLE_FMT_FLT:
-		return AUDIO_FORMAT_FLOAT;
-	case AV_SAMPLE_FMT_U8P:
-		return AUDIO_FORMAT_U8BIT_PLANAR;
-	case AV_SAMPLE_FMT_S16P:
-		return AUDIO_FORMAT_16BIT_PLANAR;
-	case AV_SAMPLE_FMT_S32P:
-		return AUDIO_FORMAT_32BIT_PLANAR;
-	case AV_SAMPLE_FMT_FLTP:
-		return AUDIO_FORMAT_FLOAT_PLANAR;
-	default:
-		return AUDIO_FORMAT_UNKNOWN;
-	}
-}
-
-static enum speaker_layout channels_to_speakers(int channels)
-{
-	switch (channels) {
-	case 1:
-		return SPEAKERS_MONO;
-	case 2:
-		return SPEAKERS_STEREO;
-	case 3:
-		return SPEAKERS_2POINT1;
-	case 4:
-		return SPEAKERS_4POINT0;
-	case 5:
-		return SPEAKERS_4POINT1;
-	case 6:
-		return SPEAKERS_5POINT1;
-	case 8:
-		return SPEAKERS_7POINT1;
-	default:
-		return SPEAKERS_UNKNOWN;
-	}
-}
+// Fix the PCM layout at subscription time because raw frame metadata carries only bytes and a timestamp.
+static constexpr moq_audio_decoder_output audio_output = {MOQ_AUDIO_FORMAT_F32, 48000, 2, 0};
 
 struct moq_source {
 	obs_source_t *source;
@@ -159,15 +99,6 @@ struct moq_source {
 	uint64_t video_attempt;
 	int32_t audio_track;
 	uint64_t audio_attempt;
-
-	// Audio decoder state (audio rendition 0, when the catalog carries one). Frames arrive encoded
-	// (AAC/Opus) with the broadcast's presentation timestamps; decoded to PCM and handed to OBS as async
-	// audio carrying those timestamps, so OBS aligns them with the async video.
-	AVCodecContext *audio_codec_ctx;
-	uint32_t audio_sample_rate;
-	uint32_t audio_channels;
-	uint32_t audio_decode_errors;
-	uint64_t audio_frames_output;
 
 	// Decoder state
 	AVCodecContext *codec_ctx;
@@ -281,9 +212,6 @@ static void moq_source_blank_video(struct moq_source *ctx);
 static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const struct moq_video_config *config);
 static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder);
 static void moq_source_destroy_decoder_locked(struct moq_source *ctx);
-static bool moq_source_init_audio_decoder_locked(struct moq_source *ctx, const struct moq_audio_config *config);
-static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx);
-static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_id);
 static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, uint32_t current_gen);
 static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id);
 
@@ -311,11 +239,6 @@ static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 	ctx->video_track = -1;
 	ctx->audio_track = -1;
 	ctx->audio_attempt = 0;
-	ctx->audio_codec_ctx = NULL;
-	ctx->audio_sample_rate = 0;
-	ctx->audio_channels = 0;
-	ctx->audio_decode_errors = 0;
-	ctx->audio_frames_output = 0;
 	ctx->catalog_attempt = 0;
 	ctx->video_attempt = 0;
 
@@ -697,21 +620,12 @@ static void on_video_frame(void *user_data, int32_t frame_id)
 	moq_source_decode_frame(ctx, frame_id);
 }
 
-// Subscribe to audio rendition `index` of a catalog snapshot (the caller still owns the snapshot) and
-// install the matching decoder. Mirrors the video path: pre-account the subscription's lifetime reference
-// and reserve the next attempt, subscribe with a callback_state carrying (generation, attempt), then make it
-// current under the mutex only on success. A broadcast with no audio rendition stays video-only (not an error).
+// Each raw consumer owns its decoder; immediate subscription failures leave the active consumer intact.
 static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, uint32_t current_gen)
 {
-	struct moq_audio_config audio_config;
-	if (moq_consume_audio_config(catalog, 0, &audio_config) < 0) {
-		LOG_INFO("Catalog has no audio rendition; video only");
-		return;
-	}
 	pthread_mutex_lock(&ctx->mutex);
-	if (!moq_source_init_audio_decoder_locked(ctx, &audio_config)) {
+	if (ctx->generation != current_gen || ctx->shutting_down.load() || ctx->consume < 0) {
 		pthread_mutex_unlock(&ctx->mutex);
-		LOG_ERROR("Failed to initialize audio decoder; continuing video only");
 		return;
 	}
 	uint64_t audio_attempt = ctx->audio_attempt + 1;
@@ -720,15 +634,25 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, 
 	auto audio_state = std::make_shared<callback_state>(ctx, current_gen, audio_attempt);
 	auto *audio_data = new callback_data{audio_state};
 
-	int32_t track = moq_consume_audio(catalog, 0, 0, on_audio_frame, audio_data);
+	int32_t track = moq_consume_audio_raw(catalog, 0, &audio_output, on_audio_frame, audio_data);
 	if (track < 0) {
-		LOG_ERROR("Failed to subscribe to audio track: %d", track);
 		delete audio_data;
 		pthread_mutex_lock(&ctx->mutex);
-		moq_source_destroy_audio_decoder_locked(ctx);
+		int32_t old_track = -1;
+		// NoIndex means a valid catalog has no audio rendition. Other failures preserve the active track.
+		if (track == -19 && ctx->generation == current_gen && ctx->audio_attempt + 1 == audio_attempt &&
+		    !ctx->shutting_down.load()) {
+			old_track = ctx->audio_track;
+			ctx->audio_track = -1;
+			ctx->audio_attempt = audio_attempt;
+		}
 		if (--ctx->refs == 0)
 			pthread_cond_broadcast(&ctx->refs_zero);
 		pthread_mutex_unlock(&ctx->mutex);
+		if (old_track >= 0)
+			moq_consume_audio_raw_close(old_track);
+		if (track != -19)
+			LOG_ERROR("Failed to subscribe to audio track: %d", track);
 		return;
 	}
 	pthread_mutex_lock(&ctx->mutex);
@@ -739,13 +663,12 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, 
 		ctx->audio_track = track;
 		pthread_mutex_unlock(&ctx->mutex);
 		if (old_track >= 0)
-			moq_consume_audio_close(old_track);
-		LOG_INFO("Subscribed to audio track successfully (%u Hz, %u ch)", ctx->audio_sample_rate,
-			 ctx->audio_channels);
+			moq_consume_audio_raw_close(old_track);
+		LOG_INFO("Subscribed to raw audio track");
 	} else {
 		pthread_mutex_unlock(&ctx->mutex);
 		if (!audio_state->terminal.load())
-			moq_consume_audio_close(track);
+			moq_consume_audio_raw_close(track);
 	}
 }
 
@@ -776,16 +699,39 @@ static void on_audio_frame(void *user_data, int32_t frame_id)
 		return;
 	}
 
+	struct moq_audio_frame frame = {};
+	int32_t result = moq_consume_audio_raw_frame(frame_id, &frame);
 	pthread_mutex_lock(&ctx->mutex);
 	if (ctx->shutting_down.load() || ctx->generation != state->gen || ctx->audio_attempt != state->attempt ||
 	    ctx->consume < 0) {
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
+		moq_consume_audio_raw_frame_free(frame_id);
 		return;
 	}
+	constexpr size_t stride = sizeof(float) * audio_output.channels;
+	if (result < 0 || !frame.data || frame.data_size == 0 || frame.data_size % stride != 0 ||
+	    frame.data_size / stride > UINT32_MAX || frame.timestamp_us > UINT64_MAX / 1000) {
+		LOG_ERROR("Invalid raw audio frame: %d", result);
+		int32_t track = ctx->audio_track;
+		ctx->audio_track = -1;
+		ctx->audio_attempt++;
+		pthread_mutex_unlock(&ctx->mutex);
+		moq_consume_audio_raw_frame_free(frame_id);
+		if (track >= 0)
+			moq_consume_audio_raw_close(track);
+		return;
+	}
+	struct obs_source_audio audio = {};
+	audio.data[0] = frame.data;
+	audio.frames = static_cast<uint32_t>(frame.data_size / stride);
+	audio.speakers = SPEAKERS_STEREO;
+	audio.format = AUDIO_FORMAT_FLOAT;
+	audio.samples_per_sec = audio_output.sample_rate;
+	audio.timestamp = frame.timestamp_us * 1000;
+	// Keep the generation check and output under one lock so reconnect cannot admit a stale frame.
+	obs_source_output_audio(ctx->source, &audio);
 	pthread_mutex_unlock(&ctx->mutex);
-
-	moq_source_decode_audio_frame(ctx, frame_id);
+	moq_consume_audio_raw_frame_free(frame_id);
 }
 
 // Helper function implementations
@@ -1107,7 +1053,7 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	}
 
 	if (ctx->audio_track >= 0) {
-		moq_consume_audio_close(ctx->audio_track);
+		moq_consume_audio_raw_close(ctx->audio_track);
 		ctx->audio_track = -1;
 	}
 
@@ -1140,7 +1086,6 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	}
 
 	moq_source_destroy_decoder_locked(ctx);
-	moq_source_destroy_audio_decoder_locked(ctx);
 	ctx->got_keyframe = false;
 	ctx->frames_waiting_for_keyframe = 0;
 	ctx->consecutive_decode_errors = 0;
@@ -1509,143 +1454,6 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	ctx->frame.timestamp = frame_data.timestamp_us * 1000;
 	obs_source_output_video(ctx->source, &ctx->frame);
 
-	av_frame_free(&frame);
-	pthread_mutex_unlock(&ctx->mutex);
-	moq_consume_frame_free(frame_id);
-}
-
-// ---- Audio -------------------------------------------------------------------
-// NOTE: caller holds ctx->mutex.
-static bool moq_source_init_audio_decoder_locked(struct moq_source *ctx, const struct moq_audio_config *config)
-{
-	AVCodecID codec_id = audio_codec_string_to_id(config->codec, config->codec_len);
-	if (codec_id == AV_CODEC_ID_NONE) {
-		char codec_str[64] = {0};
-		size_t n = config->codec_len < sizeof(codec_str) - 1 ? config->codec_len : sizeof(codec_str) - 1;
-		if (config->codec && n > 0)
-			memcpy(codec_str, config->codec, n);
-		LOG_ERROR("Unknown or unsupported audio codec: '%s'", codec_str);
-		return false;
-	}
-	const AVCodec *codec = avcodec_find_decoder(codec_id);
-	if (!codec) {
-		LOG_ERROR("Audio decoder not found for codec ID: %d", codec_id);
-		return false;
-	}
-	AVCodecContext *cctx = avcodec_alloc_context3(codec);
-	if (!cctx) {
-		LOG_ERROR("Failed to allocate audio codec context");
-		return false;
-	}
-	cctx->sample_rate = static_cast<int>(config->sample_rate);
-	av_channel_layout_default(&cctx->ch_layout, static_cast<int>(config->channel_count));
-	cctx->pkt_timebase = AVRational{1, 1000000}; // libmoq frame timestamps are microseconds
-	if (config->description && config->description_len > 0) {
-		cctx->extradata = (uint8_t *)av_mallocz(config->description_len + AV_INPUT_BUFFER_PADDING_SIZE);
-		if (cctx->extradata) {
-			memcpy(cctx->extradata, config->description, config->description_len);
-			cctx->extradata_size = static_cast<int>(config->description_len);
-		}
-	}
-	if (avcodec_open2(cctx, codec, NULL) < 0) {
-		LOG_ERROR("Failed to open audio codec");
-		avcodec_free_context(&cctx);
-		return false;
-	}
-	moq_source_destroy_audio_decoder_locked(ctx);
-	ctx->audio_codec_ctx = cctx;
-	ctx->audio_sample_rate = config->sample_rate;
-	ctx->audio_channels = config->channel_count;
-	ctx->audio_decode_errors = 0;
-	ctx->audio_frames_output = 0;
-	return true;
-}
-
-// NOTE: caller holds ctx->mutex.
-static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx)
-{
-	if (ctx->audio_codec_ctx)
-		avcodec_free_context(&ctx->audio_codec_ctx);
-	ctx->audio_sample_rate = 0;
-	ctx->audio_channels = 0;
-}
-
-static void moq_source_decode_audio_frame(struct moq_source *ctx, int32_t frame_id)
-{
-	if (ctx->shutting_down.load()) {
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->shutting_down.load() || !ctx->audio_codec_ctx) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	struct moq_frame frame_data;
-	if (moq_consume_frame(frame_id, &frame_data) < 0) {
-		LOG_ERROR("Failed to get audio frame data");
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	AVPacket *packet = av_packet_alloc();
-	if (!packet) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	packet->data = (uint8_t *)frame_data.payload;
-	packet->size = static_cast<int>(frame_data.payload_size);
-	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
-	packet->dts = packet->pts;
-	int ret = avcodec_send_packet(ctx->audio_codec_ctx, packet);
-	av_packet_free(&packet);
-	if (ret < 0) {
-		ctx->audio_decode_errors++;
-		if (ctx->audio_decode_errors == 1 || (ctx->audio_decode_errors % 100) == 0)
-			LOG_WARNING("Audio decode error %d (count %u)", ret, ctx->audio_decode_errors);
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	AVFrame *frame = av_frame_alloc();
-	if (!frame) {
-		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_free(frame_id);
-		return;
-	}
-	while (avcodec_receive_frame(ctx->audio_codec_ctx, frame) == 0) {
-		enum audio_format fmt = av_sample_fmt_to_obs(static_cast<enum AVSampleFormat>(frame->format));
-		int channels = frame->ch_layout.nb_channels;
-		enum speaker_layout speakers = channels_to_speakers(channels);
-		if (fmt == AUDIO_FORMAT_UNKNOWN || speakers == SPEAKERS_UNKNOWN || frame->sample_rate <= 0 ||
-		    frame->nb_samples <= 0) {
-			ctx->audio_decode_errors++;
-			if (ctx->audio_decode_errors == 1)
-				LOG_WARNING("Unsupported decoded audio layout: fmt=%d channels=%d rate=%d",
-					    frame->format, channels, frame->sample_rate);
-			av_frame_unref(frame);
-			continue;
-		}
-		struct obs_source_audio audio = {};
-		int planes = av_sample_fmt_is_planar(static_cast<enum AVSampleFormat>(frame->format)) ? channels : 1;
-		for (int i = 0; i < planes && i < MAX_AV_PLANES; i++)
-			audio.data[i] = frame->data[i];
-		audio.frames = static_cast<uint32_t>(frame->nb_samples);
-		audio.speakers = speakers;
-		audio.format = fmt;
-		audio.samples_per_sec = static_cast<uint32_t>(frame->sample_rate);
-		int64_t pts_us = frame->pts != AV_NOPTS_VALUE ? frame->pts
-							      : static_cast<int64_t>(frame_data.timestamp_us);
-		audio.timestamp = static_cast<uint64_t>(pts_us) * 1000ULL; // OBS expects nanoseconds
-		obs_source_output_audio(ctx->source, &audio);
-		ctx->audio_frames_output++;
-		if (ctx->audio_frames_output == 1)
-			LOG_INFO("First audio frame output: %d samples, %d Hz, %d ch, fmt=%d", frame->nb_samples,
-				 frame->sample_rate, channels, frame->format);
-		av_frame_unref(frame);
-	}
 	av_frame_free(&frame);
 	pthread_mutex_unlock(&ctx->mutex);
 	moq_consume_frame_free(frame_id);
