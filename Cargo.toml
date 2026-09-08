@@ -17,6 +17,7 @@ members = [
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-net",
+    "rs/moq-net/fuzz",
     "rs/moq-nvenc",
     "rs/moq-relay",
     "rs/moq-rtc",
