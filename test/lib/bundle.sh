@@ -726,6 +726,26 @@ bundle_retained() {
     [[ "${MOQ_QA_RETAIN:-}" == "1" ]]
 }
 
+# Snapshot a directory that a retained process may still be mutating. Build the
+# copy under excluded metadata and expose it to the upload tree only after the
+# whole copy succeeds. A concurrent rename or removal therefore leaves a plain
+# failure marker, never an unswept partial capture.
+_bundle_snapshot_live() {
+    local source="$1" destination="$2" label="$3"
+    local snapshot="$BUNDLE_META/snapshot-$label"
+    find "$source" -type f -print -quit | grep -q . || return 0
+    rm -rf "$snapshot"
+    mkdir -p "$snapshot"
+    if cp -R "$source/." "$snapshot/" && rm -rf "$destination" && mv "$snapshot" "$destination"; then
+        return 0
+    fi
+    rm -rf "$snapshot" "$destination"
+    mkdir -p "$destination"
+    printf '%s snapshot failed because a live capture changed while it was copied\n' "$label" \
+        >"$destination/SNAPSHOT-FAILED.txt"
+    printf 'warning: %s snapshot failed; no partial capture will be uploaded\n' "$label" >&2
+}
+
 # bundle_finish <status>: keep or drop the bundle, and say which.
 #
 # Returns the status it was given, so `trap 'bundle_finish $?' EXIT` neither
@@ -745,12 +765,8 @@ bundle_finish() {
     # Active writers always use the live tree. Copy a failure-time snapshot in
     # for bounding and redaction; retained processes can create later files
     # without bypassing that one-time sweep.
-    if find "$BUNDLE_TRACE_LIVE" -type f -print -quit | grep -q .; then
-        cp -R "$BUNDLE_TRACE_LIVE/." "$BUNDLE_TRACE/"
-    fi
-    if find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
-        cp -R "$BUNDLE_QLOG_LIVE/." "$BUNDLE_QLOG/"
-    fi
+    _bundle_snapshot_live "$BUNDLE_TRACE_LIVE" "$BUNDLE_TRACE" browser
+    _bundle_snapshot_live "$BUNDLE_QLOG_LIVE" "$BUNDLE_QLOG" qlog
     # An empty trace/qlog dir is a claim that nothing was captured, which the
     # capability records already make in words. Drop it so it isn't mistaken
     # for a capture that came back blank.

@@ -172,6 +172,25 @@ check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/
 check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
 check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"
 
+snapshot_failure_case() {
+    printf 'Authorization: Bearer partial-snapshot-secret\n' >"$BUNDLE_TRACE_LIVE/browser.har"
+    # Simulate cp observing a live capture and then losing it to Playwright's
+    # close-time rename. The partial destination must never become uploadable.
+    cp() {
+        printf 'Authorization: Bearer partial-snapshot-secret\n' >"$3/partial.har"
+        return 1
+    }
+    bundle_finish 1
+}
+bundle=$(run_case snapshot-failure snapshot_failure_case)
+check "a failed live snapshot leaves an explicit marker" \
+    test -f "$bundle/trace/SNAPSHOT-FAILED.txt"
+if grep -rq -- partial-snapshot-secret "$bundle"; then
+    bad "a failed live snapshot exposes no partial capture"
+else
+    ok "a failed live snapshot exposes no partial capture"
+fi
+
 split_secret_case() {
     printf 'Authorization: Bearer ' >"$BUNDLE_WORK/long-secret.log"
     head -c 1000 /dev/zero | tr '\0' x >>"$BUNDLE_WORK/long-secret.log"
