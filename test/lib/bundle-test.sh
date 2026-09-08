@@ -115,16 +115,24 @@ done
 rerun_env_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
+    export MOQ_QA_ARTIFACTS="$ROOT/artifacts with spaces"
     harness_env_array
     bundle_rerun env "${HARNESS_ENV[@]}" just test smoke
     bundle_finish 1
 }
 bundle=$(MOQ_TEST_PORT_BASE=5540 MOQ_TEST_PORTS="$ROOT/ports with spaces" \
     run_case rerun-env rerun_env_case)
-check "recorded reruns preserve the automatic port base" \
-    grep -q 'MOQ_TEST_PORT_BASE=5540' "$bundle/manifest.json"
-check "recorded reruns preserve the port reservation root" \
-    grep -q 'MOQ_TEST_PORTS=' "$bundle/manifest.json"
+check_rerun_arg() {
+    python3 -c 'import json, shlex, sys
+rerun = json.load(open(sys.argv[1]))["rerun"]
+assert sys.argv[2] in shlex.split(rerun)' "$1" "$2"
+}
+check "recorded reruns preserve the automatic port base" check_rerun_arg \
+    "$bundle/manifest.json" "MOQ_TEST_PORT_BASE=5540"
+check "recorded reruns preserve the port reservation root" check_rerun_arg \
+    "$bundle/manifest.json" "MOQ_TEST_PORTS=$ROOT/ports with spaces"
+check "recorded reruns preserve the artifact root" check_rerun_arg \
+    "$bundle/manifest.json" "MOQ_QA_ARTIFACTS=$ROOT/artifacts with spaces"
 
 # ── credentials never reach the bundle ──────────────────────────────────────
 # A JWT-shaped token, a token query parameter, an Authorization header, and URL
