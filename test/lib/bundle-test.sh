@@ -193,15 +193,24 @@ check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAIL
 malformed_har_case() {
     printf '%s\n' '{"cookies":[{"name":"session","value":"opaque-malformed-har-secret"}' \
         >"$BUNDLE_TRACE_LIVE/malformed.har"
+    printf '%s\n' '{"cookies":["opaque-malformed-cookie-entry-secret"]}' \
+        >"$BUNDLE_TRACE_LIVE/malformed-cookie.har"
     bundle_finish 1
 }
 bundle=$(run_case malformed-har malformed_har_case)
 check "a malformed HAR is withheld instead of partially redacted" \
     test -f "$bundle/trace/malformed.har.withheld"
+check "a malformed HAR cookie entry is withheld" \
+    test -f "$bundle/trace/malformed-cookie.har.withheld"
 if grep -rq -- opaque-malformed-har-secret "$bundle"; then
     bad "a malformed HAR exposes no cookie value"
 else
     ok "a malformed HAR exposes no cookie value"
+fi
+if grep -rq -- opaque-malformed-cookie-entry-secret "$bundle"; then
+    bad "a malformed cookie entry exposes no value"
+else
+    ok "a malformed cookie entry exposes no value"
 fi
 
 snapshot_failure_case() {
