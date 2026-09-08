@@ -29,5 +29,4 @@ a churn-free drift of 88 to 275 ms/s against 0.7 ms/s on localhost.
 
 ## Related
 
-- [Browser media QA](/quest/m0/browser-media-qa.md) - the harness that would measure this
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the report the numbers come from
