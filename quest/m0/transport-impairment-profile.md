@@ -35,8 +35,7 @@ than escalating when it does not.
 
 Acceptance: the three drills pass under a moderate profile and the recorded
 baseline matches the requested one within a stated tolerance. A profile that
-cannot install fails the run. Leave CI lane scheduling to the PR behavioral
-gates quest, and do not use retries to make intermittent failures green.
+cannot install fails the run. Do not use retries to make intermittent failures green.
 
 ## Related
 
