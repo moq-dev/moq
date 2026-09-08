@@ -312,6 +312,10 @@ _harness_supervise() {
 harness_spawn() {
     local label="$1" log="$2" ready go guard_ready guard_status witness started witness_started
     shift 2
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "harness: python3 is required" >&2
+        return 1
+    fi
     mkdir -p "$HARNESS_RUN/.harness"
     ready="$HARNESS_RUN/.harness/leader-$$-${#HARNESS_PIDS[@]}"
     go="$HARNESS_RUN/.harness/go-$$-${#HARNESS_PIDS[@]}"

@@ -567,6 +567,20 @@ root_path=$(
 )
 check "the filesystem root survives path normalization" test "$root_path" = /
 
+missing_python_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    mkdir "$BUNDLE_WORK/no-tools"
+    ! PATH="$BUNDLE_WORK/no-tools" harness_spawn missing-python "$BUNDLE_WORK/missing-python.log" true
+    test ! -e "$BUNDLE_WORK/.harness"
+    bundle_finish 1
+}
+bundle=$(run_case missing-python missing_python_case)
+check "a missing guard runtime fails before creating handshake state" test -f "$bundle/manifest.json"
+check "a missing guard runtime reports its dependency" \
+    grep -q "harness: python3 is required" "$ROOT/missing-python.out"
+
 unreadable_identity_reap_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
