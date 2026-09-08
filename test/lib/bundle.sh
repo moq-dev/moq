@@ -43,14 +43,15 @@ BUNDLE_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUNDLE_WORKSPACE=$(cd "$BUNDLE_LIB_DIR/../.." && pwd)
 
 # Set by bundle_init.
-BUNDLE_DIR=""       # the run's directory
-BUNDLE_WORK=""      # retained scratch: logs, configs, captures
-BUNDLE_SCRATCH=""   # never retained: compiled fixtures, plugin registries
-BUNDLE_TRACE=""     # browser traces, HARs, screenshots
-BUNDLE_QLOG=""      # bounded qlog snapshot inside the uploadable bundle
-BUNDLE_QLOG_LIVE="" # live relay qlogs outside the uploadable bundle
-BUNDLE_META=""      # jsonl fragments assembled into manifest.json
-BUNDLE_LIVE=""      # live retained logs, outside the uploadable bundle
+BUNDLE_DIR=""        # the run's directory
+BUNDLE_WORK=""       # retained scratch: logs, configs, captures
+BUNDLE_SCRATCH=""    # never retained: compiled fixtures, plugin registries
+BUNDLE_TRACE=""      # swept browser-capture snapshot in the uploadable bundle
+BUNDLE_TRACE_LIVE="" # live browser captures outside the uploadable bundle
+BUNDLE_QLOG=""       # bounded qlog snapshot inside the uploadable bundle
+BUNDLE_QLOG_LIVE=""  # live relay qlogs outside the uploadable bundle
+BUNDLE_META=""       # jsonl fragments assembled into manifest.json
+BUNDLE_LIVE=""       # live retained logs, outside the uploadable bundle
 BUNDLE_HARNESS=""
 BUNDLE_RUN_ID=""
 
@@ -147,14 +148,15 @@ bundle_init() {
     BUNDLE_QLOG="$BUNDLE_DIR/qlog"
     BUNDLE_META="$BUNDLE_DIR/.meta"
     BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_TRACE_LIVE="$BUNDLE_LIVE/trace"
     BUNDLE_QLOG_LIVE="$BUNDLE_LIVE/qlog"
     mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
-        "$BUNDLE_QLOG_LIVE" "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
+        "$BUNDLE_TRACE_LIVE" "$BUNDLE_QLOG_LIVE" "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
     chmod 700 "$BUNDLE_DIR" "$BUNDLE_LIVE"
 
     # The drivers write browser traces here without knowing the layout.
     export MOQ_QA_BUNDLE="$BUNDLE_DIR"
-    export MOQ_QA_TRACE="$BUNDLE_TRACE"
+    export MOQ_QA_TRACE="$BUNDLE_TRACE_LIVE"
 
     _bundle_identity
     bundle_capability packet-payloads "not collected (explicit local opt-in only)"
@@ -740,9 +742,12 @@ bundle_finish() {
     fi
 
     rm -rf "$BUNDLE_SCRATCH"
-    # Relays always write outside the upload tree. Copy a failure-time snapshot
-    # in for bounding and redaction; retained relays can create later files
+    # Active writers always use the live tree. Copy a failure-time snapshot in
+    # for bounding and redaction; retained processes can create later files
     # without bypassing that one-time sweep.
+    if find "$BUNDLE_TRACE_LIVE" -type f -print -quit | grep -q .; then
+        cp -R "$BUNDLE_TRACE_LIVE/." "$BUNDLE_TRACE/"
+    fi
     if find "$BUNDLE_QLOG_LIVE" -type f -print -quit | grep -q .; then
         cp -R "$BUNDLE_QLOG_LIVE/." "$BUNDLE_QLOG/"
     fi

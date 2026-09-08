@@ -137,7 +137,7 @@ secret_case() {
 }
 HAR
     } >"$BUNDLE_WORK/client.log"
-    cat >"$BUNDLE_TRACE/cookies.har" <<'HAR'
+    cat >"$BUNDLE_TRACE_LIVE/cookies.har" <<'HAR'
 {
   "log": {
     "entries": [{
@@ -150,8 +150,8 @@ HAR
   }
 }
 HAR
-    printf 'request?token=opaque-trace-secret\n' >"$BUNDLE_TRACE/browser.trace.zip"
-    printf '\211PNG\r\n\032\nrendered token=opaque-screenshot-secret\n' >"$BUNDLE_TRACE/browser.png"
+    printf 'request?token=opaque-trace-secret\n' >"$BUNDLE_TRACE_LIVE/browser.trace.zip"
+    printf '\211PNG\r\n\032\nrendered token=opaque-screenshot-secret\n' >"$BUNDLE_TRACE_LIVE/browser.png"
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
@@ -371,6 +371,9 @@ live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
 check "future retained qlogs stay outside the uploadable bundle" test ! -e "$bundle/qlog/later.sqlog"
+printf 'request?token=late-browser-secret\n' >"$live/trace/later.har"
+check "future retained browser captures stay outside the uploadable bundle" \
+    test ! -e "$bundle/trace/later.har"
 before_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
 before_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
 if python3 -c 'import signal,sys
