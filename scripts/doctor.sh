@@ -103,8 +103,9 @@ tools_for_suite() {
         smoke) printf 'cargo\ncurl\nffmpeg\ntimeout\n' ;;
         smoke-full)
             printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
-            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\npkg-config\nuniffi-bindgen-go\nuv\n'
+            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
             printf '%s\n' "${CC:-cc}"
+            printf '%s\n' "${PKG_CONFIG:-pkg-config}"
             ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
@@ -661,20 +662,20 @@ EOF
 
 # Verify the native metadata the requested GStreamer smoke client links against.
 probe_gstreamer_devel() {
-    local suites=$1 status
-    if ! command -v pkg-config >/dev/null 2>&1; then
+    local suites=$1 status pkg_config=${PKG_CONFIG:-pkg-config}
+    if ! command -v "$pkg_config" >/dev/null 2>&1; then
         record behavior.gstreamer-devel behavior skip false "$suites" \
-            "pkg-config is missing, so GStreamer metadata was not probed" "" 10 0
+            "$pkg_config is missing, so GStreamer metadata was not probed" "" 10 0
         return
     fi
-    bounded 10 pkg-config --atleast-version=1.14 gstreamer-1.0
+    bounded 10 "$pkg_config" --atleast-version=1.14 gstreamer-1.0
     status=$?
     if ((status == 0)); then
         record behavior.gstreamer-devel behavior ok true "$suites" \
-            "pkg-config resolves GStreamer 1.14+ development metadata" "" 10 "$BOUNDED_ELAPSED"
+            "$pkg_config resolves GStreamer 1.14+ development metadata" "" 10 "$BOUNDED_ELAPSED"
     else
         record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-            "pkg-config cannot resolve GStreamer 1.14+ development metadata" \
+            "$pkg_config cannot resolve GStreamer 1.14+ development metadata" \
             "install GStreamer 1.14+ development metadata that provides gstreamer-1.0.pc" 10 "$BOUNDED_ELAPSED"
     fi
 }
@@ -1441,7 +1442,8 @@ self_test() {
     check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
-    check 'smoke-full needs pkg-config' "$(tools_for_suite smoke-full | grep -c '^pkg-config$')" 1
+    check 'smoke-full needs configured pkg-config' "$(tools_for_suite smoke-full | grep -Fxc "${PKG_CONFIG:-pkg-config}")" 1
+    check 'smoke-full honors pkg-config override' "$(PKG_CONFIG=/tmp/custom-pkg-config tools_for_suite smoke-full | grep -Fxc '/tmp/custom-pkg-config')" 1
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
     self_test_process_state
