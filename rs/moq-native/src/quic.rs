@@ -390,8 +390,8 @@ pub struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` for the default. Read it through
-	/// [`Resolved::congestion`], which applies that default once for every backend.
+	/// Congestion control override, or `None` for the default. The backends read it
+	/// through `Resolved::congestion`, which applies that default once for all of them.
 	pub congestion_control: Option<CongestionControl>,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
@@ -436,7 +436,7 @@ impl Resolved {
 		not(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "iroh")),
 		allow(dead_code)
 	)]
-	pub fn congestion(&self) -> CongestionControl {
+	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
 

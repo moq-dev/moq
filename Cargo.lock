@@ -4906,6 +4906,7 @@ dependencies = [
  "jni 0.22.4",
  "libc",
  "moq-net",
+ "noq",
  "noq-proto",
  "notify",
  "qmux",

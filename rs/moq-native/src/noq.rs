@@ -12,8 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-use web_transport_noq::noq;
-
 pub use web_transport_noq;
 
 /// Attach a qlog factory writing into the configured directory, if any.
@@ -699,9 +697,10 @@ mod tests {
 	/// BBRv3 on both ends.
 	///
 	/// This backend defaulted to CUBIC while noq's BBRv3 underflowed computing the
-	/// inflight bytes at a loss event. noq 1.2.0 rewrote `BBRInflightAtLoss` in
-	/// signed arithmetic and covers the loss path with its own packet-level
-	/// simulator, so the exception is gone and the default is asserted here.
+	/// inflight bytes at a loss event. noq 1.2.0 rewrote `BBRInflightAtLoss` to compute
+	/// the loss prefix in floating point, so the subtraction can go negative instead of
+	/// wrapping, and covers the loss path with its own packet-level simulator. The
+	/// exception is gone, so the default is asserted here.
 	#[tokio::test]
 	async fn default_reaches_the_live_connection() {
 		let server_config = ServerConfig {

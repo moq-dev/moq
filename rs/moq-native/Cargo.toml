@@ -15,7 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [features]
 default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
+noq = ["dep:web-transport-noq", "dep:noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs", "dep:dns-lookup", "watch"]
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
@@ -51,8 +51,14 @@ humantime-serde = { workspace = true }
 
 moq-net = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
-# congestion configs. Version matched to the copy iroh pulls in.
-noq-proto = { version = "1", default-features = false, optional = true }
+# congestion configs. Version matched to the copy iroh pulls in. The floor is 1.2
+# because that is where BBRInflightAtLoss stopped underflowing, and this backend
+# installs BBRv3 by default.
+noq-proto = { version = "1.2", default-features = false, optional = true }
+# Depended on directly rather than through web-transport-noq's re-export so the
+# version floor is ours: web-transport-noq only asks for `noq = "1"`, and this
+# backend installs BBRv3 by default, which underflows on loss before 1.2.
+noq = { version = "1.2", default-features = false, optional = true }
 notify = { version = "8", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
