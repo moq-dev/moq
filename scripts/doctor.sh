@@ -70,8 +70,8 @@ tools_for_files() {
     # publish scripts stage the mirror tree with it, so the publisher test skips
     # without it, and a skip that keeps `just check` green is what MOQ_STRICT is
     # here to prevent.
-    scoped '^(go/|rs/moq-ffi/)' && tools="$tools go uniffi-bindgen-go cargo rsync"
-    scoped '^(dart/|rs/moq-ffi/)' && tools="$tools cargo dart uniffi_bindgen_dart"
+    scoped '^(go/|rs/moq-ffi/)' && tools="$tools go uniffi-bindgen-go cargo rsync rustc"
+    scoped '^(dart/|rs/moq-ffi/)' && tools="$tools cargo dart rustc uniffi_bindgen_dart"
     # Two obs recipes with two dispatch scopes, so two lines: over-requiring
     # would fail a diff that never runs the recipe. `just obs compile` needs
     # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg.
@@ -104,7 +104,7 @@ tools_for_suite() {
         smoke) printf 'cargo\ncurl\nffmpeg\ntimeout\n' ;;
         smoke-full)
             printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
-            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
+            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nrustc\nuniffi-bindgen-go\nuv\n'
             ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
@@ -358,11 +358,12 @@ rust_cargo_suites() {
     printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
-# Print selected suites that compile through literal Cargo. Every Cargo-backed
-# check has at least one literal invocation; Python tests and Smoke do too.
+# Print selected suites that actually compile through literal Cargo. Metadata,
+# formatting, and dependency checks do not prove linker or compiler readiness.
 literal_cargo_suites() {
     local changed=$1 out=""
-    if tools_for_files "$changed" | grep -qx cargo; then
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '^(py/|dart/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
         out=$(selected check)
     fi
     if [ "$changed" = ALL ] ||
@@ -780,10 +781,17 @@ EOF
 # True when an override resolves to an executable file from the same working
 # directory as its harness. Relative Smoke overrides are interpreted from test/.
 executable_override() {
-    local value=$1 cwd=$2 candidate
+    local value=$1 cwd=$2 candidate resolved
     case $value in
         /*) candidate=$value ;;
-        *) candidate=$cwd/$value ;;
+        */*) candidate=$cwd/$value ;;
+        *)
+            resolved=$(cd "$cwd" && command -v -- "$value") || return 1
+            case $resolved in
+                /*) candidate=$resolved ;;
+                *) candidate=$cwd/$resolved ;;
+            esac
+            ;;
     esac
     [ -x "$candidate" ] && [ ! -d "$candidate" ]
 }
@@ -791,7 +799,7 @@ executable_override() {
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
-    local id=$1 suites=$2 cargo=$3 status relay_override=0
+    local id=$1 suites=$2 cargo=$3 status relay_override=0 layout_suites=$2
     [ "$id" != smoke ] || SMOKE_CARGO_TARGET_READY=0
     if [ "${CARGO_TARGET_DIR+x}" = x ] && [ -z "$CARGO_TARGET_DIR" ]; then
         record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
@@ -814,6 +822,13 @@ probe_harness_cargo_target() {
                 return
             fi
         done
+        if [ -n "${RELAY_BIN:-}" ] && [ -n "${MOQ_BIN:-}" ]; then
+            layout_suites=""
+            for name in $suites; do
+                [ "$name" = smoke ] || layout_suites="$layout_suites $name"
+            done
+            layout_suites=${layout_suites# }
+        fi
     fi
     if [ "$id" = wasm ] && [ -n "${RELAY_BIN:-}" ]; then
         case $RELAY_BIN in
@@ -855,9 +870,14 @@ probe_harness_cargo_target() {
         return
     fi
     if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] && [ "$relay_override" = 0 ]; then
-        record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
-            "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
-            "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
+        if [ -n "$layout_suites" ]; then
+            record "behavior.$id-artifact-layout" behavior degraded true "$layout_suites" \
+                "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
+                "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
+            return
+        fi
+        record "behavior.$id-artifact-layout" behavior ok true "$suites" \
+            "RELAY_BIN and MOQ_BIN bypass Cargo's explicit target layout" "" 30 "$BOUNDED_ELAPSED"
         return
     fi
     if [ "$id" = smoke ]; then
@@ -1606,6 +1626,8 @@ self_test_ownership() {
         "$(rust_cargo_suites 'py/moq-rs/src/lib.py' '')" ''
     check 'a Dart diff compiles with literal Cargo' \
         "$(literal_cargo_suites 'dart/moq/lib.dart')" check
+    check 'a Go diff does not compile with literal Cargo' \
+        "$(literal_cargo_suites 'go/wrapper/moq/lib.go')" ''
     check 'a Dart diff does not inherit RUST_CARGO' \
         "$(rust_cargo_suites 'dart/moq/lib.dart' '')" ''
     check 'a Rust diff compiles with configured Cargo' \
@@ -1757,6 +1779,8 @@ self_test() {
     check 'tools Kotlin needs Cargo' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^cargo$')" 1
     check 'tools Kotlin needs rustc' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^rustc$')" 1
     check 'tools Python needs Cargo' "$(tools_for_files 'py/moq-rs/src/lib.py' | grep -c '^cargo$')" 1
+    check 'tools Go needs rustc' "$(tools_for_files 'go/wrapper/moq/lib.go' | grep -c '^rustc$')" 1
+    check 'tools Dart needs rustc' "$(tools_for_files 'dart/moq/lib.dart' | grep -c '^rustc$')" 1
     check 'tools ffi pulls go' "$(tools_for_files 'rs/moq-ffi/src/lib.rs' | grep -c '^go$')" 1
     check 'tools ALL pulls gradle' "$(tools_for_files ALL | grep -c '^gradle$')" 1
     check 'tools js only' "$(tools_for_files 'js/hang/src/index.ts' | grep -c '^cargo$')" 0
@@ -1777,6 +1801,7 @@ self_test() {
     check 'smoke-full needs bun' "$(tools_for_suite smoke-full | grep -c '^bun$')" 1
     check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
+    check 'smoke-full needs rustc' "$(tools_for_suite smoke-full | grep -c '^rustc$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
     check 'dynamic C compiler stays out of tool words' "$(CC='/tmp/c compiler' tools_for_suite smoke-full | grep -c 'c compiler')" 0
     mkdir -p "$SCRATCH/compiler dir"
@@ -1787,6 +1812,8 @@ self_test() {
     ln -sf "$(command -v env)" "$SCRATCH/smoke-cwd/bin/tool"
     executable_override bin/tool "$SCRATCH/smoke-cwd"
     check 'relative Smoke override resolves from its cwd' "$?" 0
+    PATH="$SCRATCH/smoke-cwd/bin" executable_override tool "$SCRATCH/smoke-cwd"
+    check 'bare Smoke override resolves through PATH' "$?" 0
     executable_override bin "$SCRATCH/smoke-cwd"
     check 'Smoke override rejects a directory' "$?" 1
     check 'dynamic pkg-config stays out of tool words' "$(tools_for_suite smoke-full | grep -c 'pkg-config')" 0
@@ -1851,6 +1878,11 @@ EOF
         CARGO_TARGET_DIR=relative RELAY_BIN="$(command -v env)" \
             probe_harness_cargo_target wasm wasm cargo
         check 'relay override permits relative Cargo target directory' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
+        local host
+        host=$(rustc -vV | sed -n 's/^host: //p')
+        CARGO_BUILD_TARGET=$host RELAY_BIN="$(command -v env)" MOQ_BIN="$(command -v env)" \
+            probe_harness_cargo_target smoke smoke cargo
+        check 'Smoke overrides bypass explicit host layout' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
