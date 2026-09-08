@@ -60,7 +60,8 @@ tools_for_files() {
     tools="actionlint bun jq nix nixfmt shellcheck shfmt taplo"
     scoped '^(quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools="$tools cargo envsubst"
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)' && tools="$tools uv"
-    scoped '^(kt/|rs/moq-ffi/)' && tools="$tools gradle java"
+    # Kotlin's generator builds the Rust FFI before Gradle compiles the wrapper.
+    scoped '^(kt/|rs/moq-ffi/)' && tools="$tools cargo rustc gradle java"
     # cargo because `go check` builds moq-ffi for the host, and skips on a
     # missing cargo the same way it skips on a missing go. rsync because the
     # publish scripts stage the mirror tree with it, so the publisher test skips
@@ -197,10 +198,15 @@ rust_suites() {
 # sandboxes that deny bind. Update this set when a crate adds or removes an OS
 # socket test.
 rust_tests_bind() {
-    local packages=$1
+    local packages=$1 protocol=$2 pattern
     [ -n "$packages" ] || return 1
     [ "$packages" = ALL ] && return 0
-    printf '%s\n' "$packages" | grep -qwE '(moq-ffi|moq-hls|moq-native|moq-relay|moq-rtc|moq-rtmp|moq-srt)'
+    case $protocol in
+        tcp) pattern='(moq-hls|moq-native|moq-relay|moq-rtc|moq-rtmp)' ;;
+        udp) pattern='(moq-ffi|moq-native|moq-relay|moq-rtc|moq-srt)' ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$packages" | grep -qwE "$pattern"
 }
 
 # Print Cargo's writable cache directory without assuming HOME exists. Minimal
@@ -257,9 +263,9 @@ nix_suites() {
 # harnesses always bind. Scoped Rust and Python tests bind, while JS unit tests
 # use mock transport pairs and bind nothing.
 bind_suites() {
-    local changed=$1 packages=$2 out="" suite
-    if rust_tests_bind "$packages" ||
-        printf '%s\n' "$changed" | grep -qE '^py/'; then
+    local changed=$1 packages=$2 protocol=$3 out="" suite
+    if rust_tests_bind "$packages" "$protocol" ||
+        { [ "$protocol" = udp ] && printf '%s\n' "$changed" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$)'; }; then
         out=$(selected test)
     fi
     for suite in $SUITES; do
@@ -563,6 +569,7 @@ EOF
 existing_ancestor() {
     local path=$1 parent
     while [ ! -e "$path" ]; do
+        [ -L "$path" ] && return 1
         parent=$(dirname "$path")
         [ "$parent" != "$path" ] || return 1
         path=$parent
@@ -1091,14 +1098,21 @@ self_test_ownership() {
     # A docs-only `test` compiles nothing and hands no scope to a recipe that
     # binds, so a sandbox forbidding bind blocks none of it.
     SUITES="check test"
-    check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md' '')" ''
-    check 'a js diff binds nothing under test' "$(bind_suites 'js/hang/src/index.ts' '')" ''
-    check 'a Python diff binds under test' "$(bind_suites 'py/moq-rs/tests/test_server.py' '')" test
-    check 'a socket-testing Rust diff binds under test' \
-        "$(bind_suites 'rs/moq-native/src/lib.rs' '--package path+file:///repo/rs/moq-native#0.0.0')" test
+    check 'a docs diff binds no TCP' "$(bind_suites 'doc/a.md' '' tcp)" ''
+    check 'a JS diff binds no TCP' "$(bind_suites 'js/hang/src/index.ts' '' tcp)" ''
+    check 'a root Python diff binds UDP under test' "$(bind_suites pyproject.toml '' udp)" test
+    check 'a Python diff binds no TCP under test' "$(bind_suites 'py/moq-rs/tests/test_server.py' '' tcp)" ''
+    check 'an HLS Rust diff binds TCP under test' \
+        "$(bind_suites 'rs/moq-hls/src/lib.rs' '--package path+file:///repo/rs/moq-hls#0.0.0' tcp)" test
+    check 'an HLS Rust diff binds no UDP under test' \
+        "$(bind_suites 'rs/moq-hls/src/lib.rs' '--package path+file:///repo/rs/moq-hls#0.0.0' udp)" ''
+    check 'an SRT Rust diff binds UDP under test' \
+        "$(bind_suites 'rs/moq-srt/src/lib.rs' '--package path+file:///repo/rs/moq-srt#0.0.0' udp)" test
+    check 'an SRT Rust diff binds no TCP under test' \
+        "$(bind_suites 'rs/moq-srt/src/lib.rs' '--package path+file:///repo/rs/moq-srt#0.0.0' tcp)" ''
     check 'a pure Rust diff binds nothing under test' \
-        "$(bind_suites 'rs/quest/src/lib.rs' '--package path+file:///repo/rs/quest#0.0.0')" ''
-    check 'a Go diff binds nothing under test' "$(bind_suites 'go/wrapper/moq/lib.go' '')" ''
+        "$(bind_suites 'rs/quest/src/lib.rs' '--package path+file:///repo/rs/quest#0.0.0' tcp)" ''
+    check 'a Go diff binds nothing under test' "$(bind_suites 'go/wrapper/moq/lib.go' '' tcp)" ''
     check 'a Go diff uses Cargo under check only' \
         "$(cargo_suites 'go/wrapper/moq/lib.go' '')" check
     check 'a Rust diff uses Cargo under both' \
@@ -1115,17 +1129,20 @@ self_test_ownership() {
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
+    ln -s missing "$SCRATCH/dangling"
+    existing_ancestor "$SCRATCH/dangling" >/dev/null
+    check 'a dangling symlink has no writable ancestor' "$?" 1
     check 'one Rust seed skips the multiline awk probe' \
         "$(needs_awk_select 'rs/moq-net/src/lib.rs' && printf yes || printf no)" no
     check 'two Rust seeds require the multiline awk probe' \
         "$(needs_awk_select "$(printf 'rs/moq-net/src/lib.rs\nrs/hang/src/lib.rs')" && printf yes || printf no)" yes
     # `check` lints and compiles; nothing in it listens, so it is never charged.
-    check 'an unscoped run binds under test alone' "$(bind_suites ALL ALL)" test
+    check 'an unscoped run binds TCP under test alone' "$(bind_suites ALL ALL tcp)" test
     check 'a docs diff skips Nix store access' "$(nix_suites 'doc/a.md')" ''
     check 'a Rust diff probes Nix store access' "$(nix_suites 'rs/moq-net/src/lib.rs')" check
 
     SUITES="check smoke wasm"
-    check 'the harnesses always bind' "$(bind_suites 'doc/a.md' '')" 'smoke wasm'
+    check 'the harnesses always bind' "$(bind_suites 'doc/a.md' '' udp)" 'smoke wasm'
 
     PAIRS=$saved_pairs
     SUITES=$saved_suites
@@ -1217,6 +1234,8 @@ self_test() {
     # language has to pull that language's toolchain in.
     check 'tools always' "$(tools_for_files '' | tr '\n' ' ')" 'actionlint bun jq nix nixfmt shellcheck shfmt taplo '
     check 'tools rust' "$(tools_for_files 'rs/moq-net/src/lib.rs' | grep -c '^cargo$')" 1
+    check 'tools Kotlin needs Cargo' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^cargo$')" 1
+    check 'tools Kotlin needs rustc' "$(tools_for_files 'kt/moq/src/main.kt' | grep -c '^rustc$')" 1
     check 'tools ffi pulls go' "$(tools_for_files 'rs/moq-ffi/src/lib.rs' | grep -c '^go$')" 1
     check 'tools ALL pulls gradle' "$(tools_for_files ALL | grep -c '^gradle$')" 1
     check 'tools js only' "$(tools_for_files 'js/hang/src/index.ts' | grep -c '^cargo$')" 0
@@ -1513,13 +1532,17 @@ else
     record probe.nix probe skip false "" "this check scope does not evaluate the flake" "" 30 0
 fi
 
-BIND_SUITES=$(bind_suites "$CHANGED" "$RUST_PACKAGES")
+TCP_BIND_SUITES=$(bind_suites "$CHANGED" "$RUST_PACKAGES" tcp)
+UDP_BIND_SUITES=$(bind_suites "$CHANGED" "$RUST_PACKAGES" udp)
 
-if [ -n "$BIND_SUITES" ]; then
-    probe_loopback tcp "$BIND_SUITES"
-    probe_loopback udp "$BIND_SUITES"
+if [ -n "$TCP_BIND_SUITES" ]; then
+    probe_loopback tcp "$TCP_BIND_SUITES"
 else
     record probe.loopback-tcp probe skip false "" "this scope binds no sockets" "" 15 0
+fi
+if [ -n "$UDP_BIND_SUITES" ]; then
+    probe_loopback udp "$UDP_BIND_SUITES"
+else
     record probe.loopback-udp probe skip false "" "this scope binds no sockets" "" 15 0
 fi
 
