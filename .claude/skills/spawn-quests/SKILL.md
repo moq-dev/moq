@@ -12,7 +12,6 @@ Use the argument (if provided) to filter to specific quests/questlines.
 Report which quests are not ready to be worked on and why.
 
 For each quest, interactively prompt the user if:
-
 1. we should work on the quest.
 2. plan it further with /plan-quest.
 3. deprioritize it.

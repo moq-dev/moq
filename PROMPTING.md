@@ -4,7 +4,6 @@ Agents are not trained to write prompts for themselves.
 They're (currently) trained on the outputs, not the inputs.
 
 # Context
-
 Focus on best practices and conventions.
 Don't document the repository; the code and documentation can handle that.
 
@@ -26,6 +25,5 @@ Check the official Claude/Codex guidance when making any changes:
 - <https://agents.md>
 
 # Skills
-
 Skills are meant to avoid repeated duplicate prompts.
 Read transcripts to determine the user's repeated intent.
