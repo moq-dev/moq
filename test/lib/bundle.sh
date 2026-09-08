@@ -533,7 +533,7 @@ _bundle_redact_stream() {
     # worth having.
     LC_ALL=C sed -E \
         -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
-        -e "s#(^|[?&/[:space:]\"])(($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1\2<redacted>#g" \
+        -e "s#(^|[\#?&/[:space:]\"])(($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1\2<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
         LC_ALL=C awk '
             function closing_quote(text,    i, ch, slashes) {

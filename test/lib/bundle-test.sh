@@ -164,6 +164,7 @@ secret_case() {
         # Upper case, because BSD sed has no case-insensitive substitution and a
         # pattern that only matches lower case would pass every check above.
         echo "GET /watch?TOKEN=opaque-query-credential"
+        echo "redirect https://example.test/callback#access_token=opaque-fragment-credential"
         cat <<'HAR'
 {
   "name": "Authorization",
@@ -207,7 +208,7 @@ bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-quoted-bearer-secret opaque-plain-escaped-secret opaque-prefixed-request-secret \
     opaque-prefixed-response-secret opaque-proxy-credential \
-    opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
+    opaque-cookie-value opaque-query-credential opaque-fragment-credential opaque-har-credential opaque-escaped-cookie-secret \
     opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
     opaque-keyed-json-secret opaque-json-note-secret opaque-json-cookie-secret \
     opaque-har-query-secret opaque-har-form-secret \
@@ -720,19 +721,13 @@ unowned_port_case() {
     # shellcheck disable=SC2034 # Sourced harness functions consume this path.
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port unowned 4558
-    harness_spawn reused "$BUNDLE_WORK/reused.log" sleep 120
-    leader_start=${HARNESS_STARTS[0]}
-    witness_start=${HARNESS_WITNESS_STARTS[0]}
-    HARNESS_STARTS[0]='Mon Jan  1 00:00:00 1900'
-    HARNESS_WITNESS_STARTS[0]='Mon Jan  1 00:00:00 1900'
+    harness_spawn stopped "$BUNDLE_WORK/stopped.log" true
+    leader=$HARNESS_PID
+    wait "$leader" 2>/dev/null || true
     if harness_retain_ports; then
-        HARNESS_STARTS[0]=$leader_start
-        HARNESS_WITNESS_STARTS[0]=$witness_start
         harness_reap_all
         return 1
     fi
-    HARNESS_STARTS[0]=$leader_start
-    HARNESS_WITNESS_STARTS[0]=$witness_start
     harness_reap_all
     harness_release_ports
     printf '%s\n' "$BUNDLE_LIVE" >"$BUNDLE_DIR/live.path"

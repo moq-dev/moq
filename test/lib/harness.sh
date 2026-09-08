@@ -379,6 +379,16 @@ harness_group_owned() {
     [[ "$group" == "$pid" ]]
 }
 
+# True only while the owned group contains a real fixture, excluding the leader shell and sentinel.
+harness_group_has_fixture() {
+    local i="$1" group="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}"
+    harness_group_owned "$i" || return 1
+    ps -axo pid=,pgid=,state= 2>/dev/null | awk -v group="$group" -v witness="$witness" '
+        $2 == group && $1 != group && $1 != witness && $3 !~ /^Z/ { found = 1 }
+        END { exit !found }
+    '
+}
+
 # Wait for a spawned group leader and return its status: `harness_wait <pid>`.
 #
 # The leader finishing does not mean the group did: a launcher that dies while
@@ -449,9 +459,9 @@ harness_retain_ports() {
     for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
         [[ "${HARNESS_STATES[$i]}" == live ]] || continue
         pid=${HARNESS_PIDS[$i]}
-        # A live table entry is not ownership: retain only a group whose exact leader or stable
-        # witness still has the birth identity recorded at spawn.
-        if harness_group_owned "$i"; then
+        # The sentinel proves group ownership but is not itself a debuggable fixture. Retain only
+        # while some other live member remains in the verified group.
+        if harness_group_has_fixture "$i"; then
             if declare -F bundle_retain_session >/dev/null 2>&1; then
                 bundle_retain_session
             fi
