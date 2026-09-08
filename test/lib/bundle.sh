@@ -125,6 +125,11 @@ bundle_init() {
                 ;;
         esac
     done
+    # Harnesses change directories while they run. Resolve the caller's root
+    # once so every later write and cleanup still names the directory created
+    # here rather than a same-named path under the new working directory.
+    mkdir -p "$root"
+    root=$(cd "$root" && pwd -P)
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the
     # failure the first was kept for.

@@ -68,6 +68,24 @@ keep_case() { bundle_finish 0; }
 bundle=$(MOQ_QA_KEEP=1 run_case keep keep_case)
 check "MOQ_QA_KEEP retains a passing run" test -f "$bundle/manifest.json"
 
+# Harnesses such as WASM change directories after initialization. A relative
+# artifact root must keep naming the original directory throughout finalization.
+relative_cwd="$ROOT/relative-cwd"
+mkdir -p "$relative_cwd"
+(
+    cd "$relative_cwd"
+    export MOQ_QA_ARTIFACTS=qa
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+    printf '%s\n' "$BUNDLE_DIR" >"$ROOT/relative.path"
+    cd "$DIR"
+    bundle_finish 1 || true
+) >"$ROOT/relative.out" 2>&1
+bundle=$(<"$ROOT/relative.path")
+check "a relative artifact root resolves absolutely" test "${bundle#/}" != "$bundle"
+check "directory changes preserve a relative-root bundle" test -f "$bundle/manifest.json"
+
 # ── a failing run leaves a described bundle ─────────────────────────────────
 fail_case() {
     bundle_endpoint relay "http://127.0.0.1:4443" moq-lite-05
