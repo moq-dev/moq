@@ -722,6 +722,26 @@ describe("re-buffer", () => {
 		expect(read(buffer, 40, 1)[0].length).toBe(40);
 	});
 
+	it("counts a quantum it could only partly fill as an underrun", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Time.Milli });
+
+		write(buffer, 0 as Time.Milli, 20, { channels: 1, value: 1.0 });
+		write(buffer, 20 as Time.Milli, 20, { channels: 1, value: 1.0 });
+		expect(read(buffer, 30, 1)[0].length).toBe(30);
+
+		// Ten samples remain against a quantum of twenty: the rest of the quantum is silence, which
+		// is an underrun whether or not a chunk lands before the next read. It is not a stall: a
+		// refill would cost the whole target to cover a gap shorter than one quantum.
+		expect(read(buffer, 20, 1)[0].length).toBe(10);
+		expect(buffer.stalled).toBe(false);
+		expect(buffer.underruns).toBe(1);
+
+		// A chunk landing before the next read keeps playback going.
+		write(buffer, 40 as Time.Milli, 20, { channels: 1, value: 2.0 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.underruns).toBe(1);
+	});
+
 	it("stall() parks playback without discarding what is buffered", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Time.Milli });
 

@@ -73,9 +73,17 @@ export class Jitter {
 	observe(timestamp: Time.Micro, now: Time.Milli): void {
 		const delay = now - Time.Milli.fromMicro(timestamp);
 
-		// Roll the minimum window forward so a stale baseline expires.
+		// Roll the minimum window forward so a stale baseline expires. A gap longer than both
+		// windows expires both minima: promoting the one from before the gap would hold a path
+		// delay that no longer exists authoritative for another window, reading every punctual
+		// frame after the gap as late.
 		this.#windowStart ??= now;
-		if (now - this.#windowStart >= WINDOW) {
+		const elapsed = now - this.#windowStart;
+		if (elapsed >= 2 * WINDOW) {
+			this.#previous = undefined;
+			this.#current = undefined;
+			this.#windowStart = now;
+		} else if (elapsed >= WINDOW) {
 			this.#previous = this.#current;
 			this.#current = undefined;
 			this.#windowStart = now;

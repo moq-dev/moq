@@ -95,6 +95,20 @@ describe("arrival jitter", () => {
 		expect(jitter.value.peek()).toBeLessThan(2 * CHUNK_MS);
 	});
 
+	it("expires the baseline after a long gap", () => {
+		const jitter = new Jitter();
+		flush(jitter, 200, 1);
+
+		// Nothing arrives for over a minute, and the path delay is higher when the stream resumes.
+		// Frames still land evenly, so they are punctual, not late: a minimum from before the gap
+		// would read the whole difference as jitter.
+		const base = 200 * CHUNK_MS + 90_000;
+		for (let i = 0; i < 200; i++) {
+			observe(jitter, base + i * CHUNK_MS, base + i * CHUNK_MS + 400);
+		}
+		expect(jitter.value.peek()).toBe(CHUNK_MS as Time.Milli);
+	});
+
 	it("forgets the baseline across a discontinuity", () => {
 		const jitter = new Jitter();
 		flush(jitter, 200, 1);

@@ -561,7 +561,7 @@ export default class MoqWatch extends HTMLElement {
 	/**
 	 * How far playback trails the live edge, in milliseconds. See {@link Delay}.
 	 *
-	 * `"auto"` (the default) sizes the jitter buffer from the connection RTT. `"instant"` drops the
+	 * `"auto"` (the default) sizes the jitter buffer from how late frames arrive. `"instant"` drops the
 	 * clock instead: video paints the moment it decodes and audio is disabled.
 	 */
 	get delay(): Delay {

@@ -403,6 +403,11 @@ export class SharedRingBuffer {
 			return 0;
 		}
 
+		// A short quantum ends in silence, so it counts as an underrun even if a chunk lands before
+		// the next read. It does not park playback: the shortfall is under one quantum, and a
+		// refill would spend the whole target as silence to cover it.
+		if (count < output[0].length) Atomics.add(this.#control, UNDERRUN, 1);
+
 		return count;
 	}
 

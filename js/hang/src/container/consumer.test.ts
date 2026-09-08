@@ -325,7 +325,7 @@ test("Consumer skips groups via PTS-span when over the max age", async () => {
 
 test("Consumer measures how late frames arrive", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), maxAge: 500 as Time.Milli });
 
 	// A prompt first group sets the arrival baseline.
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
