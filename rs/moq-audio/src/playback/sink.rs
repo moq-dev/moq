@@ -33,7 +33,11 @@ const HEADROOM: f64 = 3.0;
 /// The playback counterpart to [`encode::Input`](crate::encode::Input): it
 /// describes the buffers you hand in, not the device, which is free to run at
 /// its own rate and channel count.
+///
+/// `#[non_exhaustive]`: construct via [`Input::default`] and set fields, so new
+/// options can be added without breaking callers.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Input {
 	/// How samples are packed in each buffer.
 	pub format: Format,

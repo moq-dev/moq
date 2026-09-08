@@ -36,10 +36,11 @@ const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 /// losing the tail of a burst.
 const AUDIO_CHUNK: Duration = Duration::from_millis(20);
 
-/// Give up waiting on the speaker to drain this long after the last sample.
-/// A device that never opens reports its queue as full forever, and a truncated
-/// tail beats hanging on the way out.
-const AUDIO_DRAIN_MAX: Duration = Duration::from_secs(4);
+/// How much longer than the speaker could possibly hold to wait for it to
+/// drain. A device that never opens reports its queue as full forever, and a
+/// truncated tail beats hanging on the way out, but the budget has to cover the
+/// ring the delay asked for or every finite track loses its last `delay`.
+const AUDIO_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 /// Everything the media task needs to fill the window and the speaker.
 pub(super) struct Media {
@@ -257,12 +258,11 @@ async fn play_audio(
 	// where the speaker actually is, which keeps the two together.
 	let depth = delay.max(AUDIO_BUFFER_MIN);
 	let engine = moq_audio::playback::Engine::open(Default::default()).await?;
-	let input = moq_audio::playback::Input {
-		format: moq_audio::Format::F32,
-		sample_rate,
-		channels,
-		latency: depth,
-	};
+	let mut input = moq_audio::playback::Input::default();
+	input.format = moq_audio::Format::F32;
+	input.sample_rate = sample_rate;
+	input.channels = channels;
+	input.latency = depth;
 	let mut sink = engine.sink(input.clone())?;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
@@ -366,7 +366,10 @@ async fn play_audio(
 			tokio::time::sleep(remaining.max(Duration::from_millis(10))).await;
 		}
 	};
-	let _ = tokio::time::timeout(AUDIO_DRAIN_MAX, drain).await;
+	// A write tops the ring up to `depth` and then adds a chunk, so that sum is
+	// the deepest it can be when the track ends, and draining it takes exactly
+	// that long in real time.
+	let _ = tokio::time::timeout(depth + AUDIO_CHUNK + AUDIO_DRAIN_GRACE, drain).await;
 
 	Ok(())
 }

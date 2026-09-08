@@ -22,12 +22,35 @@ pub struct Args {
 	#[usage(long, default = "100ms")]
 	pub delay: moq_tokio::Duration,
 
+	/// The released spelling of [`Self::delay`], kept in the parser only so a
+	/// process that still passes it is told what to pass instead.
+	#[usage(long, alias = "latency-max", hide = true)]
+	pub max_age: Option<moq_tokio::Duration>,
+
 	/// Rendition selection by track name or codec.
 	#[usage(flatten)]
 	pub select: SelectArgs,
 }
 
 impl Args {
+	/// Every released spelling this stage was parsed from.
+	///
+	/// `--delay` is not a rename: it holds the picture back as well as bounding
+	/// staleness, so a command line that still passes `--max-age` is refused with
+	/// the difference spelled out rather than quietly given a playout offset.
+	pub fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.max_age.is_some() {
+			found.changed(
+				"--max-age",
+				None,
+				"--delay",
+				"it is the playout delay as well as the staleness budget, so playback trails the live edge by it",
+			);
+		}
+		found
+	}
+
 	pub(super) fn catalog_format(&self, broadcast: &str) -> CatalogFormat {
 		self.catalog_format
 			.map(Into::into)
@@ -82,7 +105,9 @@ mod tests {
 
 	/// The delay is the playout offset and the staleness budget at once, so its
 	/// default has to be one a live stream can actually present against.
-	/// `--max-age` is gone from `play`, with no alias: the two were one number.
+	/// `--max-age` no longer takes effect on `play`, but it still parses into the
+	/// hidden field, which is what lets the refusal name its replacement instead
+	/// of leaving an operator with "unexpected argument".
 	#[test]
 	fn the_delay_replaces_the_staleness_budget() {
 		assert_eq!(parse(&[]).delay.into_std(), std::time::Duration::from_millis(100));
@@ -90,13 +115,13 @@ mod tests {
 			parse(&["--delay", "500ms"]).delay.into_std(),
 			std::time::Duration::from_millis(500)
 		);
+		assert!(parse(&[]).deprecated().is_empty());
 
-		let argv: Vec<&std::ffi::OsStr> = ["--max-age", "500ms"]
-			.iter()
-			.copied()
-			.map(std::ffi::OsStr::new)
-			.collect();
-		assert!(Cli::parse_from(&argv).is_err(), "`--max-age` still parses on play");
+		for released in [["--max-age", "500ms"], ["--latency-max", "500ms"]] {
+			let refusal = parse(&released).deprecated().to_string();
+			assert!(refusal.contains("--max-age"), "{refusal}");
+			assert!(refusal.contains("--delay"), "{refusal}");
+		}
 	}
 
 	/// The suffix picks the format, and the flag overrides it.

@@ -36,11 +36,10 @@ fn tone(seconds: f32) -> Vec<u8> {
 }
 
 fn input() -> playback::Input {
-	playback::Input {
-		sample_rate: RATE,
-		channels: CHANNELS,
-		..Default::default()
-	}
+	let mut input = playback::Input::default();
+	input.sample_rate = RATE;
+	input.channels = CHANNELS;
+	input
 }
 
 /// Open `$MOQ_AUDIO_DEVICE`, the system default, or the first device that will
