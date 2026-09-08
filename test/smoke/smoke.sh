@@ -253,7 +253,9 @@ build_relay_cli() {
     # qlog is a cargo feature, so capturing traces means building a different
     # relay. Opt-in for that reason: it recompiles quinn with the qlog encoder,
     # which a run that is only going to pass has no use for.
-    [[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
+    if [[ -z "$RELAY" && -n "${MOQ_QA_QLOG:-}" ]]; then
+        flag+=(--features moq-relay/qlog)
+    fi
     [[ -n "$RELAY" ]] || packages+=(-p moq-relay)
     [[ -n "$MOQ" ]] || packages+=(-p moq-cli)
     if [[ ${#packages[@]} -gt 0 ]]; then
@@ -664,9 +666,17 @@ run_fault_probe() {
         }
 }
 
+# Capture a slow cell's stack in an owned process group, so cancelling this
+# watchdog also reaps a debugger or timeout process it started.
+run_stack_watchdog() {
+    local label="$1" pid="$2"
+    sleep "$STACK_AT"
+    bundle_stack "$label" "$pid" wrapper
+}
+
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3"
-    local pids=() names=() watchdogs=() i sub round_failed=0
+    local pids=() names=() watchdogs=() i sub watchdog cell_pid round_failed=0
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
@@ -684,11 +694,9 @@ run_round() {
         names+=("$sub")
         watchdog=""
         if [[ "$NEGATIVE" -eq 0 && "$sub" != js ]]; then
-            (
-                sleep "$STACK_AT"
-                bundle_stack "$pub-$sub" "$HARNESS_PID" wrapper
-            ) &
-            watchdog=$!
+            cell_pid="$HARNESS_PID"
+            harness_spawn "$pub-$sub-stack-watchdog" - run_stack_watchdog "$pub-$sub" "$cell_pid"
+            watchdog="$HARNESS_PID"
         fi
         watchdogs+=("$watchdog")
     done
@@ -730,7 +738,7 @@ run_round() {
     # and bash 3.2 (macOS) errors on "${!pids[@]}" for an empty array under `set -u`.
     for i in ${pids[@]+"${!pids[@]}"}; do
         if harness_wait "${pids[$i]}"; then got=1; else got=0; fi
-        [[ -z "${watchdogs[$i]}" ]] || kill "${watchdogs[$i]}" 2>/dev/null || true
+        [[ -z "${watchdogs[$i]}" ]] || harness_reap "${watchdogs[$i]}"
         elapsed=$(cat "$HARNESS_RUN/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
         if [[ "$got" -eq "$want_pass" ]]; then
             echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"

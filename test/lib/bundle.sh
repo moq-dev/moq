@@ -31,7 +31,7 @@
 #   MOQ_QA_LOG_CAP    per-text-file byte budget (default 2 MiB, 0 disables)
 #   MOQ_QA_FILE_CAP   per-binary-file byte budget (default 8 MiB, 0 disables)
 #   MOQ_QA_STACKS=0   skip stack capture entirely
-#   MOQ_QA_STACK_TIMEOUT  seconds allowed per debugger attach (default 20)
+#   MOQ_QA_STACK_TIMEOUT  positive seconds allowed per debugger attach (default 20)
 #
 # Deliberately not collected: packet payloads and core dumps. Both carry far
 # more than the failure needs and neither is safe to upload by default, so they
@@ -109,6 +109,10 @@ bundle_init() {
             return 2
         fi
     done
+    if [[ "${MOQ_QA_STACK_TIMEOUT:-}" == 0 ]]; then
+        echo "error: MOQ_QA_STACK_TIMEOUT must be a positive integer (got '0')" >&2
+        return 2
+    fi
     for knob in MOQ_QA_KEEP MOQ_QA_RETAIN MOQ_QA_QLOG MOQ_QA_STACKS; do
         value=${!knob:-}
         case "$knob:$value" in

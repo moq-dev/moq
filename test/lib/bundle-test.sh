@@ -239,6 +239,18 @@ fi
 check "a malformed stack timeout retains no partial bundle" test ! -d "$ROOT/invalid-stack-timeout.d"
 
 if (
+    export MOQ_QA_ARTIFACTS="$ROOT/zero-stack-timeout.d" MOQ_QA_STACK_TIMEOUT=0
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+) >/dev/null 2>&1; then
+    bad "a zero stack timeout is refused"
+else
+    ok "a zero stack timeout is refused"
+fi
+check "a zero stack timeout retains no partial bundle" test ! -d "$ROOT/zero-stack-timeout.d"
+
+if (
     export MOQ_QA_ARTIFACTS="$ROOT/invalid-retain.d" MOQ_QA_RETAIN=0
     # shellcheck source=/dev/null
     source "$DIR/bundle.sh"
