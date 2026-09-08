@@ -92,12 +92,14 @@ missing_version() {
 missing_archive_file() {
     local root="$STAGE/self-test/missing-file"
     local version extract
-    version=$("$CARGO" metadata --no-deps --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" |
-        jq -r --arg n "$RUST_CRATE" '.packages[] | select(.name == $n) | .version')
+    local metadata target_dir
+    metadata=$("$CARGO" metadata --no-deps --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml")
+    version=$(jq -r --arg n "$RUST_CRATE" '.packages[] | select(.name == $n) | .version' <<<"$metadata")
+    target_dir=$(jq -r '.target_directory' <<<"$metadata")
 
     mkdir -p "$root/extract" "$root/consumer/src"
     "$CARGO" package --locked --no-verify --allow-dirty --package "$RUST_CRATE" >/dev/null
-    tar -xzf "$WORKSPACE/target/package/$RUST_CRATE-$version.crate" -C "$root/extract"
+    tar -xzf "$target_dir/package/$RUST_CRATE-$version.crate" -C "$root/extract"
     extract="$root/extract/$RUST_CRATE-$version"
 
     {

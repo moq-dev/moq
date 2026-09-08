@@ -90,8 +90,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Called, not exec'd: exec replaces this process and the cleanup trap above dies
+# with it, leaking the staging directory and losing --keep's message.
 if ((SELF_TEST)); then
-    exec "$PACKAGED_DIR/self-test.sh" "$STAGE"
+    "$PACKAGED_DIR/self-test.sh" "$STAGE"
+    exit
 fi
 
 # ── lane selection ──────────────────────────────────────────────────────────
@@ -144,9 +147,15 @@ selection() {
 
     # A JS package is selected by a change under its directory, and its
     # dependents come along because js.sh stages the whole `workspace:` closure
-    # below whatever it is handed. The root manifests select everything: they are
-    # the workspace list and the lockfile.
-    if grep -qE '^(package\.json|bun\.lock)$' <<<"$files"; then
+    # below whatever it is handed.
+    #
+    # Everything selects everything when the change is one no single package
+    # owns: the root manifests are the workspace list and the lockfile, and
+    # js/common/ is the shared build (package.ts writes every published
+    # package.json, and the vite plugins inline every worklet), so a defect there
+    # lands in every tarball at once rather than in the one directory that
+    # changed.
+    if grep -qE '^(package\.json|bun\.lock)$|^js/common/' <<<"$files"; then
         js_names=$(all_js)
         return
     fi

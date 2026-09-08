@@ -36,6 +36,12 @@ That location is not cosmetic: cargo, npm, and bun all walk up from the current
 directory looking for a workspace root or a config file, so a consumer staged
 anywhere under the repo would quietly rejoin it.
 
+A change no single package owns selects every package instead of none: the root
+`package.json` and `bun.lock` are the workspace list and the lockfile, and
+`js/common/` is the shared build (`package.ts` writes every published
+`package.json`, and the vite plugins inline every worklet), so a defect there
+lands in every tarball at once.
+
 ### Rust
 
 1. `audit.sh` refuses a publishable crate whose path dependency carries no

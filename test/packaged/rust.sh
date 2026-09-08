@@ -37,6 +37,12 @@ mkdir -p "$ARCHIVES" "$EXTRACT" "$CONSUMER/src"
 # crates.io yet.
 metadata=$("$CARGO" metadata --no-deps --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml")
 
+# Where cargo actually writes, which is not always `$WORKSPACE/target`: it honours
+# CARGO_TARGET_DIR and `build.target-dir`, and metadata is what resolves all of
+# them. Asking in the wrong place would report a missing archive as a packaging
+# defect.
+TARGET_DIR=$(jq -r '.target_directory' <<<"$metadata")
+
 publishable=$(jq -r '.packages[] | select(.publish == null) | .name' <<<"$metadata" | sort)
 
 # Dev-dependencies are deliberately absent: they never appear in the dependency
@@ -131,7 +137,7 @@ done
 # An archive an earlier run left behind would be copied and consumed below as if
 # this run had built it. The directory is cargo's packaging output and nothing
 # else reads it.
-rm -rf "$WORKSPACE/target/package"
+rm -rf "$TARGET_DIR/package"
 
 echo "packaged: cargo package ${#candidates[@]} crates"
 "$CARGO" package --locked --no-verify --exclude-lockfile --allow-dirty \
@@ -140,7 +146,7 @@ echo "packaged: cargo package ${#candidates[@]} crates"
 
 for name in "${candidates[@]}"; do
     version=$(version_of "$name")
-    archive="$WORKSPACE/target/package/$name-$version.crate"
+    archive="$TARGET_DIR/package/$name-$version.crate"
     [[ -f "$archive" ]] || die "cargo produced no archive at $archive"
     cp "$archive" "$ARCHIVES/"
     tar -xzf "$archive" -C "$EXTRACT"

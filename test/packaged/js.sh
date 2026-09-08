@@ -270,7 +270,10 @@ fi
 if grep -qx -- "@moq/net" <<<"$(printf '%s\n' "${candidates[@]}")" && [[ "${PACKAGED_ROUNDTRIP:-1}" != 0 ]]; then
     echo "packaged: building moq-relay for the round trip"
     (cd "$WORKSPACE" && "${RUST_CARGO:-cargo}" build --locked --package moq-relay)
-    relay="${CARGO_TARGET_DIR:-$WORKSPACE/target}/debug/moq-relay"
+    # Cargo's own answer for where it wrote, which CARGO_TARGET_DIR and
+    # `build.target-dir` both move.
+    relay=$("${RUST_CARGO:-cargo}" metadata --no-deps --format-version 1 \
+        --manifest-path "$WORKSPACE/Cargo.toml" | jq -r '.target_directory')/debug/moq-relay
 
     # A relay left over from an earlier run would answer the readiness poll below
     # and serve the round trip, which would pass against a build nobody staged.
@@ -285,14 +288,22 @@ if grep -qx -- "@moq/net" <<<"$(printf '%s\n' "${candidates[@]}")" && [[ "${PACK
     relay_pid=$!
     trap 'kill "$relay_pid" 2>/dev/null || true; wait "$relay_pid" 2>/dev/null || true' EXIT
 
-    for _ in $(seq 1 600); do
-        curl -sf "http://127.0.0.1:$port/certificate.sha256" >/dev/null 2>&1 && break
+    # Waiting for another process to bind a socket, which it gives us no signal
+    # for; the poll matches test/smoke/smoke.sh and test/ts/run.sh. The liveness
+    # check is what keeps it honest: a relay that dies fails here immediately with
+    # its own log, instead of being reported as a timeout 30 seconds later.
+    waited=0
+    until curl -sf "http://127.0.0.1:$port/certificate.sha256" >/dev/null 2>&1; do
+        if ! kill -0 "$relay_pid" 2>/dev/null; then
+            sed 's/^/  relay: /' "$STAGE/js/relay.log" >&2 || true
+            die "the relay exited before it listened on 127.0.0.1:$port"
+        fi
+        ((waited++ < 600)) || {
+            sed 's/^/  relay: /' "$STAGE/js/relay.log" >&2 || true
+            die "the relay never became ready on 127.0.0.1:$port"
+        }
         sleep 0.05
     done
-    curl -sf "http://127.0.0.1:$port/certificate.sha256" >/dev/null 2>&1 || {
-        sed 's/^/  relay: /' "$STAGE/js/relay.log" >&2 || true
-        die "the relay never became ready on 127.0.0.1:$port"
-    }
 
     # bun rather than node: @moq/web-transport ships TypeScript sources, which
     # node refuses to strip inside node_modules. The entry-point imports above
