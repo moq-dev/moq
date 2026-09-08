@@ -159,6 +159,8 @@ expect '.github/actions/rust-cache/action.yml' smoke_full true
 expect '.github/actions/rust-cache/action.yml' wasm true
 expect '.github/actions/rust-cache/action.yml' ts true
 expect '.github/actions/rust-cache/action.yml' features true
+expect '.github/actions/rust-cache/action.yml' windows true
+expect '.github/actions/rust-cache/action.yml' macos true
 expect 'test/justfile' smoke true
 expect 'test/justfile' smoke_full true
 
