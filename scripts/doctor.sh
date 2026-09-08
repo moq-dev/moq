@@ -270,8 +270,15 @@ process_state() {
         printf 'gone\n'
         return
     }
-    case $(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') in
-        Z* | '') printf 'gone\n' ;;
+    local state
+    state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') || {
+        # Some sandboxes allow signaling a process but deny process listing.
+        # In that case kill -0 is the strongest answer available.
+        kill -0 "$1" 2>/dev/null && printf 'alive\n' || printf 'gone\n'
+        return
+    }
+    case $state in
+        Z*) printf 'gone\n' ;;
         *) printf 'alive\n' ;;
     esac
 }
