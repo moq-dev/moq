@@ -480,7 +480,16 @@ try {
 			() => `the player holds nothing to release while playing: ${JSON.stringify(busy.resources)}`,
 		);
 
-		await command(player, values.leak ? "detachLeaky" : "detach");
+		if (values.leak) {
+			await command(player, "startLeak");
+			await waitForResources(player, playerErrors, {
+				deadline: Date.now() + SETTLE_MS,
+				assertion: "resource instrumentation",
+				description: `the deliberately leaked player to open another session beyond ${JSON.stringify(busy.resources)}`,
+				predicate: (r) => r.transports + r.sockets > busy.resources.transports + busy.resources.sockets,
+			});
+		}
+		await command(player, "detach");
 		await waitForResources(player, playerErrors, {
 			deadline: Date.now() + SETTLE_MS,
 			assertion: "resource baseline",
