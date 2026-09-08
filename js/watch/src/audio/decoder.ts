@@ -3,11 +3,21 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 import { base64ToBytes } from "../base64";
 
 import { type Bound, latencyBounds, type Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { type DecoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -98,6 +108,10 @@ export class Decoder {
 
 	#signals = new Effect();
 
+	// The catalog fields that require a new audio graph, so a republish that only refines metadata
+	// (bitrate, jitter) leaves the context, worklet, and ring alone.
+	readonly #identity: Computed<PlaybackIdentity | undefined>;
+
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
@@ -105,6 +119,10 @@ export class Decoder {
 
 		this.source = source;
 		this.sync = sync;
+		this.#identity = this.#signals.computed((effect) => {
+			const config = effect.get(this.source.out.config);
+			return config ? playbackIdentity(config) : undefined;
+		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -120,14 +138,14 @@ export class Decoder {
 		//const enabled = effect.get(this.enabled);
 		//if (!enabled) return;
 
-		const config = effect.get(this.source.out.config);
-		if (!config) return;
+		const identity = effect.get(this.#identity);
+		if (!identity) return;
 
 		// Pre-build the graph at the catalog rate so warm-up starts before the first frame arrives. The
 		// decoder's actual output rate is the source of truth (see #emit); if it differs, #emit sets
 		// #decodedSampleRate, which re-runs this effect and rebuilds the graph at the real rate.
-		const sampleRate = effect.get(this.#decodedSampleRate) ?? config.sampleRate;
-		const channelCount = config.numberOfChannels;
+		const sampleRate = effect.get(this.#decodedSampleRate) ?? identity.decoder.sampleRate;
+		const channelCount = identity.decoder.numberOfChannels;
 
 		// Expose the rate the graph actually runs at.
 		effect.set(this.#out.sampleRate, sampleRate);
@@ -251,12 +269,14 @@ export class Decoder {
 		const track = effect.get(this.source.out.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.out.config);
-		if (!config) return;
+		const identity = effect.get(this.#identity);
+		if (!identity) return;
+
+		const config = identity.decoder;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast);
+		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
 		if (!active) return;
 
 		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
@@ -277,7 +297,7 @@ export class Decoder {
 		}
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
+	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip);
@@ -327,7 +347,9 @@ export class Decoder {
 						? Util.Hex.toBytes(config.description)
 						: undefined;
 			const decoderConfig: AudioDecoderConfig = {
-				...config,
+				codec: config.codec,
+				sampleRate: config.sampleRate,
+				numberOfChannels: config.numberOfChannels,
 				description,
 			};
 			decoder.configure(decoderConfig);
@@ -372,7 +394,7 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
+	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);

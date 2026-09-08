@@ -1,11 +1,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-
-// AudioWorklet always renders in 128-sample quanta.
-const WORKLET_QUANTUM = 128;
+import { playbackJitter } from "./config";
 
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -130,12 +127,7 @@ export class Source {
 		effect.set(this.#out.track, selected.track);
 		effect.set(this.#out.config, selected.config);
 
-		// Use catalog jitter if available, otherwise estimate from codec frame duration.
-		// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
-		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
-		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
-		const jitter = codecJitter + overhead;
-		effect.set(this.#out.jitter, Time.Milli(jitter));
+		effect.set(this.#out.jitter, playbackJitter(selected.config));
 	}
 
 	/**
@@ -171,26 +163,4 @@ export class Source {
 	close(): void {
 		this.#signals.close();
 	}
-}
-
-// Estimate the minimum jitter (frame duration) based on the audio codec.
-// TODO these are defaults; the actual frame duration depends on encoder config.
-function defaultAudioJitter(config: Catalog.AudioConfig): number | undefined {
-	if (config.codec.startsWith("opus")) {
-		// Opus supports 2.5–60ms but 20ms is the real-time default.
-		return 20;
-	}
-
-	if (config.codec.startsWith("mp4a")) {
-		// 1024 samples for LC-AAC; HE-AAC/AAC-LD use different sizes.
-		return Math.ceil((1024 / config.sampleRate) * 1000);
-	}
-
-	if (config.codec === "mp3") {
-		// 1152 samples per frame for MPEG-1 Layer III; MPEG-2/2.5 use 576.
-		const samples = config.sampleRate >= 32000 ? 1152 : 576;
-		return Math.ceil((samples / config.sampleRate) * 1000);
-	}
-
-	return undefined;
 }

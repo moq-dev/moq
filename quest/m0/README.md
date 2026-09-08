@@ -17,7 +17,6 @@ regression test per Root Cause First.
 
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - js/watch: auto latency follows measured arrivals, and the audio ring holds slack and re-buffers
 - [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - moq-mux: catalog jitter is the publisher's maximum flush span, never a running minimum
-- [Audio identity](/quest/m0/3479-watch-audio-identity.md) - js/watch: a catalog republish rebuilds the audio graph only when the decoder identity changes
 - [Encoder lag](/quest/m0/publish-audio-lag-measure.md) - js/publish: measure the audio encoder's input-to-output lag on a high-RTT path
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
