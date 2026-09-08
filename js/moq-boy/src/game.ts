@@ -136,14 +136,17 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		// The decoder owns rendition handoffs but also needs Sync. Bridge its jitter output through a
-		// local signal so Sync can be constructed first.
+		// The decoders own rendition handoffs and measure how late frames arrive, but they need Sync
+		// to exist first. Bridge their outputs through local signals.
 		const videoJitter = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
+		const videoSpread = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
+		const audioSpread = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
 		this.sync = new Watch.Sync({
 			delay: this.delay,
-			probe: connection.probe,
 			video: videoJitter,
 			audio: this.audioSource.out.jitter,
+			videoSpread,
+			audioSpread,
 		});
 		this.#signals.cleanup(() => this.sync.close());
 
@@ -152,6 +155,7 @@ export class Game {
 		const videoEnabled = new Moq.Signals.Signal(true);
 		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, this.sync, { enabled: videoEnabled });
 		this.#signals.proxy(videoJitter, this.videoDecoder.out.jitter);
+		this.#signals.proxy(videoSpread, this.videoDecoder.out.spread);
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
 		// Renderer needs a canvas created by the UI layer, set via `canvas`.
@@ -165,6 +169,7 @@ export class Game {
 		// Audio pipeline. The emitter stops the download when muted or paused.
 		const audioEnabled = new Moq.Signals.Signal(false);
 		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync, { enabled: audioEnabled });
+		this.#signals.proxy(audioSpread, this.audioDecoder.out.spread);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
 		const audioPaused = new Moq.Signals.Signal(true);

@@ -63,3 +63,48 @@ describe("delay and buffer", () => {
 		sync.close();
 	});
 });
+
+describe("auto delay", () => {
+	it("starts at the advertised delay and follows the measured arrivals", async () => {
+		const audioSpread = new Signal<Time.Milli | undefined>(undefined);
+		const sync = new Sync({ audio: 20 as Time.Milli, video: 33 as Time.Milli, audioSpread });
+		await flush();
+
+		// Nothing measured yet, so the delay is what the catalog advertises.
+		expect(sync.out.jitter.peek()).toBe(0 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(33 as Time.Milli);
+
+		// A publisher flushing 250ms of audio at once needs 250ms of buffer, whatever the RTT is.
+		// The measured spread already covers what the catalog advertises, so it replaces the
+		// advertised delay rather than stacking on it.
+		audioSpread.set(250 as Time.Milli);
+		await flush();
+		expect(sync.out.jitter.peek()).toBe(250 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(250 as Time.Milli);
+
+		sync.close();
+	});
+
+	it("takes the largest spread across tracks", async () => {
+		const audioSpread = new Signal<Time.Milli | undefined>(40 as Time.Milli);
+		const videoSpread = new Signal<Time.Milli | undefined>(120 as Time.Milli);
+		const sync = new Sync({ audioSpread, videoSpread });
+		await flush();
+		expect(sync.out.jitter.peek()).toBe(120 as Time.Milli);
+
+		audioSpread.set(200 as Time.Milli);
+		await flush();
+		expect(sync.out.jitter.peek()).toBe(200 as Time.Milli);
+
+		sync.close();
+	});
+
+	it("ignores the measured spread when the delay is a fixed number", async () => {
+		const audioSpread = new Signal<Time.Milli | undefined>(250 as Time.Milli);
+		const sync = new Sync({ delay: 500 as Time.Milli, audio: 20 as Time.Milli, audioSpread });
+		await flush();
+		expect(sync.out.jitter.peek()).toBe(500 as Time.Milli);
+		expect(sync.out.delay.peek()).toBe(520 as Time.Milli);
+		sync.close();
+	});
+});

@@ -323,6 +323,24 @@ test("Consumer skips groups via PTS-span when over the max age", async () => {
 	consumer.close();
 });
 
+test("Consumer measures how late frames arrive", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+
+	// A prompt first group sets the arrival baseline.
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle(150);
+
+	// The next group carries 20ms of media but shows up 150ms later, so a player needs the
+	// difference in its buffer to render it on time. Nothing about the round trip says that.
+	writeGroupWithLegacyFrames(track, 1, [20_000 as Time.Micro]);
+	track.close();
+
+	await drainFrames(consumer, 300);
+	expect(consumer.spread.peek()).toBeGreaterThanOrEqual(50 as Time.Milli);
+	consumer.close();
+});
+
 // --- Ordering ---
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {

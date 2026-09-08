@@ -10,7 +10,7 @@ import { subscribeMedia } from "../media";
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { Handover } from "./handover";
-import { reanchorFloor, ringSamples } from "./latency";
+import { ringSamples } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -45,8 +45,15 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
+	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
+	underruns: Signal<number>;
+
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
+
+	// How late audio frames arrive relative to the earliest one, measured by the container
+	// consumer. Wired into Sync by the parent, which sizes the "auto" delay from it.
+	spread: Signal<Time.Milli | undefined>;
 };
 
 /** Cumulative audio statistics since the decoder started. */
@@ -72,7 +79,9 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
+		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
+		spread: new Signal<Time.Milli | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -91,9 +100,9 @@ export class Decoder {
 	// Ordered discontinuity and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
-	// The latency floor as of the last settled change, to detect a floor *increase* (needs a deeper
-	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
-	#prevFloor?: Time.Milli;
+	// The derived target as of the last settled change, to detect a *deepening* (which needs the
+	// ring to refill) versus a decrease. See #runLatencyReanchor.
+	#prevTarget?: Time.Milli;
 
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
@@ -186,6 +195,9 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			effect.run((inner) => {
+				this.#out.underruns.set(inner.get(ring.underruns));
+			});
 
 			effect.set(this.#out.root, worklet);
 		});
@@ -217,31 +229,31 @@ export class Decoder {
 		ring.setLatency(ringSamples(ring.rate, delay));
 	}
 
-	// Re-anchor when the delay floor *increases*. A larger floor needs a deeper cushion: video
-	// rebuilds it implicitly (its per-frame sync.wait() reads the live buffer, so it just holds
-	// longer), but the audio ring keeps draining at its old depth -- resize() (via setLatency) only
-	// re-stalls an *empty* ring, so a mid-playback ring never refills to the new floor and audio runs
-	// ahead of video (the "raise latency, only video re-buffers" desync). reset() re-stalls the ring
-	// so it refills to the new floor. Watch the latency target and media delay, excluding adaptive
-	// RTT jitter, and debounce so a slider drag coalesces into one re-anchor. Decreases are left to
-	// natural catch-up.
+	// Park playback when the target *deepens*, so the ring refills to it. Video rebuilds a deeper
+	// cushion implicitly (its per-frame sync.wait() reads the live buffer, so it just holds longer),
+	// but the audio ring keeps draining at its old depth: setLatency only raises the bar a future
+	// refill has to clear, so a ring already playing never gets deeper and audio runs ahead of video
+	// (the "raise latency, only video re-buffers" desync). Stalling spends the deficit as silence,
+	// once, instead of leaving it to the underrun that the shallow buffer eventually causes anyway.
+	//
+	// The derived delay, not the user's setting, since the arrival estimator moves it too. Only a
+	// deepening worth more than a frame counts, so the estimator's small refinements ride through,
+	// and the debounce coalesces a slider drag or a converging estimate into a single stall.
+	// Decreases are left to natural catch-up.
 	#runLatencyReanchor(effect: Effect): void {
-		const floor = reanchorFloor({
-			delay: effect.get(this.sync.in.delay),
-			audio: effect.get(this.sync.in.audio),
-			video: effect.get(this.sync.in.video),
-		});
-		if (this.#prevFloor === undefined) {
+		const target = effect.get(this.sync.out.delay);
+		const step = effect.get(this.source.out.jitter) ?? Time.Milli.zero;
+		if (this.#prevTarget === undefined) {
 			// Startup: the initial fill already builds the cushion; just record the baseline.
-			this.#prevFloor = floor;
+			this.#prevTarget = target;
 			return;
 		}
-		// When the timer fires, the floor read above is still current: any change would have rerun
+		// When the timer fires, the target read above is still current: any change would have rerun
 		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
-		const baseline = this.#prevFloor;
+		const baseline = this.#prevTarget;
 		effect.timer(() => {
-			if (floor > baseline) this.reset();
-			this.#prevFloor = floor;
+			if (target - baseline > step) this.#ring?.stall();
+			this.#prevTarget = target;
 		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}
 
@@ -303,6 +315,11 @@ export class Decoder {
 			const decode = inner.get(this.#decodeBuffered);
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
+
+		// Publish the measured arrival spread for Sync. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#out.spread.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#out.spread.set(undefined));
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -408,6 +425,11 @@ export class Decoder {
 			const decode = inner.get(this.#decodeBuffered);
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
+
+		// Publish the measured arrival spread for Sync. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#out.spread.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#out.spread.set(undefined));
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();

@@ -3,10 +3,24 @@ import { Time } from "@moq/net";
 // Control array slot indices. The playhead is not here: see `state`.
 const WRITE = 0;
 const LATENCY = 1;
+/**
+ * Whether playback is held while the ring refills. The one slot both threads write.
+ *
+ * The writer clears it once the ring holds the target, the reader raises it when the ring runs
+ * dry. Neither needs a compare-exchange. The reader only raises it having observed an empty ring,
+ * which means it already drained everything the writer published, and the writer only clears it
+ * having published enough to cover the target. A raise landing after a clear costs one quantum of
+ * silence and the next insert undoes it, since every insert re-checks. A clear landing after a
+ * raise is correct on its face: the samples are there.
+ */
 const STALLED = 2;
 // Timeline identity changes only on re-anchor, independently of the packed mutation epoch.
 const TIMELINE = 3;
-const CONTROL_SLOTS = 4;
+// The size of the most recent insert, i.e. one decoded chunk. See `read`.
+const CHUNK = 4;
+// How many times the reader ran dry mid-playback. Diagnostics only.
+const UNDERRUN = 5;
+const CONTROL_SLOTS = 6;
 
 /**
  * The playhead and its mutation epoch, packed into one 64-bit word: epoch in the high
@@ -297,6 +311,15 @@ export class SharedRingBuffer {
 			}
 		}
 
+		// Publish the chunk size for the reader's skip band before the samples it describes become
+		// visible. The two stores are not one transaction, so the reader can land between them:
+		// this way it sees the wider band with the old cursor, which only makes it skip less, where
+		// the other order would have it measure a longer span against a narrower band and cut audio
+		// that is not actually late. The most recent insert, not a running maximum: one oversized
+		// decode would otherwise widen the band for the life of the ring, and a publisher that
+		// changes its frame duration is described within one insert.
+		Atomics.store(this.#control, CHUNK, originalLength);
+
 		// Advance WRITE (only forward)
 		Atomics.store(this.#control, WRITE, i32Max(Atomics.load(this.#control, WRITE), end));
 
@@ -329,17 +352,29 @@ export class SharedRingBuffer {
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 
-		// Latency skip: if buffered data exceeds LATENCY, skip ahead.
+		// Latency skip: skip ahead only once the ring holds a whole chunk more than the target,
+		// landing back on the target. Frames arrive one chunk at a time, so a ring sitting exactly
+		// on the target is a chunk above it the moment the next one lands; skipping on that
+		// overshoot discards audio on every single insert. The chunk of slack is the difference
+		// between tolerating normal arrival and cutting it.
 		// CAS ensures we never step backward relative to a concurrent writer advance.
 		// Disabled in buffered mode, where we deliberately play through the whole buffer.
 		const buffered = (write - read) | 0;
-		if (!this.buffered && latency > 0 && buffered > latency) {
+		const slack = Atomics.load(this.#control, CHUNK);
+		if (!this.buffered && latency > 0 && buffered > ((latency + slack) | 0)) {
 			const skipTo = (write - latency) | 0;
 			if (((skipTo - read) | 0) > 0) read = skipTo;
 		}
 
 		const available = (write - read) | 0;
 		const count = Math.min(available, output[0].length);
+		if (available <= 0) {
+			// Ran dry mid-playback. Re-stall so `insert` refills to the target before playback
+			// resumes: the alternative is playing the next chunk on an empty cushion, which
+			// underruns again on the very next quantum. See STALLED for the write discipline.
+			Atomics.store(this.#control, STALLED, 1);
+			Atomics.add(this.#control, UNDERRUN, 1);
+		}
 		if (count <= 0) {
 			// A latency skip still has to be published, and still only if nothing moved.
 			if (((read - readOf(state)) | 0) > 0) {
@@ -405,6 +440,19 @@ export class SharedRingBuffer {
 	}
 
 	/**
+	 * Hold playback until the ring holds the target again, keeping everything buffered.
+	 * Main thread only.
+	 *
+	 * Used when the target deepens: `setLatency` alone only raises the bar a future refill has to
+	 * clear, so a ring already playing keeps draining at its old depth and audio runs that much
+	 * ahead of video. Parking the playhead spends exactly the deficit as silence and resumes on the
+	 * same timeline, where `reset` would throw the buffer away and re-anchor.
+	 */
+	stall(): void {
+		Atomics.store(this.#control, STALLED, 1);
+	}
+
+	/**
 	 * Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode).
 	 * Main thread only. The worklet reader sees STALLED and stops until the next insert.
 	 */
@@ -458,6 +506,8 @@ export class SharedRingBuffer {
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
 		Atomics.store(dst.#control, STALLED, stalled);
+		Atomics.store(dst.#control, CHUNK, Atomics.load(this.#control, CHUNK));
+		Atomics.store(dst.#control, UNDERRUN, Atomics.load(this.#control, UNDERRUN));
 
 		// Carry the unwrapped playhead over, rebased onto dst's READ. Fold the same `read`
 		// snapshot the copy used so both sides agree on one observation; `copyStart` is at or
@@ -496,6 +546,11 @@ export class SharedRingBuffer {
 	/** Whether the buffer is stalled (waiting to fill). */
 	get stalled(): boolean {
 		return Atomics.load(this.#control, STALLED) === 1;
+	}
+
+	/** How many times the reader has run dry mid-playback. */
+	get underruns(): number {
+		return Atomics.load(this.#control, UNDERRUN);
 	}
 
 	/**

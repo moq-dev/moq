@@ -63,7 +63,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const hint = DOM.create(
 		"div",
 		{ className: "tab-hint" },
-		"A larger delay smooths over network jitter at the cost of latency. Auto tracks the connection RTT. Drag the timeline to fine-tune.",
+		"A larger delay smooths over network jitter at the cost of latency. Auto follows how late frames actually arrive. Drag the timeline to fine-tune.",
 	);
 
 	container.append(chips, timeline, readout, hint);

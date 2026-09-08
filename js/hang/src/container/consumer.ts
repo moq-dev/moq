@@ -3,6 +3,7 @@ import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
+import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame } from "./types";
 
 /** Options for constructing a {@link Consumer}. */
@@ -143,6 +144,18 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// Measured at arrival, before any group is skipped: a target derived from what survives the
+	// age budget would only ever confirm the budget it was cut to.
+	#spread = new Jitter();
+
+	/**
+	 * How late frames arrive relative to the earliest one, measured as they land.
+	 *
+	 * Size the playback buffer with this rather than with the round trip, which says nothing about
+	 * how evenly a publisher emits frames.
+	 */
+	readonly spread: Getter<Time.Milli> = this.#spread.value;
+
 	#signals = new Effect();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
@@ -256,11 +269,21 @@ export class Consumer {
 						// max age budget is what eventually breaks the stall.
 						if (this.#classifyStale(group)) return;
 						this.#checkReset(group);
+
+						// Measured once the timeline is settled and before the age budget can skip
+						// the group: a reneged straggler is already gone, a rewinding group is read
+						// against the baseline `#checkReset` just re-anchored rather than against
+						// the epoch it replaced, and a target derived from what survives the budget
+						// would only ever confirm the budget it was cut to.
+						if (!marker) this.#spread.observe(frame.timestamp, Moq.Time.Milli.now());
 						this.#checkMaxAge();
 
 						// A newer group reaching back to where the stalled active group has
 						// already presented means we can advance now instead of waiting.
 						skipped = this.#tryDurationSkip();
+					} else if (!marker) {
+						// The active group needs no classification, so its arrival counts as is.
+						this.#spread.observe(frame.timestamp, Moq.Time.Milli.now());
 					}
 
 					// Wake next() for the current delivery head so its frames surface as they
@@ -438,6 +461,7 @@ export class Consumer {
 		this.#rewind.boundary = reset;
 		this.#rewind.discontinuity++;
 		this.#gap = true;
+		this.#spread.reanchor();
 
 		// Drop buffered groups the boundary can already prove stale; keep ambiguous ones.
 		this.#groups = this.#groups.filter((g) => {
@@ -661,6 +685,7 @@ export class Consumer {
 		this.#presentedEnd = undefined;
 		this.#deliveredGroup = undefined;
 		this.#gap = true;
+		this.#spread.reanchor();
 	}
 
 	#updateBuffered(): void {

@@ -238,22 +238,28 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.text.close());
 
-		// The video decoder owns rendition handoffs but also needs Sync. Bridge its output through a
-		// parent-owned signal so Sync can be constructed first without exposing mutable wiring.
+		// The decoders own rendition handoffs and measure how late frames arrive, but they need Sync
+		// to exist first. Bridge their outputs through parent-owned signals rather than exposing
+		// mutable wiring.
 		const videoJitter = new Signal<Time.Milli | undefined>(undefined);
+		const videoSpread = new Signal<Time.Milli | undefined>(undefined);
+		const audioSpread = new Signal<Time.Milli | undefined>(undefined);
 
 		this.sync = new Sync({
 			delay: this.controls.delay,
 			buffer: this.controls.buffer,
-			probe: this.connection.probe,
 			video: videoJitter,
 			audio: audioSource.out.jitter,
+			videoSpread,
+			audioSpread,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder(videoSource, this.sync, { enabled: this.#videoEnabled });
 		this.signals.proxy(videoJitter, this.video.out.jitter);
+		this.signals.proxy(videoSpread, this.video.out.spread);
 		this.audio = new Audio.Decoder(audioSource, this.sync, { enabled: this.#audioEnabled });
+		this.signals.proxy(audioSpread, this.audio.out.spread);
 		this.signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();
