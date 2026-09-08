@@ -848,6 +848,15 @@ bundle_retain_session() {
     BUNDLE_SESSION_RETAINED=1
 }
 
+# Return whether a process still has the birth identity this bundle recorded.
+bundle_process_owned() {
+    local pid="$1" start_file="$BUNDLE_META/process-starts/$1" wanted current
+    [[ -f "$start_file" ]] || return 1
+    wanted=$(<"$start_file")
+    current=$(_bundle_process_start "$pid" || true)
+    [[ -n "$current" && "$current" == "$wanted" ]]
+}
+
 # Trim qlog snapshots to the last newline completed by the relay. JSON-SEQ uses
 # that newline to terminate each record, so a copy that reached a live file's
 # current EOF mid-write must not publish its partial final record.

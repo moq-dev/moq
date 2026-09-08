@@ -409,7 +409,9 @@ harness_retain_ports() {
     for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
         [[ "${HARNESS_STATES[$i]}" == live ]] || continue
         pid=${HARNESS_PIDS[$i]}
-        if ! harness_exited "$pid" || kill -0 -- -"$pid" 2>/dev/null; then
+        # A live table entry is not ownership: a child can exit before it is waited, and its PID or
+        # process-group ID can be reused. Retain only the exact process identity recorded at spawn.
+        if declare -F bundle_process_owned >/dev/null 2>&1 && bundle_process_owned "$pid"; then
             if declare -F bundle_retain_session >/dev/null 2>&1; then
                 bundle_retain_session
             fi

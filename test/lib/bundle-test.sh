@@ -650,18 +650,21 @@ unowned_port_case() {
     # shellcheck disable=SC2034 # Sourced harness functions consume this path.
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port unowned 4558
+    harness_spawn reused "$BUNDLE_WORK/reused.log" sleep 120
+    printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$HARNESS_PID"
     if harness_retain_ports; then
         return 1
     fi
+    harness_reap_all
     harness_release_ports
     printf '%s\n' "$BUNDLE_LIVE" >"$BUNDLE_DIR/live.path"
     bundle_finish 1
 }
 bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case unowned-port unowned_port_case)
-check "a retained failure without live processes releases its port" test ! -d "$port_root/4558"
-check "a retained failure without live processes has no session" test ! -e "$bundle/session.md"
+check "a retained failure without an owned survivor releases its port" test ! -d "$port_root/4558"
+check "a retained failure without an owned survivor has no session" test ! -e "$bundle/session.md"
 live=$(<"$bundle/live.path")
-check "a retained failure without live processes removes its live tree" test ! -d "$live"
+check "a retained failure without an owned survivor removes its live tree" test ! -d "$live"
 
 # A retained fixture may keep writing only into the private live tree. Auxiliary stack watchdogs
 # target the uploadable snapshot, so they must be gone before its final redaction pass completes.
