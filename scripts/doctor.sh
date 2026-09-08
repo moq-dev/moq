@@ -582,7 +582,15 @@ EOF
 # shell pins, compiles a crate fine and then dies partway through the suite this
 # command just called ready.
 probe_cargo_subcommand() {
-    local sub=$1 suites=$2 remedy=$3 cargo=${RUST_CARGO:-cargo}
+    local sub=$1 suites=$2 remedy=$3 cargo
+    # Probed the way rs/justfile calls it: clippy and nextest go through the
+    # wrapper, fmt, shear, and sort are plain `cargo`. A wrapper that proxies
+    # only the compiling subcommands would otherwise be reported broken for the
+    # ones that never reach it.
+    case $sub in
+        clippy | nextest) cargo=${RUST_CARGO:-cargo} ;;
+        *) cargo=cargo ;;
+    esac
     if ! command -v "$cargo" >/dev/null 2>&1; then
         record "probe.cargo-$sub" probe missing true "$suites" "$cargo is not on PATH" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
