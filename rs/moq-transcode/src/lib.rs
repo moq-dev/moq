@@ -499,8 +499,8 @@ mod tests {
 				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 				"{name} output is not Annex-B"
 			);
-			let total = group.finished().await.unwrap();
-			assert_eq!(total, 5, "{name} dropped frames");
+			while group.read_frame().await.unwrap().is_some() {}
+			assert_eq!(group.frame_count(), 5, "{name} dropped frames");
 		}
 
 		producer_task.abort();
@@ -563,8 +563,8 @@ mod tests {
 				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 				"{name} output is not Annex-B"
 			);
-			let total = group.finished().await.unwrap();
-			assert_eq!(total, 5, "{name} dropped frames");
+			while group.read_frame().await.unwrap().is_some() {}
+			assert_eq!(group.frame_count(), 5, "{name} dropped frames");
 		}
 
 		producer_task.abort();
@@ -635,8 +635,12 @@ mod tests {
 			}
 		};
 		let mut fetched = track.fetch_group(0, None).await.unwrap();
-		let total = fetched.finished().await.unwrap();
-		assert_eq!(total, 5, "VAAPI dropped the fetched group's buffered tail");
+		while fetched.read_frame().await.unwrap().is_some() {}
+		assert_eq!(
+			fetched.frame_count(),
+			5,
+			"VAAPI dropped the fetched group's buffered tail"
+		);
 
 		transcoder.abort();
 	}
@@ -673,8 +677,12 @@ mod tests {
 		};
 		let mut subscriber = track.subscribe(None).await.unwrap();
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
-		let total = group.finished().await.unwrap();
-		assert_eq!(total, 5, "VAAPI moved the live group's buffered tail past its end");
+		while group.read_frame().await.unwrap().is_some() {}
+		assert_eq!(
+			group.frame_count(),
+			5,
+			"VAAPI moved the live group's buffered tail past its end"
+		);
 
 		producer_task.abort();
 		transcoder.abort();
@@ -725,8 +733,8 @@ mod tests {
 			frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
 			"hardware rung output is not Annex-B"
 		);
-		let total = fetched.finished().await.unwrap();
-		assert_eq!(total, 5, "hardware transcode dropped frames");
+		while fetched.read_frame().await.unwrap().is_some() {}
+		assert_eq!(fetched.frame_count(), 5, "hardware transcode dropped frames");
 
 		transcoder.abort();
 	}

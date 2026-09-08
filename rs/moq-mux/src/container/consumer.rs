@@ -274,11 +274,11 @@ impl<F: Container> Consumer<F> {
 					Poll::Pending => break,
 					Poll::Ready(Err(e)) => {
 						// Tell a relay group eviction/abort (skip) from a payload decode error
-						// (propagate). The moq_net group's own terminal state is the source of
-						// truth: an evicted/aborted group reports the transport error from
-						// poll_finished, while a malformed payload leaves the group live or
-						// cleanly finished. A decode error is real and the caller must see it,
-						// not have the group silently dropped.
+						// (propagate). The moq_net group's own state at the read cursor is the
+						// source of truth: a cursor the transport can no longer serve reports
+						// the error from poll_finished, while a malformed payload leaves the
+						// group live or cleanly finished. A decode error is real and the caller
+						// must see it, not have the group silently dropped.
 						if !group.poll_aborted(waiter) {
 							return Poll::Ready(Err(e));
 						}
@@ -745,11 +745,11 @@ impl GroupBuffer {
 		Poll::Pending
 	}
 
-	/// True if the group's moq_net stream was reset/aborted (evicted, `Old`,
-	/// cancelled, ...), as opposed to still live or cleanly finished. Lets the
-	/// consumer tell a transport eviction from a payload decode error: the former
-	/// surfaces as a terminal transport error from `poll_finished`, the latter
-	/// leaves the group readable or finished.
+	/// True if the transport can no longer deliver the frame this group is stopped on:
+	/// the stream was reset (evicted, `Old`, cancelled, ...) or the frame was dropped
+	/// from the front of a live group. Lets the consumer tell a transport eviction from
+	/// a payload decode error: the former surfaces as an error from `poll_finished` at
+	/// the read cursor, the latter leaves the group readable or cleanly finished.
 	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
@@ -2335,6 +2335,74 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
+	}
+
+	/// A finished group whose frames are released afterwards (aged out of the track's
+	/// latency window, or evicted by the cache pool) is an eviction like any other: a
+	/// reader that stopped short of the end skips to the next buffered group instead of
+	/// ending the track.
+	#[tokio::test]
+	async fn finished_group_released_mid_read_skips_to_next() {
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		for timestamp in [ts(0), ts(10_000)] {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy.write(&mut group0, &[frame]).unwrap();
+		}
+		group0.finish().unwrap();
+		write_group(&mut track, 1, &[ts(30_000)]);
+		track.finish().unwrap();
+
+		// Take the first frame only, leaving the second unread.
+		let first = consumer.read().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+
+		// Expiry releases the finished group's frames out from under the reader.
+		group0.abort(moq_net::Error::Old).unwrap();
+
+		let rest = read_all(&mut consumer).await.unwrap();
+		assert_eq!(rest.len(), 1, "expected group 1 only, got {rest:?}");
+		assert_eq!(rest[0].timestamp, ts(30_000));
+	}
+
+	/// The front of a live group can be shed to stay within the cache budget. A reader
+	/// whose next frame went with it skips forward too; the gap is not a decode error.
+	#[tokio::test]
+	async fn lagged_group_skips_to_next() {
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		// Head shedding only kicks in at the per-group byte budget, so the second frame
+		// has to be large enough to push the first out.
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		for payload in [
+			Bytes::from(vec![0xDEu8; 1024]),
+			Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize - 16]),
+		] {
+			let frame = Frame {
+				timestamp: ts(0),
+				payload,
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy.write(&mut group0, &[frame]).unwrap();
+		}
+
+		write_group(&mut track, 1, &[ts(30_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 1, "expected group 1 only, got {} frames", frames.len());
+		assert_eq!(frames[0].timestamp, ts(30_000));
 	}
 
 	#[tokio::test]

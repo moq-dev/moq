@@ -15,7 +15,6 @@ regression test per Root Cause First.
 
 ## Quests
 
-- [#3491](/quest/m0/3491-moq-net-a-group-consumer-is-one-cursor.md) - moq-net: a group consumer is one cursor, so an evicted group is skipped instead of ending `moq export ts`
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - js/watch: auto latency follows measured arrivals, and the audio ring holds slack and re-buffers
 - [#3492](/quest/m0/3492-ietf-track-status.md) - moq-net: TRACK_STATUS gets a truthful answer on every draft instead of a dropped stream
 - [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - moq-mux: catalog jitter is the publisher's maximum flush span, never a running minimum
