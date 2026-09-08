@@ -47,6 +47,11 @@ ffi='rs/moq-ffi/src/lib.rs'
 expect "$ffi" smoke_full true
 expect "$ffi" smoke false
 
+# The Go wrapper. Its client is a full-matrix-only participant, so the narrow set
+# would prove nothing about it.
+expect 'go/wrapper/moq/broadcast.go' smoke_full true
+expect 'go/scripts/stage.sh' smoke_full true
+
 # A browser player change: covered by the representative set, which publishes and
 # subscribes from a real headless browser. Nothing here reaches wasm32.
 watch='js/watch/src/element.ts'

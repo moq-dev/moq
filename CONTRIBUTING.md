@@ -32,7 +32,7 @@ just test smoke-core        # what the `smoke` lane runs
 | Lane | Runs | Selected by | Cost |
 |---|---|---|---|
 | `smoke` | `just test smoke-core`: rust and browser publish; rust, browser and C subscribe | any change reaching moq-relay, moq-cli, libmoq, moq-ffi or moq-gst through the dependency graph, a `js/` package, or the dev shell | ~10 min |
-| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, the python client, or the bun workspace | ~20 min |
+| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, the python or Go client, or the bun workspace | ~20 min |
 | `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm or moq-relay, plus `js/wasm`, `js/net`, `js/signals`, `test/wasm`, `.cargo/config.toml`, the bun workspace, or the dev shell | ~8 min |
 | `ts` | `just test ts`: the MPEG-TS exporter graded with TSDuck | any change reaching moq-mux or moq-cli, plus `test/ts` or the dev shell | ~5 min |
 | `windows` | `just rs windows`: a compile gate, not a device test | an edit to moq-video, moq-audio, moq-nvenc, moq-transcode, moq-native or moq-cli | ~13 min, uncached |
@@ -47,7 +47,7 @@ The map lives in `.github/scripts/select.sh`, its fixtures in `select.test.sh`, 
 
 Deliberately still nightly, and so landing on `main` rather than in review:
 
-- Go, Swift, Kotlin, and Dart. The interop matrix has no client for any of them, so no aggregate result covers those bindings however green it is.
+- Swift, Kotlin, and Dart. The interop matrix has no client for any of them, so no aggregate result covers those bindings however green it is. Go is covered, but only by `smoke_full`.
 - Feature-arm breakage that arrives through source rather than a manifest.
 - A dependency-side API break reaching `#[cfg(target_os = ...)]` code, since the platform lanes key on the crate that holds it.
 - The OBS link (`obs.yml`), the Swift package (`swift.yml`), `just rs audit`, and the TS exporter's live release timing.

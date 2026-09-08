@@ -84,8 +84,8 @@ smoke-full:
 # The representative set gates.yml runs on a pull request the delivery path can
 # reach: rust and browser publish; rust, browser, and C subscribe. Three
 # languages and both roles, so a broken frame, catalog, or connection fails here,
-# at roughly a third of the full matrix. What it does not cover is the python and
-# GStreamer clients, which is why a change to either selects `smoke-full`
+# at roughly a third of the full matrix. What it does not cover is the python, Go,
+# and GStreamer clients, which is why a change to any of them selects `smoke-full`
 
 # instead. --timeout 30 gives headless Chromium cold-start headroom.
 smoke-core:

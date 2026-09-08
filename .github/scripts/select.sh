@@ -112,10 +112,11 @@ shell='^flake\.(nix|lock)$'
 # and would make the wide matrix the default lane. What the rule actually names
 # is a change TO the wire, the binding, or a gateway.
 #
-# The python and GStreamer arms exist only here, so a change to either client's
-# source selects the wide matrix even though nothing else about it is wide.
+# The python, Go, and GStreamer arms exist only here, so a change to any of those
+# clients selects the wide matrix even though nothing else about it is wide.
 if edits moq-net moq-ffi libmoq moq-gst moq-rtmp moq-srt moq-rtc moq-hls ||
     touches '^(py/|pyproject\.toml$|uv\.lock$)' ||
+    touches '^go/' ||
     touches '^(test/smoke/|test/justfile$|package\.json$|bun\.lock$)'; then
     selected[smoke_full]=true
 elif reaches moq-relay moq-cli libmoq moq-ffi moq-gst ||
