@@ -39,9 +39,11 @@ git -C "$FIXTURE" config user.name verify
 git -C "$FIXTURE" config commit.gpgsign false
 
 mkdir -p "$FIXTURE/bin"
+
 # Stands in for the root justfile's `_changed`: reports the base it picked on
 # stderr and the changed files on stdout, untracked ones included.
-cat >"$FIXTURE/bin/just" <<'EOF'
+write_stub() {
+    cat >"$FIXTURE/bin/just" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ ${1:-} == _changed ]] || {
@@ -52,7 +54,9 @@ echo "base: base" >&2
 git diff --name-only "$(git merge-base base HEAD)"
 git ls-files --others --exclude-standard
 EOF
-chmod +x "$FIXTURE/bin/just"
+    chmod +x "$FIXTURE/bin/just"
+}
+write_stub
 
 printf 'bin/\n.verify/\n' >"$FIXTURE/.gitignore"
 printf 'one\n' >"$FIXTURE/tracked.txt"
@@ -111,6 +115,14 @@ rm "$FIXTURE/mixed.txt"
 [[ "$(run status --json | jq -r '.[0].binaries[0].digest')" =~ ^[0-9a-f]{40}$ ]] ||
     fail "an override must be digested"
 
+# ...and the digest is there to be checked. An override lives outside the source
+# digest, so rebuilding one leaves the tree identical and the receipt wrong.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/bin/just"
+[[ "$(verdict)" == stale ]] || fail "a changed override must invalidate the receipt"
+rm "$FIXTURE/bin/just"
+[[ "$(verdict)" == stale ]] || fail "a deleted override must invalidate the receipt"
+write_stub
+
 # A docs-only change is reported at its own size: the wrapper adds no work.
 rm -rf "${FIXTURE:?}/.verify"
 printf '# docs\nmore\n' >"$FIXTURE/docs.md"
@@ -132,6 +144,11 @@ run record static docs "" -- true --show check >/dev/null 2>&1 ||
 : >"$FIXTURE/.verify/docs.json"
 [[ "$(verdict)" == unreadable ]] || fail "an unreadable receipt must be reported"
 ! run status >/dev/null 2>&1 || fail "an unreadable receipt must exit nonzero"
+
+# Valid JSON missing a field the grading reads is the same problem: jq would
+# abort halfway and the receipt would disappear from an exhaustive list.
+echo '{"lane": "docs", "source": {}}' >"$FIXTURE/.verify/docs.json"
+[[ "$(verdict)" == unreadable ]] || fail "a partial receipt must be reported, not dropped"
 
 # Everything below grades gathered pull request state, with no network: a
 # required result that is absent, cancelled, skipped, or unfinished must never
@@ -191,7 +208,19 @@ failed_lane='.checks += [{name: "Smoke", status: "completed", conclusion: "failu
 
 # A rerun repeats the name, and the newest attempt is the one that counts.
 rerun='.checks[0].conclusion = "failure"
-    | .checks += [{name: "Check", status: "completed", conclusion: "success", started_at: "2"}]'
+    | .checks += [{name: "Check", id: 2, status: "completed", conclusion: "success", started_at: "2"}]'
 [[ "$(grade "$rerun")" == green ]] || fail "the newest attempt of a required job must win"
+
+# A queued rerun can arrive with no start time at all. Sorting it to the front
+# would hand the grade back to the attempt it is replacing.
+queued='.checks += [{name: "Check", id: 9, status: "queued", conclusion: null, started_at: null}]'
+[[ "$(grade "$queued")" == pending ]] || fail "a queued rerun must not inherit the old pass"
+
+# The same rule has to hold for the lanes policy does not require, or a lane
+# that failed and was rerun green keeps failing the whole report.
+extra_rerun='.checks += [
+    {name: "Smoke", id: 3, status: "completed", conclusion: "failure", started_at: "1"},
+    {name: "Smoke", id: 4, status: "completed", conclusion: "success", started_at: "2"}]'
+[[ "$(grade "$extra_rerun")" == green ]] || fail "a rerun extra lane must be graded on its newest attempt"
 
 echo "verify: receipt and readiness regression ok"

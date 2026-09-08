@@ -313,6 +313,19 @@ current_state() {
     CURRENT_DIGEST=$(source_digest)
 }
 
+# What the binaries a receipt names hash to right now. An override lives outside
+# the source digest, so rebuilding or deleting one leaves the tree untouched and
+# the receipt describing something that is no longer there.
+binary_digests() {
+    local file=$1 path digests='[]'
+    while IFS= read -r path; do
+        [[ -n $path ]] || continue
+        digests=$(jq --arg path "$path" --arg digest "$(blob "$path")" \
+            '. + [{path: $path, digest: $digest}]' <<<"$digests")
+    done < <(jq -r '.binaries[]?.path // empty' "$file")
+    printf '%s' "$digests"
+}
+
 # Grades one receipt against the tree as it is now. A pass is a pass only while
 # the source, HEAD, and target base it names are the ones in front of you.
 grade_receipt() {
@@ -321,7 +334,14 @@ grade_receipt() {
     # A receipt that cannot be read is reported as one, never skipped: dropping
     # it would turn a truncated or half-written file into "nothing was claimed",
     # which is the one answer a wrapper like this must never give by accident.
-    if ! jq -e 'has("lane") and has("source")' >/dev/null 2>&1 <"$file"; then
+    # Every field the grading filter dereferences is checked, not just a couple:
+    # a receipt from an older schema would otherwise abort jq mid-array and be
+    # dropped from a list whose whole point is being exhaustive.
+    if ! jq -e 'has("lane") and has("exit_status") and has("finished_epoch")
+        and (.binaries | type == "array")
+        and (.source | type == "object" and has("head") and has("base")
+            and has("base_head") and has("digest") and has("digest_after"))' \
+        >/dev/null 2>&1 <"$file"; then
         jq -n --arg lane "$(basename -- "${file%.json}")" \
             '{lane: $lane, kind: "unknown", verdict: "unreadable",
               reason: "the receipt is not readable; delete it and run the lane again",
@@ -336,6 +356,7 @@ grade_receipt() {
         --arg head "$CURRENT_HEAD" \
         --arg digest "$CURRENT_DIGEST" \
         --arg base_head "$base_head" \
+        --argjson binaries "$(binary_digests "$file")" \
         --argjson now "$(date -u +%s)" \
         '. as $receipt
         | (if .exit_status != 0 then
@@ -348,6 +369,10 @@ grade_receipt() {
                 {verdict: "stale", reason: "the working tree changed after the run"}
             elif .source.base_head != $base_head then
                 {verdict: "stale", reason: (.source.base + " moved after the run")}
+            elif ([.binaries[] as $recorded | $binaries[]
+                    | select(.path == $recorded.path and .digest != $recorded.digest)]
+                    | length) > 0 then
+                {verdict: "stale", reason: "an overridden binary changed after the run"}
             elif ([.binaries[] | select(.provenance != "checkout")] | length) > 0 then
                 {verdict: "exploratory", reason: "an externally supplied binary was under test"}
             else
@@ -452,11 +477,12 @@ cmd_pr() {
     rules=$(gh api "repos/$repo/rules/branches/$base" 2>/dev/null) || rules=null
 
     checks=$(gh api "repos/$repo/commits/$head/check-runs?per_page=100" \
-        --jq '[.check_runs[] | {name, status, conclusion, started_at, html_url}]' 2>/dev/null) || checks=null
+        --jq '[.check_runs[] | {id, name, status, conclusion, started_at, html_url}]' 2>/dev/null) ||
+        checks=null
     # Commit statuses predate check runs and spell the same thing differently:
     # one `state` field covering both "has it finished" and "did it pass".
     statuses=$(gh api "repos/$repo/commits/$head/status?per_page=100" --jq \
-        '[.statuses[] | {name: .context, conclusion: .state,
+        '[.statuses[] | {id, name: .context, conclusion: .state,
             status: (if .state == "pending" then "in_progress" else "completed" end),
             started_at: .created_at, html_url: .target_url}]' 2>/dev/null) || statuses=null
 
@@ -485,18 +511,27 @@ cmd_pr() {
 # cancelled, or skipped required result is testable without a network.
 cmd_classify() {
     jq '
-        def latest($runs; $name): $runs
-            | map(select(.name == $name)) | sort_by(.started_at // "") | last;
+        # A rerun repeats the name. Ordering by id as well as start time matters
+        # because a queued attempt can carry no start time at all, and sorting it
+        # to the front would hand the grade back to the attempt it replaced.
+        def attempts($runs; $name): $runs
+            | map(select(.name == $name))
+            | sort_by([(.started_at // ""), (.id // 0)]);
 
         # A result is green only when it says so. Everything else -- absent,
-        # unfinished, cancelled, skipped, neutral -- is its own state.
-        def state(run):
-            if run == null then "missing"
-            elif run.status != "completed" then "pending"
-            elif run.conclusion == "success" then "pass"
-            elif run.conclusion == "skipped" then "skipped"
-            elif run.conclusion == "neutral" or run.conclusion == null then "unknown"
-            else "fail"
+        # unfinished, cancelled, skipped, neutral -- is its own state. Any
+        # unfinished attempt makes the context pending, whatever an older one
+        # concluded: a rerun in flight is a result nobody has yet.
+        def state($runs; $name):
+            attempts($runs; $name) as $tries
+            | if ($tries | length) == 0 then "missing"
+            elif ($tries | map(.status != "completed") | any) then "pending"
+            else ($tries | last | .conclusion
+                | if . == "success" then "pass"
+                elif . == "skipped" then "skipped"
+                elif . == "neutral" or . == null then "unknown"
+                else "fail"
+                end)
             end;
 
         . as $input
@@ -508,11 +543,18 @@ cmd_classify() {
         | (($rules | map(select(.type == "merge_queue")) | length) > 0) as $queue
         | ($required | map({
             context: .,
-            state: state(latest($runs; .)),
-            url: (latest($runs; .) | if . == null then null else .html_url end)
+            state: state($runs; .),
+            url: (attempts($runs; .) | last | if . == null then null else .html_url end)
           })) as $graded
-        | ((.checks // []) | map(select(.name as $name | $required | index($name) | not))
-            | map({context: .name, state: state(.), url: .html_url})) as $extra
+        # Grouped by name for the same reason: a lane that failed and was rerun
+        # green must not keep failing the report on its first attempt.
+        | ($runs | map(.name) | unique
+            | map(select(. as $name | $required | index($name) | not))
+            | map({
+                context: .,
+                state: state($runs; .),
+                url: (attempts($runs; .) | last | .html_url)
+              })) as $extra
         | .pr.headRefOid as $head
         | ((.receipts // []) | map({
             lane: .lane,
