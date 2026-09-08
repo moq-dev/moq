@@ -429,10 +429,12 @@ with open(sys.argv[1], "rb", buffering=0) as ready:
  ready.read(1)
 os.write(9, b"still running\n")
 os.write(10, b"still running\n")
+with open(os.path.join(sys.argv[3], "late.log"), "w") as late:
+ late.write("Authorization: Bearer opaque-late-retained-secret\n")
 with open(sys.argv[2], "wb", buffering=0) as written:
  written.write(b"done\n")
 while True:
- time.sleep(120)' "$ROOT/continue" "$ROOT/written" '?token=teardown-secret' &
+ time.sleep(120)' "$ROOT/continue" "$ROOT/written" "$BUNDLE_WORK" '?token=teardown-secret' &
     mine=$!
     exec 9>&-
     exec 10>&-
@@ -515,6 +517,13 @@ after_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
 after_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
 check "retained logs continue after bundling" test "$after_log" -gt "$before_log"
 check "retained qlogs continue after bundling" test "$after_qlog" -gt "$before_qlog"
+check "late path-based writes stay in the live tree" \
+    grep -q opaque-late-retained-secret "$live/work/late.log"
+if grep -rq -- opaque-late-retained-secret "$bundle"; then
+    bad "late path-based writes stay outside the uploadable bundle"
+else
+    ok "late path-based writes stay outside the uploadable bundle"
+fi
 if running "$mine"; then
     ok "a retained session leaves its processes running"
     output=$(bash "$bundle/teardown.sh" 2>&1 || true)

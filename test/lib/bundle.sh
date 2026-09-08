@@ -44,7 +44,7 @@ BUNDLE_WORKSPACE=$(cd "$BUNDLE_LIB_DIR/../.." && pwd)
 
 # Set by bundle_init.
 BUNDLE_DIR=""        # the run's directory
-BUNDLE_WORK=""       # retained scratch: logs, configs, captures
+BUNDLE_WORK=""       # live logs and configs, always outside the upload tree
 BUNDLE_SCRATCH=""    # never retained: compiled fixtures, plugin registries
 BUNDLE_TRACE=""      # swept browser-capture snapshot in the uploadable bundle
 BUNDLE_TRACE_LIVE="" # live browser captures outside the uploadable bundle
@@ -146,12 +146,12 @@ bundle_init() {
         suffix=$((suffix + 1))
     done
     BUNDLE_DIR="$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
-    BUNDLE_WORK="$BUNDLE_DIR/work"
+    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_WORK="$BUNDLE_LIVE/work"
     BUNDLE_SCRATCH="$BUNDLE_DIR/scratch"
     BUNDLE_TRACE="$BUNDLE_DIR/trace"
     BUNDLE_QLOG="$BUNDLE_DIR/qlog"
     BUNDLE_META="$BUNDLE_DIR/.meta"
-    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     BUNDLE_TRACE_LIVE="$BUNDLE_LIVE/trace"
     BUNDLE_QLOG_LIVE="$BUNDLE_LIVE/qlog"
     mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
@@ -890,9 +890,10 @@ bundle_finish() {
     fi
 
     rm -rf "$BUNDLE_SCRATCH"
-    # Active writers always use the live tree. Copy a failure-time snapshot in
+    # Active writers always use the live tree. Copy failure-time snapshots in
     # for bounding and redaction; retained processes can create later files
     # without bypassing that one-time sweep.
+    _bundle_snapshot_live "$BUNDLE_WORK" "$BUNDLE_DIR/work" work
     _bundle_snapshot_live "$BUNDLE_TRACE_LIVE" "$BUNDLE_TRACE" browser
     _bundle_snapshot_live "$BUNDLE_QLOG_LIVE" "$BUNDLE_QLOG" qlog
     # An empty trace/qlog dir is a claim that nothing was captured, which the
@@ -901,13 +902,8 @@ bundle_finish() {
     rmdir "$BUNDLE_TRACE" "$BUNDLE_QLOG" "$BUNDLE_DIR/stacks" 2>/dev/null || true
 
     if bundle_retained && [[ "$status" -ne 0 ]]; then
-        # Keep the live inodes outside the upload root, then sweep a snapshot.
-        # Processes continue writing to BUNDLE_LIVE while the uploadable bundle
-        # remains bounded and redacted.
-        mkdir -p "$BUNDLE_LIVE"
-        mv "$BUNDLE_WORK" "$BUNDLE_LIVE/work"
-        mkdir -p "$BUNDLE_WORK"
-        cp -R "$BUNDLE_LIVE/work/." "$BUNDLE_WORK/"
+        # Processes continue writing to BUNDLE_LIVE while the uploadable
+        # snapshots remain immutable, bounded, and redacted.
         _bundle_session
     else
         rm -rf "$BUNDLE_LIVE"
