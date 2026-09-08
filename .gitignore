@@ -15,11 +15,6 @@
 /.claude/tmp/
 /.claude/worktrees/
 
-# Verification receipts and their logs, written by `just verify ...`. Untracked
-# on purpose: `just _changed` counts untracked files, so a tracked receipt would
-# change the very scope it describes.
-/.verify/
-
 # IDE
 .idea
 

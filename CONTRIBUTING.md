@@ -17,16 +17,6 @@ Keep the body short and structured, not narrated.
 When pushing additional commits to an existing PR, update the title and description if needed.
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
 
-# Verification
-
-`just verify check` and `just verify test` run the same recipes and record what
-the pass covered: source, base, toolchain, and any overridden binary. A receipt
-stops counting when HEAD, the tree, or the target base moves.
-
-`just verify report [NUMBER]` joins those receipts to the pull request's live
-head, base freshness, required checks, and reviews, read-only. It is evidence,
-not a merge gate; see `verify/README.md`.
-
 # AI
 
 AI-assisted issues, pull requests, reviews, and comments are welcome.
