@@ -12,6 +12,11 @@ VideoToolbox and openh264 backends; nothing joins them.
 
 ## Plan
 
+The decoded consumer below applies only if the ownership decision selects
+Rust-owned codecs. If Swift and Kotlin own codecs, rescope this quest to
+the existing encoded-access-unit boundary and abandon any redundant Rust
+decode work before implementation.
+
 - Add `MoqVideoConsumer` beside `MoqAudioConsumer` in `rs/moq-ffi/src`,
   selecting a rendition from the catalog, decoding with `moq-video::decode`,
   and delivering frames through the same callback-free handle shape the audio

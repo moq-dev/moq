@@ -34,6 +34,10 @@ frame, and what happens at the transitions (mute, audio track end, the ring
 re-stalling). Record the verdict here, re-title this file as the
 implementation quest, and re-estimate it.
 
+## Required
+
+- PR #3517 has merged to `dev`
+
 ## Related
 
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the estimator this sits on
