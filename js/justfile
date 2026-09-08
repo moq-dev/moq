@@ -68,7 +68,7 @@ test $FILES="":
     fi
     bun install --frozen-lockfile
     if tty -s; then
-    	bun run --filter='*' --elide-lines=0 test
+        bun run --filter='*' --elide-lines=0 test
     else
     	bun run --filter='*' test
     fi

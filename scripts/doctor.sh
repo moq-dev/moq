@@ -1189,6 +1189,8 @@ self_test_ownership() {
     check 'a relative harness port root uses the test directory' \
         "$(MOQ_TEST_PORTS=relative harness_root ports)" "$REPO/test/relative"
     check 'the filesystem root is preserved' "$(MOQ_TEST_PORTS=/ harness_root ports)" /
+    check 'the shared harness preserves the filesystem root' \
+        "$(bash -c 'source "$1"; harness_normalize_root /' _ "$REPO/test/lib/harness.sh")" /
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
