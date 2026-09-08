@@ -167,10 +167,10 @@ clients/
 ## Failures
 
 A failing run leaves a debug bundle in `target/qa`: the relay config and log,
-every client's log, per-cell timings, a screenshot and redacted HAR for a
-failing browser cell, stacks for anything that hung, and the exact command that
-reproduces the run. Playwright trace archives are replaced with their hashes
-because their internal request metadata cannot be safely redacted.
+every client's log, per-cell timings, a redacted HAR for a failing browser cell,
+stacks for anything that hung, and the exact command that reproduces the run.
+Screenshots and Playwright trace archives are replaced with their hashes because
+their rendered or internal contents cannot be safely redacted.
 `MOQ_QA_RETAIN=1` leaves the relay and clients alive to attach to. See
 [../README.md](../README.md).
 

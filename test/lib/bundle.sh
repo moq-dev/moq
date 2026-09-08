@@ -533,12 +533,16 @@ _bundle_sweep() {
         # unparseable, leaving the retained processes alive.
         [[ "$file" == "$BUNDLE_DIR/teardown.sh" ]] && continue
         case "$file" in
-            *.trace.zip)
-                # Playwright traces are ZIP archives containing request URLs
-                # and network metadata. Text redaction cannot make the archive
-                # safe without parsing and rewriting its internal indexes, so
-                # never upload it as an opaque binary.
-                _bundle_withhold "$file" "Playwright trace archives cannot be safely redacted"
+            *.trace.zip | *.png)
+                # Playwright traces contain request metadata, while screenshots
+                # can contain credentials rendered by the page. Neither can be
+                # made safe by the text redactor, so never upload them as opaque
+                # binaries.
+                if [[ "$file" == *.png ]]; then
+                    _bundle_withhold "$file" "screenshots cannot be safely redacted"
+                else
+                    _bundle_withhold "$file" "Playwright trace archives cannot be safely redacted"
+                fi
                 ;;
             *.qlog | *.sqlog)
                 # qlog is structured JSON-SEQ. Cutting bytes through a record
