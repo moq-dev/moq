@@ -181,8 +181,13 @@ impl Media {
 							continue;
 						}
 					};
+					// The floored depth, not the raw delay: the speaker holds at least
+					// AUDIO_BUFFER_MIN whatever was asked for, so a smaller budget would
+					// skip a group the playhead could still have reached, and would size
+					// the hole fill below to a playhead that does not exist.
+					let depth = self.args.delay.into_std().max(AUDIO_BUFFER_MIN);
 					let mut decode = moq_audio::decode::Config::new();
-					decode.max_age = self.args.delay.into_std();
+					decode.max_age = depth;
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.format = moq_audio::Format::F32;
@@ -190,10 +195,9 @@ impl Media {
 						Ok(consumer) => {
 							tracing::info!(track = name, "playing audio rendition");
 							let presentation = self.presentation.clone();
-							let delay = self.args.delay.into_std();
 							let proxy = self.proxy.clone();
 							tasks.spawn(async move {
-								(Kind::Audio, play_audio(consumer, presentation, delay, proxy).await)
+								(Kind::Audio, play_audio(consumer, presentation, depth, proxy).await)
 							});
 							playback.started(Kind::Audio);
 							break;
@@ -252,16 +256,17 @@ async fn play_video(
 async fn play_audio(
 	mut consumer: moq_audio::decode::Consumer,
 	presentation: Arc<Mutex<Presentation>>,
-	delay: Duration,
+	depth: Duration,
 	proxy: EventLoopProxy<Event>,
 ) -> anyhow::Result<()> {
+	// `depth` is how much the speaker holds: the playout delay, floored, and the
+	// same value the decoder's age budget was built from. The delay lives in the
+	// sink rather than in the throttle, since a sample handed over now sounds
+	// that much later and waiting for the delayed instant before writing would
+	// take it twice. The window schedules video against where the speaker
+	// actually is, which keeps the two together.
 	let sample_rate = consumer.sample_rate();
 	let channels = consumer.channels();
-	// The playout delay lives in the sink rather than in the throttle: a sample
-	// handed over now sounds this much later, so waiting for the delayed instant
-	// and *then* writing would take it twice. The window schedules video against
-	// where the speaker actually is, which keeps the two together.
-	let depth = delay.max(AUDIO_BUFFER_MIN);
 	let engine = moq_audio::playback::Engine::open(Default::default()).await?;
 	let mut input = moq_audio::playback::Input::default();
 	input.format = moq_audio::Format::F32;
