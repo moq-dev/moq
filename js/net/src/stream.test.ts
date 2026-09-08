@@ -622,5 +622,23 @@ for (const [version, tooFarBehind] of [
 		// 0x5 is TOO_FAR_BEHIND only where the draft registers it; on draft-14 it means
 		// nothing, so reading it as a lag would invent a gap the peer never reported.
 		expect(err instanceof Lagged).toBe(tooFarBehind === StreamCode.TooFarBehind);
+		// Flattened where the draft does not register it, but the wire value still reaches a
+		// log rather than being lost.
+		if (tooFarBehind === StreamCode.Internal) expect((err as StreamError).message).toContain("5");
+	});
+
+	// EXCESSIVE_LOAD, which moq-lite names nothing for, so nothing can misread the value
+	// and it survives intact. Only a code moq-lite claims for something else is flattened.
+	test(`a code moq-lite does not claim keeps its value (${version})`, async () => {
+		const reader = new Reader(
+			new ReadableStream<Uint8Array>({
+				start: (controller) => controller.error(new Reset(0x9)),
+			}),
+			undefined,
+			version,
+		);
+		const err = await reader.closed.catch((err: unknown) => err);
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(0x9 as StreamCode);
 	});
 }

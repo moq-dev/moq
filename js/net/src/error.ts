@@ -303,21 +303,27 @@ function localStreamCode(err: unknown): StreamCode {
  * the same `instanceof` as one raised here. Only the registered codes do: the reserved 32-63
  * placeholders carry no meaning the draft assigns, so they stay a plain {@link StreamError}.
  *
- * On an IETF stream the same holds per draft: a code the negotiated draft gives a meaning
- * moq-lite has no name for, or none at all, reads as {@link StreamCode.Internal} with the wire
- * value kept in the message, rather than being read as whatever moq-lite assigns that number.
+ * On an IETF stream a code keeps its value unless moq-lite claims that number for something
+ * the draft does not: `0x4` is GOING_AWAY here but UNKNOWN_OBJECT_STATUS on draft-16 and 17,
+ * and reading one back as the other would retire a session that is not going anywhere. Those
+ * read as {@link StreamCode.Internal} with the wire value kept in the message, since
+ * {@link StreamCode} is one numeric space and cannot hold a foreign code without lying about
+ * it. A code moq-lite names nothing for survives intact: nothing can misread it.
  *
  * @internal Called at the transport boundary so the raw error never reaches an application.
  */
 export function fromTransport(err: unknown, options?: TransportErrorOptions): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	if (options?.version !== undefined && !sharedStreamCode(code, options.version)) {
+	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && LOCAL_CODES.has(code)) {
 		return new StreamError(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
 	return new StreamError(code, { cause: err });
 }
+
+/** The codes moq-lite gives a meaning of its own, which a foreign one must not borrow. */
+const LOCAL_CODES: ReadonlySet<number> = new Set(Object.values(StreamCode));
 
 const legacyWebTransportErrors = new WeakSet<object>();
 
