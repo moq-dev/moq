@@ -19,7 +19,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { type BrowserContext, type Page } from "playwright";
+import { type Browser, type BrowserContext, type Page } from "playwright";
 import {
 	type BrowserErrors,
 	launch,
@@ -85,11 +85,8 @@ async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: n
 }
 
 const server = serve();
-const browser = await launch([
-	"--use-fake-device-for-media-stream",
-	"--use-fake-ui-for-media-stream",
-	"--autoplay-policy=no-user-gesture-required",
-]);
+let browser: Browser | undefined;
+let context: BrowserContext | undefined;
 
 // Only the subscriber. The publisher streams until the orchestrator SIGKILLs
 // it, which is not an ending a trace or a HAR survives; its page errors reach
@@ -100,13 +97,6 @@ const label = process.env.MOQ_QA_LABEL ?? `${role}-${process.pid}`;
 // The HAR body content is omitted: the media never travels over HTTP anyway,
 // and a bundle that ships payloads is one nobody can upload. WebTransport is
 // invisible to both the trace and the HAR, which is what relay qlog is for.
-const context: BrowserContext = await browser.newContext(
-	traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
-);
-if (traceDir) {
-	await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
-}
-
 let errors: BrowserErrors = { page: [], console: [] };
 
 // A capture step that threw is the one case worth naming: a crashed Chromium
@@ -128,26 +118,36 @@ async function attempt(what: string, fn: () => Promise<unknown>): Promise<boolea
 // A trace is worth its megabytes only for a run that failed; a passing one
 // discards everything it recorded. Returns the trace path when one was written.
 async function saveTrace(page: Page | undefined, failed: boolean): Promise<string | undefined> {
+	if (!context) {
+		if (traceDir && failed) {
+			captureFailures.push("context: browser context initialization did not complete");
+			await writeFile(join(traceDir, `${label}.capture-failed.log`), `${captureFailures.join("\n")}\n`).catch(
+				() => {},
+			);
+		}
+		return undefined;
+	}
+	const activeContext = context;
 	if (!traceDir) {
-		await attempt("context.close", () => context.close());
+		await attempt("context.close", () => activeContext.close());
 		return undefined;
 	}
 	const tracePath = join(traceDir, `${label}.trace.zip`);
 	let wrote = false;
 	if (failed) {
-		wrote = await attempt("tracing.stop", () => context.tracing.stop({ path: tracePath }));
+		wrote = await attempt("tracing.stop", () => activeContext.tracing.stop({ path: tracePath }));
 		await attempt("screenshot", async () => {
-			const capturePage = page ?? context.pages()[0];
+			const capturePage = page ?? activeContext.pages()[0];
 			if (!capturePage) throw new Error("the browser context has no page to capture");
 			await capturePage.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
 		});
 		const log = [...errors.page.map((e) => `page: ${e}`), ...errors.console.map((e) => `console: ${e}`)];
 		await attempt("console log", () => writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`));
 	} else {
-		await attempt("tracing.stop", () => context.tracing.stop());
+		await attempt("tracing.stop", () => activeContext.tracing.stop());
 	}
 	// The HAR is only written on close, so it has to happen either way.
-	await attempt("context.close", () => context.close());
+	await attempt("context.close", () => activeContext.close());
 	if (!failed) await attempt("har cleanup", () => rm(join(traceDir, `${label}.har`), { force: true }));
 
 	if (captureFailures.length > 0 && failed) {
@@ -163,6 +163,15 @@ let page: Page | undefined;
 let failure: unknown;
 let tracePath: string | undefined;
 try {
+	browser = await launch([
+		"--use-fake-device-for-media-stream",
+		"--use-fake-ui-for-media-stream",
+		"--autoplay-policy=no-user-gesture-required",
+	]);
+	context = await browser.newContext(
+		traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
+	);
+	if (traceDir) await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
 	[page, errors] = await open(context, pageUrl(server.origin, role, { url, broadcast }));
 	if (role === "subscribe") await waitForWatch(page);
 
@@ -249,7 +258,7 @@ try {
 	failure = err;
 } finally {
 	tracePath = await saveTrace(page, code !== 0);
-	await browser.close().catch(() => {});
+	await browser?.close().catch(() => {});
 	server.stop();
 }
 

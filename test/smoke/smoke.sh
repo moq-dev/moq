@@ -719,16 +719,16 @@ run_round() {
         # what breaks that promise: by the time cleanup runs, the publisher that
         # was streaming into the failed round is already gone. Leave it up, and
         # let teardown.sh reap it with everything else the run recorded. Only for
-        # a round that actually failed, since a passing round has nothing to
-        # inspect and its publisher would otherwise stream for the whole run.
-        if [[ "$round_failed" -eq 1 ]] && bundle_retained; then
+        # a round or relay that actually failed, since a passing run has nothing
+        # to inspect and its publisher would otherwise stream for the whole run.
+        if [[ "$round_failed" -eq 1 || "$RELAY_FAILED" -eq 1 ]] && bundle_retained; then
             echo "  INFO  publisher '$pub' left running for the retained session (pid $pub_pid)"
         else
             kill_tree "$pub_pid"
             wait "$pub_pid" 2>/dev/null || true
         fi
         # Don't let cleanup() later signal this now-reaped (possibly recycled) PID.
-        if [[ "$round_failed" -eq 0 ]] || ! bundle_retained; then
+        if [[ "$round_failed" -eq 0 && "$RELAY_FAILED" -eq 0 ]] || ! bundle_retained; then
             [[ "${PUB_PID:-}" == "$pub_pid" ]] && PUB_PID=""
         fi
     fi

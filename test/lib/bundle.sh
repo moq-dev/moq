@@ -55,15 +55,18 @@ BUNDLE_RUN_ID=""
 
 _bundle_have() { command -v "$1" >/dev/null 2>&1; }
 
-# JSON string escaping, enough for the paths, commands, and log lines recorded
-# here. Bash 3.2 has no printf %q that emits JSON, so this is by hand.
+# JSON string escaping for every byte Bash can store. Bash variables cannot
+# contain NUL; the remaining JSON control bytes are emitted as Unicode escapes.
 _bundle_json() {
-    local s=$1
+    local s=$1 code oct ch escaped
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
-    s=${s//$'\n'/\\n}
-    s=${s//$'\r'/\\r}
-    s=${s//$'\t'/\\t}
+    for ((code = 1; code < 32; code++)); do
+        printf -v oct '%03o' "$code"
+        printf -v ch '%b' "\\$oct"
+        printf -v escaped '\\u%04x' "$code"
+        s=${s//$ch/$escaped}
+    done
     printf '"%s"' "$s"
 }
 
@@ -342,15 +345,26 @@ _bundle_stack_one() {
 # Keep both ends of an oversized text file. The head says how the run was set
 # up and the tail says how it died; the middle is the part nobody reads.
 _bundle_bound_text() {
-    local file=$1 cap=$2 bytes
+    local file=$1 cap=$2 bytes marker marker_bytes remaining head_keep tail_keep elided
     bytes=$(_bundle_bytes "$file")
     ((bytes > cap)) || return 0
-    local keep=$((cap / 2)) tmp="$file.bounded"
-    {
-        head -c "$keep" "$file"
-        printf '\n\n... %s bytes elided by the %s-byte MOQ_QA_LOG_CAP ...\n\n' "$((bytes - cap))" "$cap"
-        tail -c "$keep" "$file"
-    } >"$tmp"
+    local tmp="$file.bounded"
+    marker=$(printf '\n\n... %s bytes elided by the %s-byte MOQ_QA_LOG_CAP ...\n\n' "$bytes" "$cap")
+    marker_bytes=${#marker}
+    if ((cap <= marker_bytes)); then
+        head -c "$cap" "$file" >"$tmp"
+    else
+        remaining=$((cap - marker_bytes))
+        head_keep=$(((remaining + 1) / 2))
+        tail_keep=$((remaining / 2))
+        elided=$((bytes - head_keep - tail_keep))
+        marker=$(printf '\n\n... %s bytes elided by the %s-byte MOQ_QA_LOG_CAP ...\n\n' "$elided" "$cap")
+        {
+            head -c "$head_keep" "$file"
+            printf '%s' "$marker"
+            tail -c "$tail_keep" "$file"
+        } >"$tmp"
+    fi
     mv "$tmp" "$file"
 }
 
@@ -446,7 +460,7 @@ _bundle_redact_stream() {
         -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
         -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
-        awk '
+        LC_ALL=C awk '
             function redact_value(    start, tail, quote) {
                 if (!match($0, /"value"[[:space:]]*:[[:space:]]*"/)) return
                 start = RSTART + RLENGTH

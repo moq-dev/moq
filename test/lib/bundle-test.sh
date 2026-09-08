@@ -59,6 +59,7 @@ fail_case() {
     bundle_endpoint relay "http://127.0.0.1:4443" moq-lite-05
     bundle_capability browser-network "HAR only; WebTransport is invisible to it"
     bundle_result "rust -> rust" fail 20 "no data before the timeout"
+    bundle_note $'diagnostic:\033[31mred'
     printf 'relay is up\n' >"$BUNDLE_WORK/relay.log"
     bundle_finish 1
 }
@@ -75,6 +76,7 @@ if command -v python3 >/dev/null 2>&1; then
         bad "the manifest is valid JSON"
     fi
 fi
+check "JSON control bytes are escaped" grep -q '\\u001b' "$manifest"
 for field in '"rerun"' '"run_id"' '"commit"' 'moq-lite-05' 'rust -> rust' 'WebTransport is invisible' 'core-dumps'; do
     if grep -q -- "$field" "$manifest"; then ok "the manifest records $field"; else bad "the manifest records $field"; fi
 done
@@ -129,7 +131,7 @@ bound_case() {
 }
 bundle=$(MOQ_QA_LOG_CAP=4096 MOQ_QA_FILE_CAP=4096 run_case bound bound_case)
 size=$(wc -c <"$bundle/work/huge.log" | tr -d '[:space:]')
-check "an oversized log is bounded" test "$size" -lt 20000
+check "an oversized log respects the exact cap" test "$size" -le 4096
 check "bounding keeps the head" grep -q FIRST-LINE "$bundle/work/huge.log"
 check "bounding keeps the tail" grep -q LAST-LINE "$bundle/work/huge.log"
 check "an oversized capture is dropped" test ! -f "$bundle/work/capture.bin"

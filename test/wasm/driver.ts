@@ -16,7 +16,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { chromium, type Page } from "playwright";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
 import type { CaseResult, Config, RelayFixture } from "./src/main.ts";
 
 const { values } = parseArgs({
@@ -63,10 +63,8 @@ const config: Config = {
 	timeout: timeoutMs,
 };
 
-const browser = await chromium.launch({
-	channel: "chromium", // full Chromium (new headless); the headless shell lacks WebTransport
-	headless: true,
-});
+let browser: Browser | undefined;
+let context: BrowserContext | undefined;
 
 const traceDir = process.env.MOQ_QA_TRACE;
 const label = process.env.MOQ_QA_LABEL ?? "wasm";
@@ -75,13 +73,6 @@ const label = process.env.MOQ_QA_LABEL ?? "wasm";
 // result cannot. HAR bodies are omitted: the session runs over WebTransport,
 // which neither the trace nor the HAR can see (that is what relay qlog is for),
 // so the bodies would be page assets and nothing else.
-const context = await browser.newContext(
-	traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
-);
-if (traceDir) {
-	await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
-}
-
 // A capture step that threw is the one case worth naming: a crashed Chromium
 // rejects `tracing.stop` and the bundle then holds no trace, which is
 // indistinguishable from a trace nobody asked for. Collected rather than
@@ -101,23 +92,35 @@ async function attempt(what: string, fn: () => Promise<unknown>): Promise<boolea
 // A trace is worth its megabytes only for a run that failed; a passing one
 // discards everything it recorded. Returns the trace path when one was written.
 async function saveTrace(page: Page | undefined, failed: boolean, log: string[]): Promise<string | undefined> {
+	if (!context) {
+		if (traceDir && failed) {
+			captureFailures.push("context: browser context initialization did not complete");
+			await writeFile(join(traceDir, `${label}.capture-failed.log`), `${captureFailures.join("\n")}\n`).catch(
+				() => {},
+			);
+		}
+		return undefined;
+	}
+	const activeContext = context;
 	if (!traceDir) {
-		await attempt("context.close", () => context.close());
+		await attempt("context.close", () => activeContext.close());
 		return undefined;
 	}
 	const path = join(traceDir, `${label}.trace.zip`);
 	let wrote = false;
 	if (failed) {
-		wrote = await attempt("tracing.stop", () => context.tracing.stop({ path }));
+		wrote = await attempt("tracing.stop", () => activeContext.tracing.stop({ path }));
 		await attempt("screenshot", async () => {
-			await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
+			const capturePage = page ?? activeContext.pages()[0];
+			if (!capturePage) throw new Error("the browser context has no page to capture");
+			await capturePage.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
 		});
 		await attempt("console log", () => writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`));
 	} else {
-		await attempt("tracing.stop", () => context.tracing.stop());
+		await attempt("tracing.stop", () => activeContext.tracing.stop());
 	}
 	// The HAR is only written on close, so it has to happen either way.
-	await attempt("context.close", () => context.close());
+	await attempt("context.close", () => activeContext.close());
 	if (!failed) await attempt("har cleanup", () => rm(join(traceDir, `${label}.har`), { force: true }));
 
 	if (captureFailures.length > 0 && failed) {
@@ -136,6 +139,14 @@ let code = 1;
 let page: Page | undefined;
 let tracePath: string | undefined;
 try {
+	browser = await chromium.launch({
+		channel: "chromium", // full Chromium (new headless); the headless shell lacks WebTransport
+		headless: true,
+	});
+	context = await browser.newContext(
+		traceDir ? { recordHar: { path: join(traceDir, `${label}.har`), content: "omit" } } : {},
+	);
+	if (traceDir) await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
 	page = await context.newPage();
 
 	// A Rust panic reaches the console through `console_error_panic_hook` rather
@@ -197,7 +208,7 @@ try {
 	console.log(`  FAIL  ${err instanceof Error ? err.message : String(err)}`);
 } finally {
 	tracePath = await saveTrace(page, code !== 0, transcript);
-	await browser.close().catch(() => {});
+	await browser?.close().catch(() => {});
 	server.stop(true);
 }
 
