@@ -154,7 +154,13 @@ worktree ACTION="check" $BASE="":
     		echo "       grant write access to the main repository's Git directory, not just this worktree" >&2
     		exit 1
     	fi
-    	git fetch --quiet origin
+    	# Whichever remote provides the base, not always origin: recording a stamp
+    	# against a ref nobody refreshed is worse than recording none, and `just
+    	# check` would scope the branch against a base that has since moved. A base
+    	# whose first segment names no remote (a local branch, a tag) leaves origin.
+    	remote="${base%%/*}"
+    	git remote | grep -qx "$remote" || remote=origin
+    	git fetch --quiet "$remote"
     	# Repointing an upstream someone chose would silently change what `just
     	# check` scopes against, so only three cases write it: no upstream, an
     	# upstream `_base` discards anyway (the branch's own remote copy, which
