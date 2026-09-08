@@ -134,8 +134,8 @@ harness_valid_port() {
 #
 # Holding the reservation for the run's lifetime is the difference from probing:
 # a probe that finds a port free has already released it by the time the relay
-# binds, so two runs that probe together pick the same number. The reservation is
-# a directory, created with mkdir(2), so two runs racing for one cannot both win.
+# binds, so two runs that probe together pick the same number. A populated claim
+# is renamed into place, so its owner metadata and reservation appear atomically.
 # shellcheck disable=SC2034  # HARNESS_PORT is the result, read by the caller
 harness_port() {
     local label="$1" wanted="${2:-}"
@@ -178,28 +178,42 @@ harness_port() {
 
 # Claim one port. Private; `harness_port` is the entry point.
 harness_port_take() {
-    local root="$1" port="$2" owner aside
-    if ! mkdir "$root/$port" 2>/dev/null; then
+    local root="$1" port="$2" owner aside claim marker nested
+    while true; do
+        claim=$(mktemp -d "$root/.claim-$port-XXXXXXXX") || return 1
+        marker=$(basename "$claim")
+        printf '%s\n' "$$" >"$claim/pid"
+        printf '%s\n' "$HARNESS_RUN" >"$claim/run"
+        : >"$claim/$marker"
+
+        if mv "$claim" "$root/$port" 2>/dev/null; then
+            if [[ -f "$root/$port/$marker" ]]; then
+                rm -f "$root/$port/$marker"
+                HARNESS_PORTS+=("$root/$port")
+                return 0
+            fi
+            # `mv source existing-directory` nests the source instead of failing.
+            # Remove our nested claim before inspecting the reservation we lost.
+            nested="$root/$port/$marker"
+            [[ ! -d "$nested" ]] || rm -rf "$nested"
+        else
+            rm -rf "$claim"
+        fi
+
         # An owner that no longer exists left the reservation behind (SIGKILL, a
-        # crashed shell). Reclaim it rather than skipping the port forever.
+        # crashed shell). Because the directory was populated before its atomic
+        # rename, an empty owner is stale rather than a claim still initializing.
         owner=$(cat "$root/$port/pid" 2>/dev/null || true)
-        if [[ -z "$owner" ]] || kill -0 "$owner" 2>/dev/null; then
+        if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
             return 1
         fi
         # Renaming it away is the ownership transition, and rename(2) is atomic:
-        # of two reclaimers that both saw the dead owner, exactly one moves the
-        # directory and the loser fails with the source already gone. Deleting it
-        # in place is not enough -- the loser's `rm -rf` would land after the
-        # winner had already recreated the reservation, and both would proceed.
-        aside="$root/.stale-$port-$$"
-        mv "$root/$port" "$aside" 2>/dev/null || return 1
+        # of two reclaimers that both saw the dead owner, exactly one moves it;
+        # the loser loops and inspects the winner's populated reservation.
+        aside="$root/.stale-$port-$$-$RANDOM"
+        mv "$root/$port" "$aside" 2>/dev/null || continue
         rm -rf "${aside:?}"
-        mkdir "$root/$port" 2>/dev/null || return 1
-    fi
-    echo "$$" >"$root/$port/pid"
-    echo "$HARNESS_RUN" >"$root/$port/run"
-    HARNESS_PORTS+=("$root/$port")
-    return 0
+    done
 }
 
 # Record an endpoint this run stood up: `harness_endpoint <label> <url>`.

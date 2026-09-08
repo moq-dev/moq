@@ -101,16 +101,16 @@ worktree ACTION="check" $BASE="":
     	fi
     }
 
-    # A directory git will create on demand is only as writable as the parent it
-    # would be created in, so probe that instead of reporting it missing.
+    # A directory git will create on demand is only as writable as its nearest
+    # existing parent, so probe upward instead of reporting it missing.
     access_or_parent() {
-    	local dir="$1" result
-    	result=$(access "$dir")
-    	if [[ "$result" == missing ]]; then
-    		access "$(dirname "$dir")"
-    	else
-    		echo "$result"
-    	fi
+    	local dir="$1" parent
+    	while [[ ! -d "$dir" ]]; do
+    		parent=$(dirname "$dir")
+    		[[ "$parent" != "$dir" ]] || { echo missing; return; }
+    		dir="$parent"
+    	done
+    	access "$dir"
     }
 
     base=$(just _base "$BASE")

@@ -255,17 +255,17 @@ prepare_go() {
         return
     }
     echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
-    local staged ffi_pkg wrapper_pkg src="$TMP/go-client"
-    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$TMP/go-stage.log"); then
+    local staged ffi_pkg wrapper_pkg src="$HARNESS_RUN/go-client"
+    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
         mark_broken go "go/scripts/stage.sh failed"
-        sed 's/^/        /' "$TMP/go-stage.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/go-stage.log" >&2 || true
         return
     fi
     ffi_pkg=$(printf '%s\n' "$staged" | sed -n 1p)
     wrapper_pkg=$(printf '%s\n' "$staged" | sed -n 2p)
     mkdir -p "$src"
     cp "$CLIENTS/go/go.mod" "$CLIENTS/go/main.go" "$src/"
-    GO_SMOKE="$TMP/go-smoke"
+    GO_SMOKE="$HARNESS_RUN/go-smoke"
     if ! (
         cd "$src"
         export CGO_ENABLED=1 GOFLAGS=-mod=mod
@@ -273,9 +273,9 @@ prepare_go() {
             -replace="github.com/moq-dev/moq-go=$wrapper_pkg" \
             -replace="github.com/moq-dev/moq-go-ffi=$ffi_pkg"
         go build -o "$GO_SMOKE" .
-    ) >"$TMP/go-build.log" 2>&1; then
+    ) >"$HARNESS_RUN/go-build.log" 2>&1; then
         mark_broken go "go build failed"
-        sed 's/^/        /' "$TMP/go-build.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
     fi
 }
 
@@ -425,7 +425,7 @@ run_publisher() {
                 publish --url "$URL" --broadcast "$broadcast"
             ;;
         go)
-            (ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+            ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
