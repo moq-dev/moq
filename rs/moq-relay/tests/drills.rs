@@ -17,7 +17,6 @@
 //! covering the primitives underneath.
 #![cfg(all(feature = "quinn", feature = "websocket"))]
 
-use std::net::UdpSocket;
 use std::time::Duration;
 
 use moq_native::moq_net::{self, Origin};
@@ -36,16 +35,6 @@ const STALL_GROUPS: usize = 8;
 /// The track every drill publishes.
 const TRACK: &str = "drill";
 
-/// Reserve a UDP port by binding it, then hand back the number.
-///
-/// A relay restart has to come back on the same port, since that is the URL its
-/// clients are reconnecting to, so the port is picked once up front rather than
-/// asking the kernel for a fresh one each time.
-fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind udp probe");
-	probe.local_addr().expect("probe addr").port()
-}
-
 /// A relay on its own runtime, so a drill can kill it the way a crash does.
 ///
 /// Aborting the `run` task is not enough: [`moq_relay::serve`] spawns a task per
@@ -59,13 +48,13 @@ struct RelayHost {
 }
 
 impl RelayHost {
-	/// Bind a relay on `port` and wait for it to be ready to accept.
-	async fn start(port: u16) -> Self {
+	/// Bind a relay and wait for it to be ready to accept.
+	async fn start(requested_port: Option<u16>) -> Self {
 		// Process-global; every drill in this binary races to be first.
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		let mut config = Config::default();
-		config.server.bind = Some(format!("127.0.0.1:{port}"));
+		config.server.bind = Some(format!("127.0.0.1:{}", requested_port.unwrap_or_default()));
 		config.server.tls.generate = vec!["localhost".into()];
 		config.auth.public = Some(PublicConfig::Detailed(PublicDetailed {
 			subscribe: vec![String::new()],
@@ -97,7 +86,10 @@ impl RelayHost {
 			.expect("relay startup timed out")
 			.expect("relay task vanished during startup")
 			.expect("relay failed to load");
-		assert_eq!(addr.map(|addr| addr.port()), Some(port), "relay bound the wrong port");
+		let port = addr.expect("relay did not bind UDP").port();
+		if let Some(requested_port) = requested_port {
+			assert_eq!(port, requested_port, "relay bound the wrong port");
+		}
 
 		Self {
 			port,
@@ -271,7 +263,7 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 /// of that behavior worth grading.
 #[tokio::test]
 async fn cancel_under_backpressure_releases_the_reader() {
-	let relay = RelayHost::start(free_udp_port()).await;
+	let relay = RelayHost::start(None).await;
 	let url = relay.url();
 
 	let publisher = Origin::random().produce();
@@ -370,8 +362,8 @@ async fn cancel_under_backpressure_releases_the_reader() {
 /// splice over the gap, so the same handles resume when the relay returns.
 #[tokio::test]
 async fn relay_killed_mid_group_aborts_then_resumes() {
-	let port = free_udp_port();
-	let mut relay = RelayHost::start(port).await;
+	let mut relay = RelayHost::start(None).await;
+	let port = relay.port;
 	let url = relay.url();
 
 	let publisher = Origin::random().produce();
@@ -422,7 +414,7 @@ async fn relay_killed_mid_group_aborts_then_resumes() {
 	expect_status(&mut subscribe_loop, moq_native::Status::Disconnected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_native::Status::Disconnected, "publisher").await;
 
-	let relay = RelayHost::start(port).await;
+	let relay = RelayHost::start(Some(port)).await;
 
 	expect_status(&mut subscribe_loop, moq_native::Status::Connected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_native::Status::Connected, "publisher").await;
@@ -460,7 +452,7 @@ async fn expect_status(reconnect: &mut moq_native::Reconnect, want: moq_native::
 /// new publisher is sending, never the previous one's cache.
 #[tokio::test]
 async fn interrupted_publisher_republishes_new_content() {
-	let relay = RelayHost::start(free_udp_port()).await;
+	let relay = RelayHost::start(None).await;
 	let url = relay.url();
 
 	let subscriber = Origin::random().produce();
@@ -553,7 +545,7 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 /// ever arrive, so "the frame showed up" cannot be a harness artifact.
 #[tokio::test]
 async fn no_publisher_never_delivers() {
-	let relay = RelayHost::start(free_udp_port()).await;
+	let relay = RelayHost::start(None).await;
 	let url = relay.url();
 
 	let subscriber = Origin::random().produce();

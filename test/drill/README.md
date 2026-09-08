@@ -53,7 +53,7 @@ connection and those keep serving a relay whose accept loop is gone.
 
 A dropped runtime sends no `CONNECTION_CLOSE`, exactly like a killed process, so
 the clients discover the loss through the QUIC idle timeout. The drills set that
-to one second (and the keep-alive well inside it), which is what keeps a crash
+to two seconds (and the keep-alive well inside it), which is what keeps a crash
 bounded rather than fast.
 
 ## Sensitivity

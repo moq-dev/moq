@@ -32,6 +32,19 @@ CARGO="${RUST_CARGO:-cargo}"
 KEEP=0
 BASELINE=1
 SELECTED=()
+dir=
+log=
+
+cleanup() {
+    if [[ $KEEP -eq 0 ]]; then
+        [[ -z "$dir" ]] || rm -rf "$dir"
+        [[ -z "$log" ]] || rm -f "$log"
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Read a `# key: value` header out of a patch. The headers sit above the diff,
 # where `patch` ignores them.
@@ -158,10 +171,17 @@ for patch in "$MUTATIONS"/*.patch; do
     fi
 
     dir=$(mktemp -d "${TMPDIR:-/tmp}/moq-drill.XXXXXX")
+    log=
     snapshot "$dir"
     # The snapshot is a plain directory with no repository metadata of its own,
     # and it stays that way: nothing here can reach the developer's checkout.
-    patch -p1 -d "$dir" --batch --forward --silent <"$patch"
+    if ! patch -p1 -d "$dir" --batch --forward --silent <"$patch"; then
+        echo "  FAIL: '$name' does not apply to this tree" >&2
+        failed=$((failed + 1))
+        cleanup
+        dir=
+        continue
+    fi
 
     log=$(mktemp "${TMPDIR:-/tmp}/drill-mutated.XXXXXX")
     status=$(run_drill "$dir" "$drill" "$log")
@@ -189,8 +209,9 @@ for patch in "$MUTATIONS"/*.patch; do
         echo "  snapshot: $dir"
         echo "  log:      $log"
     else
-        rm -rf "$dir"
-        rm -f "$log"
+        cleanup
+        dir=
+        log=
     fi
 done
 
