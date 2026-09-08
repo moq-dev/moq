@@ -619,6 +619,31 @@ unreadable_wait_child=$(<"$bundle/unreadable-wait-child.pid")
 check "waiting preserves job ownership long enough to reap surviving children" \
     stopped "$unreadable_wait_child"
 
+released_group_wait_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_spawn released-group "$BUNDLE_WORK/released-group.log" true
+    # shellcheck disable=SC2153 # Set by harness_spawn in the sourced library.
+    leader=$HARNESS_PID
+    ownership_checks=0
+    # shellcheck disable=SC2329 # harness_wait invokes these test doubles indirectly.
+    harness_group_owned() {
+        ownership_checks=$((ownership_checks + 1))
+        ((ownership_checks == 1))
+    }
+    # shellcheck disable=SC2329 # harness_wait invokes this test double indirectly.
+    _harness_group_present() { return 1; }
+    # shellcheck disable=SC2329 # harness_wait must not invoke this test double.
+    kill() { : >"$BUNDLE_WORK/signalled-released-group"; }
+    harness_wait "$leader"
+    command kill -KILL -- -"$leader" 2>/dev/null || true
+    test ! -e "$BUNDLE_WORK/signalled-released-group"
+    bundle_finish 1
+}
+bundle=$(run_case released-group-wait released_group_wait_case)
+check "a released process-group id is not signalled from stale ownership" test -f "$bundle/manifest.json"
+
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
     # The argument exercises a credential-shaped command without exposing it in

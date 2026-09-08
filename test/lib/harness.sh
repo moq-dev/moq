@@ -382,6 +382,15 @@ harness_group_owned() {
     [[ "$group" == "$pid" ]]
 }
 
+# True while the recorded witness still occupies the original process group.
+# This is presence, not ownership by itself: it is used only with ownership
+# proven before waiting, so an empty, reusable group id is never signalled.
+_harness_group_present() {
+    local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" group
+    group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)
+    [[ "$group" == "$pid" ]]
+}
+
 # True only while the owned group contains a real fixture, excluding the leader shell and sentinel.
 harness_group_has_fixture() {
     local i="$1" group="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}"
@@ -406,7 +415,7 @@ harness_wait() {
     fi
     wait "$pid" || status=$?
     if [[ -n "$i" ]]; then
-        if harness_group_owned "$i" || ((owned)); then
+        if harness_group_owned "$i" || { ((owned)) && _harness_group_present "$i"; }; then
             kill -KILL -- -"$pid" 2>/dev/null || true
         fi
         HARNESS_STATES[i]="done"
