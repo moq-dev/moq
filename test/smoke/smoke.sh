@@ -732,6 +732,7 @@ run_round() {
         if [[ -f "$marker" ]]; then
             FAULT_DONE=1
             echo "=== fault injection: killing the relay with a subscriber connected ==="
+            bundle_stack relay "$RELAY_PID"
             harness_reap "$RELAY_PID"
             RELAY_PID=""
             RELAY_FAILED=1
@@ -745,7 +746,7 @@ run_round() {
     fi
     # A publisher that streams forever should still be alive; if it died, the
     # subscriber failures below are a publisher bug, so surface its log.
-    if [[ -n "$pub_pid" ]] && ! kill -0 "$pub_pid" 2>/dev/null; then
+    if [[ -n "$pub_pid" ]] && harness_exited "$pub_pid"; then
         echo "  WARN  publisher '$pub' exited early:"
         sed 's/^/        /' "$HARNESS_RUN/pub-$pub.log" 2>/dev/null || true
     fi
@@ -873,7 +874,7 @@ fi
 # crash halfway through the matrix can be reported as a clean run. It is not
 # one: nothing after the crash was actually tested. Checked here rather than
 # per-cell, because it is a property of the run.
-if [[ "$RELAY_FAILED" -eq 1 ]] || { [[ -n "$RELAY_PID" ]] && ! kill -0 "$RELAY_PID" 2>/dev/null; }; then
+if [[ "$RELAY_FAILED" -eq 1 ]] || { [[ -n "$RELAY_PID" ]] && harness_exited "$RELAY_PID"; }; then
     echo "  FAIL  relay (exited during the matrix)"
     bundle_result relay fail "" "exited during the matrix"
     overall=1
