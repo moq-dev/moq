@@ -103,9 +103,18 @@ stage=$(<"$ROOT/canonical-stage.path")
 check "a symlinked upload root resolves to its canonical target" \
     sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$bundle" "$real_root"
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-check "a trailing slash cannot place staging under the upload root" \
-    sh -c 'case "$1" in "$2"/*) exit 1;; esac' _ "$stage" "$real_root"
+check "a trailing slash keeps staging in the private namespace" \
+    sh -c 'case "$1" in "$2"/.incomplete/*) exit 0;; esac; exit 1' _ "$stage" "$real_root"
 check "canonical-root publication removes its private staging path" test ! -e "$stage"
+
+# A mounted artifact directory can be writable even when its parent is not.
+# Private state belongs below the configured root, so this remains supported.
+mkdir -p "$ROOT/mounted-parent/artifacts"
+chmod 500 "$ROOT/mounted-parent"
+mounted_root_case() { bundle_finish 1; }
+bundle=$(CASE_ROOT="$ROOT/mounted-parent/artifacts" run_case mounted-root mounted_root_case)
+chmod 700 "$ROOT/mounted-parent"
+check "a writable artifact root needs no writable parent" test -f "$bundle/manifest.json"
 
 # ── a failing run leaves a described bundle ─────────────────────────────────
 fail_case() {
@@ -121,9 +130,10 @@ fail_case() {
 bundle=$(run_case fail fail_case)
 manifest="$bundle/manifest.json"
 stage=$(<"$ROOT/fail-stage.path")
+fail_root=$(cd "$ROOT/fail.d" && pwd -P)
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-check "an in-progress bundle stays outside the upload root" \
-    sh -c 'case "$1" in "$2"/*) exit 1;; esac' _ "$stage" "$ROOT/fail.d"
+check "an in-progress bundle stays in the private namespace" \
+    sh -c 'case "$1" in "$2"/.incomplete/*) exit 0;; esac; exit 1' _ "$stage" "$fail_root"
 check "an in-progress bundle is hidden until finalization" test -f "$ROOT/fail-final-hidden"
 check "the private staging directory is removed after publication" test ! -e "$stage"
 check "a failing run retains its bundle" test -f "$manifest"

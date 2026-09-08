@@ -45,14 +45,14 @@ BUNDLE_WORKSPACE=$(cd "$BUNDLE_LIB_DIR/../.." && pwd)
 # Set by bundle_init.
 BUNDLE_DIR=""        # private staging directory while the run is active
 BUNDLE_FINAL=""      # uploadable directory, published only after finalization
-BUNDLE_WORK=""       # live logs and configs, always outside the upload tree
+BUNDLE_WORK=""       # live logs and configs, always outside the upload selection
 BUNDLE_SCRATCH=""    # never retained: compiled fixtures, plugin registries
 BUNDLE_TRACE=""      # swept browser-capture snapshot in the uploadable bundle
 BUNDLE_TRACE_LIVE="" # live browser captures outside the uploadable bundle
 BUNDLE_QLOG=""       # bounded qlog snapshot inside the uploadable bundle
 BUNDLE_QLOG_LIVE=""  # live relay qlogs outside the uploadable bundle
 BUNDLE_META=""       # jsonl fragments assembled into manifest.json
-BUNDLE_LIVE=""       # live retained logs, outside the uploadable bundle
+BUNDLE_LIVE=""       # private live state, always outside the upload selection
 BUNDLE_HARNESS=""
 BUNDLE_RUN_ID=""
 BUNDLE_SESSION_RETAINED=0 # whether the harness proved that an owned process survived
@@ -144,9 +144,11 @@ bundle_init() {
     # here rather than a same-named path under the new working directory.
     mkdir -p "$root"
     root=$(cd "$root" && pwd -P)
-    local stage_root="${root}-incomplete"
-    mkdir -p "$stage_root"
+    local stage_root="$root/.incomplete"
+    local live_root="$root/.live"
+    mkdir -p "$stage_root" "$live_root"
     stage_root=$(cd "$stage_root" && pwd -P)
+    live_root=$(cd "$live_root" && pwd -P)
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the
     # failure the first was kept for.
@@ -159,7 +161,7 @@ bundle_init() {
     done
     BUNDLE_FINAL="$root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     BUNDLE_DIR="$stage_root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
-    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
+    BUNDLE_LIVE="$live_root/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     BUNDLE_WORK="$BUNDLE_LIVE/work"
     BUNDLE_SCRATCH="$BUNDLE_DIR/scratch"
     BUNDLE_TRACE="$BUNDLE_DIR/trace"
@@ -794,7 +796,7 @@ set -uo pipefail
 bundle_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 run=${bundle_dir##*/}
 root=${bundle_dir%/*}
-teardown="${root}-live/$run/teardown.sh"
+teardown="$root/.live/$run/teardown.sh"
 if [[ ! -x "$teardown" ]]; then
     echo "no retained session is available for this bundle" >&2
     exit 1
@@ -951,8 +953,8 @@ _bundle_snapshot_live() {
 # bundle_finish <status>: keep or drop the bundle, and say which.
 #
 # Returns the status it was given unless publishing the finalized bundle fails.
-# The upload root never contains an in-progress directory, so cancellation
-# cannot expose files that final redaction did not reach.
+# The workflow upload selection never matches an in-progress directory, so
+# cancellation cannot expose files that final redaction did not reach.
 bundle_finish() {
     local status=${1:-0}
     [[ -n "$BUNDLE_DIR" && -d "$BUNDLE_DIR" ]] || return "$status"
@@ -960,8 +962,8 @@ bundle_finish() {
     if [[ "$status" -eq 0 && -z "${MOQ_QA_KEEP:-}" ]]; then
         rm -rf "$BUNDLE_DIR" "$BUNDLE_LIVE"
         rmdir "$(dirname "$BUNDLE_DIR")" 2>/dev/null || true
-        rmdir "$(dirname "$BUNDLE_FINAL")" 2>/dev/null || true
         rmdir "$(dirname "$BUNDLE_LIVE")" 2>/dev/null || true
+        rmdir "$(dirname "$BUNDLE_FINAL")" 2>/dev/null || true
         return 0
     fi
 

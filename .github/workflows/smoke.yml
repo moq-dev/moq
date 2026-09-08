@@ -114,6 +114,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: qa-bundle-smoke
-          path: qa-artifacts/
+          # Match finalized harness directories, never .incomplete or .live.
+          path: |
+            qa-artifacts/smoke-*/
+            qa-artifacts/ts-*/
           if-no-files-found: ignore
           retention-days: 14
