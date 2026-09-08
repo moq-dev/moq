@@ -607,7 +607,7 @@ run_round() {
 run_media() {
     local name="$1" log started status=0
     shift
-    log="$TMP/media-${name// /-}.log"
+    log="$HARNESS_RUN/media-${name// /-}.log"
     started=$SECONDS
     (cd "$CLIENTS/js" && bun media.ts --url "$URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
     if [[ "$status" -eq 0 ]]; then
