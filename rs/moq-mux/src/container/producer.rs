@@ -91,10 +91,14 @@ impl<C: Container> Producer<C> {
 	/// Record a frame's reorder delay (`PTS - DTS`), raising the measured jitter to the decode
 	/// buffer a B-frame stream needs.
 	///
-	/// The one measurement that can't come from the writes themselves: frames carry no decode time,
-	/// so only a caller that demuxed one (a container importer) can supply it.
+	/// Frames carry no decode time, so a caller that demuxed one (a container importer) supplies it.
 	pub fn reorder(&mut self, delay: moq_net::Timestamp) {
 		self.estimator.reorder(delay);
+	}
+
+	/// Record the media duration emitted together by a container importer.
+	pub(crate) fn burst(&mut self, duration: std::time::Duration) {
+		self.estimator.burst(duration);
 	}
 
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open

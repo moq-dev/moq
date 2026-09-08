@@ -476,6 +476,7 @@ A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
 If absent, a consumer SHOULD assume each frame is flushed immediately.
 
 It is measured at the publisher: how far behind the media clock a frame is when the publisher hands it to the transport, whether an encoder, a reorder buffer, or a segmenter held it.
+An importer can estimate this delay from the media span of a batch, such as a TS PES or an fMP4 fragment, without measuring the time spent waiting for input.
 It is never a measurement of the network, which a consumer observes for itself and which no two consumers of the same broadcast would agree on.
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
@@ -945,6 +946,7 @@ This document has no IANA actions.
 # Appendix A: Changelog
 
 ## moq-hang-03
+- Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
 
 # Acknowledgments

@@ -74,6 +74,12 @@ impl<E: CatalogExt> Import<E> {
 		self.rendition.estimate(self.track.estimate());
 	}
 
+	/// Record the media duration emitted together by the TS importer.
+	pub(crate) fn burst(&mut self, duration: std::time::Duration) {
+		self.track.burst(duration);
+		self.estimate();
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

@@ -1082,7 +1082,7 @@ fn audio_fragment_samples(base_media_decode_time: u64, duration: u32, size: u32,
 	buf
 }
 
-/// Each fragment is one write, so the advertised jitter is the fragment cadence. A source whose
+/// Each fragment advertises its media span immediately. A source whose
 /// fragments shrink (or whose last fragment holds a single sample) must not walk the advertised
 /// value back down: the publisher can emit a long fragment again at any point.
 #[test]
@@ -1110,6 +1110,10 @@ fn fragment_jitter_never_shrinks() {
 
 	// bbb's AAC track runs at 44100; eight 1024-sample frames span 8192 ticks (~186 ms).
 	fmp4.decode(&audio_fragment_samples(0, 1024, 327, 8)).unwrap();
+	assert!(
+		audio_jitter(&catalog).is_some(),
+		"the first fragment must publish its own span"
+	);
 	fmp4.decode(&audio_fragment_samples(8192, 1024, 327, 8)).unwrap();
 	let cadence = audio_jitter(&catalog).expect("the fragment cadence is published");
 	assert!(
@@ -1129,4 +1133,61 @@ fn fragment_jitter_never_shrinks() {
 
 	fmp4.finish().unwrap();
 	assert_eq!(audio_jitter(&catalog), Some(cadence));
+}
+
+#[test]
+fn fragment_jitter_uses_sample_endpoints() {
+	for (samples, expected) in [
+		(vec![(Some(882), 0), (Some(4410), 0)], 120),
+		(vec![(Some(441), 0), (Some(4410), -441)], 100),
+		(vec![(Some(882), 0), (None, 0)], 40),
+	] {
+		let (ftyp, mut moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+		for trex in &mut moov.mvex.as_mut().unwrap().trex {
+			trex.default_sample_duration = 0;
+		}
+		let mut init = Vec::new();
+		ftyp.encode(&mut init).unwrap();
+		moov.encode(&mut init).unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+		import.decode(&init).unwrap();
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: 2,
+					default_sample_size: Some(8),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 0,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: None,
+					entries: samples
+						.iter()
+						.map(|(duration, cts)| mp4_atom::TrunEntry {
+							duration: *duration,
+							cts: Some(*cts),
+							..Default::default()
+						})
+						.collect(),
+				}],
+				..Default::default()
+			}],
+		};
+		let mut fragment = Vec::new();
+		moof.encode(&mut fragment).unwrap();
+		mp4_atom::Mdat {
+			data: vec![0xAA; samples.len() * 8],
+		}
+		.encode(&mut fragment)
+		.unwrap();
+		import.decode(&fragment).unwrap();
+		let snapshot = catalog.snapshot();
+		let jitter = snapshot.audio.renditions.values().next().unwrap().jitter.unwrap();
+		assert_eq!(jitter.as_nanos().div_ceil(1_000_000), expected);
+	}
 }

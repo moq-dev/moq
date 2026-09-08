@@ -11,7 +11,8 @@ encoder, and a latency-buffered batch all raise it without being special
 cases, and a video encoder running 200 ms behind the audio encoder shows up
 as 200 ms on the video rendition. Only encoders feed the clock; file and pipe
 imports and the RTMP, SRT, and TS gateways never do, so an unstable ingest
-link cannot inflate the catalog.
+link cannot inflate the catalog. TS and fragmented MP4 imports retain their
+clock-free estimates from the media span of each emitted batch.
 
 ## Plan
 

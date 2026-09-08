@@ -1872,6 +1872,7 @@ impl<E: CatalogExt> AacStream<E> {
 		let mut in_tail = carried > 0;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
+		let mut burst = std::time::Duration::ZERO;
 		let mut offset = 0;
 		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
 		// carried only if nothing later in the buffer confirms.
@@ -1997,6 +1998,8 @@ impl<E: CatalogExt> AacStream<E> {
 			};
 
 			import.decode(&data[offset + header.header_len..end], pts)?;
+			// Count only completed frames; input gaps and unfinished tails are not a media burst.
+			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
@@ -2007,6 +2010,10 @@ impl<E: CatalogExt> AacStream<E> {
 			// Every ADTS frame is 1024 samples.
 			pts = advance_pts(pts, 1024, header.sample_rate)?;
 			offset = end;
+		}
+
+		if let Some(import) = &mut self.import {
+			import.burst(burst);
 		}
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
@@ -3158,6 +3165,66 @@ mod test {
 		p.extend_from_slice(&pes);
 		assert_eq!(p.len(), 188, "audio PES packet must fill exactly one TS packet");
 		p
+	}
+
+	#[test]
+	fn aac_pes_jitter_survives_bitrate_updates() {
+		const PID: u16 = 0x60;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&synth_pmt(&[(StreamType::AdtsAac, PID)], false)).unwrap();
+		let mut frame = super::adts::write_header(2, 44_100, 2, 8).unwrap().to_vec();
+		frame.extend_from_slice(&[0; 8]);
+		import
+			.decode(&audio_pes_packet(PID, 0, 90_000, &frame.repeat(7)))
+			.unwrap();
+		let initial = catalog
+			.snapshot()
+			.audio
+			.renditions
+			.values()
+			.next()
+			.unwrap()
+			.jitter
+			.unwrap();
+		assert_eq!(
+			initial.as_nanos().div_ceil(1_000_000),
+			163,
+			"a seven-frame PES is one burst"
+		);
+		for i in 0..60 {
+			let pts = 90_000 + (7 + i) * 1024 * 90_000 / 44_100;
+			import
+				.decode(&audio_pes_packet(PID, ((i + 1) % 16) as u8, pts, &frame))
+				.unwrap();
+		}
+		import.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		let config = snapshot.audio.renditions.values().next().unwrap();
+		assert!(config.bitrate.is_some(), "exercise a bitrate refinement");
+		assert_eq!(config.jitter, Some(initial));
+	}
+
+	#[test]
+	fn aac_pes_jitter_counts_completed_split_frames() {
+		const PID: u16 = 0x60;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&synth_pmt(&[(StreamType::AdtsAac, PID)], false)).unwrap();
+		let mut frame = super::adts::write_header(2, 44_100, 2, 8).unwrap().to_vec();
+		frame.extend_from_slice(&[0; 8]);
+		let mut first = frame.repeat(2);
+		first.extend_from_slice(&frame[..10]);
+		import.decode(&audio_pes_packet(PID, 0, 90_000, &first)).unwrap();
+		let mut second = frame[10..].to_vec();
+		second.extend_from_slice(&frame.repeat(6));
+		// A timestamp jump must not turn time spent waiting for input into publisher jitter.
+		import.decode(&audio_pes_packet(PID, 1, 900_000, &second)).unwrap();
+		let snapshot = catalog.snapshot();
+		let jitter = snapshot.audio.renditions.values().next().unwrap().jitter.unwrap();
+		assert_eq!(jitter.as_nanos().div_ceil(1_000_000), 163);
 	}
 
 	/// Open a bounded audio PES whose declared payload is longer than this packet carries.

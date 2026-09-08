@@ -113,7 +113,12 @@ impl Estimator {
 	/// B-frame stream needs. Only a container knows this; the elementary stream carries no decode
 	/// time.
 	pub fn reorder(&mut self, delay: Timestamp) {
-		self.jitter.reorder(delay);
+		self.burst(Duration::from(delay));
+	}
+
+	/// Record the media duration emitted together by a container importer.
+	pub(crate) fn burst(&mut self, duration: Duration) {
+		self.jitter.max = self.jitter.max.max(duration);
 	}
 
 	/// Everything measured so far. Hand it to
@@ -234,7 +239,8 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 /// Tracks the catalog `jitter` for a video/audio track: the maximum delay between a frame being
 /// ready and the publisher flushing it, so a player sizes its buffer to at least this much.
 ///
-/// Two things contribute, and the reported value is the largest ever seen:
+/// The reported value is the largest contribution ever seen:
+/// - the media span of a container batch,
 /// - the reorder delay (`max(PTS - DTS)`), non-zero only for reordered (B-frame) streams and
 ///   which a transmuxer also reuses as the decode-clock reserve, and
 /// - the steady inter-frame spacing, the floor for a track that flushes each write on its own.
@@ -273,10 +279,6 @@ impl Jitter {
 			self.min_duration = Some(min);
 			self.max = self.max.max(min);
 		}
-	}
-
-	fn reorder(&mut self, delay: Timestamp) {
-		self.max = self.max.max(Duration::from(delay));
 	}
 
 	fn discontinuity(&mut self) {

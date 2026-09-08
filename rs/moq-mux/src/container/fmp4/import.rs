@@ -143,6 +143,9 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// The decode time of the last fragment, which the next one has to advance past.
 	last_decode_time: Option<u64>,
 
+	// The shortest declared sample duration, used when a final sample leaves its end open.
+	sample_duration: Option<Timestamp>,
+
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
 
@@ -356,6 +359,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					segment: None,
 					recorder: Some(recorder),
 					last_decode_time: None,
+					sample_duration: None,
 					pending_sequence: None,
 					estimator: Estimator::new(),
 				},
@@ -733,6 +737,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 
 			let mut min_timestamp = None;
+			let mut max_end = None;
 			let mut contains_keyframe = false;
 			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 			let mut sample_index = 0usize;
@@ -785,6 +790,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
 					// doesn't go through a lossy microsecond detour.
 					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
+					let end = if let Some(duration) = duration {
+						let duration = Timestamp::new(duration as u64, timescale)?;
+						track.sample_duration = Some(track.sample_duration.map_or(duration, |min| min.min(duration)));
+						timestamp.checked_add(duration)?
+					} else if let Some(duration) = track.sample_duration {
+						timestamp.checked_add(duration)?
+					} else {
+						timestamp
+					};
+					max_end = Some(max_end.map_or(end, |max: Timestamp| max.max(end)));
 
 					let sample_end = offset.checked_add(size).ok_or(Error::InvalidDataOffset)?;
 					if sample_end > mdat.data.len() {
@@ -958,8 +973,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			track.group = Some(g);
 
-			// Each fragment is one write, so the estimator's frame spacing is the fragment cadence.
 			track.estimator.write(timestamp, fragment_len);
+			let span = max_end.ok_or(Error::MissingTrun)?.checked_sub(timestamp)?;
+			track.estimator.burst(span.into());
 			track.rendition.estimate(track.estimator.estimate());
 		}
 
