@@ -76,7 +76,10 @@ harness_env() {
 harness_env_array() {
     local name value
     HARNESS_ENV=()
-    for name in MOQ_QA_ARTIFACTS MOQ_TEST_RUNS MOQ_TEST_PORTS MOQ_TEST_PORT_BASE MOQ_TEST_KEEP "$@"; do
+    for name in \
+        MOQ_QA_ARTIFACTS MOQ_QA_KEEP MOQ_QA_RETAIN MOQ_QA_QLOG MOQ_QA_STACKS \
+        MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX MOQ_QA_STACK_TIMEOUT \
+        MOQ_TEST_RUNS MOQ_TEST_PORTS MOQ_TEST_PORT_BASE MOQ_TEST_KEEP "$@"; do
         value="${!name-}"
         [[ -n "$value" ]] || continue
         HARNESS_ENV+=("$name=$value")

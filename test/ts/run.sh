@@ -154,7 +154,6 @@ fi
 bundle_init ts
 harness_env_array
 rerun_env=("${HARNESS_ENV[@]}" "TSC_PROFILE=$PROFILE")
-[[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 bundle_rerun env "${rerun_env[@]}" "${rerun[@]}"
 TMP="$BUNDLE_WORK"
 HARNESS_RUN="$TMP"

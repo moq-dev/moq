@@ -162,7 +162,6 @@ rerun_env=("${HARNESS_ENV[@]}" "SMOKE_PROFILE=$PROFILE" "SMOKE_PORT=$PORT" "SMOK
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
 [[ -z "$MOQ" ]] || rerun_env+=("MOQ_BIN=$MOQ")
 [[ -z "$FAULT" ]] || rerun_env+=("MOQ_QA_FAULT=$FAULT")
-[[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
 [[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
 [[ "$MEDIA" -eq 0 ]] || rerun+=(--media)

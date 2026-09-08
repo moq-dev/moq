@@ -122,6 +122,8 @@ rerun_env_case() {
     bundle_finish 1
 }
 bundle=$(MOQ_TEST_PORT_BASE=5540 MOQ_TEST_PORTS="$ROOT/ports with spaces" \
+    MOQ_QA_KEEP=1 MOQ_QA_RETAIN=1 MOQ_QA_QLOG=1 MOQ_QA_STACKS=0 \
+    MOQ_QA_LOG_CAP=123 MOQ_QA_FILE_CAP=456 MOQ_QA_STACK_MAX=7 MOQ_QA_STACK_TIMEOUT=9 \
     run_case rerun-env rerun_env_case)
 check_rerun_arg() {
     python3 -c 'import json, shlex, sys
@@ -134,6 +136,11 @@ check "recorded reruns preserve the port reservation root" check_rerun_arg \
     "$bundle/manifest.json" "MOQ_TEST_PORTS=$ROOT/ports with spaces"
 check "recorded reruns preserve the artifact root" check_rerun_arg \
     "$bundle/manifest.json" "MOQ_QA_ARTIFACTS=$ROOT/artifacts with spaces"
+for assignment in \
+    MOQ_QA_KEEP=1 MOQ_QA_RETAIN=1 MOQ_QA_QLOG=1 MOQ_QA_STACKS=0 \
+    MOQ_QA_LOG_CAP=123 MOQ_QA_FILE_CAP=456 MOQ_QA_STACK_MAX=7 MOQ_QA_STACK_TIMEOUT=9; do
+    check "recorded reruns preserve $assignment" check_rerun_arg "$bundle/manifest.json" "$assignment"
+done
 
 # ── credentials never reach the bundle ──────────────────────────────────────
 # A JWT-shaped token, a token query parameter, an Authorization header, and URL
