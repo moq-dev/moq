@@ -5,10 +5,16 @@ and Claude Code both read `hooks.json` from here.
 
 ## Session hook
 
-`hooks/direnv.sh` runs at session start and loads the Nix dev shell into the
-session, so shell commands resolve the flake-pinned `just`, `bun`, and linters
-instead of whatever the host has. It prefers `nix print-dev-env` and falls back
-to `direnv export`; without direnv or an `.envrc` it does nothing.
+`scripts/session-setup.sh` runs at session start and loads the Nix dev shell
+into the session, so shell commands resolve the flake-pinned `just`, `bun`, and
+linters instead of whatever the host has. It prefers `nix print-dev-env` and
+falls back to `direnv export`; without direnv or an `.envrc` it does nothing.
+
+One implementation, two entry points: `.codex/hooks/direnv.sh` (this
+directory's `hooks.json`) and `.claude/hooks/direnv.sh` (Claude Code's
+`settings.json`) both exec it. Codex atomically replaces a per-worktree snapshot
+because every command is a fresh shell; Claude Code appends to the session
+environment file it provides.
 
 It always reports what it did, because a hook that exits 0 having exported
 nothing leaves a session that fails much later as an unexplained missing tool:

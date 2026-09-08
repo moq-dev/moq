@@ -33,7 +33,7 @@ Top-level only. Read the area-specific `CLAUDE.md` where one exists before worki
 - `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
 - `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
 - `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.
-- `/scripts/` - repo-wide tooling that is not any one language's. `doctor.sh` backs `just doctor`.
+- `/scripts/` - repo-wide tooling that is not any one language's. `doctor.sh` backs `just doctor`; `session-setup.sh` is the agent SessionStart hook both `.claude` and `.codex` exec.
 
 Changes ripple across languages. Follow the Cross-Package Sync checklist below.
 

@@ -83,9 +83,15 @@ tools_for_files() {
 }
 
 # Print the extra tools a cross-language suite needs beyond the file scope.
+#
+# Exactly what each harness refuses to start without: smoke's `require_tools`
+# (test/smoke/smoke.sh) and the guard at the top of test/wasm/run.sh. bun is on
+# both because the browser clients and the Playwright probe need it. A
+# per-client toolchain that smoke merely marks broken is not listed, because it
+# fails its own matrix cells rather than the run.
 tools_for_suite() {
     case $1 in
-        smoke) printf 'bun\ncargo\n' ;;
+        smoke) printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
         wasm) printf 'bun\ncargo\nwasm-bindgen\n' ;;
         *) : ;;
     esac
@@ -326,7 +332,7 @@ probe_bun_yaml() {
 # literal newline in a -v assignment ("newline in string"), so the selector dies
 # on any diff touching two crates while a one-crate diff sails through.
 probe_awk_select() {
-    local suites="check test"
+    local suites=$1
     if ! command -v awk >/dev/null 2>&1; then
         record behavior.awk-select behavior missing true "$suites" "awk is not on PATH" \
             "install awk, or enter the dev shell: nix develop" 10 0
@@ -432,7 +438,7 @@ probe_nix_eval() {
 # on a crate with no dependencies. Nothing else finds a wrapper that cannot
 # write its cache before a workspace compile has already been paid for.
 probe_cargo_compile() {
-    local suites="check test" cargo=${RUST_CARGO:-cargo}
+    local suites=$1 cargo=${RUST_CARGO:-cargo}
     if ! command -v "$cargo" >/dev/null 2>&1; then
         record probe.cargo-compile probe missing true "$suites" "$cargo is not on PATH" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 120 0
@@ -831,6 +837,13 @@ self_test() {
     check 'tools ALL pulls gradle' "$(tools_for_files ALL | grep -c '^gradle$')" 1
     check 'tools js only' "$(tools_for_files 'js/hang/src/index.ts' | grep -c '^cargo$')" 0
 
+    # Exactly what each harness refuses to start without. A suite reported
+    # healthy that then dies in its own prerequisite check is the failure this
+    # command exists to remove.
+    check 'smoke needs ffmpeg' "$(tools_for_suite smoke | grep -c '^ffmpeg$')" 1
+    check 'smoke needs timeout' "$(tools_for_suite smoke | grep -c '^timeout$')" 1
+    check 'wasm needs wasm-bindgen' "$(tools_for_suite wasm | grep -c '^wasm-bindgen$')" 1
+
     self_test_incomplete
 
     unset -f check
@@ -988,19 +1001,38 @@ for tool in $TOOL_LIST; do
 done
 
 probe_bun_yaml
-probe_awk_select
+
+# Which selected suites actually compile Rust. `check` and `test` do only when
+# the file scope reaches it, which is the same question `_tools` answers; the
+# cross-language harnesses always do. Attributing these to a fixed `check test`
+# would report a docs-only diff blocked on a toolchain it never invokes, and
+# would leave a broken toolchain blocking nothing under `--suite wasm`.
+CARGO_SUITES=""
+if tools_for_files "${CHANGED:-}" | grep -qx cargo; then
+    CARGO_SUITES=$(selected "check test")
+fi
+for suite in $SUITES; do
+    case $suite in smoke | wasm) CARGO_SUITES="$CARGO_SUITES $suite" ;; esac
+done
+CARGO_SUITES=$(printf '%s' "$CARGO_SUITES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+CARGO_SUITES=${CARGO_SUITES% }
+
+# `just rs check-changed` is where the selector runs, and its seed list only
+# grows past one line when the diff reaches Rust, so a docs-only branch on BSD
+# awk is not blocked by it.
+if [ -n "$(selected "check test")" ] && tools_for_files "${CHANGED:-}" | grep -qx cargo; then
+    probe_awk_select "$(selected "check test")"
+else
+    record behavior.awk-select behavior skip false "" "this scope selects no Rust packages" "" 10 0
+fi
 
 probe_writable scratch "${TMPDIR:-/tmp}" "$SUITES"
 
-# Everything Rust hangs off the same question `_tools` already answered: does
-# this scope dispatch cargo at all? A docs-only diff compiles nothing, and
-# reporting its `check` and `test` blocked on a missing toolchain would be a
-# confident wrong answer.
-if printf '%s\n' "$TOOL_LIST" | grep -qx cargo; then
-    probe_writable target "$TARGET_DIR" "check test"
-    probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "check test"
-    probe_disk "$TARGET_DIR" "check test"
-    probe_cargo_compile
+if [ -n "$CARGO_SUITES" ]; then
+    probe_writable target "$TARGET_DIR" "$CARGO_SUITES"
+    probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "$CARGO_SUITES"
+    probe_disk "$TARGET_DIR" "$CARGO_SUITES"
+    probe_cargo_compile "$CARGO_SUITES"
 else
     record storage.target storage skip false "" "this scope compiles nothing" "" 5 0
     record probe.cargo-compile probe skip false "" "this scope compiles nothing" "" 120 0
