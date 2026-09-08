@@ -36,12 +36,12 @@ fn pages_grow_and_frames_cross_page_boundaries() {
 			publish_every: 32,
 		});
 		// 128 + 256 + ... + 32768 + enough 65536-byte pages.
-		let bytes = if matches!(layout, Layout::Packed) {
+		let bytes: usize = if matches!(layout, Layout::Packed) {
 			1160000
 		} else {
 			1000000
 		};
-		let expected = 65408 + ((bytes - 65408 + 65535) / 65536) * 65536;
+		let expected = 65408 + (bytes - 65408).div_ceil(65536) * 65536;
 		assert_eq!(group.footprint().page_bytes, expected);
 		drain(
 			&group,

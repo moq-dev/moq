@@ -103,6 +103,9 @@ pub(crate) struct GroupState {
 	// The single in-flight frame, if one is open.
 	pub(crate) partial: Option<Partial>,
 
+	// The in-flight writer takes the tail and returns it when the frame commits.
+	pages: frame::Pages,
+
 	// Index of the first frame this handle holds: frames evicted from the front, plus any
 	// the group deliberately started past (see [`Producer::start_at`]). Reading below it
 	// is [`Error::Lagged`] either way; the frames are not here.
@@ -270,6 +273,7 @@ impl GroupState {
 	fn release(&mut self) {
 		self.frames.clear();
 		self.partial = None;
+		self.pages = frame::Pages::default();
 		self.cache = 0;
 		self.charge.clear();
 	}
@@ -604,6 +608,7 @@ impl Producer {
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
 		state.evict();
+		let pages = std::mem::take(&mut state.pages);
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -619,7 +624,7 @@ impl Producer {
 			size: frame.size,
 			timestamp,
 		};
-		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
+		Ok(frame::Producer::new(self, buf, info, pages).with_meter(meter))
 	}
 
 	/// The owned counterpart of [`Self::create_frame`], for the wire drivers that
@@ -658,6 +663,7 @@ impl Producer {
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
 		state.evict();
+		let pages = std::mem::take(&mut state.pages);
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -673,7 +679,7 @@ impl Producer {
 			size: frame.size,
 			timestamp,
 		};
-		Ok(frame::ProducerOwned::new(self.clone(), buf, info).with_meter(meter))
+		Ok(frame::ProducerOwned::new(self.clone(), buf, info, pages).with_meter(meter))
 	}
 
 	/// Wake consumers parked on the group channel (called after a partial write).
@@ -695,11 +701,12 @@ impl Producer {
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
-	pub(crate) fn frame_commit(&mut self, frame: Frame) -> Result<()> {
+	pub(crate) fn frame_commit(&mut self, frame: Frame, pages: frame::Pages) -> Result<()> {
 		let mut state = modify(&self.state)?;
 		// Bytes were already counted against the cache (and the pool charge) when the
 		// frame was created; committing just moves the tail into the completed set.
 		state.partial = None;
+		state.pages = pages;
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
 		// Completing the frame is a write access like any chunk, and the only one the
@@ -741,6 +748,7 @@ impl Producer {
 			return Err(Error::FrameOpen);
 		}
 		state.fin = Some(state.next_index);
+		state.pages = frame::Pages::default();
 		Ok(())
 	}
 
@@ -2368,5 +2376,60 @@ mod test {
 			timestamp: Timestamp::ZERO,
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
+	}
+	#[test]
+	fn chunked_slices_survive_later_frames_and_abort() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut consumer = producer.consume();
+		let mut retained = Vec::new();
+		for (tag, size) in [6, 100, 256, 4096, 65536, 65537, 3].into_iter().enumerate() {
+			let tag = tag as u8;
+			let mut writer = producer
+				.create_frame(frame::Info {
+					size,
+					timestamp: Timestamp::ZERO,
+				})
+				.unwrap();
+			writer.write(&[tag]).unwrap();
+			let mut reader = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			retained.push((tag, reader.read_chunk().now_or_never().unwrap().unwrap().unwrap()));
+			writer.write(vec![tag; size as usize - 1]).unwrap();
+			writer.finish().unwrap();
+			retained.push((tag, reader.read_all().now_or_never().unwrap().unwrap()));
+		}
+		producer.abort(Error::Dropped).unwrap();
+		drop(consumer);
+		std::thread::spawn(move || {
+			for (tag, bytes) in retained {
+				assert!(bytes.iter().all(|byte| *byte == tag));
+			}
+		})
+		.join()
+		.unwrap();
+	}
+
+	#[test]
+	fn producer_clones_share_the_page_tail() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut other = producer.clone();
+		let mut consumer = producer.consume();
+		for writer in [&mut producer, &mut other] {
+			let mut frame = writer
+				.create_frame(frame::Info {
+					size: 64,
+					timestamp: Timestamp::ZERO,
+				})
+				.unwrap();
+			frame.write(&[1; 32]).unwrap();
+			frame.write(&[2; 32]).unwrap();
+			frame.finish().unwrap();
+		}
+		producer.finish().unwrap();
+		let first = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		let second = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(first.payload.as_ptr().wrapping_add(64), second.payload.as_ptr());
+		assert_eq!(first.payload, second.payload);
+		assert_eq!(&first.payload[..32], &[1; 32]);
+		assert_eq!(&first.payload[32..], &[2; 32]);
 	}
 }

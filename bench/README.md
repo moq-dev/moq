@@ -65,9 +65,10 @@ cargo run --locked --release -p moq-net --example frame-storage > frame-storage.
 
 With Nix, prefix each command with `nix develop --command`.
 
+- [Production integration](adaptive-net.md): adaptive allocation in moq-net with before/after measurements.
 - [Adaptive prototype](adaptive-frames.md): first-frame-sized pages, capped growth, direct `BufMut` writes, and separate versus packed headers.
 - [Initial investigation](frame-storage.md): current-model measurements and isolated storage comparisons.
 
 The programs print CSV to stdout. Run each more than once on an otherwise idle machine, and record the commit, CPU, OS, and Rust version with the results. Keep release mode enabled. Timing includes the instrumentation wrapper with counting disabled; allocation counts are collected in separate untimed passes.
 
-Committed CSV files are historical local measurements, not expected test outputs. The initial measurements used `1e6c7ce0f` on `dev`; this PR targets `dev`. Rerunning the current-model comparison on this branch measures its own model revision, so do not label it an exact reproduction of the historical results. Neither experiment changes production storage or the wire format.
+Committed CSV files are historical local measurements, not expected test outputs. The initial measurements used `1e6c7ce0f` on `dev`; this PR targets `dev`. Rerunning the current-model comparison on this branch measures its own model revision, so do not label it an exact reproduction of the historical results. The example implementations are isolated; the production integration changes chunked-frame allocation without changing the wire format.

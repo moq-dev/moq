@@ -130,8 +130,8 @@ impl<const N: usize> Buffer<N> {
 /// Payload storage for the single in-flight frame, shared between the writing
 /// [`Producer`] and any streaming [`Consumer`]s.
 ///
-/// A whole-frame [`Bytes`] write is stored directly. Chunked writes fall back to one
-/// mutable heap allocation sized to the declared frame. The producer writes through
+/// A whole-frame [`Bytes`] write is stored directly. Chunked writes reserve a
+/// contiguous region from the group's adaptive pages. The producer writes through
 /// the raw pointer (sole writer, guaranteed by the exclusive borrow of the parent
 /// group); `written` provides happens-before for cross-thread reads. Implements
 /// [AsRef]<[u8]> so it can back a [`Bytes::from_owner`].
@@ -149,18 +149,19 @@ enum FrameStorage {
 	Mutable(MutableFrameBuf),
 }
 
-struct MutableFrameBuf {
+struct Page {
 	// Owned heap allocation of `capacity` bytes (zero-initialized).
 	data: *mut u8,
 	capacity: usize,
 }
 
-// Safety: `data` is owned (Box-allocated, freed in Drop). The producer is the sole
-// writer and consumers only read bytes `< written`.
-unsafe impl Send for MutableFrameBuf {}
-unsafe impl Sync for MutableFrameBuf {}
+// Safety: the Box lives until the last page reference drops. Reservations never
+// overlap, each frame has one writer, and readers only access that frame's
+// published prefix after an Acquire load of its written count.
+unsafe impl Send for Page {}
+unsafe impl Sync for Page {}
 
-impl Drop for MutableFrameBuf {
+impl Drop for Page {
 	fn drop(&mut self) {
 		// Safety: data was obtained from `Box::into_raw` of a `Box<[u8]>` of length
 		// `capacity` and is not aliased at drop (Arc refcount hit 0).
@@ -171,12 +172,56 @@ impl Drop for MutableFrameBuf {
 	}
 }
 
-impl MutableFrameBuf {
+impl Page {
 	fn new(size: usize) -> Self {
 		let boxed: Box<[u8]> = vec![0u8; size].into_boxed_slice();
 		let capacity = boxed.len();
 		let data = Box::into_raw(boxed) as *mut u8;
 		Self { data, capacity }
+	}
+}
+
+/// Reserves disjoint contiguous frame regions, growing small-frame pages up to 64 KiB.
+#[derive(Default)]
+pub(crate) struct Pages {
+	page: Option<Arc<Page>>,
+	offset: usize,
+	previous: usize,
+}
+
+impl Pages {
+	fn allocate(&mut self, size: usize) -> MutableFrameBuf {
+		const MAX: usize = 64 * 1024;
+		// Large frames must remain contiguous without making later small frames
+		// retain a large allocation. They do not consume or grow the shared tail.
+		if size > MAX {
+			return MutableFrameBuf::Owned(Page::new(size));
+		}
+		if self.page.as_ref().is_none_or(|page| page.capacity - self.offset < size) {
+			let capacity = size.max(128).next_power_of_two().max(self.previous * 2).min(MAX);
+			self.page = Some(Arc::new(Page::new(capacity)));
+			self.offset = 0;
+			self.previous = capacity;
+		}
+		let page = self.page.as_ref().unwrap().clone();
+		let offset = self.offset;
+		self.offset += size;
+		MutableFrameBuf::Shared { page, offset }
+	}
+}
+
+/// A frame's exclusive reservation within a shared allocation.
+enum MutableFrameBuf {
+	Shared { page: Arc<Page>, offset: usize },
+	Owned(Page),
+}
+
+impl MutableFrameBuf {
+	fn ptr(&self) -> *mut u8 {
+		match self {
+			Self::Shared { page, offset } => page.data.wrapping_add(*offset),
+			Self::Owned(page) => page.data,
+		}
 	}
 }
 
@@ -214,18 +259,16 @@ impl FrameBuf {
 			})
 	}
 
-	/// The mutable buffer for multi-chunk writes, lazily allocated.
-	///
-	/// Returns `None` once a whole-frame write has installed shared storage.
-	fn mutable(&self) -> Option<&MutableFrameBuf> {
-		match self
+	/// Reserve storage only when a nonempty write cannot keep an owned buffer.
+	fn mutable(&self, pages: &mut Pages) -> &MutableFrameBuf {
+		let storage = self
 			.0
 			.storage
-			.get_or_init(|| FrameStorage::Mutable(MutableFrameBuf::new(self.capacity())))
-		{
-			FrameStorage::Shared(_) => None,
-			FrameStorage::Mutable(buf) => Some(buf),
-		}
+			.get_or_init(|| FrameStorage::Mutable(pages.allocate(self.capacity())));
+		let FrameStorage::Mutable(buf) = storage else {
+			unreachable!("a completed shared frame cannot accept more bytes");
+		};
+		buf
 	}
 
 	/// Safety: caller must be the sole producer and `new_written` must be `<= capacity`.
@@ -239,20 +282,16 @@ impl FrameBuf {
 	/// Safety relies on the single-producer invariant: only one [`Producer`] exists for
 	/// a frame (it holds the exclusive borrow of the parent group), so this is the sole
 	/// writer even though it takes `&self`.
-	fn append(&self, src: &[u8]) {
+	fn append(&self, src: &[u8], pages: &mut Pages) {
 		if src.is_empty() {
 			return;
 		}
 		let prev = self.written(Ordering::Relaxed);
-		let Some(buf) = self.mutable() else {
-			// Only reachable if the frame is already complete via shared storage, which
-			// `Producer::write` rejects for a non-empty chunk. Nothing to copy.
-			return;
-		};
+		let buf = self.mutable(pages);
 		// Safety: sole writer; the caller bounds-checked `src` against the remaining
 		// capacity, and consumers only read `[..written]`.
 		unsafe {
-			std::ptr::copy_nonoverlapping(src.as_ptr(), buf.data.add(prev), src.len());
+			std::ptr::copy_nonoverlapping(src.as_ptr(), buf.ptr().add(prev), src.len());
 			self.store_written(prev + src.len());
 		}
 	}
@@ -285,7 +324,7 @@ impl AsRef<[u8]> for FrameBuf {
 				// Safety: data..data+written is initialized (zero-init at alloc + producer
 				// writes up to `written`). The Arc keeps the allocation alive while any
 				// reference to the slice lives.
-				unsafe { std::slice::from_raw_parts(buf.data, written) }
+				unsafe { std::slice::from_raw_parts(buf.ptr(), written) }
 			}
 			None => &[],
 		}
@@ -297,6 +336,7 @@ impl AsRef<[u8]> for FrameBuf {
 struct Raw<G: std::borrow::BorrowMut<group::Producer>> {
 	group: G,
 	buf: FrameBuf,
+	pages: Pages,
 	info: Info,
 	// Set once the frame is committed (finished) or aborted, so Drop is a no-op.
 	done: bool,
@@ -326,10 +366,10 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 					// size, so publishing all bytes is in bounds.
 					unsafe { self.buf.store_written(cap) };
 				}
-				Err(chunk) => self.buf.append(&chunk),
+				Err(chunk) => self.buf.append(&chunk, &mut self.pages),
 			}
 		} else {
-			self.buf.append(chunk.as_ref());
+			self.buf.append(chunk.as_ref(), &mut self.pages);
 		}
 		Ok(())
 	}
@@ -339,10 +379,13 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 			return Err(Error::WrongSize);
 		}
 		let payload = self.buf.freeze(self.buf.capacity());
-		self.group.borrow_mut().frame_commit(Frame {
-			timestamp: self.info.timestamp,
-			payload,
-		})?;
+		self.group.borrow_mut().frame_commit(
+			Frame {
+				timestamp: self.info.timestamp,
+				payload,
+			},
+			std::mem::take(&mut self.pages),
+		)?;
 		self.done = true;
 		Ok(())
 	}
@@ -389,10 +432,11 @@ impl std::ops::Deref for Producer<'_> {
 }
 
 impl<'a> Producer<'a> {
-	pub(crate) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
+	pub(crate) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info, pages: Pages) -> Self {
 		Self(Raw {
 			group,
 			buf,
+			pages,
 			info,
 			done: false,
 			stats: stats::Meter::default(),
@@ -454,10 +498,11 @@ impl std::ops::Deref for ProducerOwned {
 }
 
 impl ProducerOwned {
-	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info) -> Self {
+	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info, pages: Pages) -> Self {
 		Self(Raw {
 			group,
 			buf,
+			pages,
 			info,
 			done: false,
 			stats: stats::Meter::default(),
@@ -743,4 +788,44 @@ where
 		Ok(res) => res,
 		Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn page_reservations_grow_without_overlapping() {
+		fn shared(buf: MutableFrameBuf) -> (Arc<Page>, usize) {
+			let MutableFrameBuf::Shared { page, offset } = buf else {
+				panic!("small frames should share a page");
+			};
+			(page, offset)
+		}
+		let mut pages = Pages::default();
+		assert!(pages.page.is_none());
+		let (first, first_offset) = shared(pages.allocate(64));
+		assert_eq!(first.capacity, 128);
+		let (second, second_offset) = shared(pages.allocate(64));
+		assert!(Arc::ptr_eq(&first, &second));
+		assert_eq!(second_offset, first_offset + 64);
+		let (third, _) = shared(pages.allocate(64));
+		assert_eq!(third.capacity, 256);
+		assert!(!Arc::ptr_eq(&second, &third));
+		let MutableFrameBuf::Owned(large) = pages.allocate(65537) else {
+			panic!("large frames should own a dedicated allocation");
+		};
+		assert_eq!(large.capacity, 65537);
+		let (fourth, _) = shared(pages.allocate(64));
+		assert!(Arc::ptr_eq(&third, &fourth));
+		for _ in 0..100 {
+			assert_eq!(shared(pages.allocate(65536)).0.capacity, 65536);
+		}
+		let retained = Arc::downgrade(&first);
+		drop(pages);
+		drop(first);
+		assert!(retained.upgrade().is_some());
+		drop(second);
+		assert!(retained.upgrade().is_none());
+	}
 }

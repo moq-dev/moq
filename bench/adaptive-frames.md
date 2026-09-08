@@ -1,6 +1,6 @@
 # Adaptive frame storage prototype
 
-The prototype lives in `rs/moq-net/examples/adaptive-frames.rs` and `examples/adaptive_frames/`. It implements both separate headers and packed headers on the same adaptive byte storage. It does not modify the production model or wire format.
+The prototype lives in `rs/moq-net/examples/adaptive-frames.rs` and `examples/adaptive_frames/`. It implements both separate headers and packed headers on the same adaptive byte storage. The example remains isolated. The first production integration is described in [the moq-net comparison](adaptive-net.md).
 
 ## Header choice
 
@@ -35,7 +35,7 @@ group.publish();
 
 ## Measurements
 
-2026-09-07, macOS arm64, direct Cargo release build using the dependency lockfile at `1e6c7ce0f` on `dev`. The PR targets `main`; reruns use that branch's dependency lockfile. Raw results are `bench/adaptive-frames.csv` and `bench/adaptive-frames-repeat.csv`. Each case has a warmup and nine timed repetitions. Tiny groups are repeated within a sample. Allocation counts are gathered separately from timing; they include vector growth and backing-owner allocations. Page and vector capacities are not total RSS and exclude shared-state size, allocator bookkeeping, and caller-owned buffers.
+2026-09-07, macOS arm64, direct Cargo release build using the dependency lockfile at `1e6c7ce0f` on `dev`. The PR targets `dev`; reruns use that branch's dependency lockfile. Raw results are `bench/adaptive-frames.csv` and `bench/adaptive-frames-repeat.csv`. Each case has a warmup and nine timed repetitions. Tiny groups are repeated within a sample. Allocation counts are gathered separately from timing; they include vector growth and backing-owner allocations. Page and vector capacities are not total RSS and exclude shared-state size, allocator bookkeeping, and caller-owned buffers.
 
 | Case | Header layout | Payload page capacity | Header capacity | Chunk-vector capacity | Write allocations |
 |---|---|---:|---:|---:|---:|
@@ -64,4 +64,4 @@ cargo clippy --locked -p moq-net --example adaptive-frames --example frame-stora
 
 Eight tests passed: tiny allocation, geometric growth and page crossings, partial reads and cross-thread production with retained slices, wrong-size abort, empty frames and cloned consumers, arbitrary owned slices, BufMut bounds and dropped writers, mixed direct/owned ordering, and abandoned-reader handling (some cases share a test). Two complete benchmark runs validated frame counts, timestamps, payload contents, EOF, and a zero-copy pointer check. Clippy passed with warnings denied and rustfmt passed. The allocation counter is shared with the earlier experiment under `examples/support/`.
 
-The prototype uses a single writer and explicit polling, not production kio notification, cache expiry/eviction, stats, resumable routing, or group producer clones. It caps declared frame size at 32 MiB but does not implement a total group memory cap. Payloads spanning chunks have a chunked API; a contiguous `Frame.payload: Bytes` adapter would need to copy those frames. Those are integration decisions still to validate, including preserving coalesced wakeups and cache lock order. None of this changes the public API, package versions, or wire behavior.
+The prototype uses a single writer and explicit polling, not production kio notification, cache expiry/eviction, stats, resumable routing, or group producer clones. It caps declared frame size at 32 MiB but does not implement a total group memory cap. Payloads spanning chunks have a chunked API; a contiguous `Frame.payload: Bytes` adapter would need to copy those frames. Those are integration decisions still to validate, including preserving coalesced wakeups and cache lock order. The isolated prototype changes no public API, package version, or wire behavior.
