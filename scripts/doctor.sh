@@ -377,12 +377,14 @@ literal_cargo_suites() {
 # Go and Kotlin build with configured Cargo, then locate the result with
 # literal Cargo metadata and an unqualified host layout.
 binding_cargo_suites() {
-    local changed=$1
-    [ -n "$(selected check)" ] || return
-    if [ "$changed" = ALL ] ||
-        printf '%s\n' "$changed" | grep -qE '^(go/|kt/|rs/moq-ffi/)'; then
-        printf 'check\n'
+    local changed=$1 out=""
+    out=$(selected smoke-full)
+    if [ -n "$(selected check)" ] && {
+        [ "$changed" = ALL ] || printf '%s\n' "$changed" | grep -qE '^(go/|kt/|rs/moq-ffi/)'
+    }; then
+        out="$out check"
     fi
+    printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
 # Dart always reads target/<host>/release below the workspace.
@@ -759,10 +761,11 @@ probe_c_compiler() {
 # so an uninstalled cross target still tells us which pkg-config variables the
 # real build will select.
 cargo_targets() {
-    local cargo=$1 cargo_home=${2:-} cargo_dir=${3:-$REPO} crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
+    local cargo=$1 cargo_home=${2:-} cargo_dir=${3:-$REPO} action=${4:-check}
+    local crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
     local command=(env "CARGO_TARGET_DIR=$crate/target" "MOQ_DOCTOR_TARGET_DIR=$crate/target")
     [ -n "$cargo_home" ] && command+=("CARGO_HOME=$cargo_home")
-    command+=("$cargo" check --offline --color never --manifest-path "$crate/Cargo.toml")
+    command+=("$cargo" "$action" --offline --color never --manifest-path "$crate/Cargo.toml")
 
     mkdir -p "$crate/src"
     cat >"$crate/Cargo.toml" <<'EOF'
@@ -799,6 +802,19 @@ EOF
         { [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] || [ "$CARGO_PROBE_EXPLICIT_TARGET" = false ]; }
 }
 
+# Print Cargo's effective target directory from the caller's working directory,
+# including environment and configuration layers.
+effective_cargo_target_dir() {
+    local cargo=$1 cargo_dir=$2 manifest=$3 previous=$PWD status
+    cd "$cargo_dir" || return 1
+    bounded 30 "$cargo" metadata --offline --format-version 1 --no-deps --manifest-path "$manifest"
+    status=$?
+    cd "$previous" || return 1
+    ((status == 0)) || return "$status"
+    CARGO_EFFECTIVE_TARGET_DIR=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | tail -1)
+    [ -n "$CARGO_EFFECTIVE_TARGET_DIR" ]
+}
+
 # True when an override resolves to an executable file from the same working
 # directory as its harness. Relative Smoke overrides are interpreted from test/.
 executable_override() {
@@ -820,7 +836,7 @@ executable_override() {
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
-    local id=$1 suites=$2 cargo=$3 status relay_override=0 layout_suites=$2
+    local id=$1 suites=$2 cargo=$3 action=${4:-build} status relay_override=0 layout_suites=$2
     [ "$id" != smoke ] || SMOKE_CARGO_TARGET_READY=0
     if [ "${CARGO_TARGET_DIR+x}" = x ] && [ -z "$CARGO_TARGET_DIR" ]; then
         record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
@@ -889,7 +905,7 @@ probe_harness_cargo_target() {
             "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
         return
     fi
-    cargo_targets "$cargo"
+    cargo_targets "$cargo" "" "$REPO" "$action"
     status=$?
     if ((status != 0)); then
         record "behavior.$id-artifact-layout" behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
@@ -1671,6 +1687,8 @@ self_test_ownership() {
     SUITES=smoke-full
     check 'smoke-full compiles Go with configured Cargo' \
         "$(rust_cargo_suites 'doc/a.md' '')" smoke-full
+    check 'smoke-full validates the mixed binding layout' \
+        "$(binding_cargo_suites 'doc/a.md')" smoke-full
     SUITES="check test"
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
@@ -1927,6 +1945,28 @@ EOF
         probe_harness_cargo_target bindings check "$SCRATCH/cargo-wrapper"
         check 'bindings reject a configured Cargo target layout' \
             "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
+
+        cat >"$SCRATCH/cargo-build-wrapper" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = build ]; then
+    export CARGO_BUILD_TARGET=wasm32-unknown-unknown
+fi
+exec cargo "$@"
+EOF
+        chmod +x "$SCRATCH/cargo-build-wrapper"
+        probe_harness_cargo_target bindings check "$SCRATCH/cargo-build-wrapper"
+        check 'binding layout uses the build subcommand' \
+            "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
+
+        mkdir -p "$SCRATCH/dart-cargo-home"
+        cat >"$SCRATCH/dart-cargo-home/config.toml" <<EOF
+[build]
+target-dir = "$SCRATCH/dart-target"
+EOF
+        CARGO_HOME="$SCRATCH/dart-cargo-home" \
+            effective_cargo_target_dir cargo "$REPO/dart" "$REPO/Cargo.toml"
+        check 'Dart target probe reads Cargo configuration' \
+            "$CARGO_EFFECTIVE_TARGET_DIR" "$SCRATCH/dart-target"
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -2170,13 +2210,25 @@ fi
 DART_CARGO_SUITES=$(dart_cargo_suites "$CHANGED")
 if [ -z "$DART_CARGO_SUITES" ]; then
     record behavior.dart-artifact-layout behavior skip false "" "no Dart check is selected" "" 5 0
-elif [ "${CARGO_TARGET_DIR+x}" = x ] && [ "$CARGO_TARGET_DIR" != "$REPO/target" ]; then
-    record behavior.dart-artifact-layout behavior degraded true "$DART_CARGO_SUITES" \
-        "Dart reads $REPO/target/<host>/release, but CARGO_TARGET_DIR is ${CARGO_TARGET_DIR:-empty}" \
-        "unset CARGO_TARGET_DIR or set it to $REPO/target for Dart checks" 5 0
+elif ! command -v cargo >/dev/null 2>&1; then
+    record behavior.dart-artifact-layout behavior missing true "$DART_CARGO_SUITES" \
+        "cargo is missing, so Dart's effective target directory cannot be resolved" \
+        "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
 else
-    record behavior.dart-artifact-layout behavior ok true "$DART_CARGO_SUITES" \
-        "Dart's fixed workspace target directory matches Cargo" "" 5 0
+    effective_cargo_target_dir cargo "$REPO/dart" "$REPO/Cargo.toml"
+    DART_TARGET_STATUS=$?
+    if ((DART_TARGET_STATUS != 0)); then
+        record behavior.dart-artifact-layout behavior "$(classify "$DART_TARGET_STATUS" "$BOUNDED_OUT")" true "$DART_CARGO_SUITES" \
+            "cargo could not resolve Dart's target directory: $(error_line "$BOUNDED_OUT")" \
+            "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
+    elif [ "$CARGO_EFFECTIVE_TARGET_DIR" != "$REPO/target" ]; then
+        record behavior.dart-artifact-layout behavior degraded true "$DART_CARGO_SUITES" \
+            "Dart reads $REPO/target/<host>/release, but Cargo targets $CARGO_EFFECTIVE_TARGET_DIR" \
+            "configure Cargo's target directory as $REPO/target for Dart checks" 30 "$BOUNDED_ELAPSED"
+    else
+        record behavior.dart-artifact-layout behavior ok true "$DART_CARGO_SUITES" \
+            "Dart's fixed workspace target directory matches Cargo" "" 30 "$BOUNDED_ELAPSED"
+    fi
 fi
 
 # Ask the Rust selector once. Its result drives the Cargo, wasm-target, and
