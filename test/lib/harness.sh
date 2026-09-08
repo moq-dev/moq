@@ -44,6 +44,10 @@ HARNESS_PIDS=()
 HARNESS_LABELS=()
 HARNESS_STATES=()
 
+# Process groups that support the run but must never outlive finalization. A retained session keeps
+# its debuggable fixtures, not delayed writers that could mutate the uploadable evidence afterward.
+HARNESS_AUXILIARIES=()
+
 # ── run identity ────────────────────────────────────────────────────────────
 
 # Print the caller's own argv, requoted so it can be pasted back: pass it "$@"
@@ -315,6 +319,12 @@ harness_spawn() {
     fi
 }
 
+# Spawn an auxiliary process group that must be reaped before artifacts are finalized.
+harness_spawn_auxiliary() {
+    harness_spawn "$@"
+    HARNESS_AUXILIARIES+=("$HARNESS_PID")
+}
+
 # Index of PID in the spawn table; fails when this run never spawned it.
 #
 # Newest first, because the OS can hand the same number to a later spawn in the
@@ -372,6 +382,15 @@ harness_reap_all() {
     for ((i = ${#HARNESS_PIDS[@]} - 1; i >= 0; i--)); do
         harness_reap "${HARNESS_PIDS[$i]}"
     done
+}
+
+# Reap every auxiliary group while leaving retained fixtures alone.
+harness_reap_auxiliaries() {
+    local i
+    for ((i = ${#HARNESS_AUXILIARIES[@]} - 1; i >= 0; i--)); do
+        harness_reap "${HARNESS_AUXILIARIES[$i]}"
+    done
+    HARNESS_AUXILIARIES=()
 }
 
 # Release every port reservation this run owns.

@@ -658,6 +658,48 @@ check "a retained failure without live processes releases its port" test ! -d "$
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "a live evidence directory is private to its owner" test "$(mode "$live")" = 700
 
+# A retained fixture may keep writing only into the private live tree. Auxiliary stack watchdogs
+# target the uploadable snapshot, so they must be gone before its final redaction pass completes.
+auxiliary_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    # shellcheck disable=SC2034 # Sourced harness functions consume this path.
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_spawn retained "$BUNDLE_WORK/retained.log" sleep 120
+    retained=$HARNESS_PID
+    mkfifo "$ROOT/auxiliary-ready" "$ROOT/auxiliary-go"
+    harness_spawn_auxiliary late-stack - bash -c \
+        'printf "ready\n" >"$1"; IFS= read -r _ <"$2"; printf "%s\n" "Authorization: Bearer late-watchdog-secret" >"$3/stacks/late.txt"' \
+        _ "$ROOT/auxiliary-ready" "$ROOT/auxiliary-go" "$BUNDLE_DIR"
+    auxiliary=$HARNESS_PID
+    read -r _ <"$ROOT/auxiliary-ready"
+    harness_reap_auxiliaries
+    harness_retain_ports
+    printf '%s\n' "$retained" >"$BUNDLE_DIR/retained.pid"
+    printf '%s\n' "$auxiliary" >"$BUNDLE_DIR/auxiliary.pid"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_RETAIN=1 run_case auxiliary auxiliary_case)
+check "retained finalization reaps auxiliary writers" test ! -e "$bundle/stacks/late.txt"
+if grep -rq -- late-watchdog-secret "$bundle"; then
+    bad "retained finalization prevents post-redaction writes"
+else
+    ok "retained finalization prevents post-redaction writes"
+fi
+auxiliary=$(<"$bundle/auxiliary.pid")
+if running "$auxiliary"; then
+    bad "retained finalization stops auxiliary processes"
+else
+    ok "retained finalization stops auxiliary processes"
+fi
+retained=$(<"$bundle/retained.pid")
+if running "$retained"; then
+    ok "reaping auxiliaries preserves the retained fixture"
+else
+    bad "reaping auxiliaries preserves the retained fixture"
+fi
+bash "$bundle/teardown.sh" >/dev/null
+
 if ((failures > 0)); then
     echo "bundle: $failures checks failed" >&2
     exit 1

@@ -201,6 +201,10 @@ is_broken() {
 cleanup() {
     local status=$?
 
+    # Stack watchdogs write into the uploadable bundle. They may not survive into a retained
+    # session and write after bundle_finish has completed its one-time redaction sweep.
+    harness_reap_auxiliaries
+
     # Whatever is still running here never finished: a relay that wedged, a
     # publisher that stopped producing. Their stacks are the only thing left
     # that says where, and reaping them is what destroys it, so read first.
@@ -711,7 +715,7 @@ run_round() {
         watchdog=""
         if [[ "$NEGATIVE" -eq 0 && "$sub" != js ]]; then
             cell_pid="$HARNESS_PID"
-            harness_spawn "$pub-$sub-stack-watchdog" - run_stack_watchdog "$pub-$sub" "$cell_pid"
+            harness_spawn_auxiliary "$pub-$sub-stack-watchdog" - run_stack_watchdog "$pub-$sub" "$cell_pid"
             watchdog="$HARNESS_PID"
         fi
         watchdogs+=("$watchdog")
