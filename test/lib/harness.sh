@@ -310,7 +310,7 @@ _harness_supervise() {
 }
 
 harness_spawn() {
-    local label="$1" log="$2" ready go guard_ready guard_status witness started witness_started
+    local label="$1" log="$2" ready go guard_ready guard_status i witness started witness_started
     shift 2
     if ! command -v python3 >/dev/null 2>&1; then
         echo "harness: python3 is required" >&2
@@ -329,26 +329,35 @@ harness_spawn() {
     fi
     HARNESS_PID=$!
     set +m
+    # Register the provisional group before either readiness read can block, so
+    # a cancellation trap can always find and reap startup in progress.
+    i=${#HARNESS_PIDS[@]}
+    HARNESS_PIDS+=("$HARNESS_PID")
+    HARNESS_LABELS+=("$label")
+    HARNESS_STATES+=("live")
+    HARNESS_STARTS+=("")
+    HARNESS_WITNESSES+=("")
+    HARNESS_WITNESS_STARTS+=("")
     read -r _ <"$ready"
+    started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
+    HARNESS_STARTS[i]="$started"
     "$HARNESS_LIB/group-guard.py" "$HARNESS_PID" "$guard_ready" >/dev/null 2>&1 &
     witness=$!
+    HARNESS_WITNESSES[i]="$witness"
     if ! read -r guard_status <"$guard_ready" || [[ "$guard_status" != ok ]]; then
-        kill -KILL -- -"$HARNESS_PID" 2>/dev/null || true
+        if harness_group_owned "$i"; then
+            kill -KILL -- -"$HARNESS_PID" 2>/dev/null || true
+        fi
         wait "$HARNESS_PID" "$witness" 2>/dev/null || true
+        HARNESS_STATES[i]="done"
         rm -f "$ready" "$go" "$guard_ready"
         printf 'failed to guard process group %s: %s\n' "$HARNESS_PID" "${guard_status:-no status}" >&2
         return 1
     fi
     printf 'go\n' >"$go"
     rm -f "$ready" "$go" "$guard_ready"
-    started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
     witness_started=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
-    HARNESS_PIDS+=("$HARNESS_PID")
-    HARNESS_LABELS+=("$label")
-    HARNESS_STATES+=("live")
-    HARNESS_STARTS+=("$started")
-    HARNESS_WITNESSES+=("$witness")
-    HARNESS_WITNESS_STARTS+=("$witness_started")
+    HARNESS_WITNESS_STARTS[i]="$witness_started"
     if declare -F bundle_process >/dev/null 2>&1; then
         bundle_process "$label" "$HARNESS_PID"
     fi
@@ -392,6 +401,7 @@ harness_group_owned() {
     while read -r job; do
         [[ "$job" == "$pid" ]] && return 0
     done < <(jobs -pr)
+    [[ -n "$witness" ]] || return 1
     # The guard is this shell's direct child, so its job-table entry cannot be
     # recycled before this shell waits for it. Its startup handshake proves it
     # joined this group, so cleanup stays safe even when process reads fail.
@@ -430,7 +440,9 @@ harness_wait() {
         if harness_group_owned "$i"; then
             kill -KILL -- -"$pid" 2>/dev/null || true
         fi
-        wait "$witness" 2>/dev/null || true
+        if [[ -n "$witness" ]]; then
+            wait "$witness" 2>/dev/null || true
+        fi
         HARNESS_STATES[i]="done"
     fi
     return "$status"
@@ -453,7 +465,9 @@ harness_reap() {
         kill -KILL -- -"$pid" 2>/dev/null || true
     fi
     wait "$pid" 2>/dev/null || true
-    wait "$witness" 2>/dev/null || true
+    if [[ -n "$witness" ]]; then
+        wait "$witness" 2>/dev/null || true
+    fi
     HARNESS_STATES[i]="done"
 }
 

@@ -583,6 +583,38 @@ check "a missing guard runtime fails before creating handshake state" test -f "$
 check "a missing guard runtime reports its dependency" \
     grep -q "harness: python3 is required" "$ROOT/missing-python.out"
 
+mkdir "$ROOT/startup-lib" "$ROOT/startup-runs"
+ln -s "$DIR/process-start.py" "$ROOT/startup-lib/process-start.py"
+printf '%s\n' \
+    '#!/usr/bin/env python3' \
+    'import os' \
+    'import signal' \
+    'group = int(__import__("sys").argv[1])' \
+    'os.setpgid(0, group)' \
+    'with open(os.environ["MOCK_GUARD_MARKER"], "w", encoding="utf-8") as marker:' \
+    '    marker.write(f"{group} {os.getpid()}\n")' \
+    '    marker.flush()' \
+    'while True:' \
+    '    signal.pause()' >"$ROOT/startup-lib/group-guard.py"
+chmod +x "$ROOT/startup-lib/group-guard.py"
+mkfifo "$ROOT/startup-guard"
+bash -c '
+    source "$1"
+    HARNESS_LIB=$2
+    export MOCK_GUARD_MARKER=$3
+    MOQ_TEST_RUNS=$4 harness_begin startup-cancel "just test bundle"
+    harness_spawn pending "$HARNESS_RUN/pending.log" sleep 120
+' _ "$DIR/harness.sh" "$ROOT/startup-lib" "$ROOT/startup-guard" "$ROOT/startup-runs" \
+    >"$ROOT/startup-cancel.out" 2>&1 &
+startup_shell=$!
+read -r startup_leader startup_guard <"$ROOT/startup-guard"
+kill -TERM "$startup_shell"
+startup_status=0
+wait "$startup_shell" || startup_status=$?
+check "cancellation during guard startup exits with the signal status" test "$startup_status" -eq 143
+check "cancellation during guard startup reaps the provisional leader" stopped "$startup_leader"
+check "cancellation during guard startup reaps the provisional guard" stopped "$startup_guard"
+
 unreadable_identity_reap_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
