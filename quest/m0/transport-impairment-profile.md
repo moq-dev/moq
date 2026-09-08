@@ -36,10 +36,9 @@ than escalating when it does not.
 Acceptance: the three drills pass under a moderate profile and the recorded
 baseline matches the requested one within a stated tolerance. A profile that
 cannot install fails the run. Leave CI lane scheduling to the PR behavioral
-gates quest, and do not use retries to make intermittent failures green.
+gate selector, and do not use retries to make intermittent failures green.
 
 ## Related
 
-- [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - selects bounded scenarios by changed scope
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - stores timelines, seeds, and traces
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - provides Linux execution for the profile
