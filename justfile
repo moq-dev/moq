@@ -123,6 +123,7 @@ worktree ACTION="check" $BASE="":
     objects=$(access "$common_dir/objects")
     heads=$(access "$common_dir/refs/heads")
     worktree_meta=$(access "$git_dir")
+    worktree=$(access "$root")
     # Tracking is `branch.<name>.remote`/`.merge` in the repository config, which
     # lives in the common directory alongside the `config.lock` the write needs,
     # not in the branch's ref. Probing refs/heads for it would refuse on a
@@ -144,7 +145,8 @@ worktree ACTION="check" $BASE="":
     echo "             $git_dir (FETCH_HEAD): $worktree_meta"
     echo "  branch needs $common_dir/refs/heads: $heads"
     echo "  upstream needs $common_dir/config: $config"
-    echo "  rebase needs $git_dir and the worktree: $worktree_meta"
+    echo "  rebase needs $git_dir: $worktree_meta"
+    echo "               $root: $worktree"
 
     dirty=$(git status --porcelain | wc -l | tr -d ' ')
     echo "dirty:       $dirty tracked/untracked path(s)"

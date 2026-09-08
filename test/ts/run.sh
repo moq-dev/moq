@@ -207,7 +207,7 @@ URL="http://127.0.0.1:${PORT}"
 # still refuse a port some unrelated process is already serving on. Without this
 # the readiness probe below would be satisfied by that relay while ours died on
 # its failed bind, and the round-trip would grade a binary nobody built here.
-if curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+if harness_probe "$URL/certificate.sha256"; then
     echo "error: something is already listening on 127.0.0.1:${PORT} (stale relay?)" >&2
     exit 1
 fi

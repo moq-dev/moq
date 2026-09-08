@@ -19,6 +19,8 @@
 #
 # See test/README.md for the contract and the teardown rules.
 
+HARNESS_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # Absolute path to this run's private directory. Every artifact goes here.
 HARNESS_RUN=""
 
@@ -119,7 +121,7 @@ harness_port_root() {
 # directory outside the reservation root that teardown then removes.
 harness_valid_port() {
     local port="$1"
-    [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((port >= 1024 && port <= 65535))
+    [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((${#port} <= 5)) && ((port >= 1024 && port <= 65535))
 }
 
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
@@ -134,12 +136,12 @@ harness_valid_port() {
 #
 # Holding the reservation for the run's lifetime is the difference from probing:
 # a probe that finds a port free has already released it by the time the relay
-# binds, so two runs that probe together pick the same number. A populated claim
-# is renamed into place, so its owner metadata and reservation appear atomically.
+# binds, so two runs that probe together pick the same number. An advisory lock
+# serializes replacement, and a populated claim is renamed into place atomically.
 # shellcheck disable=SC2034  # HARNESS_PORT is the result, read by the caller
 harness_port() {
     local label="$1" wanted="${2:-}"
-    local root port last
+    local root port last status
     root=$(harness_port_root)
     mkdir -p "$root"
 
@@ -148,12 +150,17 @@ harness_port() {
             echo "error: port for $label must be 1024..65535 (got '$wanted')" >&2
             return 1
         }
-        harness_port_take "$root" "$wanted" || {
+        if harness_port_take "$root" "$wanted"; then
+            HARNESS_PORT="$wanted"
+            return 0
+        else
+            status=$?
+        fi
+        if ((status == 1)); then
             echo "error: port $wanted ($label) is held by another run; see $root/$wanted" >&2
             return 1
-        }
-        HARNESS_PORT="$wanted"
-        return 0
+        fi
+        return "$status"
     fi
 
     port="${MOQ_TEST_PORT_BASE:-4500}"
@@ -169,7 +176,10 @@ harness_port() {
         if harness_port_take "$root" "$port"; then
             HARNESS_PORT="$port"
             return 0
+        else
+            status=$?
         fi
+        ((status == 1)) || return "$status"
         port=$((port + 1))
     done
     echo "error: no free port for $label in ${MOQ_TEST_PORT_BASE:-4500}..$last (see $root)" >&2
@@ -178,42 +188,16 @@ harness_port() {
 
 # Claim one port. Private; `harness_port` is the entry point.
 harness_port_take() {
-    local root="$1" port="$2" owner aside claim marker nested
-    while true; do
-        claim=$(mktemp -d "$root/.claim-$port-XXXXXXXX") || return 1
-        marker=$(basename "$claim")
-        printf '%s\n' "$$" >"$claim/pid"
-        printf '%s\n' "$HARNESS_RUN" >"$claim/run"
-        : >"$claim/$marker"
-
-        if mv "$claim" "$root/$port" 2>/dev/null; then
-            if [[ -f "$root/$port/$marker" ]]; then
-                rm -f "$root/$port/$marker"
-                HARNESS_PORTS+=("$root/$port")
-                return 0
-            fi
-            # `mv source existing-directory` nests the source instead of failing.
-            # Remove our nested claim before inspecting the reservation we lost.
-            nested="$root/$port/$marker"
-            [[ ! -d "$nested" ]] || rm -rf "$nested"
-        else
-            rm -rf "$claim"
-        fi
-
-        # An owner that no longer exists left the reservation behind (SIGKILL, a
-        # crashed shell). Because the directory was populated before its atomic
-        # rename, an empty owner is stale rather than a claim still initializing.
-        owner=$(cat "$root/$port/pid" 2>/dev/null || true)
-        if [[ -n "$owner" ]] && ! harness_exited "$owner"; then
-            return 1
-        fi
-        # Renaming it away is the ownership transition, and rename(2) is atomic:
-        # of two reclaimers that both saw the dead owner, exactly one moves it;
-        # the loser loops and inspects the winner's populated reservation.
-        aside="$root/.stale-$port-$$-$RANDOM"
-        mv "$root/$port" "$aside" 2>/dev/null || continue
-        rm -rf "${aside:?}"
-    done
+    local root="$1" port="$2" lock="$1/.lock-$2"
+    if command -v flock >/dev/null 2>&1; then
+        flock "$lock" "$HARNESS_LIB/reserve.sh" "$root" "$port" "$$" "$HARNESS_RUN" || return $?
+    elif command -v lockf >/dev/null 2>&1; then
+        lockf -k "$lock" "$HARNESS_LIB/reserve.sh" "$root" "$port" "$$" "$HARNESS_RUN" || return $?
+    else
+        echo "error: port reservations require flock or lockf" >&2
+        return 2
+    fi
+    HARNESS_PORTS+=("$root/$port")
 }
 
 # Record an endpoint this run stood up: `harness_endpoint <label> <url>`.
@@ -235,9 +219,11 @@ harness_endpoint() {
 # already exited will never bind, so waiting out the budget only delays the
 # report of a bind that failed.
 harness_ready() {
-    local url="$1" seconds="${2:-30}" pid="${3:-}" i
-    for ((i = 0; i < seconds * 20; i++)); do
-        if curl -sf "$url" >/dev/null 2>&1; then
+    local url="$1" seconds="${2:-30}" pid="${3:-}" deadline remaining
+    deadline=$((SECONDS + seconds))
+    while ((SECONDS < deadline)); do
+        remaining=$((deadline - SECONDS))
+        if harness_probe "$url" "$remaining"; then
             if [[ -n "$pid" ]] && harness_exited "$pid"; then
                 echo "error: $url answered, but the process this run started is gone" >&2
                 return 1
@@ -250,6 +236,12 @@ harness_ready() {
         sleep 0.05
     done
     return 1
+}
+
+# Probe one URL without letting a connected but unresponsive peer block forever.
+harness_probe() {
+    local url="$1" seconds="${2:-1}"
+    curl -sf --max-time "$seconds" "$url" >/dev/null 2>&1
 }
 
 # True once a spawned child has exited, waited on or not: `harness_exited <pid>`.

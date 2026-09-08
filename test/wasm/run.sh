@@ -72,7 +72,7 @@ FLAVOURS=(
 # WASM_PORT pins the first relay and the rest are reserved individually, so only
 # the first has to be a real port. Port 0 is the trap worth naming: the relay
 # would bind an arbitrary port while this script polls 0 forever.
-if [[ -n "$PORT" ]] && { [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT > 65535)); }; then
+if [[ -n "$PORT" ]] && ! harness_valid_port "$PORT"; then
     echo "error: port must be 1024..65535 (got '$PORT')" >&2
     exit 2
 fi
@@ -135,7 +135,7 @@ for flavour in "${FLAVOURS[@]}"; do
 
     # The reservation covers other harness runs, not the rest of the machine, so
     # still refuse a port some unrelated process is already serving on.
-    if curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
+    if harness_probe "$url/certificate.sha256"; then
         echo "error: something is already listening on 127.0.0.1:${port} (stale relay?)" >&2
         exit 1
     fi
