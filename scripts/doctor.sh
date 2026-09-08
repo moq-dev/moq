@@ -98,9 +98,9 @@ tools_for_files() {
 # c, and a system GStreamer for gst.
 tools_for_suite() {
     case $1 in
-        smoke) printf 'cargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
+        smoke) printf 'cargo\ncurl\nffmpeg\ntimeout\n' ;;
         smoke-full)
-            printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n'
+            printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
             printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
             printf '%s\n' "${CC:-cc}"
             ;;
@@ -772,6 +772,32 @@ probe_loopback() {
         "allow binding and connecting to 127.0.0.1 over $kind" 15 "$BOUNDED_ELAPSED"
 }
 
+# Concurrent harnesses serialize port reservations with whichever advisory
+# locking utility the host provides. Linux normally has flock and macOS lockf;
+# requiring one by name would reject the other valid platform.
+probe_advisory_lock() {
+    local suites=$1 tool status
+    if command -v flock >/dev/null 2>&1; then
+        tool=flock
+        bounded 5 flock "$SCRATCH/harness.lock" true
+    elif command -v lockf >/dev/null 2>&1; then
+        tool=lockf
+        bounded 5 lockf -k "$SCRATCH/harness.lock" true
+    else
+        record probe.advisory-lock probe missing true "$suites" \
+            "neither flock nor lockf is on PATH" "install flock or lockf" 5 0
+        return
+    fi
+    status=$?
+    if ((status == 0)); then
+        record probe.advisory-lock probe ok true "$suites" "$tool acquires an advisory lock" "" 5 "$BOUNDED_ELAPSED"
+    else
+        record probe.advisory-lock probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+            "$tool could not acquire an advisory lock: $(error_line "$BOUNDED_OUT")" \
+            "allow $tool to create and lock files in ${TMPDIR:-/tmp}" 5 "$BOUNDED_ELAPSED"
+    fi
+}
+
 # `just test smoke` and `just test wasm` drive headless Chromium through the
 # Playwright each pins in its own package. Probed by launching it, because an
 # installed package with no downloaded browser is the common shape of this
@@ -1245,6 +1271,7 @@ self_test() {
     # command exists to remove.
     check 'smoke needs ffmpeg' "$(tools_for_suite smoke | grep -c '^ffmpeg$')" 1
     check 'smoke needs timeout' "$(tools_for_suite smoke | grep -c '^timeout$')" 1
+    check 'smoke no longer needs pgrep' "$(tools_for_suite smoke | grep -c '^pgrep$')" 0
     check 'wasm needs wasm-bindgen' "$(tools_for_suite wasm | grep -c '^wasm-bindgen$')" 1
     check 'wasm needs curl' "$(tools_for_suite wasm | grep -c '^curl$')" 1
     # smoke's default matrix is Rust alone, and smoke.sh only marks the browser
@@ -1544,6 +1571,13 @@ if [ -n "$UDP_BIND_SUITES" ]; then
     probe_loopback udp "$UDP_BIND_SUITES"
 else
     record probe.loopback-udp probe skip false "" "this scope binds no sockets" "" 15 0
+fi
+
+LOCK_SUITES=$(selected "smoke smoke-full wasm")
+if [ -n "$LOCK_SUITES" ]; then
+    probe_advisory_lock "$LOCK_SUITES"
+else
+    record probe.advisory-lock probe skip false "" "no harness suite is selected" "" 5 0
 fi
 
 # Plain `smoke` runs the Rust matrix and needs no browser; `smoke-full`
