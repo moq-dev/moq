@@ -56,11 +56,16 @@ Delete:
   `_doc-names-test`, `_publish-test`, `sh/rs/package-nfpm.test.sh`,
   `sh/gh/package-binary.test.sh`.
 - Guards: `_doc-names` and `doc-names.jq`, `_fuzz-lock`, and the publish
-  lower-bound check. Where each incident surfaces instead: a doc-directory
-  collision fails the `cargo doc` step of the pull request that selects both
-  crates (resolve with `doc = false` as before); fuzz lockfile drift fails the
-  nightly fuzz job; a stale internal lower bound fails release-plz's publish.
-  `alert.sh check-coverage` stays: it is a lint of alert.yml, not of a recipe.
+  lower-bound check. This is a deliberate trade: the guards were three
+  incidents' worth of bash plus their self-tests on every pull request. Where
+  each surfaces instead: a doc-directory collision shows up as an intermittent
+  `failed to remove directory` in the `cargo doc` step of whichever pull
+  request selects both crates, not deterministically (resolve with `doc =
+  false` as before); a stale internal lower bound fails release-plz's publish.
+  `_fuzz-lock` is already deleted by #3543, which folds the fuzz harness into
+  the workspace so the root lockfile and `--locked` cover it; if that lands
+  first there is nothing left to remove here. `alert.sh check-coverage`
+  stays: it is a lint of alert.yml, not of a recipe.
 - The `worktree` recipe and its 170 lines, plus the Worktrees section of
   `test/README.md`. This absorbs the justfile half of
   [Harness drive-bys](/quest/m0/harness-drive-bys.md); keep `_base` folded
@@ -77,7 +82,8 @@ Rename:
 
 - Root `wasm` becomes `js wasm`: it emits `js/wasm/dist`, so it is a JS
   package build. `rs wasm` stays the compile gate and `test wasm` the browser
-  run. Update wasm.yml, root `build`, and the four doc references.
+  run. Update wasm.yml, root `build`, `test/wasm/run.sh` (which runs `just
+  wasm` to build the package under test), and the four doc references.
 
 Keep, moved into scripts unchanged in behavior: the remark mirror-and-diff in
 `sh/markdown.sh` (remark-cli has no check mode and the lint presets are

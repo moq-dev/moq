@@ -19,6 +19,11 @@ only its packaging and publish steps.
   targets, uploads one artifact per target, and outputs the version parsed
   from the tag. Callers download the artifacts and run their `just <lang>
   package` and publish recipes.
+- `release-dart-ffi.yml` and `release-go-ffi.yml` also run on `pull_request`,
+  where `GITHUB_REF` is not a `moq-ffi-v*` tag and `parse-version` fails; they
+  read the version from `rs/moq-ffi/Cargo.toml` instead. The reusable
+  workflow keeps that fallback (an input or a ref check), or those PR runs die
+  before building.
 - Callers keep their `name:` and triggers, as the binary quest did, so
   `alert.yml` and the `workflow_run` chains (`release-go.yml`,
   `release-py.yml`, `release-swift-lib.yml`) are untouched.
