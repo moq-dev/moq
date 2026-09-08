@@ -126,6 +126,8 @@ secret_case() {
         # pattern that stops at the first space ships it.
         echo "Authorization: Bearer opaque-bearer-credential"
         echo 'Cookie: session=\"opaque-plain-escaped-secret\"'
+        echo '> Authorization: Bearer opaque-prefixed-request-secret'
+        echo '< Set-Cookie: session=opaque-prefixed-response-secret'
         echo "Proxy-Authorization: Basic opaque-proxy-credential"
         echo 'set-cookie: session=opaque-cookie-value; Path=/'
         # Upper case, because BSD sed has no case-insensitive substitution and a
@@ -164,7 +166,8 @@ HAR
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
-    opaque-bearer-credential opaque-plain-escaped-secret opaque-proxy-credential \
+    opaque-bearer-credential opaque-plain-escaped-secret opaque-prefixed-request-secret \
+    opaque-prefixed-response-secret opaque-proxy-credential \
     opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
     opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
     opaque-keyed-json-secret \

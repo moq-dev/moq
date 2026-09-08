@@ -524,7 +524,7 @@ _bundle_redact_stream() {
             }
             function redact_plain(    lower) {
                 lower = tolower($0)
-                if (match(lower, /^[[:space:]]*(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
+                if (match(lower, /(^|[^[:alnum:]-])(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
                     $0 = substr($0, 1, RSTART + RLENGTH - 1) "<redacted>"
                 }
             }
