@@ -739,9 +739,10 @@ run_round() {
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
 # assertion it names), so the exit code is the whole answer.
 run_media() {
-    local name="$1" log started status=0
+    local name="$1" safe log started status=0
     shift
-    log="$TMP/media-${name// /-}.log"
+    safe=${name//[^[:alnum:]._-]/-}
+    log="$TMP/media-$safe.log"
     started=$SECONDS
     (cd "$CLIENTS/js" && bun media.ts --url "$URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
     if [[ "$status" -eq 0 ]]; then

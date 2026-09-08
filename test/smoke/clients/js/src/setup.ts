@@ -84,9 +84,7 @@ if (role === "publish") {
 		detachLeaky: () => {
 			// Stand up a second player on the same broadcast and leave it connected. This is the old
 			// session a detach is supposed to end, so the resource baseline must not come back clean.
-			const stray = document.createElement("moq-watch") as MoqWatch;
-			stray.setAttribute("url", url);
-			stray.setAttribute("name", broadcast);
+			const stray = el.cloneNode(true) as MoqWatch;
 			leak.appendChild(stray);
 			stop();
 			el.remove();

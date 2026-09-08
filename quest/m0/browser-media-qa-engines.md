@@ -25,7 +25,3 @@ missing, which is the groundwork this builds on.
   cell; it is a stated limit with the missing API named.
 - Keep the tolerances shared. A skew bound that only holds on one engine is a
   measurement of that engine, not of the player.
-
-## Related
-
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - shared trace and sample output

@@ -44,4 +44,3 @@ decoder would.
 ## Related
 
 - [Media QA on other engines](/quest/m0/browser-media-qa-engines.md) - the same harness, another axis
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - shared trace and sample output

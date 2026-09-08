@@ -32,7 +32,3 @@ matrix, which grants everything up front.
   enforces the gate on the fixture page and has been seen not enforcing it on the
   player's, whose graph is built a second later. Find what actually decides it,
   then assert the gate rather than only exercising it.
-
-## Related
-
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - shared trace and sample output
