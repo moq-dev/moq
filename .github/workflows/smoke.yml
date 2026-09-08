@@ -96,7 +96,14 @@ jobs:
         shell: bash -leo pipefail {0}
 
       - name: Smoke
-        run: nix develop --command just test smoke-${{ inputs.matrix || 'full' }}
+        env:
+          MOQ_QA_MATRIX: ${{ inputs.matrix || 'full' }}
+        run: |
+          case "$MOQ_QA_MATRIX" in
+            core|full) ;;
+            *) echo "error: unsupported smoke matrix: $MOQ_QA_MATRIX" >&2; exit 2 ;;
+          esac
+          nix develop --command just test "smoke-$MOQ_QA_MATRIX"
         shell: bash -leo pipefail {0}
 
       # Proves the harness can still report a failure at all, which every cell
@@ -119,7 +126,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: qa-bundle-smoke
+          name: qa-bundle-smoke-${{ inputs.matrix || 'full' }}
           # Match finalized harness directories, never .incomplete or .live.
           path: qa-artifacts/smoke-*/
           if-no-files-found: ignore

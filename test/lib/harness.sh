@@ -95,11 +95,17 @@ harness_env_array() {
 
 # Start a run named NAME, reproducible with RERUN. Creates the run directory and
 # installs the teardown trap; every other function needs this called first.
+_harness_root() {
+    local root="$1"
+    while [[ "$root" != / && "$root" == */ ]]; do root=${root%/}; done
+    printf '%s\n' "$root"
+}
+
 harness_begin() {
     local name="$1" rerun="${2:-}"
 
     local root="${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}}"
-    root="${root%/}"
+    root=$(_harness_root "$root")
     [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
     HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
@@ -130,7 +136,7 @@ harness_begin() {
 # worktrees still share, because they run as the same user.
 harness_port_root() {
     local root="${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}}"
-    root="${root%/}"
+    root=$(_harness_root "$root")
     [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports-$(id -u)"
     echo "$root"
 }
@@ -359,11 +365,17 @@ harness_index() {
 
 # True while the exact leader or its stable in-group witness still proves group ownership.
 harness_group_owned() {
-    local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" current group
+    local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" current group job
     current=$("$HARNESS_LIB/process-start.py" "$pid" 2>/dev/null || true)
     if [[ -n "$current" && "$current" == "${HARNESS_STARTS[$i]}" ]]; then
         return 0
     fi
+    # The shell's job table is a second stable ownership source. A direct child
+    # cannot have its PID recycled before this shell waits for it, so this also
+    # covers sandboxes that deny process birth-time inspection during cleanup.
+    while read -r job; do
+        [[ "$job" == "$pid" ]] && return 0
+    done < <(jobs -pr)
     current=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
     [[ -n "$current" && "$current" == "${HARNESS_WITNESS_STARTS[$i]}" ]] || return 1
     group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)

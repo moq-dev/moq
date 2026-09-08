@@ -550,6 +550,35 @@ check "stack capture skips an unrelated enumerated pid" \
     sh -c '! grep -qx "$1" "$2"' _ "$unrelated_pid" "$bundle/work/attached"
 check "an unrelated pid does not consume the stack cap" grep -qx "$eligible_pid" "$bundle/work/attached"
 
+root_path=$(
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    MOQ_TEST_PORTS=/ harness_port_root
+)
+check "the filesystem root survives path normalization" test "$root_path" = /
+
+unreadable_identity_reap_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_spawn unreadable "$BUNDLE_WORK/unreadable.log" sleep 120
+    # shellcheck disable=SC2153 # Set by harness_spawn in the sourced library.
+    spawned=$HARNESS_PID
+    mkdir -p "$BUNDLE_WORK/unreadable-lib"
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$BUNDLE_WORK/unreadable-lib/process-start.py"
+    chmod +x "$BUNDLE_WORK/unreadable-lib/process-start.py"
+    # shellcheck disable=SC2034 # Read by harness_reap in the sourced library.
+    HARNESS_LIB="$BUNDLE_WORK/unreadable-lib"
+    harness_reap "$spawned"
+    printf '%s\n' "$spawned" >"$BUNDLE_DIR/unreadable.pid"
+    bundle_finish 1
+}
+bundle=$(run_case unreadable-identity-reap unreadable_identity_reap_case)
+unreadable_pid=$(<"$bundle/unreadable.pid")
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "the shell job identity permits cleanup when birth reads fail" \
+    sh -c '! kill -0 "$1" 2>/dev/null' _ "$unreadable_pid"
+
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
     # The argument exercises a credential-shaped command without exposing it in
