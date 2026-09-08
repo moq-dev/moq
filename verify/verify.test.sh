@@ -225,6 +225,11 @@ grade() {
     jq "$1" <<<"$green" | "$VERIFY" classify | jq -r .verdict
 }
 
+# The state the report assigns to the only local receipt.
+evidence() {
+    jq "$1" <<<"$green" | "$VERIFY" classify | jq -r '.evidence[0].state'
+}
+
 [[ "$(grade '.')" == green ]] || fail "a complete, current candidate must be green"
 [[ "$(grade '.checks |= map(select(.name != "Test"))')" == incomplete ]] ||
     fail "a required job that never ran must block"
@@ -253,6 +258,13 @@ failed_lane='.checks += [{name: "Smoke", status: "completed", conclusion: "failu
     fail "evidence recorded against another base must be stale"
 [[ "$(grade '.receipts[0].source.base = "main"')" == green ]] ||
     fail "a base recorded without its remote must still match"
+
+# An unreadable receipt has no source to compare, and "delete it and run the
+# lane again" is the useful answer. Reading it as freshness would bury that.
+unreadable='.receipts[0] = {lane: "check", kind: "unknown", verdict: "unreadable"}'
+[[ "$(evidence "$unreadable")" == unreadable ]] ||
+    fail "an unreadable receipt must keep its own diagnosis in the report"
+[[ "$(grade "$unreadable")" == stale ]] || fail "an unreadable receipt must still block"
 [[ "$(grade '.pr.mergeable = "CONFLICTING"')" == failed ]] || fail "a conflicting candidate must block"
 [[ "$(grade '.pr.reviewDecision = "CHANGES_REQUESTED"')" == failed ]] || fail "requested changes must block"
 [[ "$(grade '.pr.isDraft = true')" == incomplete ]] || fail "a draft must not be green"

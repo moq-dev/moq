@@ -592,7 +592,12 @@ cmd_classify() {
             lane: .lane,
             kind: .kind,
             verdict: .verdict,
-            state: (if .source.head != $head then "different-head"
+            # An unreadable receipt carries no source to compare, and its own
+            # verdict is the actionable one: reading it as "different-head"
+            # would replace "delete this and run the lane again" with a
+            # freshness complaint about a file nobody can read.
+            state: (if (.source | type) != "object" then .verdict
+                    elif .source.head != $head then "different-head"
                     elif ((.source.base // "") | . != $base and (endswith("/" + $base) | not))
                         then "different-base"
                     elif .verdict == "pass" then "current"
