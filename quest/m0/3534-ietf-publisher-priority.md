@@ -36,14 +36,18 @@ Steps:
 - Properties: add DEFAULT_PUBLISHER_PRIORITY (0x21) beside 0x22. Encode it on
   SUBSCRIBE_OK and PUBLISH from `info.priority` through `priority::to_wire`;
   decode it into `track::Info::priority` on the subscriber through
-  `priority::from_wire`.
+  `priority::from_wire`. The property block is written from draft-17 on and
+  read from draft-16 on, as `Properties::encode` already gates; draft-14 and 15
+  have no block at all, so on those drafts the priority travels only in the
+  group header and an absent flag resolves straight to the draft's fallback.
 - Group header: the publisher stamps `priority::to_wire(track.info().priority)`
   where it reads the timescale today. The decoder resolves an absent flag to the
   track's declared default first and only then to the draft's fallback; confirm
   that fallback against each negotiated draft's text instead of keeping 128 by
   assumption, and cite the section in the type's docs.
 - Mirror in `js/net/src/ietf/publisher.ts`, `object.ts`, and `properties.ts`.
-- Tests: 0x21 round-trips on SUBSCRIBE_OK per version; a lite-ingested track
+- Tests: 0x21 round-trips on SUBSCRIBE_OK on every draft that carries the
+  block and is absent from the bytes on the ones that do not; a lite-ingested track
   with priority N serves over moq-transport with header priority `to_wire(N)`;
   a subgroup without the flag decodes to the declared default; a relay
   integration test where hang audio (priority 80) and video (60) arrive at a

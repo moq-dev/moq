@@ -4,7 +4,7 @@
 
 Two encoding stages over one connection, such as `moq ... capture -- capture`,
 are accepted, and both encoders target shares of the connection's estimate that
-sum to it. The refusal in `rs/moq-cli/src/args.rs`, "a stage that encodes to fit
+sum to at most it, surplus left unclaimed when a ceiling binds. The refusal in `rs/moq-cli/src/args.rs`, "a stage that encodes to fit
 the connection's bandwidth estimate assumes it's the only publisher", is gone
 with the test that asserts it.
 
@@ -22,8 +22,13 @@ priority.
   has a reader; otherwise delete both.
 - Regression: two capture stages on one connection whose grants sum to at most
   the estimate and rank by priority, next to the allocator's
-  `concurrent_tracks_split_the_estimate`, plus an args test that the
-  combination parses.
+  `concurrent_tracks_split_the_estimate`, plus an args test that runs the same
+  validation entry point the CLI does and accepts the combination, not one that
+  only parses it.
+- Audio reserves its configured rate and does not follow a smaller grant until
+  [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md);
+  that is the allocator's documented advisory contract and holds for one
+  capture stage exactly as for two, so it is not a reason to keep the refusal.
 - `doc/bin/cli.md` "Multiple stages" drops any mention of the limit.
 
 Branch from dev.

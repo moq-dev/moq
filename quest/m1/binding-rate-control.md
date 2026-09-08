@@ -26,14 +26,22 @@ estimate. Today `rs/moq-ffi/src/video.rs` and `audio.rs` never set
 `Options::bandwidth`, and the estimate reaches a binding only as the
 `send_rate_bps` snapshot on the connection stats.
 
-- moq-ffi: `MoqSession::bandwidth() -> MoqBandwidth`, the allocator over the
-  session's estimate. `MoqBandwidth::reserve(track, max_bps) -> MoqReservation`
-  keyed on the track producer's demand. `MoqReservation::grant() -> Option<u64>`
-  is the current share (a snapshot; an encoder that asks before each frame needs
-  nothing more), `update(max_bps)` moves the ceiling, and dropping it releases
-  the share. Video and audio publish options accept an optional reservation, and
-  the built-in encoders take `Options::bandwidth` from it. `set_bitrate` stays
-  as the manual ceiling.
+- moq-ffi: `MoqSession::bandwidth() -> MoqBandwidth` returns a handle to the
+  one allocator the session owns, so every handle shares one reservation
+  registry. The allocator consumes the live `bandwidth::Consumer`, and because a
+  moq-ffi session reconnects on its own, that consumer is the reconnecting
+  one: it reports no estimate while disconnected and resumes on the next
+  connection, and reservations survive the gap. `MoqBandwidth::reserve(track,
+  max_bps) -> MoqReservation` is keyed on the track producer's demand.
+  `MoqReservation::grant() -> Option<u64>` is the current share as a snapshot
+  (an encoder that asks before each frame needs nothing more); `None` means the
+  allocator has no estimate or the track is not demanded, hold the current
+  rate, and `Some(0)` is a real zero grant, exactly the distinction
+  `Reservation::peek` draws. `update(max_bps)` moves the ceiling and dropping
+  the reservation releases the share. Video and audio publish options accept an
+  optional reservation; the built-in encoders feed its consumer to
+  `Options::bandwidth` unchanged, so the same `None` versus zero semantics
+  reach `rate::Control`. `set_bitrate` stays as the manual ceiling.
 - libmoq: `moq_session_bandwidth`, `moq_bandwidth_reserve`,
   `moq_reservation_grant`, `moq_reservation_update`, `moq_reservation_close`,
   and a reservation parameter on the raw video and audio publish calls.
@@ -42,9 +50,10 @@ estimate. Today `rs/moq-ffi/src/video.rs` and `audio.rs` never set
   `doc/lib/{py,swift,kt,go,c}` per the Cross-Package Sync table; dart after dev
   merges. Run `just test smoke-full`.
 - Tests: two video producers on one session reserving 4 and 2 Mbps against a
-  3 Mbps estimate get grants summing to at most 3 Mbps; a dropped reservation
-  frees its share; the built-in encoder's applied bitrate follows a shrinking
-  grant.
+  3 Mbps estimate get grants summing to at most 3 Mbps; two `bandwidth()`
+  handles see each other's reservations; a dropped reservation frees its share;
+  a reservation reports `None` across a reconnect and a grant again after it;
+  the built-in encoder's applied bitrate follows a shrinking grant.
 
 Branch from dev.
 

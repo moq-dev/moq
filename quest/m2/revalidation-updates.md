@@ -1,4 +1,4 @@
-# [S] An auth re-check moves the tier and names an alias change
+# [M] An auth re-check moves the tier and names an alias change
 
 ## Goal
 
@@ -13,24 +13,35 @@ refusal. Scope narrowing keeps the
 
 ## Plan
 
-`Auth::recheck` in `rs/moq-relay/src/auth.rs` scores a reply with
+Today `Auth::recheck` in `rs/moq-relay/src/auth.rs` scores a reply with
 `Scope::covered_by` (root, subscribe, publish), drops the `AuthToken`, and
-propagates only `CacheHints`. The stats handle is built once at admission in
-`connection.rs` from `token.tier` and `token.root`.
+propagates only `CacheHints`; the revalidation loop consumes `Recheck::Valid`
+to reschedule itself and nothing reaches the connection. The stats handle is
+built once at admission in `connection.rs` from `token.tier` and `token.root`,
+handed into the request before acceptance, and cloned into the origins, scopes
+and meters, so rebuilding a local handle would retag nothing.
 
-- `Recheck::Valid` carries the reply's `tier`. The connection compares it with
-  the live handle's and, on change, rebuilds the session stats handle under the
-  new tier and swaps it into the session's traffic accounting. Earlier counters
-  are not migrated: the old tier was truthfully what paid until then.
+- `Recheck::Valid` carries the reply's `tier` beside the hints, never the whole
+  `AuthToken`. The revalidation loop compares it with the tier the session was
+  admitted under and, on change, retags the session's accounting: the tier
+  becomes a label the shared `stats::Session` state swaps in place, so every
+  clone the origins and meters hold records subsequent bytes under the new
+  tier. Earlier counters are not migrated: the old tier was truthfully what
+  paid until then. This is the substantive piece; size it before the alias
+  half.
 - `Expired` gains an `Alias` variant, additive under `#[non_exhaustive]`, raised
   when the reply's alias no longer matches the admitted root (v0) or the
   canonical alias transform relay auth defines for v1 grants. `covered_by`
   keeps failing it; only the reason changes.
 - Tests: a re-check that moves the tier records subsequent bytes under the new
-  meter and leaves earlier bytes where they were; a re-check that changes the
-  alias closes with `Expired::Alias`; a reply that changes both closes.
+  meter through an already-cloned handle and leaves earlier bytes where they
+  were; a re-check that changes the alias closes with `Expired::Alias`; a reply
+  that changes both closes.
 - Docs: the revalidation section of `doc/bin/relay/auth.md` gains a per-field
-  table: scope narrowing resizes, tier updates in place, alias closes.
+  table: tier updates in place, alias closes, and scope narrowing closes today
+  (`covered_by` failing maps to `Recheck::Revoked`) and resizes once
+  [relay auth](/quest/m2/path-patterns/relay-auth.md) lands; say which is in
+  effect.
 
 On main, additive.
 

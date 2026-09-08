@@ -3,12 +3,15 @@
 ## Goal
 
 `moq export ts` keeps emitting every elementary stream across a content join
-on a source whose timeline is continuous: PCR, PTS and DTS monotone, continuity
-counters unbroken, no `discontinuity_indicator`. That is what a real encoder
-produces at a hard cut. A rewind detected on one track may cost the program one
-clock and PSI reset, but it never fences another track for good. The true
-rewind recovery #3375 added, a looping file where every track steps backwards,
-keeps working.
+on a source whose transport timeline is continuous: PCR, PTS and DTS monotone
+on the wire, continuity counters unbroken, no `discontinuity_indicator`. That is
+what a real encoder produces at a hard cut. The only backwards step in that
+scenario is the importer's: the legacy audio importer extrapolates timestamps
+from the last PES header, so after a resync at the join it re-locks a frame a
+few milliseconds below its own extrapolated high-water mark. A rewind detected
+on one track may cost the program one clock and PSI reset, but it never fences
+another track for good, and the true rewind recovery #3375 added, a looping
+file where every track steps backwards, keeps withholding stale frames.
 
 Boundaries: the consumer's rewind detection and the legacy audio importer's
 resync are untouched here. Retiring inferred rewinds altogether is
@@ -29,18 +32,22 @@ measured 0.31 Mb/s against a 9.5 Mb/s source with no recovery over 40 minutes,
 bisected to #3375, and showed a single-track source is immune because the fence
 needs a bystander.
 
-- Every track joins the new epoch on every rewind: delete the `backwards`
-  branch in `rewind()`, its parameter, and the epoch test in `Track::admit`,
-  keeping the watermark, clock, counter, PSI and PCR reset that #3375 introduced
-  for #2833. A bystander that still holds media from before the boundary emits
-  it under the reset clock instead of being discarded, and its own next
-  boundary resets again. Delete whatever only the fence kept alive.
-- Regression test in `export_test.rs`: two tracks on a continuous timeline
-  whose content restarts, the audio track alone stepping back by less than one
-  frame at the join; video and audio keep emitting across it, and the join
-  costs at most one PCR discontinuity and one PSI re-emission. The existing
+- Give the fence an exit. A fenced track joins the new generation when its own
+  timeline steps back, as today, or when the program clock driven by the joined
+  tracks passes its pending frame's timestamp. On a true rewind the video
+  track's own boundary arrives long before the reset clock climbs back to its
+  stale frames, so they are still discarded, which is what
+  `rewind_flags_the_break_once_across_tracks` asserts. On the #3533 join the
+  reset clock sits a few milliseconds below video's next frame, so video
+  re-joins within one frame. Implement it in `Track::admit` against the
+  exporter's watermark rather than as a timer: the exit is a clock comparison,
+  never a deadline.
+- Regression test in `export_test.rs`: two tracks on a continuous transport
+  timeline whose content restarts, the audio track alone stepping back by less
+  than one frame at the join; video and audio keep emitting across it, and the
+  join costs at most one PCR discontinuity and one PSI re-emission. The existing
   `rewind_re_emits_tables_and_resumes_the_clock` and
-  `rewind_flags_the_break_once_across_tracks` keep passing.
+  `rewind_flags_the_break_once_across_tracks` keep passing unchanged.
 - Land after [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md)
   (PR #3529), which edits the same functions and makes the legacy importer
   declare its breaks.
