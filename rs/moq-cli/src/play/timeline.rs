@@ -195,10 +195,8 @@ mod tests {
 		Timestamp::from_millis(millis).unwrap()
 	}
 
-	/// The defect this clock exists for: a first frame that arrives late used to
-	/// pin the anchor once and leave playback that far behind live for the whole
-	/// session. Every earlier arrival has to pull it forward instead, without
-	/// giving up the delay.
+	/// Earlier arrivals pull the anchor forward so playback converges on the live
+	/// edge without giving up the configured delay.
 	#[test]
 	fn a_late_first_frame_catches_up_to_live() {
 		let start = Instant::now();

@@ -194,11 +194,12 @@ impl Media {
 					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, "playing audio rendition");
-							let presentation = self.presentation.clone();
-							let proxy = self.proxy.clone();
-							tasks.spawn(async move {
-								(Kind::Audio, play_audio(consumer, presentation, depth, proxy).await)
-							});
+							let audio = AudioPlayback {
+								presentation: self.presentation.clone(),
+								depth,
+								proxy: self.proxy.clone(),
+							};
+							tasks.spawn(async move { (Kind::Audio, play_audio(consumer, audio).await) });
 							playback.started(Kind::Audio);
 							break;
 						}
@@ -253,12 +254,19 @@ async fn play_video(
 	Ok(())
 }
 
-async fn play_audio(
-	mut consumer: moq_audio::decode::Consumer,
+struct AudioPlayback {
 	presentation: Arc<Mutex<Presentation>>,
 	depth: Duration,
 	proxy: EventLoopProxy<Event>,
-) -> anyhow::Result<()> {
+}
+
+async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPlayback) -> anyhow::Result<()> {
+	let AudioPlayback {
+		presentation,
+		depth,
+		proxy,
+	} = playback;
+
 	// `depth` is how much the speaker holds: the playout delay, floored, and the
 	// same value the decoder's age budget was built from. The delay lives in the
 	// sink rather than in the throttle, since a sample handed over now sounds
