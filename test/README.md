@@ -25,7 +25,7 @@ target/qa/smoke-20260907T230859Z-71169/
   teardown.sh       reaps exactly the processes this run owned
   session.md        only with MOQ_QA_RETAIN: URLs, PIDs, attach + teardown
   work/             per-process logs, relay config, captures, per-cell timings
-  trace/            Playwright traces, screenshots, HARs, page-error logs
+  trace/            screenshots, redacted HARs, page-error logs, withheld trace hashes
   stacks/           backtraces of whatever was still running
   qlog/             relay QUIC traces, only with MOQ_QA_QLOG
 ```
@@ -75,10 +75,11 @@ were unavailable. A capability nothing recorded looks exactly like one that was
 never tried, which is what sends a reader hunting for a trace that was never
 going to exist.
 
-- **Browser.** A failing browser case leaves a Playwright trace with DOM
-  snapshots and screenshots, a screenshot of the final state, the page's console
-  and error transcript, and a HAR. Open the trace with
-  `bunx playwright show-trace <file>`.
+- **Browser.** A failing browser case captures a Playwright trace, a screenshot
+  of the final state, the page's console and error transcript, and a HAR. Trace
+  archives contain request metadata that cannot be safely redacted, so the
+  retained/uploaded bundle replaces each archive with its SHA-256 identity.
+  Screenshots, transcripts, and redacted HARs remain available.
 - **Network.** The HAR covers HTTP and nothing else, and its bodies are omitted.
   The media itself rides WebTransport over QUIC, which neither the trace nor the
   HAR can see at all. Relay qlog is the only view of that, and it needs a relay

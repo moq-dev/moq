@@ -109,9 +109,8 @@ jobs:
         run: nix develop --command just test wasm
         shell: bash -leo pipefail {0}
 
-      # A browser failure is the one nobody can reproduce from a log line, so
-      # the Playwright trace has to leave the runner. `just test fetch <run id>`
-      # pulls this down.
+      # Browser screenshots, redacted HARs, logs, and withheld trace identities
+      # have to leave the runner. `just test fetch <run id>` pulls them down.
       - name: Debug bundles
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

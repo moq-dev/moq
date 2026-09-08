@@ -127,16 +127,20 @@ HAR
   }
 }
 HAR
+    printf 'request?token=opaque-trace-secret\n' >"$BUNDLE_TRACE/browser.trace.zip"
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential \
-    opaque-har-credential opaque-escaped-cookie-secret; do
+    opaque-har-credential opaque-escaped-cookie-secret opaque-trace-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
 check "redaction keeps escaped-string HAR valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/cookies.har"
+check "an uploadable bundle excludes Playwright trace archives" test ! -f "$bundle/trace/browser.trace.zip"
+check "a withheld Playwright trace keeps its identity" grep -q '^sha256: ' \
+    "$bundle/trace/browser.trace.zip.withheld"
 check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
 check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
 check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"

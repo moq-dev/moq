@@ -460,6 +460,19 @@ _bundle_redact() {
     return 1
 }
 
+# Replace an artifact that cannot be made upload-safe with its identity. This
+# is intentionally the same fail-closed shape as a redaction error: the reader
+# can prove which file was withheld without receiving its contents.
+_bundle_withhold() {
+    local file="$1" reason="$2"
+    {
+        printf 'withheld: %s\n' "$reason"
+        printf 'sha256: %s\n' "$(_bundle_sha256 "$file")"
+        printf 'reproduce it with the rerun command in manifest.json\n'
+    } >"$file.withheld"
+    rm -f "$file"
+}
+
 # Redact one text stream. The awk pass handles HAR headers, whose name and
 # value are separate JSON fields and commonly live on separate lines.
 _bundle_redact_stream() {
@@ -520,6 +533,13 @@ _bundle_sweep() {
         # unparseable, leaving the retained processes alive.
         [[ "$file" == "$BUNDLE_DIR/teardown.sh" ]] && continue
         case "$file" in
+            *.trace.zip)
+                # Playwright traces are ZIP archives containing request URLs
+                # and network metadata. Text redaction cannot make the archive
+                # safe without parsing and rewriting its internal indexes, so
+                # never upload it as an opaque binary.
+                _bundle_withhold "$file" "Playwright trace archives cannot be safely redacted"
+                ;;
             *.qlog | *.sqlog)
                 # qlog is structured JSON-SEQ. Cutting bytes through a record
                 # makes the entire trace unreadable, so keep it whole or omit
