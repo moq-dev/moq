@@ -75,8 +75,9 @@ Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
 trails the live edge, which is both the jitter a late frame may absorb and the
 point past which a stalled group is skipped. The speaker holds the delay, with a
 50 ms floor under it, and the picture is scheduled against where the speaker
-actually is. A frame arriving earlier than the clock predicted pulls playback
-forward, so a late start catches up to live instead of staying behind it.
+actually is. While video owns the clock, a frame arriving earlier than predicted
+pulls playback forward, so a late start catches up to live instead of staying
+behind it. Once the speaker owns the clock, video follows the speaker instead.
 
 Each role follows the catalog for as long as it lasts, so a publisher that
 retires the rendition being played ends that track and the role picks a
