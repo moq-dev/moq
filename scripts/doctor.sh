@@ -169,7 +169,26 @@ rust_packages() {
         printf 'ALL\n'
         return
     }
-    just rs _select "$changed" 2>/dev/null
+    just rs _select "$changed"
+}
+
+# True when the selector receives more than one changed crate as its seed list.
+# That is the only narrow case that puts a literal newline in awk's `-v`
+# argument; workspace-wide inputs return before awk, and a single seed is valid
+# on both BSD awk and gawk even when it later selects multiple dependents.
+needs_awk_select() {
+    local changed=$1 count
+    [ "$changed" != ALL ] || return 1
+    count=$(printf '%s\n' "$changed" | sed -n 's|^rs/\([^/]*\)/.*|\1|p' | sort -u | grep -c . || true)
+    ((count > 1))
+}
+
+# Print the selected check/test suites that invoke the Rust recipes. Cargo can
+# also be reached through Python and bindings checks, but those paths do not run
+# clippy, rustfmt, cargo-shear, cargo-sort, or nextest.
+rust_suites() {
+    [ -n "$1" ] || return
+    selected "check test"
 }
 
 wants_wasm() {
@@ -209,20 +228,13 @@ nix_suites() {
 }
 
 # Print the selected suites that actually bind a loopback socket, for a
-# changed-file scope and its Rust package selection. Loopback belongs to
-# whoever binds one: the cross-language
-# harnesses always do, while `test` depends on the diff, because `just test`
-# hands the file list to the js, rs, and py recipes and all three skip a scope
-# they were not given. A docs-only diff binds nothing, and reporting it blocked
-# in a sandbox that forbids bind would name a cost it never pays.
-#
-# The Rust half asks `tools_for_files` rather than the suites that compile,
-# because `--suite test wasm` compiles Rust for the wasm harness on a diff that
-# hands `just test` nothing.
+# changed-file scope and its Rust package selection. The cross-language
+# harnesses always bind. Scoped Rust and Python tests bind, while JS unit tests
+# use mock transport pairs and bind nothing.
 bind_suites() {
     local changed=$1 packages=$2 out="" suite
     if [ -n "$packages" ] ||
-        printf '%s\n' "$changed" | grep -qE '^(js|py)/'; then
+        printf '%s\n' "$changed" | grep -qE '^py/'; then
         out=$(selected test)
     fi
     for suite in $SUITES; do
@@ -1039,13 +1051,20 @@ self_test_ownership() {
     # binds, so a sandbox forbidding bind blocks none of it.
     SUITES="check test"
     check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md' '')" ''
-    check 'a js diff binds under test' "$(bind_suites 'js/hang/src/index.ts' '')" test
+    check 'a js diff binds nothing under test' "$(bind_suites 'js/hang/src/index.ts' '')" ''
+    check 'a Python diff binds under test' "$(bind_suites 'py/moq-rs/tests/test_server.py' '')" test
     check 'a rust diff binds under test' "$(bind_suites 'rs/moq-net/src/lib.rs' packages)" test
     check 'a Go diff binds nothing under test' "$(bind_suites 'go/wrapper/moq/lib.go' '')" ''
     check 'a Go diff uses Cargo under check only' \
         "$(cargo_suites 'go/wrapper/moq/lib.go' '')" check
     check 'a Rust diff uses Cargo under both' \
         "$(cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
+    check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
+    check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
+    check 'one Rust seed skips the multiline awk probe' \
+        "$(needs_awk_select 'rs/moq-net/src/lib.rs' && printf yes || printf no)" no
+    check 'two Rust seeds require the multiline awk probe' \
+        "$(needs_awk_select "$(printf 'rs/moq-net/src/lib.rs\nrs/hang/src/lib.rs')" && printf yes || printf no)" yes
     # `check` lints and compiles; nothing in it listens, so it is never charged.
     check 'an unscoped run binds under test alone' "$(bind_suites ALL ALL)" test
     check 'a docs diff skips Nix store access' "$(nix_suites 'doc/a.md')" ''
@@ -1357,16 +1376,25 @@ else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
 fi
 
-# Ask the Rust selector once. Its result drives the awk, Cargo, wasm-target, and
+# Ask the Rust selector once. Its result drives the Cargo, wasm-target, and
 # test-bind probes; using check's broader tool list for those is what made a
-# Go-only test pay for work it never dispatches.
-RUST_PACKAGES=$(rust_packages "$CHANGED" || true)
+# Go-only test pay for work it never dispatches. A failed selector is itself a
+# blocked Rust dispatch, not an empty selection.
+RUST_PACKAGES=$(rust_packages "$CHANGED" 2>"$SCRATCH/rust-select")
+RUST_SELECT_STATUS=$?
+if ((RUST_SELECT_STATUS != 0)); then
+    record behavior.rust-select behavior degraded true "$(selected "check test")" \
+        "the Rust package selector failed: $(error_line "$(cat "$SCRATCH/rust-select")")" \
+        "enter the dev shell and run: just rs _select <changed files>" 30 0
+    RUST_PACKAGES=""
+fi
 CARGO_SUITES=$(cargo_suites "$CHANGED" "$RUST_PACKAGES")
 
-# `just rs check-changed` is where the selector runs, and its seed list only
-# grows past one line when the diff reaches Rust, so a docs-only branch on BSD
-# awk is not blocked by it.
-if [ -n "$(selected "check test")" ] && [ -n "$RUST_PACKAGES" ] && [ "$RUST_PACKAGES" != ALL ]; then
+# A successful narrow selection exercised the same awk behavior as this
+# fixture. A failed selection is already recorded above with its real output,
+# while an empty or workspace-wide selection never evaluates the multiline
+# seed expression.
+if ((RUST_SELECT_STATUS == 0)) && [ -n "$(selected "check test")" ] && needs_awk_select "$CHANGED"; then
     probe_awk_select "$(selected "check test")"
 else
     record behavior.awk-select behavior skip false "" "this scope selects no Rust packages" "" 10 0
@@ -1386,10 +1414,11 @@ fi
 
 # The subcommands each Rust suite invokes, charged to the suite that invokes
 # them. The harnesses build and run, so they need none of these.
+RUST_SUITES=$(rust_suites "$RUST_PACKAGES")
 CHECK_CARGO=""
 TEST_CARGO=""
-case " $CARGO_SUITES " in *" check "*) CHECK_CARGO="check" ;; esac
-case " $CARGO_SUITES " in *" test "*) TEST_CARGO="test" ;; esac
+case " $RUST_SUITES " in *" check "*) CHECK_CARGO="check" ;; esac
+case " $RUST_SUITES " in *" test "*) TEST_CARGO="test" ;; esac
 if [ -n "$CHECK_CARGO" ]; then
     probe_cargo_subcommand clippy "$CHECK_CARGO" "add the component: rustup component add clippy, or enter the dev shell: nix develop"
     probe_cargo_subcommand fmt "$CHECK_CARGO" "add the component: rustup component add rustfmt, or enter the dev shell: nix develop"
