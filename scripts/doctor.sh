@@ -86,15 +86,23 @@ tools_for_files() {
 # Print the tools a cross-language suite refuses to start without.
 #
 # Exactly what each harness checks: smoke's `require_tools`, the guard at the
-# top of test/wasm/run.sh, plus the curl that run.sh polls every relay with. A
-# per-client toolchain that smoke only marks broken is deliberately absent,
-# because it fails its own matrix cells rather than the run: that is why bun
-# belongs to `smoke-full` (`just test smoke-full`, which publishes from a
-# browser) and not to plain `smoke`, whose default matrix is Rust alone.
+# top of test/wasm/run.sh, plus the curl that run.sh polls every relay with.
+#
+# Plain `smoke` runs the Rust matrix, so a per-client toolchain it merely marks
+# broken is deliberately absent: that client is not in the matrix, and its
+# absence fails nothing. `smoke-full` names every client on its command line, a
+# broken one sets `overall=1`, so there the whole fixed matrix is a
+# prerequisite: uv for python, bun for the browser and both native JS clients
+# plus node for one of them, go and uniffi-bindgen-go for go, a C compiler for
+# c, and a system GStreamer for gst.
 tools_for_suite() {
     case $1 in
         smoke) printf 'cargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
-        smoke-full) printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
+        smoke-full)
+            printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n'
+            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
+            printf '%s\n' "${CC:-cc}"
+            ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
     esac
@@ -149,6 +157,22 @@ suites_for_tool() {
         case " $out " in *" $s "*) ;; *) out="$out $s" ;; esac
     done <<<"${PAIRS:-}"
     printf '%s' "${out# }"
+}
+
+# Whether `just rs check-changed` will reach `just rs wasm` for a changed-file
+# scope, asked of the real gate rather than a second copy of it: the gate is
+# `_select` then `_wants-wasm`, and a diff selecting a crate that moq-mux or
+# moq-ffi depends on reaches it without naming one, which no path pattern here
+# could tell. False when just cannot answer, so an environment missing the
+# dispatch is not also reported blocked on a cross-compilation target.
+wants_wasm() {
+    local changed=$1 packages
+    command -v just >/dev/null 2>&1 || return 1
+    [ "$changed" = ALL ] && return 0
+    packages=$(just rs _select "$changed" 2>/dev/null) || return 1
+    [ -n "$packages" ] || return 1
+    [ "$packages" = ALL ] && return 0
+    just rs _wants-wasm "$packages" >/dev/null 2>&1
 }
 
 # Print the selected suites that actually bind a loopback socket, for a
@@ -510,28 +534,39 @@ probe_disk() {
 
 # Nix on PATH proves nothing about the daemon socket or the store, which is
 # what a sandboxed session actually loses.
-probe_nix_eval() {
+probe_nix() {
     local suites="check"
     if ! command -v nix >/dev/null 2>&1; then
         # Not required here: `tool.nix` already reports the absence, and
         # reporting it twice would double-count one problem. An installed nix
         # that cannot reach its store is the case only this probe catches, and
         # that one does block `check`.
-        record probe.nix-eval probe missing false "$suites" "nix is not installed" \
+        record probe.nix probe missing false "$suites" "nix is not installed" \
             "install nix, or accept that 'just check' skips 'nix flake check'" 30 0
         return
     fi
-    local status
+    local status remedy
+    remedy="allow reading ${NIX_STORE:-/nix/store} and connecting to /nix/var/nix/daemon-socket/socket"
+
+    # The store first, because evaluating a literal never contacts it: with an
+    # unreachable daemon `nix eval --expr` still prints its answer, and `nix
+    # flake check` then dies on the first line with "cannot connect to socket".
+    bounded 30 nix store info
+    status=$?
+    if ((status != 0)); then
+        record probe.nix probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+            "nix cannot reach its store: $(error_line "$BOUNDED_OUT")" "$remedy" 30 "$BOUNDED_ELAPSED"
+        return
+    fi
+
     bounded 30 nix eval --impure --raw --expr '"ok"'
     status=$?
     if ((status == 0)) && [ "$BOUNDED_OUT" = ok ]; then
-        record probe.nix-eval probe ok true "$suites" "nix evaluates" "" 30 "$BOUNDED_ELAPSED"
+        record probe.nix probe ok true "$suites" "nix evaluates and reaches its store" "" 30 "$BOUNDED_ELAPSED"
         return
     fi
-    record probe.nix-eval probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-        "nix eval failed: $(error_line "$BOUNDED_OUT")" \
-        "allow reading ${NIX_STORE:-/nix/store} and connecting to /nix/var/nix/daemon-socket/socket" \
-        30 "$BOUNDED_ELAPSED"
+    record probe.nix probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+        "nix eval failed: $(error_line "$BOUNDED_OUT")" "$remedy" 30 "$BOUNDED_ELAPSED"
 }
 
 # The wrapper, the linker, and a writable target directory, exercised end to end
@@ -872,24 +907,29 @@ emit_json() {
 # invisible in a healthy environment, which is every environment that runs CI.
 # ---------------------------------------------------------------------------
 
-# Run the whole thing against a PATH holding only the handful of POSIX tools it
-# is written against, which is the environment it exists for and the one CI
-# never has. Uses the `check` helper its caller defines.
-#
-# The PATH is built out of symlinks to the real binaries rather than a hardcoded
-# /usr/bin, because a NixOS host has almost nothing there and the test would be
-# asserting the wrong thing.
-self_test_incomplete() {
-    local bin="$SCRATCH/bin" tool path
+# Build a directory of symlinks to the POSIX tools this script is written
+# against, for a PATH that holds those and nothing else. Symlinks to the real
+# binaries rather than a hardcoded /usr/bin, because a NixOS host has almost
+# nothing there and the test would be asserting the wrong thing. Fails when the
+# host is missing one, so the caller skips instead of asserting nonsense.
+posix_path() {
+    local bin=$1 tool path
     mkdir -p "$bin"
     for tool in awk bash cat cut df dirname env git grep mktemp rm sed sleep sort tr; do
         path=$(command -v "$tool" 2>/dev/null)
         if [ -z "$path" ]; then
-            printf 'doctor: self-test: skipping the incomplete-PATH run, no %s\n' "$tool" >&2
-            return 0
+            printf 'doctor: self-test: skipping a bare-PATH run, no %s\n' "$tool" >&2
+            return 1
         fi
         ln -sf "$path" "$bin/$tool"
     done
+}
+
+# Run the whole thing against that PATH, which is the environment this exists
+# for and the one CI never has. Uses the `check` helper its caller defines.
+self_test_incomplete() {
+    local bin="$SCRATCH/bin"
+    posix_path "$bin" || return 0
 
     local out status
     out=$(PATH="$bin" MOQ_STRICT='' "$SELF" --json --suite check 2>/dev/null)
@@ -931,6 +971,15 @@ self_test_orchestration() {
 
     "$SELF" --base no/such/ref/for/doctor >/dev/null 2>&1
     check 'an unresolvable base is refused' "$?" 2
+
+    # The same refusal without just, which is what resolves a base at all.
+    # Answering about everything instead would name a scope nobody asked for,
+    # and this is the environment the command exists to diagnose.
+    local bin="$SCRATCH/nojust"
+    if posix_path "$bin"; then
+        PATH="$bin" "$SELF" --base origin/main >/dev/null 2>&1
+        check 'a base with no just is refused' "$?" 2
+    fi
 }
 
 # A capability is charged to the suites that actually invoke it, never to the
@@ -1068,7 +1117,13 @@ self_test() {
     # smoke's default matrix is Rust alone, and smoke.sh only marks the browser
     # clients broken without bun, so plain smoke is not blocked by its absence.
     check 'plain smoke does not need bun' "$(tools_for_suite smoke | grep -c '^bun$')" 0
+    # smoke-full names every client on its command line and a broken one sets
+    # overall=1, so its whole fixed matrix is a prerequisite there.
     check 'smoke-full needs bun' "$(tools_for_suite smoke-full | grep -c '^bun$')" 1
+    check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
+    check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
+    check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
+    check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
     self_test_process_state
     self_test_ownership
@@ -1190,6 +1245,14 @@ if command -v just >/dev/null 2>&1; then
         CHANGED=ALL
         BASE_REF="unresolved"
     fi
+elif [ -n "$BASE" ]; then
+    # Same refusal as an unresolvable ref, and for the same reason: `_changed`
+    # is what resolves a base, so without just the requested comparison cannot
+    # be made at all. Answering about everything instead would report a scope
+    # the caller never asked for.
+    printf 'doctor: cannot resolve --base %s: just is not installed\n' "$BASE" >&2
+    printf '        install just, or drop --base to diagnose the whole repository\n' >&2
+    exit 2
 else
     # Without just there is no scope to narrow to, and a narrow report would
     # understate what is missing, so require everything.
@@ -1298,12 +1361,12 @@ if [ -n "$TEST_CARGO" ]; then
 fi
 
 # `just rs wasm` cross-compiles moq-wasm, moq-mux, and moq-ffi for the target,
-# and `check-all` runs it unconditionally, so a widened check needs the target
-# as much as the wasm harness does. A narrow Rust scope reaches it only through
-# `just rs _wants-wasm`, which this cannot answer without running the package
-# selector, so it is not charged there.
+# so a check that reaches it needs the target as much as the wasm harness does.
+# `check-all` runs it unconditionally; a narrow scope reaches it through
+# `check-changed`'s gate, which is asked here rather than reimplemented, since
+# the copy of a selection rule is the one that drifts.
 WASM_TARGET_SUITES=$(selected wasm)
-if [ "$CHANGED" = ALL ]; then
+if wants_wasm "$CHANGED"; then
     WASM_TARGET_SUITES="$(selected check) $WASM_TARGET_SUITES"
     WASM_TARGET_SUITES=$(printf '%s' "$WASM_TARGET_SUITES" | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
     WASM_TARGET_SUITES=${WASM_TARGET_SUITES% }
@@ -1315,9 +1378,9 @@ else
 fi
 
 if [ -n "$(selected check)" ]; then
-    probe_nix_eval
+    probe_nix
 else
-    record probe.nix-eval probe skip false "" "check is not selected" "" 30 0
+    record probe.nix probe skip false "" "check is not selected" "" 30 0
 fi
 
 BIND_SUITES=$(bind_suites "$CHANGED")
@@ -1338,7 +1401,7 @@ case " $SUITES " in *" wasm "*) probe_playwright wasm "$REPO/test/wasm" ;; esac
 probe_github
 
 # Tally. A required check that is not ok blocks the selected suites it names,
-# and only those: a probe declares every suite it serves, so a nix-eval failure
+# and only those: a probe declares every suite it serves, so a nix failure
 # declared for `check` must not fail a `--strict --suite smoke` run whose own
 # capabilities are all there. A check naming no selected suite is reported and
 # never blocks, which is how a diagnostic run still returns every independent
