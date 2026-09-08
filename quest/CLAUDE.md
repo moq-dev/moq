@@ -121,7 +121,7 @@ priority order, each with a one-line summary:
   lack write access to the repository.
 - Quests may be updated over time as the plan changes.
 - A quest is completed when the plan is executed and no further work is needed.
-  Follow-up work becomes a new quest.
+  Suggest follow-up work as a new quest.
 - Run `just check` before completing the change.
 - When the quest is complete, open a PR per
   [CONTRIBUTING.md](../CONTRIBUTING.md), with a GitHub closing keyword for every

@@ -10,6 +10,8 @@ Use the argument (if provided) to filter to specific quests/questlines.
 Report which quests are not ready to be worked on and why.
 
 For each quest, spawn a sub-agent to /start-quest.
+Determine the base branch for the quest and create a fresh worktree.
 Limit the concurrency to at most N agents in parallel, where N is half the number of CPU cores.
+
 Monitor the sub-agents and report their final status.
-Don't monitor or merge any PRs; that's up to the agent.
+Don't monitor or merge any PRs.

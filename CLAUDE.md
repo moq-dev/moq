@@ -67,7 +67,7 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - Error on unsupported or malformed input rather than warn and continue. Warn-then-ignore is banned: supported or refused.
 - Reproduce bugs before fixing them. Add a regression test when one is easy.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
-- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn. Propose a course change, or abandon the PR, rather than finish a half-solution. File a quest for the larger vision.
+- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn. Propose a course change, or abandon the PR, rather than finish a half-solution.
 - When taking over someone's PR, build on their commits so they keep credit.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 
@@ -80,6 +80,8 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - Inline simple helpers. Question whether functionality is needed at all before adding it.
 - Match the existing conventions, patterns, and naming.
 - These `CLAUDE.md` files (the root `AGENTS.md` is a symlink) are stateless instructions: minimal, situational, no history, no file links. If a missing line here would have saved you cycles, suggest it.
+- Deleting code is better than adding code.
+- Suggest follow up sessions and quests.
 
 # Development
 
@@ -97,7 +99,7 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages. Run `just fix` before committing. CI runs the same `check` and `test`.
 
-See `CONTRIBUTING.md` before making a PR.
+See `CONTRIBUTING.md` before making or merging a PR .
 
 # Cross-Package Sync
 

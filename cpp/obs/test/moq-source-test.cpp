@@ -38,6 +38,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 #include "moq.h"
 }
@@ -160,6 +162,10 @@ bool g_registered = false;
 std::atomic<int> g_output_frames{0};
 std::atomic<int> g_blank_calls{0};
 std::atomic<uint64_t> g_last_timestamp{0};
+// PCM buffers the audio decode path handed to OBS.
+std::atomic<int> g_output_audio{0};
+std::atomic<uint64_t> g_last_audio_timestamp{0};
+std::atomic<int> g_audio_frame_unrefs{0};
 
 // The bmalloc/bfree balance. The source's whole teardown contract reduces to
 // this: ctx is freed only once every subscription has delivered its terminal, so
@@ -245,6 +251,14 @@ void obs_source_output_video(obs_source_t *, const struct obs_source_frame *fram
 	g_output_frames++;
 }
 
+void obs_source_output_audio(obs_source_t *, const struct obs_source_audio *audio)
+{
+	if (!audio)
+		return;
+	g_last_audio_timestamp = audio->timestamp;
+	g_output_audio++;
+}
+
 void obs_register_source_s(const struct obs_source_info *info, size_t size)
 {
 	memcpy(&g_info, info, size < sizeof(g_info) ? size : sizeof(g_info));
@@ -267,8 +281,22 @@ std::atomic<long> g_av_allocs{0};
 bool g_find_decoder_ok = true;
 int g_send_result = 0;
 int g_receive_result = 0;
+int g_audio_send_result = 0;
+int g_audio_receive_result = 0;
 int g_decoded_width = 320;
 int g_decoded_height = 240;
+enum AVSampleFormat g_decoded_audio_format = AV_SAMPLE_FMT_FLTP;
+int g_decoded_audio_samples = 960;
+int64_t g_decoded_audio_pts = AV_NOPTS_VALUE;
+int g_decoded_audio_channels = 2;
+enum AVChannelOrder g_decoded_audio_order = AV_CHANNEL_ORDER_NATIVE;
+uint64_t g_decoded_audio_layout = AV_CH_LAYOUT_STEREO;
+bool g_audio_frame_pending = false;
+bool g_audio_packet_owned = false;
+bool g_audio_packet_copied = false;
+bool g_audio_packet_padding_zero = false;
+const uint8_t *g_last_frame_payload = nullptr;
+size_t g_last_frame_payload_size = 0;
 std::atomic<int> g_last_decoder_extradata{-1};
 
 std::atomic<int> g_sws_scales{0};
@@ -281,13 +309,16 @@ extern "C" {
 
 const AVCodec *avcodec_find_decoder(enum AVCodecID id)
 {
+	g_fake_codec.id = id;
 	return (g_find_decoder_ok && id != AV_CODEC_ID_NONE) ? &g_fake_codec : nullptr;
 }
 
-AVCodecContext *avcodec_alloc_context3(const AVCodec *)
+AVCodecContext *avcodec_alloc_context3(const AVCodec *codec)
 {
 	g_av_allocs++;
-	return static_cast<AVCodecContext *>(calloc(1, sizeof(AVCodecContext)));
+	auto *ctx = static_cast<AVCodecContext *>(calloc(1, sizeof(AVCodecContext)));
+	ctx->codec_id = codec ? codec->id : AV_CODEC_ID_NONE;
+	return ctx;
 }
 
 void avcodec_free_context(AVCodecContext **avctx)
@@ -310,14 +341,43 @@ int avcodec_open2(AVCodecContext *, const AVCodec *, AVDictionary **)
 
 void avcodec_flush_buffers(AVCodecContext *) {}
 
-int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *)
+int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 {
 	g_last_decoder_extradata = ctx->extradata_size > 0 ? ctx->extradata[0] : -1;
+	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
+		g_audio_packet_owned = packet->buf != nullptr;
+		g_audio_packet_copied = packet->data != g_last_frame_payload &&
+					packet->size == static_cast<int>(g_last_frame_payload_size) &&
+					memcmp(packet->data, g_last_frame_payload, g_last_frame_payload_size) == 0;
+		g_audio_packet_padding_zero = true;
+		for (int i = 0; i < AV_INPUT_BUFFER_PADDING_SIZE; i++)
+			g_audio_packet_padding_zero &= packet->data[packet->size + i] == 0;
+		if (g_audio_send_result < 0)
+			return g_audio_send_result;
+		g_audio_frame_pending = true;
+	}
 	return g_send_result;
 }
 
-int avcodec_receive_frame(AVCodecContext *, AVFrame *frame)
+int avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame)
 {
+	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
+		if (g_audio_receive_result < 0)
+			return g_audio_receive_result;
+		if (!g_audio_frame_pending)
+			return AVERROR(EAGAIN);
+		g_audio_frame_pending = false;
+		frame->format = g_decoded_audio_format;
+		frame->sample_rate = ctx->sample_rate;
+		frame->nb_samples = g_decoded_audio_samples;
+		frame->pts = g_decoded_audio_pts;
+		frame->ch_layout.order = g_decoded_audio_order;
+		frame->ch_layout.nb_channels = g_decoded_audio_channels;
+		frame->ch_layout.u.mask = g_decoded_audio_layout;
+		for (int i = 0; i < frame->ch_layout.nb_channels; i++)
+			frame->data[i] = g_fake_plane;
+		return 0;
+	}
 	if (g_receive_result < 0)
 		return g_receive_result;
 
@@ -337,10 +397,27 @@ AVPacket *av_packet_alloc(void)
 	return static_cast<AVPacket *>(calloc(1, sizeof(AVPacket)));
 }
 
+int av_new_packet(AVPacket *pkt, int size)
+{
+	if (!pkt || size < 0)
+		return AVERROR(EINVAL);
+	pkt->data = static_cast<uint8_t *>(calloc(static_cast<size_t>(size) + AV_INPUT_BUFFER_PADDING_SIZE, 1));
+	if (!pkt->data)
+		return AVERROR(ENOMEM);
+	g_av_allocs++;
+	pkt->size = size;
+	pkt->buf = reinterpret_cast<AVBufferRef *>(pkt->data);
+	return 0;
+}
+
 void av_packet_free(AVPacket **pkt)
 {
 	if (!pkt || !*pkt)
 		return;
+	if ((*pkt)->buf) {
+		g_av_allocs--;
+		free((*pkt)->data);
+	}
 	g_av_allocs--;
 	free(*pkt);
 	*pkt = nullptr;
@@ -359,6 +436,29 @@ void av_frame_free(AVFrame **frame)
 	g_av_allocs--;
 	free(*frame);
 	*frame = nullptr;
+}
+
+void av_frame_unref(AVFrame *)
+{
+	g_audio_frame_unrefs++;
+}
+
+void av_channel_layout_default(AVChannelLayout *ch_layout, int nb_channels)
+{
+	if (!ch_layout)
+		return;
+	*ch_layout = AVChannelLayout{};
+	ch_layout->order = AV_CHANNEL_ORDER_NATIVE;
+	ch_layout->nb_channels = nb_channels;
+}
+
+int av_sample_fmt_is_planar(enum AVSampleFormat sample_fmt)
+{
+	return sample_fmt == AV_SAMPLE_FMT_U8P || sample_fmt == AV_SAMPLE_FMT_S16P ||
+			       sample_fmt == AV_SAMPLE_FMT_S32P || sample_fmt == AV_SAMPLE_FMT_FLTP ||
+			       sample_fmt == AV_SAMPLE_FMT_DBLP
+		       ? 1
+		       : 0;
 }
 
 void *av_mallocz(size_t size)
@@ -406,7 +506,7 @@ int sws_scale(struct SwsContext *, const uint8_t *const[], const int[], int, int
 // ----------------------------------------------------------------- libmoq stubs
 
 namespace {
-enum class SubKind { Session, Announced, Catalog, Video };
+enum class SubKind { Session, Announced, Catalog, Video, Audio };
 
 // One outstanding libmoq subscription: the callback plus the user_data the
 // plugin asked us to keep alive, and the two bits of state that make the
@@ -461,6 +561,8 @@ std::atomic<int> g_announced_calls{0};
 std::atomic<int> g_request_calls{0};
 std::atomic<int> g_catalog_calls{0};
 std::atomic<int> g_video_calls{0};
+std::atomic<int> g_audio_calls{0};
+std::atomic<int> g_audio_closes{0};
 std::atomic<int> g_snapshot_frees{0};
 std::atomic<int> g_frame_frees{0};
 std::atomic<int> g_consume_closes{0};
@@ -470,6 +572,7 @@ std::atomic<int32_t> g_last_session{0};
 std::atomic<int32_t> g_last_announced{0};
 std::atomic<int32_t> g_last_catalog{0};
 std::atomic<int32_t> g_last_video{0};
+std::atomic<int32_t> g_last_audio{0};
 
 // Immediate-failure injection, matching libmoq's negative return codes.
 bool g_session_connect_early = false;
@@ -479,6 +582,15 @@ int g_announced_result = 0;
 int g_catalog_result = 0;
 int g_video_result = 0;
 int g_video_config_result = 0;
+
+// Audio rendition knobs. Default: no audio rendition (config returns < 0), so
+// every existing scenario stays video-only and its counts are unchanged. A test
+// that wants the audio path sets g_audio_config_result = 0.
+int g_audio_result = 0;
+int g_audio_config_result = -1;
+std::string g_audio_codec = "mp4a.40.2";
+uint32_t g_audio_sample_rate = 48000;
+uint32_t g_audio_channels = 2;
 
 // What moq_consume_video_config hands back.
 uint32_t g_coded_width = 320;
@@ -723,6 +835,57 @@ int32_t moq_consume_video_close(uint32_t track)
 	return closeSub(static_cast<int32_t>(track));
 }
 
+int32_t moq_consume_audio_config(uint32_t catalog, uint32_t, struct moq_audio_config *dst)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_subs_mutex);
+		if (g_snapshots.find(static_cast<int32_t>(catalog)) == g_snapshots.end()) {
+			g_stub_errors++;
+			return -1;
+		}
+	}
+	// Absent by default: the broadcast carries no audio rendition, which the
+	// plugin must treat as video-only rather than as an error.
+	if (g_audio_config_result < 0)
+		return g_audio_config_result;
+
+	dst->name = "audio";
+	dst->name_len = 5;
+	dst->codec = g_audio_codec.data();
+	dst->codec_len = g_audio_codec.size();
+	dst->description = g_describe ? g_description : nullptr;
+	dst->description_len = g_describe ? sizeof(g_description) : 0;
+	dst->sample_rate = g_audio_sample_rate;
+	dst->channel_count = g_audio_channels;
+	dst->container.kind = MOQ_CONTAINER_KIND_LEGACY;
+	dst->container.init = nullptr;
+	dst->container.init_len = 0;
+	return 0;
+}
+
+int32_t moq_consume_audio(uint32_t catalog, uint32_t, uint64_t, void (*on_frame)(void *, int32_t), void *user_data)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_subs_mutex);
+		if (g_snapshots.find(static_cast<int32_t>(catalog)) == g_snapshots.end()) {
+			g_stub_errors++;
+			return -1;
+		}
+	}
+	if (g_audio_result < 0)
+		return g_audio_result;
+	g_audio_calls++;
+	int32_t handle = addSub(SubKind::Audio, on_frame, user_data);
+	g_last_audio = handle;
+	return handle;
+}
+
+int32_t moq_consume_audio_close(uint32_t track)
+{
+	g_audio_closes++;
+	return closeSub(static_cast<int32_t>(track));
+}
+
 int32_t moq_consume_frame(uint32_t frame, struct moq_frame *dst)
 {
 	std::lock_guard<std::mutex> lock(g_subs_mutex);
@@ -733,6 +896,8 @@ int32_t moq_consume_frame(uint32_t frame, struct moq_frame *dst)
 	}
 	dst->payload = g_description;
 	dst->payload_size = sizeof(g_description);
+	g_last_frame_payload = static_cast<const uint8_t *>(dst->payload);
+	g_last_frame_payload_size = dst->payload_size;
 	dst->timestamp_us = 1000 * static_cast<uint64_t>(frame);
 	dst->keyframe = it->second;
 	return 0;
@@ -849,6 +1014,8 @@ void reset()
 	g_announced_calls = 0;
 	g_catalog_calls = 0;
 	g_video_calls = 0;
+	g_audio_calls = 0;
+	g_audio_closes = 0;
 	g_snapshot_frees = 0;
 	g_frame_frees = 0;
 	g_consume_closes = 0;
@@ -857,7 +1024,11 @@ void reset()
 	g_last_announced = 0;
 	g_last_catalog = 0;
 	g_last_video = 0;
+	g_last_audio = 0;
 	g_output_frames = 0;
+	g_output_audio = 0;
+	g_last_audio_timestamp = 0;
+	g_audio_frame_unrefs = 0;
 	g_blank_calls = 0;
 	g_sws_scales = 0;
 	g_session_connect_early = false;
@@ -867,13 +1038,30 @@ void reset()
 	g_catalog_result = 0;
 	g_video_result = 0;
 	g_video_config_result = 0;
+	g_audio_result = 0;
+	g_audio_config_result = -1;
+	g_audio_codec = "mp4a.40.2";
 	g_find_decoder_ok = true;
 	g_send_result = 0;
 	g_receive_result = 0;
+	g_audio_send_result = 0;
+	g_audio_receive_result = 0;
 	g_describe = false;
 	g_description[0] = 0x01;
 	g_decoded_width = 320;
 	g_decoded_height = 240;
+	g_decoded_audio_format = AV_SAMPLE_FMT_FLTP;
+	g_decoded_audio_samples = 960;
+	g_decoded_audio_pts = AV_NOPTS_VALUE;
+	g_decoded_audio_channels = 2;
+	g_decoded_audio_order = AV_CHANNEL_ORDER_NATIVE;
+	g_decoded_audio_layout = AV_CH_LAYOUT_STEREO;
+	g_audio_frame_pending = false;
+	g_audio_packet_owned = false;
+	g_audio_packet_copied = false;
+	g_audio_packet_padding_zero = false;
+	g_last_frame_payload = nullptr;
+	g_last_frame_payload_size = 0;
 	g_last_decoder_extradata = -1;
 	g_live_allocs = 0;
 	g_av_allocs = 0;
@@ -892,6 +1080,11 @@ void destroySource(void *source)
 	auto start = std::chrono::steady_clock::now();
 	g_info.destroy(source);
 	auto elapsed = std::chrono::steady_clock::now() - start;
+	// destroy returns after each terminal callback releases its source reference,
+	// just before the runtime marks that callback complete in the stub. Drain the
+	// runtime so the next scenario cannot clear the subscription table in that
+	// final bookkeeping window.
+	g_runtime->Run([] {});
 
 	// The destructor's backstop is two seconds. Landing anywhere near it means a
 	// terminal never arrived, so a reference was never released.
@@ -1067,6 +1260,226 @@ int main()
 		destroySource(source);
 	}
 	report("delivered frames output and freed");
+
+	// A catalog that carries an audio rendition: the source subscribes audio from
+	// the same snapshot as video, holds one reference for it, and teardown closes
+	// the audio track and releases that reference on its terminal callback (the
+	// destroy bound in destroySource is what proves the release happened).
+	{
+		reset();
+		g_audio_config_result = 0; // the snapshot has an audio rendition
+		void *source = createSource();
+		g_runtime->Run([] { deliverStatus(g_last_session, 1); });
+		int32_t broadcast = newBroadcast();
+		g_runtime->Run([broadcast] { deliverStatus(g_last_announced, broadcast); });
+		int32_t snapshot = newSnapshot();
+		g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
+
+		CHECK(g_video_calls == 1);
+		CHECK(g_audio_calls == 1); // audio subscribed alongside video
+		{
+			std::lock_guard<std::mutex> lock(g_subs_mutex);
+			CHECK(g_subs.at(g_last_audio).kind == SubKind::Audio);
+			CHECK(!g_subs.at(g_last_audio).terminated);
+		}
+		destroySource(source);
+		CHECK(g_audio_closes >= 1); // the audio track is closed on teardown
+	}
+	report("audio rendition subscribed alongside video");
+
+	// AAC and Opus frames are decoded, timestamped in OBS nanoseconds, and
+	// released after the synchronous OBS handoff.
+	for (const char *codec : {"mp4a.40.2", "opus"}) {
+		reset();
+		g_audio_config_result = 0;
+		g_audio_codec = codec;
+		g_decoded_audio_pts = 123456;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([frame] { deliverStatus(g_last_audio, frame); });
+		CHECK(g_output_audio == 1);
+		CHECK(g_last_audio_timestamp == 123456000);
+		CHECK(g_audio_frame_unrefs == 1);
+		CHECK(g_frame_frees == 1);
+		CHECK(g_audio_packet_owned);
+		CHECK(g_audio_packet_copied);
+		CHECK(g_audio_packet_padding_zero);
+
+		destroySource(source);
+	}
+	report("AAC and Opus frames output and freed");
+
+	// Without a decoder PTS, use the container frame timestamp and preserve the
+	// microseconds-to-nanoseconds conversion.
+	{
+		reset();
+		g_audio_config_result = 0;
+		g_decoded_audio_pts = AV_NOPTS_VALUE;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([frame] { deliverStatus(g_last_audio, frame); });
+		CHECK(g_output_audio == 1);
+		CHECK(g_last_audio_timestamp == 1000ull * static_cast<uint64_t>(frame) * 1000ull);
+		CHECK(g_audio_frame_unrefs == 1);
+		CHECK(g_frame_frees == 1);
+
+		destroySource(source);
+	}
+	report("audio without decoder PTS uses the frame timestamp");
+
+	// Audio is independent of video in the catalog. A source still subscribes
+	// and outputs audio when there is no video rendition.
+	{
+		reset();
+		g_video_config_result = -1;
+		g_audio_config_result = 0;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		CHECK(g_video_calls == 0);
+		CHECK(g_audio_calls == 1);
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([frame] { deliverStatus(g_last_audio, frame); });
+		CHECK(g_output_audio == 1);
+		CHECK(g_frame_frees == 1);
+
+		destroySource(source);
+	}
+	report("audio-only catalog remains playable");
+
+	// Malformed packets and fatal receive failures refuse the audio track instead
+	// of leaving a live subscription that silently drops every later frame.
+	for (bool fail_send : {true, false}) {
+		reset();
+		g_audio_config_result = 0;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		if (fail_send)
+			g_audio_send_result = -77;
+		else
+			g_audio_receive_result = -77;
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([frame] { deliverStatus(g_last_audio, frame); });
+		g_runtime->Run([] {});
+		CHECK(g_output_audio == 0);
+		CHECK(g_frame_frees == 1);
+		CHECK(g_audio_closes == 1);
+
+		destroySource(source);
+	}
+	report("fatal audio decode errors retire the track");
+
+	// If a later catalog's audio subscription fails, the existing track and its
+	// decoder remain current rather than leaving a live track with no decoder.
+	{
+		reset();
+		g_audio_config_result = 0;
+		g_describe = true;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		int32_t first_audio = g_last_audio;
+
+		g_description[0] = 0x02;
+		g_audio_result = -77;
+		int32_t snapshot = newSnapshot();
+		g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
+		CHECK(g_audio_calls == 1);
+		CHECK(g_last_audio == first_audio);
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([first_audio, frame] { deliverStatus(first_audio, frame); });
+		CHECK(g_output_audio == 1);
+		CHECK(g_frame_frees == 1);
+		CHECK(g_last_decoder_extradata == 0x01);
+
+		destroySource(source);
+	}
+	report("failed audio replacement keeps the old track current");
+
+	// A video-only catalog update retires audio from the previous snapshot.
+	{
+		reset();
+		g_audio_config_result = 0;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		int32_t first_audio = g_last_audio;
+
+		g_audio_config_result = -1;
+		int32_t snapshot = newSnapshot();
+		g_runtime->Run([snapshot] { deliverStatus(g_last_catalog, snapshot); });
+		CHECK(g_audio_closes == 1);
+		g_runtime->Run([] {});
+		{
+			std::lock_guard<std::mutex> lock(g_subs_mutex);
+			CHECK(g_subs.at(first_audio).terminated);
+		}
+
+		destroySource(source);
+	}
+	report("video-only catalog update retires audio");
+
+	// Reject object types that use the mp4a namespace but are not an AAC profile.
+	{
+		reset();
+		g_audio_config_result = 0;
+		g_audio_codec = "mp4a.40.34";
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		CHECK(g_audio_calls == 0);
+		destroySource(source);
+	}
+	report("non-AAC mp4a object type is rejected");
+
+	// OBS layouts imply exact speaker positions. Refuse non-native and mismatched
+	// masks instead of inferring mono, stereo, or 2.1 from channel count alone.
+	struct incompatible_layout {
+		int channels;
+		enum AVChannelOrder order;
+		uint64_t mask;
+	};
+	for (const auto &layout :
+	     {incompatible_layout{1, AV_CHANNEL_ORDER_NATIVE, AV_CH_FRONT_LEFT},
+	      incompatible_layout{2, AV_CHANNEL_ORDER_NATIVE, AV_CH_FRONT_LEFT | AV_CH_FRONT_CENTER},
+	      incompatible_layout{2, AV_CHANNEL_ORDER_UNSPEC, AV_CH_LAYOUT_STEREO},
+	      incompatible_layout{3, AV_CHANNEL_ORDER_NATIVE, AV_CH_LAYOUT_SURROUND}}) {
+		reset();
+		g_audio_config_result = 0;
+		g_decoded_audio_channels = layout.channels;
+		g_decoded_audio_order = layout.order;
+		g_decoded_audio_layout = layout.mask;
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+
+		int32_t frame = newFrame(false);
+		g_runtime->Run([frame] { deliverStatus(g_last_audio, frame); });
+		g_runtime->Run([] {});
+		CHECK(g_output_audio == 0);
+		CHECK(g_audio_frame_unrefs == 1);
+		CHECK(g_frame_frees == 1);
+		CHECK(g_audio_closes == 1);
+
+		destroySource(source);
+	}
+	report("incompatible channel layouts are rejected");
+
+	// The default: no audio rendition in the catalog. moq_consume_audio_config
+	// returns absent, and the source stays video-only with nothing subscribed or
+	// torn down for audio. This is the shape every other scenario runs under.
+	{
+		reset(); // g_audio_config_result stays -1
+		void *source = createSource();
+		subscribeVideo(newBroadcast());
+		CHECK(g_video_calls == 1);
+		CHECK(g_audio_calls == 0);
+		destroySource(source);
+		CHECK(g_audio_closes == 0);
+	}
+	report("no audio rendition stays video-only");
 
 	// Frames that arrive before the first keyframe, and frames the decoder
 	// rejects, take early returns out of the decode path. Each one still owns the

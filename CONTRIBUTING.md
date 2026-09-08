@@ -66,4 +66,5 @@ CodeRabbit may be rate-limited, treat it as optional.
 
 Address review comments or leave a comment if you disagree with a suggestion.
 Repeat at most once without user intervention, avoiding a loop of back-and-forth review/feedback cycles.
+Never manually request a review.
 If a review comment is out of scope or not relevant to the PR, make or update a follow-up quest.
