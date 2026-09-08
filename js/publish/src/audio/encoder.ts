@@ -458,7 +458,11 @@ export class Encoder {
 						this.#fatal.set(err);
 					},
 				});
-				effect.cleanup(() => encoder.close());
+				// A fatal error closes the encoder before the callback runs, and close() throws
+				// InvalidStateError once it is closed.
+				effect.cleanup(() => {
+					if (encoder.state !== "closed") encoder.close();
+				});
 
 				console.debug("encoding audio", encoderConfig);
 				encoder.configure(encoderConfig);

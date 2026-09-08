@@ -208,7 +208,13 @@ function installEncodingHarness(description: Uint8Array, pipeline = 0) {
 			}
 		}
 
+		get state(): CodecState {
+			return this.#closed ? "closed" : "configured";
+		}
+
 		close(): void {
+			// WebCodecs throws once the codec is closed, which a fatal error already did.
+			if (this.#closed) throw new DOMException("already closed", "InvalidStateError");
 			this.#closed = true;
 			this.#inflight.length = 0;
 		}
@@ -589,6 +595,8 @@ test("stays down after a fatal encoder error and closes later subscribers with i
 	expect(session.closed).toEqual([fatal, fatal]);
 	expect(session.encoder.out.active.peek()).toBe(false);
 	expect(session.harness.audioEncoders).toBe(1);
-	expect(error).toHaveBeenCalled();
+	// Only the encoder's own error. A closed codec throws from close(), so tearing the run down
+	// must not call it again.
+	expect(error).toHaveBeenCalledTimes(1);
 	error.mockRestore();
 });
