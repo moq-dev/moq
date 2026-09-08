@@ -13,7 +13,8 @@ behind the encode seam on Windows.
 - The encoder MFT fixes its output rates and bitrates per channel count;
   refuse configurations outside that table at construction rather than
   letting the MFT pick silently.
-- The output type's `MF_MT_USER_DATA` carries the ASC for the catalog.
+- The catalog ASC is synthesized at construction per the encode seam; the
+  output type's `MF_MT_USER_DATA` must match it, asserted in tests.
 - Round-trip regression through the Media Foundation decoder; verification on
   a Windows host, since the per-PR CI compiles only.
 
@@ -21,6 +22,7 @@ behind the encode seam on Windows.
 
 - [Encode seam](/quest/m2/audio-codecs/encode-backend.md) - the candidate order this backend joins
 - [Layout](/quest/m2/audio-codecs/layout.md) - the input layout the encoder accepts
+- [Media Foundation decode](/quest/m2/audio-codecs/decode-mediafoundation.md) - the round-trip regression decodes through it
 
 ## Related
 

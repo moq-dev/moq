@@ -16,12 +16,19 @@ that walks platform candidates before software ones, and `encode::Kind` on
 only software backends: no Rust AAC encoder exists, which is why the platform
 quests follow.
 
-- `encode::Codec` gains `Aac`, meaning `mp4a.40.2`. `as_str` and `FromStr`
-  accept `"aac"`, which is what the FFI and libmoq codec strings carry, so
-  moq-ffi and every binding gain AAC by string with no signature change.
-- Catalog emission: `AudioCodec::AAC` with profile 2, the ASC as
-  `description`, `Container::Legacy`, and the encoder's reported delay folded
-  into timestamps like Opus pre-skip is today.
+- `encode::Codec` gains `Aac`, meaning `mp4a.40.2`, and `as_str` / `FromStr`
+  accept `"aac"`, which is what libmoq's codec string carries. moq-ffi's
+  `MoqAudioCodec` is a closed UniFFI enum, so it gains an `Aac` variant and
+  conversion, and the generated bindings, hand-written wrappers, and docs
+  follow the Cross-Package Sync table.
+- Catalog emission: `AudioCodec::AAC` with profile 2, `Container::Legacy`,
+  and the encoder's reported delay folded into timestamps like Opus pre-skip
+  is today. `Producer` registers the rendition before the first frame is
+  written, so the ASC `description` is synthesized at construction from the
+  config with `moq_mux::codec::aac::Config::encode`, never read back from the
+  backend's first packet. A backend that reports its own header (a magic
+  cookie, `csd-0`, `MF_MT_USER_DATA`) must produce one equal to the synthesized
+  ASC, asserted in its tests.
 - Frame size is the codec's (1024 samples for AAC), so `frame_duration` is
   validated per codec rather than against the Opus table.
 - Bitrate updates go through the backend; one that cannot change rate

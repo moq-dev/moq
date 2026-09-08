@@ -27,10 +27,12 @@ construction, so a `Layout` always downmixes.
   device chooser prefers the widest well-known layout the device offers (a
   5.1 HDMI sink opens at six channels, a headset at two), and each `Sink`
   remixes into the bus. Today's "silence past the front pair" fan-out goes.
-- moq-ffi and libmoq: `channels` on the decoder output, encoder input, and
-  encoder output become a layout, additive with a default so every binding and
-  the C ABI keep compiling. Bindings (Python, Swift, Kotlin, Go, Dart wrappers
-  and docs) follow the Cross-Package Sync table.
+- moq-ffi and libmoq keep `channels` as a count, and the count means the
+  default layout for that count (the WAVE convention: 3 is 2.1, 4 is quad, 6
+  is 5.1, 8 is 7.1), delivered or accepted in the canonical order. No record,
+  `repr(C)` struct, or binding changes, so this stays on `main`; only the
+  Rust API names the layout, and a binding that needs 5.0 rather than 5.1 is
+  a later additive field. Document the mapping in every binding's audio doc.
 - The catalog does not change: `channel_count` already carries what the
   description implies, and `js/hang`'s `aac.ts` stops falling back to stereo
   for a count it cannot map.
