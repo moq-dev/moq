@@ -31,6 +31,7 @@
 #   MOQ_QA_LOG_CAP    per-text-file byte budget (default 2 MiB, 0 disables)
 #   MOQ_QA_FILE_CAP   per-binary-file byte budget (default 8 MiB, 0 disables)
 #   MOQ_QA_STACKS=0   skip stack capture entirely
+#   MOQ_QA_STACK_TIMEOUT  seconds allowed per debugger attach (default 20)
 #
 # Deliberately not collected: packet payloads and core dumps. Both carry far
 # more than the failure needs and neither is safe to upload by default, so they
@@ -101,7 +102,7 @@ bundle_init() {
         MOQ_QA_KEEP="$MOQ_TEST_KEEP"
     fi
     local knob value expected
-    for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX; do
+    for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX MOQ_QA_STACK_TIMEOUT; do
         value=${!knob:-}
         if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
             echo "error: $knob must be a non-negative integer (got '$value')" >&2

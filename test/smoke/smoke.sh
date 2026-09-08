@@ -747,19 +747,23 @@ run_round() {
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
 # assertion it names), so the exit code is the whole answer.
 run_media() {
-    local name="$1" safe log started status=0
+    local name="$1" safe log started status=0 elapsed
     shift
     safe=${name//[^[:alnum:]._-]/-}
     log="$TMP/media-$safe.log"
     started=$SECONDS
-    (cd "$CLIENTS/js" && bun media.ts --url "$URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
+    (cd "$CLIENTS/js" && MOQ_QA_LABEL="media-$safe" bun media.ts --url "$URL" --timeout "$TIMEOUT" "$@") \
+        >"$log" 2>&1 || status=$?
+    elapsed=$((SECONDS - started))
     if [[ "$status" -eq 0 ]]; then
-        echo "  PASS  $name ($((SECONDS - started))s)"
+        echo "  PASS  $name (${elapsed}s)"
+        bundle_result "media: $name" pass "$elapsed"
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
         # toward its bound is worth seeing before it crosses.
         grep -E '^(  |=== )' "$log" || true
     else
-        echo "  FAIL  $name ($((SECONDS - started))s)"
+        echo "  FAIL  $name (${elapsed}s)"
+        bundle_result "media: $name" fail "$elapsed" "media.ts exited $status"
         sed 's/^/        /' "$log" >&2 || true
         overall=1
     fi

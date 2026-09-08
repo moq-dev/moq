@@ -17,7 +17,9 @@
  * @module
  */
 import { parseArgs } from "node:util";
-import type { Browser, Page } from "playwright";
+import { rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { Browser, BrowserContext, Page } from "playwright";
 import {
 	type BrowserErrors,
 	check,
@@ -310,22 +312,73 @@ async function capabilities(page: Page): Promise<void> {
 }
 
 const server = serve();
-const browsers: Browser[] = [];
+type Capture = { browser: Browser; context?: BrowserContext; label: string };
+const captures: Capture[] = [];
+const captureFailures: string[] = [];
+const traceDir = process.env.MOQ_QA_TRACE;
+const traceLabel = process.env.MOQ_QA_LABEL ?? "media";
+
+async function capture(what: string, fn: () => Promise<unknown>): Promise<boolean> {
+	try {
+		await fn();
+		return true;
+	} catch (err) {
+		captureFailures.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+		return false;
+	}
+}
 
 // One browser per role, launched with no arguments at all: no fake camera, no fake permission
 // prompt, no autoplay override. Pages in one browser share a renderer scheduler, and the one that
 // is not frontmost is throttled and reported hidden, which stalls both the fixture's clock and the
 // player's download policy.
-async function browserFor(): Promise<Browser> {
+async function browserFor(role: string): Promise<BrowserContext> {
 	const browser = await launch();
-	browsers.push(browser);
-	return browser;
+	const item: Capture = { browser, label: `${traceLabel}-${role}` };
+	captures.push(item);
+	const context = await browser.newContext(
+		traceDir ? { recordHar: { path: join(traceDir, `${item.label}.har`), content: "omit" } } : {},
+	);
+	item.context = context;
+	if (traceDir) await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+	return context;
+}
+
+async function saveCaptures(failed: boolean): Promise<void> {
+	for (const item of captures) {
+		const context = item.context;
+		if (!context) {
+			if (traceDir && failed) captureFailures.push(`${item.label}: browser context initialization did not complete`);
+			await item.browser.close().catch(() => {});
+			continue;
+		}
+		if (traceDir && failed) {
+			await capture(`${item.label} tracing.stop`, () =>
+				context.tracing.stop({ path: join(traceDir, `${item.label}.trace.zip`) }),
+			);
+			await capture(`${item.label} screenshot`, async () => {
+				const page = context.pages()[0];
+				if (!page) throw new Error("the browser context has no page to capture");
+				await page.screenshot({ path: join(traceDir, `${item.label}.png`), fullPage: true });
+			});
+		} else if (traceDir) {
+			await capture(`${item.label} tracing.stop`, () => context.tracing.stop());
+		}
+		await capture(`${item.label} context.close`, () => context.close());
+		if (traceDir && !failed) await capture(`${item.label} har cleanup`, () => rm(join(traceDir, `${item.label}.har`), { force: true }));
+		await item.browser.close().catch(() => {});
+	}
+	if (traceDir && failed && captureFailures.length > 0) {
+		await writeFile(join(traceDir, `${traceLabel}.capture-failed.log`), `${captureFailures.join("\n")}\n`).catch(
+			() => {},
+		);
+	}
 }
 
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
 async function subscriber(broadcast: string, label: string): Promise<[Page, BrowserErrors]> {
 	const [page, errors] = await open(
-		await browserFor(),
+		await browserFor(label),
 		// visible="always" because the window is never frontmost in a headless run, and the default
 		// policy would stop downloading video and leave the canvas black.
 		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always" }),
@@ -344,7 +397,7 @@ try {
 
 	// ── publisher ────────────────────────────────────────────────────────────
 	const [publisher, publisherErrors] = await open(
-		await browserFor(),
+		await browserFor("fixture"),
 		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
 		"fixture",
 	);
@@ -553,7 +606,11 @@ try {
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 } finally {
-	for (const browser of browsers) await browser.close().catch(() => {});
+	const failed =
+		expectFail === undefined
+			? failure !== undefined
+			: !(failure instanceof Failure && failure.assertion === expectFail);
+	await saveCaptures(failed);
 	server.stop();
 }
 

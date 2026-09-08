@@ -14,6 +14,11 @@ DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 
+command -v python3 >/dev/null 2>&1 || {
+    echo "bundle: python3 is required (use the nix dev shell)" >&2
+    exit 1
+}
+
 failures=0
 ok() { printf '  ok    %s\n' "$1"; }
 bad() {
@@ -69,12 +74,10 @@ check "a failing run retains its bundle" test -f "$manifest"
 check "per-process logs are retained" test -f "$bundle/work/relay.log"
 check "tool versions are recorded" test -f "$bundle/versions.txt"
 check "a teardown command is written" test -f "$bundle/teardown.sh"
-if command -v python3 >/dev/null 2>&1; then
-    if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$manifest" >/dev/null 2>&1; then
-        ok "the manifest is valid JSON"
-    else
-        bad "the manifest is valid JSON"
-    fi
+if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$manifest" >/dev/null 2>&1; then
+    ok "the manifest is valid JSON"
+else
+    bad "the manifest is valid JSON"
 fi
 check "JSON control bytes are escaped" grep -q '\\u001b' "$manifest"
 for field in '"rerun"' '"run_id"' '"commit"' 'moq-lite-05' 'rust -> rust' 'WebTransport is invisible' 'core-dumps'; do
@@ -153,10 +156,8 @@ manifest_cap_case() {
     bundle_finish 1
 }
 bundle=$(MOQ_QA_LOG_CAP=128 run_case manifest-cap manifest_cap_case)
-if command -v python3 >/dev/null 2>&1; then
-    check "a small log cap leaves valid manifest JSON" python3 -c \
-        'import json,sys; json.load(open(sys.argv[1]))' "$bundle/manifest.json"
-fi
+check "a small log cap leaves valid manifest JSON" python3 -c \
+    'import json,sys; json.load(open(sys.argv[1]))' "$bundle/manifest.json"
 
 if (
     export MOQ_QA_ARTIFACTS="$ROOT/invalid-cap.d" MOQ_QA_LOG_CAP=bogus
@@ -181,6 +182,18 @@ else
     ok "a malformed stack cap is refused"
 fi
 check "a malformed stack cap retains no partial bundle" test ! -d "$ROOT/invalid-stack.d"
+
+if (
+    export MOQ_QA_ARTIFACTS="$ROOT/invalid-stack-timeout.d" MOQ_QA_STACK_TIMEOUT=bogus
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+) >/dev/null 2>&1; then
+    bad "a malformed stack timeout is refused"
+else
+    ok "a malformed stack timeout is refused"
+fi
+check "a malformed stack timeout retains no partial bundle" test ! -d "$ROOT/invalid-stack-timeout.d"
 
 if (
     export MOQ_QA_ARTIFACTS="$ROOT/invalid-retain.d" MOQ_QA_RETAIN=0
@@ -277,8 +290,18 @@ printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/lat
 check "future retained qlogs stay outside the uploadable bundle" test ! -e "$bundle/qlog/later.sqlog"
 before_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
 before_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
-printf 'continue\n' >"$ROOT/continue"
-IFS= read -r _ <"$ROOT/written"
+if python3 -c 'import signal,sys
+signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError("FIFO handshake timed out")))
+signal.alarm(10)
+with open(sys.argv[1], "w") as ready:
+ ready.write("continue\n")
+with open(sys.argv[2]) as written:
+ written.readline()
+' "$ROOT/continue" "$ROOT/written"; then
+    ok "the retained process completed its handshake"
+else
+    bad "the retained process completed its handshake"
+fi
 after_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
 after_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
 check "retained logs continue after bundling" test "$after_log" -gt "$before_log"
