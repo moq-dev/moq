@@ -122,6 +122,20 @@ widen_orchestration() {
     fi
 }
 
+# Print the tools the test dispatcher actually reaches for a changed-file list.
+# Unlike check-all, test/all covers only JS, Rust, and Python. An orchestration
+# diff still runs `_tools` on the original list before widening to those three.
+tools_for_test_files() {
+    local files=$1 tools=""
+    if [ "$files" != ALL ]; then
+        tools=$(tools_for_files "$files")
+    fi
+    if [ "$files" = ALL ] || printf '%s\n' "$files" | grep -qE '^(justfile|test/justfile)$'; then
+        tools="$tools bun cargo uv"
+    fi
+    printf '%s' "$tools" | tr ' ' '\n' | grep -v '^$' | sort -u
+}
+
 # Print which suite needs which tool, one `tool suite` pair per line, for a
 # suite list and a changed-file scope. Per-suite ownership rather than one
 # union: the file scope's tools belong to `check` and `test`, which are what
@@ -131,14 +145,20 @@ widen_orchestration() {
 # git and just carry the dispatch itself, so they belong to every suite;
 # `_tools` leaves them out because just is what runs it.
 tool_pairs() {
-    local suites=$1 changed=$2 suite tool
+    local suites=$1 changed=$2
+    local test_files=${3:-$changed} suite tool
     for suite in $suites; do
         for tool in git just; do
             printf '%s %s\n' "$tool" "$suite"
         done
         case $suite in
-            check | test)
+            check)
                 for tool in $(tools_for_files "$changed"); do
+                    printf '%s %s\n' "$tool" "$suite"
+                done
+                ;;
+            test)
+                for tool in $(tools_for_test_files "$test_files"); do
                     printf '%s %s\n' "$tool" "$suite"
                 done
                 ;;
@@ -244,6 +264,34 @@ harness_root() {
         root="$root/moq-test-ports-$(id -u)"
     fi
     printf '%s\n' "$root"
+}
+
+# True when a configured harness port is in the range the shared allocator accepts.
+valid_harness_port() {
+    local port=$1
+    [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((${#port} <= 5)) && ((port >= 1024 && port <= 65535))
+}
+
+# Record whether one harness port setting is accepted by the shared allocator.
+probe_harness_port() {
+    local id=$1 name=$2 value=$3 suites=$4
+    if valid_harness_port "$value"; then
+        record "behavior.$id" behavior ok true "$suites" "$name=$value is a valid harness port" "" 5 0
+    else
+        record "behavior.$id" behavior degraded true "$suites" \
+            "$name must be 1024..65535 (got '$value')" \
+            "set $name to a port from 1024 through 65535" 5 0
+    fi
+}
+
+# Print the selected suites that walk from MOQ_TEST_PORT_BASE rather than using
+# only a pinned first port. WASM can start multiple relays, so it always walks.
+harness_port_base_suites() {
+    local out=""
+    [ -z "${SMOKE_PORT:-}" ] && out=$(selected "smoke smoke-full")
+    out="$out $(selected wasm)"
+    out=$(printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    printf '%s' "${out% }"
 }
 
 wants_wasm() {
@@ -1148,6 +1196,14 @@ self_test_ownership() {
     check 'a harness tool belongs to its harness' "$(suites_for_tool ffmpeg)" smoke
     check 'a shared tool names both' "$(suites_for_tool cargo)" 'check smoke'
     check 'an unclaimed tool names nothing' "$(suites_for_tool gradle)" ''
+    check 'an orchestration test widens to Cargo' \
+        "$(tools_for_test_files justfile | grep -c '^cargo$')" 1
+    check 'an orchestration test widens to Python' \
+        "$(tools_for_test_files justfile | grep -c '^uv$')" 1
+    check 'an orchestration test excludes check-only Gradle' \
+        "$(tools_for_test_files justfile | grep -c '^gradle$')" 0
+    check 'an oversized test needs only three language toolchains' \
+        "$(tools_for_test_files ALL | tr '\n' ' ')" 'bun cargo uv '
 
     SUITES="smoke"
     PAIRS=$(tool_pairs "$SUITES" 'rs/moq-net/src/lib.rs')
@@ -1191,6 +1247,16 @@ self_test_ownership() {
     check 'the filesystem root is preserved' "$(MOQ_TEST_PORTS=/ harness_root ports)" /
     check 'the shared harness preserves the filesystem root' \
         "$(bash -c 'source "$1"; harness_normalize_root /' _ "$REPO/test/lib/harness.sh")" /
+    valid_harness_port 1024
+    check 'the first harness port is valid' "$?" 0
+    valid_harness_port 65536
+    check 'a harness port above the range is rejected' "$?" 1
+    valid_harness_port words
+    check 'a nonnumeric harness port is rejected' "$?" 1
+    SUITES="smoke wasm"
+    check 'smoke and wasm use the base without a pin' "$(SMOKE_PORT= harness_port_base_suites)" 'smoke wasm'
+    check 'a smoke pin leaves only wasm on the base' "$(SMOKE_PORT=4500 harness_port_base_suites)" wasm
+    SUITES="check test"
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
@@ -1460,6 +1526,7 @@ else
     BASE_REF="unresolved (just is unavailable)"
 fi
 
+TEST_FILES=$CHANGED
 CHANGED=$(widen_orchestration "$CHANGED")
 
 if [ "$CHANGED" = ALL ]; then
@@ -1500,7 +1567,7 @@ TARGET_DIR=${CARGO_TARGET_DIR:-$REPO/target}
 
 probe_session
 
-PAIRS=$(tool_pairs "$SUITES" "${CHANGED:-}")
+PAIRS=$(tool_pairs "$SUITES" "${CHANGED:-}" "${TEST_FILES:-}")
 
 TOOL_LIST=$(printf '%s\n' "$PAIRS" | cut -d' ' -f1 | grep -v '^$' | sort -u)
 for tool in $TOOL_LIST; do
@@ -1615,12 +1682,34 @@ fi
 
 LOCK_SUITES=$(selected "smoke smoke-full wasm")
 if [ -n "$LOCK_SUITES" ]; then
+    BASE_PORT_SUITES=$(harness_port_base_suites)
+    if [ -n "$BASE_PORT_SUITES" ]; then
+        probe_harness_port harness-port-base MOQ_TEST_PORT_BASE "${MOQ_TEST_PORT_BASE:-4500}" "$BASE_PORT_SUITES"
+    else
+        record behavior.harness-port-base behavior skip false "" \
+            "the selected harness uses only its pinned port" "" 5 0
+    fi
+    SMOKE_PIN_SUITES=$(selected "smoke smoke-full")
+    if [ -n "$SMOKE_PIN_SUITES" ] && [ -n "${SMOKE_PORT:-}" ]; then
+        probe_harness_port smoke-port SMOKE_PORT "$SMOKE_PORT" "$SMOKE_PIN_SUITES"
+    else
+        record behavior.smoke-port behavior skip false "" "SMOKE_PORT is not selected or set" "" 5 0
+    fi
+    WASM_PIN_SUITES=$(selected wasm)
+    if [ -n "$WASM_PIN_SUITES" ] && [ -n "${WASM_PORT:-}" ]; then
+        probe_harness_port wasm-port WASM_PORT "$WASM_PORT" "$WASM_PIN_SUITES"
+    else
+        record behavior.wasm-port behavior skip false "" "WASM_PORT is not selected or set" "" 5 0
+    fi
     HARNESS_RUN_ROOT=$(harness_root runs)
     HARNESS_PORT_ROOT=$(harness_root ports)
     probe_writable harness-runs "$HARNESS_RUN_ROOT" "$LOCK_SUITES"
     probe_writable harness-ports "$HARNESS_PORT_ROOT" "$LOCK_SUITES"
     probe_advisory_lock "$LOCK_SUITES" "$HARNESS_PORT_ROOT"
 else
+    record behavior.harness-port-base behavior skip false "" "no harness suite is selected" "" 5 0
+    record behavior.smoke-port behavior skip false "" "no harness suite is selected" "" 5 0
+    record behavior.wasm-port behavior skip false "" "no harness suite is selected" "" 5 0
     record storage.harness-runs storage skip false "" "no harness suite is selected" "" 5 0
     record storage.harness-ports storage skip false "" "no harness suite is selected" "" 5 0
     record probe.advisory-lock probe skip false "" "no harness suite is selected" "" 5 0
