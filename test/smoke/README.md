@@ -71,6 +71,10 @@ just test smoke
 # Full matrix: rust/python/go/browser publish; everyone subscribes.
 just test smoke-full
 
+# The representative set a pull request runs: rust/browser publish; rust,
+# browser and C subscribe. See the CI table in CONTRIBUTING.md.
+just test smoke-core
+
 # Pick your own axes:
 just test smoke --publishers rust,python --subscribers rust,c,js-native-bun
 
