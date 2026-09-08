@@ -313,6 +313,13 @@ check "bounding keeps the tail" grep -q LAST-LINE "$bundle/work/huge.log"
 check "an oversized capture is dropped" test ! -f "$bundle/work/capture.bin"
 check "an oversized capture leaves its identity" test -f "$bundle/work/capture.bin.omitted"
 
+decimal_cap_case() {
+    head -c 9 /dev/zero >"$BUNDLE_WORK/capture.bin"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_FILE_CAP=08 run_case decimal-cap decimal_cap_case)
+check "leading-zero caps are applied as decimal" test -f "$bundle/work/capture.bin.omitted"
+
 qlog_cap_case() {
     local i
     for ((i = 0; i < 20; i++)); do

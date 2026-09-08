@@ -113,6 +113,12 @@ bundle_init() {
             echo "error: $knob must be a non-negative integer (got '$value')" >&2
             return 2
         fi
+        if [[ -n "$value" ]]; then
+            while [[ "$value" == 0* && "$value" != 0 ]]; do
+                value=${value#0}
+            done
+            printf -v "$knob" '%s' "$value"
+        fi
     done
     if [[ "${MOQ_QA_STACK_TIMEOUT:-}" == 0 ]]; then
         echo "error: MOQ_QA_STACK_TIMEOUT must be a positive integer (got '0')" >&2
