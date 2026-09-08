@@ -53,6 +53,11 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
+# Except the packaged-consumer fixture, which installs candidate tarballs with npm
+# because it has to install without a bun workspace. Its lockfile is what freezes
+# the consumer's own tooling. See test/packaged/README.md.
+!test/packaged/js/consumer/package-lock.json
+
 # Python
 __pycache__/
 *.pyc

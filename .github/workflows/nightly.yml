@@ -13,7 +13,9 @@ name: Nightly
 # paths covers every one of them (see the comment there). `windows` and `macos`
 # are diff-independent because what they catch is a whole target's worth of
 # `#[cfg(target_os = ...)]` code that no Linux job compiles at all, and those
-# runners are throttled too hard to gate every PR on.
+# runners are throttled too hard to gate every PR on. `packaged` is
+# diff-independent because a release is: the release workflows publish whatever
+# the current versions are, not whatever the last pull request touched.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -92,6 +94,52 @@ jobs:
       - name: TS timing
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --live --duration 120
+
+  # Consumes the archives a release would upload from outside the workspace: the
+  # defects it catches (a file the archive omits, a dependency nobody declares, a
+  # path dependency with no version) are invisible to every gate that builds the
+  # packages as workspace members, which is all of them.
+  #
+  # Diff-independent because a release is: `release-plz` and release-js.yml
+  # publish whatever the current versions are, not whatever the last pull request
+  # touched, and a sibling nobody edited still has to resolve. That means a full
+  # second compile of the workspace's dependency graph from extracted archives,
+  # which is why it is a separate job with its own budget rather than another
+  # step above. Locally it is diff-scoped: `just test packaged` picks the lanes
+  # from the branch.
+  packaged:
+    name: Packaged
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          cache-on-failure: true
+
+      # First, because a harness that only ever passes is indistinguishable from
+      # one that checks nothing.
+      - name: Negative controls
+        run: nix develop --command just test packaged --self-test
+
+      - name: Consumers
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test packaged --rust --js
 
   # `just rs windows` is the only thing that compiles moq-video's Media
   # Foundation capture/encode/decode, its D3D11 frames, and every

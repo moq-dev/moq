@@ -30,4 +30,3 @@ regression test per Root Cause First.
 - [Media QA on other engines](/quest/m0/browser-media-qa-engines.md) - the media output checks only run on the pinned Chromium
 - [Teardown error classification](/quest/m0/js-teardown-error-classification.md) - a browser consumer cannot tell a requested end from a fault, so QA cannot be strict during one
 - [Impaired-path profile](/quest/m0/transport-impairment-profile.md) - run the transport failure drills over a delayed, lossy, rate-limited QUIC path
-- [Packaged consumer QA](/quest/m0/packaged-consumer-qa.md) - install Rust and JS candidate archives outside the workspace before publication
