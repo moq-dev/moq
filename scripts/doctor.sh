@@ -31,7 +31,8 @@ set -uo pipefail
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  just doctor [--json] [--strict] [--base REF] [--suite check|test|smoke|wasm|all]...
+  just doctor [--json] [--strict] [--base REF]
+              [--suite check|test|smoke|smoke-full|wasm|all]...
   scripts/doctor.sh --tools [FILES]
   scripts/doctor.sh --self-test
 EOF
@@ -82,19 +83,95 @@ tools_for_files() {
     printf '%s' "$tools" | tr ' ' '\n' | sort -u
 }
 
-# Print the extra tools a cross-language suite needs beyond the file scope.
+# Print the tools a cross-language suite refuses to start without.
 #
-# Exactly what each harness refuses to start without: smoke's `require_tools`
-# (test/smoke/smoke.sh) and the guard at the top of test/wasm/run.sh. bun is on
-# both because the browser clients and the Playwright probe need it. A
-# per-client toolchain that smoke merely marks broken is not listed, because it
-# fails its own matrix cells rather than the run.
+# Exactly what each harness checks: smoke's `require_tools`, the guard at the
+# top of test/wasm/run.sh, plus the curl that run.sh polls every relay with. A
+# per-client toolchain that smoke only marks broken is deliberately absent,
+# because it fails its own matrix cells rather than the run: that is why bun
+# belongs to `smoke-full` (`just test smoke-full`, which publishes from a
+# browser) and not to plain `smoke`, whose default matrix is Rust alone.
 tools_for_suite() {
     case $1 in
-        smoke) printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
-        wasm) printf 'bun\ncargo\nwasm-bindgen\n' ;;
+        smoke) printf 'cargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
+        smoke-full) printf 'bun\ncargo\ncurl\nffmpeg\npgrep\ntimeout\n' ;;
+        wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
     esac
+}
+
+# Print the file scope `just check` would really use, given the one it was
+# handed. The dispatch itself lives in `justfile` and `test/justfile`, and
+# neither matches any language scope, so `check` hands a diff touching either
+# one to `check-all` instead. Diagnosing the narrow scope there would clear a
+# run that is about to need every tool in the repository.
+widen_orchestration() {
+    if printf '%s\n' "$1" | grep -qE '^(justfile|test/justfile)$'; then
+        printf 'ALL\n'
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+# Print which suite needs which tool, one `tool suite` pair per line, for a
+# suite list and a changed-file scope. Per-suite ownership rather than one
+# union: the file scope's tools belong to `check` and `test`, which are what
+# dispatch them, so a missing actionlint must not block a strict `--suite smoke`
+# diagnosis of a harness that never invokes it.
+#
+# git and just carry the dispatch itself, so they belong to every suite;
+# `_tools` leaves them out because just is what runs it.
+tool_pairs() {
+    local suites=$1 changed=$2 suite tool
+    for suite in $suites; do
+        for tool in git just; do
+            printf '%s %s\n' "$tool" "$suite"
+        done
+        case $suite in
+            check | test)
+                for tool in $(tools_for_files "$changed"); do
+                    printf '%s %s\n' "$tool" "$suite"
+                done
+                ;;
+        esac
+        for tool in $(tools_for_suite "$suite"); do
+            printf '%s %s\n' "$tool" "$suite"
+        done
+    done
+}
+
+# The suites in PAIRS that named a tool, deduplicated and in the order they were
+# given.
+suites_for_tool() {
+    local out="" t s
+    while read -r t s; do
+        [ "$t" = "$1" ] || continue
+        case " $out " in *" $s "*) ;; *) out="$out $s" ;; esac
+    done <<<"${PAIRS:-}"
+    printf '%s' "${out# }"
+}
+
+# Print the selected suites that actually bind a loopback socket, for a
+# changed-file scope. Loopback belongs to whoever binds one: the cross-language
+# harnesses always do, while `test` depends on the diff, because `just test`
+# hands the file list to the js, rs, and py recipes and all three skip a scope
+# they were not given. A docs-only diff binds nothing, and reporting it blocked
+# in a sandbox that forbids bind would name a cost it never pays.
+#
+# The Rust half asks `tools_for_files` rather than the suites that compile,
+# because `--suite test wasm` compiles Rust for the wasm harness on a diff that
+# hands `just test` nothing.
+bind_suites() {
+    local changed=$1 out="" suite
+    if tools_for_files "$changed" | grep -qx cargo ||
+        printf '%s\n' "$changed" | grep -qE '^(js|py)/'; then
+        out=$(selected test)
+    fi
+    for suite in $SUITES; do
+        case $suite in smoke | smoke-full | wasm) out="$out $suite" ;; esac
+    done
+    out=$(printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    printf '%s' "${out% }"
 }
 
 # ---------------------------------------------------------------------------
@@ -181,6 +258,22 @@ bounded() {
     BOUNDED_ELAPSED=$(printf '%d.%d' $((ticks / 10)) $((ticks % 10)))
     BOUNDED_OUT=$(cat "$BOUNDED_TMP" 2>/dev/null)
     return $status
+}
+
+# Print `alive` or `gone` for a pid. A zombie counts as gone: it consumes
+# nothing and writes nothing, it just holds a pid until someone reaps it, and a
+# killed descendant reparented to a container's PID 1 that does not reap stays
+# that way forever. `kill -0` succeeds on a zombie, so it cannot answer this
+# question on its own.
+process_state() {
+    kill -0 "$1" 2>/dev/null || {
+        printf 'gone\n'
+        return
+    }
+    case $(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') in
+        Z* | '') printf 'gone\n' ;;
+        *) printf 'alive\n' ;;
+    esac
 }
 
 # Map a failed command's exit status and output onto a status. A refusal reads
@@ -437,15 +530,20 @@ probe_nix_eval() {
 # The wrapper, the linker, and a writable target directory, exercised end to end
 # on a crate with no dependencies. Nothing else finds a wrapper that cannot
 # write its cache before a workspace compile has already been paid for.
+#
+# TARGET is a rustc target triple, or empty for the host. The host compiling is
+# no evidence at all for the wasm suite: rust-toolchain.toml does not install
+# wasm32-unknown-unknown, so a rustup box passes this and then fails on the
+# first line of `just wasm`.
 probe_cargo_compile() {
-    local suites=$1 cargo=${RUST_CARGO:-cargo}
+    local id=$1 suites=$2 target=$3 cargo=${RUST_CARGO:-cargo}
     if ! command -v "$cargo" >/dev/null 2>&1; then
-        record probe.cargo-compile probe missing true "$suites" "$cargo is not on PATH" \
+        record "probe.$id" probe missing true "$suites" "$cargo is not on PATH" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 120 0
         return
     fi
 
-    local crate="$SCRATCH/probe-crate"
+    local crate="$SCRATCH/probe-crate-$id"
     mkdir -p "$crate/src"
     cat >"$crate/Cargo.toml" <<'EOF'
 [package]
@@ -457,23 +555,31 @@ edition = "2021"
 EOF
     printf 'fn main() {}\n' >"$crate/src/main.rs"
 
-    local status
-    bounded 120 env CARGO_TARGET_DIR="$crate/target" "$cargo" build --offline --quiet --manifest-path "$crate/Cargo.toml"
+    local status label="for the host" remedy
+    remedy="allow writing ${CARGO_HOME:-$HOME/.cargo} and ${TMPDIR:-/tmp}, and executing the linker"
+    if [ -n "$target" ]; then
+        label="for $target"
+        remedy="install the target: rustup target add $target, or enter the dev shell: nix develop"
+        bounded 120 env CARGO_TARGET_DIR="$crate/target" "$cargo" build --offline --quiet \
+            --target "$target" --manifest-path "$crate/Cargo.toml"
+    else
+        bounded 120 env CARGO_TARGET_DIR="$crate/target" "$cargo" build --offline --quiet \
+            --manifest-path "$crate/Cargo.toml"
+    fi
     status=$?
     if ((status == 0)); then
-        record probe.cargo-compile probe ok true "$suites" "$cargo compiles a trivial crate" "" 120 "$BOUNDED_ELAPSED"
+        record "probe.$id" probe ok true "$suites" "$cargo compiles a trivial crate $label" "" 120 "$BOUNDED_ELAPSED"
         return
     fi
-    record probe.cargo-compile probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-        "$cargo could not compile a trivial crate: $(error_line "$BOUNDED_OUT")" \
-        "allow writing ${CARGO_HOME:-$HOME/.cargo} and ${TMPDIR:-/tmp}, and executing the linker" \
-        120 "$BOUNDED_ELAPSED"
+    record "probe.$id" probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+        "$cargo could not compile a trivial crate $label: $(error_line "$BOUNDED_OUT")" \
+        "$remedy" 120 "$BOUNDED_ELAPSED"
 }
 
 # Every relay, gateway, and harness test stands up a loopback endpoint, and a
 # sandbox that forbids bind fails all of them identically and late.
 probe_loopback() {
-    local kind=$1 suites="test smoke wasm"
+    local kind=$1 suites=$2
     if ! command -v bun >/dev/null 2>&1; then
         record "probe.loopback-$kind" probe skip false "$suites" "bun is not installed, so the bind was not probed" "" 15 0
         return
@@ -760,6 +866,72 @@ self_test_incomplete() {
     check 'strict refuses an incomplete scope' "$?" 1
 }
 
+# A diff touching the root justfile widens the real dispatch to `check-all`, so
+# the diagnosis has to widen with it, and an explicit base that does not resolve
+# is refused rather than silently answered about some other scope. Uses the
+# `check` helper its caller defines.
+self_test_orchestration() {
+    check 'the root justfile widens' "$(widen_orchestration justfile)" ALL
+    check 'test/justfile widens' \
+        "$(widen_orchestration "$(printf 'doc/a.md\ntest/justfile')")" ALL
+    check 'anything else stays narrow' "$(widen_orchestration doc/a.md)" doc/a.md
+    check 'ALL stays ALL' "$(widen_orchestration ALL)" ALL
+    # A per-language justfile is a language scope like any other file under it.
+    check 'a language justfile stays narrow' "$(widen_orchestration rs/justfile)" rs/justfile
+
+    "$SELF" --base no/such/ref/for/doctor >/dev/null 2>&1
+    check 'an unresolvable base is refused' "$?" 2
+}
+
+# A capability is charged to the suites that actually invoke it, never to the
+# union of everything selected. Charging the union is what makes a strict
+# harness run fail on a linter it never calls, which is the false negative this
+# command exists to remove. Uses the `check` helper its caller defines.
+self_test_ownership() {
+    local saved_pairs=${PAIRS:-} saved_suites=$SUITES
+
+    SUITES="check smoke"
+    PAIRS=$(tool_pairs "$SUITES" 'rs/moq-net/src/lib.rs')
+    check 'the dispatch belongs to every suite' "$(suites_for_tool git)" 'check smoke'
+    check 'a file-scope linter belongs to check' "$(suites_for_tool shellcheck)" check
+    check 'a harness tool belongs to its harness' "$(suites_for_tool ffmpeg)" smoke
+    check 'a shared tool names both' "$(suites_for_tool cargo)" 'check smoke'
+    check 'an unclaimed tool names nothing' "$(suites_for_tool gradle)" ''
+
+    SUITES="smoke"
+    PAIRS=$(tool_pairs "$SUITES" 'rs/moq-net/src/lib.rs')
+    check 'a harness run drops the linters' "$(suites_for_tool shellcheck)" ''
+
+    # A docs-only `test` compiles nothing and hands no scope to a recipe that
+    # binds, so a sandbox forbidding bind blocks none of it.
+    SUITES="check test"
+    check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md')" ''
+    check 'a js diff binds under test' "$(bind_suites 'js/hang/src/index.ts')" test
+    check 'a rust diff binds under test' "$(bind_suites 'rs/moq-net/src/lib.rs')" test
+    # `check` lints and compiles; nothing in it listens, so it is never charged.
+    check 'an unscoped run binds under test alone' "$(bind_suites ALL)" test
+
+    SUITES="check smoke wasm"
+    check 'the harnesses always bind' "$(bind_suites 'doc/a.md')" 'smoke wasm'
+
+    PAIRS=$saved_pairs
+    SUITES=$saved_suites
+}
+
+# A zombie holds a pid without holding a resource, and `kill -0` succeeds on
+# one, so the leak check has to look past it. Uses the `check` helper its
+# caller defines.
+self_test_process_state() {
+    check 'the current process is alive' "$(process_state $$)" alive
+    # Reaped immediately by this shell, so by the time it is asked the pid is
+    # either gone or a zombie, and both answers must read the same.
+    local reaped
+    sh -c 'exit 0' &
+    reaped=$!
+    wait "$reaped" 2>/dev/null
+    check 'a reaped child is gone' "$(process_state "$reaped")" gone
+}
+
 self_test() {
     local fail=0
     check() {
@@ -797,14 +969,13 @@ self_test() {
 
     local orphan ticks=0
     orphan=$(cat "$SCRATCH/grandchild" 2>/dev/null)
-    # Signal delivery and reaping are asynchronous, so give them a moment before
+    # Signal delivery and reaping are asynchronous, so give it a moment before
     # calling it a leak.
-    while ((ticks < 20)) && kill -0 "$orphan" 2>/dev/null; do
+    while ((ticks < 20)) && [ "$(process_state "$orphan")" = alive ]; do
         sleep 0.1
         ticks=$((ticks + 1))
     done
-    check 'bounded kills the process tree' \
-        "$(kill -0 "$orphan" 2>/dev/null && printf alive || printf gone)" gone
+    check 'bounded kills the process tree' "$(process_state "$orphan")" gone
 
     # Only the suites this run selected are blocked. A probe declares every
     # suite it serves, and counting an unselected one would fail a strict run
@@ -843,8 +1014,16 @@ self_test() {
     check 'smoke needs ffmpeg' "$(tools_for_suite smoke | grep -c '^ffmpeg$')" 1
     check 'smoke needs timeout' "$(tools_for_suite smoke | grep -c '^timeout$')" 1
     check 'wasm needs wasm-bindgen' "$(tools_for_suite wasm | grep -c '^wasm-bindgen$')" 1
+    check 'wasm needs curl' "$(tools_for_suite wasm | grep -c '^curl$')" 1
+    # smoke's default matrix is Rust alone, and smoke.sh only marks the browser
+    # clients broken without bun, so plain smoke is not blocked by its absence.
+    check 'plain smoke does not need bun' "$(tools_for_suite smoke | grep -c '^bun$')" 0
+    check 'smoke-full needs bun' "$(tools_for_suite smoke-full | grep -c '^bun$')" 1
 
+    self_test_process_state
+    self_test_ownership
     self_test_incomplete
+    self_test_orchestration
 
     unset -f check
     if ((fail)); then
@@ -889,7 +1068,7 @@ while (($#)); do
                 exit 2
             }
             case $1 in
-                all | check | smoke | test | wasm) ;;
+                all | check | smoke | smoke-full | test | wasm) ;;
                 *)
                     printf 'doctor: unknown suite: %s\n' "$1" >&2
                     usage
@@ -929,7 +1108,15 @@ if [ -z "$REPO" ]; then
 fi
 cd "$REPO" || exit 2
 
-SCRATCH=$(mktemp -d)
+# Every fixture, probe crate, and captured output lands here. Without it the
+# paths below would resolve against the filesystem root, and the report would be
+# a list of unrelated root-level write failures instead of the one real problem.
+SCRATCH=$(mktemp -d 2>/dev/null)
+if [ -z "$SCRATCH" ] || [ ! -d "$SCRATCH" ]; then
+    printf 'doctor: cannot create a scratch directory in %s\n' "${TMPDIR:-/tmp}" >&2
+    printf '        grant write access to %s, or set TMPDIR to a writable path\n' "${TMPDIR:-/tmp}" >&2
+    exit 2
+fi
 BOUNDED_TMP="$SCRATCH/out"
 trap 'rm -rf "$SCRATCH"' EXIT
 
@@ -939,15 +1126,29 @@ BASE_REF="$BASE"
 CHANGED=""
 CHANGED_COUNT=0
 if command -v just >/dev/null 2>&1; then
-    CHANGED=$(just _changed "$BASE" 2>"$SCRATCH/base") || CHANGED=ALL
-    BASE_REF=$(sed -n 's/^base: //p' "$SCRATCH/base" | tail -1)
-    : "${BASE_REF:=unknown}"
+    if CHANGED=$(just _changed "$BASE" 2>"$SCRATCH/base"); then
+        BASE_REF=$(sed -n 's/^base: //p' "$SCRATCH/base" | tail -1)
+        : "${BASE_REF:=unknown}"
+    elif [ -n "$BASE" ]; then
+        # An explicit ref that does not resolve is a question this cannot
+        # answer. Widening to everything would report a scope the caller never
+        # asked about, and call it their base.
+        printf 'doctor: cannot resolve --base %s\n' "$BASE" >&2
+        sed 's/^/        /' "$SCRATCH/base" >&2
+        exit 2
+    else
+        CHANGED=ALL
+        BASE_REF="unresolved"
+    fi
 else
     # Without just there is no scope to narrow to, and a narrow report would
     # understate what is missing, so require everything.
     CHANGED=ALL
     BASE_REF="unresolved (just is unavailable)"
 fi
+
+CHANGED=$(widen_orchestration "$CHANGED")
+
 if [ "$CHANGED" = ALL ]; then
     CHANGED_COUNT=0
 else
@@ -959,7 +1160,7 @@ fi
 SUITES=$(printf '%s' "$SUITES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
 SUITES=${SUITES% }
 case " $SUITES " in
-    *" all "*) SUITES="check smoke test wasm" ;;
+    *" all "*) SUITES="check smoke smoke-full test wasm" ;;
     "  ") SUITES="check test" ;;
 esac
 
@@ -986,36 +1187,28 @@ TARGET_DIR=${CARGO_TARGET_DIR:-$REPO/target}
 
 probe_session
 
-# Tools the selected scope and suites need. git and just carry the dispatch
-# itself, so they belong to every scope; `_tools` leaves them out because just
-# is what runs it.
-TOOL_LIST=$(
-    {
-        printf 'git\njust\n'
-        tools_for_files "${CHANGED:-}"
-        for suite in $SUITES; do tools_for_suite "$suite"; done
-    } | sort -u
-)
+PAIRS=$(tool_pairs "$SUITES" "${CHANGED:-}")
+
+TOOL_LIST=$(printf '%s\n' "$PAIRS" | cut -d' ' -f1 | grep -v '^$' | sort -u)
 for tool in $TOOL_LIST; do
-    probe_tool "$tool" "$SUITES"
+    probe_tool "$tool" "$(suites_for_tool "$tool")"
 done
 
-probe_bun_yaml
+# Both belong to `check` alone: alert.sh's coverage check and `nix flake check`
+# run there and nowhere else, so a standalone harness diagnosis should not pay
+# for them.
+if [ -n "$(selected check)" ]; then
+    probe_bun_yaml
+else
+    record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
+fi
 
 # Which selected suites actually compile Rust. `check` and `test` do only when
 # the file scope reaches it, which is the same question `_tools` answers; the
 # cross-language harnesses always do. Attributing these to a fixed `check test`
 # would report a docs-only diff blocked on a toolchain it never invokes, and
 # would leave a broken toolchain blocking nothing under `--suite wasm`.
-CARGO_SUITES=""
-if tools_for_files "${CHANGED:-}" | grep -qx cargo; then
-    CARGO_SUITES=$(selected "check test")
-fi
-for suite in $SUITES; do
-    case $suite in smoke | wasm) CARGO_SUITES="$CARGO_SUITES $suite" ;; esac
-done
-CARGO_SUITES=$(printf '%s' "$CARGO_SUITES" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
-CARGO_SUITES=${CARGO_SUITES% }
+CARGO_SUITES=$(suites_for_tool cargo)
 
 # `just rs check-changed` is where the selector runs, and its seed list only
 # grows past one line when the diff reaches Rust, so a docs-only branch on BSD
@@ -1032,20 +1225,35 @@ if [ -n "$CARGO_SUITES" ]; then
     probe_writable target "$TARGET_DIR" "$CARGO_SUITES"
     probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "$CARGO_SUITES"
     probe_disk "$TARGET_DIR" "$CARGO_SUITES"
-    probe_cargo_compile "$CARGO_SUITES"
+    probe_cargo_compile cargo-compile "$CARGO_SUITES" ""
 else
     record storage.target storage skip false "" "this scope compiles nothing" "" 5 0
     record probe.cargo-compile probe skip false "" "this scope compiles nothing" "" 120 0
 fi
 
-probe_nix_eval
 case " $SUITES " in
-    *" test "* | *" smoke "* | *" wasm "*)
-        probe_loopback tcp
-        probe_loopback udp
-        ;;
+    *" wasm "*) probe_cargo_compile cargo-wasm32 wasm wasm32-unknown-unknown ;;
 esac
-case " $SUITES " in *" smoke "*) probe_playwright smoke "$REPO/test/smoke/clients/js" ;; esac
+
+if [ -n "$(selected check)" ]; then
+    probe_nix_eval
+else
+    record probe.nix-eval probe skip false "" "check is not selected" "" 30 0
+fi
+
+BIND_SUITES=$(bind_suites "$CHANGED")
+
+if [ -n "$BIND_SUITES" ]; then
+    probe_loopback tcp "$BIND_SUITES"
+    probe_loopback udp "$BIND_SUITES"
+else
+    record probe.loopback-tcp probe skip false "" "this scope binds no sockets" "" 15 0
+    record probe.loopback-udp probe skip false "" "this scope binds no sockets" "" 15 0
+fi
+
+# Plain `smoke` runs the Rust matrix and needs no browser; `smoke-full`
+# publishes from one, and the wasm harness is nothing but one.
+case " $SUITES " in *" smoke-full "*) probe_playwright smoke-full "$REPO/test/smoke/clients/js" ;; esac
 case " $SUITES " in *" wasm "*) probe_playwright wasm "$REPO/test/wasm" ;; esac
 
 probe_github
