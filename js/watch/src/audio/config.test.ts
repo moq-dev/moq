@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { playbackIdentity, playbackJitter } from "./config";
+import { decoderConfig, playbackIdentity, playbackJitter } from "./config";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -16,14 +16,14 @@ function config(fields: Record<string, unknown> = {}): Catalog.AudioConfig {
 	});
 }
 
-test("metadata changes do not change the playback identity", async () => {
+test("metadata and routing changes do not change the decoder config", async () => {
 	const rendition = new Signal<Catalog.AudioConfig>(config());
 	const root = new Effect();
-	const identity = root.computed((effect) => playbackIdentity(effect.get(rendition)));
+	const decoder = root.computed((effect) => decoderConfig(effect.get(rendition)));
 	let worklets = 0;
 
 	root.run((effect) => {
-		effect.get(identity);
+		effect.get(decoder);
 		worklets++;
 	});
 	await flush();
@@ -35,6 +35,10 @@ test("metadata changes do not change the playback identity", async () => {
 	expect(worklets).toBe(1);
 
 	rendition.set(config({ bitrate: 96_000, jitter: 20, timeline: { track: "timeline" } }));
+	await flush();
+	expect(worklets).toBe(1);
+
+	rendition.set(config({ broadcast: "../source" }));
 	await flush();
 	expect(worklets).toBe(1);
 

@@ -17,7 +17,7 @@ import { base64ToBytes } from "../base64";
 
 import { type Bound, latencyBounds, type Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
-import { type DecoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
+import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -108,9 +108,12 @@ export class Decoder {
 
 	#signals = new Effect();
 
-	// The catalog fields that require a new audio graph, so a republish that only refines metadata
-	// (bitrate, jitter) leaves the context, worklet, and ring alone.
+	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
+
+	// The decoder fields that require a new audio graph. Routing and metadata changes leave the
+	// context, worklet, and ring alone.
+	readonly #config: Computed<DecoderConfig | undefined>;
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
@@ -122,6 +125,10 @@ export class Decoder {
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
+		});
+		this.#config = this.#signals.computed((effect) => {
+			const config = effect.get(this.source.out.config);
+			return config ? decoderConfig(config) : undefined;
 		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
@@ -138,14 +145,14 @@ export class Decoder {
 		//const enabled = effect.get(this.enabled);
 		//if (!enabled) return;
 
-		const identity = effect.get(this.#identity);
-		if (!identity) return;
+		const config = effect.get(this.#config);
+		if (!config) return;
 
 		// Pre-build the graph at the catalog rate so warm-up starts before the first frame arrives. The
 		// decoder's actual output rate is the source of truth (see #emit); if it differs, #emit sets
 		// #decodedSampleRate, which re-runs this effect and rebuilds the graph at the real rate.
-		const sampleRate = effect.get(this.#decodedSampleRate) ?? identity.decoder.sampleRate;
-		const channelCount = identity.decoder.numberOfChannels;
+		const sampleRate = effect.get(this.#decodedSampleRate) ?? config.sampleRate;
+		const channelCount = config.numberOfChannels;
 
 		// Expose the rate the graph actually runs at.
 		effect.set(this.#out.sampleRate, sampleRate);

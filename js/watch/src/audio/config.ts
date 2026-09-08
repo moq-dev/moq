@@ -15,23 +15,28 @@ export type DecoderConfig = Pick<
 	"codec" | "container" | "description" | "sampleRate" | "numberOfChannels"
 >;
 
-/** The routing and decoder state whose changes require a new audio graph. */
+/** The routing and decoder state whose changes require a replacement subscription. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.AudioConfig["broadcast"];
 	decoder: DecoderConfig;
 };
 
-/** Reduce a rendition config to the fields that require a new audio graph. */
+/** Reduce a rendition config to the fields that require a new decoder. */
+export function decoderConfig(config: Catalog.AudioConfig): DecoderConfig {
+	return {
+		codec: config.codec,
+		container: config.container,
+		description: config.description,
+		sampleRate: config.sampleRate,
+		numberOfChannels: config.numberOfChannels,
+	};
+}
+
+/** Reduce a rendition config to the fields that require a replacement subscription. */
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
-		decoder: {
-			codec: config.codec,
-			container: config.container,
-			description: config.description,
-			sampleRate: config.sampleRate,
-			numberOfChannels: config.numberOfChannels,
-		},
+		decoder: decoderConfig(config),
 	};
 }
 
