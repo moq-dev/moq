@@ -41,10 +41,11 @@ with the current dev tree before starting.
 - [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper mirrors the same three operations once dev merges
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
 - [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
+- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - moq-cli runs several adaptive import stages on one connection now that the allocator divides the estimate
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
 - [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
-- [Plan: binding rate control](/quest/m1/plan-binding-rate-control.md) - settle how a non-Rust publisher follows the send estimate before wiring five bindings
+- [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
 - [#3000](/quest/m1/3000-track-teardown-on-poll-unused-is-not-atomic-against-a.md) - Track teardown on poll_unused is not atomic against a consumer reattaching
 - [JS stream codes](/quest/m1/js-net-stream-error-codes.md) - js/net: a locally raised group error reaches the wire as INTERNAL_ERROR
@@ -67,7 +68,7 @@ with the current dev tree before starting.
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - Make 2.5 ms Opus frame durations work across bindings
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
-- [Plan: route cold cost](/quest/m1/plan-route-cold-cost.md) - settle how a route's cold cost crosses the bindings without being rewritten on the way back
+- [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
 - [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - moq-net: ban Hop ID 0 from hop chains
 - [#2248](/quest/m1/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

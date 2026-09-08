@@ -25,6 +25,7 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [Encoder presets](/quest/m2/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
 - [Audio publishing](/quest/m2/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m2/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
+- [Rate control](/quest/m2/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
 - [macOS GPU input](/quest/m2/obs-moq-video/macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit synchronization
 - [Linux GPU input](/quest/m2/obs-moq-video/linux.md) - export OBS allocations and connect a real hardware encoder import path
