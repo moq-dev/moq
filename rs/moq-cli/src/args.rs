@@ -570,8 +570,6 @@ impl Command {
 				ExportSink::Hls(hls) => hls.tls.deprecated(),
 				_ => moq_tokio::Deprecated::default(),
 			},
-			#[cfg(feature = "play")]
-			Self::Play(play) => play.deprecated(),
 			_ => moq_tokio::Deprecated::default(),
 		}
 	}
