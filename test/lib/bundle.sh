@@ -344,10 +344,6 @@ bundle_stack() {
     # Capped, because attaching costs a second each and a tree can be a browser.
     local out="$BUNDLE_DIR/stacks/$name.txt" target target_start walked=0 left="${MOQ_QA_STACK_MAX:-8}"
     for target in $(_bundle_descendants "$pid"); do
-        if ((left-- <= 0)); then
-            printf 'stopped after %s processes (MOQ_QA_STACK_MAX)\n' "${MOQ_QA_STACK_MAX:-8}" >>"$out"
-            break
-        fi
         _bundle_descendant_of "$pid" "$target" || continue
         target_start=$(_bundle_process_start "$target" || true)
         [[ -n "$target_start" ]] || continue
@@ -355,16 +351,20 @@ bundle_stack() {
         [[ -n "$current" && "$current" == "$wanted" ]] || break
         current=$(_bundle_process_start "$target" || true)
         [[ -n "$current" && "$current" == "$target_start" ]] || continue
-        walked=$((walked + 1))
-        {
-            printf '=== %s pid %s ===\n' "$name" "$target"
-            ps -o pid=,command= -p "$target" 2>/dev/null || true
-        } >>"$out"
         current=$(_bundle_process_start "$pid" || true)
         [[ -n "$current" && "$current" == "$wanted" ]] || break
         current=$(_bundle_process_start "$target" || true)
         [[ -n "$current" && "$current" == "$target_start" ]] || continue
         _bundle_descendant_of "$pid" "$target" || continue
+        if ((left-- <= 0)); then
+            printf 'stopped after %s processes (MOQ_QA_STACK_MAX)\n' "${MOQ_QA_STACK_MAX:-8}" >>"$out"
+            break
+        fi
+        walked=$((walked + 1))
+        {
+            printf '=== %s pid %s ===\n' "$name" "$target"
+            ps -o pid=,command= -p "$target" 2>/dev/null || true
+        } >>"$out"
         _bundle_stack_one "$target" >>"$out" 2>&1
     done
 
