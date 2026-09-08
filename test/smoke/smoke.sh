@@ -678,7 +678,6 @@ run_round() {
     if [[ "$FAULT" == relay && "$FAULT_DONE" -eq 0 && ${#pids[@]} -gt 0 ]]; then
         FAULT_DONE=1
         echo "=== fault injection: killing the relay with subscriber cells active ==="
-        bundle_stack relay-fault "$RELAY_PID"
         kill -KILL "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
         RELAY_PID=""

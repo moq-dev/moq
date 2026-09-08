@@ -137,7 +137,9 @@ async function saveTrace(page: Page | undefined, failed: boolean): Promise<strin
 	if (failed) {
 		wrote = await attempt("tracing.stop", () => context.tracing.stop({ path: tracePath }));
 		await attempt("screenshot", async () => {
-			await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
+			const capturePage = page ?? context.pages()[0];
+			if (!capturePage) throw new Error("the browser context has no page to capture");
+			await capturePage.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
 		});
 		const log = [...errors.page.map((e) => `page: ${e}`), ...errors.console.map((e) => `console: ${e}`)];
 		await attempt("console log", () => writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`));
