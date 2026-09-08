@@ -695,7 +695,7 @@ probe_c_compiler() {
 # real build will select.
 cargo_targets() {
     local cargo_home=${1:-} cargo_dir=${2:-$REPO} crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
-    local command=(env "CARGO_TARGET_DIR=$crate/target")
+    local command=(env "CARGO_TARGET_DIR=$crate/target" "MOQ_DOCTOR_TARGET_DIR=$crate/target")
     [ -n "$cargo_home" ] && command+=("CARGO_HOME=$cargo_home")
     command+=(cargo check --offline --color never --manifest-path "$crate/Cargo.toml")
 
@@ -713,7 +713,10 @@ EOF
 fn main() {
     let host = std::env::var("HOST").unwrap();
     let target = std::env::var("TARGET").unwrap();
-    let explicit = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).components().any(|part| part.as_os_str() == target.as_str());
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let root = std::path::PathBuf::from(std::env::var("MOQ_DOCTOR_TARGET_DIR").unwrap());
+    let relative = out.strip_prefix(root).unwrap();
+    let explicit = relative.components().next().unwrap().as_os_str() == target.as_str();
     println!("cargo:warning=moq-doctor-target:{host}:{target}:{explicit}");
 }
 EOF
@@ -731,13 +734,13 @@ EOF
         { [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] || [ "$CARGO_PROBE_EXPLICIT_TARGET" = false ]; }
 }
 
-# The smoke harness reads artifacts from target/{debug,release}; any explicit
-# Cargo target writes them below target/<triple>/ instead, even for HOST.
-probe_smoke_cargo_target() {
+# The harnesses read artifacts from target/{debug,release}; any explicit Cargo
+# target writes them below target/<triple>/ instead, even for HOST.
+probe_harness_cargo_target() {
     local suites=$1 status
     CARGO_TARGET_READY=0
     if ! command -v cargo >/dev/null 2>&1; then
-        record behavior.smoke-cargo-target behavior missing true "$suites" \
+        record behavior.cargo-artifact-layout behavior missing true "$suites" \
             "cargo is missing, so its artifact layout cannot be resolved" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
         return
@@ -745,19 +748,19 @@ probe_smoke_cargo_target() {
     cargo_targets
     status=$?
     if ((status != 0)); then
-        record behavior.smoke-cargo-target behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+        record behavior.cargo-artifact-layout behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
             "cargo could not resolve its artifact layout: $(error_line "$BOUNDED_OUT")" \
             "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
         return
     fi
     if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ]; then
-        record behavior.smoke-cargo-target behavior degraded true "$suites" \
-            "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but smoke reads target directly" \
-            "unset Cargo build.target for smoke, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
+        record behavior.cargo-artifact-layout behavior degraded true "$suites" \
+            "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
+            "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
         return
     fi
     CARGO_TARGET_READY=1
-    record behavior.smoke-cargo-target behavior ok true "$suites" \
+    record behavior.cargo-artifact-layout behavior ok true "$suites" \
         "Cargo uses the host artifact layout for $CARGO_PROBE_TARGET" "" 30 "$BOUNDED_ELAPSED"
 }
 
@@ -793,6 +796,30 @@ relative_command() {
     local entry old_ifs=$IFS
     IFS=:
     for entry in ${PATH:-}; do
+        case $entry in
+            /*)
+                if [ -x "$entry/$1" ]; then
+                    IFS=$old_ifs
+                    return 1
+                fi
+                ;;
+            *)
+                IFS=$old_ifs
+                return 0
+                ;;
+        esac
+    done
+    IFS=$old_ifs
+    return 1
+}
+
+# True when a pkg-config search path changes meaning with the working directory.
+relative_search_path() {
+    local value=$1 entry old_ifs=$IFS
+    [ -n "$value" ] || return 1
+    case $value in :* | *: | *::*) return 0 ;; esac
+    IFS=:
+    for entry in $value; do
         case $entry in /*) ;; *)
             IFS=$old_ifs
             return 0
@@ -835,6 +862,13 @@ probe_gstreamer_devel() {
     fi
     for base in PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR; do
         if value=$(targeted_env "$base" "$target" "$host"); then
+            if { [ "$base" = PKG_CONFIG_SYSROOT_DIR ] && [ -n "$value" ] && [ "${value#/}" = "$value" ]; } ||
+                { [ "$base" != PKG_CONFIG_SYSROOT_DIR ] && relative_search_path "$value"; }; then
+                record behavior.gstreamer-devel behavior degraded true "$suites" \
+                    "$base depends on Cargo's build-script working directory: $value" \
+                    "use absolute paths in pkg-config metadata configuration" 10 0
+                return
+            fi
             pkg_env+=("$base=$value")
         fi
     done
@@ -1631,8 +1665,16 @@ self_test() {
         )" pkg-config
     relative_command ./tools/pkg-config
     check 'relative pkg-config override is context dependent' "$?" 0
-    PATH=/usr/bin:/bin relative_command pkg-config
-    check 'absolute PATH keeps pkg-config stable' "$?" 1
+    mkdir -p "$SCRATCH/pkg-config-bin"
+    ln -sf "$(command -v env)" "$SCRATCH/pkg-config-bin/pkg-config"
+    PATH="$SCRATCH/pkg-config-bin:./later" relative_command pkg-config
+    check 'PATH stops at the first pkg-config match' "$?" 1
+    PATH="./first:$SCRATCH/pkg-config-bin" relative_command pkg-config
+    check 'relative PATH before pkg-config is context dependent' "$?" 0
+    relative_search_path '/absolute/one:/absolute/two'
+    check 'absolute pkg-config search paths are stable' "$?" 1
+    relative_search_path '/absolute:relative'
+    check 'relative pkg-config search path is context dependent' "$?" 0
     if command -v cargo >/dev/null 2>&1; then
         mkdir -p "$SCRATCH/cargo-config/.cargo"
         cat >"$SCRATCH/cargo-config/.cargo/config.toml" <<'EOF'
@@ -1855,11 +1897,11 @@ else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
 fi
 
-SMOKE_SUITES=$(selected 'smoke smoke-full')
-if [ -n "$SMOKE_SUITES" ]; then
-    probe_smoke_cargo_target "$SMOKE_SUITES"
+HARNESS_CARGO_SUITES=$(selected 'smoke smoke-full wasm')
+if [ -n "$HARNESS_CARGO_SUITES" ]; then
+    probe_harness_cargo_target "$HARNESS_CARGO_SUITES"
 else
-    record behavior.smoke-cargo-target behavior skip false "" "smoke is not selected" "" 30 0
+    record behavior.cargo-artifact-layout behavior skip false "" "no Cargo harness is selected" "" 30 0
 fi
 
 SMOKE_FULL_SUITES=$(selected smoke-full)
