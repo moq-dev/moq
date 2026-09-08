@@ -1128,3 +1128,38 @@ fn fragment_span_never_shrinks() {
 	fmp4.finish().unwrap();
 	assert_eq!(audio_jitter(&catalog), Some(burst));
 }
+
+/// A fragment's media stops at its samples' declared ends, not a fixed step past the latest
+/// timestamp. A one-sample fragment declaring a long duration is that long a flush, however
+/// tightly the track's other samples were spaced.
+#[test]
+fn fragment_span_uses_the_declared_sample_duration() {
+	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	// Two 1024-tick samples establish a ~23 ms steady spacing...
+	fmp4.decode(&audio_fragment_samples(0, 1024, 327, 2)).unwrap();
+	// ...then one sample covering 8192 ticks (~186 ms) of media on its own.
+	fmp4.decode(&audio_fragment_samples(2048, 8192, 327, 1)).unwrap();
+
+	let jitter = catalog
+		.snapshot()
+		.audio
+		.renditions
+		.values()
+		.next()
+		.expect("an audio rendition")
+		.jitter
+		.expect("a jitter");
+	assert!(
+		jitter >= std::time::Duration::from_millis(180),
+		"the long sample's own duration is the flush span: {jitter:?}"
+	);
+}

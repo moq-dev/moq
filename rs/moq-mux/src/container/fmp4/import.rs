@@ -741,9 +741,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				return Err(Error::MissingTrun.into());
 			}
 
-			// Keep track of the minimum and maximum timestamp for this track to compute the jitter.
+			// Keep track of the minimum and maximum timestamp for this track to compute the jitter,
+			// plus the latest sample end, which is where the fragment's media actually stops.
 			let mut min_timestamp = None;
 			let mut max_timestamp = None;
+			let mut max_end: Option<Timestamp> = None;
 			let mut contains_keyframe = false;
 			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 			let mut sample_index = 0usize;
@@ -814,6 +816,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
+					}
+					// Sample durations vary, so the fragment ends at the latest sample end rather
+					// than a fixed step past the latest timestamp.
+					if let Some(duration) = duration {
+						let end = timestamp.checked_add(moq_net::Timestamp::new(duration as u64, timescale)?)?;
+						if max_end.is_none_or(|max| end > max) {
+							max_end = Some(end);
+						}
 					}
 
 					if let Some(last_timestamp) = track.last_timestamp
@@ -993,11 +1003,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				recorder.end(end);
 			}
 
-			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
-				// All three share the track timescale (min/max are this fragment's frame
-				// timestamps, min_duration is derived from them).
-				let span = max.checked_sub(min)?.checked_add(min_duration)?;
-				track.estimator.burst(span);
+			// The whole fragment goes out as one frame, so a consumer waits its full media span
+			// between flushes however tightly the samples inside are spaced. It stops at the
+			// latest sample end when the samples declared durations, else one steady frame past
+			// the latest timestamp. Everything here shares the track timescale.
+			let end = match (max_end, max_timestamp, track.min_duration) {
+				(Some(end), _, _) => Some(end),
+				(None, Some(max), Some(min_duration)) => max.checked_add(min_duration).ok(),
+				_ => None,
+			};
+			if let (Some(min), Some(end)) = (min_timestamp, end) {
+				track.estimator.burst(end.checked_sub(min)?);
 			}
 
 			track.rendition.estimate(track.estimator.estimate());
