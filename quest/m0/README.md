@@ -28,7 +28,8 @@ regression test per Root Cause First.
 - [Group charge](/quest/m0/group-charge.md) - charge real per-group cost so MOQ_CACHE_CAPACITY bounds real memory
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
-- [Harness drive-bys](/quest/m0/harness-drive-bys.md) - drop the just worktree recipe and decide the relay listening kind field that came with #3509
+- [Harness drive-bys](/quest/m0/harness-drive-bys.md) - decide whether the relay listening kind field that came with #3509 stays
 - [Capture denial](/quest/m0/browser-permission-qa.md) - moq-publish swallows a refused camera or microphone and retries forever; it surfaces the denial and recovers on grant
 - [Publisher audio unlock](/quest/m0/publish-audio-unlock.md) - the publisher's capture AudioContext stays suspended when the page had no gesture, so no audio is ever encoded
 - [Impaired path](/quest/m0/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
+- [Tooling](/quest/m0/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
