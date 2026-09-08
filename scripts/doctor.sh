@@ -222,6 +222,24 @@ cargo_home() {
     fi
 }
 
+# Resolve the same per-user roots as test/lib/harness.sh. Explicit overrides are
+# shared across worktrees by definition; defaults are namespaced by uid.
+harness_root() {
+    local kind=$1 root
+    case $kind in
+        runs) root=${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}} ;;
+        ports) root=${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}} ;;
+        *) return 1 ;;
+    esac
+    root=${root%/}
+    if [ "$kind" = runs ] && [ -z "${MOQ_TEST_RUNS:-}" ]; then
+        root="$root/moq-test-$(id -u)"
+    elif [ "$kind" = ports ] && [ -z "${MOQ_TEST_PORTS:-}" ]; then
+        root="$root/moq-test-ports-$(id -u)"
+    fi
+    printf '%s\n' "$root"
+}
+
 wants_wasm() {
     local packages=$1
     [ -n "$packages" ] || return 1
@@ -776,25 +794,33 @@ probe_loopback() {
 # locking utility the host provides. Linux normally has flock and macOS lockf;
 # requiring one by name would reject the other valid platform.
 probe_advisory_lock() {
-    local suites=$1 tool status
+    local suites=$1 requested=$2 tool status root lock
+    if ! root=$(existing_ancestor "$requested"); then
+        record probe.advisory-lock probe missing true "$suites" \
+            "$requested has no usable directory ancestor" "configure MOQ_TEST_PORTS under a writable directory" 5 0
+        return
+    fi
+    lock="$root/.moq-doctor-harness-lock.$$"
     if command -v flock >/dev/null 2>&1; then
         tool=flock
-        bounded 5 flock "$SCRATCH/harness.lock" true
+        bounded 5 flock "$lock" true
     elif command -v lockf >/dev/null 2>&1; then
         tool=lockf
-        bounded 5 lockf -k "$SCRATCH/harness.lock" true
+        bounded 5 lockf -k "$lock" true
     else
         record probe.advisory-lock probe missing true "$suites" \
             "neither flock nor lockf is on PATH" "install flock or lockf" 5 0
         return
     fi
     status=$?
+    rm -f "$lock" 2>/dev/null || true
     if ((status == 0)); then
-        record probe.advisory-lock probe ok true "$suites" "$tool acquires an advisory lock" "" 5 "$BOUNDED_ELAPSED"
+        record probe.advisory-lock probe ok true "$suites" \
+            "$tool acquires an advisory lock in $root, the existing ancestor of $requested" "" 5 "$BOUNDED_ELAPSED"
     else
         record probe.advisory-lock probe "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
             "$tool could not acquire an advisory lock: $(error_line "$BOUNDED_OUT")" \
-            "allow $tool to create and lock files in ${TMPDIR:-/tmp}" 5 "$BOUNDED_ELAPSED"
+            "allow $tool to create and lock files in $root" 5 "$BOUNDED_ELAPSED"
     fi
 }
 
@@ -1152,6 +1178,8 @@ self_test_ownership() {
         cargo_home >/dev/null
     )
     check 'Cargo home rejects an unknown location' "$?" 1
+    check 'an explicit harness port root is preserved' \
+        "$(MOQ_TEST_PORTS=/custom/ports harness_root ports)" /custom/ports
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
@@ -1575,8 +1603,14 @@ fi
 
 LOCK_SUITES=$(selected "smoke smoke-full wasm")
 if [ -n "$LOCK_SUITES" ]; then
-    probe_advisory_lock "$LOCK_SUITES"
+    HARNESS_RUN_ROOT=$(harness_root runs)
+    HARNESS_PORT_ROOT=$(harness_root ports)
+    probe_writable harness-runs "$HARNESS_RUN_ROOT" "$LOCK_SUITES"
+    probe_writable harness-ports "$HARNESS_PORT_ROOT" "$LOCK_SUITES"
+    probe_advisory_lock "$LOCK_SUITES" "$HARNESS_PORT_ROOT"
 else
+    record storage.harness-runs storage skip false "" "no harness suite is selected" "" 5 0
+    record storage.harness-ports storage skip false "" "no harness suite is selected" "" 5 0
     record probe.advisory-lock probe skip false "" "no harness suite is selected" "" 5 0
 fi
 
