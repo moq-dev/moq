@@ -1178,6 +1178,10 @@ mod tests {
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
 		rung.info().await.unwrap();
+		assert!(
+			source._track.subscription_changed().await.unwrap().is_some(),
+			"the rung never subscribed to the live source",
+		);
 
 		// Queued synchronously, so the rung's handler can pop it without this task
 		// polling the fetch. Sequence 7 is one the live path never reaches.
@@ -1185,23 +1189,20 @@ mod tests {
 
 		// The rung's fetch task is now inside its source read, which is upstream of
 		// both its decoder and the `GroupRequest::accept` that claims output group 7.
-		let request = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
-			.await
-			.expect("the rung never fetched the source group")
-			.expect("the source track closed");
+		let request = source_fetches.requested_group().await.expect("the source track closed");
 		assert_eq!(request.sequence(), 7);
 
 		// Retire the rung with the fetch parked there, and let the retirement land
 		// before the source group exists.
 		source.resize(160, 90);
-		tokio::time::timeout(
-			std::time::Duration::from_secs(5),
-			await_catalog(&mut catalogs, |snapshot| {
-				!snapshot.video.renditions.contains_key("video/120p")
-			}),
-		)
-		.await
-		.expect("the ladder never retired the rung");
+		await_catalog(&mut catalogs, |snapshot| {
+			!snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+		assert!(
+			source._track.subscription_changed().await.unwrap().is_none(),
+			"the rung kept its live source subscription after retirement",
+		);
 
 		// Release the fetch: it opens its decoder and only now claims output group
 		// 7, which retirement had to leave writable.
@@ -1209,16 +1210,14 @@ mod tests {
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 
-		let mut fetched = tokio::time::timeout(std::time::Duration::from_secs(5), fetching)
+		let mut fetched = fetching
 			.await
-			.expect("the fetch never resolved")
 			.expect("retirement finished the track before the fetch claimed its group");
-		let frames = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		let frames = async {
 			while fetched.read_frame().await?.is_some() {}
 			fetched.finished().await
-		})
+		}
 		.await
-		.expect("the accepted fetch never finished")
 		.expect("retirement aborted the accepted group");
 		assert!(frames > 0, "the fetch claimed its group but produced no frames");
 
