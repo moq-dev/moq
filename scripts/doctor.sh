@@ -694,10 +694,10 @@ probe_c_compiler() {
 # so an uninstalled cross target still tells us which pkg-config variables the
 # real build will select.
 cargo_targets() {
-    local cargo_home=${1:-} cargo_dir=${2:-$REPO} crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
+    local cargo=$1 cargo_home=${2:-} cargo_dir=${3:-$REPO} crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
     local command=(env "CARGO_TARGET_DIR=$crate/target" "MOQ_DOCTOR_TARGET_DIR=$crate/target")
     [ -n "$cargo_home" ] && command+=("CARGO_HOME=$cargo_home")
-    command+=(cargo check --offline --color never --manifest-path "$crate/Cargo.toml")
+    command+=("$cargo" check --offline --color never --manifest-path "$crate/Cargo.toml")
 
     mkdir -p "$crate/src"
     cat >"$crate/Cargo.toml" <<'EOF'
@@ -737,30 +737,40 @@ EOF
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
-    local suites=$1 status
-    CARGO_TARGET_READY=0
-    if ! command -v cargo >/dev/null 2>&1; then
-        record behavior.cargo-artifact-layout behavior missing true "$suites" \
-            "cargo is missing, so its artifact layout cannot be resolved" \
+    local id=$1 suites=$2 cargo=$3 status
+    [ "$id" != smoke ] || SMOKE_CARGO_TARGET_READY=0
+    if [ "$id" = wasm ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ "${CARGO_TARGET_DIR#/}" = "$CARGO_TARGET_DIR" ]; then
+        record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
+            "CARGO_TARGET_DIR is relative, but wasm resolves the relay after changing directories: $CARGO_TARGET_DIR" \
+            "use an absolute CARGO_TARGET_DIR for wasm" 30 0
+        return
+    fi
+    if ! command -v "$cargo" >/dev/null 2>&1; then
+        record "behavior.$id-artifact-layout" behavior missing true "$suites" \
+            "$cargo is missing, so its artifact layout cannot be resolved" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
         return
     fi
-    cargo_targets
+    cargo_targets "$cargo"
     status=$?
     if ((status != 0)); then
-        record behavior.cargo-artifact-layout behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+        record "behavior.$id-artifact-layout" behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
             "cargo could not resolve its artifact layout: $(error_line "$BOUNDED_OUT")" \
             "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
         return
     fi
     if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ]; then
-        record behavior.cargo-artifact-layout behavior degraded true "$suites" \
+        record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
             "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
             "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
         return
     fi
-    CARGO_TARGET_READY=1
-    record behavior.cargo-artifact-layout behavior ok true "$suites" \
+    if [ "$id" = smoke ]; then
+        SMOKE_CARGO_TARGET_READY=1
+        SMOKE_CARGO_HOST=$CARGO_PROBE_HOST
+        SMOKE_CARGO_TARGET=$CARGO_PROBE_TARGET
+    fi
+    record "behavior.$id-artifact-layout" behavior ok true "$suites" \
         "Cargo uses the host artifact layout for $CARGO_PROBE_TARGET" "" 30 "$BOUNDED_ELAPSED"
 }
 
@@ -793,23 +803,30 @@ relative_command() {
         /*) return 1 ;;
         */*) return 0 ;;
     esac
-    local entry old_ifs=$IFS
-    IFS=:
-    for entry in ${PATH:-}; do
+    local entry path=${PATH-} more
+    while :; do
+        case $path in
+            *:*)
+                entry=${path%%:*}
+                path=${path#*:}
+                more=1
+                ;;
+            *)
+                entry=$path
+                more=0
+                ;;
+        esac
+        [ -n "$entry" ] || return 0
         case $entry in
             /*)
                 if [ -x "$entry/$1" ]; then
-                    IFS=$old_ifs
                     return 1
                 fi
                 ;;
-            *)
-                IFS=$old_ifs
-                return 0
-                ;;
+            *) return 0 ;;
         esac
+        [ "$more" = 1 ] || break
     done
-    IFS=$old_ifs
     return 1
 }
 
@@ -834,13 +851,13 @@ relative_search_path() {
 probe_gstreamer_devel() {
     local suites=$1 status host target pkg_config source display base value
     local pkg_env=(env)
-    if [ "${CARGO_TARGET_READY:-0}" != 1 ]; then
+    if [ "${SMOKE_CARGO_TARGET_READY:-0}" != 1 ]; then
         record behavior.gstreamer-devel behavior skip false "$suites" \
             "Cargo's smoke artifact layout is unavailable" "" 10 0
         return
     fi
-    host=$CARGO_PROBE_HOST
-    target=$CARGO_PROBE_TARGET
+    host=$SMOKE_CARGO_HOST
+    target=$SMOKE_CARGO_TARGET
     if pkg_config=$(targeted_env PKG_CONFIG "$target" "$host"); then
         source="Cargo's target-qualified pkg-config override"
     else
@@ -1671,6 +1688,8 @@ self_test() {
     check 'PATH stops at the first pkg-config match' "$?" 1
     PATH="./first:$SCRATCH/pkg-config-bin" relative_command pkg-config
     check 'relative PATH before pkg-config is context dependent' "$?" 0
+    PATH="$SCRATCH/missing:" relative_command pkg-config
+    check 'trailing empty PATH is context dependent' "$?" 0
     relative_search_path '/absolute/one:/absolute/two'
     check 'absolute pkg-config search paths are stable' "$?" 1
     relative_search_path '/absolute:relative'
@@ -1684,10 +1703,22 @@ EOF
         local configured_target
         configured_target=$(
             unset CARGO_BUILD_TARGET
-            cargo_targets "" "$SCRATCH/cargo-config"
+            cargo_targets cargo "" "$SCRATCH/cargo-config"
             printf '%s %s' "$CARGO_PROBE_TARGET" "$CARGO_PROBE_EXPLICIT_TARGET"
         )
         check 'Cargo config selects an explicit artifact target' "$configured_target" 'wasm32-unknown-unknown true'
+
+        cat >"$SCRATCH/cargo-wrapper" <<'EOF'
+#!/usr/bin/env bash
+CARGO_BUILD_TARGET=wasm32-unknown-unknown exec cargo "$@"
+EOF
+        chmod +x "$SCRATCH/cargo-wrapper"
+        configured_target=$(
+            unset CARGO_BUILD_TARGET
+            cargo_targets "$SCRATCH/cargo-wrapper"
+            printf '%s %s' "$CARGO_PROBE_TARGET" "$CARGO_PROBE_EXPLICIT_TARGET"
+        )
+        check 'configured Cargo wrapper selects the artifact target' "$configured_target" 'wasm32-unknown-unknown true'
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -1897,11 +1928,11 @@ else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
 fi
 
-HARNESS_CARGO_SUITES=$(selected 'smoke smoke-full wasm')
-if [ -n "$HARNESS_CARGO_SUITES" ]; then
-    probe_harness_cargo_target "$HARNESS_CARGO_SUITES"
+SMOKE_CARGO_SUITES=$(selected 'smoke smoke-full')
+if [ -n "$SMOKE_CARGO_SUITES" ]; then
+    probe_harness_cargo_target smoke "$SMOKE_CARGO_SUITES" cargo
 else
-    record behavior.cargo-artifact-layout behavior skip false "" "no Cargo harness is selected" "" 30 0
+    record behavior.smoke-artifact-layout behavior skip false "" "smoke is not selected" "" 30 0
 fi
 
 SMOKE_FULL_SUITES=$(selected smoke-full)
@@ -1911,6 +1942,13 @@ if [ -n "$SMOKE_FULL_SUITES" ]; then
 else
     record behavior.c-compiler behavior skip false "" "smoke-full is not selected" "" 10 0
     record behavior.gstreamer-devel behavior skip false "" "smoke-full is not selected" "" 10 0
+fi
+
+WASM_CARGO_SUITES=$(selected wasm)
+if [ -n "$WASM_CARGO_SUITES" ]; then
+    probe_harness_cargo_target wasm "$WASM_CARGO_SUITES" "${RUST_CARGO:-cargo}"
+else
+    record behavior.wasm-artifact-layout behavior skip false "" "wasm is not selected" "" 30 0
 fi
 
 # Ask the Rust selector once. Its result drives the Cargo, wasm-target, and
