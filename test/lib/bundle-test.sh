@@ -167,6 +167,7 @@ secret_case() {
         echo "redirect https://example.test/callback#access_token=opaque-fragment-credential"
         echo "refresh https://example.test/callback#refresh_token=opaque-refresh-credential"
         echo "exchange https://example.test/token?client_secret=opaque-client-credential"
+        echo "callback https://example.test/callback?code=opaque-code-credential"
         cat <<'HAR'
 {
   "name": "Authorization",
@@ -191,11 +192,13 @@ HAR
         ],
         "queryString": [
           {"name": "token", "value": "opaque-har-query-secret"},
-          {"name": "refresh_token", "value": "opaque-har-refresh-secret"}
+          {"name": "refresh_token", "value": "opaque-har-refresh-secret"},
+          {"name": "code", "value": "opaque-har-code-query-secret"}
         ],
         "postData": {"params": [
           {"name": "access_token", "value": "opaque-har-form-secret"},
-          {"name": "client_secret", "value": "opaque-har-client-secret"}
+          {"name": "client_secret", "value": "opaque-har-client-secret"},
+          {"name": "code", "value": "opaque-har-code-form-secret"}
         ]}
       }
     }]
@@ -213,10 +216,11 @@ for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-quoted-bearer-secret opaque-plain-escaped-secret opaque-prefixed-request-secret \
     opaque-prefixed-response-secret opaque-proxy-credential \
     opaque-cookie-value opaque-query-credential opaque-fragment-credential opaque-refresh-credential \
-    opaque-client-credential opaque-har-credential opaque-escaped-cookie-secret \
+    opaque-client-credential opaque-code-credential opaque-har-credential opaque-escaped-cookie-secret \
     opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
     opaque-keyed-json-secret opaque-json-note-secret opaque-json-cookie-secret \
-    opaque-har-query-secret opaque-har-refresh-secret opaque-har-form-secret opaque-har-client-secret \
+    opaque-har-query-secret opaque-har-refresh-secret opaque-har-code-query-secret \
+    opaque-har-form-secret opaque-har-client-secret opaque-har-code-form-secret \
     opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done

@@ -13,6 +13,7 @@ SENSITIVE_PARAMETERS = {
     "id_token",
     "client_secret",
     "client_assertion",
+    "code",
     "code_verifier",
     "device_code",
     "auth",
