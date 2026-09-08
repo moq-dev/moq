@@ -71,8 +71,9 @@ test $FILES="":
     	exit 0
     fi
     bun install --frozen-lockfile
+    bun test common/deps.test.ts
     if tty -s; then
-    	bun run --filter='*' --elide-lines=0 test
+        bun run --filter='*' --elide-lines=0 test
     else
     	bun run --filter='*' test
     fi
