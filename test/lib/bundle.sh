@@ -680,12 +680,7 @@ reap() {
     local pid="$1" want="$2" have started
     have=$(ps -o command= -p "$pid" 2> /dev/null | head -n 1 || true)
     if [[ -z "$have" ]]; then
-        if kill -0 -- -"$pid" 2>/dev/null; then
-            echo "pid $pid: leader exited; killing remaining process group"
-            kill -KILL -- -"$pid" 2>/dev/null || true
-        else
-            echo "pid $pid: gone"
-        fi
+        echo "pid $pid: leader gone"
         return
     fi
     started=$(ps -o lstart= -p "$pid" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
@@ -697,12 +692,32 @@ reap() {
     kill_tree "$pid"
 }
 
+reap_group() {
+    local group="$1" witness="$2" want="$3" started current_group
+    started=$(ps -o lstart= -p "$witness" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    current_group=$(ps -o pgid= -p "$witness" 2> /dev/null | tr -d '[:space:]' || true)
+    if [[ -z "$started" || "$started" != "$want" || "$current_group" != "$group" ]]; then
+        echo "group $group: recorded member $witness is gone or reused, skipping"
+        return
+    fi
+    echo "group $group: killing verified member $witness and its group"
+    kill -KILL -- -"$group" 2>/dev/null || true
+}
+
 PRELUDE
-        local start_file pid
+        local start_file pid member member_start members
         for start_file in "$BUNDLE_META/process-starts"/*; do
             [[ -f "$start_file" ]] || continue
             pid=${start_file##*/}
             printf 'reap %s %q\n' "$pid" "$(<"$start_file")"
+            members=$(ps -axo pid=,pgid= 2>/dev/null | awk -v group="$pid" '$2 == group { print $1 }' || true)
+            for member in $members; do
+                [[ "$member" != "$pid" ]] || continue
+                member_start=$(ps -o lstart= -p "$member" 2>/dev/null |
+                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                [[ -n "$member_start" ]] || continue
+                printf 'reap_group %s %s %q\n' "$pid" "$member" "$member_start"
+            done
         done
         local reservation
         if [[ -f "$BUNDLE_META/reservations.txt" ]]; then

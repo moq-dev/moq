@@ -369,6 +369,7 @@ while True:
     printf 'go\n' >"$ROOT/wrapper-go"
     wait "$wrapper"
     printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
+    printf '%s\n' "$wrapper" >"$BUNDLE_DIR/wrapper.pid"
     cp "$ROOT/wrapper-child" "$BUNDLE_DIR/wrapper-child.pid"
     bundle_finish 1
 }
@@ -384,11 +385,14 @@ running() {
 
 bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
+wrapper=$(<"$bundle/wrapper.pid")
 wrapper_child=$(<"$bundle/wrapper-child.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
     "$bundle/teardown.sh"
+check "surviving groups carry a member birth identity" \
+    grep -q "reap_group $wrapper " "$bundle/teardown.sh"
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
@@ -428,6 +432,11 @@ if running "$mine"; then
         kill -KILL "$wrapper_child" 2>/dev/null || true
     else
         ok "teardown reaps a surviving process group"
+    fi
+    if grep -q 'killing verified member' <<<"$output"; then
+        ok "teardown verifies a surviving group before signaling it"
+    else
+        bad "teardown verifies a surviving group before signaling it"
     fi
     if grep -q 'reused by another process' <<<"$output"; then
         ok "teardown skips a recycled pid"
