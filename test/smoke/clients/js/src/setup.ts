@@ -88,6 +88,8 @@ if (role === "publish") {
 			const stray = document.createElement("moq-watch") as MoqWatch;
 			stray.setAttribute("url", url);
 			stray.setAttribute("name", broadcast);
+			stray.setAttribute("visible", "always");
+			stray.appendChild(document.createElement("canvas"));
 			leak.appendChild(stray);
 		},
 		reattach: () => {

@@ -170,6 +170,8 @@ clients/
 
 ## CI
 
-`.github/workflows/smoke.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/smoke/`). A red cell means a real interop break in the
-current tree.
+`.github/workflows/smoke.yml` runs the full matrix nightly and on demand. Pull
+requests reach it through the `Gates` workflow: the impact map selects the full
+matrix for `test/smoke/` and wide interop inputs, or the representative core
+matrix for ordinary delivery-path changes. A red cell means a real interop break
+in the current tree.

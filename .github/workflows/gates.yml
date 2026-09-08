@@ -34,7 +34,7 @@ on:
     types: [opened, synchronize, reopened, closed]
 
 concurrency:
-  group: gates-${{ github.ref }}
+  group: gates-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
