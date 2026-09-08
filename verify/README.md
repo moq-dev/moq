@@ -104,6 +104,12 @@ and only `green` exits zero. `stale` is the interesting one: it means every
 result is green but something has moved on since, either the head is behind its
 base or the local receipts describe a different commit.
 
+Having no local receipt at all is not staleness. A required result that passed
+on this exact head is stronger evidence than a local run, so the record says it
+is hosted-only and stays green. A receipt describing a *different* head is
+staleness, because it invites a reader to credit this candidate with what
+another one proved.
+
 `mergeable` comes back `UNKNOWN` on the first request for a pull request GitHub
 has not compared recently; it computes the answer in the background and returns
 it to the next request. That reads as `pending` here rather than as a pass, and

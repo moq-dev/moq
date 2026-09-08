@@ -547,7 +547,8 @@ cmd_classify() {
                 + " commits behind " + $input.pr.baseRefName
                 + (if $strict then "" else ", and no rule requires it to be current" end)
              else empty end),
-            (if ($evidence | length) == 0 then "no local receipt covers this head" else empty end),
+            (if ($evidence | length) == 0
+                then "no local receipt; this record is the hosted results only" else empty end),
             ($evidence[] | select(.state != "current") | "local " + .lane + " evidence is " + .state)
           ] as $reasons
         | (if ($graded | map(.state) | any(. == "fail"))
@@ -563,8 +564,11 @@ cmd_classify() {
             elif ($graded | map(.state) | any(. == "pending"))
                 or ($extra | map(.state) | any(. == "pending"))
                 or $input.pr.mergeable == "UNKNOWN" then "pending"
+            # Having no local receipt is not staleness: a required result that
+            # passed on this exact head is stronger evidence than a local run.
+            # A receipt describing another head is, because it invites a reader
+            # to credit this candidate with what a different one proved.
             elif ($input.compare.behind_by // 0) > 0
-                or ($evidence | length) == 0
                 or ($evidence | map(.state) | any(. != "current")) then "stale"
             else "green"
             end) as $verdict

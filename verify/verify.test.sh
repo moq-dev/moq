@@ -181,7 +181,8 @@ failed_lane='.checks += [{name: "Smoke", status: "completed", conclusion: "failu
 [[ "$(grade '.compare.behind_by = 3')" == stale ]] || fail "a head behind its base must be stale"
 [[ "$(grade '.rules = null')" == incomplete ]] || fail "unreadable branch policy must block"
 [[ "$(grade '.rules = []')" == incomplete ]] || fail "a base requiring nothing must block"
-[[ "$(grade '.receipts = []')" == stale ]] || fail "no local evidence must not be green"
+[[ "$(grade '.receipts = []')" == green ]] ||
+    fail "a required result on this head must stand without a local receipt"
 [[ "$(grade '.receipts[0].source.head = "other"')" == stale ]] ||
     fail "evidence from another head must be stale"
 [[ "$(grade '.pr.mergeable = "CONFLICTING"')" == failed ]] || fail "a conflicting candidate must block"
