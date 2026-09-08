@@ -82,3 +82,29 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	effect.close();
 });
+
+test("catalog producer refuses zero jitter before retaining an edit", () => {
+	const catalog = new CatalogProducer();
+	for (const section of ["audio", "video"] as const) {
+		expect(() =>
+			catalog.mutate((value) => {
+				Object.assign(value, {
+					[section]: {
+						renditions: {
+							media: {
+								codec: "opus",
+								container: { kind: "legacy" },
+								sampleRate: 48000,
+								numberOfChannels: 2,
+								jitter: 0,
+							},
+						},
+					},
+				});
+			}),
+		).toThrow("omit jitter");
+	}
+	catalog.mutate((value) => {
+		expect(value).toEqual({});
+	});
+});

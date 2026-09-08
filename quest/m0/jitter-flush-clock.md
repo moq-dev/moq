@@ -32,6 +32,10 @@ link cannot inflate the catalog.
   mirrors the measurement in the video and audio encoders and replaces its
   fixed `ceil(1000 / framerate)` and frame-duration hints. `container::Producer`
   does not call it on its own.
+- Replace the provisional PTS-gap floor so a decode-order sequence such as
+  `0, 120, 40, 80` ms does not permanently advertise its first 120 ms gap
+  when the reorder delay is only 80 ms. Preserve the never-lower rule for
+  measurements already advertised.
 - Tests inject the clock. Cover: a batch flushed at its end reports the
   batch, a constant offset reports zero on one track and the offset on the
   other track sharing the baseline, and a slow drift stays bounded.

@@ -53,7 +53,12 @@ export const AudioConfigSchema = z.object({
 	//
 	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
-	jitter: z.optional(u53Schema),
+	jitter: z.optional(
+		z.pipe(
+			u53Schema,
+			z.transform((value) => (value === 0 ? undefined : value)),
+		),
+	),
 });
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */
