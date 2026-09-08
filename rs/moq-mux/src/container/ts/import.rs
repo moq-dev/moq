@@ -251,6 +251,14 @@ impl<E: catalog::Catalog> Import<E> {
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
 			off += TsPacket::SIZE;
 			let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+			let continuation = Pid::new(pid)
+				.ok()
+				.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
+				.map(|pid| self.continuity.entry(pid).or_default().observe(&pkt));
+			// A retransmitted payload must not repeat the clock reset it carried.
+			if matches!(continuation, Some(Continuation::Duplicate)) {
+				continue;
+			}
 			// Read the clock's own flag before routing, so the break lands between the media
 			// either side of it. The PCR PID can be a dedicated one the routing gate below
 			// drops, and the flag rides an adaptation-only packet as readily as a payload one.
@@ -279,7 +287,7 @@ impl<E: catalog::Catalog> Import<E> {
 			if let Ok(pid) = Pid::new(pid)
 				&& self.streams.contains_key(&pid)
 			{
-				match self.continuity.entry(pid).or_default().observe(&pkt) {
+				match continuation.expect("media PID continuity was classified") {
 					Continuation::Duplicate => continue,
 					// Flagged corrupt, so the packet joins the partial rather than opening a
 					// new PES out of bytes the demodulator already disowned.
@@ -662,8 +670,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		stream.write(pending, run_start)?;
-		self.published = true;
+		self.published |= stream.write(pending, run_start)?;
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -1146,7 +1153,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or zero when the PES carried none).
-	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
 		// Record the original PES stream_id once, from the first PES, so export
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
@@ -1168,7 +1175,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		};
 		self.track.write(frame)?;
 		self.track.cut(None)?;
-		Ok(())
+		Ok(true)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -1452,42 +1459,44 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
-	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<bool> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				skip_missing_keyframe((|| {
-					// Each PES is one access unit, so flush to emit it immediately.
-					let mut frames = split.decode(&pending.data, pts)?;
-					frames.extend(split.flush(pts)?);
-					import.decode(frames)
-				})())?;
+				// Each PES is one access unit, so flush to emit it immediately.
+				let mut frames = split.decode(&pending.data, pts)?;
+				frames.extend(split.flush(pts)?);
+				let mut published = false;
+				for frame in frames {
+					published |= skip_missing_keyframe(import.decode([frame]))?;
+				}
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder);
 				}
-				Ok(())
+				Ok(published)
 			}
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				skip_missing_keyframe((|| {
-					// Each PES is one access unit, so flush to emit it immediately.
-					let mut frames = split.decode(&pending.data, pts)?;
-					frames.extend(split.flush(pts)?);
-					import.decode(frames)
-				})())?;
+				// Each PES is one access unit, so flush to emit it immediately.
+				let mut frames = split.decode(&pending.data, pts)?;
+				frames.extend(split.flush(pts)?);
+				let mut published = false;
+				for frame in frames {
+					published |= skip_missing_keyframe(import.decode([frame]))?;
+				}
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder);
 				}
-				Ok(())
+				Ok(published)
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			Stream::Clock | Stream::Ignored => Ok(false),
 		}
 	}
 
@@ -1869,7 +1878,7 @@ struct AacStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<bool> {
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2039,7 +2048,8 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		self.update_jitter(run_start, pending.pts, index, sample_rate)
+		self.update_jitter(run_start, pending.pts, index, sample_rate)?;
+		Ok(index > 0)
 	}
 
 	/// Size the catalog jitter to the TS audio burst. MPEG-TS delivers audio in
@@ -2151,7 +2161,7 @@ struct OpusStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> OpusStream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
 		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		let data = &pending.data;
@@ -2184,7 +2194,7 @@ impl<E: CatalogExt> OpusStream<E> {
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
 			offset = end;
 		}
-		Ok(())
+		Ok(offset > 0)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2304,7 +2314,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+		let mut published = false;
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2464,6 +2475,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
 			self.resync.published(unvouched);
+			published = true;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
 
@@ -2481,7 +2493,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			self.tail_pts = pts;
 		}
 
-		Ok(())
+		Ok(published)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2563,9 +2575,10 @@ fn pes_data_len(header: &PesHeader, pes_packet_len: u16) -> Option<usize> {
 /// Swallow a [`MissingKeyframe`](crate::container::MissingKeyframe) from a video
 /// decode: a TS capture can join mid-GOP, so the deltas before the first keyframe
 /// have no group to anchor and are simply dropped rather than aborting the demux.
-fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<()> {
+fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<bool> {
 	match result {
-		Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+		Ok(()) => Ok(true),
+		Err(crate::Error::MissingKeyframe(_)) => Ok(false),
 		Err(e) => Err(e.into()),
 	}
 }
@@ -4745,6 +4758,50 @@ mod test {
 		let (frames, breaks) = read_breaks(&consumer, &name).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(breaks, 2, "sections must participate in reset boundaries");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn duplicate_payload_clock_packet_declares_one_break() {
+		let (consumer, catalog, mut import) = two_stream_import();
+		for pid in [PCR_PID, PEER_PID] {
+			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
+		}
+		let flagged = flag_discontinuity(mp2_pes(PCR_PID, 1, 180_000, [0xCC, 0xDD]));
+		import.decode(flagged.as_slice()).unwrap();
+		import.decode(flagged.as_slice()).unwrap();
+		for pid in [PCR_PID, PEER_PID] {
+			let cc = if pid == PCR_PID { 2 } else { 1 };
+			import
+				.decode(mp2_pes(pid, cc, 270_000, [0xEE, 0xFF]).as_slice())
+				.unwrap();
+		}
+		import.finish().unwrap();
+		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
+			assert_eq!(breaks, 1, "a retransmitted packet declared another break");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn incomplete_media_does_not_declare_another_break() {
+		let (consumer, catalog, mut import) = two_stream_import();
+		for pid in [PCR_PID, PEER_PID] {
+			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
+		}
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		import
+			.decode(audio_pes_packet(PEER_PID, 1, 180_000, &mp2_frame(0xCC)[..20]).as_slice())
+			.unwrap();
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		for pid in [PCR_PID, PEER_PID] {
+			let cc = if pid == PCR_PID { 1 } else { 2 };
+			import
+				.decode(mp2_pes(pid, cc, 270_000, [0xEE, 0xFF]).as_slice())
+				.unwrap();
+		}
+		import.finish().unwrap();
+		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
+			assert_eq!(breaks, 1, "an incomplete frame was counted as publication");
+		}
 	}
 
 	/// The defect from #2833: a source that signals a timebase reset produced nothing on the

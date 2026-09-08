@@ -51,13 +51,6 @@ needs a bystander.
   join costs at most one PCR discontinuity and one PSI re-emission. The existing
   `rewind_re_emits_tables_and_resumes_the_clock` and
   `rewind_flags_the_break_once_across_tracks` keep passing unchanged.
-- Land after [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md)
-  (PR #3529), which edits the same functions and makes the legacy importer
-  declare its breaks.
-
-## Required
-
-- [TS timebase discontinuity](/quest/m0/ts-forward-discontinuity.md) - PR #3529 rewrites the same boundary handling; rebase on it rather than race it
 
 ## Closes
 
