@@ -71,7 +71,7 @@ fails '{"select":{"result":"success","outputs":{}}}' \
 
 # A merged pull request's closed event has the base branch ref, so the pull
 # request number is the stable identity that cancels its still-running jobs.
-grep -qF 'group: gates-${{ github.event.pull_request.number }}' "$scripts/../workflows/gates.yml" ||
+grep -qF "group: gates-\${{ github.event.pull_request.number }}" "$scripts/../workflows/gates.yml" ||
     fail "the concurrency group must stay stable across pull request events"
 
 echo "gates: aggregate ok"
