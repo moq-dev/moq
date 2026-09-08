@@ -101,7 +101,7 @@ jobs:
       # A timing arm that fails at 3am is graded off a window nobody watched,
       # so the capture and the logs have to leave the runner with it.
       - name: Debug bundles
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: qa-bundle-nightly

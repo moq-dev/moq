@@ -468,7 +468,7 @@ _BUNDLE_RE_HEADERS=""
 _bundle_patterns() {
     [[ -z "$_BUNDLE_RE_PARAMS" ]] || return 0
     local word
-    for word in jwt token access_token auth key secret; do
+    for word in jwt token access_token refresh_token id_token client_secret client_assertion code_verifier device_code auth key secret; do
         _BUNDLE_RE_PARAMS="${_BUNDLE_RE_PARAMS:+$_BUNDLE_RE_PARAMS|}$(_bundle_anycase "$word")"
     done
     # Longest first, so `proxy-authorization` is not matched as `authorization`

@@ -110,7 +110,7 @@ jobs:
       # Nightly is the run nobody is watching, so its failures have to explain
       # themselves without a rerun. `just test fetch <run id>` pulls this down.
       - name: Debug bundles
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: qa-bundle-smoke

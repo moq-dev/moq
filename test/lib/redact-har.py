@@ -5,7 +5,20 @@ import json
 import sys
 
 
-SENSITIVE_PARAMETERS = {"jwt", "token", "access_token", "auth", "key", "secret"}
+SENSITIVE_PARAMETERS = {
+    "jwt",
+    "token",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+    "client_assertion",
+    "code_verifier",
+    "device_code",
+    "auth",
+    "key",
+    "secret",
+}
 
 
 def redact_entries(entries: object, field: str, redact_all: bool) -> None:
