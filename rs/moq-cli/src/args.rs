@@ -1469,7 +1469,7 @@ mod tests {
 		let Command::Play(play) = &cli.stages[0] else {
 			panic!("expected play")
 		};
-		assert_eq!(play.max_age, Duration::from_millis(500));
+		assert_eq!(play.delay, Duration::from_millis(100));
 		assert_eq!(play.select.video_name.as_deref(), Some("hd"));
 		assert!(cli.moq.validate().is_ok());
 		assert!(play.validate().is_ok());

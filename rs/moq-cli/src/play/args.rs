@@ -12,12 +12,15 @@ pub struct Args {
 	#[usage(long, value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// How stale a media group may get before it is skipped.
+	/// How far playback trails the live edge.
 	///
-	/// A staleness budget, not a playout delay: it never holds the picture back, it caps how
-	/// long a late group is waited for. The presentation clock anchors to the speaker.
-	#[usage(long, alias = "latency-max", default = "500ms")]
-	pub max_age: moq_tokio::Duration,
+	/// The playout delay: every frame is presented this long after the live edge, which is
+	/// how late one may arrive and still make its slot. It doubles as the staleness budget,
+	/// since nothing older than the playhead is worth presenting. The speaker holds the
+	/// delay, with a 50ms floor under it, so a smaller value than that does not reach the
+	/// picture either.
+	#[usage(long, default = "100ms")]
+	pub delay: moq_tokio::Duration,
 
 	/// Rendition selection by track name or codec.
 	#[usage(flatten)]
@@ -75,6 +78,25 @@ mod tests {
 		let err = parse(&["--video-codec", "vp9"]).validate().unwrap_err().to_string();
 		assert!(err.contains("vp8 or vp9"), "{err}");
 		assert!(parse(&["--video-codec", "vp8"]).validate().is_err());
+	}
+
+	/// The delay is the playout offset and the staleness budget at once, so its
+	/// default has to be one a live stream can actually present against.
+	/// `--max-age` is gone from `play`, with no alias: the two were one number.
+	#[test]
+	fn the_delay_replaces_the_staleness_budget() {
+		assert_eq!(parse(&[]).delay.into_std(), std::time::Duration::from_millis(100));
+		assert_eq!(
+			parse(&["--delay", "500ms"]).delay.into_std(),
+			std::time::Duration::from_millis(500)
+		);
+
+		let argv: Vec<&std::ffi::OsStr> = ["--max-age", "500ms"]
+			.iter()
+			.copied()
+			.map(std::ffi::OsStr::new)
+			.collect();
+		assert!(Cli::parse_from(&argv).is_err(), "`--max-age` still parses on play");
 	}
 
 	/// The suffix picks the format, and the flag overrides it.
