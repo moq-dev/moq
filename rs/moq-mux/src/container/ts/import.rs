@@ -3308,9 +3308,9 @@ mod test {
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false));
 
-		// Eight PES of seven frames: over a second of media, so the bitrate window closes and
+		// Ten PES of seven frames: well over a second of media, so the bitrate window closes and
 		// republishes the rendition at least once.
-		for pes in 0..8u64 {
+		for pes in 0..10u64 {
 			let mut payload = Vec::new();
 			for frame in 0..PER_PES {
 				payload.extend_from_slice(&adts_frame(17, 0xA0 | frame as u8));
