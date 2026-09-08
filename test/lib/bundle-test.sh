@@ -137,6 +137,8 @@ secret_case() {
 }
 HAR
     } >"$BUNDLE_WORK/client.log"
+    printf '%s\n' '{"Authorization":"Bearer \"opaque-keyed-json-secret\""}' \
+        >"$BUNDLE_WORK/keyed.json"
     cat >"$BUNDLE_TRACE_LIVE/cookies.har" <<'HAR'
 {
   "log": {
@@ -157,11 +159,14 @@ HAR
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential \
-    opaque-har-credential opaque-escaped-cookie-secret opaque-trace-secret opaque-screenshot-secret; do
+    opaque-har-credential opaque-escaped-cookie-secret opaque-keyed-json-secret \
+    opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
 check "redaction keeps escaped-string HAR valid" python3 -c \
     'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/cookies.har"
+check "redaction keeps escaped keyed-header JSON valid" python3 -c \
+    'import json,sys; json.load(open(sys.argv[1]))' "$bundle/work/keyed.json"
 check "an uploadable bundle excludes Playwright trace archives" test ! -f "$bundle/trace/browser.trace.zip"
 check "a withheld Playwright trace keeps its identity" grep -q '^sha256: ' \
     "$bundle/trace/browser.trace.zip.withheld"
@@ -424,6 +429,8 @@ check "surviving groups carry a member birth identity" \
     grep -q "reap_group $wrapper " "$bundle/teardown.sh"
 check "a group without a verified leader acquires no witness" sh -c \
     '! grep -q "reap_group $1 " "$2"' _ "$unowned" "$bundle/teardown.sh"
+check "a process without a verified birth identity is omitted from the session" sh -c \
+    '! grep -q "pid $1 " "$2"' _ "$unowned" "$bundle/session.md"
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"

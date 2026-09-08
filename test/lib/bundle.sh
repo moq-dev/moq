@@ -494,7 +494,7 @@ _bundle_redact_stream() {
     LC_ALL=C sed -E \
         -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
         -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
-        -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
+        -e "s#(($_BUNDLE_RE_HEADERS)[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
         LC_ALL=C awk '
             function closing_quote(text,    i, ch, slashes) {
@@ -517,7 +517,25 @@ _bundle_redact_stream() {
                 quote = closing_quote(tail)
                 if (quote) $0 = substr($0, 1, start - 1) "<redacted>" substr(tail, quote)
             }
+            function redact_keyed(    rest, out, start, tail, quote) {
+                rest = $0
+                out = ""
+                while (match(tolower(rest), /"(proxy-authorization|authorization|set-cookie|cookie|x-api-key)"[[:space:]]*:[[:space:]]*"/)) {
+                    start = RSTART + RLENGTH
+                    tail = substr(rest, start)
+                    quote = closing_quote(tail)
+                    out = out substr(rest, 1, start - 1) "<redacted>"
+                    if (!quote) {
+                        rest = ""
+                        break
+                    }
+                    out = out substr(tail, quote, 1)
+                    rest = substr(tail, quote + 1)
+                }
+                $0 = out rest
+            }
             {
+                redact_keyed()
                 lower = tolower($0)
                 if (sensitive) {
                     redact_value()
@@ -633,7 +651,7 @@ _bundle_manifest() {
 # they would otherwise have to reconstruct: where it is, what is running, how
 # to attach, and how to stop it.
 _bundle_session() {
-    local file="$BUNDLE_DIR/session.md" pid name line
+    local file="$BUNDLE_DIR/session.md" pid name line start_file wanted current
     {
         printf '# Retained session\n\n'
         printf 'Processes from this run are still alive. They hold their ports until torn down.\n\n'
@@ -647,7 +665,12 @@ _bundle_session() {
                 pid=$(printf '%s' "$line" | sed -n 's/.*"pid": \([0-9]*\).*/\1/p')
                 name=$(printf '%s' "$line" | sed -n 's/.*"name": "\([^"]*\)".*/\1/p')
                 [[ -n "$pid" ]] || continue
-                kill -0 "$pid" 2>/dev/null || continue
+                start_file="$BUNDLE_META/process-starts/$pid"
+                [[ -f "$start_file" ]] || continue
+                wanted=$(<"$start_file")
+                current=$(ps -o lstart= -p "$pid" 2>/dev/null |
+                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                [[ -n "$current" && "$current" == "$wanted" ]] || continue
                 # shellcheck disable=SC2016  # backticks are Markdown here, not a subshell
                 printf -- '- %s: pid %s -- attach with `lldb -p %s` or `gdb -p %s`\n' "$name" "$pid" "$pid" "$pid"
             done <"$BUNDLE_META/processes.jsonl"
