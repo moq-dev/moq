@@ -283,10 +283,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
-		let reserved = self
-			.initial_reservation
-			.clone()
-			.expect("the moov reservation is held until init returns");
+		// Held from construction until the track set is declared, so a second moov would be
+		// re-declaring a track set the catalog already published.
+		let reserved = self.initial_reservation.clone().ok_or(Error::DuplicateMoov)?;
 		let timeline = self.catalog.timeline();
 
 		// The tracks below enroll in the timeline, so advertise it in the same catalog update

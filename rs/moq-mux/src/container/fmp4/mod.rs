@@ -112,6 +112,10 @@ pub enum Error {
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
+	/// A second moov would re-declare the track set the first one already published.
+	#[error("duplicate moov")]
+	DuplicateMoov,
+
 	#[error("missing trun")]
 	MissingTrun,
 
