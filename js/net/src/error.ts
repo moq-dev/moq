@@ -315,15 +315,25 @@ function localStreamCode(err: unknown): StreamCode {
 export function fromTransport(err: unknown, options?: TransportErrorOptions): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && LOCAL_CODES.has(code)) {
+	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && claimedLocally(code)) {
 		return new StreamError(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
 	return new StreamError(code, { cause: err });
 }
 
-/** The codes moq-lite gives a meaning of its own, which a foreign one must not borrow. */
-const LOCAL_CODES: ReadonlySet<number> = new Set(Object.values(StreamCode));
+/** The codes moq-lite names, which a foreign one must not borrow. */
+const NAMED_CODES: ReadonlySet<number> = new Set(Object.values(StreamCode));
+
+/**
+ * Whether moq-lite could give `code` a meaning of its own: one of its named codes, or
+ * anywhere in the 64+ range, where `StreamCode(code)` mints an application code and an
+ * application compares against its own. moq-transport registers nothing above 0x12 and has
+ * no application range at all, so a foreign code landing there is never what it looks like.
+ */
+function claimedLocally(code: number): boolean {
+	return code >= 64 || NAMED_CODES.has(code);
+}
 
 const legacyWebTransportErrors = new WeakSet<object>();
 

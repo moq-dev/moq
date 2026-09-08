@@ -641,4 +641,21 @@ for (const [version, tooFarBehind] of [
 		expect(err).toBeInstanceOf(StreamError);
 		expect((err as StreamError).code).toBe(0x9 as StreamCode);
 	});
+
+	// moq-lite mints an application code for anything 64 and up, so an application compares
+	// against its own. moq-transport has no such range, so a code landing there from an IETF
+	// peer is never the application code it would look like.
+	test(`a foreign code in the application range is flattened (${version})`, async () => {
+		const reader = new Reader(
+			new ReadableStream<Uint8Array>({
+				start: (controller) => controller.error(new Reset(70)),
+			}),
+			undefined,
+			version,
+		);
+		const err = await reader.closed.catch((err: unknown) => err);
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(version === undefined ? StreamCode(70) : StreamCode.Internal);
+		if (version !== undefined) expect((err as StreamError).message).toContain("70");
+	});
 }
