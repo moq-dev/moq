@@ -84,7 +84,8 @@ async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Prom
 		await stream.writer.u53(RequestError.id);
 		await new RequestError({
 			requestId: undefined,
-			errorCode: 403,
+			// UNINTERESTED, draft-19 section 15.11.2.
+			errorCode: 0x20,
 			reasonPhrase: "no",
 			retryInterval,
 		}).encode(stream.writer, VERSION);

@@ -11,6 +11,7 @@ import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
+import { requestReason, toRequestCode } from "./error.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
@@ -614,7 +615,7 @@ export class Subscriber {
 						version === Version.DRAFT_14
 							? await SubscribeError.decode(state.stream.reader, version)
 							: await RequestError.decode(state.stream.reader, version);
-					reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
+					reasonPhrase = requestReason(err.errorCode, err.reasonPhrase, "subscribe", version);
 				}
 			} catch {
 				// Decoding error response failed, use default message
@@ -660,7 +661,7 @@ export class Subscriber {
 			await stream.writer.u53(RequestError.id);
 			await new RequestError({
 				requestId: msg.requestId,
-				errorCode: 400,
+				errorCode: toRequestCode("uninterested", "publish_namespace", version),
 				reasonPhrase: "route loops back",
 			}).encode(stream.writer, version);
 			stream.close();
@@ -676,18 +677,21 @@ export class Subscriber {
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (legacy && (this.#announced.has(path) || this.#legacyRequests.has(path))) {
 			console.warn("duplicate PublishNamespace");
+			// No draft registers a code for a duplicate, and this refusal is a draft-14/15
+			// implementation limit, which is what INTERNAL_ERROR describes.
+			const errorCode = toRequestCode("internal", "publish_namespace", version);
 			if (version === Version.DRAFT_14) {
 				await stream.writer.u53(PublishNamespaceError.id);
 				await new PublishNamespaceError({
 					requestId: msg.requestId,
-					errorCode: 409,
+					errorCode,
 					reasonPhrase: "duplicate namespace",
 				}).encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestError.id);
 				await new RequestError({
 					requestId: msg.requestId,
-					errorCode: 409,
+					errorCode,
 					reasonPhrase: "duplicate namespace",
 				}).encode(stream.writer, version);
 			}
@@ -788,18 +792,18 @@ export class Subscriber {
 	async runPublish(msg: Publish, stream: Stream) {
 		const version = this.#session.version;
 
-		// NOT_SUPPORTED, from the PUBLISH error codes in draft-19 section 10.10. We decline
-		// the method itself rather than this particular track, which is UNINTERESTED (0x4).
+		// We decline the method itself rather than this particular track, which would be
+		// UNINTERESTED.
 		//
 		// The alias the message carries is deliberately not recorded. Nothing will ever bind
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on.
-		const NOT_SUPPORTED = 0x3;
+		const errorCode = toRequestCode("not_supported", "publish", version);
 
 		if (version === Version.DRAFT_14) {
 			await stream.writer.u53(PublishError.id);
 			const err = new PublishError({
 				requestId: msg.requestId,
-				errorCode: NOT_SUPPORTED,
+				errorCode,
 				reasonPhrase: "publish not supported",
 			});
 			await err.encode(stream.writer, version);
@@ -807,7 +811,7 @@ export class Subscriber {
 			await stream.writer.u53(RequestError.id);
 			const err = new RequestError({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-				errorCode: NOT_SUPPORTED,
+				errorCode,
 				reasonPhrase: "publish not supported",
 			});
 			await err.encode(stream.writer, version);

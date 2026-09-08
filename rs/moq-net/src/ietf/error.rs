@@ -1,4 +1,9 @@
-//! The moq-transport stream reset code registry, per negotiated draft.
+//! The moq-transport error code registries, per negotiated draft.
+//!
+//! This module holds the stream reset registry; [`request`] holds the one for rejecting a
+//! request. The two are disjoint, so the same integer means different things in each.
+//!
+//! # Stream reset codes
 //!
 //! Sent on RESET_STREAM and STOP_SENDING, and read back off both. The values are the
 //! draft's, not [`StreamError::to_code`]'s: the two registries agree on most of what they
@@ -106,6 +111,390 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 		TOO_FAR_BEHIND if has_too_far_behind(version) => StreamError::TooFarBehind,
 		MALFORMED_TRACK if has_malformed_track(version) => StreamError::MalformedTrack,
 		code => StreamError::Unknown(code),
+	}
+}
+
+/// The moq-transport request error registry, per negotiated draft.
+///
+/// Sent in a rejection response to a request, and read back off one. Draft-14 gives each
+/// error message its own registry and they disagree about 0x4; draft-15 folded them all
+/// into REQUEST_ERROR with a single registry that renumbered almost everything. So a
+/// request code only means something once you know both the draft and, on draft-14, which
+/// request it answers.
+///
+/// | Condition | 14 SUBSCRIBE | 14 FETCH | 14 PUBLISH | 14 ANNOUNCE | 14 SUB_NS | 15+ |
+/// |-----------|--------------|----------|------------|-------------|-----------|-----|
+/// | INTERNAL_ERROR | 0x0 | 0x0 | 0x0 | 0x0 | 0x0 | 0x0 |
+/// | UNAUTHORIZED | 0x1 | 0x1 | 0x1 | 0x1 | 0x1 | 0x1 |
+/// | TIMEOUT | 0x2 | 0x2 | 0x2 | 0x2 | 0x2 | 0x2 |
+/// | NOT_SUPPORTED | 0x3 | 0x3 | 0x3 | 0x3 | 0x3 | 0x3 |
+/// | DOES_NOT_EXIST | 0x4 | 0x4 | - | - | - | 0x10 |
+/// | UNINTERESTED | - | - | 0x4 | 0x4 | - | 0x20 |
+/// | MALFORMED_TRACK | - | 0x9 | - | - | - | 0x12 |
+/// | GOING_AWAY | - | - | - | - | - | 0x6 (17+) |
+///
+/// The renumbering is the trap: draft-14 SUBSCRIBE_ERROR gives 0x4 to TRACK_DOES_NOT_EXIST
+/// and 0x10 to MALFORMED_AUTH_TOKEN, and draft-15 swaps the two. Sending either number
+/// without the draft in hand tells the peer the opposite of what happened.
+pub(crate) mod request {
+	use super::Version;
+	use crate::Error;
+
+	/// Which request the error answers, so draft-14 picks the right registry.
+	///
+	/// Draft-15 and later carry one REQUEST_ERROR registry for every request, so from there
+	/// on the kind changes nothing.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	pub(crate) enum Kind {
+		/// SUBSCRIBE_ERROR, draft-14 section 13.1.2.
+		Subscribe,
+		/// FETCH_ERROR, draft-14 section 13.1.5.
+		Fetch,
+		/// PUBLISH_ERROR, draft-14 section 13.1.4.
+		Publish,
+		/// ANNOUNCE_ERROR, draft-14 section 13.1.6.
+		PublishNamespace,
+		/// SUBSCRIBE_NAMESPACE_ERROR, draft-14 section 13.1.7.
+		SubscribeNamespace,
+	}
+
+	/// An implementation-specific error, with no registry entry for why. Assigned by every
+	/// draft, for every request.
+	const INTERNAL_ERROR: u64 = 0x0;
+
+	/// The peer's credentials do not cover the request.
+	const UNAUTHORIZED: u64 = 0x1;
+
+	/// The request could not be answered before an implementation-specific deadline.
+	const TIMEOUT: u64 = 0x2;
+
+	/// The endpoint does not implement this request at all, as opposed to refusing this one.
+	const NOT_SUPPORTED: u64 = 0x3;
+
+	/// A GOAWAY is draining the session, so no new request is accepted. Draft-17 and later.
+	const GOING_AWAY: u64 = 0x6;
+
+	/// The requested broadcast or track is not here, as draft-14 numbers it under the name
+	/// TRACK_DOES_NOT_EXIST.
+	const DOES_NOT_EXIST_14: u64 = 0x4;
+
+	/// The same condition from draft-15 on, renamed DOES_NOT_EXIST and moved off 0x4.
+	const DOES_NOT_EXIST: u64 = 0x10;
+
+	/// The offered content is not wanted here, as draft-14 numbers it.
+	const UNINTERESTED_14: u64 = 0x4;
+
+	/// The same condition from draft-15 on.
+	const UNINTERESTED: u64 = 0x20;
+
+	/// The track's content could not be parsed, as draft-14 numbers it on FETCH_ERROR.
+	const MALFORMED_TRACK_14: u64 = 0x9;
+
+	/// The same condition from draft-15 on.
+	const MALFORMED_TRACK: u64 = 0x12;
+
+	/// The value for "the thing you asked for is not here", or `None` where the draft and
+	/// request assign none.
+	fn does_not_exist(kind: Kind, version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 => match kind {
+				Kind::Subscribe | Kind::Fetch => Some(DOES_NOT_EXIST_14),
+				_ => None,
+			},
+			_ => Some(DOES_NOT_EXIST),
+		}
+	}
+
+	/// The value for "we do not want this", or `None` where the draft and request assign
+	/// none. Draft-14 registers it only on the two requests that offer content.
+	fn uninterested(kind: Kind, version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 => match kind {
+				Kind::Publish | Kind::PublishNamespace => Some(UNINTERESTED_14),
+				_ => None,
+			},
+			_ => Some(UNINTERESTED),
+		}
+	}
+
+	/// The value for a track we could not parse, or `None` where the draft and request
+	/// assign none.
+	fn malformed_track(kind: Kind, version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 => match kind {
+				Kind::Fetch => Some(MALFORMED_TRACK_14),
+				_ => None,
+			},
+			_ => Some(MALFORMED_TRACK),
+		}
+	}
+
+	/// The value for a draining session, or `None` before draft-17 registered one.
+	fn going_away(version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => None,
+			_ => Some(GOING_AWAY),
+		}
+	}
+
+	/// What a rejection reports, before the draft picks the number for it.
+	///
+	/// Named separately from [`Error`] because a rejection says less than an error does: a
+	/// dozen local failures are one INTERNAL_ERROR on the wire, and the two conditions the
+	/// registry does distinguish (asking for something absent versus offering something
+	/// unwanted) are the same [`Error::Unroutable`] here. A caller that knows which it means
+	/// names it; one that only holds an error converts.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	pub(crate) enum Condition {
+		/// Something went wrong that the registry has no value for.
+		Internal,
+		/// The peer's credentials do not cover the request.
+		Unauthorized,
+		/// The request outlived an implementation-specific deadline.
+		Timeout,
+		/// This endpoint does not implement the request at all.
+		NotSupported,
+		/// The broadcast or track the peer asked for is not here.
+		DoesNotExist,
+		/// The content the peer offered is not wanted here, so it should stop offering it.
+		Uninterested,
+		/// The track's content could not be parsed.
+		MalformedTrack,
+		/// A GOAWAY is draining the session, so no new request is accepted.
+		GoingAway,
+	}
+
+	impl From<&Error> for Condition {
+		fn from(err: &Error) -> Self {
+			match err {
+				Error::Unauthorized => Self::Unauthorized,
+				Error::Timeout => Self::Timeout,
+				Error::Unsupported | Error::Version => Self::NotSupported,
+				Error::NotFound => Self::DoesNotExist,
+				// A path with no route is one we will not carry. On a request that offers
+				// content that is UNINTERESTED; on one that asks for it, [`to_code`] reads
+				// it as the answer the asker can act on instead.
+				Error::Unroutable => Self::Uninterested,
+				// Our own parse failure is, from the peer's side, a malformed track.
+				Error::Decode(_) | Error::BoundsExceeded(_) | Error::MalformedTrack => Self::MalformedTrack,
+				Error::GoingAway => Self::GoingAway,
+				// Everything else, a duplicate included: no draft assigns it a value, and
+				// INTERNAL_ERROR is how a peer reads an unregistered code anyway.
+				_ => Self::Internal,
+			}
+		}
+	}
+
+	/// The code to reject a request with, on the negotiated draft.
+	///
+	/// A condition the draft does not register for this request falls back to
+	/// INTERNAL_ERROR rather than borrowing a number from another draft, which would say
+	/// something the peer's registry gives a different meaning.
+	pub(crate) fn to_code(condition: Condition, kind: Kind, version: Version) -> u64 {
+		let registered = match condition {
+			Condition::Internal => return INTERNAL_ERROR,
+			Condition::Unauthorized => return UNAUTHORIZED,
+			Condition::Timeout => return TIMEOUT,
+			Condition::NotSupported => return NOT_SUPPORTED,
+			Condition::DoesNotExist => does_not_exist(kind, version),
+			// A subscriber that asked for content cannot act on "we do not want it": what it
+			// needs to know is that we do not have it, which is the same refusal from its
+			// side. Only the requests that offer content say UNINTERESTED.
+			Condition::Uninterested => match kind {
+				Kind::Subscribe | Kind::Fetch => does_not_exist(kind, version),
+				_ => uninterested(kind, version),
+			},
+			Condition::MalformedTrack => malformed_track(kind, version),
+			Condition::GoingAway => going_away(version),
+		};
+
+		registered.unwrap_or(INTERNAL_ERROR)
+	}
+
+	/// Read a rejection code received on the negotiated draft.
+	///
+	/// A code the draft does not assign for this request, INTERNAL_ERROR included, stays
+	/// [`Error::Remote`]: an error, but never one given a meaning it did not carry.
+	pub(crate) fn from_code(code: u64, kind: Kind, version: Version) -> Error {
+		match code {
+			UNAUTHORIZED => Error::Unauthorized,
+			TIMEOUT => Error::Timeout,
+			NOT_SUPPORTED => Error::Unsupported,
+			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
+			code if Some(code) == uninterested(kind, version) => Error::Unroutable,
+			code if Some(code) == malformed_track(kind, version) => Error::MalformedTrack,
+			code if Some(code) == going_away(version) => Error::GoingAway,
+			code => Error::Remote(u32::try_from(code).unwrap_or(u32::MAX)),
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		const ALL: [Version; 7] = [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+		];
+
+		const KINDS: [Kind; 5] = [
+			Kind::Subscribe,
+			Kind::Fetch,
+			Kind::Publish,
+			Kind::PublishNamespace,
+			Kind::SubscribeNamespace,
+		];
+
+		/// Every condition a rejection can carry, so the checks below cover the whole space
+		/// rather than the variants someone remembered. A new variant belongs here.
+		const EVERY_CONDITION: [Condition; 8] = [
+			Condition::Internal,
+			Condition::Unauthorized,
+			Condition::Timeout,
+			Condition::NotSupported,
+			Condition::DoesNotExist,
+			Condition::Uninterested,
+			Condition::MalformedTrack,
+			Condition::GoingAway,
+		];
+
+		/// Draft-14 numbers a missing track 0x4 and draft-15 moved it to 0x10, which is
+		/// draft-14's MALFORMED_AUTH_TOKEN. Getting this backwards tells a peer its token is
+		/// broken when the broadcast simply is not here, so it re-authenticates instead of
+		/// waiting for the announcement.
+		#[test]
+		fn a_missing_broadcast_uses_the_draft_s_own_number() {
+			for kind in [Kind::Subscribe, Kind::Fetch] {
+				assert_eq!(to_code(Condition::DoesNotExist, kind, Version::Draft14), 0x4);
+				assert!(matches!(from_code(0x4, kind, Version::Draft14), Error::NotFound));
+
+				for version in ALL.into_iter().skip(1) {
+					assert_eq!(to_code(Condition::DoesNotExist, kind, version), 0x10);
+					assert!(matches!(from_code(0x10, kind, version), Error::NotFound));
+					// 0x4 is MALFORMED_AUTH_TOKEN from draft-15 on, which is not ours to claim.
+					assert!(matches!(from_code(0x4, kind, version), Error::Remote(0x4)));
+				}
+			}
+
+			// And an error with no more specific meaning reaches the same value.
+			assert_eq!(
+				to_code(Condition::from(&Error::NotFound), Kind::Subscribe, Version::Draft20),
+				0x10
+			);
+		}
+
+		/// Draft-14 gives 0x4 to UNINTERESTED on the requests that offer content and to
+		/// TRACK_DOES_NOT_EXIST on the ones that ask for it, so the same integer on the same
+		/// draft says two different things.
+		#[test]
+		fn draft_14_reads_0x4_per_request() {
+			for kind in [Kind::Publish, Kind::PublishNamespace] {
+				assert_eq!(to_code(Condition::Uninterested, kind, Version::Draft14), 0x4);
+				assert!(matches!(from_code(0x4, kind, Version::Draft14), Error::Unroutable));
+				// Those requests offer content, so "it is not here" is not a rejection they
+				// can carry.
+				assert_eq!(to_code(Condition::DoesNotExist, kind, Version::Draft14), INTERNAL_ERROR);
+			}
+
+			// And neither meaning reaches a request draft-14 gives neither to.
+			assert!(matches!(
+				from_code(0x4, Kind::SubscribeNamespace, Version::Draft14),
+				Error::Remote(0x4)
+			));
+		}
+
+		/// GOING_AWAY arrived in draft-17. Sent to an earlier peer, 0x6 is unassigned there,
+		/// so say INTERNAL_ERROR outright rather than a number that means nothing.
+		#[test]
+		fn going_away_only_exists_from_draft_17() {
+			for kind in KINDS {
+				for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+					assert_eq!(to_code(Condition::GoingAway, kind, version), INTERNAL_ERROR);
+					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::Remote(0x6)));
+				}
+
+				for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
+					assert_eq!(to_code(Condition::GoingAway, kind, version), GOING_AWAY);
+					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
+				}
+			}
+		}
+
+		/// Every code we send must decode back to what we meant on the same draft and
+		/// request, or two moq-net peers disagree about what a rejection said.
+		#[test]
+		fn every_emitted_code_round_trips() {
+			for version in ALL {
+				for kind in KINDS {
+					for condition in EVERY_CONDITION {
+						let code = to_code(condition, kind, version);
+						let decoded = Condition::from(&from_code(code, kind, version));
+						assert_eq!(
+							to_code(decoded, kind, version),
+							code,
+							"{condition:?} on {version:?}/{kind:?} did not survive a round trip"
+						);
+					}
+				}
+			}
+		}
+
+		/// Every code we put in a rejection has to be one the negotiated draft registers for
+		/// that request. The table is transcribed from the drafts (draft-14 section 13.1
+		/// through draft-20 section 15.11.2), not derived from the mapping, so a mistake in
+		/// the mapping cannot talk the assertion into agreeing with it.
+		#[test]
+		fn only_registered_codes_reach_the_wire() {
+			fn registered(kind: Kind, version: Version) -> &'static [u64] {
+				match (version, kind) {
+					(Version::Draft14, Kind::Subscribe) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
+					(Version::Draft14, Kind::Fetch) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0x10, 0x12],
+					(Version::Draft14, Kind::Publish) => &[0x0, 0x1, 0x2, 0x3, 0x4],
+					(Version::Draft14, Kind::PublishNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x10, 0x12],
+					(Version::Draft14, Kind::SubscribeNamespace) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x12],
+					(Version::Draft15, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x20, 0x30, 0x32, 0x33],
+					(Version::Draft16, _) => &[0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x32],
+					(Version::Draft17, _) => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32,
+					],
+					_ => &[
+						0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x9, 0x10, 0x11, 0x12, 0x19, 0x20, 0x30, 0x31, 0x32, 0x33,
+						0x34, 0x35, 0x36,
+					],
+				}
+			}
+
+			for version in ALL {
+				for kind in KINDS {
+					for condition in EVERY_CONDITION {
+						let code = to_code(condition, kind, version);
+						assert!(
+							registered(kind, version).contains(&code),
+							"{condition:?} sends {code:#x}, which {version} does not register for {kind:?}"
+						);
+					}
+				}
+			}
+		}
+
+		/// The conditions a local error degrades to. A failure with no registered meaning
+		/// says INTERNAL_ERROR rather than borrowing a number that means something else.
+		#[test]
+		fn a_local_error_degrades_to_a_registered_condition() {
+			for err in [Error::Duplicate, Error::Cancel, Error::ProtocolViolation, Error::Closed] {
+				assert_eq!(Condition::from(&err), Condition::Internal, "{err} is not internal");
+			}
+
+			assert_eq!(Condition::from(&Error::Unsupported), Condition::NotSupported);
+			assert_eq!(Condition::from(&Error::Unauthorized), Condition::Unauthorized);
+			assert_eq!(Condition::from(&Error::Unroutable), Condition::Uninterested);
+			assert_eq!(Condition::from(&Error::GoingAway), Condition::GoingAway);
+		}
 	}
 }
 

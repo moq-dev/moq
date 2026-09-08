@@ -52,10 +52,9 @@ evicted prefix.
   exactly 100,000 one-byte frames to assert there is no count cap; it is
   rewritten rather than deleted, since the byte-budget half of what it proves
   still holds.
-- **The IETF wire keeps its own mapping.** Sending the new code on the
-  moq-transport wire belongs to
-  [IETF error codes](/quest/m0/ietf-error-codes.md),
-  which is fixing the whole registry confusion rather than one variant.
+- **The IETF wire keeps its own mapping.** `rs/moq-net/src/ietf/error.rs` picks
+  the registered value for the negotiated draft, and it registers nothing for
+  this condition, so the moq-transport wire says INTERNAL_ERROR.
 
 ### What actually gets deleted
 
@@ -124,4 +123,3 @@ already claims its top end "intentionally reaches the raised
 ## Related
 
 - [Group charge](/quest/m0/group-charge.md) - pool-level budget accounting, unaffected by this change
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the moq-transport half of the code mapping

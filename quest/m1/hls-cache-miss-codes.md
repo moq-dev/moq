@@ -48,7 +48,3 @@ The work:
 - Rewrite the tests to build the remote shape from the wire registry
   (`StreamError::to_code`, `ietf::error::to_stream_code`) so they fail when the
   two drift again.
-
-## Related
-
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the registry work that this classification has to follow

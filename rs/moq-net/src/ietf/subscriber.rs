@@ -13,7 +13,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster, peer};
+use super::{Message, Version, cluster, error::request, peer};
 
 use web_async::Lock;
 use web_transport_trait::{MaybeSend, MaybeSync};
@@ -640,13 +640,15 @@ where
 			}
 			ietf::SubscribeNamespaceError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, self.version)?;
-				tracing::warn!(error_code = %msg.error_code, reason = %msg.reason_phrase, "subscribe_namespace error");
-				return Err(Error::Cancel);
+				let err = request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
+				tracing::warn!(%err, reason = %msg.reason_phrase, "subscribe_namespace error");
+				return Err(err);
 			}
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-				tracing::warn!(error_code = %msg.error_code, reason = %msg.reason_phrase, "subscribe_namespace error");
-				return Err(Error::Cancel);
+				let err = request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
+				tracing::warn!(%err, reason = %msg.reason_phrase, "subscribe_namespace error");
+				return Err(err);
 			}
 			_ => return Err(Error::UnexpectedMessage),
 		}
@@ -856,8 +858,13 @@ where
 		// than attaching a source we would then have to route around.
 		let Some(advert) = self.route(msg.cluster.as_ref(), &peer) else {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
-			self.write_error(&mut stream, request_id, 400, "route loops through this relay")
-				.await?;
+			self.write_error(
+				&mut stream,
+				request_id,
+				request::Condition::Uninterested,
+				"route loops through this relay",
+			)
+			.await?;
 			let _ = stream.writer.close().await;
 			return Ok(());
 		};
@@ -871,7 +878,8 @@ where
 				}
 			}
 			Err(err) => {
-				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
+				self.write_error(&mut stream, request_id, (&err).into(), &err.to_string())
+					.await?;
 				let _ = stream.writer.close().await;
 				return Ok(());
 			}
@@ -1010,17 +1018,20 @@ where
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
 
-		// NOT_SUPPORTED, from the PUBLISH error codes in draft-19 section 10.10. We decline
-		// the method itself rather than this particular track, which is UNINTERESTED (0x4).
+		// We decline the method itself rather than this particular track, which would be
+		// UNINTERESTED.
 		//
 		// The alias the message carries is deliberately not recorded. Nothing will ever bind
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
 		// entry would have to be swept asynchronously. Any data streams the publisher opened
 		// before reading this are dropped by the unknown-alias path instead.
-		const NOT_SUPPORTED: u64 = 0x3;
-
-		self.write_publish_error(&mut stream, msg.request_id, NOT_SUPPORTED, "PUBLISH is not supported")
-			.await?;
+		self.write_publish_error(
+			&mut stream,
+			msg.request_id,
+			request::Condition::NotSupported,
+			"PUBLISH is not supported",
+		)
+		.await?;
 		// The rejection is the whole exchange, but it still has to arrive: a finish alone
 		// leaves the drop-time reset free to discard it before the peer acknowledges it.
 		let _ = stream.writer.close().await;
@@ -1052,14 +1063,16 @@ where
 		Ok(())
 	}
 
-	/// Send error on the bidi stream.
+	/// Refuse a PUBLISH_NAMESPACE on the bidi stream that carries it.
 	async fn write_error(
 		&self,
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
+		let error_code = request::to_code(condition, request::Kind::PublishNamespace, self.version);
+
 		match self.version {
 			Version::Draft14 => {
 				stream.writer.encode(&ietf::PublishNamespaceError::ID).await?;
@@ -1100,13 +1113,16 @@ where
 		Ok(())
 	}
 
+	/// Refuse a PUBLISH on the bidi stream that carries it.
 	async fn write_publish_error(
 		&self,
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
+		let error_code = request::to_code(condition, request::Kind::Publish, self.version);
+
 		match self.version {
 			Version::Draft14 => {
 				stream.writer.encode(&ietf::PublishError::ID).await?;
@@ -1727,15 +1743,25 @@ where
 					largest: msg.largest,
 				}))
 			}
+			// The rejection reaches the track as the reason the publisher gave, so a
+			// subscriber can tell a broadcast that is not there from one it may not have.
 			ietf::SubscribeError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "subscribe error");
-				Err(Error::Cancel)
+				Err(request::from_code(
+					msg.error_code,
+					request::Kind::Subscribe,
+					self.version,
+				))
 			}
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "request error");
-				Err(Error::Cancel)
+				Err(request::from_code(
+					msg.error_code,
+					request::Kind::Subscribe,
+					self.version,
+				))
 			}
 			_ => Err(Error::UnexpectedMessage),
 		}
@@ -2788,7 +2814,8 @@ mod tests {
 			writer
 				.encode(&ietf::RequestError {
 					request_id: Some(RequestId(1)),
-					error_code: 404,
+					// DOES_NOT_EXIST, draft-16 section 13.4.2.
+					error_code: 0x10,
 					reason_phrase: "not found".into(),
 					retry_interval: 0,
 				})
@@ -4181,78 +4208,98 @@ mod tests {
 	/// PUBLISH offers one track, but a source attaches per namespace and serves every
 	/// track under it. Rather than invent a namespace-level source from a track-level
 	/// offer, decline the request and leave the session running.
+	///
+	/// Draft-14 answers with PUBLISH_ERROR and its own registry; draft-15 folded the message
+	/// into REQUEST_ERROR, so both shapes have to carry NOT_SUPPORTED.
 	#[tokio::test]
 	async fn publish_is_rejected_without_announcing() {
-		// An open gate, so the rejection actually reaches the wire.
-		let gate = kio::Producer::new(true);
-		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
-		let consumer = origin.consume();
-		let (tasks, task_set) = crate::util::TaskSet::new();
-		std::mem::forget(task_set);
+		for version in [Version::Draft14, Version::Draft19] {
+			// An open gate, so the rejection actually reaches the wire.
+			let gate = kio::Producer::new(true);
+			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+			let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+			let consumer = origin.consume();
+			let (tasks, task_set) = crate::util::TaskSet::new();
+			std::mem::forget(task_set);
 
-		let mut subscriber = Subscriber::new(
-			TestRuntime::new(),
-			session.clone(),
-			origin,
-			Control::new(None, false),
-			None,
-			peer::PeerSetup::default(),
-			crate::Hop::new(1).unwrap(),
-			None,
-			Version::Draft19,
-			tasks,
-			Default::default(),
-		);
-
-		let stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
-		let msg = ietf::Publish {
-			request_id: RequestId(1),
-			track_namespace: crate::Path::new("room/host"),
-			track_name: "video".into(),
-			track_alias: 7,
-			largest_location: None,
-			forward: true,
-			properties: ietf::Properties::default(),
-		};
-
-		// Errors are surfaced to the peer on the stream, not raised as a session error.
-		subscriber.run_publish_stream(stream, msg).await.unwrap();
-		tokio::time::sleep(Duration::from_millis(1)).await;
-
-		assert!(
-			routed_now(&consumer, "room/host").is_none(),
-			"a rejected PUBLISH must not announce a broadcast"
-		);
-		// Encode the reply we expect rather than matching the reason alone, so the error code
-		// regressing to something outside draft-19 section 10.10's table cannot slip through.
-		let expected = {
-			const NOT_SUPPORTED: u64 = 0x3;
-
-			let log = crate::lite::test_transport::Log::default();
-			let mut writer = crate::coding::Writer::new(
-				crate::lite::test_transport::SinkSend::new(log.clone()),
-				Version::Draft19,
+			let mut subscriber = Subscriber::new(
+				TestRuntime::new(),
+				session.clone(),
+				origin,
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
 			);
-			writer.encode(&ietf::RequestError::ID).await.unwrap();
-			writer
-				.encode(&ietf::RequestError {
-					request_id: None,
-					error_code: NOT_SUPPORTED,
-					reason_phrase: "PUBLISH is not supported".into(),
-					retry_interval: 0,
-				})
-				.await
-				.unwrap();
 
-			log.writes.lock().unwrap().clone()
-		};
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let msg = ietf::Publish {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new("room/host"),
+				track_name: "video".into(),
+				track_alias: 7,
+				largest_location: None,
+				forward: true,
+				properties: ietf::Properties::default(),
+			};
 
-		assert_eq!(
-			occurrences(&session.log, &expected),
-			1,
-			"the decline reaches the peer as NOT_SUPPORTED"
-		);
+			// Errors are surfaced to the peer on the stream, not raised as a session error.
+			subscriber.run_publish_stream(stream, msg).await.unwrap();
+			tokio::time::sleep(Duration::from_millis(1)).await;
+
+			assert!(
+				routed_now(&consumer, "room/host").is_none(),
+				"a rejected PUBLISH must not announce a broadcast"
+			);
+			// Encode the reply we expect rather than matching the reason alone, so an error
+			// code regressing to something outside the draft's table cannot slip through.
+			// NOT_SUPPORTED is 0x3 in every registry, which is what makes it comparable here.
+			let expected = {
+				const NOT_SUPPORTED: u64 = 0x3;
+
+				let log = crate::lite::test_transport::Log::default();
+				let mut writer =
+					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+				match version {
+					Version::Draft14 => {
+						writer.encode(&ietf::PublishError::ID).await.unwrap();
+						writer
+							.encode(&ietf::PublishError {
+								request_id: RequestId(1),
+								error_code: NOT_SUPPORTED,
+								reason_phrase: "PUBLISH is not supported".into(),
+							})
+							.await
+							.unwrap();
+					}
+					_ => {
+						writer.encode(&ietf::RequestError::ID).await.unwrap();
+						writer
+							.encode(&ietf::RequestError {
+								request_id: None,
+								error_code: NOT_SUPPORTED,
+								reason_phrase: "PUBLISH is not supported".into(),
+								retry_interval: 0,
+							})
+							.await
+							.unwrap();
+					}
+				}
+
+				log.writes.lock().unwrap().clone()
+			};
+
+			assert_eq!(
+				occurrences(&session.log, &expected),
+				1,
+				"{version} must decline the PUBLISH as NOT_SUPPORTED"
+			);
+		}
 	}
 }
 

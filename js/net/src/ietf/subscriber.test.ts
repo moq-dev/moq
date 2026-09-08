@@ -401,7 +401,8 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
 	expect(await peer.reader.u53()).toBe(RequestError.id);
 	const err = await RequestError.decode(peer.reader, VERSION);
-	expect(err.errorCode).toBe(400);
+	// UNINTERESTED, draft-19 section 15.11.2: stop offering us this namespace.
+	expect(err.errorCode).toBe(0x20);
 
 	// Refused, so nothing was announced: the sentinel is the first thing a consumer hears.
 	await syncInline(subscription, announced, { hops: [PEER], cost: 0n });
@@ -547,7 +548,8 @@ test("a rejected subscribe is not unsubscribed", async () => {
 	await wire.writer.u53(RequestError.id);
 	await new RequestError({
 		requestId: 0n,
-		errorCode: 404,
+		// DOES_NOT_EXIST, draft-16 section 13.4.2.
+		errorCode: 0x10,
 		reasonPhrase: "not found",
 		retryInterval: 0n,
 	}).encode(wire.writer, LEGACY);

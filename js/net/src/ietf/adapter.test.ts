@@ -3,6 +3,7 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { ControlStreamAdapter } from "./adapter.ts";
+import { toRequestCode } from "./error.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
 import { ALPN, Version } from "./version.ts";
@@ -85,10 +86,10 @@ async function closed(stream: Stream): Promise<boolean> {
 
 /**
  * Draft-14/15 withdrawals name a namespace, so the adapter resolves them through a map it
- * keeps while decoding. A duplicate announcement is refused with 409, but the mapping is
- * written before the subscriber ever sees it: overwriting there would point the first
- * request's DONE at the refused one, which has no stream left, and the announcement would
- * stay up for the rest of the session.
+ * keeps while decoding. A duplicate announcement is refused, but the mapping is written
+ * before the subscriber ever sees it: overwriting there would point the first request's DONE
+ * at the refused one, which has no stream left, and the announcement would stay up for the
+ * rest of the session.
  */
 test("a refused duplicate does not strand the first announcement", async () => {
 	const { adapter, peer } = await connect();
@@ -105,7 +106,7 @@ test("a refused duplicate does not strand the first announcement", async () => {
 	await second.writer.u53(RequestError.id);
 	await new RequestError({
 		requestId: 3n,
-		errorCode: 409,
+		errorCode: toRequestCode("internal", "publish_namespace", VERSION),
 		reasonPhrase: "duplicate namespace",
 		retryInterval: 0n,
 	}).encode(second.writer, VERSION);

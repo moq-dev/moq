@@ -15,7 +15,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::{Message, Version, cluster, peer};
+use super::{Message, Version, cluster, error::request, peer};
 
 /// Largest millisecond duration every implementation can carry losslessly.
 const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
@@ -437,7 +437,12 @@ where
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				return self
-					.reject_subscribe(stream, request_id, 404, "Broadcast not found")
+					.reject_subscribe(
+						stream,
+						request_id,
+						request::Condition::DoesNotExist,
+						"broadcast not found",
+					)
 					.await;
 			}
 		};
@@ -445,7 +450,9 @@ where
 		let track = match broadcast.track(&msg.track_name) {
 			Ok(track) => track,
 			Err(err) => {
-				return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
+				return self
+					.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
+					.await;
 			}
 		};
 
@@ -460,7 +467,9 @@ where
 			match track.subscribe(subscription.clone()).await {
 				Ok(subscribed) => (track, subscribed),
 				Err(err) => {
-					return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
+					return self
+						.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
+						.await;
 				}
 			}
 		};
@@ -584,10 +593,10 @@ where
 		&self,
 		mut stream: Stream<S, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_subscribe_error(&mut stream.writer, request_id, error_code, reason)
+		self.write_subscribe_error(&mut stream.writer, request_id, condition, reason)
 			.await?;
 
 		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
@@ -600,9 +609,11 @@ where
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
+		let error_code = request::to_code(condition, request::Kind::Subscribe, self.version);
+
 		match self.version {
 			Version::Draft14 => {
 				writer.encode(&ietf::SubscribeError::ID).await?;
@@ -893,19 +904,40 @@ where
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let _subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
-				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
+				return self
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						request::Condition::NotSupported,
+						"not supported",
+					)
+					.await;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id,
 				group_offset,
 			} => {
 				if group_offset != 0 {
-					return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
+					return self
+						.reject_fetch(
+							stream,
+							msg.request_id,
+							request::Condition::NotSupported,
+							"not supported",
+						)
+						.await;
 				}
 				subscriber_request_id
 			}
 			FetchType::AbsoluteJoining { .. } => {
-				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
+				return self
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						request::Condition::NotSupported,
+						"not supported",
+					)
+					.await;
 			}
 		};
 
@@ -965,10 +997,10 @@ where
 		&self,
 		mut stream: Stream<S, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_fetch_error(&mut stream.writer, request_id, error_code, reason)
+		self.write_fetch_error(&mut stream.writer, request_id, condition, reason)
 			.await?;
 
 		let _ = stream.writer.close().await;
@@ -979,9 +1011,11 @@ where
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
 		request_id: RequestId,
-		error_code: u64,
+		condition: request::Condition,
 		reason: &str,
 	) -> Result<(), Error> {
+		let error_code = request::to_code(condition, request::Kind::Fetch, self.version);
+
 		match self.version {
 			Version::Draft14 => {
 				writer.encode(&ietf::FetchError::ID).await?;
@@ -2328,6 +2362,83 @@ mod serve_tests {
 		serve.await.unwrap();
 	}
 
+	/// A subscribe for a broadcast we do not serve is refused with the negotiated draft's own
+	/// "does not exist" value.
+	///
+	/// Draft-14 numbers it 0x4 and draft-15 moved it to 0x10, which is draft-14's
+	/// MALFORMED_AUTH_TOKEN: a peer told the wrong one re-authenticates instead of waiting
+	/// for the announcement. The reply is encoded here rather than matched by code alone, so
+	/// a value slipping outside the draft's table cannot pass.
+	#[tokio::test]
+	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+		] {
+			let error_code = match version {
+				Version::Draft14 => 0x4,
+				_ => 0x10,
+			};
+
+			let h = serve(version);
+			let mut session = h.session.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+
+			let mut msg = subscribe(Filter::NextObject, None);
+			msg.track_namespace = crate::Path::new("absent");
+
+			h.publisher.clone().run_subscribe_stream(stream, msg).await.unwrap();
+
+			let expected = {
+				let log = crate::lite::test_transport::Log::default();
+				let mut writer =
+					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+				match version {
+					Version::Draft14 => {
+						writer.encode(&ietf::SubscribeError::ID).await.unwrap();
+						writer
+							.encode(&ietf::SubscribeError {
+								request_id: RequestId(REQUEST_ID),
+								error_code,
+								reason_phrase: "broadcast not found".into(),
+							})
+							.await
+							.unwrap();
+					}
+					_ => {
+						writer.encode(&ietf::RequestError::ID).await.unwrap();
+						writer
+							.encode(&ietf::RequestError {
+								request_id: match version {
+									Version::Draft15 | Version::Draft16 => Some(RequestId(REQUEST_ID)),
+									_ => None,
+								},
+								error_code,
+								reason_phrase: "broadcast not found".into(),
+								retry_interval: 0,
+							})
+							.await
+							.unwrap();
+					}
+				}
+
+				log.writes.lock().unwrap().clone()
+			};
+
+			assert_eq!(
+				occurrences(&h.log, &expected),
+				1,
+				"{version} must refuse a missing broadcast with {error_code:#x}"
+			);
+		}
+	}
+
 	/// The draft's canonical current-group join: a Next Object subscription plus a
 	/// StartGroup=1 fill. The published head arrives exactly once, on a fetch stream,
 	/// and the subscription starts past the snapshot, so nothing is duplicated and
@@ -2806,7 +2917,8 @@ mod tests {
 		writer
 			.encode(&ietf::RequestError {
 				request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(1)),
-				error_code: 403,
+				// UNINTERESTED, draft-17 section 14.5.2.
+				error_code: 0x20,
 				reason_phrase: "no".into(),
 				retry_interval,
 			})
