@@ -159,24 +159,58 @@ suites_for_tool() {
     printf '%s' "${out# }"
 }
 
-# Whether `just rs check-changed` will reach `just rs wasm` for a changed-file
-# scope, asked of the real gate rather than a second copy of it: the gate is
-# `_select` then `_wants-wasm`, and a diff selecting a crate that moq-mux or
-# moq-ffi depends on reaches it without naming one, which no path pattern here
-# could tell. False when just cannot answer, so an environment missing the
-# dispatch is not also reported blocked on a cross-compilation target.
-wants_wasm() {
-    local changed=$1 packages
+# Ask the real Rust selector once, then reuse its answer for every capability
+# owned by that dispatch. A diff can select dependents it never names, which no
+# path pattern here could reproduce safely.
+rust_packages() {
+    local changed=$1
     command -v just >/dev/null 2>&1 || return 1
-    [ "$changed" = ALL ] && return 0
-    packages=$(just rs _select "$changed" 2>/dev/null) || return 1
+    [ "$changed" = ALL ] && {
+        printf 'ALL\n'
+        return
+    }
+    just rs _select "$changed" 2>/dev/null
+}
+
+wants_wasm() {
+    local packages=$1
     [ -n "$packages" ] || return 1
     [ "$packages" = ALL ] && return 0
     just rs _wants-wasm "$packages" >/dev/null 2>&1
 }
 
+# Print the selected suites that actually invoke Cargo. Check reaches Cargo
+# through more languages than test; test dispatches only Rust and Python.
+cargo_suites() {
+    local changed=$1 packages=$2 out="" suite
+    if tools_for_files "$changed" | grep -qx cargo; then
+        out=$(selected check)
+    fi
+    if [ "$changed" = ALL ] || [ -n "$packages" ] ||
+        printf '%s\n' "$changed" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+        out="$out $(selected test)"
+    fi
+    for suite in smoke smoke-full wasm; do
+        out="$out $(selected "$suite")"
+    done
+    out=$(printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    printf '%s' "${out% }"
+}
+
+# Print check when the changed-file predicate for the real `_flake` recipe
+# matches. Nix on PATH is required more broadly, but store access is not.
+nix_suites() {
+    local changed=$1
+    [ -n "$(selected check)" ] || return
+    if [ "$changed" = ALL ] ||
+        printf '%s\n' "$changed" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
+        printf 'check\n'
+    fi
+}
+
 # Print the selected suites that actually bind a loopback socket, for a
-# changed-file scope. Loopback belongs to whoever binds one: the cross-language
+# changed-file scope and its Rust package selection. Loopback belongs to
+# whoever binds one: the cross-language
 # harnesses always do, while `test` depends on the diff, because `just test`
 # hands the file list to the js, rs, and py recipes and all three skip a scope
 # they were not given. A docs-only diff binds nothing, and reporting it blocked
@@ -186,8 +220,8 @@ wants_wasm() {
 # because `--suite test wasm` compiles Rust for the wasm harness on a diff that
 # hands `just test` nothing.
 bind_suites() {
-    local changed=$1 out="" suite
-    if tools_for_files "$changed" | grep -qx cargo ||
+    local changed=$1 packages=$2 out="" suite
+    if [ -n "$packages" ] ||
         printf '%s\n' "$changed" | grep -qE '^(js|py)/'; then
         out=$(selected test)
     fi
@@ -1004,14 +1038,21 @@ self_test_ownership() {
     # A docs-only `test` compiles nothing and hands no scope to a recipe that
     # binds, so a sandbox forbidding bind blocks none of it.
     SUITES="check test"
-    check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md')" ''
-    check 'a js diff binds under test' "$(bind_suites 'js/hang/src/index.ts')" test
-    check 'a rust diff binds under test' "$(bind_suites 'rs/moq-net/src/lib.rs')" test
+    check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md' '')" ''
+    check 'a js diff binds under test' "$(bind_suites 'js/hang/src/index.ts' '')" test
+    check 'a rust diff binds under test' "$(bind_suites 'rs/moq-net/src/lib.rs' packages)" test
+    check 'a Go diff binds nothing under test' "$(bind_suites 'go/wrapper/moq/lib.go' '')" ''
+    check 'a Go diff uses Cargo under check only' \
+        "$(cargo_suites 'go/wrapper/moq/lib.go' '')" check
+    check 'a Rust diff uses Cargo under both' \
+        "$(cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
     # `check` lints and compiles; nothing in it listens, so it is never charged.
-    check 'an unscoped run binds under test alone' "$(bind_suites ALL)" test
+    check 'an unscoped run binds under test alone' "$(bind_suites ALL ALL)" test
+    check 'a docs diff skips Nix store access' "$(nix_suites 'doc/a.md')" ''
+    check 'a Rust diff probes Nix store access' "$(nix_suites 'rs/moq-net/src/lib.rs')" check
 
     SUITES="check smoke wasm"
-    check 'the harnesses always bind' "$(bind_suites 'doc/a.md')" 'smoke wasm'
+    check 'the harnesses always bind' "$(bind_suites 'doc/a.md' '')" 'smoke wasm'
 
     PAIRS=$saved_pairs
     SUITES=$saved_suites
@@ -1316,17 +1357,16 @@ else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
 fi
 
-# Which selected suites actually compile Rust. `check` and `test` do only when
-# the file scope reaches it, which is the same question `_tools` answers; the
-# cross-language harnesses always do. Attributing these to a fixed `check test`
-# would report a docs-only diff blocked on a toolchain it never invokes, and
-# would leave a broken toolchain blocking nothing under `--suite wasm`.
-CARGO_SUITES=$(suites_for_tool cargo)
+# Ask the Rust selector once. Its result drives the awk, Cargo, wasm-target, and
+# test-bind probes; using check's broader tool list for those is what made a
+# Go-only test pay for work it never dispatches.
+RUST_PACKAGES=$(rust_packages "$CHANGED" || true)
+CARGO_SUITES=$(cargo_suites "$CHANGED" "$RUST_PACKAGES")
 
 # `just rs check-changed` is where the selector runs, and its seed list only
 # grows past one line when the diff reaches Rust, so a docs-only branch on BSD
 # awk is not blocked by it.
-if [ -n "$(selected "check test")" ] && tools_for_files "${CHANGED:-}" | grep -qx cargo; then
+if [ -n "$(selected "check test")" ] && [ -n "$RUST_PACKAGES" ] && [ "$RUST_PACKAGES" != ALL ]; then
     probe_awk_select "$(selected "check test")"
 else
     record behavior.awk-select behavior skip false "" "this scope selects no Rust packages" "" 10 0
@@ -1366,7 +1406,7 @@ fi
 # `check-changed`'s gate, which is asked here rather than reimplemented, since
 # the copy of a selection rule is the one that drifts.
 WASM_TARGET_SUITES=$(selected wasm)
-if wants_wasm "$CHANGED"; then
+if wants_wasm "$RUST_PACKAGES"; then
     WASM_TARGET_SUITES="$(selected check) $WASM_TARGET_SUITES"
     WASM_TARGET_SUITES=$(printf '%s' "$WASM_TARGET_SUITES" | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
     WASM_TARGET_SUITES=${WASM_TARGET_SUITES% }
@@ -1377,13 +1417,14 @@ else
     record probe.cargo-wasm32 probe skip false "" "this scope compiles nothing for wasm32" "" 120 0
 fi
 
-if [ -n "$(selected check)" ]; then
+NIX_SUITES=$(nix_suites "$CHANGED")
+if [ -n "$NIX_SUITES" ]; then
     probe_nix
 else
-    record probe.nix probe skip false "" "check is not selected" "" 30 0
+    record probe.nix probe skip false "" "this check scope does not evaluate the flake" "" 30 0
 fi
 
-BIND_SUITES=$(bind_suites "$CHANGED")
+BIND_SUITES=$(bind_suites "$CHANGED" "$RUST_PACKAGES")
 
 if [ -n "$BIND_SUITES" ]; then
     probe_loopback tcp "$BIND_SUITES"
