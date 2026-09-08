@@ -104,7 +104,6 @@ tools_for_suite() {
         smoke-full)
             printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
             printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
-            printf '%s\n' "${CC:-cc}"
             ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
         *) : ;;
@@ -659,6 +658,72 @@ EOF
     record behavior.awk-select behavior ok true "$suites" "awk selects a multi-crate diff" "" 10 "$BOUNDED_ELAPSED"
 }
 
+# Report the configured C compiler without putting a dynamic path in the
+# whitespace-delimited tool map.
+probe_c_compiler() {
+    local suites=$1 cc=${CC:-cc} path status kind version
+    path=$(command -v "$cc" 2>/dev/null)
+    if [ -z "$path" ]; then
+        record behavior.c-compiler behavior missing true "$suites" \
+            "configured C compiler is missing: $cc" \
+            "install the configured C compiler, or enter the dev shell: nix develop" 10 0
+        return
+    fi
+    if [ ! -x "$path" ]; then
+        record behavior.c-compiler behavior denied true "$suites" "$path is not executable" \
+            "grant execute permission on $path" 10 0
+        return
+    fi
+    bounded 10 "$path" --version
+    status=$?
+    version=$(first_line "$BOUNDED_OUT")
+    kind=$(classify "$status" "$BOUNDED_OUT")
+    if ((status != 0)) && [ "$kind" != degraded ]; then
+        record behavior.c-compiler behavior "$kind" true "$suites" \
+            "$path: $(error_line "$BOUNDED_OUT")" "allow executing $path" 10 "$BOUNDED_ELAPSED"
+        return
+    fi
+    record behavior.c-compiler behavior ok true "$suites" \
+        "$path${version:+ ($version)}" "" 10 "$BOUNDED_ELAPSED"
+}
+
+# Ask Cargo for the HOST and TARGET it gives build scripts. This incorporates
+# build.target from every Cargo configuration layer without reimplementing its
+# merge rules. The marker is emitted before the probe crate itself is checked,
+# so an uninstalled cross target still tells us which pkg-config variables the
+# real build will select.
+cargo_targets() {
+    local cargo_home=${1:-} cargo_dir=${2:-$REPO} crate="$SCRATCH/probe-crate-cargo-target" marker previous=$PWD
+    local command=(env "CARGO_TARGET_DIR=$crate/target")
+    [ -n "$cargo_home" ] && command+=("CARGO_HOME=$cargo_home")
+    command+=(cargo check --offline --color never --manifest-path "$crate/Cargo.toml")
+
+    mkdir -p "$crate/src"
+    cat >"$crate/Cargo.toml" <<'EOF'
+[package]
+name = "moq-doctor-target"
+version = "0.0.0"
+edition = "2021"
+build = "build.rs"
+
+[workspace]
+EOF
+    cat >"$crate/build.rs" <<'EOF'
+fn main() {
+    println!("cargo:warning=moq-doctor-target:{}:{}", std::env::var("HOST").unwrap(), std::env::var("TARGET").unwrap());
+}
+EOF
+    printf 'fn main() {}\n' >"$crate/src/main.rs"
+
+    cd "$cargo_dir" || return 1
+    bounded 30 "${command[@]}"
+    cd "$previous" || return 1
+    marker=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/.*moq-doctor-target:\([^:]*\):\([^:]*\)$/\1 \2/p' | tail -1)
+    CARGO_PROBE_HOST=${marker%% *}
+    CARGO_PROBE_TARGET=${marker#* }
+    [ -n "$marker" ] && [ -n "$CARGO_PROBE_HOST" ] && [ -n "$CARGO_PROBE_TARGET" ]
+}
+
 # Print the same target-qualified environment value pkg-config-rs selects.
 targeted_env() {
     local base=$1 target=$2 host=$3 kind name value
@@ -676,34 +741,37 @@ targeted_env() {
     return 1
 }
 
+# Print Cargo's configured executable, whose fallback is the literal
+# `pkg-config`; pkg-config-rs does not substitute a distinct `pkgconf` binary.
+pkg_config_executable() {
+    targeted_env PKG_CONFIG "$1" "$2" || printf 'pkg-config\n'
+}
+
 # Verify the native metadata the requested GStreamer smoke client links against.
 probe_gstreamer_devel() {
-    local suites=$1 status host target pkg_config source display base value rustc_exe=${RUSTC-rustc}
+    local suites=$1 status host target pkg_config source display base value
     local pkg_env=(env)
-    if ! command -v "$rustc_exe" >/dev/null 2>&1; then
+    if ! command -v cargo >/dev/null 2>&1; then
         record behavior.gstreamer-devel behavior missing true "$suites" \
-            "Cargo's rustc executable is missing: ${rustc_exe:-<empty RUSTC override>}" \
-            "install the configured rustc executable, or enter the dev shell: nix develop" 10 0
+            "cargo is missing, so its pkg-config target cannot be resolved" \
+            "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
         return
     fi
-    bounded 10 "$rustc_exe" -vV
+    cargo_targets
     status=$?
-    host=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/^host: //p')
-    if ((status != 0)) || [ -z "$host" ]; then
+    if ((status != 0)); then
         record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-            "rustc could not report Cargo's host target: $(error_line "$BOUNDED_OUT")" \
-            "use the dev shell's Rust toolchain: nix develop" 10 "$BOUNDED_ELAPSED"
+            "cargo could not resolve its build target: $(error_line "$BOUNDED_OUT")" \
+            "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
         return
     fi
-    target=${CARGO_BUILD_TARGET:-$host}
+    host=$CARGO_PROBE_HOST
+    target=$CARGO_PROBE_TARGET
     if pkg_config=$(targeted_env PKG_CONFIG "$target" "$host"); then
         source="Cargo's target-qualified pkg-config override"
-    elif command -v pkg-config >/dev/null 2>&1; then
-        pkg_config=pkg-config
-        source="Cargo's default pkg-config executable"
     else
-        pkg_config=pkgconf
-        source="Cargo's pkgconf fallback"
+        pkg_config=$(pkg_config_executable "$target" "$host")
+        source="Cargo's default pkg-config executable"
     fi
     display=${pkg_config:-'<empty pkg-config override>'}
     if ! command -v "$pkg_config" >/dev/null 2>&1; then
@@ -1491,6 +1559,7 @@ self_test() {
     check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
+    check 'dynamic C compiler stays out of tool words' "$(CC='/tmp/c compiler' tools_for_suite smoke-full | grep -c 'c compiler')" 0
     check 'dynamic pkg-config stays out of tool words' "$(tools_for_suite smoke-full | grep -c 'pkg-config')" 0
     check 'pkg-config target override wins' \
         "$(PKG_CONFIG_doctor_test_host=/target HOST_PKG_CONFIG=/host PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" /target
@@ -1498,6 +1567,20 @@ self_test() {
         "$(HOST_PKG_CONFIG='/host pkg-config' PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" '/host pkg-config'
     check 'pkg-config target kind wins generic' \
         "$(TARGET_PKG_CONFIG=/cross PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-target doctor-test-host)" /cross
+    check 'pkg-config default does not substitute pkgconf' \
+        "$(
+            unset PKG_CONFIG HOST_PKG_CONFIG PKG_CONFIG_doctor_test_host
+            pkg_config_executable doctor-test-host doctor-test-host
+        )" pkg-config
+    if command -v cargo >/dev/null 2>&1; then
+        mkdir -p "$SCRATCH/cargo-config/.cargo"
+        cat >"$SCRATCH/cargo-config/.cargo/config.toml" <<'EOF'
+[build]
+target = "wasm32-unknown-unknown"
+EOF
+        cargo_targets "" "$SCRATCH/cargo-config"
+        check 'Cargo config selects the pkg-config target' "$CARGO_PROBE_TARGET" wasm32-unknown-unknown
+    fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
     self_test_process_state
@@ -1708,8 +1791,10 @@ fi
 
 SMOKE_FULL_SUITES=$(selected smoke-full)
 if [ -n "$SMOKE_FULL_SUITES" ]; then
+    probe_c_compiler "$SMOKE_FULL_SUITES"
     probe_gstreamer_devel "$SMOKE_FULL_SUITES"
 else
+    record behavior.c-compiler behavior skip false "" "smoke-full is not selected" "" 10 0
     record behavior.gstreamer-devel behavior skip false "" "smoke-full is not selected" "" 10 0
 fi
 
