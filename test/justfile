@@ -62,7 +62,7 @@ default $BASE="":
 # Run every language's unit tests, unscoped.
 all:
     just js test
-    just rs test --workspace
+    just rs test --workspace --exclude moq-net-fuzz
     just py test
 
 # Cross-language media interop smoke test, built from this checkout. Stands up a
