@@ -142,9 +142,10 @@ bundle_init() {
     # Harnesses change directories while they run. Resolve the caller's root
     # once so every later write and cleanup still names the directory created
     # here rather than a same-named path under the new working directory.
-    local stage_root="${root}-incomplete"
-    mkdir -p "$root" "$stage_root"
+    mkdir -p "$root"
     root=$(cd "$root" && pwd -P)
+    local stage_root="${root}-incomplete"
+    mkdir -p "$stage_root"
     stage_root=$(cd "$stage_root" && pwd -P)
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the

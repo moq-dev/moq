@@ -87,6 +87,26 @@ bundle=$(<"$ROOT/relative.path")
 check "a relative artifact root resolves absolutely" test "${bundle#/}" != "$bundle"
 check "directory changes preserve a relative-root bundle" test -f "$bundle/manifest.json"
 
+# Normalize before deriving the private staging sibling. A trailing slash must
+# not turn it into a child of the upload root, and a symlink must not put the
+# final rename across two different directory trees.
+mkdir -p "$ROOT/real-artifacts"
+real_root=$(cd "$ROOT/real-artifacts" && pwd -P)
+ln -s "$ROOT/real-artifacts" "$ROOT/link-artifacts"
+canonical_root_case() {
+    printf '%s\n' "$BUNDLE_DIR" >"$ROOT/canonical-stage.path"
+    bundle_finish 1
+}
+bundle=$(CASE_ROOT="$ROOT/link-artifacts/" run_case canonical-root canonical_root_case)
+stage=$(<"$ROOT/canonical-stage.path")
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "a symlinked upload root resolves to its canonical target" \
+    sh -c 'case "$1" in "$2"/*) exit 0;; esac; exit 1' _ "$bundle" "$real_root"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "a trailing slash cannot place staging under the upload root" \
+    sh -c 'case "$1" in "$2"/*) exit 1;; esac' _ "$stage" "$real_root"
+check "canonical-root publication removes its private staging path" test ! -e "$stage"
+
 # ── a failing run leaves a described bundle ─────────────────────────────────
 fail_case() {
     printf '%s\n' "$BUNDLE_DIR" >"$ROOT/fail-stage.path"
