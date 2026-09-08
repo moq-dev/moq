@@ -705,17 +705,27 @@ reap_group() {
 }
 
 PRELUDE
-        local start_file pid member member_start members
+        local start_file pid pid_start current_start member member_start members
         for start_file in "$BUNDLE_META/process-starts"/*; do
             [[ -f "$start_file" ]] || continue
             pid=${start_file##*/}
-            printf 'reap %s %q\n' "$pid" "$(<"$start_file")"
+            pid_start=$(<"$start_file")
+            printf 'reap %s %q\n' "$pid" "$pid_start"
+            current_start=$(ps -o lstart= -p "$pid" 2>/dev/null |
+                sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+            [[ -n "$current_start" && "$current_start" == "$pid_start" ]] || continue
             members=$(ps -axo pid=,pgid= 2>/dev/null | awk -v group="$pid" '$2 == group { print $1 }' || true)
             for member in $members; do
                 [[ "$member" != "$pid" ]] || continue
                 member_start=$(ps -o lstart= -p "$member" 2>/dev/null |
                     sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
                 [[ -n "$member_start" ]] || continue
+                # The recorded leader proves this is still our group. Re-check
+                # after observing the member so an exited leader and recycled
+                # PGID cannot turn an unrelated process into a trusted witness.
+                current_start=$(ps -o lstart= -p "$pid" 2>/dev/null |
+                    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+                [[ -n "$current_start" && "$current_start" == "$pid_start" ]] || continue
                 printf 'reap_group %s %s %q\n' "$pid" "$member" "$member_start"
             done
         done
@@ -750,12 +760,12 @@ _bundle_complete_qlogs() {
     while IFS= read -r -d '' file; do
         tmp="$file.complete"
         while IFS= read -r line; do
-            printf '%s\n' "$line"
-        done <"$file" >"$tmp"
+            printf '%s\n' "$line" || return 1
+        done <"$file" >"$tmp" || return 1
         if [[ -s "$tmp" ]]; then
-            mv "$tmp" "$file"
+            mv "$tmp" "$file" || return 1
         else
-            rm -f "$tmp" "$file"
+            rm -f "$tmp" "$file" || return 1
         fi
     done <"$list"
 }

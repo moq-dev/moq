@@ -191,6 +191,23 @@ else
     ok "a failed live snapshot exposes no partial capture"
 fi
 
+qlog_completion_failure_case() {
+    printf '\036{"time":1}\npartial' >"$BUNDLE_QLOG_LIVE/bad.sqlog"
+    printf '\036{"time":2}\n' >"$BUNDLE_QLOG_LIVE/good.sqlog"
+    mv() {
+        if [[ "$1" == *bad.sqlog.complete ]]; then
+            return 1
+        fi
+        command mv "$@"
+    }
+    bundle_finish 1
+}
+bundle=$(run_case qlog-completion-failure qlog_completion_failure_case)
+check "a failed qlog completion leaves an explicit marker" \
+    test -f "$bundle/qlog/SNAPSHOT-FAILED.txt"
+check "a later qlog cannot mask an earlier completion failure" \
+    test ! -f "$bundle/qlog/good.sqlog"
+
 split_secret_case() {
     printf 'Authorization: Bearer ' >"$BUNDLE_WORK/long-secret.log"
     head -c 1000 /dev/zero | tr '\0' x >>"$BUNDLE_WORK/long-secret.log"
@@ -360,17 +377,27 @@ while True:
     # teardown has to leave the current owner alone.
     bundle_process stranger "$$"
     printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$$"
-    mkfifo "$ROOT/wrapper-go"
+    mkfifo "$ROOT/wrapper-go" "$ROOT/wrapper-ready" "$ROOT/unowned-ready"
     set -m
-    bash -c 'sleep 120 & echo $! >"$1"; IFS= read -r _ <"$2"' _ "$ROOT/wrapper-child" "$ROOT/wrapper-go" &
+    bash -c 'sleep 120 & echo $! >"$1"; echo ready >"$3"; IFS= read -r _ <"$2"' \
+        _ "$ROOT/wrapper-child" "$ROOT/wrapper-go" "$ROOT/wrapper-ready" >/dev/null 2>&1 &
     wrapper=$!
     set +m
+    read -r _ <"$ROOT/wrapper-ready"
     bundle_process wrapper "$wrapper"
-    printf 'go\n' >"$ROOT/wrapper-go"
-    wait "$wrapper"
+    set -m
+    bash -c 'sleep 120 & echo $! >"$1"; echo ready >"$2"; wait' \
+        _ "$ROOT/unowned-child" "$ROOT/unowned-ready" >/dev/null 2>&1 &
+    unowned=$!
+    set +m
+    read -r _ <"$ROOT/unowned-ready"
+    bundle_process unowned "$unowned"
+    printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$unowned"
     printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
     printf '%s\n' "$wrapper" >"$BUNDLE_DIR/wrapper.pid"
     cp "$ROOT/wrapper-child" "$BUNDLE_DIR/wrapper-child.pid"
+    printf '%s\n' "$unowned" >"$BUNDLE_DIR/unowned.pid"
+    cp "$ROOT/unowned-child" "$BUNDLE_DIR/unowned-child.pid"
     bundle_finish 1
 }
 # `kill -0` is not "is it running": it succeeds on a zombie, and the case above
@@ -387,12 +414,16 @@ bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
 wrapper=$(<"$bundle/wrapper.pid")
 wrapper_child=$(<"$bundle/wrapper-child.pid")
+unowned=$(<"$bundle/unowned.pid")
+unowned_child=$(<"$bundle/unowned-child.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
     "$bundle/teardown.sh"
 check "surviving groups carry a member birth identity" \
     grep -q "reap_group $wrapper " "$bundle/teardown.sh"
+check "a group without a verified leader acquires no witness" sh -c \
+    '! grep -q "reap_group $1 " "$2"' _ "$unowned" "$bundle/teardown.sh"
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
@@ -433,16 +464,18 @@ if running "$mine"; then
     else
         ok "teardown reaps a surviving process group"
     fi
-    if grep -q 'killing verified member' <<<"$output"; then
-        ok "teardown verifies a surviving group before signaling it"
+    if grep -Eq 'killing verified member|recorded member .* is gone or reused' <<<"$output"; then
+        ok "teardown rechecks a surviving group witness"
     else
-        bad "teardown verifies a surviving group before signaling it"
+        bad "teardown rechecks a surviving group witness"
     fi
     if grep -q 'reused by another process' <<<"$output"; then
         ok "teardown skips a recycled pid"
     else
         bad "teardown skips a recycled pid"
     fi
+    kill -KILL -- -"$unowned" 2>/dev/null || true
+    wait "$unowned" 2>/dev/null || true
     kill -KILL "$mine" 2>/dev/null || true
 else
     bad "a retained session leaves its processes running"
