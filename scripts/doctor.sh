@@ -737,9 +737,34 @@ EOF
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
-    local id=$1 suites=$2 cargo=$3 status
+    local id=$1 suites=$2 cargo=$3 status relay_override=0
     [ "$id" != smoke ] || SMOKE_CARGO_TARGET_READY=0
-    if [ "$id" = wasm ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ "${CARGO_TARGET_DIR#/}" = "$CARGO_TARGET_DIR" ]; then
+    if [ "${CARGO_TARGET_DIR+x}" = x ] && [ -z "$CARGO_TARGET_DIR" ]; then
+        record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
+            "CARGO_TARGET_DIR is explicitly empty, which Cargo refuses" \
+            "unset CARGO_TARGET_DIR or set it to a non-empty path" 30 0
+        return
+    fi
+    if [ "$id" = wasm ] && [ -n "${RELAY_BIN:-}" ]; then
+        case $RELAY_BIN in
+            /*)
+                if [ ! -x "$RELAY_BIN" ] || [ -d "$RELAY_BIN" ]; then
+                    record "behavior.$id-artifact-layout" behavior missing true "$suites" \
+                        "RELAY_BIN is not an executable file: $RELAY_BIN" \
+                        "set RELAY_BIN to an executable absolute path" 30 0
+                    return
+                fi
+                relay_override=1
+                ;;
+            *)
+                record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
+                    "RELAY_BIN changes meaning after wasm changes directories: $RELAY_BIN" \
+                    "set RELAY_BIN to an executable absolute path" 30 0
+                return
+                ;;
+        esac
+    fi
+    if [ "$id" = wasm ] && [ "$relay_override" = 0 ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ "${CARGO_TARGET_DIR#/}" = "$CARGO_TARGET_DIR" ]; then
         record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
             "CARGO_TARGET_DIR is relative, but wasm resolves the relay after changing directories: $CARGO_TARGET_DIR" \
             "use an absolute CARGO_TARGET_DIR for wasm" 30 0
@@ -759,7 +784,7 @@ probe_harness_cargo_target() {
             "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
         return
     fi
-    if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ]; then
+    if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] && [ "$relay_override" = 0 ]; then
         record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
             "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but the harnesses read target directly" \
             "unset Cargo build.target for smoke and wasm, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
@@ -819,7 +844,7 @@ relative_command() {
         [ -n "$entry" ] || return 0
         case $entry in
             /*)
-                if [ -x "$entry/$1" ]; then
+                if [ -x "$entry/$1" ] && [ ! -d "$entry/$1" ]; then
                     return 1
                 fi
                 ;;
@@ -1006,7 +1031,14 @@ probe_nix() {
 # wasm32-unknown-unknown, so a rustup box passes this and then fails on the
 # first line of `just wasm`.
 probe_cargo_compile() {
-    local id=$1 suites=$2 target=$3 cargo=${RUST_CARGO:-cargo}
+    local id=$1 suites=$2 target=$3 cargo
+    cargo=${4:-${RUST_CARGO:-cargo}}
+    if [ "${CARGO_TARGET_DIR+x}" = x ] && [ -z "$CARGO_TARGET_DIR" ]; then
+        record "probe.$id" probe degraded true "$suites" \
+            "CARGO_TARGET_DIR is explicitly empty, which Cargo refuses" \
+            "unset CARGO_TARGET_DIR or set it to a non-empty path" 120 0
+        return
+    fi
     if ! command -v "$cargo" >/dev/null 2>&1; then
         record "probe.$id" probe missing true "$suites" "$cargo is not on PATH" \
             "install the Rust toolchain, or enter the dev shell: nix develop" 120 0
@@ -1690,6 +1722,9 @@ self_test() {
     check 'relative PATH before pkg-config is context dependent' "$?" 0
     PATH="$SCRATCH/missing:" relative_command pkg-config
     check 'trailing empty PATH is context dependent' "$?" 0
+    mkdir -p "$SCRATCH/pkg-config-dir/pkg-config"
+    PATH="$SCRATCH/pkg-config-dir:./later" relative_command pkg-config
+    check 'PATH ignores executable directories' "$?" 0
     relative_search_path '/absolute/one:/absolute/two'
     check 'absolute pkg-config search paths are stable' "$?" 1
     relative_search_path '/absolute:relative'
@@ -1719,6 +1754,14 @@ EOF
             printf '%s %s' "$CARGO_PROBE_TARGET" "$CARGO_PROBE_EXPLICIT_TARGET"
         )
         check 'configured Cargo wrapper selects the artifact target' "$configured_target" 'wasm32-unknown-unknown true'
+
+        RUST_CARGO=/no/such/wrapper probe_cargo_compile smoke-cargo smoke "" cargo
+        check 'smoke compile uses literal Cargo' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
+        CARGO_TARGET_DIR= probe_cargo_compile empty-target wasm ""
+        check 'empty Cargo target directory is refused' "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
+        CARGO_TARGET_DIR=relative RELAY_BIN="$(command -v env)" \
+            probe_harness_cargo_target wasm wasm cargo
+        check 'relay override permits relative Cargo target directory' "${R_STATUS[${#R_STATUS[@]} - 1]}" ok
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -1908,7 +1951,7 @@ elif [ -n "${IN_NIX_SHELL:-}" ]; then
 else
     SHELL_ID="host toolchain, not the dev shell"
 fi
-TARGET_DIR=${CARGO_TARGET_DIR:-$REPO/target}
+TARGET_DIR=${CARGO_TARGET_DIR-$REPO/target}
 
 probe_session
 
@@ -1964,6 +2007,16 @@ if ((RUST_SELECT_STATUS != 0)); then
     RUST_PACKAGES=""
 fi
 CARGO_SUITES=$(cargo_suites "$CHANGED" "$RUST_PACKAGES")
+CARGO_SMOKE_SUITES=""
+CARGO_RUST_SUITES=""
+for suite in $CARGO_SUITES; do
+    case $suite in
+        smoke | smoke-full) CARGO_SMOKE_SUITES="$CARGO_SMOKE_SUITES $suite" ;;
+        *) CARGO_RUST_SUITES="$CARGO_RUST_SUITES $suite" ;;
+    esac
+done
+CARGO_SMOKE_SUITES=${CARGO_SMOKE_SUITES# }
+CARGO_RUST_SUITES=${CARGO_RUST_SUITES# }
 
 # A successful narrow selection exercised the same awk behavior as this
 # fixture. A failed selection is already recorded above with its real output,
@@ -1978,7 +2031,15 @@ fi
 probe_writable scratch "${TMPDIR:-/tmp}" "$SUITES"
 
 if [ -n "$CARGO_SUITES" ]; then
-    probe_writable target "$TARGET_DIR" "$CARGO_SUITES"
+    if [ -z "$TARGET_DIR" ]; then
+        record storage.target storage degraded true "$CARGO_SUITES" \
+            "CARGO_TARGET_DIR is explicitly empty, which Cargo refuses" \
+            "unset CARGO_TARGET_DIR or set it to a non-empty path" 5 0
+        record storage.disk storage skip false "$CARGO_SUITES" "the Cargo target directory is malformed" "" 5 0
+    else
+        probe_writable target "$TARGET_DIR" "$CARGO_SUITES"
+        probe_disk "$TARGET_DIR" "$CARGO_SUITES"
+    fi
     if CARGO_HOME_DIR=$(cargo_home); then
         probe_writable cargo-home "$CARGO_HOME_DIR" "$CARGO_SUITES"
     else
@@ -1986,11 +2047,18 @@ if [ -n "$CARGO_SUITES" ]; then
             "neither CARGO_HOME nor HOME is set, so Cargo's cache location is unknown" \
             "set HOME or CARGO_HOME to a writable directory" 5 0
     fi
-    probe_disk "$TARGET_DIR" "$CARGO_SUITES"
-    probe_cargo_compile cargo-compile "$CARGO_SUITES" ""
 else
     record storage.target storage skip false "" "this scope compiles nothing" "" 5 0
-    record probe.cargo-compile probe skip false "" "this scope compiles nothing" "" 120 0
+fi
+if [ -n "$CARGO_RUST_SUITES" ]; then
+    probe_cargo_compile cargo-compile "$CARGO_RUST_SUITES" "" "${RUST_CARGO:-cargo}"
+else
+    record probe.cargo-compile probe skip false "" "no selected Rust recipe compiles for this scope" "" 120 0
+fi
+if [ -n "$CARGO_SMOKE_SUITES" ]; then
+    probe_cargo_compile cargo-smoke "$CARGO_SMOKE_SUITES" "" cargo
+else
+    record probe.cargo-smoke probe skip false "" "no selected Smoke suite compiles for this scope" "" 120 0
 fi
 
 # The subcommands each Rust suite invokes, charged to the suite that invokes
