@@ -1,9 +1,0 @@
-{
-	"name": "packaged-consumer",
-	"private": true,
-	"type": "module",
-	"description": "Fixture consumer for test/packaged. Installs candidate @moq tarballs outside the bun workspace.",
-	"dependencies": {
-		"@moq/web-transport": "0.1.4"
-	}
-}
