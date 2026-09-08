@@ -74,7 +74,9 @@ if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT + ${#FLAVOURS[@]} - 1 > 
 fi
 
 bundle_init wasm
-bundle_rerun just test wasm --timeout "$TIMEOUT"
+rerun_env=("WASM_PORT=$PORT" "WASM_PROFILE=$PROFILE")
+[[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
+bundle_rerun env "${rerun_env[@]}" just test wasm --timeout "$TIMEOUT"
 TMP="$BUNDLE_WORK"
 RELAY_PIDS=()
 
@@ -116,16 +118,23 @@ command -v wasm-bindgen >/dev/null 2>&1 || {
 echo "building @moq/wasm..."
 (cd "$WORKSPACE" && just wasm)
 
-echo "building moq-relay ($PROFILE)..."
-flag=()
-[[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
-# qlog is a cargo feature, so capturing traces means building a different relay.
-# Opt-in for that reason: it recompiles quinn with the qlog encoder, which a run
-# that is only going to pass has no use for.
-[[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
-(cd "$WORKSPACE" && "${RUST_CARGO:-cargo}" build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
-TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
-[[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
+if [[ -n "$RELAY" ]]; then
+    [[ -x "$RELAY" ]] || {
+        echo "error: RELAY_BIN is not executable: $RELAY" >&2
+        exit 1
+    }
+else
+    echo "building moq-relay ($PROFILE)..."
+    flag=()
+    [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
+    # qlog is a cargo feature, so capturing traces means building a different relay.
+    # Opt-in for that reason: it recompiles quinn with the qlog encoder, which a run
+    # that is only going to pass has no use for.
+    [[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
+    (cd "$WORKSPACE" && "${RUST_CARGO:-cargo}" build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
+    TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
+    RELAY="$TARGET_BASE/$PROFILE/moq-relay"
+fi
 # Which binary the stacks and logs below came out of: a backtrace is only as
 # useful as the symbols it can be matched against.
 bundle_binary moq-relay "$RELAY"

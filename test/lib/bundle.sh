@@ -93,13 +93,25 @@ _bundle_record() {
 bundle_init() {
     BUNDLE_HARNESS=$1
     local root="${MOQ_QA_ARTIFACTS:-$BUNDLE_WORKSPACE/target/qa}"
-    local knob value
+    local knob value expected
     for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX; do
         value=${!knob:-}
         if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
             echo "error: $knob must be a non-negative integer (got '$value')" >&2
             return 2
         fi
+    done
+    for knob in MOQ_QA_KEEP MOQ_QA_RETAIN MOQ_QA_QLOG MOQ_QA_STACKS; do
+        value=${!knob:-}
+        case "$knob:$value" in
+            MOQ_QA_STACKS: | MOQ_QA_STACKS:0 | MOQ_QA_STACKS:1 | *: | *:1) ;;
+            *)
+                expected="1 or unset"
+                [[ "$knob" != MOQ_QA_STACKS ]] || expected="0, 1, or unset"
+                echo "error: $knob must be $expected (got '$value')" >&2
+                return 2
+                ;;
+        esac
     done
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the
@@ -466,16 +478,29 @@ _bundle_sweep() {
         # second textual rewrite could remove printf %q escaping and make it
         # unparseable, leaving the retained processes alive.
         [[ "$file" == "$BUNDLE_DIR/teardown.sh" ]] && continue
-        if _bundle_is_text "$file"; then
-            # Byte-splicing structured metadata makes invalid JSON. Its fields
-            # are individually small, so keep the manifest whole.
-            if [[ "$file" != "$BUNDLE_DIR/manifest.json" ]]; then
-                ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
-            fi
-            _bundle_redact "$file" || withheld=$((withheld + 1))
-        else
-            ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
-        fi
+        case "$file" in
+            *.qlog | *.sqlog)
+                # qlog is structured JSON-SEQ. Cutting bytes through a record
+                # makes the entire trace unreadable, so keep it whole or omit
+                # it under the binary-file budget.
+                ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
+                if [[ -f "$file" ]]; then
+                    _bundle_redact "$file" || withheld=$((withheld + 1))
+                fi
+                ;;
+            *)
+                if _bundle_is_text "$file"; then
+                    # Byte-splicing structured metadata makes invalid JSON. Its
+                    # fields are individually small, so keep the manifest whole.
+                    if [[ "$file" != "$BUNDLE_DIR/manifest.json" ]]; then
+                        ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
+                    fi
+                    _bundle_redact "$file" || withheld=$((withheld + 1))
+                else
+                    ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
+                fi
+                ;;
+        esac
     done < <(find "$BUNDLE_DIR" -type f ! -path "$BUNDLE_META/*" -print0)
     # Named in the bundle as well as on stderr: the bundle is what travels, and
     # a reader has to be able to tell a withheld file from one that was clean.
@@ -605,7 +630,7 @@ PRELUDE
 # bundle_retained: true when the caller must leave its processes running.
 # Called from the harness cleanup so a retained session survives the trap.
 bundle_retained() {
-    [[ -n "${MOQ_QA_RETAIN:-}" ]]
+    [[ "${MOQ_QA_RETAIN:-}" == "1" ]]
 }
 
 # bundle_finish <status>: keep or drop the bundle, and say which.

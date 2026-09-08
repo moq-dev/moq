@@ -139,15 +139,15 @@ needs_js() {
     needs js || needs js-native-node || needs js-native-bun
 }
 
+rerun_env=("SMOKE_PROFILE=$PROFILE" "SMOKE_PORT=$PORT" "SMOKE_FPS=$FPS" "SMOKE_SIZE=$SIZE")
+[[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
+[[ -z "$MOQ" ]] || rerun_env+=("MOQ_BIN=$MOQ")
+[[ -z "$FAULT" ]] || rerun_env+=("MOQ_QA_FAULT=$FAULT")
 rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
 [[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
 [[ "$MEDIA" -eq 0 ]] || rerun+=(--media)
 bundle_init smoke
-if [[ -n "$FAULT" ]]; then
-    bundle_rerun env "MOQ_QA_FAULT=$FAULT" "${rerun[@]}"
-else
-    bundle_rerun "${rerun[@]}"
-fi
+bundle_rerun env "${rerun_env[@]}" "${rerun[@]}"
 [[ -z "$FAULT" ]] || bundle_note "fault injection: MOQ_QA_FAULT=$FAULT"
 
 # The harness scratch lives in the bundle, so the per-process logs, the relay
@@ -156,6 +156,7 @@ fi
 # recorded by identity below.
 TMP="$BUNDLE_WORK"
 RELAY_PID=""
+RELAY_FAILED=0
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_SMOKE=""        # compiled C client binary (set in prepare)
@@ -247,19 +248,31 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
-    local flag=()
+    local flag=() packages=()
+    if [[ -n "$RELAY" && ! -x "$RELAY" ]]; then
+        echo "error: RELAY_BIN is not executable: $RELAY" >&2
+        exit 1
+    fi
+    if [[ -n "$MOQ" && ! -x "$MOQ" ]]; then
+        echo "error: MOQ_BIN is not executable: $MOQ" >&2
+        exit 1
+    fi
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     # qlog is a cargo feature, so capturing traces means building a different
     # relay. Opt-in for that reason: it recompiles quinn with the qlog encoder,
     # which a run that is only going to pass has no use for.
     [[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
-    echo "building moq-relay + moq-cli ($PROFILE)..."
-    # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
-    # an empty (debug) array under `set -u`.
-    (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
-        echo "error: failed to build moq-relay / moq-cli" >&2
-        exit 1
-    }
+    [[ -n "$RELAY" ]] || packages+=(-p moq-relay)
+    [[ -n "$MOQ" ]] || packages+=(-p moq-cli)
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        echo "building workspace relay/CLI fixtures ($PROFILE)..."
+        # ${arr[@]+...} guards: bash 3.2 (macOS /bin/bash) errors on an empty
+        # array expansion under `set -u`.
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} "${packages[@]}") || {
+            echo "error: failed to build relay/CLI fixtures" >&2
+            exit 1
+        }
+    fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
     [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
@@ -668,6 +681,8 @@ run_round() {
         bundle_stack relay-fault "$RELAY_PID"
         kill -KILL "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
+        RELAY_PID=""
+        RELAY_FAILED=1
     fi
     # A publisher that streams forever should still be alive; if it died, the
     # subscriber failures below are a publisher bug, so surface its log.
@@ -792,7 +807,7 @@ fi
 # crash halfway through the matrix can be reported as a clean run. It is not
 # one: nothing after the crash was actually tested. Checked here rather than
 # per-cell, because it is a property of the run.
-if [[ -n "$RELAY_PID" ]] && ! kill -0 "$RELAY_PID" 2>/dev/null; then
+if [[ "$RELAY_FAILED" -eq 1 ]] || { [[ -n "$RELAY_PID" ]] && ! kill -0 "$RELAY_PID" 2>/dev/null; }; then
     echo "  FAIL  relay (exited during the matrix)"
     bundle_result relay fail "" "exited during the matrix"
     overall=1

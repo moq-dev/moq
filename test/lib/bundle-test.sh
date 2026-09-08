@@ -135,6 +135,17 @@ check "bounding keeps the tail" grep -q LAST-LINE "$bundle/work/huge.log"
 check "an oversized capture is dropped" test ! -f "$bundle/work/capture.bin"
 check "an oversized capture leaves its identity" test -f "$bundle/work/capture.bin.omitted"
 
+qlog_cap_case() {
+    local i
+    for ((i = 0; i < 20; i++)); do
+        printf '\036{"time":%d,"name":"transport:packet_sent"}\n' "$i"
+    done >"$BUNDLE_QLOG/relay.sqlog"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_LOG_CAP=128 MOQ_QA_FILE_CAP=8192 run_case qlog-cap qlog_cap_case)
+count=$(LC_ALL=C tr -cd '\036' <"$bundle/qlog/relay.sqlog" | wc -c | tr -d '[:space:]')
+check "qlog byte caps preserve complete JSON-SEQ records" test "$count" -eq 20
+
 manifest_cap_case() {
     bundle_note "the manifest must remain structured even below its own size"
     bundle_finish 1
@@ -168,6 +179,18 @@ else
     ok "a malformed stack cap is refused"
 fi
 check "a malformed stack cap retains no partial bundle" test ! -d "$ROOT/invalid-stack.d"
+
+if (
+    export MOQ_QA_ARTIFACTS="$ROOT/invalid-retain.d" MOQ_QA_RETAIN=0
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+) >/dev/null 2>&1; then
+    bad "a malformed retain toggle is refused"
+else
+    ok "a malformed retain toggle is refused"
+fi
+check "a malformed retain toggle retains no partial bundle" test ! -d "$ROOT/invalid-retain.d"
 
 # ── a hung process is described before it is killed ─────────────────────────
 # The stack itself may be unavailable (ptrace_scope, no debugger, a hardened
