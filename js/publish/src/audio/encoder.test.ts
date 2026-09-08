@@ -87,6 +87,8 @@ function installEncodingHarness(description: Uint8Array, pipeline = 0) {
 	let worklet: FakeAudioWorkletNode | undefined;
 	let audioEncoders = 0;
 	let encodeCalls = 0;
+	// Reports a fatal error from the newest encoder, the way a real codec failure arrives.
+	let fail: ((err: DOMException) => void) | undefined;
 
 	class FakePort extends EventTarget {
 		start(): void {}
@@ -163,6 +165,11 @@ function installEncodingHarness(description: Uint8Array, pipeline = 0) {
 		constructor(init: AudioEncoderInit) {
 			audioEncoders++;
 			this.#output = init.output;
+			fail = (err: DOMException) => {
+				this.#closed = true;
+				this.#inflight.length = 0;
+				init.error(err);
+			};
 		}
 
 		configure(_config: AudioEncoderConfig): void {}
@@ -234,6 +241,10 @@ function installEncodingHarness(description: Uint8Array, pipeline = 0) {
 		},
 		get encodeCalls() {
 			return encodeCalls;
+		},
+		fail(err: DOMException) {
+			if (!fail) throw new Error("no encoder to fail");
+			fail(err);
 		},
 		[Symbol.dispose]() {
 			for (const [name, original] of originals) {
@@ -403,13 +414,16 @@ const FRAME_MICROS = (OPUS_FRAME_SAMPLES / SAMPLE_RATE) * 1_000_000;
 function encoding(pipeline: number) {
 	const harness = installEncodingHarness(OPUS_DESCRIPTION, pipeline);
 	const written: number[] = [];
+	const closed: (Error | undefined)[] = [];
 
 	const newTrack = () =>
 		({
 			writeFrame: (frame: { timestamp: { as(scale: number): number } }) => {
 				written.push(frame.timestamp.as(1_000_000));
 			},
-			close: () => {},
+			close: (err?: Error) => {
+				closed.push(err);
+			},
 		}) as unknown as never;
 
 	const track = new Signal<unknown>(undefined);
@@ -437,6 +451,7 @@ function encoding(pipeline: number) {
 		harness,
 		encoder,
 		written,
+		closed,
 		quanta,
 		// The capture timestamp the next quantum carries.
 		now: () => timestamp,
@@ -535,4 +550,45 @@ test("does not encode without a subscriber, and resumes on the capture clock", a
 	expect(session.written[0]).toBe(origin + 20 * FRAME_MICROS);
 	expect(contiguous(session.written)).toBe(true);
 	expect(session.harness.audioEncoders).toBe(1);
+});
+
+// A fatal AudioEncoder error kills that codec instance, and reconfiguring it would be a retry. The
+// pipeline no longer watches the track producer, so the failure has to be held: without it a later
+// subscription would install a producer that nothing ever encodes into, with out.active true.
+test("stays down after a fatal encoder error and closes later subscribers with it", async () => {
+	using session = encoding(1);
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	session.subscribe();
+	await settle();
+
+	session.quanta(1);
+	await settle();
+
+	session.quanta(155);
+	await settle();
+	expect(session.written.length).toBeGreaterThan(0);
+	expect(session.encoder.out.active.peek()).toBe(true);
+
+	const fatal = new DOMException("codec died", "EncodingError");
+	session.harness.fail(fatal);
+	await settle();
+
+	expect(session.closed).toEqual([fatal]);
+	expect(session.encoder.out.active.peek()).toBe(false);
+
+	// A later subscription must not silently sit on a track nothing encodes into.
+	const before = session.written.length;
+	session.subscribe();
+	await settle();
+
+	session.quanta(155);
+	await settle();
+
+	expect(session.written.length).toBe(before);
+	expect(session.closed).toEqual([fatal, fatal]);
+	expect(session.encoder.out.active.peek()).toBe(false);
+	expect(session.harness.audioEncoders).toBe(1);
+	expect(error).toHaveBeenCalled();
+	error.mockRestore();
 });

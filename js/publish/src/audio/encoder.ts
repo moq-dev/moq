@@ -152,6 +152,10 @@ export class Encoder {
 
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 
+	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
+	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
+	#fatal = new Signal<Error | undefined>(undefined);
+
 	// The tail of the capture graph, typed for the gain ramps in #runGain. #out.root is the
 	// same node, widened for consumers.
 	#gain = new Signal<GainNode | undefined>(undefined);
@@ -202,7 +206,8 @@ export class Encoder {
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const worklet = effect.get(this.#worklet);
-			if (!enabled || !worklet) return;
+			const fatal = effect.get(this.#fatal);
+			if (!enabled || !worklet || fatal) return;
 
 			this.#encode(rendition.track, worklet, effect);
 		});
@@ -211,7 +216,13 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const worklet = effect.get(this.#worklet);
 			const track = effect.get(rendition.track);
-			effect.set(this.#out.active, enabled && !!worklet && !!track, false);
+			const fatal = effect.get(this.#fatal);
+
+			// A dead encoder can't serve anyone, so the current subscriber and every later one get
+			// the real error rather than a track that stays silent.
+			if (fatal) track?.close(fatal);
+
+			effect.set(this.#out.active, enabled && !!worklet && !!track && !fatal, false);
 		});
 	}
 
@@ -405,7 +416,7 @@ export class Encoder {
 	}
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
-	// track's lifetime, so this only aborts it on a fatal encoder error, never on teardown.
+	// track's lifetime, so this never closes it; a fatal encoder error is reported through #fatal.
 	#encode(track: Getter<Moq.Track.Producer | undefined>, worklet: AudioWorkletNode, effect: Effect): void {
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
@@ -442,7 +453,9 @@ export class Encoder {
 					},
 					error: (err) => {
 						console.error("encoder error", err);
-						track.peek()?.close(err);
+						// #runRegister owns the abort, so the current producer and every later one
+						// are closed with this in one place.
+						this.#fatal.set(err);
 					},
 				});
 				effect.cleanup(() => encoder.close());
