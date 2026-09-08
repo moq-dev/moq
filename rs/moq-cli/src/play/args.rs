@@ -71,6 +71,13 @@ impl Args {
 			!matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
 			"`play` cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
 		);
+		// The delay is the speaker's ring depth, so a value it cannot hold is
+		// refused here rather than after the pipeline has opened a device.
+		let max = moq_audio::playback::Input::LATENCY_MAX;
+		anyhow::ensure!(
+			self.delay.into_std() <= max,
+			"--delay must be at most {max:?}; it is the depth the speaker buffers"
+		);
 		Ok(())
 	}
 }

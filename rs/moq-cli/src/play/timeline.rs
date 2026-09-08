@@ -40,11 +40,18 @@ impl Presentation {
 		}
 	}
 
-	/// Fold an arriving video frame into the anchor, unless the speaker owns it.
-	pub(super) fn video(&mut self, timestamp: Timestamp, now: Instant) {
-		if !self.speaker {
-			self.pacer.pace(timestamp, now);
+	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
+	/// reporting whether that moved the schedule.
+	///
+	/// A move makes every queued frame due earlier, so the window has to recompute
+	/// the deadline it is already asleep on.
+	pub(super) fn video(&mut self, timestamp: Timestamp, now: Instant) -> bool {
+		if self.speaker {
+			return false;
 		}
+
+		let before = self.pacer.due(timestamp);
+		before != Some(self.pacer.pace(timestamp, now))
 	}
 
 	/// Fold the speaker's position into the anchor, reporting whether that moved
@@ -188,20 +195,21 @@ mod tests {
 		let start = Instant::now();
 		let mut presentation = Presentation::new(DELAY);
 
-		// Produced 500ms ago, though nothing here knows that yet.
-		presentation.video(ms(0), start);
+		// Produced 500ms ago, though nothing here knows that yet. The window is
+		// asleep on the deadline the anchor last gave it, so every move is reported.
+		assert!(presentation.video(ms(0), start), "the first anchor");
 		assert_eq!(presentation.due(ms(0)), Some(start + DELAY));
 
 		// 40ms of media later, but only 20ms of wall clock: the anchor was 480ms
 		// behind live, so it moves onto this frame.
 		let now = start + Duration::from_millis(20);
-		presentation.video(ms(40), now);
+		assert!(presentation.video(ms(40), now), "an early frame left the anchor alone");
 		assert_eq!(presentation.due(ms(40)), Some(now + DELAY));
 
 		// A frame that merely arrives late keeps its media instant. The delay is
 		// the room it has to be late in.
 		let late = now + Duration::from_millis(70);
-		presentation.video(ms(80), late);
+		assert!(!presentation.video(ms(80), late), "a late arrival moved the anchor");
 		assert_eq!(presentation.due(ms(80)), Some(now + Duration::from_millis(140)));
 	}
 

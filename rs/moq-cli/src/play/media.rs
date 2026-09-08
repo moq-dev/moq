@@ -226,8 +226,13 @@ async fn play_video(
 ) -> anyhow::Result<()> {
 	while let Some(frame) = consumer.read().await? {
 		// Fold the arrival into the playout clock before queueing it, so the window
-		// always has a deadline for whatever it finds in the queue.
-		presentation.lock().unwrap().video(frame.timestamp, Instant::now());
+		// always has a deadline for whatever it finds in the queue. A move has to
+		// wake it before the wait below, not after: the window is asleep on the old
+		// anchor's deadline, and it is the only thing that drains the queue this
+		// task is about to block on.
+		if presentation.lock().unwrap().video(frame.timestamp, Instant::now()) {
+			let _ = proxy.send_event(Event::Wake);
+		}
 
 		// Wait for room rather than dropping the oldest. Audio is paced to real
 		// time, so during a catch-up burst the frames at the front are still ahead

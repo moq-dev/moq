@@ -20,10 +20,6 @@ use crate::{Error, Format};
 /// being audible as delay.
 const LATENCY: Duration = Duration::from_millis(50);
 
-/// The longest buffer a caller may ask for. Well past any playout delay worth
-/// presenting, and it bounds the ring the device thread walks.
-const LATENCY_MAX: Duration = Duration::from_secs(10);
-
 /// Headroom above [`Input::latency`]. A writer that runs ahead (a decoder
 /// catching up after a pause) parks samples here instead of losing them.
 const HEADROOM: f64 = 3.0;
@@ -72,6 +68,12 @@ impl Default for Input {
 }
 
 impl Input {
+	/// The longest [`latency`](Self::latency) a sink accepts. Well past any
+	/// playout delay worth presenting, and it bounds the ring the device thread
+	/// walks. Public so a caller taking the depth from its own configuration can
+	/// refuse an impossible one before it opens a device.
+	pub const LATENCY_MAX: Duration = Duration::from_secs(10);
+
 	fn validate(&self) -> Result<(), Error> {
 		if self.sample_rate == 0 {
 			return Err(Error::Unsupported("sample rate must be > 0".into()));
@@ -82,9 +84,10 @@ impl Input {
 				self.channels
 			)));
 		}
-		if self.latency.is_zero() || self.latency > LATENCY_MAX {
+		if self.latency.is_zero() || self.latency > Self::LATENCY_MAX {
 			return Err(Error::Unsupported(format!(
-				"playback latency must be non-zero and at most {LATENCY_MAX:?} (got {:?})",
+				"playback latency must be non-zero and at most {:?} (got {:?})",
+				Self::LATENCY_MAX,
 				self.latency
 			)));
 		}
@@ -387,7 +390,7 @@ mod tests {
 	/// device could ever drain is a delay nobody asked for.
 	#[test]
 	fn rejects_a_latency_it_cannot_buffer() {
-		for latency in [Duration::ZERO, LATENCY_MAX + Duration::from_secs(1)] {
+		for latency in [Duration::ZERO, Input::LATENCY_MAX + Duration::from_secs(1)] {
 			let input = Input {
 				latency,
 				..Default::default()
@@ -396,7 +399,7 @@ mod tests {
 		}
 
 		Input {
-			latency: LATENCY_MAX,
+			latency: Input::LATENCY_MAX,
 			..Default::default()
 		}
 		.validate()

@@ -11,11 +11,11 @@
 //! use moq_audio::playback;
 //!
 //! let engine = playback::Engine::open(playback::Config::default()).await?;
-//! let mut sink = engine.sink(playback::Input {
-//!     sample_rate: audio.sample_rate(),
-//!     channels: audio.channels(),
-//!     ..Default::default()
-//! })?;
+//! let mut input = playback::Input::default();
+//! input.sample_rate = audio.sample_rate();
+//! input.channels = audio.channels();
+//!
+//! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(frame) = audio.read().await? {
 //!     sink.write(&frame.data)?;
