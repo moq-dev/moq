@@ -376,15 +376,24 @@ literal_cargo_suites() {
 
 # Go and Kotlin build with configured Cargo, then locate the result with
 # literal Cargo metadata and an unqualified host layout.
-binding_cargo_suites() {
-    local changed=$1 out=""
-    out=$(selected smoke-full)
-    if [ -n "$(selected check)" ] && {
-        [ "$changed" = ALL ] || printf '%s\n' "$changed" | grep -qE '^(go/|kt/|rs/moq-ffi/)'
-    }; then
-        out="$out check"
+go_binding_cargo_suites() {
+    local changed=$1
+    [ -n "$(selected check)" ] || return
+    if [ "$changed" = ALL ] || printf '%s\n' "$changed" | grep -qE '^(go/|rs/moq-ffi/)'; then
+        printf 'check\n'
     fi
-    printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+kotlin_binding_cargo_suites() {
+    local changed=$1
+    [ -n "$(selected check)" ] || return
+    if [ "$changed" = ALL ] || printf '%s\n' "$changed" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+        printf 'check\n'
+    fi
+}
+
+smoke_binding_cargo_suites() {
+    selected smoke-full
 }
 
 # Dart always reads target/<host>/release below the workspace.
@@ -815,6 +824,25 @@ effective_cargo_target_dir() {
     [ -n "$CARGO_EFFECTIVE_TARGET_DIR" ]
 }
 
+# Lexically normalize an absolute path without requiring its final directories
+# to exist. Cargo metadata preserves harmless trailing and parent components.
+normalize_absolute_path() {
+    local rest=$1 out="" part
+    [ "${rest#/}" != "$rest" ] || return 1
+    while [ -n "$rest" ]; do
+        rest=${rest#/}
+        [ -n "$rest" ] || break
+        part=${rest%%/*}
+        if [ "$part" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+        case $part in
+            "" | .) ;;
+            ..) out=${out%/*} ;;
+            *) out=$out/$part ;;
+        esac
+    done
+    printf '%s\n' "${out:-/}"
+}
+
 # True when an override resolves to an executable file from the same working
 # directory as its harness. Relative Smoke overrides are interpreted from test/.
 executable_override() {
@@ -836,7 +864,8 @@ executable_override() {
 # The harnesses read artifacts from target/{debug,release}; any explicit Cargo
 # target writes them below target/<triple>/ instead, even for HOST.
 probe_harness_cargo_target() {
-    local id=$1 suites=$2 cargo=$3 action=${4:-build} status relay_override=0 layout_suites=$2
+    local id=$1 suites=$2 cargo=$3 action=${4:-build} cargo_dir=${5:-$REPO}
+    local status relay_override=0 layout_suites=$2
     [ "$id" != smoke ] || SMOKE_CARGO_TARGET_READY=0
     if [ "${CARGO_TARGET_DIR+x}" = x ] && [ -z "$CARGO_TARGET_DIR" ]; then
         record "behavior.$id-artifact-layout" behavior degraded true "$suites" \
@@ -905,7 +934,7 @@ probe_harness_cargo_target() {
             "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
         return
     fi
-    cargo_targets "$cargo" "" "$REPO" "$action"
+    cargo_targets "$cargo" "" "$cargo_dir" "$action"
     status=$?
     if ((status != 0)); then
         record "behavior.$id-artifact-layout" behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
@@ -1681,14 +1710,16 @@ self_test_ownership() {
     check 'Python Cargo target context follows its selected scope' \
         "$(python_cargo_suites 'py/moq-rs/src/lib.py')" 'check test'
     check 'Go uses the mixed Cargo artifact layout' \
-        "$(binding_cargo_suites 'go/wrapper/moq/lib.go')" check
+        "$(go_binding_cargo_suites 'go/wrapper/moq/lib.go')" check
+    check 'Kotlin uses the mixed Cargo artifact layout' \
+        "$(kotlin_binding_cargo_suites 'kt/moq/src/main.kt')" check
     check 'Dart uses its fixed artifact layout' \
         "$(dart_cargo_suites 'dart/moq/lib.dart')" check
     SUITES=smoke-full
     check 'smoke-full compiles Go with configured Cargo' \
         "$(rust_cargo_suites 'doc/a.md' '')" smoke-full
     check 'smoke-full validates the mixed binding layout' \
-        "$(binding_cargo_suites 'doc/a.md')" smoke-full
+        "$(smoke_binding_cargo_suites)" smoke-full
     SUITES="check test"
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
@@ -1957,6 +1988,9 @@ EOF
         probe_harness_cargo_target bindings check "$SCRATCH/cargo-build-wrapper"
         check 'binding layout uses the build subcommand' \
             "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
+        probe_harness_cargo_target caller-dir check cargo build "$SCRATCH/cargo-config"
+        check 'binding layout uses the caller working directory' \
+            "${R_STATUS[${#R_STATUS[@]} - 1]}" degraded
 
         mkdir -p "$SCRATCH/dart-cargo-home"
         cat >"$SCRATCH/dart-cargo-home/config.toml" <<EOF
@@ -1967,6 +2001,8 @@ EOF
             effective_cargo_target_dir cargo "$REPO/dart" "$REPO/Cargo.toml"
         check 'Dart target probe reads Cargo configuration' \
             "$CARGO_EFFECTIVE_TARGET_DIR" "$SCRATCH/dart-target"
+        check 'equivalent Cargo target paths normalize equally' \
+            "$(normalize_absolute_path "$REPO/target/../target/")" "$REPO/target"
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -2199,12 +2235,23 @@ else
     record behavior.wasm-artifact-layout behavior skip false "" "wasm is not selected" "" 30 0
 fi
 
-BINDING_CARGO_SUITES=$(binding_cargo_suites "$CHANGED")
-if [ -n "$BINDING_CARGO_SUITES" ]; then
-    probe_harness_cargo_target bindings "$BINDING_CARGO_SUITES" "${RUST_CARGO:-cargo}"
+GO_BINDING_CARGO_SUITES=$(go_binding_cargo_suites "$CHANGED")
+if [ -n "$GO_BINDING_CARGO_SUITES" ]; then
+    probe_harness_cargo_target go-bindings "$GO_BINDING_CARGO_SUITES" "${RUST_CARGO:-cargo}" build "$REPO/go"
 else
-    record behavior.bindings-artifact-layout behavior skip false "" \
-        "no selected Go or Kotlin build combines configured Cargo with literal metadata" "" 30 0
+    record behavior.go-bindings-artifact-layout behavior skip false "" "no Go binding check is selected" "" 30 0
+fi
+KOTLIN_BINDING_CARGO_SUITES=$(kotlin_binding_cargo_suites "$CHANGED")
+if [ -n "$KOTLIN_BINDING_CARGO_SUITES" ]; then
+    probe_harness_cargo_target kotlin-bindings "$KOTLIN_BINDING_CARGO_SUITES" "${RUST_CARGO:-cargo}" build "$REPO/kt"
+else
+    record behavior.kotlin-bindings-artifact-layout behavior skip false "" "no Kotlin binding check is selected" "" 30 0
+fi
+SMOKE_BINDING_CARGO_SUITES=$(smoke_binding_cargo_suites)
+if [ -n "$SMOKE_BINDING_CARGO_SUITES" ]; then
+    probe_harness_cargo_target smoke-go-bindings "$SMOKE_BINDING_CARGO_SUITES" "${RUST_CARGO:-cargo}" build "$REPO/test"
+else
+    record behavior.smoke-go-bindings-artifact-layout behavior skip false "" "smoke-full is not selected" "" 30 0
 fi
 
 DART_CARGO_SUITES=$(dart_cargo_suites "$CHANGED")
@@ -2221,7 +2268,7 @@ else
         record behavior.dart-artifact-layout behavior "$(classify "$DART_TARGET_STATUS" "$BOUNDED_OUT")" true "$DART_CARGO_SUITES" \
             "cargo could not resolve Dart's target directory: $(error_line "$BOUNDED_OUT")" \
             "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
-    elif [ "$CARGO_EFFECTIVE_TARGET_DIR" != "$REPO/target" ]; then
+    elif [ "$(normalize_absolute_path "$CARGO_EFFECTIVE_TARGET_DIR")" != "$(normalize_absolute_path "$REPO/target")" ]; then
         record behavior.dart-artifact-layout behavior degraded true "$DART_CARGO_SUITES" \
             "Dart reads $REPO/target/<host>/release, but Cargo targets $CARGO_EFFECTIVE_TARGET_DIR" \
             "configure Cargo's target directory as $REPO/target for Dart checks" 30 "$BOUNDED_ELAPSED"
