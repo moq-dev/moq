@@ -42,4 +42,3 @@ is available, split that rollout into an explicit externally blocked follow-up.
 - [Video hardware validation](/quest/m3/video-hardware.md) - owns real encoder/capture/zero-copy verdicts
 - [Dart on iOS](/quest/m2/mobile/dart-ios.md) - owns simulator/device packaging validation
 - [Transport failure drills](/quest/m0/transport-failure-drills.md) - consumes the Linux runner
-- [Merge evidence](/quest/m0/merge-verification-evidence.md) - binds remote results to the reviewed source

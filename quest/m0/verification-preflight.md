@@ -53,4 +53,3 @@ mechanism; verify the installed app's generated configuration when implementing.
 ## Related
 
 - [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - owns shared Git metadata and test resource lifecycle
-- [Merge evidence](/quest/m0/merge-verification-evidence.md) - records unavailable checks alongside executed results

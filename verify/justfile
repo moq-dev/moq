@@ -1,0 +1,58 @@
+#!/usr/bin/env just --justfile
+#
+# Receipts for the merge candidate. Each recipe here runs an existing recipe
+# unchanged and records what that run covered; none of them decide what to run,
+# and none of them merge. See verify/README.md.
+
+set fallback
+
+# Lint and compile what the branch changed since BASE. Static evidence: nothing ran.
+check BASE="":
+    {{ source_directory() }}/verify.sh record static check "{{ BASE }}" -- just check "{{ BASE }}"
+
+# Unit tests for what the branch changed since BASE, built from this checkout.
+test BASE="":
+    {{ source_directory() }}/verify.sh record local test "{{ BASE }}" -- just test default "{{ BASE }}"
+
+# Cross-language media interop, built from this checkout unless RELAY_BIN/MOQ_BIN override it.
+smoke *args:
+    {{ source_directory() }}/verify.sh record local smoke "" -- just test smoke {{ args }}
+
+# The full interop matrix, same binary rules as `smoke`.
+smoke-full:
+    {{ source_directory() }}/verify.sh record local smoke-full "" -- just test smoke-full
+
+# The @moq/wasm bindings in headless Chromium against a real relay.
+wasm *args:
+    {{ source_directory() }}/verify.sh record local wasm "" -- just test wasm {{ args }}
+
+# MPEG-TS output conformance through a relay.
+ts *args:
+    {{ source_directory() }}/verify.sh record local ts "" -- just test ts {{ args }}
+
+# Record a run this repository cannot drive itself, e.g. on a phone or a
+# capture device: `just verify record hardware android-pixel8 -- ./run.sh`.
+record KIND LANE +COMMAND:
+    {{ source_directory() }}/verify.sh record "{{ KIND }}" "{{ LANE }}" "" -- {{ COMMAND }}
+
+# Re-grade every stored receipt against the tree as it is right now.
+status *args:
+    {{ source_directory() }}/verify.sh status {{ args }}
+
+# Read-only: the pull request's head, base freshness, required checks, and reviews.
+pr *args:
+    {{ source_directory() }}/verify.sh pr {{ args }}
+
+# The merge-candidate record: local receipts joined to the pull request.
+report *args:
+    {{ source_directory() }}/verify.sh report {{ args }}
+
+# Forget the recorded evidence for this worktree.
+clean:
+    rm -rf {{ source_directory() }}/../.verify
+
+# Check that a recorded pass stops being one when its source, head, or base
+# moves, and that an absent or cancelled required result is never green.
+[private]
+_test:
+    {{ source_directory() }}/verify.test.sh

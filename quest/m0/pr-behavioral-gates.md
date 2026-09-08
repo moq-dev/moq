@@ -47,5 +47,4 @@ the remaining nightly-only coverage in CONTRIBUTING.
 
 ## Related
 
-- [Merge evidence](/quest/m0/merge-verification-evidence.md) - checks freshness and completeness of selected results
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - supplies execution where hosted compile gates cannot

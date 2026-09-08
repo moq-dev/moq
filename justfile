@@ -19,6 +19,8 @@ mod dart
 mod obs 'cpp/obs'
 # Unit tests per language (`just test`).
 mod test
+# Receipts binding local, CI, and device results to this merge candidate.
+mod verify
 # Demos and infra.
 mod demo
 mod infra
@@ -313,6 +315,11 @@ check $BASE="":
         if echo "$files" | grep -qE '^(quest/|rs/quest/)'; then
             cargo run --quiet --locked --package quest -- check
         fi
+        # A receipt wrapper that always reported "pass" would look exactly like
+        # a working one, so its own regression test is the gate.
+        if echo "$files" | grep -q '^verify/'; then
+            just verify _test
+        fi
         just py check "$files"
         just kt check "$files"
         just swift check "$files"
@@ -353,6 +360,7 @@ check-all *args:
     just js check
     just rs check --workspace {{ args }}
     cargo run --quiet --locked --package quest -- check
+    just verify _test
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
     just py check

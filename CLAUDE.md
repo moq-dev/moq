@@ -30,6 +30,8 @@ Top-level only. Read the area-specific `CLAUDE.md` where one exists before worki
 - `/cpp/` - C/C++ consumers of `libmoq`, including the OBS plugin.
 - `/demo/` - demos and test media. `just dev` runs a local relay, publisher, and web UI.
 - `/test/` - harnesses that span languages or need a server (`just test smoke`).
+- `/verify/` - receipts binding local, CI, and device results to a merge
+  candidate. See `verify/README.md`.
 - `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
 - `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
 - `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.
