@@ -2064,7 +2064,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		self.flush(run_start, pending.pts, index, sample_rate)?;
+		self.burst(run_start, pending.pts, index, sample_rate)?;
 		Ok(index > 0)
 	}
 
@@ -2074,7 +2074,7 @@ impl<E: CatalogExt> AacStream<E> {
 	/// the burst the catalog would advertise the 23 ms frame the estimator sees between writes, and
 	/// the player would under-buffer and stutter between bursts. The burst is the PTS span from the
 	/// start of the current audio run to this PES's last frame.
-	fn flush(
+	fn burst(
 		&mut self,
 		run_start: Option<u64>,
 		pes_pts: Option<u64>,
@@ -2097,7 +2097,7 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 
 		if let Some(import) = &mut self.import {
-			import.flush(Timestamp::from_scale(span, 90_000)?);
+			import.burst(Timestamp::from_scale(span, 90_000)?);
 		}
 		Ok(())
 	}

@@ -123,8 +123,8 @@ impl Estimator {
 	/// makes its consumer wait that long between flushes no matter how tightly the frames inside
 	/// are spaced. Only the source's structure says so, so the container importer reads it off the
 	/// fragment or packet it just unpacked; arrival timing never enters it.
-	pub fn flush(&mut self, span: Timestamp) {
-		self.jitter.flush(span);
+	pub fn burst(&mut self, span: Timestamp) {
+		self.jitter.burst(span);
 	}
 
 	/// Everything measured so far. Hand it to
@@ -246,7 +246,7 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 /// ready and the publisher flushing it, so a player sizes its buffer to at least this much.
 ///
 /// Three things contribute, and the reported value is the largest ever seen:
-/// - the flush span (see [`Estimator::flush`]), how much media one synchronous burst covers,
+/// - the burst span (see [`Estimator::burst`]), how much media one synchronous flush covers,
 /// - the reorder delay (`max(PTS - DTS)`), non-zero only for reordered (B-frame) streams and
 ///   which a transmuxer also reuses as the decode-clock reserve, and
 /// - the steady inter-frame spacing, the floor for a track that flushes each frame on its own.
@@ -293,7 +293,7 @@ impl Jitter {
 		self.max = self.max.max(Duration::from(delay));
 	}
 
-	fn flush(&mut self, span: Timestamp) {
+	fn burst(&mut self, span: Timestamp) {
 		self.max = self.max.max(Duration::from(span));
 	}
 
@@ -335,7 +335,7 @@ mod tests {
 	/// The publish burst is the whole point of the field: a track whose frames are 23 ms apart but
 	/// which arrive seven at a time makes its consumer wait for the burst, not for one frame.
 	#[test]
-	fn flush_span_wins_over_frame_spacing() {
+	fn burst_span_wins_over_frame_spacing() {
 		let mut estimator = Estimator::new();
 
 		for i in 0..7u64 {
@@ -343,25 +343,25 @@ mod tests {
 		}
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(23)));
 
-		estimator.flush(micros(161_000));
+		estimator.burst(micros(161_000));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(161)));
 
 		// A later, smaller burst doesn't walk it back: the publisher can burst again.
-		estimator.flush(micros(23_000));
+		estimator.burst(micros(23_000));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(161)));
 	}
 
 	/// A fragmented source whose fragments shrink keeps the span it already advertised, and a
 	/// degenerate fragment (every sample on one timestamp) can never drag it to zero.
 	#[test]
-	fn flush_span_never_shrinks() {
+	fn burst_span_never_shrinks() {
 		let mut estimator = Estimator::new();
 
-		estimator.flush(micros(2_000_000));
+		estimator.burst(micros(2_000_000));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_secs(2)));
 
-		estimator.flush(micros(0));
-		estimator.flush(micros(23_000));
+		estimator.burst(micros(0));
+		estimator.burst(micros(23_000));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_secs(2)));
 	}
 

@@ -103,8 +103,8 @@ impl<C: Container> Producer<C> {
 	/// Like [`reorder`](Self::reorder), the writes alone can't reveal this: a caller that unpacked a
 	/// fragment or a PES packet knows the frames went out together, and the timestamps inside only
 	/// say how tightly they are spaced.
-	pub fn flush(&mut self, span: moq_net::Timestamp) {
-		self.estimator.flush(span);
+	pub fn burst(&mut self, span: moq_net::Timestamp) {
+		self.estimator.burst(span);
 	}
 
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open

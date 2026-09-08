@@ -59,8 +59,8 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// The TS importer cuts every ADTS frame of a PES into its own group in one pass, so the
 	/// catalog jitter has to describe the PES rather than the 23 ms frames inside it.
-	pub(crate) fn flush(&mut self, span: moq_net::Timestamp) {
-		self.track.flush(span);
+	pub(crate) fn burst(&mut self, span: moq_net::Timestamp) {
+		self.track.burst(span);
 		self.estimate();
 	}
 

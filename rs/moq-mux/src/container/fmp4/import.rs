@@ -997,7 +997,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// All three share the track timescale (min/max are this fragment's frame
 				// timestamps, min_duration is derived from them).
 				let span = max.checked_sub(min)?.checked_add(min_duration)?;
-				track.estimator.flush(span);
+				track.estimator.burst(span);
 			}
 
 			track.rendition.estimate(track.estimator.estimate());
