@@ -23,6 +23,15 @@ replace_env=${MOQ_SESSION_ENV_REPLACE:-}
 output_file=$env_file
 log=""
 
+setup_error() {
+    printf 'moq session setup: failed (%s)\n' "$1" >&2
+    if [ -n "$replace_env" ] && [ -n "$output_file" ]; then
+        trap - EXIT
+        rm -f "$output_file" 2>/dev/null || true
+    fi
+    exit 1
+}
+
 # Quote a value for the env file, which is sourced. A checkout path with a space
 # would otherwise become two words, and the second one a command.
 shell_quote() {
@@ -34,10 +43,12 @@ shell_quote() {
 finish() {
     local result=$1 detail=$2
     if [ -n "$output_file" ]; then
-        printf 'export MOQ_SESSION_SETUP=%s\n' "$(shell_quote "$result")" >>"$output_file"
-        printf 'export MOQ_SESSION_SETUP_LOG=%s\n' "$(shell_quote "${log:-none}")" >>"$output_file"
+        {
+            printf 'export MOQ_SESSION_SETUP=%s\n' "$(shell_quote "$result")"
+            printf 'export MOQ_SESSION_SETUP_LOG=%s\n' "$(shell_quote "${log:-none}")"
+        } >>"$output_file" || setup_error "cannot write $output_file"
         if [ -n "$replace_env" ]; then
-            mv "$output_file" "$env_file"
+            mv "$output_file" "$env_file" || setup_error "cannot replace $env_file"
             trap - EXIT
         fi
     fi
@@ -56,10 +67,10 @@ project_dir="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-${PWD:-}}}"
 cd "$project_dir" || finish host "cannot enter $project_dir"
 
 if [ -n "$replace_env" ]; then
-    mkdir -p "$PWD/.direnv"
+    mkdir -p "$PWD/.direnv" || setup_error "cannot create $PWD/.direnv"
     output_file="$env_file.tmp.$$"
     trap 'rm -f "$output_file"' EXIT
-    : >"$output_file"
+    : >"$output_file" || setup_error "cannot create $output_file"
 fi
 
 command -v direnv >/dev/null 2>&1 || finish host "direnv is not installed"
@@ -83,7 +94,7 @@ if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
     if nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
         >"$nix_env" 2>>"$log"; then
-        cat "$nix_env" >>"$output_file"
+        cat "$nix_env" >>"$output_file" || setup_error "cannot write $output_file"
         rm -f "$nix_env"
         finish nix-dev-env "flake dev shell exported"
     fi
@@ -107,7 +118,7 @@ fi
 # An export that produced nothing left the session on the host toolchain, which
 # is a different outcome from one that loaded the shell, so say so.
 if [ -s "$exports" ]; then
-    cat "$exports" >>"$output_file"
+    cat "$exports" >>"$output_file" || setup_error "cannot write $output_file"
     rm -f "$exports"
     finish direnv "direnv exported the environment"
 fi

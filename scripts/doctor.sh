@@ -191,6 +191,19 @@ rust_suites() {
     selected "check test"
 }
 
+# Print Cargo's writable cache directory without assuming HOME exists. Minimal
+# containers and sandboxes may omit it, which is a capability result to report,
+# not a shell error that aborts the diagnosis.
+cargo_home() {
+    if [ -n "${CARGO_HOME:-}" ]; then
+        printf '%s\n' "$CARGO_HOME"
+    elif [ -n "${HOME:-}" ]; then
+        printf '%s/.cargo\n' "$HOME"
+    else
+        return 1
+    fi
+}
+
 wants_wasm() {
     local packages=$1
     [ -n "$packages" ] || return 1
@@ -1061,6 +1074,13 @@ self_test_ownership() {
         "$(cargo_suites 'rs/moq-net/src/lib.rs' packages)" 'check test'
     check 'a Python diff runs no Rust suite commands' "$(rust_suites '')" ''
     check 'a Rust diff runs both Rust suite commands' "$(rust_suites packages)" 'check test'
+    check 'Cargo home prefers its override' "$(HOME=/home CARGO_HOME=/cargo cargo_home)" /cargo
+    check 'Cargo home falls back to HOME' "$(HOME=/home CARGO_HOME= cargo_home)" /home/.cargo
+    (
+        unset HOME CARGO_HOME
+        cargo_home >/dev/null
+    )
+    check 'Cargo home rejects an unknown location' "$?" 1
     check 'one Rust seed skips the multiline awk probe' \
         "$(needs_awk_select 'rs/moq-net/src/lib.rs' && printf yes || printf no)" no
     check 'two Rust seeds require the multiline awk probe' \
@@ -1404,7 +1424,13 @@ probe_writable scratch "${TMPDIR:-/tmp}" "$SUITES"
 
 if [ -n "$CARGO_SUITES" ]; then
     probe_writable target "$TARGET_DIR" "$CARGO_SUITES"
-    probe_writable cargo-home "${CARGO_HOME:-$HOME/.cargo}" "$CARGO_SUITES"
+    if CARGO_HOME_DIR=$(cargo_home); then
+        probe_writable cargo-home "$CARGO_HOME_DIR" "$CARGO_SUITES"
+    else
+        record storage.cargo-home storage missing true "$CARGO_SUITES" \
+            "neither CARGO_HOME nor HOME is set, so Cargo's cache location is unknown" \
+            "set HOME or CARGO_HOME to a writable directory" 5 0
+    fi
     probe_disk "$TARGET_DIR" "$CARGO_SUITES"
     probe_cargo_compile cargo-compile "$CARGO_SUITES" ""
 else
