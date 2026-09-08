@@ -400,10 +400,15 @@ harness_group_has_fixture() {
 # is also the last moment it is safe to name: a process group id stays reserved
 # while any member lives, and becomes reusable the instant the last one exits.
 harness_wait() {
-    local pid="$1" status=0 i
+    local pid="$1" status=0 i="" owned=0
+    if i=$(harness_index "$pid") && harness_group_owned "$i"; then
+        owned=1
+    fi
     wait "$pid" || status=$?
-    if i=$(harness_index "$pid"); then
-        harness_group_owned "$i" && kill -KILL -- -"$pid" 2>/dev/null || true
+    if [[ -n "$i" ]]; then
+        if harness_group_owned "$i" || ((owned)); then
+            kill -KILL -- -"$pid" 2>/dev/null || true
+        fi
         HARNESS_STATES[i]="done"
     fi
     return "$status"

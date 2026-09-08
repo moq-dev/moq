@@ -42,6 +42,16 @@ mode() {
     fi
 }
 
+# `kill -0` succeeds on a zombie. Treat an unreaped corpse as stopped, including
+# on hosts whose PID 1 does not promptly adopt and collect orphaned children.
+running() {
+    local state
+    state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "$state" && "$state" != Z* ]]
+}
+
+stopped() { ! running "$1"; }
+
 # Each case runs in its own subshell so a `bundle_init` cannot leak into the
 # next one, under its own artifacts root unless CASE_ROOT shares one. The
 # bundle's path lands in $ROOT/<name>.path for the caller to inspect.
@@ -575,9 +585,39 @@ unreadable_identity_reap_case() {
 }
 bundle=$(run_case unreadable-identity-reap unreadable_identity_reap_case)
 unreadable_pid=$(<"$bundle/unreadable.pid")
-# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "the shell job identity permits cleanup when birth reads fail" \
-    sh -c '! kill -0 "$1" 2>/dev/null' _ "$unreadable_pid"
+    stopped "$unreadable_pid"
+
+unreadable_wait_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    mkfifo "$BUNDLE_WORK/child-ready"
+    harness_spawn unreadable-wait "$BUNDLE_WORK/unreadable-wait.log" \
+        python3 -c 'import subprocess,sys
+child = subprocess.Popen(["sleep", "120"])
+with open(sys.argv[1], "w") as ready:
+    ready.write(f"{child.pid}\n")' "$BUNDLE_WORK/child-ready"
+    # shellcheck disable=SC2153 # Set by harness_spawn in the sourced library.
+    leader=$HARNESS_PID
+    read -r child <"$BUNDLE_WORK/child-ready"
+    ownership_checks=0
+    # The first result is the job-table proof captured before wait. Once wait
+    # returns, process inspection is unavailable and no second proof remains.
+    # shellcheck disable=SC2329 # harness_wait invokes this test double indirectly.
+    harness_group_owned() {
+        ownership_checks=$((ownership_checks + 1))
+        ((ownership_checks == 1))
+    }
+    harness_wait "$leader"
+    printf '%s\n' "$child" >"$BUNDLE_DIR/unreadable-wait-child.pid"
+    bundle_finish 1
+}
+bundle=$(run_case unreadable-identity-wait unreadable_wait_case)
+unreadable_wait_child=$(<"$bundle/unreadable-wait-child.pid")
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "waiting preserves job ownership long enough to reap surviving children" \
+    stopped "$unreadable_wait_child"
 
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
@@ -631,16 +671,6 @@ while True:
     bundle_retain_session
     bundle_finish 1
 }
-# `kill -0` is not "is it running": it succeeds on a zombie, and the case above
-# exits the parent that would have reaped this one, so on a host whose PID 1
-# does not adopt orphans the killed sleep stays visible forever. Read the state
-# instead, and treat an unreaped corpse as gone.
-running() {
-    local state
-    state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]')
-    [[ -n "$state" && "$state" != Z* ]]
-}
-
 bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
 wrapper=$(<"$bundle/wrapper.pid")
