@@ -46,6 +46,7 @@ HARNESS_STATES=()
 HARNESS_STARTS=()
 HARNESS_WITNESSES=()
 HARNESS_WITNESS_STARTS=()
+HARNESS_GUARDED=()
 
 # Process groups that support the run but must never outlive finalization. A retained session keeps
 # its debuggable fixtures, not delayed writers that could mutate the uploadable evidence afterward.
@@ -338,6 +339,7 @@ harness_spawn() {
     HARNESS_STARTS+=("")
     HARNESS_WITNESSES+=("")
     HARNESS_WITNESS_STARTS+=("")
+    HARNESS_GUARDED+=(0)
     read -r _ <"$ready"
     started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
     HARNESS_STARTS[i]="$started"
@@ -345,6 +347,7 @@ harness_spawn() {
     witness=$!
     HARNESS_WITNESSES[i]="$witness"
     if ! read -r guard_status <"$guard_ready" || [[ "$guard_status" != ok ]]; then
+        kill -KILL "$witness" 2>/dev/null || true
         if harness_group_owned "$i"; then
             kill -KILL -- -"$HARNESS_PID" 2>/dev/null || true
         fi
@@ -354,6 +357,7 @@ harness_spawn() {
         printf 'failed to guard process group %s: %s\n' "$HARNESS_PID" "${guard_status:-no status}" >&2
         return 1
     fi
+    HARNESS_GUARDED[i]=1
     printf 'go\n' >"$go"
     rm -f "$ready" "$go" "$guard_ready"
     witness_started=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
@@ -405,9 +409,11 @@ harness_group_owned() {
     # The guard is this shell's direct child, so its job-table entry cannot be
     # recycled before this shell waits for it. Its startup handshake proves it
     # joined this group, so cleanup stays safe even when process reads fail.
-    while read -r job; do
-        [[ "$job" == "$witness" ]] && return 0
-    done < <(jobs -pr)
+    if [[ "${HARNESS_GUARDED[$i]}" == 1 ]]; then
+        while read -r job; do
+            [[ "$job" == "$witness" ]] && return 0
+        done < <(jobs -pr)
+    fi
     current=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
     [[ -n "$current" && "$current" == "${HARNESS_WITNESS_STARTS[$i]}" ]] || return 1
     group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)
@@ -440,6 +446,9 @@ harness_wait() {
         if harness_group_owned "$i"; then
             kill -KILL -- -"$pid" 2>/dev/null || true
         fi
+        if [[ -n "$witness" && "${HARNESS_GUARDED[$i]}" != 1 ]]; then
+            kill -KILL "$witness" 2>/dev/null || true
+        fi
         if [[ -n "$witness" ]]; then
             wait "$witness" 2>/dev/null || true
         fi
@@ -459,6 +468,11 @@ harness_reap() {
     i=$(harness_index "$pid") || return 0
     [[ "${HARNESS_STATES[$i]}" == live ]] || return 0
     witness=${HARNESS_WITNESSES[$i]}
+    if [[ -n "$witness" && "${HARNESS_GUARDED[$i]}" != 1 ]]; then
+        # Until the handshake completes, the guard is still in this shell's
+        # process group and must be signalled as a direct child.
+        kill -KILL "$witness" 2>/dev/null || true
+    fi
     # The group first, so grandchildren go with it; the bare PID is the fallback
     # for a job that somehow never became a group leader.
     if harness_group_owned "$i"; then

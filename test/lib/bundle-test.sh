@@ -590,30 +590,38 @@ printf '%s\n' \
     'import os' \
     'import signal' \
     'group = int(__import__("sys").argv[1])' \
-    'os.setpgid(0, group)' \
+    'if os.environ["MOCK_GUARD_JOIN"] == "1":' \
+    '    os.setpgid(0, group)' \
     'with open(os.environ["MOCK_GUARD_MARKER"], "w", encoding="utf-8") as marker:' \
     '    marker.write(f"{group} {os.getpid()}\n")' \
     '    marker.flush()' \
     'while True:' \
     '    signal.pause()' >"$ROOT/startup-lib/group-guard.py"
 chmod +x "$ROOT/startup-lib/group-guard.py"
-mkfifo "$ROOT/startup-guard"
-bash -c '
-    source "$1"
-    HARNESS_LIB=$2
-    export MOCK_GUARD_MARKER=$3
-    MOQ_TEST_RUNS=$4 harness_begin startup-cancel "just test bundle"
-    harness_spawn pending "$HARNESS_RUN/pending.log" sleep 120
-' _ "$DIR/harness.sh" "$ROOT/startup-lib" "$ROOT/startup-guard" "$ROOT/startup-runs" \
-    >"$ROOT/startup-cancel.out" 2>&1 &
-startup_shell=$!
-read -r startup_leader startup_guard <"$ROOT/startup-guard"
-kill -TERM "$startup_shell"
-startup_status=0
-wait "$startup_shell" || startup_status=$?
-check "cancellation during guard startup exits with the signal status" test "$startup_status" -eq 143
-check "cancellation during guard startup reaps the provisional leader" stopped "$startup_leader"
-check "cancellation during guard startup reaps the provisional guard" stopped "$startup_guard"
+
+startup_cancel_case() {
+    local name=$1 join=$2 marker="$ROOT/startup-$1" runs="$ROOT/startup-runs/$1"
+    mkdir "$runs"
+    mkfifo "$marker"
+    bash -c '
+        source "$1"
+        HARNESS_LIB=$2
+        export MOCK_GUARD_MARKER=$3 MOCK_GUARD_JOIN=$5
+        MOQ_TEST_RUNS=$4 harness_begin startup-cancel "just test bundle"
+        harness_spawn pending "$HARNESS_RUN/pending.log" sleep 120
+    ' _ "$DIR/harness.sh" "$ROOT/startup-lib" "$marker" "$runs" "$join" \
+        >"$ROOT/startup-cancel-$name.out" 2>&1 &
+    local shell=$! leader guard status=0
+    read -r leader guard <"$marker"
+    kill -TERM "$shell"
+    wait "$shell" || status=$?
+    check "cancellation $name exits with the signal status" test "$status" -eq 143
+    check "cancellation $name reaps the provisional leader" stopped "$leader"
+    check "cancellation $name reaps the provisional guard" stopped "$guard"
+}
+
+startup_cancel_case before-guard-join 0
+startup_cancel_case after-guard-join 1
 
 unreadable_identity_reap_case() {
     # shellcheck source=/dev/null
