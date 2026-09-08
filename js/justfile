@@ -32,7 +32,8 @@ install:
 
 # `knip` runs first and cheaply: bundlers resolve an undeclared import through
 # hoisting, so nothing else in `check` notices one until a published consumer
-# with a stricter resolver gets `undefined`.
+# with a stricter resolver gets `undefined`. `--directory ..` because the bun
+# workspace is rooted at the repo, not here, and knip reads that manifest.
 
 # Lint, type-check, biome-format, and build all packages.
 check $FILES="":
@@ -43,7 +44,7 @@ check $FILES="":
     	exit 0
     fi
     bun install --frozen-lockfile
-    bun knip
+    bun knip --directory ..
     if tty -s; then
     	bun run --filter='*' --elide-lines=0 check
     else
