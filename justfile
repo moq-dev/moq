@@ -196,10 +196,16 @@ worktree ACTION="check" $BASE="":
     	fi
     	# Resolved, written, then renamed into place. A redirect straight into the
     	# stamp truncates it before git runs, so a failure there would leave an
-    	# empty file that reads back as a recorded base that never existed.
+    	# empty file that reads back as a recorded base that never existed. Each
+    	# setup needs its own temporary file so concurrent runs cannot rename or
+    	# overwrite each other's in-progress stamp.
     	if [[ "$worktree_meta" == write ]]; then
-    		git rev-parse "$base" > "$stamp.tmp"
-    		mv "$stamp.tmp" "$stamp"
+    		stamp_tmp=$(mktemp "$git_dir/.moq-base.XXXXXXXX")
+    		if ! git rev-parse "$base" > "$stamp_tmp"; then
+    			rm -f "$stamp_tmp"
+    			exit 1
+    		fi
+    		mv "$stamp_tmp" "$stamp"
     	fi
     fi
 

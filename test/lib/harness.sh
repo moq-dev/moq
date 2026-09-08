@@ -204,7 +204,7 @@ harness_port_take() {
         # crashed shell). Because the directory was populated before its atomic
         # rename, an empty owner is stale rather than a claim still initializing.
         owner=$(cat "$root/$port/pid" 2>/dev/null || true)
-        if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
+        if [[ -n "$owner" ]] && ! harness_exited "$owner"; then
             return 1
         fi
         # Renaming it away is the ownership transition, and rename(2) is atomic:
@@ -258,7 +258,13 @@ harness_ready() {
 harness_exited() {
     local state
     state=$(ps -o state= -p "$1" 2>/dev/null || true)
-    [[ -z "$state" || "$state" == Z* ]]
+    if [[ -n "$state" ]]; then
+        [[ "$state" == Z* ]]
+    else
+        # A sandbox can deny process inspection even while signalling is allowed.
+        # In that case, absence from `ps` does not prove the process is gone.
+        ! kill -0 "$1" 2>/dev/null
+    fi
 }
 
 # ── processes ───────────────────────────────────────────────────────────────
