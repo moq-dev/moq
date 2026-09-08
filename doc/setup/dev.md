@@ -13,7 +13,6 @@ match CI.
 | --- | --- |
 | `just` | Start the local relay, test publisher, and web demo. |
 | `just --list` | List every recipe. |
-| `just doctor` | Report which checks this machine can actually run. |
 | `just fix` | Format and lint the packages this branch changed. |
 | `just check` | Compile and lint the same scope. This is what CI runs. |
 | `just test` | Run tests for the same scope. |
@@ -27,33 +26,6 @@ Recipes default to the local relay at `http://localhost:4443`. Pass
 `https://cdn.moq.dev/anon` to use the public relay instead. The default BBB/TOS
 publishers and `just pub serve` use MPEG-TS, with one audio frame per PES to
 avoid batching latency. Use `just pub cmaf` only when testing fMP4/CMAF.
-
-## Checking your environment
-
-`just check` and `just test` skip whatever isn't installed, so a green run on an
-incomplete toolchain looks exactly like a complete one. `just doctor` says which
-suites this checkout can actually run, and why one cannot:
-
-```bash
-just doctor                  # the scope this branch selects
-just doctor --suite all      # everything, including the smoke and wasm harnesses
-just doctor --json           # the same results for a script
-```
-
-It reports the base and scope it picked, every tool's path and version, the dev
-shell it is in, the Cargo wrapper and target directory, writable scratch space
-and disk headroom, and whether Nix, a trivial compile, a loopback socket, the
-pinned Playwright browser, and GitHub reads work. Each result is `ok`, `missing`,
-`denied`, `timeout`, `degraded` (installed, wrong version or behavior), or
-`skip`, and each names the suites it blocks.
-
-Every probe is bounded, so an unreachable network or a hung daemon costs seconds.
-Nothing is installed or approved for you: the output names the narrow path,
-socket, or capability that is missing.
-
-`MOQ_STRICT=1` turns a missing tool into an error rather than a warning, in
-`just doctor` and in `just check` alike. CI sets it, so nothing there passes by
-skipping.
 
 ## Debugging
 

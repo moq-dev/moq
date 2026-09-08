@@ -419,71 +419,60 @@ _echo $VALUE:
 # required set into a precondition. Checked up front, and as one list, so a
 # missing tool is reported before a long compile rather than after it.
 #
-# Locally it warns rather than failing, because the alternative is the thing
-# this exists to prevent: a green `just check` that skipped half its linters and
-# reads exactly like one that ran them.
+# Required per scope, mirroring what `check` actually dispatches for a given
+# diff: demanding gradle on a docs-only PR would fail a run that was never going
+# to invoke it. Takes the same file list as the dispatch, or `ALL` to require
+# everything (`check-all`).
 #
-# The scope-to-tool mapping lives in `scripts/doctor.sh --tools`, which `just
-# doctor` reads as well. Two copies would drift, and the one that drifted
-# quietly would be the one turning a skip into a pass.
+# One deliberate absence: swift exists only on macOS, and `swift check` skips
+# off-macOS by design; swift.yml is its real gate.
 
-# Fail (under MOQ_STRICT) or warn when a tool the diff's scopes need is missing.
+# Fail when a tool the diff's scopes need is missing. No-op unless MOQ_STRICT.
 [private]
-_tools $FILES="" $SUITE="check":
+_tools $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
+    [[ -n "${MOQ_STRICT:-}" ]] || exit 0
 
-    case "$SUITE" in
-        check) mode=--tools ;;
-        test) mode=--test-tools ;;
-        *) echo "error: unknown tool suite: $SUITE" >&2; exit 2 ;;
-    esac
+    scoped() { [[ "$FILES" == ALL ]] || grep -qE "$1" <<< "$FILES"; }
 
-    if ! tools=$(scripts/doctor.sh "$mode" "$FILES"); then
-        echo "error: scripts/doctor.sh $mode failed; the required tool set is unknown" >&2
-        exit 1
-    fi
-    if [[ -z "$tools" ]]; then
-        if [[ "$SUITE" == check ]]; then
-            echo "error: scripts/doctor.sh $mode returned no tools; the mapping is broken" >&2
-            exit 1
-        fi
-        exit 0
-    fi
+    # `_check-common` runs on every invocation, so its tools are unconditional.
+    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
+    scoped '^(quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
+    scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    # cargo because `go check` builds moq-ffi for the host, and skips on a
+    # missing cargo the same way it skips on a missing go. rsync because the
+    # publish scripts stage the mirror tree with it, so the publisher test skips
+    # without it, and a skip that keeps `just check` green is what MOQ_STRICT is
+    # here to prevent.
+    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
+    scoped '^(dart/|rs/moq-ffi/)'                              && tools+=(cargo dart uniffi_bindgen_dart)
+    # Two obs recipes with two dispatch scopes, so two lines: over-requiring
+    # would fail a diff that never runs the recipe. `just obs compile` needs
+    # cargo to regenerate moq.h and pkg-config to locate Qt6 and ffmpeg. Every
+    # platform: the plugin type-checks against headers, and the dev shell ships
+    # those even on Darwin, where obs-studio can't build.
+    scoped '^(cpp/obs/|rs/libmoq/|flake\.nix$)' && tools+=(pkg-config cargo)
+    # `just obs check` lints with clang-format and gersemi, validates the CMake
+    # release configuration, and compares the three OBS pins, one of which moves
+    # on a flake.lock bump alone.
+    scoped '^(cpp/obs/|flake\.(nix|lock)$)' && tools+=(clang-format gersemi cmake)
+
+    # Scopes overlap (rs/moq-ffi/ is in five of them), so the same tool can land
+    # in the list twice and be reported missing twice. Splitting on whitespace is
+    # safe: every entry is a bare command name.
+    tools=($(printf '%s\n' "${tools[@]}" | sort -u))
 
     missing=()
-    while IFS= read -r tool; do
-        [[ -n "$tool" ]] || continue
-        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
-    done <<< "$tools"
-
-    ((${#missing[@]})) || exit 0
-
-    if [[ -n "${MOQ_STRICT:-}" ]]; then
-        echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
-        echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
-        exit 1
+    for tool in "${tools[@]}"; do
+    	command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    if ((${#missing[@]})); then
+    	echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
+    	echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+    	exit 1
     fi
-
-    echo "warning: missing tools, so whatever needs them is SKIPPED, not checked: ${missing[*]}" >&2
-    echo "         this run is not complete verification; 'just doctor' says what each one blocks." >&2
-
-# Diagnosis only: it never installs a tool, approves an .envrc, or widens a
-# sandbox, and every probe carries a budget, so a hung daemon or an unreachable
-# network costs seconds rather than the run. `--json` for a machine reader.
-
-# Report which verification suites this checkout can run, and why one cannot.
-doctor *args:
-    scripts/doctor.sh {{ args }}
-
-# The parts whose bugs are invisible in a healthy environment, which is every
-# environment that would otherwise notice: the budget, the permission
-# classifier, the JSON encoder, and the tool mapping `_tools` now depends on.
-
-# Check the doctor's own classifier, budget, encoder, and tool mapping.
-[private]
-_doctor-test:
-    scripts/doctor.sh --self-test
 
 # Lints and compiles only the packages the branch changed plus everything
 # depending on them, so several worktrees can build at once. This is also what
@@ -745,7 +734,6 @@ _markdown-test:
 [private]
 _check-common:
     just _changed-test
-    just _doctor-test
     bun install --frozen-lockfile
     just _markdown-test
     just _markdown check

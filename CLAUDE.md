@@ -33,7 +33,6 @@ Top-level only. Read the area-specific `CLAUDE.md` where one exists before worki
 - `/doc/` - documentation site. Keep it current; surface what is possible rather than every detail.
 - `/drafts/` - our IETF drafts. See `drafts/CLAUDE.md`. Upstream: `https://datatracker.ietf.org/wg/moq/documents/`
 - `/quest/` - versioned plans for work needing durable scope. See `quest/CLAUDE.md`. Prefer a quest over an issue.
-- `/scripts/` - repo-wide tooling that is not any one language's. `doctor.sh` backs `just doctor`; `session-setup.sh` is the agent SessionStart hook both `.claude` and `.codex` exec.
 
 Changes ripple across languages. Follow the Cross-Package Sync checklist below.
 
@@ -91,15 +90,12 @@ Before starting, `git fetch origin` and set the upstream to the base branch. If 
 Use the Nix dev shell so tooling matches CI. direnv loads it automatically, or `nix develop --command just ...`.
 
 ```bash
-just doctor       # What this machine can actually verify, and why not
 just check        # Lint and compile what the branch changed
 just test         # Test what the branch changed, same scope
 just fix          # Auto-fix lint/formatting, same scope
 ```
 
 These diff the branch against its base and only run the affected packages. Run `just fix` before committing. CI runs the same `check` and `test`.
-
-`check` and `test` skip what is not installed and warn, so a green run is not proof the scope was verified. Run `just doctor` first, or `MOQ_STRICT=1` to make a missing tool an error the way CI does.
 
 See `CONTRIBUTING.md` before making a PR.
 

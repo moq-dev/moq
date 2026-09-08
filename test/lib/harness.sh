@@ -93,22 +93,13 @@ harness_env_array() {
     done
 }
 
-# Normalize trailing separators without changing the filesystem root.
-harness_normalize_root() {
-    local root="$1"
-    while [[ "$root" != / && "${root%/}" != "$root" ]]; do
-        root="${root%/}"
-    done
-    printf '%s\n' "$root"
-}
-
 # Start a run named NAME, reproducible with RERUN. Creates the run directory and
 # installs the teardown trap; every other function needs this called first.
 harness_begin() {
     local name="$1" rerun="${2:-}"
 
     local root="${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}}"
-    root=$(harness_normalize_root "$root")
+    root="${root%/}"
     [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
     HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
@@ -139,7 +130,7 @@ harness_begin() {
 # worktrees still share, because they run as the same user.
 harness_port_root() {
     local root="${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}}"
-    root=$(harness_normalize_root "$root")
+    root="${root%/}"
     [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports-$(id -u)"
     echo "$root"
 }
