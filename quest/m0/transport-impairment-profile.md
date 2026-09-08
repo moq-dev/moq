@@ -41,5 +41,5 @@ gates quest, and do not use retries to make intermittent failures green.
 ## Related
 
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - selects bounded scenarios by changed scope
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - stores timelines, seeds, and traces
+- [Debug bundles](/test/README.md#debug-bundles) - stores timelines, seeds, and traces
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - provides Linux execution for the profile

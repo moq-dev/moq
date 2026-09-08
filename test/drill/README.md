@@ -106,5 +106,5 @@ corpus nobody replays.
   drills see; `quest/m0/transport-impairment-profile.md` adds the Linux
   network-namespace profile they run under.
 - CI lane scheduling, which belongs to `quest/m0/pr-behavioral-gates.md`.
-- Failure bundles beyond what the test harness prints, which belongs to
-  `quest/m0/qa-failure-artifacts.md`.
+- Failure bundles beyond what the test harness prints, which are documented in
+  [Debug bundles](../README.md#debug-bundles).
