@@ -50,15 +50,15 @@ humantime = { workspace = true }
 humantime-serde = { workspace = true }
 
 moq-net = { workspace = true }
+# Depended on directly rather than through web-transport-noq's re-export so the
+# version floor is ours: web-transport-noq only asks for `noq = "1"`, and this
+# backend installs BBRv3 by default, which underflows on loss before 1.2.
+noq = { version = "1.2", default-features = false, optional = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
 # congestion configs. Version matched to the copy iroh pulls in. The floor is 1.2
 # because that is where BBRInflightAtLoss stopped underflowing, and this backend
 # installs BBRv3 by default.
 noq-proto = { version = "1.2", default-features = false, optional = true }
-# Depended on directly rather than through web-transport-noq's re-export so the
-# version floor is ours: web-transport-noq only asks for `noq = "1"`, and this
-# backend installs BBRv3 by default, which underflows on loss before 1.2.
-noq = { version = "1.2", default-features = false, optional = true }
 notify = { version = "8", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
