@@ -97,6 +97,13 @@ touches() {
     grep -qE "$1" <<<"$files"
 }
 
+# The dev shell every harness runs inside. It is where ffmpeg, TSDuck, and the
+# wasm-bindgen CLI (whose version has to match the crate) come from, and the
+# rust-cache key already rolls on it because build scripts link against its store
+# paths. Nothing in the Cargo or bun graph names it, so without this a lock bump
+# selects no lane at all.
+shell='^flake\.(nix|lock)$'
+
 # The full interop matrix, per the Cross-Package Sync rule in CLAUDE.md: wire,
 # FFI, and gateway changes run every publisher against every subscriber.
 #
@@ -112,7 +119,7 @@ if edits moq-net moq-ffi libmoq moq-gst moq-rtmp moq-srt moq-rtc moq-hls ||
     touches '^(test/smoke/|test/justfile$|package\.json$|bun\.lock$)'; then
     selected[smoke_full]=true
 elif reaches moq-relay moq-cli libmoq moq-ffi moq-gst ||
-    touches '^(js/|demo/web/)'; then
+    touches '^(js/|demo/web/)' || touches "$shell"; then
     # The representative set: rust and browser publish, rust, browser and C
     # subscribe. Every client here is built from a crate or package in the
     # closure above, so this covers the delivery path end to end at roughly a
@@ -135,14 +142,20 @@ fi
 # what the paths filter this replaced deliberately gave up (a browser on a large
 # share of pull requests); the impact map buys it back, because those diffs run
 # the smoke lane alongside rather than after.
+#
+# The bun workspace is here for the same reason: run.sh installs it frozen and
+# bundles the publisher out of it, so the root manifest and lockfile decide what
+# the harness actually loads.
 if reaches moq-wasm moq-relay ||
-    touches '^(js/(wasm|net|signals)/|test/wasm/|\.cargo/config\.toml$)'; then
+    touches '^(js/(wasm|net|signals)/|test/wasm/|\.cargo/config\.toml$)' ||
+    touches '^(package\.json|bun\.lock)$' || touches "$shell"; then
     selected[wasm]=true
 fi
 
 # The MPEG-TS exporter graded against a real analyzer. moq-mux owns the muxer and
-# moq-cli owns the `export ts` that drives it.
-if reaches moq-mux moq-cli || touches '^test/ts/'; then
+# moq-cli owns the `export ts` that drives it; TSDuck grades the output and comes
+# from the dev shell.
+if reaches moq-mux moq-cli || touches '^test/ts/' || touches "$shell"; then
     selected[ts]=true
 fi
 
@@ -150,6 +163,9 @@ fi
 # the closure: these cost a whole extra runner on a throttled pool, and the code
 # they cover changes when its own crate changes. rust-toolchain.toml is in
 # because a compiler bump is the other way this code stops building.
+#
+# The dev shell is deliberately absent: these two jobs need an Apple or Windows
+# host and use the runner's own toolchain, so nix never runs in them.
 if edits moq-video moq-audio moq-nvenc moq-transcode moq-native moq-cli ||
     touches '^rust-toolchain\.toml$'; then
     selected[windows]=true

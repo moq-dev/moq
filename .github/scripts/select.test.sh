@@ -96,6 +96,23 @@ expect "$lock" features false
 expect 'rs/moq-video/Cargo.toml' features true
 expect 'rs/moq-relay/build.rs' features true
 
+# The dev shell supplies ffmpeg, TSDuck, and the wasm-bindgen CLI whose version
+# has to match the crate, and nothing in the Cargo or bun graph names it. A lock
+# bump used to select no lane at all.
+shell='flake.lock'
+expect "$shell" smoke true
+expect "$shell" wasm true
+expect "$shell" ts true
+# Both of these run on a runner-native toolchain, so nix never enters them.
+expect "$shell" windows false
+expect "$shell" macos false
+
+# The bun workspace the wasm harness installs frozen and bundles its publisher
+# out of. It reaches the native node and bun clients too, which only the wide
+# matrix runs.
+expect 'bun.lock' wasm true
+expect 'bun.lock' smoke_full true
+
 # Docs cannot change behavior, and this is the case that must finish without
 # waiting on a lane: it is why the aggregate exists.
 docs='doc/concept/index.md'

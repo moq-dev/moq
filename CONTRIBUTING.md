@@ -31,13 +31,15 @@ just test smoke-core        # what the `smoke` lane runs
 
 | Lane | Runs | Selected by | Cost |
 |---|---|---|---|
-| `smoke` | `just test smoke-core`: rust and browser publish; rust, browser and C subscribe | any change reaching moq-relay, moq-cli, libmoq, moq-ffi or moq-gst through the dependency graph, or a `js/` package | ~10 min |
-| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, or the python client | ~20 min |
-| `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm or moq-relay, plus `js/wasm`, `js/net`, `js/signals`, `test/wasm`, `.cargo/config.toml` | ~8 min |
-| `ts` | `just test ts`: the MPEG-TS exporter graded with TSDuck | any change reaching moq-mux or moq-cli, plus `test/ts` | ~5 min |
+| `smoke` | `just test smoke-core`: rust and browser publish; rust, browser and C subscribe | any change reaching moq-relay, moq-cli, libmoq, moq-ffi or moq-gst through the dependency graph, a `js/` package, or the dev shell | ~10 min |
+| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, the python client, or the bun workspace | ~20 min |
+| `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm or moq-relay, plus `js/wasm`, `js/net`, `js/signals`, `test/wasm`, `.cargo/config.toml`, the bun workspace, or the dev shell | ~8 min |
+| `ts` | `just test ts`: the MPEG-TS exporter graded with TSDuck | any change reaching moq-mux or moq-cli, plus `test/ts` or the dev shell | ~5 min |
 | `windows` | `just rs windows`: a compile gate, not a device test | an edit to moq-video, moq-audio, moq-nvenc, moq-transcode, moq-native or moq-cli | ~13 min, uncached |
 | `macos` | `just rs macos`: same, for VideoToolbox and ScreenCaptureKit | an edit to moq-video or moq-audio | ~5 min, uncached |
 | `features` | `just rs features`: the `--all-features` and `--no-default-features` permutations | a manifest, a build script, or the toolchain pin | ~20 min |
+
+"The dev shell" is `flake.nix` and `flake.lock`, which supply ffmpeg, TSDuck, and the `wasm-bindgen` CLI every harness runs on; `windows` and `macos` use the runner's own toolchain instead, so nix never enters them.
 
 Costs are wall clock on a cold shared cache, measured on the run that added this table; every selected lane runs in parallel, so a diff selecting all seven finishes in the slowest one. Selection itself costs ~90s, which every pull request pays.
 
