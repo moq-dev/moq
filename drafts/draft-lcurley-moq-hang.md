@@ -942,6 +942,11 @@ This document has no IANA actions.
 
 --- back
 
+# Appendix A: Changelog
+
+## moq-hang-03
+- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
+
 # Acknowledgments
 {:numbered="false"}
 

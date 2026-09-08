@@ -32,8 +32,9 @@ impl SerializeAs<Option<Duration>> for MillisCeil {
 		}
 
 		let millis = duration.as_nanos().div_ceil(1_000_000);
-		// A duration over 584 million years is nonsense either way; clamping keeps this total.
-		u64::try_from(millis).unwrap_or(u64::MAX).serialize(serializer)
+		u64::try_from(millis)
+			.map_err(|_| S::Error::custom("a duration too long to express in milliseconds"))?
+			.serialize(serializer)
 	}
 }
 
@@ -91,5 +92,13 @@ mod test {
 
 		// So it round-trips as an omission rather than failing to re-encode.
 		assert!(!catalog.to_json().unwrap().contains("jitter"));
+	}
+
+	/// A duration past what `u64` milliseconds can carry is refused rather than clamped, so a
+	/// consumer is never handed a bound smaller than the one the publisher meant.
+	#[test]
+	fn too_long_is_refused() {
+		let err = audio(Some(std::time::Duration::MAX)).to_json().unwrap_err().to_string();
+		assert!(err.contains("too long"), "{err}");
 	}
 }
