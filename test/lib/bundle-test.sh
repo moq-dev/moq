@@ -185,7 +185,21 @@ started=$SECONDS
 bundle=$(run_case stack stack_case)
 check "stack capture is bounded" test "$((SECONDS - started))" -lt 90
 check "the hung process is described" test -s "$bundle/stacks/hung.txt"
+check "a direct process stack is not called a harness shell" sh -c \
+    '! grep -q "this is the harness shell" "$1"' _ "$bundle/stacks/hung.txt"
 check "the owned process is recorded" grep -q '"name": "hung"' "$bundle/manifest.json"
+
+wrapper_stack_case() {
+    sleep 120 &
+    hung=$!
+    bundle_stack wrapper "$hung" wrapper
+    kill -KILL "$hung" 2>/dev/null || true
+    wait "$hung" 2>/dev/null || true
+    bundle_finish 1
+}
+bundle=$(run_case wrapper-stack wrapper_stack_case)
+check "a childless wrapper stack identifies the harness shell" \
+    grep -q "this is the harness shell" "$bundle/stacks/wrapper.txt"
 
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {

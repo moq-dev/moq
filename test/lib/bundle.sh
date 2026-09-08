@@ -238,8 +238,8 @@ bundle_note() {
 
 # ── stacks ──────────────────────────────────────────────────────────────────
 
-# bundle_stack <name> <pid>: best-effort backtrace of a process and its
-# descendants, for the case a timeout is about to destroy the evidence.
+# bundle_stack <name> <pid> [wrapper]: best-effort backtrace of a process and
+# its descendants, for the case a timeout is about to destroy the evidence.
 #
 # Never fatal and never blocking. A debugger that cannot attach is the common
 # case (Linux ptrace_scope, macOS SIP, no debugger installed), and a run that
@@ -253,7 +253,7 @@ _bundle_descendants() {
 }
 
 bundle_stack() {
-    local name=$1 pid=$2
+    local name=$1 pid=$2 wrapper=${3:-}
     [[ -n "$BUNDLE_DIR" ]] || return 0
     [[ "${MOQ_QA_STACKS:-1}" != "0" ]] || return 0
     kill -0 "$pid" 2>/dev/null || return 0
@@ -280,7 +280,7 @@ bundle_stack() {
     # process anybody came here to read. Say so: a file holding a shell's stack
     # under the client's name is worse than one that admits the client had
     # already exited, because it looks like the answer.
-    if ((walked <= 1)); then
+    if [[ "$wrapper" == wrapper ]] && ((walked <= 1)); then
         printf '\nno child processes were running under pid %s at capture time;\n' "$pid" >>"$out"
         printf 'this is the harness shell, not the client it was waiting on.\n' >>"$out"
     fi
