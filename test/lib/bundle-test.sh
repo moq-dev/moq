@@ -601,14 +601,11 @@ with open(sys.argv[1], "w") as ready:
     # shellcheck disable=SC2153 # Set by harness_spawn in the sourced library.
     leader=$HARNESS_PID
     read -r child <"$BUNDLE_WORK/child-ready"
-    ownership_checks=0
-    # The first result is the job-table proof captured before wait. Once wait
-    # returns, process inspection is unavailable and no second proof remains.
-    # shellcheck disable=SC2329 # harness_wait invokes this test double indirectly.
-    harness_group_owned() {
-        ownership_checks=$((ownership_checks + 1))
-        ((ownership_checks == 1))
-    }
+    mkdir -p "$BUNDLE_WORK/unreadable-wait-lib"
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$BUNDLE_WORK/unreadable-wait-lib/process-start.py"
+    chmod +x "$BUNDLE_WORK/unreadable-wait-lib/process-start.py"
+    # shellcheck disable=SC2034 # Read by harness_wait in the sourced library.
+    HARNESS_LIB="$BUNDLE_WORK/unreadable-wait-lib"
     harness_wait "$leader"
     printf '%s\n' "$child" >"$BUNDLE_DIR/unreadable-wait-child.pid"
     bundle_finish 1
@@ -626,14 +623,10 @@ released_group_wait_case() {
     harness_spawn released-group "$BUNDLE_WORK/released-group.log" true
     # shellcheck disable=SC2153 # Set by harness_spawn in the sourced library.
     leader=$HARNESS_PID
-    ownership_checks=0
-    # shellcheck disable=SC2329 # harness_wait invokes these test doubles indirectly.
-    harness_group_owned() {
-        ownership_checks=$((ownership_checks + 1))
-        ((ownership_checks == 1))
-    }
-    # shellcheck disable=SC2329 # harness_wait invokes this test double indirectly.
-    _harness_group_present() { return 1; }
+    i=$(harness_index "$leader")
+    witness=${HARNESS_WITNESSES[$i]}
+    command kill -KILL "$witness" 2>/dev/null || true
+    wait "$witness" 2>/dev/null || true
     # shellcheck disable=SC2329 # harness_wait must not invoke this test double.
     kill() { : >"$BUNDLE_WORK/signalled-released-group"; }
     harness_wait "$leader"

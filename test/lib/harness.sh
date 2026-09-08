@@ -301,30 +301,42 @@ harness_exited() {
 # terminal takes SIGTTIN and stops. ffmpeg reads stdin for keyboard commands and
 # would do exactly that.
 _harness_supervise() {
-    local ready="$1" status=0
-    shift
-    sleep 2147483647 &
-    printf '%s\n' "$!" >"$ready"
+    local ready="$1" go="$2" status=0
+    shift 2
+    printf 'ok\n' >"$ready"
+    read -r _ <"$go"
     "$@" || status=$?
     return "$status"
 }
 
 harness_spawn() {
-    local label="$1" log="$2" ready witness started witness_started
+    local label="$1" log="$2" ready go guard_ready guard_status witness started witness_started
     shift 2
     mkdir -p "$HARNESS_RUN/.harness"
-    ready="$HARNESS_RUN/.harness/witness-$$-${#HARNESS_PIDS[@]}"
-    mkfifo "$ready"
+    ready="$HARNESS_RUN/.harness/leader-$$-${#HARNESS_PIDS[@]}"
+    go="$HARNESS_RUN/.harness/go-$$-${#HARNESS_PIDS[@]}"
+    guard_ready="$HARNESS_RUN/.harness/guard-$$-${#HARNESS_PIDS[@]}"
+    mkfifo "$ready" "$go" "$guard_ready"
     set -m
     if [[ "$log" == "-" ]]; then
-        _harness_supervise "$ready" "$@" </dev/null &
+        _harness_supervise "$ready" "$go" "$@" </dev/null &
     else
-        _harness_supervise "$ready" "$@" </dev/null >"$log" 2>&1 &
+        _harness_supervise "$ready" "$go" "$@" </dev/null >"$log" 2>&1 &
     fi
     HARNESS_PID=$!
     set +m
-    read -r witness <"$ready"
-    rm -f "$ready"
+    read -r _ <"$ready"
+    "$HARNESS_LIB/group-guard.py" "$HARNESS_PID" "$guard_ready" >/dev/null 2>&1 &
+    witness=$!
+    if ! read -r guard_status <"$guard_ready" || [[ "$guard_status" != ok ]]; then
+        kill -KILL -- -"$HARNESS_PID" 2>/dev/null || true
+        wait "$HARNESS_PID" "$witness" 2>/dev/null || true
+        rm -f "$ready" "$go" "$guard_ready"
+        printf 'failed to guard process group %s: %s\n' "$HARNESS_PID" "${guard_status:-no status}" >&2
+        return 1
+    fi
+    printf 'go\n' >"$go"
+    rm -f "$ready" "$go" "$guard_ready"
     started=$("$HARNESS_LIB/process-start.py" "$HARNESS_PID" 2>/dev/null || true)
     witness_started=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
     HARNESS_PIDS+=("$HARNESS_PID")
@@ -363,7 +375,7 @@ harness_index() {
     return 1
 }
 
-# True while the exact leader or its stable in-group witness still proves group ownership.
+# True while the exact leader or its stable in-group guard still proves group ownership.
 harness_group_owned() {
     local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" current group job
     current=$("$HARNESS_LIB/process-start.py" "$pid" 2>/dev/null || true)
@@ -376,22 +388,19 @@ harness_group_owned() {
     while read -r job; do
         [[ "$job" == "$pid" ]] && return 0
     done < <(jobs -pr)
+    # The guard is this shell's direct child, so its job-table entry cannot be
+    # recycled before this shell waits for it. Its startup handshake proves it
+    # joined this group, so cleanup stays safe even when process reads fail.
+    while read -r job; do
+        [[ "$job" == "$witness" ]] && return 0
+    done < <(jobs -pr)
     current=$("$HARNESS_LIB/process-start.py" "$witness" 2>/dev/null || true)
     [[ -n "$current" && "$current" == "${HARNESS_WITNESS_STARTS[$i]}" ]] || return 1
     group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)
     [[ "$group" == "$pid" ]]
 }
 
-# True while the recorded witness still occupies the original process group.
-# This is presence, not ownership by itself: it is used only with ownership
-# proven before waiting, so an empty, reusable group id is never signalled.
-_harness_group_present() {
-    local i="$1" pid="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}" group
-    group=$(ps -o pgid= -p "$witness" 2>/dev/null | tr -d '[:space:]' || true)
-    [[ "$group" == "$pid" ]]
-}
-
-# True only while the owned group contains a real fixture, excluding the leader shell and sentinel.
+# True only while the owned group contains a real fixture, excluding the leader shell and guard.
 harness_group_has_fixture() {
     local i="$1" group="${HARNESS_PIDS[$1]}" witness="${HARNESS_WITNESSES[$1]}"
     harness_group_owned "$i" || return 1
@@ -409,15 +418,15 @@ harness_group_has_fixture() {
 # is also the last moment it is safe to name: a process group id stays reserved
 # while any member lives, and becomes reusable the instant the last one exits.
 harness_wait() {
-    local pid="$1" status=0 i="" owned=0
-    if i=$(harness_index "$pid") && harness_group_owned "$i"; then
-        owned=1
-    fi
+    local pid="$1" status=0 i="" witness=""
+    i=$(harness_index "$pid") || true
     wait "$pid" || status=$?
     if [[ -n "$i" ]]; then
-        if harness_group_owned "$i" || { ((owned)) && _harness_group_present "$i"; }; then
+        witness=${HARNESS_WITNESSES[$i]}
+        if harness_group_owned "$i"; then
             kill -KILL -- -"$pid" 2>/dev/null || true
         fi
+        wait "$witness" 2>/dev/null || true
         HARNESS_STATES[i]="done"
     fi
     return "$status"
@@ -430,15 +439,17 @@ harness_wait() {
 # this run did not spawn, or already waited on, is ignored: reaping may be called
 # twice, and the second call must not signal whatever now holds the number.
 harness_reap() {
-    local pid="$1" i
+    local pid="$1" i witness
     i=$(harness_index "$pid") || return 0
     [[ "${HARNESS_STATES[$i]}" == live ]] || return 0
+    witness=${HARNESS_WITNESSES[$i]}
     # The group first, so grandchildren go with it; the bare PID is the fallback
     # for a job that somehow never became a group leader.
     if harness_group_owned "$i"; then
         kill -KILL -- -"$pid" 2>/dev/null || true
     fi
     wait "$pid" 2>/dev/null || true
+    wait "$witness" 2>/dev/null || true
     HARNESS_STATES[i]="done"
 }
 
@@ -476,7 +487,7 @@ harness_retain_ports() {
     for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
         [[ "${HARNESS_STATES[$i]}" == live ]] || continue
         pid=${HARNESS_PIDS[$i]}
-        # The sentinel proves group ownership but is not itself a debuggable fixture. Retain only
+        # The guard proves group ownership but is not itself a debuggable fixture. Retain only
         # while some other live member remains in the verified group.
         if harness_group_has_fixture "$i"; then
             if declare -F bundle_retain_session >/dev/null 2>&1; then
