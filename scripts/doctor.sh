@@ -101,7 +101,7 @@ tools_for_suite() {
         smoke) printf 'cargo\ncurl\nffmpeg\ntimeout\n' ;;
         smoke-full)
             printf 'bun\ncargo\ncurl\nffmpeg\ntimeout\n'
-            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\nuniffi-bindgen-go\nuv\n'
+            printf 'go\ngst-inspect-1.0\ngst-launch-1.0\nnode\npkg-config\nuniffi-bindgen-go\nuv\n'
             printf '%s\n' "${CC:-cc}"
             ;;
         wasm) printf 'bun\ncargo\ncurl\nwasm-bindgen\n' ;;
@@ -282,26 +282,23 @@ valid_harness_port() {
     [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((${#port} <= 5)) && ((port >= 1024 && port <= 65535))
 }
 
-# Record whether one harness port setting is accepted by the shared allocator.
-probe_harness_port() {
-    local id=$1 name=$2 value=$3 suites=$4
-    if valid_harness_port "$value"; then
-        record "behavior.$id" behavior ok true "$suites" "$name=$value is a valid harness port" "" 5 0
-    else
-        record "behavior.$id" behavior degraded true "$suites" \
-            "$name must be 1024..65535 (got '$value')" \
-            "set $name to a port from 1024 through 65535" 5 0
-    fi
+# True when an allocator base leaves room for COUNT distinct valid ports.
+valid_harness_port_span() {
+    local port=$1 count=$2
+    valid_harness_port "$port" && ((port <= 65536 - count))
 }
 
-# Print the selected suites that walk from MOQ_TEST_PORT_BASE rather than using
-# only a pinned first port. WASM can start multiple relays, so it always walks.
-harness_port_base_suites() {
-    local out=""
-    [ -z "${SMOKE_PORT:-}" ] && out=$(selected "smoke smoke-full")
-    out="$out $(selected wasm)"
-    out=$(printf '%s' "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
-    printf '%s' "${out% }"
+# Record whether one harness port setting can supply the required slots.
+probe_harness_port() {
+    local id=$1 name=$2 value=$3 slots=$4 suites=$5
+    if valid_harness_port_span "$value" "$slots"; then
+        record "behavior.$id" behavior ok true "$suites" \
+            "$name=$value leaves at least $slots valid allocator slots" "" 5 0
+    else
+        record "behavior.$id" behavior degraded true "$suites" \
+            "$name=$value does not leave $slots valid allocator slots" \
+            "set $name between 1024 and $((65536 - slots))" 5 0
+    fi
 }
 
 wants_wasm() {
@@ -1265,10 +1262,12 @@ self_test_ownership() {
     check 'a harness port above the range is rejected' "$?" 1
     valid_harness_port words
     check 'a nonnumeric harness port is rejected' "$?" 1
-    SUITES="smoke wasm"
-    check 'smoke and wasm use the base without a pin' "$(SMOKE_PORT= harness_port_base_suites)" 'smoke wasm'
-    check 'a smoke pin leaves only wasm on the base' "$(SMOKE_PORT=4500 harness_port_base_suites)" wasm
-    SUITES="check test"
+    valid_harness_port_span 65533 3
+    check 'three wasm allocator slots fit below the limit' "$?" 0
+    valid_harness_port_span 65534 3
+    check 'three wasm allocator slots reject a short range' "$?" 1
+    valid_harness_port_span 65534 2
+    check 'a pinned wasm run needs only two allocator slots' "$?" 0
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
@@ -1400,6 +1399,7 @@ self_test() {
     check 'smoke-full needs go' "$(tools_for_suite smoke-full | grep -c '^go$')" 1
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
+    check 'smoke-full needs pkg-config' "$(tools_for_suite smoke-full | grep -c '^pkg-config$')" 1
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
     self_test_process_state
@@ -1699,22 +1699,33 @@ fi
 
 LOCK_SUITES=$(selected "smoke smoke-full wasm")
 if [ -n "$LOCK_SUITES" ]; then
-    BASE_PORT_SUITES=$(harness_port_base_suites)
-    if [ -n "$BASE_PORT_SUITES" ]; then
-        probe_harness_port harness-port-base MOQ_TEST_PORT_BASE "${MOQ_TEST_PORT_BASE:-4500}" "$BASE_PORT_SUITES"
+    SMOKE_BASE_SUITES=""
+    [ -z "${SMOKE_PORT:-}" ] && SMOKE_BASE_SUITES=$(selected "smoke smoke-full")
+    if [ -n "$SMOKE_BASE_SUITES" ]; then
+        probe_harness_port harness-port-base-smoke MOQ_TEST_PORT_BASE \
+            "${MOQ_TEST_PORT_BASE:-4500}" 1 "$SMOKE_BASE_SUITES"
     else
-        record behavior.harness-port-base behavior skip false "" \
-            "the selected harness uses only its pinned port" "" 5 0
+        record behavior.harness-port-base-smoke behavior skip false "" \
+            "smoke is not selected or uses its pinned port" "" 5 0
+    fi
+    WASM_BASE_SUITES=$(selected wasm)
+    if [ -n "$WASM_BASE_SUITES" ]; then
+        WASM_BASE_SLOTS=3
+        [ -n "${WASM_PORT:-}" ] && WASM_BASE_SLOTS=2
+        probe_harness_port harness-port-base-wasm MOQ_TEST_PORT_BASE \
+            "${MOQ_TEST_PORT_BASE:-4500}" "$WASM_BASE_SLOTS" "$WASM_BASE_SUITES"
+    else
+        record behavior.harness-port-base-wasm behavior skip false "" "wasm is not selected" "" 5 0
     fi
     SMOKE_PIN_SUITES=$(selected "smoke smoke-full")
     if [ -n "$SMOKE_PIN_SUITES" ] && [ -n "${SMOKE_PORT:-}" ]; then
-        probe_harness_port smoke-port SMOKE_PORT "$SMOKE_PORT" "$SMOKE_PIN_SUITES"
+        probe_harness_port smoke-port SMOKE_PORT "$SMOKE_PORT" 1 "$SMOKE_PIN_SUITES"
     else
         record behavior.smoke-port behavior skip false "" "SMOKE_PORT is not selected or set" "" 5 0
     fi
     WASM_PIN_SUITES=$(selected wasm)
     if [ -n "$WASM_PIN_SUITES" ] && [ -n "${WASM_PORT:-}" ]; then
-        probe_harness_port wasm-port WASM_PORT "$WASM_PORT" "$WASM_PIN_SUITES"
+        probe_harness_port wasm-port WASM_PORT "$WASM_PORT" 1 "$WASM_PIN_SUITES"
     else
         record behavior.wasm-port behavior skip false "" "WASM_PORT is not selected or set" "" 5 0
     fi
@@ -1724,7 +1735,8 @@ if [ -n "$LOCK_SUITES" ]; then
     probe_writable harness-ports "$HARNESS_PORT_ROOT" "$LOCK_SUITES"
     probe_advisory_lock "$LOCK_SUITES" "$HARNESS_PORT_ROOT"
 else
-    record behavior.harness-port-base behavior skip false "" "no harness suite is selected" "" 5 0
+    record behavior.harness-port-base-smoke behavior skip false "" "no harness suite is selected" "" 5 0
+    record behavior.harness-port-base-wasm behavior skip false "" "no harness suite is selected" "" 5 0
     record behavior.smoke-port behavior skip false "" "no harness suite is selected" "" 5 0
     record behavior.wasm-port behavior skip false "" "no harness suite is selected" "" 5 0
     record storage.harness-runs storage skip false "" "no harness suite is selected" "" 5 0
