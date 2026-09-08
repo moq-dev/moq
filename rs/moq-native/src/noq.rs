@@ -57,17 +57,7 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
-	transport.congestion_controller_factory(congestion_factory(congestion_control(quic)));
-}
-
-/// The congestion control family to install, defaulting to loss-based.
-///
-/// Unlike the other backends we don't default to BBR here: noq's BBRv3 subtracts
-/// without a floor when computing the inflight bytes at the loss event, so a single
-/// packet loss can underflow and panic, taking the whole process with it. Delay-based
-/// stays reachable, but only when an operator asks for it by name.
-fn congestion_control(quic: &Resolved) -> CongestionControl {
-	quic.congestion_control.unwrap_or(CongestionControl::Loss)
+	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
 }
 
 /// The noq controller factory for a congestion control family. noq's BBR is v3.
@@ -705,15 +695,76 @@ mod tests {
 		assert!(delay.into_any().downcast::<noq::congestion::Bbr3>().is_ok());
 	}
 
-	/// noq's BBRv3 panics on loss, so an unset knob must land on CUBIC here even
-	/// though every other backend defaults to BBR.
-	#[test]
-	fn congestion_control_defaults_to_loss() {
-		let mut quic = crate::quic::Client::default();
-		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
+	/// Loopback regression test: with the knob unset, live noq connections must run
+	/// BBRv3 on both ends.
+	///
+	/// This backend defaulted to CUBIC while noq's BBRv3 underflowed computing the
+	/// inflight bytes at a loss event. noq 1.2.0 rewrote `BBRInflightAtLoss` in
+	/// signed arithmetic and covers the loss path with its own packet-level
+	/// simulator, so the exception is gone and the default is asserted here.
+	#[tokio::test]
+	async fn default_reaches_the_live_connection() {
+		let server_config = ServerConfig {
+			bind: Some("127.0.0.1:0".to_string()),
+			tls: crate::tls::Server {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
 
-		// An explicit request still gets through.
-		quic.congestion_control = Some(CongestionControl::Delay);
-		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
+		let server = NoqServer::new(server_config).expect("server init");
+		let addr = server.local_addr().expect("local addr");
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			is_bbr3(&conn)
+		});
+
+		// tls::Client has a private field, so it can't be built with a struct literal.
+		let mut tls_config = crate::tls::Client::default();
+		tls_config.disable_verify = Some(true);
+
+		let client_config = ClientConfig {
+			bind: "127.0.0.1:0".parse().unwrap(),
+			tls: tls_config,
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = NoqClient::new(&client_config).expect("client init");
+		// Dial the loopback IP directly so the system resolver is never involved.
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		// Bound the whole connect + accept + assert flow so a handshake
+		// regression fails fast instead of stalling CI.
+		tokio::time::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url, &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			// web_transport_noq::Session derefs to the noq connection.
+			assert!(is_bbr3(&session), "client connection is not running BBRv3");
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server connection is not running BBRv3"
+			);
+		})
+		.await
+		.expect("test timed out");
+	}
+
+	/// Whether a live connection's initial path is running BBRv3.
+	///
+	/// noq is multipath, so the controller is per path rather than per connection;
+	/// `PathId::ZERO` is the path the handshake came up on.
+	fn is_bbr3(conn: &noq::Connection) -> bool {
+		conn.congestion_state(noq::PathId::ZERO)
+			.expect("no controller on the initial path")
+			.into_any()
+			.downcast::<noq::congestion::Bbr3>()
+			.is_ok()
 	}
 }

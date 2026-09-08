@@ -145,9 +145,8 @@ pub struct Client {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq and iroh, whose shared BBRv3 can panic on packet loss and take
-	/// the process with it. Selecting `delay` there is for deliberate testing only.
+	/// Congestion control family, defaulting to `delay` on every backend. Which BBR
+	/// generation that is depends on the backend (see [`CongestionControl`]).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-quic-congestion-control",
@@ -283,9 +282,8 @@ pub struct Server {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq, whose BBRv3 can panic on packet loss and take the process with
-	/// it. Selecting `delay` there is for deliberate testing only.
+	/// Congestion control family, defaulting to `delay` on every backend. Which BBR
+	/// generation that is depends on the backend (see [`CongestionControl`]).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "server-quic-congestion-control",
@@ -392,8 +390,8 @@ pub struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` for the backend's own default. Each
-	/// backend picks that default itself, since they don't all agree.
+	/// Congestion control override, or `None` for the default. Read it through
+	/// [`Resolved::congestion`], which applies that default once for every backend.
 	pub congestion_control: Option<CongestionControl>,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
@@ -426,6 +424,20 @@ impl Resolved {
 			congestion_control,
 			qlog,
 		}
+	}
+
+	/// The congestion control family to install.
+	///
+	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
+	/// send rate steady enough for a live encoder to track, which is what this stack
+	/// carries. Every backend resolves the default here rather than each picking its
+	/// own, so the answer can't drift between them.
+	#[cfg_attr(
+		not(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "iroh")),
+		allow(dead_code)
+	)]
+	pub fn congestion(&self) -> CongestionControl {
+		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
 
 	/// The directory to write qlog traces into, if any.
@@ -616,7 +628,19 @@ mod tests {
 		assert_eq!(both.client.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(both.server.congestion_control, Some(CongestionControl::Loss));
 
-		// Unset stays None; each backend then picks its own default.
+		// Unset stays None on the wire; `Resolved::congestion` applies the default.
 		assert_eq!(Client::default().resolve().congestion_control, None);
+	}
+
+	/// One default for every backend, so a knob left unset can't mean CUBIC on one
+	/// and BBR on another.
+	#[test]
+	fn congestion_defaults_to_delay() {
+		let mut quic = Client::default();
+		assert_eq!(quic.resolve().congestion(), CongestionControl::Delay);
+
+		// An explicit request still gets through.
+		quic.congestion_control = Some(CongestionControl::Loss);
+		assert_eq!(quic.resolve().congestion(), CongestionControl::Loss);
 	}
 }

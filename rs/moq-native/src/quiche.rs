@@ -179,10 +179,7 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved
 	settings.max_idle_timeout = Some(quic.idle_timeout);
 	settings.discover_path_mtu = quic.mtu_discovery;
 
-	// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
-	// so default to BBR rather than quiche's own CUBIC.
-	let family = quic.congestion_control.unwrap_or(CongestionControl::Delay);
-	settings.cc_algorithm = cc_algorithm(family).to_owned();
+	settings.cc_algorithm = cc_algorithm(quic.congestion()).to_owned();
 
 	// quiche writes one file per connection itself, named after the connection ID.
 	if let Some(dir) = quic.qlog_dir() {

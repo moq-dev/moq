@@ -22,7 +22,7 @@ generate = ["localhost"]             # Or: a self-signed cert for development.
 root = ["peer-ca.pem"]               # Optional: CAs whose client certs get full access (mTLS).
 
 [server.quic]
-congestion_control = "delay"         # "delay" (BBR, default on quinn/quiche) or "loss" (CUBIC).
+congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
 
 [server.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
@@ -33,8 +33,8 @@ allow.uid = [1001]
 ```
 
 The `quinn` (default), `quiche`, and `noq` QUIC backends are compile-time
-features selected with `backend`. Don't pick `"delay"` on `noq` or iroh: their
-BBRv3 can panic on loss.
+features selected with `backend`. `"delay"` is BBR on all of them, but the
+generation differs: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh.
 
 ## \[web]
 

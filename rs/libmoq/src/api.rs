@@ -1098,7 +1098,7 @@ pub extern "C" fn moq_client_set_quic_mtu_discovery(client: u32, enabled: bool) 
 ///
 /// Either `"loss"` (CUBIC, throughput-oriented) or `"delay"` (BBR, which keeps queues
 /// short and the send rate steady enough for an encoder to track). A NULL or empty value
-/// puts it back to the backend's own default. QUIC only.
+/// puts it back to the default, `"delay"` on every backend. QUIC only.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown or the family is
 /// unrecognized.
