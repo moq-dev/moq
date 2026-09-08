@@ -143,7 +143,7 @@ HAR
     } >"$BUNDLE_WORK/client.log"
     printf '%s\n' '{"Authorization":"Bearer \"opaque-keyed-json-secret\""}' \
         >"$BUNDLE_WORK/keyed.json"
-    printf '%s\n' '{"note":"Authorization: Bearer opaque-json-note-secret","status":"kept"}' \
+    printf '%s\n' '{"first":"Authorization: Bearer opaque-json-note-secret","second":"Cookie: opaque-json-cookie-secret","status":"kept"}' \
         >"$BUNDLE_WORK/note.json"
     cat >"$BUNDLE_TRACE_LIVE/cookies.har" <<'HAR'
 {
@@ -179,7 +179,8 @@ for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-prefixed-response-secret opaque-proxy-credential \
     opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
     opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
-    opaque-keyed-json-secret opaque-json-note-secret opaque-har-query-secret opaque-har-form-secret \
+    opaque-keyed-json-secret opaque-json-note-secret opaque-json-cookie-secret \
+    opaque-har-query-secret opaque-har-form-secret \
     opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done

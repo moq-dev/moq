@@ -536,14 +536,22 @@ _bundle_redact_stream() {
                 }
                 return quoted
             }
-            function redact_plain(    lower, start, tail, quote) {
-                lower = tolower($0)
-                if (match(lower, /(^|[^[:alnum:]-])(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
+            function redact_plain(    rest, out, lower, start, tail, quote) {
+                rest = $0
+                out = ""
+                while (match(tolower(rest), /(^|[^[:alnum:]-])(proxy-authorization|authorization|set-cookie|cookie|x-api-key)[[:space:]]*[:=][[:space:]]*/)) {
                     start = RSTART + RLENGTH
-                    tail = substr($0, start)
-                    quote = inside_quote(substr($0, 1, RSTART)) ? closing_quote(tail) : 0
-                    $0 = substr($0, 1, start - 1) "<redacted>" (quote ? substr(tail, quote) : "")
+                    tail = substr(rest, start)
+                    quote = inside_quote(out substr(rest, 1, RSTART)) ? closing_quote(tail) : 0
+                    out = out substr(rest, 1, start - 1) "<redacted>"
+                    if (!quote) {
+                        rest = ""
+                        break
+                    }
+                    out = out substr(tail, quote, 1)
+                    rest = substr(tail, quote + 1)
                 }
+                $0 = out rest
             }
             function redact_keyed(    rest, out, start, tail, quote) {
                 rest = $0
