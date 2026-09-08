@@ -91,16 +91,18 @@ going to exist.
 `MOQ_QA_RETAIN=1` leaves a failing run's processes alive, holding their ports,
 so the relay can be attached to rather than reconstructed. The bundle then also
 carries `session.md`, listing the endpoint URLs, the live PIDs, the debugger
-command for each, and the teardown command. Nothing else reaps them:
+command for each, the external path where live logs continue, and the teardown
+command. The bundle's `work/` remains a bounded, redacted failure-time snapshot.
+Nothing else reaps them:
 
 ```bash
 MOQ_QA_RETAIN=1 just test smoke
 bash target/qa/smoke-*/teardown.sh
 ```
 
-`teardown.sh` kills only the processes that run recorded, and only while they
-still match the command they were started with, so a PID the kernel has since
-handed to somebody else is left alone.
+`teardown.sh` kills only the processes that run recorded, and only while their
+process start time still matches, so a PID the kernel has since handed to
+somebody else is left alone even if it runs the same command.
 
 ### From CI
 

@@ -87,7 +87,7 @@ cleanup() {
         for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
             bundle_stack "relay-$pid" "$pid"
         done
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relays wrote no traces: this backend cannot capture them"
         fi
     fi

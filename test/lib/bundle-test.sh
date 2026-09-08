@@ -97,12 +97,19 @@ secret_case() {
         # Upper case, because BSD sed has no case-insensitive substitution and a
         # pattern that only matches lower case would pass every check above.
         echo "GET /watch?TOKEN=opaque-query-credential"
+        cat <<'HAR'
+{
+  "name": "Authorization",
+  "value": "Bearer opaque-har-credential"
+}
+HAR
     } >"$BUNDLE_WORK/client.log"
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
-    opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential; do
+    opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential \
+    opaque-har-credential; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
 check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
@@ -128,6 +135,28 @@ check "bounding keeps the tail" grep -q LAST-LINE "$bundle/work/huge.log"
 check "an oversized capture is dropped" test ! -f "$bundle/work/capture.bin"
 check "an oversized capture leaves its identity" test -f "$bundle/work/capture.bin.omitted"
 
+manifest_cap_case() {
+    bundle_note "the manifest must remain structured even below its own size"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_LOG_CAP=128 run_case manifest-cap manifest_cap_case)
+if command -v python3 >/dev/null 2>&1; then
+    check "a small log cap leaves valid manifest JSON" python3 -c \
+        'import json,sys; json.load(open(sys.argv[1]))' "$bundle/manifest.json"
+fi
+
+if (
+    export MOQ_QA_ARTIFACTS="$ROOT/invalid-cap.d" MOQ_QA_LOG_CAP=bogus
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+) >/dev/null 2>&1; then
+    bad "a malformed log cap is refused"
+else
+    ok "a malformed log cap is refused"
+fi
+check "a malformed cap retains no partial bundle" test ! -d "$ROOT/invalid-cap.d"
+
 # ── a hung process is described before it is killed ─────────────────────────
 # The stack itself may be unavailable (ptrace_scope, no debugger, a hardened
 # runtime); the requirement is that the attempt is recorded and does not block.
@@ -148,12 +177,26 @@ check "the owned process is recorded" grep -q '"name": "hung"' "$bundle/manifest
 
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
-    sleep 120 &
+    # The argument exercises a credential-shaped command without exposing it in
+    # teardown.sh. Ownership is checked by process birth identity instead.
+    : >"$BUNDLE_WORK/live.log"
+    mkfifo "$ROOT/continue" "$ROOT/written"
+    exec 9>>"$BUNDLE_WORK/live.log"
+    python3 -c 'import os,sys,time
+with open(sys.argv[1], "rb", buffering=0) as ready:
+ ready.read(1)
+os.write(9, b"still running\n")
+with open(sys.argv[2], "wb", buffering=0) as written:
+ written.write(b"done\n")
+while True:
+ time.sleep(120)' "$ROOT/continue" "$ROOT/written" '?token=teardown-secret' &
     mine=$!
+    exec 9>&-
     bundle_process mine "$mine"
-    # A PID recorded under a command it no longer runs, standing in for one the
-    # kernel has since recycled: teardown has to leave it alone.
-    bundle_process stranger "$$" "a-command-this-pid-no-longer-runs"
+    # A changed birth identity stands in for a PID the kernel has recycled:
+    # teardown has to leave the current owner alone.
+    bundle_process stranger "$$"
+    printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$$"
     printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
     bundle_finish 1
 }
@@ -171,10 +214,24 @@ bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
+check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
+    "$bundle/teardown.sh"
+live=$(sed -n 's/^Live logs continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
+check "retained logs live outside the uploadable bundle" test -d "$live"
+before=$(wc -c <"$live/live.log" | tr -d '[:space:]')
+printf 'continue\n' >"$ROOT/continue"
+IFS= read -r _ <"$ROOT/written"
+after=$(wc -c <"$live/live.log" | tr -d '[:space:]')
+check "retained logs continue after bundling" test "$after" -gt "$before"
 if running "$mine"; then
     ok "a retained session leaves its processes running"
     output=$(bash "$bundle/teardown.sh" 2>&1 || true)
-    if running "$mine"; then bad "teardown reaps the run's process"; else ok "teardown reaps the run's process"; fi
+    if running "$mine"; then
+        bad "teardown reaps the run's process"
+        printf '%s\n' "$output" >&2
+    else
+        ok "teardown reaps the run's process"
+    fi
     if grep -q 'reused by another process' <<<"$output"; then
         ok "teardown skips a recycled pid"
     else

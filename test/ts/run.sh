@@ -174,7 +174,7 @@ cleanup() {
         [[ -z "$SUB_PID" ]] || bundle_stack subscriber "$SUB_PID"
         [[ -z "$PUB_PID" ]] || bundle_stack publisher "$PUB_PID"
         [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
         fi
     fi

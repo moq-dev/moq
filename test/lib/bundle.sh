@@ -48,6 +48,7 @@ BUNDLE_SCRATCH="" # never retained: compiled fixtures, plugin registries
 BUNDLE_TRACE=""   # browser traces, HARs, screenshots
 BUNDLE_QLOG=""    # relay qlog traces, when captured
 BUNDLE_META=""    # jsonl fragments assembled into manifest.json
+BUNDLE_LIVE=""    # live retained logs, outside the uploadable bundle
 BUNDLE_HARNESS=""
 BUNDLE_RUN_ID=""
 
@@ -92,6 +93,14 @@ _bundle_record() {
 bundle_init() {
     BUNDLE_HARNESS=$1
     local root="${MOQ_QA_ARTIFACTS:-$BUNDLE_WORKSPACE/target/qa}"
+    local knob value
+    for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP; do
+        value=${!knob:-}
+        if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
+            echo "error: $knob must be a non-negative integer (got '$value')" >&2
+            return 2
+        fi
+    done
     # Timestamp plus PID, disambiguated if that pair is somehow already taken:
     # two runs must never share a directory, or the second would overwrite the
     # failure the first was kept for.
@@ -108,7 +117,9 @@ bundle_init() {
     BUNDLE_TRACE="$BUNDLE_DIR/trace"
     BUNDLE_QLOG="$BUNDLE_DIR/qlog"
     BUNDLE_META="$BUNDLE_DIR/.meta"
-    mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" "$BUNDLE_META" "$BUNDLE_DIR/stacks"
+    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID/work"
+    mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
+        "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
 
     # The drivers write browser traces here without knowing the layout.
     export MOQ_QA_BUNDLE="$BUNDLE_DIR"
@@ -206,8 +217,10 @@ bundle_binary() {
 # Recorded so the retained-session teardown can reap exactly these and nothing
 # else. The command is read from the process unless one is given.
 bundle_process() {
-    local command="${3:-}"
+    local command="${3:-}" started
     [[ -n "$command" ]] || command=$(ps -o command= -p "$2" 2>/dev/null | head -n 1 || true)
+    started=$(ps -o lstart= -p "$2" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    [[ -z "$started" ]] || printf '%s' "$started" >"$BUNDLE_META/process-starts/$2"
     _bundle_record processes \
         "{ \"name\": $(_bundle_json "$1"), \"pid\": $2, \"command\": $(_bundle_json "$command") }"
 }
@@ -393,16 +406,7 @@ _bundle_patterns() {
 _bundle_redact() {
     local file=$1
     local tmp="$file.redacted"
-    _bundle_patterns
-    # A header value runs to the closing quote or the end of the line, not to
-    # the first space: `Bearer <token>` is two words and the second is the one
-    # worth having.
-    if LC_ALL=C sed -E \
-        -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
-        -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
-        -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
-        -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' \
-        "$file" >"$tmp" 2>/dev/null; then
+    if _bundle_redact_stream <"$file" >"$tmp" 2>/dev/null; then
         mv "$tmp" "$file"
         return 0
     fi
@@ -416,14 +420,58 @@ _bundle_redact() {
     return 1
 }
 
+# Redact one text stream. The awk pass handles HAR headers, whose name and
+# value are separate JSON fields and commonly live on separate lines.
+_bundle_redact_stream() {
+    _bundle_patterns
+    # A header value runs to the closing quote or the end of the line, not to
+    # the first space: `Bearer <token>` is two words and the second is the one
+    # worth having.
+    LC_ALL=C sed -E \
+        -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
+        -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
+        -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
+        -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
+        awk '
+            function redact_value(    start, tail, quote) {
+                if (!match($0, /"value"[[:space:]]*:[[:space:]]*"/)) return
+                start = RSTART + RLENGTH
+                tail = substr($0, start)
+                quote = index(tail, "\"")
+                if (quote) $0 = substr($0, 1, start - 1) "<redacted>" substr(tail, quote)
+            }
+            {
+                lower = tolower($0)
+                if (sensitive) {
+                    redact_value()
+                    if (lower ~ /"value"[[:space:]]*:/) sensitive = 0
+                }
+                if (lower ~ /"name"[[:space:]]*:[[:space:]]*"(proxy-authorization|authorization|set-cookie|cookie|x-api-key)"/) {
+                    sensitive = 1
+                    redact_value()
+                    if (lower ~ /"value"[[:space:]]*:/) sensitive = 0
+                }
+                print
+            }
+        '
+}
+
 # Walk everything retained: bound it, then redact it. Order matters, because
 # bounding is what makes redacting a multi-megabyte log affordable.
 _bundle_sweep() {
     local log_cap="${MOQ_QA_LOG_CAP:-2097152}" file_cap="${MOQ_QA_FILE_CAP:-8388608}" file
     local withheld=0
     while IFS= read -r -d '' file; do
+        # This script is generated from already-redacted command values. A
+        # second textual rewrite could remove printf %q escaping and make it
+        # unparseable, leaving the retained processes alive.
+        [[ "$file" == "$BUNDLE_DIR/teardown.sh" ]] && continue
         if _bundle_is_text "$file"; then
-            ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
+            # Byte-splicing structured metadata makes invalid JSON. Its fields
+            # are individually small, so keep the manifest whole.
+            if [[ "$file" != "$BUNDLE_DIR/manifest.json" ]]; then
+                ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
+            fi
             _bundle_redact "$file" || withheld=$((withheld + 1))
         else
             ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
@@ -482,6 +530,7 @@ _bundle_session() {
     {
         printf '# Retained session\n\n'
         printf 'Processes from this run are still alive. They hold their ports until torn down.\n\n'
+        printf 'Live logs continue in `%s`; `work/` is the redacted failure-time snapshot.\n\n' "$BUNDLE_LIVE"
         printf '## Endpoints\n\n'
         [[ -f "$BUNDLE_META/endpoints.jsonl" ]] &&
             sed -n 's/.*"url": "\([^"]*\)".*/- \1/p' "$BUNDLE_META/endpoints.jsonl"
@@ -502,15 +551,16 @@ _bundle_session() {
     } >"$file"
 }
 
-# Reaps only what this run recorded. The command is re-checked before the
-# signal, because a PID freed since the run is somebody else's process now.
+# Reaps only what this run recorded. The process start time is re-checked before
+# the signal, because a PID freed since the run is somebody else's process now.
 _bundle_teardown_script() {
     {
         printf '#!/usr/bin/env bash\n'
         printf '# Teardown for the retained %s run %s.\n' "$BUNDLE_HARNESS" "$BUNDLE_RUN_ID"
         cat <<'PRELUDE'
-# Kills only the processes this run recorded, and only while they still match
-# the command they were started with, so a recycled PID is left alone.
+# Kills only the processes this run recorded, and only while their process birth
+# identity still matches, so a recycled PID is left alone even if it runs the
+# same command.
 set -uo pipefail
 
 kill_tree() {
@@ -520,13 +570,14 @@ kill_tree() {
 }
 
 reap() {
-    local pid="$1" want="$2" have
+    local pid="$1" want="$2" have started
     have=$(ps -o command= -p "$pid" 2> /dev/null | head -n 1 || true)
     if [[ -z "$have" ]]; then
         echo "pid $pid: gone"
         return
     fi
-    if [[ "$have" != "$want" ]]; then
+    started=$(ps -o lstart= -p "$pid" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    if [[ -z "$started" || "$started" != "$want" ]]; then
         echo "pid $pid: reused by another process, skipping"
         return
     fi
@@ -535,14 +586,15 @@ reap() {
 }
 
 PRELUDE
-        local line pid command
-        if [[ -f "$BUNDLE_META/processes.jsonl" ]]; then
-            while IFS= read -r line; do
-                pid=$(printf '%s' "$line" | sed -n 's/.*"pid": \([0-9]*\).*/\1/p')
-                command=$(printf '%s' "$line" | sed -n 's/.*"command": "\(.*\)" }$/\1/p')
-                [[ -n "$pid" ]] || continue
-                printf 'reap %s %q\n' "$pid" "$command"
-            done <"$BUNDLE_META/processes.jsonl"
+        local start_file pid
+        for start_file in "$BUNDLE_META/process-starts"/*; do
+            [[ -f "$start_file" ]] || continue
+            pid=${start_file##*/}
+            printf 'reap %s %q\n' "$pid" "$(<"$start_file")"
+        done
+        if [[ -d "$BUNDLE_LIVE" ]]; then
+            printf 'rm -rf -- %q\n' "${BUNDLE_LIVE%/work}"
+            printf 'rmdir %q 2>/dev/null || true\n' "$(dirname "${BUNDLE_LIVE%/work}")"
         fi
     } >"$BUNDLE_DIR/teardown.sh"
     chmod +x "$BUNDLE_DIR/teardown.sh"
@@ -577,6 +629,13 @@ bundle_finish() {
     rmdir "$BUNDLE_TRACE" "$BUNDLE_QLOG" "$BUNDLE_DIR/stacks" 2>/dev/null || true
 
     if bundle_retained && [[ "$status" -ne 0 ]]; then
+        # Keep the live inodes outside the upload root, then sweep a snapshot.
+        # Processes continue writing to BUNDLE_LIVE while the uploadable bundle
+        # remains bounded and redacted.
+        mkdir -p "$(dirname "$BUNDLE_LIVE")"
+        mv "$BUNDLE_WORK" "$BUNDLE_LIVE"
+        mkdir -p "$BUNDLE_WORK"
+        cp -R "$BUNDLE_LIVE/." "$BUNDLE_WORK/"
         _bundle_session
     fi
     _bundle_teardown_script

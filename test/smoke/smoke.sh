@@ -138,7 +138,11 @@ needs_js() {
 rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
 [[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
 bundle_init smoke
-bundle_rerun "${rerun[@]}"
+if [[ -n "$FAULT" ]]; then
+    bundle_rerun env "MOQ_QA_FAULT=$FAULT" "${rerun[@]}"
+else
+    bundle_rerun "${rerun[@]}"
+fi
 [[ -z "$FAULT" ]] || bundle_note "fault injection: MOQ_QA_FAULT=$FAULT"
 
 # The harness scratch lives in the bundle, so the per-process logs, the relay
@@ -193,7 +197,7 @@ cleanup() {
     if [[ "$status" -ne 0 ]]; then
         [[ -z "$RELAY_PID" ]] || bundle_stack relay "$RELAY_PID"
         [[ -z "${PUB_PID:-}" ]] || bundle_stack publisher "$PUB_PID"
-        if [[ -n "${MOQ_QA_QLOG:-}" ]] && [[ -z "$(ls -A "$BUNDLE_QLOG" 2>/dev/null)" ]]; then
+        if [[ -n "${MOQ_QA_QLOG:-}" ]] && ! find "$BUNDLE_QLOG" -type f -print -quit | grep -q .; then
             bundle_capability qlog "requested, but the relay wrote no traces: this backend cannot capture them"
         fi
     fi
@@ -610,12 +614,13 @@ overall=0
 
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3"
-    local pids=() names=() i sub
+    local pids=() names=() i sub round_failed=0
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             bundle_result "$pub -> $sub" fail "" "subscriber client unavailable"
             overall=1
+            round_failed=1
             continue
         fi
         # Record how long each cell took. Every subscriber shares one budget, so the
@@ -677,6 +682,7 @@ run_round() {
             bundle_result "$pub -> ${names[$i]}" fail "$elapsed" "budget ${TIMEOUT}s"
             sed 's/^/        /' "$TMP/$pub-${names[$i]}.log" 2>/dev/null || true
             overall=1
+            round_failed=1
         fi
     done
     # Every leg failing points at the publisher; surface its log even when the
@@ -692,14 +698,16 @@ run_round() {
         # let teardown.sh reap it with everything else the run recorded. Only for
         # a round that actually failed, since a passing round has nothing to
         # inspect and its publisher would otherwise stream for the whole run.
-        if [[ "$round_pass" -eq 0 ]] && [[ ${#pids[@]} -gt 0 ]] && bundle_retained; then
+        if [[ "$round_failed" -eq 1 ]] && bundle_retained; then
             echo "  INFO  publisher '$pub' left running for the retained session (pid $pub_pid)"
         else
             kill_tree "$pub_pid"
             wait "$pub_pid" 2>/dev/null || true
         fi
         # Don't let cleanup() later signal this now-reaped (possibly recycled) PID.
-        [[ "${PUB_PID:-}" == "$pub_pid" ]] && PUB_PID=""
+        if [[ "$round_failed" -eq 0 ]] || ! bundle_retained; then
+            [[ "${PUB_PID:-}" == "$pub_pid" ]] && PUB_PID=""
+        fi
     fi
     return 0
 }

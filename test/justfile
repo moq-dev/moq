@@ -63,7 +63,7 @@ default $BASE="":
     # gate, but the debug bundle they all write into is neither, and it only
     # runs on the failure path -- so nothing else would notice it breaking.
     if echo "$files" | grep -qE '^test/(lib|smoke|wasm|ts)/'; then
-    	./lib/bundle-test.sh
+        ./lib/bundle-test.sh
     fi
 
 # Run every language's unit tests, unscoped.
