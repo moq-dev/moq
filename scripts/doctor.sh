@@ -231,7 +231,13 @@ harness_root() {
         ports) root=${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}} ;;
         *) return 1 ;;
     esac
-    root=${root%/}
+    while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do
+        root=${root%/}
+    done
+    case $root in
+        /*) ;;
+        *) root="$REPO/test/$root" ;;
+    esac
     if [ "$kind" = runs ] && [ -z "${MOQ_TEST_RUNS:-}" ]; then
         root="$root/moq-test-$(id -u)"
     elif [ "$kind" = ports ] && [ -z "${MOQ_TEST_PORTS:-}" ]; then
@@ -1178,8 +1184,11 @@ self_test_ownership() {
         cargo_home >/dev/null
     )
     check 'Cargo home rejects an unknown location' "$?" 1
-    check 'an explicit harness port root is preserved' \
+    check 'an absolute harness port root is preserved' \
         "$(MOQ_TEST_PORTS=/custom/ports harness_root ports)" /custom/ports
+    check 'a relative harness port root uses the test directory' \
+        "$(MOQ_TEST_PORTS=relative harness_root ports)" "$REPO/test/relative"
+    check 'the filesystem root is preserved' "$(MOQ_TEST_PORTS=/ harness_root ports)" /
     check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
     check 'a nested path uses its existing ancestor' \
         "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
@@ -1390,6 +1399,7 @@ while (($#)); do
 done
 
 if [ "$MODE" = self-test ]; then
+    REPO=$(cd "$(dirname "$SELF")/.." && pwd)
     self_test
     exit $?
 fi

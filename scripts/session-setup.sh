@@ -60,18 +60,19 @@ finish() {
 # Nothing to export into without this; older agent versions won't set it.
 [ -n "$env_file" ] || exit 0
 
+if [ -n "$replace_env" ]; then
+    env_dir=$(dirname "$env_file")
+    mkdir -p "$env_dir" || setup_error "cannot create $env_dir"
+    output_file="$env_file.tmp.$$"
+    trap 'rm -f "$output_file"' EXIT
+    : >"$output_file" || setup_error "cannot create $output_file"
+fi
+
 # Require an explicit project dir so we never approve/export a stray .envrc from
 # some unrelated working directory.
 project_dir="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-${PWD:-}}}"
 [ -n "$project_dir" ] || finish host "no project directory"
 cd "$project_dir" || finish host "cannot enter $project_dir"
-
-if [ -n "$replace_env" ]; then
-    mkdir -p "$PWD/.direnv" || setup_error "cannot create $PWD/.direnv"
-    output_file="$env_file.tmp.$$"
-    trap 'rm -f "$output_file"' EXIT
-    : >"$output_file" || setup_error "cannot create $output_file"
-fi
 
 command -v direnv >/dev/null 2>&1 || finish host "direnv is not installed"
 [ -f .envrc ] || finish host "no .envrc in $project_dir"

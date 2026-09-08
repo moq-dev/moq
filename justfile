@@ -433,11 +433,20 @@ _tools $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    if ! tools=$(scripts/doctor.sh --tools "$FILES"); then
+        echo "error: scripts/doctor.sh --tools failed; the required tool set is unknown" >&2
+        exit 1
+    fi
+    if [[ -z "$tools" ]]; then
+        echo "error: scripts/doctor.sh --tools returned no tools; the mapping is broken" >&2
+        exit 1
+    fi
+
     missing=()
     while IFS= read -r tool; do
         [[ -n "$tool" ]] || continue
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
-    done < <(scripts/doctor.sh --tools "$FILES")
+    done <<< "$tools"
 
     ((${#missing[@]})) || exit 0
 
