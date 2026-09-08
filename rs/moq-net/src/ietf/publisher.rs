@@ -435,14 +435,12 @@ where
 			.await
 		{
 			Ok(broadcast) => broadcast,
-			Err(_) => {
+			// The reason is the origin's, not ours: a dynamic router refusing on
+			// authorization or a drain says so, and only an unroutable path means the
+			// broadcast is not here.
+			Err(err) => {
 				return self
-					.reject_subscribe(
-						stream,
-						request_id,
-						request::Condition::DoesNotExist,
-						"broadcast not found",
-					)
+					.reject_subscribe(stream, request_id, (&err).into(), &err.to_string())
 					.await;
 			}
 		};
@@ -2368,7 +2366,8 @@ mod serve_tests {
 	/// Draft-14 numbers it 0x4 and draft-15 moved it to 0x10, which is draft-14's
 	/// MALFORMED_AUTH_TOKEN: a peer told the wrong one re-authenticates instead of waiting
 	/// for the announcement. The reply is encoded here rather than matched by code alone, so
-	/// a value slipping outside the draft's table cannot pass.
+	/// a value slipping outside the draft's table cannot pass, and the reason phrase is the
+	/// origin's own, which is what carries a refusal the registry has no value for.
 	#[tokio::test]
 	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
 		for version in [
@@ -2406,7 +2405,7 @@ mod serve_tests {
 							.encode(&ietf::SubscribeError {
 								request_id: RequestId(REQUEST_ID),
 								error_code,
-								reason_phrase: "broadcast not found".into(),
+								reason_phrase: Error::Unroutable.to_string().into(),
 							})
 							.await
 							.unwrap();
@@ -2420,7 +2419,7 @@ mod serve_tests {
 									_ => None,
 								},
 								error_code,
-								reason_phrase: "broadcast not found".into(),
+								reason_phrase: Error::Unroutable.to_string().into(),
 								retry_interval: 0,
 							})
 							.await
