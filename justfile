@@ -429,17 +429,26 @@ _echo $VALUE:
 
 # Fail (under MOQ_STRICT) or warn when a tool the diff's scopes need is missing.
 [private]
-_tools $FILES="":
+_tools $FILES="" $SUITE="check":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if ! tools=$(scripts/doctor.sh --tools "$FILES"); then
-        echo "error: scripts/doctor.sh --tools failed; the required tool set is unknown" >&2
+    case "$SUITE" in
+        check) mode=--tools ;;
+        test) mode=--test-tools ;;
+        *) echo "error: unknown tool suite: $SUITE" >&2; exit 2 ;;
+    esac
+
+    if ! tools=$(scripts/doctor.sh "$mode" "$FILES"); then
+        echo "error: scripts/doctor.sh $mode failed; the required tool set is unknown" >&2
         exit 1
     fi
     if [[ -z "$tools" ]]; then
-        echo "error: scripts/doctor.sh --tools returned no tools; the mapping is broken" >&2
-        exit 1
+        if [[ "$SUITE" == check ]]; then
+            echo "error: scripts/doctor.sh $mode returned no tools; the mapping is broken" >&2
+            exit 1
+        fi
+        exit 0
     fi
 
     missing=()

@@ -91,7 +91,7 @@ log="$PWD/.direnv/session-setup.log"
 # Codex only needs the flake dev shell environment, so avoid depending on
 # nix-direnv's remote bootstrap when Nix can emit the shell exports directly.
 if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
-    nix_env="$(mktemp)"
+    nix_env=$(mktemp "$PWD/.direnv/session-nix.XXXXXX") || setup_error "cannot create a Nix environment snapshot"
     if nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
         >"$nix_env" 2>>"$log"; then
@@ -110,7 +110,7 @@ unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
 
 direnv allow . 2>>"$log" || finish direnv-failed "direnv could not approve .envrc"
 
-exports="$(mktemp)"
+exports=$(mktemp "$PWD/.direnv/session-direnv.XXXXXX") || setup_error "cannot create a direnv snapshot"
 if ! direnv export bash >"$exports" 2>>"$log"; then
     rm -f "$exports"
     finish direnv-failed "direnv export failed"

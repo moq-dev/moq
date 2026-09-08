@@ -11,6 +11,7 @@
 # Modes:
 #   doctor.sh [--json] [--strict] [--base REF] [--suite NAME]...
 #   doctor.sh --tools [FILES]   Print the tools a changed-file list needs.
+#   doctor.sh --test-tools [FILES]   Print tools the test dispatch needs.
 #   doctor.sh --self-test       Check the classifier, budget, and JSON encoder.
 #
 # Written for bash 3.2 (no associative arrays, no mapfile): the environments
@@ -34,6 +35,7 @@ Usage:
   just doctor [--json] [--strict] [--base REF]
               [--suite check|test|smoke|smoke-full|wasm|all]...
   scripts/doctor.sh --tools [FILES]
+  scripts/doctor.sh --test-tools [FILES]
   scripts/doctor.sh --self-test
 EOF
 }
@@ -127,12 +129,18 @@ widen_orchestration() {
 # diff still runs `_tools` on the original list before widening to those three.
 tools_for_test_files() {
     local files=$1 tools=""
-    if [ "$files" != ALL ]; then
-        tools=$(tools_for_files "$files")
-    fi
-    if [ "$files" = ALL ] || printf '%s\n' "$files" | grep -qE '^(justfile|test/justfile)$'; then
+    scoped() { [ "$files" = ALL ] || printf '%s\n' "$files" | grep -qE "$1"; }
+
+    scoped '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|test/wasm/|package\.json$|bun\.lock(b)?$|biome\.jsonc$)' &&
+        tools="$tools bun"
+    scoped '^(Cargo\.(toml|lock)$|rust-toolchain\.toml$|rs/justfile$|\.config/nextest\.toml$|rs/)' &&
+        tools="$tools cargo"
+    # Python's test setup builds the Rust FFI through maturin.
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)' && tools="$tools cargo uv"
+    if printf '%s\n' "$files" | grep -qE '^(justfile|test/justfile)$'; then
         tools="$tools bun cargo uv"
     fi
+    unset -f scoped
     printf '%s' "$tools" | tr ' ' '\n' | grep -v '^$' | sort -u
 }
 
@@ -1211,6 +1219,7 @@ self_test_ownership() {
         "$(tools_for_test_files justfile | grep -c '^gradle$')" 0
     check 'an oversized test needs only three language toolchains' \
         "$(tools_for_test_files ALL | tr '\n' ' ')" 'bun cargo uv '
+    check 'a Go-only test needs no toolchain' "$(tools_for_test_files go/wrapper/moq/lib.go)" ''
 
     SUITES="smoke"
     PAIRS=$(tool_pairs "$SUITES" 'rs/moq-net/src/lib.rs')
@@ -1464,6 +1473,11 @@ while (($#)); do
             tools_for_files "${1:-}"
             exit 0
             ;;
+        --test-tools)
+            shift
+            tools_for_test_files "${1:-}"
+            exit 0
+            ;;
         --self-test) MODE=self-test ;;
         -h | --help)
             usage
@@ -1480,6 +1494,9 @@ done
 
 if [ "$MODE" = self-test ]; then
     REPO=$(cd "$(dirname "$SELF")/.." && pwd)
+    HARNESS_TMPDIR=${TMPDIR:-/tmp}
+    TMPDIR=$(doctor_tmpdir)
+    export TMPDIR
     self_test
     exit $?
 fi
