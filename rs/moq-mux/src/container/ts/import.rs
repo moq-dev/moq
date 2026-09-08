@@ -79,7 +79,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// discontinuity only here; on any other PID it says nothing but that the
 	/// continuity counter jumped ([`Continuity`]).
 	pcr_pid: Option<Pid>,
-	/// Whether any media has been published since the last timebase break, so
+	/// Whether any media or section has been published since the last timebase break, so
 	/// consecutive markers (a repeated flag, a retransmitted clock packet) declare one
 	/// break rather than one each.
 	published: bool,
@@ -262,7 +262,7 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 			let pts = self.last_pts.unwrap_or(Timestamp::ZERO);
 			if let Some(section) = self.sections.get_mut(&pid) {
-				section.packet(&pkt, pts)?;
+				self.published |= section.packet(&pkt, pts)?;
 				continue;
 			}
 			// Intercept the standalone SI PIDs before the routing gate below drops them:
@@ -700,12 +700,6 @@ impl<E: catalog::Catalog> Import<E> {
 	/// PCR/PTS rollover sets nothing and is unwrapped rather than reset; neither is a program
 	/// break and neither reaches here.
 	fn timebase_break(&mut self) -> anyhow::Result<()> {
-		// Nothing has been published on this timebase, so there is nothing to break from: a
-		// mid-stream join, or a source repeating the flag on the packets after the first.
-		if !self.published {
-			return Ok(());
-		}
-
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
 		// runs before the marker so a salvaged tail lands in the closing group.
@@ -713,12 +707,13 @@ impl<E: catalog::Catalog> Import<E> {
 			self.broken(pid)?;
 		}
 		for stream in self.streams.values_mut() {
-			stream.discontinuity()?;
+			stream.discontinuity(self.published)?;
 		}
 		for section in self.sections.values_mut() {
-			section.discontinuity()?;
+			section.discontinuity(self.published)?;
 		}
 		self.media_unwrap.discontinuity();
+		self.last_pts = None;
 		self.audio_burst = None;
 		self.published = false;
 		tracing::debug!("MPEG-TS system time-base discontinuity");
@@ -1060,13 +1055,14 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	/// Consume one 188-byte TS packet, publishing each completed section. `pts` is
 	/// the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes).
-	fn packet(&mut self, pkt: &[u8], pts: Timestamp) -> anyhow::Result<()> {
+	fn packet(&mut self, pkt: &[u8], pts: Timestamp) -> anyhow::Result<bool> {
 		let mut sections = Vec::new();
 		self.reassembler.push(pkt, &mut sections);
+		let published = !sections.is_empty();
 		for section in sections {
 			self.emit(section, pts)?;
 		}
-		Ok(())
+		Ok(published)
 	}
 
 	/// Publish one complete section as a frame in its own group.
@@ -1082,10 +1078,12 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		Ok(())
 	}
 
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		// The half-reassembled section is stamped with the clock that just ended.
 		self.reassembler = SectionReassembler::default();
-		self.track.discontinuity()?;
+		if published {
+			self.track.discontinuity()?;
+		}
 		Ok(())
 	}
 
@@ -1173,9 +1171,11 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		Ok(())
 	}
 
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.unwrap.discontinuity();
-		self.track.discontinuity()?;
+		if published {
+			self.track.discontinuity()?;
+		}
 		Ok(())
 	}
 
@@ -1525,20 +1525,26 @@ impl<E: catalog::Catalog> Stream<E> {
 
 	/// The program clock restarted: mark the break on this track and stop unwrapping the
 	/// next PTS against a sample from the timebase that just ended.
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		match self {
 			Stream::H264 { import, unwrap, .. } => {
 				unwrap.discontinuity();
-				Ok(import.discontinuity()?)
+				if published {
+					import.discontinuity()?;
+				}
+				Ok(())
 			}
 			Stream::H265 { import, unwrap, .. } => {
 				unwrap.discontinuity();
-				Ok(import.discontinuity()?)
+				if published {
+					import.discontinuity()?;
+				}
+				Ok(())
 			}
-			Stream::Aac(stream) => stream.discontinuity(),
-			Stream::Opus(stream) => stream.discontinuity(),
-			Stream::Legacy(stream) => stream.discontinuity(),
-			Stream::Verbatim(stream) => stream.discontinuity(),
+			Stream::Aac(stream) => stream.discontinuity(published),
+			Stream::Opus(stream) => stream.discontinuity(published),
+			Stream::Legacy(stream) => stream.discontinuity(published),
+			Stream::Verbatim(stream) => stream.discontinuity(published),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -2075,10 +2081,10 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.desync();
 		self.unwrap.discontinuity();
-		if let Some(import) = &mut self.import {
+		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
 		}
 		Ok(())
@@ -2181,9 +2187,12 @@ impl<E: CatalogExt> OpusStream<E> {
 		Ok(())
 	}
 
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.unwrap.discontinuity();
-		Ok(self.import.discontinuity()?)
+		if published {
+			self.import.discontinuity()?;
+		}
+		Ok(())
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
@@ -2475,10 +2484,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(())
 	}
 
-	fn discontinuity(&mut self) -> anyhow::Result<()> {
+	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.desync();
 		self.unwrap.discontinuity();
-		if let Some(import) = &mut self.import {
+		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
 		}
 		Ok(())
@@ -4682,6 +4691,60 @@ mod test {
 		);
 		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
 		(consumer, catalog, import)
+	}
+
+	#[test]
+	fn timebase_reset_clears_unpublished_pending() {
+		let (_, _, mut import) = two_stream_import();
+		let payload = mp2_frame(0xAA);
+		import
+			.decode(audio_pes_open(PEER_PID, 0, 90_000, payload.len() * 2, &payload[..20]).as_slice())
+			.unwrap();
+		assert!(!import.published);
+		assert!(!import.pending.is_empty());
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		assert!(import.pending.is_empty(), "old PES survived the timebase reset");
+	}
+
+	#[test]
+	fn timebase_reset_clears_section_clock() {
+		let (_, _, mut import) = two_stream_import();
+		import.last_pts = Some(Timestamp::from_micros(45_000_000).unwrap());
+		import.published = true;
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		assert!(import.last_pts.is_none(), "section clock belongs to the old timebase");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn timebase_reset_after_section_only_publication() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(
+				synth_pmt(
+					&[
+						(StreamType::Mpeg2Video, PCR_PID),
+						(StreamType::Dts8ChannelLosslessAudio, 0x21),
+					],
+					true,
+				)
+				.as_slice(),
+			)
+			.unwrap();
+		import.decode(packet(true, 0, 0, &CUE).as_slice()).unwrap();
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		import.decode(packet(true, 1, 0, &CUE).as_slice()).unwrap();
+		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
+		import.decode(packet(true, 2, 0, &CUE).as_slice()).unwrap();
+		import.finish().unwrap();
+		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
+		let (frames, breaks) = read_breaks(&consumer, &name).await;
+		assert_eq!(frames.len(), 3);
+		assert_eq!(breaks, 2, "sections must participate in reset boundaries");
 	}
 
 	/// The defect from #2833: a source that signals a timebase reset produced nothing on the
