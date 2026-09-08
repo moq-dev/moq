@@ -189,9 +189,15 @@ cleanup() {
         fi
     fi
     if [[ "$status" -eq 0 ]] || ! bundle_retained; then
-        [[ -z "$SUB_PID" ]] || kill_tree "$SUB_PID"
-        [[ -z "$PUB_PID" ]] || kill_tree "$PUB_PID"
-        [[ -z "$RELAY_PID" ]] || kill_tree "$RELAY_PID"
+        # `wait` after each kill consumes the job status: bundle_finish below runs
+        # long enough for the shell to otherwise report "Killed" on its own, which
+        # reads like a failure in a run that passed.
+        local pid
+        for pid in "$SUB_PID" "$PUB_PID" "$RELAY_PID"; do
+            [[ -n "$pid" ]] || continue
+            kill_tree "$pid"
+            wait "$pid" 2>/dev/null || true
+        done
     fi
     bundle_finish "$status"
 }

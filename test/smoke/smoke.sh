@@ -194,8 +194,17 @@ cleanup() {
     # held and the processes stay attachable until teardown.sh runs.
     if [[ "$status" -eq 0 ]] || ! bundle_retained; then
         # Reap the last publisher too; subscribers self-terminate via their timeouts.
-        [[ -z "${PUB_PID:-}" ]] || kill_tree "$PUB_PID"
-        [[ -z "$RELAY_PID" ]] || kill_tree "$RELAY_PID"
+        # `wait` after each kill consumes the job status: bundle_finish below runs
+        # long enough for the shell to otherwise report "Killed" on its own, which
+        # reads like a failure in a run that passed.
+        if [[ -n "${PUB_PID:-}" ]]; then
+            kill_tree "$PUB_PID"
+            wait "$PUB_PID" 2>/dev/null || true
+        fi
+        if [[ -n "$RELAY_PID" ]]; then
+            kill_tree "$RELAY_PID"
+            wait "$RELAY_PID" 2>/dev/null || true
+        fi
     fi
     bundle_finish "$status"
 }
