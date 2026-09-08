@@ -13,6 +13,7 @@ use serde_with::DisplayFromStr;
 
 use crate::catalog::Container;
 use crate::catalog::hex::Hex;
+use crate::catalog::millis::MillisCeil;
 
 /// Information about an audio track in the catalog.
 ///
@@ -120,7 +121,7 @@ pub struct AudioConfig {
 	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
-	#[serde_as(as = "Option<crate::catalog::millis::MillisCeil>")]
+	#[serde_as(as = "Option<MillisCeil>")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }
