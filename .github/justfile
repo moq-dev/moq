@@ -8,31 +8,3 @@ check:
     @if command -v actionlint >/dev/null 2>&1; then actionlint; fi
     {{ source_directory() }}/scripts/alert.sh check-coverage
     @if command -v rustc >/dev/null 2>&1; then {{ source_directory() }}/scripts/package-binary.test.sh; fi
-    just gh gates-test
-    @if command -v cargo >/dev/null 2>&1; then just gh select-test; fi
-
-# Which end-to-end lanes a diff needs, as `<lane>=true|false` lines. Takes the
-# newline-separated changed-file list `just _changed` prints, and defaults to
-# this branch's own diff so the answer is reproducible outside CI:
-#
-#     just gh select
-#     just gh select "$(just _changed '')"
-#
-# gates.yml appends the output to $GITHUB_OUTPUT and drives one job per lane.
-select $FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -z "$FILES" ]]; then
-        FILES=$(just _changed "")
-    fi
-    printf '%s' "$FILES" | {{ source_directory() }}/scripts/select.sh
-
-# Check the impact map against the diff shapes it exists to catch.
-[private]
-select-test:
-    {{ source_directory() }}/scripts/select.test.sh
-
-# Check that the aggregate verdict tells an irrelevant lane from a missing one.
-[private]
-gates-test:
-    {{ source_directory() }}/scripts/gates.test.sh

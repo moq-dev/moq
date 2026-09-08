@@ -20,41 +20,10 @@ When taking over someone else's PR, push commits on top of theirs so they keep c
 # CI
 
 `Check` and `Test` compile the packages a branch changed and run their unit tests.
-`Gates` is the behavioral half: it always starts, asks the impact map which end-to-end lanes the diff needs, runs those, and reports one result whatever was selected.
-
-Ask for the same answer locally before pushing:
-
-```bash
-just gh select              # this branch's lanes, as `<lane>=true|false`
-just test smoke-core        # what the `smoke` lane runs
-```
-
-| Lane | Runs | Selected by | Cost |
-|---|---|---|---|
-| `smoke` | `just test smoke-core`: rust and browser publish; rust, browser and C subscribe | any change reaching moq-relay, moq-cli, libmoq, moq-ffi or moq-gst through the dependency graph, a `js/` package, or the dev shell | ~10 min |
-| `smoke_full` | `just test smoke-full` plus the negative control: every publisher against every subscriber | a change *to* the wire (moq-net), the FFI (moq-ffi, libmoq, moq-gst), a gateway, the python or Go client, or the bun workspace | ~20 min |
-| `wasm` | `just test wasm`: the `@moq/wasm` bindings in headless Chromium | any change reaching moq-wasm or moq-relay, plus `js/wasm`, `js/net`, `js/signals`, `js/tsconfig.json`, `test/wasm`, `.cargo/config.toml`, the bun workspace, or the dev shell | ~8 min |
-| `ts` | `just test ts`: the MPEG-TS exporter graded with TSDuck | any change reaching moq-mux or moq-cli, plus `test/ts` or the dev shell | ~5 min |
-| `windows` | `just rs windows`: a compile gate, not a device test | an edit to moq-video, moq-audio, moq-nvenc, moq-transcode, moq-native or moq-cli | ~13 min, uncached |
-| `macos` | `just rs macos`: same, for VideoToolbox and ScreenCaptureKit | an edit to moq-video or moq-audio | ~5 min, uncached |
-| `features` | `just rs features`: the `--all-features` and `--no-default-features` permutations | a manifest, a build script, or the toolchain pin | ~20 min |
-
-"The dev shell" is `flake.nix` and `flake.lock`, which supply ffmpeg, TSDuck, and the `wasm-bindgen` CLI every harness runs on; `windows` and `macos` use the runner's own toolchain instead, so nix never enters them.
-
-Costs are wall clock on a cold shared cache, measured on the run that added this table; every selected lane runs in parallel, so a diff selecting all seven finishes in the slowest one. Selection itself costs ~90s, which every pull request pays.
-
-The map lives in `.github/scripts/select.sh`, its fixtures in `select.test.sh`, and the aggregate in `gates.sh`. A lane is three things: an entry in the map, an output on gates.yml's `select` job, and a job whose id is the lane name. Miss one and `Gates` fails rather than passing quietly.
 
 Every test suite must run in CI, at least nightly. The Nightly workflow runs
 Rust doctests, Loom, drill sensitivity, and all four fuzz targets (five minutes
 each); ordinary fuzz regression replay stays in the PR test suite.
-
-Deliberately still nightly, and so landing on `main` rather than in review:
-
-- Swift, Kotlin, and Dart. The interop matrix has no client for any of them, so no aggregate result covers those bindings however green it is. Go is covered, but only by `smoke_full`.
-- Feature-arm breakage that arrives through source rather than a manifest.
-- A dependency-side API break reaching `#[cfg(target_os = ...)]` code, since the platform lanes key on the crate that holds it.
-- The OBS link (`obs.yml`), the Swift package (`swift.yml`), `just rs audit`, and the TS exporter's live release timing.
 
 # AI
 

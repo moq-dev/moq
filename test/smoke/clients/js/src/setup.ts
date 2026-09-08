@@ -81,16 +81,15 @@ if (role === "publish") {
 			stop();
 			el.remove();
 		},
-		startLeak: () => {
-			// Stand up a second player on the same broadcast and leave it connected. The driver proves
-			// its session exists before detaching the real player, so a zero-resource instant cannot
-			// satisfy the negative control before the deliberate leak has started.
+		detachLeaky: () => {
+			// Stand up a second player on the same broadcast and leave it connected. This is the old
+			// session a detach is supposed to end, so the resource baseline must not come back clean.
 			const stray = document.createElement("moq-watch") as MoqWatch;
 			stray.setAttribute("url", url);
 			stray.setAttribute("name", broadcast);
-			stray.setAttribute("visible", "always");
-			stray.appendChild(document.createElement("canvas"));
 			leak.appendChild(stray);
+			stop();
+			el.remove();
 		},
 		reattach: () => {
 			stop();

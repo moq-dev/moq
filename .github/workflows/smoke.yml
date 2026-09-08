@@ -2,41 +2,35 @@ name: Smoke
 
 # Cross-language interop smoke test built from THIS checkout (not the published
 # packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
-# publish x subscribe matrix across rust / python / go / browser / native-js / c / gst.
-#
-# The TS/IRD compliance harness used to ride along here. It is its own lane in
-# gates.yml now, so it runs on the pull requests that change the exporter rather
-# than on the ones that change this harness, and nightly.yml still runs the
-# stronger `--live` arm of it.
+# publish x subscribe matrix across rust / python / go / browser / native-js / c,
+# then the TS/IRD compliance harness over the exporter's output.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # Pull requests reach this through gates.yml, which asks the impact map which
-  # width the diff needs instead of filtering on paths. A `paths:` filter here
-  # only ever named the harness, so an ordinary relay, hang, or player change ran
-  # no matrix at all and the regression surfaced the next night, on `main`.
-  workflow_call:
-    inputs:
-      matrix:
-        description: >-
-          `full` for every publisher against every subscriber, or `core` for the
-          representative rust/browser/C set. Empty on schedule, meaning full.
-        type: string
-        default: full
+  # On PRs that touch the harness itself, so a change to the smoke test is
+  # validated before it merges. Source regressions still surface nightly.
+  pull_request:
+    paths:
+      - "test/smoke/**"
+      # The TS/IRD compliance harness runs in the same job (see below).
+      - "test/ts/**"
+      # The smoke job also depends on the recipe that invokes it and the
+      # workspace membership that links the JS clients to source.
+      - "test/justfile"
+      - "package.json"
+      # The Go client builds against the modules this script stages.
+      - "go/scripts/**"
+      - ".github/workflows/smoke.yml"
 
 concurrency:
-  # Keyed by width as well as ref: gates.yml picks one of the two, but a run of
-  # each must not cancel the other if both are ever selected.
-  group: smoke-${{ inputs.matrix || 'full' }}-${{ github.ref }}
+  group: smoke-${{ github.ref }}
   cancel-in-progress: true
 
-# No id-token: nothing here authenticates over OIDC, and a called workflow cannot
-# ask for more than its caller grants, so an unused write would force gates.yml to
-# hand every lane the same.
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -71,14 +65,12 @@ jobs:
             extra-substituters = https://kixelated.cachix.org
             extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
 
-      # Restore only, from the x64 entry cache.yml warms on `main`. This used to
-      # save its own, which was affordable while the only pull requests reaching
-      # here were the ones editing the harness. Selected by the impact map it is
-      # on a large share of them, and a per-PR entry is readable only by that PR
-      # while still counting against the repository's 10 GB budget, evicting the
-      # shared entries everyone else restores.
+      # Reuse ~/.cargo + ./target across nightly runs so only changed crates
+      # recompile (the relay, cli, moq-ffi, and libmoq all build from source).
       - name: Rust cache
-        uses: ./.github/actions/rust-cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          cache-on-failure: true
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager) so the
@@ -88,16 +80,11 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
-      - name: Smoke
-        run: nix develop --command just test smoke-${{ inputs.matrix || 'full' }}
+      - name: Smoke (full matrix)
+        run: nix develop --command just test smoke-full
         shell: bash -leo pipefail {0}
 
-      # Proves the harness can still report a failure at all, which every cell
-      # passing does not. Only on the full matrix: the core set is the same
-      # orchestrator at three fewer subscribers, so a second negative run of it
-      # would re-prove the same thing on the pull requests paying for it.
       - name: Negative control
-        if: inputs.matrix != 'core'
         run: nix develop --command just test smoke-negative
         shell: bash -leo pipefail {0}
 
@@ -105,4 +92,10 @@ jobs:
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle
         run: nix develop --command just test smoke-media
+        shell: bash -leo pipefail {0}
+
+      # Round-trips a PCR-paced TS through a relay and checks the subscriber's
+      # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
+      - name: TS compliance
+        run: nix develop --command just test ts
         shell: bash -leo pipefail {0}

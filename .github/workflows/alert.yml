@@ -18,12 +18,8 @@ on:
   workflow_run:
     # Matched by workflow `name:`, not filename. Every workflow that can run
     # outside a pull request belongs here; the pull-request-only ones (Check,
-    # Gates) are omitted so they don't spawn a skipped Alert run on every push
-    # to every PR. `just gh check` enforces both halves of that.
-    #
-    # A reusable workflow (WASM) is omitted too, for a different reason: it
-    # raises no workflow_run event of its own, so an entry for one would sit
-    # here never firing. Its caller is what reports.
+    # macOS, Windows) are omitted so they don't spawn a skipped Alert run on
+    # every push to every PR. `just gh check` enforces both halves of that.
     #
     # Swift is here despite also running on pull requests: it warms its own
     # Rust cache on `main`, and that push run is nobody's check, so a break in

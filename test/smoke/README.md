@@ -71,10 +71,6 @@ just test smoke
 # Full matrix: rust/python/go/browser publish; everyone subscribes.
 just test smoke-full
 
-# The representative set a pull request runs: rust/browser publish; rust,
-# browser and C subscribe. See the CI table in CONTRIBUTING.md.
-just test smoke-core
-
 # Pick your own axes:
 just test smoke --publishers rust,python --subscribers rust,c,js-native-bun
 
@@ -170,8 +166,6 @@ clients/
 
 ## CI
 
-`.github/workflows/smoke.yml` runs the full matrix nightly and on demand. Pull
-requests reach it through the `Gates` workflow: the impact map selects the full
-matrix for `test/smoke/` and wide interop inputs, or the representative core
-matrix for ordinary delivery-path changes. A red cell means a real interop break
-in the current tree.
+`.github/workflows/smoke.yml` runs the full matrix nightly (and on demand, and on
+PRs that touch `test/smoke/`). A red cell means a real interop break in the
+current tree.

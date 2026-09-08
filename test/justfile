@@ -80,16 +80,6 @@ smoke *args:
 smoke-full:
     ./smoke/smoke.sh --publishers rust,python,go,js --subscribers rust,python,go,js,js-native-node,js-native-bun,c,gst --timeout 30
 
-# The representative set gates.yml runs on a pull request the delivery path can
-# reach: rust and browser publish; rust, browser, and C subscribe. Three
-# languages and both roles, so a broken frame, catalog, or connection fails here,
-# at roughly a third of the full matrix. What it does not cover is the python, Go,
-# and GStreamer clients, which is why a change to any of them selects `smoke-full`
-
-# instead. --timeout 30 gives headless Chromium cold-start headroom.
-smoke-core:
-    ./smoke/smoke.sh --publishers rust,js --subscribers rust,js,c --timeout 30
-
 # Negative control: no publisher, every subscriber must time out (proves the
 
 # harness can actually report failure).
