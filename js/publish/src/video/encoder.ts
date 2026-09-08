@@ -36,7 +36,7 @@ export interface Config {
 	codec?: string;
 
 	// Constrain the encoded width/height in pixels. If unset, source width.max and height.max
-	// constraints provide the cap when both are present.
+	// constraints provide the cap when both are present; otherwise screens default to logical pixels.
 	maxPixels?: number;
 
 	// Cap the encoded resolution to this fraction of the source pixel count.
@@ -425,7 +425,11 @@ export class Encoder {
 		const sourcePixels = display.width * display.height;
 
 		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
-		let maxPixels = user?.maxPixels ?? sourceConstraintPixels(source) ?? sourcePixels;
+		let maxPixels =
+			user?.maxPixels ??
+			sourceConstraintPixels(source) ??
+			(user?.maxScale === undefined ? screenPixels(source) : undefined) ??
+			sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
 				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
@@ -504,20 +508,14 @@ export class Encoder {
 			// This likely won't work because of licensing issues.
 			"hev1.1.6.L93.B0",
 			"hev1", // Browser's choice
-
-			// AV1
-			// Super expensive to encode so it's our last choice.
-			"av01.0.08M.08",
-			"av01",
 		];
 
 		// Try hardware encoding first.
-		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
 		// Safari accepts every codec under `prefer-hardware` and echoes the hint straight back, but
 		// VideoToolbox only hardware-encodes H.264 and HEVC. Skip the hardware pass and let it fall
 		// through to the software pass, which is H.264 first, since Safari routes that through
 		// VideoToolbox anyway regardless of the hint.
-		if (!Util.Hacks.isFirefox && !Util.Hacks.isSafari) {
+		if (!Util.Hacks.isSafari) {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 
@@ -607,6 +605,18 @@ function sourceConstraintPixels(source: Source): number | undefined {
 	const height = constraintMax(constraints.height);
 
 	return width !== undefined && height !== undefined ? width * height : undefined;
+}
+
+function screenPixels(source: Source): number | undefined {
+	const ratio = source.getSettings().screenPixelRatio;
+	if (ratio === undefined || !Number.isFinite(ratio) || ratio <= 1) return;
+
+	// Cap against the native surface, not the current frame, which may already be downscaled.
+	const capabilities = source.getCapabilities();
+	const width = capabilities.width?.max;
+	const height = capabilities.height?.max;
+	if (!width || !height) return;
+	return (width * height) / ratio ** 2;
 }
 
 function constraintMax(value: MediaTrackConstraints["width"]): number | undefined {

@@ -9,9 +9,6 @@ import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { type Codec, type Full, isSupported, type Level } from "./";
 
-// https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
-const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
-
 const OBSERVED = ["show", "details"] as const;
 type Observed = (typeof OBSERVED)[number];
 
@@ -209,7 +206,7 @@ export default class MoqPublishSupport extends HTMLElement {
 
 		const binary = (value: boolean | undefined) => (value ? "🟢 Yes" : "🔴 No");
 		const hardware = (codec: Codec | undefined) =>
-			codec?.hardware ? "🟢 Hardware" : codec?.software ? `🟡 Software${isFirefox ? "*" : ""}` : "🔴 No";
+			codec?.hardware ? "🟢 Hardware" : codec?.software ? "🟡 Software" : "🔴 No";
 		const partial = (value: Level | undefined) =>
 			value === "full" ? "🟢 Full" : value === "partial" ? "🟡 Polyfill" : "🔴 None";
 
@@ -260,31 +257,6 @@ export default class MoqPublishSupport extends HTMLElement {
 		addRow("", "H.264", hardware(support.video.encoding?.h264));
 		addRow("", "VP9", hardware(support.video.encoding?.vp9));
 		addRow("", "VP8", hardware(support.video.encoding?.vp8));
-
-		if (isFirefox) {
-			const noteDiv = DOM.create(
-				"div",
-				{
-					style: {
-						gridColumnStart: "1",
-						gridColumnEnd: "4",
-						textAlign: "center",
-						fontSize: "0.875rem",
-						fontStyle: "italic",
-					},
-				},
-				"Hardware acceleration is ",
-				DOM.create(
-					"a",
-					{
-						href: "https://github.com/w3c/webcodecs/issues/896",
-					},
-					"undetectable",
-				),
-				" on Firefox.",
-			);
-			container.appendChild(noteDiv);
-		}
 
 		parent.appendChild(container);
 		effect.cleanup(() => parent.removeChild(container));

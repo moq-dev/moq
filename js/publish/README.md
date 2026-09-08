@@ -95,6 +95,14 @@ const publish = new Publish.Broadcast(connection, {
 publish.source.camera.enabled.set(true);
 ```
 
+Video encoders prefer hardware encoding, including on Firefox. AV1 is only
+considered with hardware acceleration; software selection starts with H.264.
+Screen tracks default to logical resolution when the browser supplies
+`screenPixelRatio` and native dimensions: a 5120×2880 surface at 2× encodes at
+2560×1440. Browsers without that metadata keep the captured resolution.
+Explicit `maxPixels`, `maxScale`, or source width/height limits override this
+default; `maxScale: 1` preserves the captured resolution.
+
 ## UI Web Component
 
 `@moq/publish` includes a Web Component UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It is built on top of `@moq/signals` with no framework dependency.

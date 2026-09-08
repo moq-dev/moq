@@ -72,7 +72,6 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 		hardwareAcceleration: "prefer-software",
 	});
 
-	// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
 	const hardware = await VideoEncoder.isConfigSupported({
 		codec: CODECS[codec],
 		width: 1280,
@@ -80,11 +79,8 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 		hardwareAcceleration: "prefer-hardware",
 	});
 
-	// Safari always echoes "prefer-hardware" back, so the hint tells us nothing. Treat it like
-	// Firefox and report hardware support as unknown rather than advertising hardware VP9/AV1 it
-	// doesn't have.
-	const unknown =
-		Util.Hacks.isFirefox || Util.Hacks.isSafari || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+	// Safari accepts software codecs under "prefer-hardware", so report hardware support as unknown.
+	const unknown = Util.Hacks.isSafari || hardware.config?.hardwareAcceleration !== "prefer-hardware";
 
 	return {
 		hardware: unknown ? undefined : hardware.supported === true,

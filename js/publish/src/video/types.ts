@@ -43,6 +43,8 @@ export interface TrackSettings {
 	height: number;
 	resizeMode: "none" | "crop-and-scale";
 	width: number;
+	/** Physical pixels per logical pixel on the captured screen. */
+	screenPixelRatio?: number;
 }
 
 export type Constraints = Omit<
