@@ -480,6 +480,7 @@ It is never a measurement of the network, which a consumer observes for itself a
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
 A publisher MUST NOT advertise `0`; a track that flushes each frame immediately omits the field instead.
+A consumer receiving `0` SHOULD treat the field as absent, since it is a publisher rounding down rather than a claim of zero delay.
 A publisher MUST NOT lower a previously advertised value, since a burst it emitted once it may emit again.
 
 For example:
