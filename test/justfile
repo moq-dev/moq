@@ -34,8 +34,8 @@ default $BASE="":
 
     # Mirrors the root `check`: too long for argv means test everything instead.
     if [[ "$files" == ALL ]]; then
-    	just all
-    	exit 0
+        just all
+        exit 0
     fi
 
     just _tools "$files"

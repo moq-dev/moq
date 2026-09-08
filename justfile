@@ -466,12 +466,12 @@ _tools $FILES="":
 
     missing=()
     for tool in "${tools[@]}"; do
-    	command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
     if ((${#missing[@]})); then
-    	echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
-    	echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
-    	exit 1
+        echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
+        echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+        exit 1
     fi
 
 # Lints and compiles only the packages the branch changed plus everything
