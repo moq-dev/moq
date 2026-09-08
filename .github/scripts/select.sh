@@ -146,9 +146,12 @@ fi
 #
 # The bun workspace is here for the same reason: run.sh installs it frozen and
 # bundles the publisher out of it, so the root manifest and lockfile decide what
-# the harness actually loads.
+# the harness actually loads. js/tsconfig.json likewise: test/wasm extends it, and
+# this lane is the only thing that type-checks the harness against the generated
+# @moq/wasm declarations, since the wasm workspace has no `check` script for
+# `just js check` to run.
 if reaches moq-wasm moq-relay ||
-    touches '^(js/(wasm|net|signals)/|test/wasm/|\.cargo/config\.toml$)' ||
+    touches '^(js/(wasm|net|signals)/|js/tsconfig\.json$|test/wasm/|\.cargo/config\.toml$)' ||
     touches '^(package\.json|bun\.lock)$' || touches "$shell"; then
     selected[wasm]=true
 fi

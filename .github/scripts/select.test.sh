@@ -118,6 +118,11 @@ expect "$shell" macos false
 expect 'bun.lock' wasm true
 expect 'bun.lock' smoke_full true
 
+# test/wasm extends the shared compiler options, and run.sh's `tsc --noEmit` is
+# the only thing that type-checks the harness against the generated @moq/wasm
+# declarations: the workspace has no `check` script for `just js check` to run.
+expect 'js/tsconfig.json' wasm true
+
 # Docs cannot change behavior, and this is the case that must finish without
 # waiting on a lane: it is why the aggregate exists.
 docs='doc/concept/index.md'
