@@ -165,8 +165,16 @@ worktree ACTION="check" $BASE="":
     		{ [[ -z "$upstream" ]] || [[ "$upstream" == */"$branch" ]] || [[ -n "$BASE" ]]; }; then
     		if [[ "$config" == write ]]; then
     			git branch --set-upstream-to "$base" "$branch"
+    		elif [[ "$base" == origin/main ]]; then
+    			# Nothing is lost: with no upstream `_base` falls back to
+    			# origin/main, which is what this would have written.
+    			echo "warning: cannot record the upstream; $common_dir/config is $config" >&2
     		else
-    			echo "warning: cannot set upstream; $common_dir/config is $config" >&2
+    			# The upstream is the only place this choice survives, so a setup
+    			# that could not write it did not do what it was asked.
+    			echo "error: cannot set the upstream to $base; $common_dir/config is $config" >&2
+    			echo "       the branch would keep scoping against origin/main" >&2
+    			exit 1
     		fi
     	fi
     	# Resolved, written, then renamed into place. A redirect straight into the

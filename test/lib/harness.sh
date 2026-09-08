@@ -143,7 +143,14 @@ harness_port() {
     fi
 
     port="${MOQ_TEST_PORT_BASE:-4500}"
+    # A base outside the port range would hand out numbers no socket can bind, and
+    # the run would report it much later as a relay that never became ready.
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1024 || port > 65535)); then
+        echo "error: MOQ_TEST_PORT_BASE must be 1024..65535 (got '$port')" >&2
+        return 1
+    fi
     last=$((port + 500))
+    ((last <= 65535)) || last=65535
     while ((port <= last)); do
         if harness_port_take "$root" "$port"; then
             HARNESS_PORT="$port"
@@ -257,9 +264,13 @@ harness_spawn() {
 }
 
 # Index of PID in the spawn table; fails when this run never spawned it.
+#
+# Newest first, because the OS can hand the same number to a later spawn in the
+# same run. The first match going forward would be the retired entry, so reaping
+# would treat the live process as already collected and leave it running.
 harness_index() {
     local pid="$1" i
-    for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
+    for ((i = ${#HARNESS_PIDS[@]} - 1; i >= 0; i--)); do
         if [[ "${HARNESS_PIDS[$i]}" == "$pid" ]]; then
             echo "$i"
             return 0
