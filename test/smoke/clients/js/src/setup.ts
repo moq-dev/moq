@@ -71,23 +71,15 @@ if (role === "publish") {
 	watchResources();
 	let stop = attach(el);
 
-	// Where the leaked-session control parks the player it refuses to tear down.
-	const leak = document.createElement("div");
-	leak.hidden = true;
-	document.body.appendChild(leak);
-
 	publish({
 		detach: () => {
 			stop();
 			el.remove();
 		},
 		detachLeaky: () => {
-			// Stand up a second player on the same broadcast and leave it connected. This is the old
-			// session a detach is supposed to end, so the resource baseline must not come back clean.
-			const stray = el.cloneNode(true) as MoqWatch;
-			leak.appendChild(stray);
+			// Inject the application defect directly: the detach command forgets to remove the
+			// already-active player, so its established session and media graph remain observable.
 			stop();
-			el.remove();
 		},
 		reattach: () => {
 			stop();

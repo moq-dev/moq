@@ -133,7 +133,7 @@ names the assertion that has to catch it, and passes only by failing there:
 | tone muted at the source | `audio tone` |
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
-| the detached player's session never torn down | `resource baseline` |
+| detach command leaves the player connected | `resource baseline` |
 
 Not covered yet: other browser engines (the capability probe is the groundwork),
 camera/microphone permission denial, asserting the gesture gate rather than only

@@ -140,7 +140,7 @@ export type SmokeControl = {
 	detach(): void;
 	/** Put the player back and resume sampling. */
 	reattach(): void;
-	/** Detach the player but leave a second one connected: the leaked-session negative control. */
+	/** Forget to detach the player: the leaked-session negative control. */
 	detachLeaky(): void;
 };
 
