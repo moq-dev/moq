@@ -73,7 +73,10 @@ going to exist.
   before its own timeout kills it, and so is anything still alive when a failing
   run tears down. Capture is best-effort and bounded: a debugger that cannot
   attach (Linux `ptrace_scope`, macOS hardened runtime, no debugger installed)
-  records the refusal instead of blocking cleanup.
+  records the refusal instead of blocking cleanup. It walks the process tree
+  from the harness shell down, so it can catch the shell alone if the client has
+  already gone; the file says when that happened rather than passing a shell's
+  backtrace off as the client's.
 - **Credentials.** The harnesses run anonymous against a self-signed localhost
   relay, so there is nothing to leak by design. Under that, everything retained
   is swept for JWT-shaped tokens, token query parameters, authorization and

@@ -248,19 +248,29 @@ bundle_stack() {
     # The whole tree, not just the named process: a cell is a shell wrapping a
     # `timeout` wrapping the client, and the client is the one that is stuck.
     # Capped, because attaching costs a second each and a tree can be a browser.
-    local out="$BUNDLE_DIR/stacks/$name.txt" target left="${MOQ_QA_STACK_MAX:-8}"
+    local out="$BUNDLE_DIR/stacks/$name.txt" target walked=0 left="${MOQ_QA_STACK_MAX:-8}"
     for target in $(_bundle_descendants "$pid"); do
         if ((left-- <= 0)); then
             printf 'stopped after %s processes (MOQ_QA_STACK_MAX)\n' "${MOQ_QA_STACK_MAX:-8}" >>"$out"
             break
         fi
         kill -0 "$target" 2>/dev/null || continue
+        walked=$((walked + 1))
         {
             printf '=== %s pid %s ===\n' "$name" "$target"
             ps -o pid=,command= -p "$target" 2>/dev/null || true
         } >>"$out"
         _bundle_stack_one "$target" >>"$out" 2>&1
     done
+
+    # A tree of one is almost always the harness shell alone, which is not the
+    # process anybody came here to read. Say so: a file holding a shell's stack
+    # under the client's name is worse than one that admits the client had
+    # already exited, because it looks like the answer.
+    if ((walked <= 1)); then
+        printf '\nno child processes were running under pid %s at capture time;\n' "$pid" >>"$out"
+        printf 'this is the harness shell, not the client it was waiting on.\n' >>"$out"
+    fi
 }
 
 # Run a debugger under `timeout` where the host has one, and directly where it
