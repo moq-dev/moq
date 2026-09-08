@@ -435,16 +435,16 @@ _tools $FILES="":
 
     missing=()
     while IFS= read -r tool; do
-    	[[ -n "$tool" ]] || continue
-    	command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+        [[ -n "$tool" ]] || continue
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done < <(scripts/doctor.sh --tools "$FILES")
 
     ((${#missing[@]})) || exit 0
 
     if [[ -n "${MOQ_STRICT:-}" ]]; then
-    	echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
-    	echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
-    	exit 1
+        echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
+        echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+        exit 1
     fi
 
     echo "warning: missing tools, so whatever needs them is SKIPPED, not checked: ${missing[*]}" >&2
