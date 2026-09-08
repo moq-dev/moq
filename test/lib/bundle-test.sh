@@ -147,6 +147,9 @@ HAR
       "request": {
         "headers": [
           {"name": "Cookie", "value": "session=\"opaque-escaped-cookie-secret\""}
+        ],
+        "cookies": [
+          {"name": "session", "value": "opaque-cookie-object-secret"}
         ]
       }
     }]
@@ -163,7 +166,8 @@ bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-plain-escaped-secret opaque-proxy-credential \
     opaque-cookie-value opaque-query-credential opaque-har-credential opaque-escaped-cookie-secret \
-    opaque-compact-har-secret opaque-compact-cookie-secret opaque-keyed-json-secret \
+    opaque-cookie-object-secret opaque-compact-har-secret opaque-compact-cookie-secret \
+    opaque-keyed-json-secret \
     opaque-trace-secret opaque-screenshot-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
@@ -182,6 +186,20 @@ check "a withheld screenshot keeps its identity" grep -q '^sha256: ' \
 check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
 check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
 check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"
+
+malformed_har_case() {
+    printf '%s\n' '{"cookies":[{"name":"session","value":"opaque-malformed-har-secret"}' \
+        >"$BUNDLE_TRACE_LIVE/malformed.har"
+    bundle_finish 1
+}
+bundle=$(run_case malformed-har malformed_har_case)
+check "a malformed HAR is withheld instead of partially redacted" \
+    test -f "$bundle/trace/malformed.har.withheld"
+if grep -rq -- opaque-malformed-har-secret "$bundle"; then
+    bad "a malformed HAR exposes no cookie value"
+else
+    ok "a malformed HAR exposes no cookie value"
+fi
 
 snapshot_failure_case() {
     printf 'Authorization: Bearer partial-snapshot-secret\n' >"$BUNDLE_TRACE_LIVE/browser.har"

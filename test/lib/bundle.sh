@@ -460,12 +460,21 @@ _bundle_patterns() {
 # redact" are indistinguishable once the bundle leaves the machine.
 _bundle_redact() {
     local file=$1
-    local tmp="$file.redacted"
-    if _bundle_redact_stream <"$file" >"$tmp" 2>/dev/null; then
+    local tmp="$file.redacted" source="$file" har_tmp="$file.har-redacted"
+    if [[ "$file" == *.har ]]; then
+        if ! "$BUNDLE_LIB_DIR/redact-har.py" <"$file" >"$har_tmp" 2>/dev/null; then
+            rm -f "$har_tmp"
+            _bundle_withhold "$file" "the HAR parser could not safely redact cookie objects"
+            return 1
+        fi
+        source="$har_tmp"
+    fi
+    if _bundle_redact_stream <"$source" >"$tmp" 2>/dev/null; then
+        rm -f "$har_tmp"
         mv "$tmp" "$file"
         return 0
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$har_tmp"
     {
         printf 'withheld: the redactor could not rewrite this file, so it is not shipped\n'
         printf 'sha256: %s\n' "$(_bundle_sha256 "$file")"

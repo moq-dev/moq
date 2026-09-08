@@ -10,7 +10,7 @@ def linux_start(pid: int) -> str:
     stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
     fields = stat[stat.rfind(")") + 2 :].split()
     boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    return f"linux:{boot_id}:{fields[19]}"
+    return f"linux:{boot_id}:{pid}:{fields[19]}"
 
 
 class ProcBsdInfo(ctypes.Structure):
@@ -46,7 +46,7 @@ def darwin_start(pid: int) -> str:
     size = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
     if size != ctypes.sizeof(info):
         raise ProcessLookupError(pid)
-    return f"darwin:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}"
+    return f"darwin:{pid}:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}"
 
 
 def main() -> None:
