@@ -155,9 +155,14 @@ worktree ACTION="check" $BASE="":
     		exit 1
     	fi
     	git fetch --quiet origin
-    	# Only when unset: repointing an upstream someone chose would silently
-    	# change what `just check` scopes against.
-    	if [[ -n "$branch" ]] && ! git rev-parse --abbrev-ref '@{upstream}' > /dev/null 2>&1; then
+    	# Repointing an upstream someone chose would silently change what `just
+    	# check` scopes against, so only three cases write it: no upstream, an
+    	# upstream `_base` discards anyway (the branch's own remote copy, which
+    	# `git push -u` leaves behind and which says nothing about what the branch
+    	# merges into), and a base the caller named on the command line.
+    	upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || true)
+    	if [[ -n "$branch" ]] &&
+    		{ [[ -z "$upstream" ]] || [[ "$upstream" == */"$branch" ]] || [[ -n "$BASE" ]]; }; then
     		if [[ "$config" == write ]]; then
     			git branch --set-upstream-to "$base" "$branch"
     		else

@@ -57,9 +57,13 @@ harness_argv() {
 # for the rerun command: `harness_env SMOKE_PORT SMOKE_PROFILE`. Timing, port,
 # and profile knobs arrive this way rather than in argv, so a command built from
 # argv alone reruns with the defaults and reproduces a different test.
+#
+# The variables this library reads are added for every caller rather than left to
+# each harness to remember: they move the allocator and the artifact root, which
+# is exactly what a collision or a filesystem failure depends on.
 harness_env() {
     local name value
-    for name in "$@"; do
+    for name in MOQ_TEST_RUNS MOQ_TEST_PORTS MOQ_TEST_PORT_BASE MOQ_TEST_KEEP "$@"; do
         value="${!name-}"
         [[ -n "$value" ]] || continue
         printf '%s=%q ' "$name" "$value"
