@@ -350,21 +350,18 @@ impl<C: Container> Producer<C> {
 		self.container.write(group, &self.buffer)?;
 
 		// Latency buffering hands the whole batch over at once, so a consumer waits its full media
-		// span between flushes however tightly the frames inside are spaced. Presentation order,
-		// not decode order: a B-frame's timestamp can trail its predecessor's. The durations
-		// backfilled above give the last frame's end, and without one the span stops at its
-		// timestamp, which understates rather than overstates.
+		// span between flushes however tightly the frames inside are spaced. It runs from the
+		// earliest timestamp to the latest end, taken over every frame: the durations differ, and
+		// frames are in decode order, so neither the first nor the last frame is reliably either
+		// edge.
 		if self.buffer.len() >= 2 {
-			let mut iter = self.buffer.iter();
-			let first = iter.next().expect("buffer is not empty");
-			let (min, max) = iter.fold((first, first), |(min, max), frame| {
-				let min = if frame.timestamp < min.timestamp { frame } else { min };
-				let max = if frame.timestamp > max.timestamp { frame } else { max };
-				(min, max)
+			let mut frames = self.buffer.iter();
+			let first = frames.next().expect("buffer is not empty");
+			let (start, end) = frames.fold((first.timestamp, frame_end(first)), |(start, end), frame| {
+				(start.min(frame.timestamp), end.max(frame_end(frame)))
 			});
 			// A mixed-timescale buffer can't be timed; that is not a burst we can describe.
-			if let Ok(span) = max.timestamp.checked_sub(min.timestamp) {
-				let span = max.duration.and_then(|end| span.checked_add(end).ok()).unwrap_or(span);
+			if let Ok(span) = end.checked_sub(start) {
 				self.estimator.burst(span);
 			}
 		}
@@ -399,6 +396,15 @@ impl<C: Container> Producer<C> {
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)
 	}
+}
+
+/// Where a frame's media stops: its own end when it carries a duration, else its timestamp, which
+/// understates the batch rather than overstating it.
+fn frame_end(frame: &Frame) -> moq_net::Timestamp {
+	frame
+		.duration
+		.and_then(|duration| frame.timestamp.checked_add(duration).ok())
+		.unwrap_or(frame.timestamp)
 }
 
 impl<C: Container> std::ops::Deref for Producer<C> {

@@ -1004,13 +1004,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 
 			// The whole fragment goes out as one frame, so a consumer waits its full media span
-			// between flushes however tightly the samples inside are spaced. It stops at the
-			// latest sample end when the samples declared durations, else one steady frame past
-			// the latest timestamp. Everything here shares the track timescale.
-			let end = match (max_end, max_timestamp, track.min_duration) {
-				(Some(end), _, _) => Some(end),
-				(None, Some(max), Some(min_duration)) => max.checked_add(min_duration).ok(),
+			// between flushes however tightly the samples inside are spaced. It stops at whichever
+			// is later: the latest declared sample end, or one steady frame past the latest
+			// timestamp, which covers the final sample legally leaving its duration unset.
+			// Everything here shares the track timescale.
+			let cadence = match (max_timestamp, track.min_duration) {
+				(Some(max), Some(min_duration)) => max.checked_add(min_duration).ok(),
 				_ => None,
+			};
+			let end = match (max_end, cadence) {
+				(Some(end), Some(cadence)) => Some(end.max(cadence)),
+				(end, cadence) => end.or(cadence),
 			};
 			if let (Some(min), Some(end)) = (min_timestamp, end) {
 				track.estimator.burst(end.checked_sub(min)?);
