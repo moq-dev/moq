@@ -25,4 +25,4 @@ capture quests in this questline start only once this is settled.
 
 ## Related
 
-- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - ships with byte-array frames either way
+- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - the first quest that ships a frame across the boundary, so it waits on this

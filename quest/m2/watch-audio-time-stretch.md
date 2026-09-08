@@ -9,10 +9,13 @@ audio or rendering silence. Convergence is inaudible at ordinary drift and
 burst sizes.
 
 Boundaries: no packet loss concealment; an underrun still renders a ramped
-gap. The target estimator and the ring's hysteresis come from
-[Auto latency](/quest/m0/3477-watch-auto-latency.md).
+gap. The target estimator and the ring's slack and re-stall are #3517 on
+dev; the clock the stretch converges toward is
+[Plan: A/V clock](/quest/m1/plan-av-clock.md).
 
 ## Plan
+
+Branch from dev.
 
 - Implement WSOLA-style stretch and compress in `render-worklet.ts` on the
   PCM the ring hands out, bounded to a few percent per quantum, driven by the
@@ -26,4 +29,8 @@ gap. The target estimator and the ring's hysteresis come from
 
 ## Required
 
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the target and the ring slack this converges toward
+- [Plan: A/V clock](/quest/m1/plan-av-clock.md) - stretching against a free-running ring only moves the drift
+
+## Related
+
+- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the recorded traces this replays

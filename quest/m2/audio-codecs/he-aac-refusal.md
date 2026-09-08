@@ -28,11 +28,7 @@ does too.
   the sniff belongs to the symphonia backend only; the OS decoders read SBR in
   band themselves.
 
-Also fix the two places the catalog invents a channel count: the ADTS and
-ASC importers in `rs/moq-mux/src/codec/aac` map `channel_config == 0` (a
-program config element) and reserved values to stereo with a warning.
-Warn-then-continue is banned: parse the PCE or refuse the track.
-
 ## Related
 
 - [Decode seam](/quest/m2/audio-codecs/decode-backend.md) - the sniff becomes the software backend's contract
+- [AAC PCE](/quest/m2/audio-codecs/aac-pce.md) - the other place the catalog lies about an AAC stream

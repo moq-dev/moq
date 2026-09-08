@@ -41,4 +41,3 @@ is available, split that rollout into an explicit externally blocked follow-up.
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - owns real encoder/capture/zero-copy verdicts
 - [Dart on iOS](/quest/m2/mobile/dart-ios.md) - owns simulator/device packaging validation
-- [Impaired-path profile](/quest/m0/transport-impairment-profile.md) - consumes the Linux runner

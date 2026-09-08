@@ -1,43 +1,33 @@
-# [M] Preserve QA failures as reproducible debug bundles
+# [S] A failing harness run leaves its run directory and a browser trace behind
 
 ## Goal
 
-A failed or hung end-to-end run leaves enough evidence to diagnose and rerun
-the failure without reconstructing its environment or asking for screenshots.
-Agents can inspect test processes and traces through a documented debug path.
+When smoke, WASM, or TS fails in CI, the run's logs, relay config, and a
+Playwright trace of the failing page are downloadable from the workflow run.
+Locally, the same directory survives the failure with the rerun command
+printed. A passing run still cleans up.
 
 ## Plan
 
-The smoke, WASM, and TS harnesses delete their temporary directories on exit.
-The smoke and WASM workflows do not upload a diagnostic bundle. Browser console
-output exists, but there is no retained Playwright trace for the failing action.
+The harness library already gives every run a private directory with each
+process's log, and `MOQ_TEST_KEEP=1` retains it; on failure it prints the
+rerun command but still deletes the directory unless the flag was set. The
+browser drivers record nothing. `smoke.yml` and `wasm.yml` upload nothing.
 
-- Add a common artifact-directory convention and retain failure evidence before
-  cleaning up processes. Include the command, versions, run identity, fixture
-  hashes, endpoint topology, negotiated protocol, per-process logs, and results.
-- Capture Playwright traces with DOM snapshots/screenshots, page errors, and
-  supported browser network diagnostics. Ordinary HTTP traces do not expose
-  every QUIC/WebTransport event; collect relay qlog where supported and mark
-  missing backend trace capability explicitly.
-- Bound logs and preserve a useful tail. On timeout, attempt a bounded stack
-  capture for owned native processes before terminating them; report debugger
-  permission failures without blocking cleanup. Retain matching symbols/build
-  identity for crash analysis.
-- Provide a local retained-session option with the exact URL, PIDs, debugger
-  attach command, and teardown command. Add read-only CI artifact retrieval by
-  run ID so the agent can inspect the same failure that the reviewer sees.
-- Upload bundles on failure in CI with finite retention. Use synthetic media
-  and test credentials by default; redact tokens, URL credentials, and headers
-  before upload. Packet payloads and full core dumps require explicit opt-in.
+- Keep the run directory whenever the run fails, not only when asked.
+- The Playwright drivers (`test/smoke/clients/js`, `test/wasm/driver.ts`)
+  start a trace and save it into the run directory on failure. Chromium's
+  console and page errors already reach the log.
+- `smoke.yml` and `wasm.yml` upload the run directory as a workflow artifact
+  when the job fails, with a short retention. The relay config in it carries
+  only the harness's throwaway certificate and test tokens, so nothing needs
+  redacting; the TS harness joins if its outputs fit the same shape.
 
-Acceptance: inject a browser assertion failure, relay crash, and hung subscriber.
-Each exits nonzero, leaves an inspectable bundle and rerun command, and reaps its
-children. Verify a test token is absent from uploaded artifacts. Retrying for
-diagnosis must retain the original failure rather than convert it into a pass.
-
-[Playwright's debugging guidance](https://playwright.dev/docs/best-practices)
-supports trace-based inspection; use the existing pinned Playwright dependency.
+That is the whole quest. Stack dumps of hung processes, relay qlog, HAR
+capture, retained debug sessions, and fetching CI artifacts by run id were
+the earlier plan, abandoned with #3506 as far more machinery than a failed
+run needs; if one of them earns its place later it is its own quest.
 
 ## Related
 
-- [qlog](/quest/m1/uring-qlog.md) - adds traces for the io_uring backend; other backends can ship first
+- [Impaired path](/quest/m0/transport-impairment-profile.md) - records the profile and seed in the same directory

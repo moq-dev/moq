@@ -52,12 +52,13 @@ with the current dev tree before starting.
 - [#3002](/quest/m1/3002-no-test-drives-a-late-group-through-the-ietf-dispatch-loop.md) - No test drives a late group through the IETF dispatch loop
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
 - [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range controls, typed errors)
-- [#2216](/quest/m1/2216-js-net-typed-announce-status.md) - js/net: an announcement event carries its typed status instead of an active boolean
+- [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - Collapse Reload and Shared into one Connection class
 - [#2870](/quest/m1/2870-moq-hls-a-named-sibling-rendition-is-pinned-too-late-to.md) - moq-hls: a named sibling rendition is pinned too late to survive a same-path republish
 - [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - Mirror catalog reservation gating in @moq/hang (js/hang)
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - Video rotation metadata not propagated from mobile camera publish to watch renderer
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: video decoder captures the rewind generation at output time, not submit time
+- [Plan: A/V clock](/quest/m1/plan-av-clock.md) - settle how the audio playhead drives Sync.reference while audio plays, then build it
 - [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so TOML survives CLI defaults and empty lists, and env outranks the file
 - [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
 - [Abort on drop](/quest/m1/abort-on-drop.md) - one abort-on-drop task guard per crate, replacing five copies of the same Drop

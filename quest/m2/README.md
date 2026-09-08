@@ -60,6 +60,7 @@ can act on. Each still carries its own plan and regression test.
 - [#2779](/quest/m2/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same broadcast emit streams that can never be compared
 - [#2829](/quest/m2/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one broadcast render the same media in different orders
 - [#3489](/quest/m2/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
+- [SRT import stats](/quest/m2/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m2/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [SRT metadata parity](/quest/m2/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
@@ -82,6 +83,7 @@ can act on. Each still carries its own plan and regression test.
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
 - [Room SDK](/quest/m2/room-sdk.md) - a headless room package: a room is a path prefix, no service, no storage
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
+- [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [LiveKit shim](/quest/m2/livekit-shim.md) - a drop-in livekit-client-compatible package running rooms over MoQ
 - [Auth verdict](/quest/m2/auth-verdict.md) - the relay hands an opaque credential to its auth API and is told the grant; lands as the proxy mode in #3044
 - [#3087](/quest/m2/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them

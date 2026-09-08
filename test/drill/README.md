@@ -106,8 +106,8 @@ corpus nobody replays.
 ## Not covered here
 
 - An impaired path (delay, loss, rate limits). Loopback is the only path these
-  drills see; `quest/m0/transport-impairment-profile.md` adds the Linux
-  network-namespace profile they run under.
+  drills see; `quest/m0/transport-impairment-profile.md` adds the seeded UDP
+  shaper they run under.
 - CI lane scheduling.
 - Failure bundles beyond what the test harness prints, which belongs to
   `quest/m0/qa-failure-artifacts.md`.

@@ -132,7 +132,7 @@ export function throwPageErrors(errors: BrowserErrors): void {
  * group reaches the video decoder as the same bare `DOMException` a broken decoder would. Nothing is
  * concealed - `open` echoes every console message and page error as it arrives - but during a
  * transition the two are indistinguishable. Classifying them is
- * `/quest/m0/js-teardown-error-classification.md`, which ends with tightening this.
+ * `/quest/m1/js-close-classification.md`, which ends with tightening this.
  */
 export function drainPageErrors(errors: BrowserErrors): string[] {
 	return errors.page.splice(0).concat(errors.console.splice(0));

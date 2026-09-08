@@ -1,43 +1,43 @@
-# [M] Impaired-path profile for the transport drills
+# [M] The transport drills run over a seeded, impaired UDP path
 
 ## Goal
 
 The transport drills run against a bidirectionally impaired QUIC path (delay,
-loss, and rate limit) with the impairment measured rather than assumed, and the
-run removes every namespace and process it created on exit or cancellation.
-The host's normal network path is never touched.
+jitter, loss, reorder, and a rate limit) with the impairment asserted rather
+than assumed, on macOS and Linux alike, with no capabilities and nothing
+touching the host's network. A profile that fails to install fails the run.
 
 ## Plan
 
-`test/drill` already owns the scenarios and the sensitivity proof; this quest
-only adds the impaired path they run on. The drills drive real QUIC over
-loopback inside one process, so a private network namespace with `netem` on its
-own `lo` impairs them unmodified: no veth pair, no proxy, and no way to reach
-the host's interfaces. `unshare -rn` grants `CAP_NET_ADMIN` inside that
-namespace without root on stock kernels; report the missing capability rather
-than escalating when it does not.
+`rs/moq-relay/tests/drills.rs` already owns the scenarios: cancellation
+under backpressure, relay death mid-group, and republish after an
+interrupted publisher. They drive real QUIC over `127.0.0.1` inside one
+process, relay and clients alike, so the impairment can be a userspace UDP
+shaper the test itself owns: the client connects to the shaper's socket,
+which forwards each datagram to the relay after the profile's treatment, and
+back. That is not an HTTP interceptor or a TCP proxy, which cannot impair
+QUIC; it is a datagram relay, and QUIC is indifferent to the extra hop.
 
-- Linux only. On another host the recipe reports the profile as unavailable and
-  exits nonzero for a strict run, rather than silently running unimpaired.
-- Apply `netem` (delay, jitter, loss, reorder) plus a `tbf` rate limit to `lo`
-  inside the namespace, so both directions are impaired. Never write a qdisc on
-  a host interface, and never require `sudo` for the default profile.
-- Record the applied settings, the seed, the kernel and `tc` versions, and a
-  measured baseline (observed one-way delay, loss, and achieved rate) with the
-  run's artifacts. A seed does not make kernel scheduling deterministic, so the
-  record is evidence of what ran, not a promise of reproducibility.
-- Do not substitute an HTTP interceptor or a TCP-only proxy: those cannot
-  impair QUIC.
-- Prove teardown: cancel a run mid-drill and show the namespace, the qdiscs,
-  and every child process are gone, then rerun successfully on the same host.
-- Assert the impairment actually applied before grading a drill. A profile that
-  silently failed to install turns an impaired run into an unimpaired pass.
+- A `Shaper` in the drill support code: per-direction delay and jitter,
+  loss, reorder, and a token-bucket rate limit, all driven by one seeded RNG
+  so a failing run's seed reproduces the same treatment. Kernel scheduling
+  still varies delivery timing; the seed makes the decisions reproducible,
+  not the clock.
+- Assert the impairment applied before grading a drill: the shaper counts
+  what it dropped, delayed, and reordered, and a profile that treated nothing
+  fails the run. A profile that silently did nothing turns an impaired run
+  into an unimpaired pass.
+- Record the profile, the seed, and the shaper's counters with the run's
+  artifacts.
+- The drills pass unchanged under a moderate profile; add the impaired
+  variant as a second lane of each drill rather than a separate suite, so a
+  scenario cannot drift between the two. No retries to make an intermittent
+  failure green; a drill that only passes unimpaired is a finding.
 
-Acceptance: the three drills pass under a moderate profile and the recorded
-baseline matches the requested one within a stated tolerance. A profile that
-cannot install fails the run. Do not use retries to make intermittent failures green.
+Kernel-real impairment (`netem` in a private network namespace) is out of
+scope: it is Linux only, needs `CAP_NET_ADMIN`, and the drills test the
+protocol's reaction to loss and delay, not the kernel's rendering of them.
 
 ## Related
 
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - stores timelines, seeds, and traces
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - provides Linux execution for the profile
+- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - stores profiles, seeds, and traces
