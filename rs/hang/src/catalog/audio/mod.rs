@@ -113,8 +113,8 @@ pub struct AudioConfig {
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
-	/// This is the publisher's own structure (frame duration, packet packing, reordering),
-	/// never a measurement of the network. It only ever grows over the life of a stream.
+	/// This is measured at the publisher (encoder latency, packet packing, reordering),
+	/// never on the network a consumer sees. It only ever grows over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.

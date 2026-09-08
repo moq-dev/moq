@@ -86,10 +86,6 @@ pub struct Import<E: catalog::Catalog = ()> {
 	published: bool,
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
-	/// Raw 90 kHz PTS of the first audio frame in the current consecutive run.
-	/// TS muxes audio in clumps separated by video, so the span of one run sizes
-	/// the audio catalog jitter (see [`AacStream::write`]). Reset on a video frame.
-	audio_burst: Option<u64>,
 
 	/// Whole-packet accumulator. Bytes are routed one TS packet at a time
 	/// (section-framed verbatim PIDs diverted, the rest fed to the reader); a
@@ -163,7 +159,6 @@ impl<E: catalog::Catalog> Import<E> {
 			pcr_pid: None,
 			published: false,
 			initialized: false,
-			audio_burst: None,
 			scratch: Vec::new(),
 			synced: false,
 			sections: HashMap::new(),
@@ -607,14 +602,9 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
-		// A video PES arriving marks the end of any preceding audio run; audio is
-		// muxed into the gaps between video frames. Resetting here (on delivery)
-		// rather than only on the video flush avoids over-counting the startup run,
-		// since unbounded video PES don't flush until the next one starts.
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
 		if is_video {
-			self.audio_burst = None;
 			// Advance the media clock here, not at flush: unbounded video only
 			// flushes on the next PES, so a SCTE-35 section arriving during this
 			// frame must be timestamped with this frame's PTS ("now"), not the
@@ -657,46 +647,15 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Whether the PMT declared a video stream, whose frames close each audio run.
-	fn has_video(&self) -> bool {
-		self.streams
-			.values()
-			.any(|stream| matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock))
-	}
-
 	fn flush(&mut self, pid: Pid) -> anyhow::Result<()> {
 		let Some(pending) = self.pending.remove(&pid) else {
 			return Ok(());
 		};
 
-		// Track the start of the current consecutive audio run (audio PTS since the
-		// last video frame), so the audio stream can size its jitter to the burst.
-		// Only AAC consumes the jitter hint, so only AAC anchors the run: a legacy
-		// audio stream opening it would re-anchor AAC's span on a foreign PTS,
-		// inflating the published jitter by the inter-PID PTS offset.
-		let is_video = matches!(
-			self.streams.get(&pid),
-			Some(Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock)
-		);
-		let run_start = if is_video {
-			self.audio_burst = None;
-			None
-		} else if matches!(self.streams.get(&pid), Some(Stream::Aac(_))) {
-			// Video is what separates one audio clump from the next. Without any, nothing would
-			// ever close the run and the span would climb until it reads as implausible, so each
-			// PES stands alone: it is still the whole burst the publisher hands over at once.
-			if !self.has_video() {
-				self.audio_burst = None;
-			}
-			pending.pts.map(|audio| *self.audio_burst.get_or_insert(audio))
-		} else {
-			None
-		};
-
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		self.published |= stream.write(pending, run_start)?;
+		self.published |= stream.write(pending)?;
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -1475,7 +1434,7 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
-	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
@@ -1508,7 +1467,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				}
 				Ok(published)
 			}
-			Stream::Aac(stream) => stream.write(pending, burst),
+			Stream::Aac(stream) => stream.write(pending),
 			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
@@ -1892,7 +1851,7 @@ struct AacStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -1914,8 +1873,6 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
 		let mut offset = 0;
-		let mut index = 0u64;
-		let mut sample_rate = None;
 		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
 		// carried only if nothing later in the buffer confirms.
 		let mut fallback = None;
@@ -2015,7 +1972,6 @@ impl<E: CatalogExt> AacStream<E> {
 					}
 				}
 			};
-			sample_rate = Some(header.sample_rate);
 
 			let import = match &mut self.import {
 				Some(import) => import,
@@ -2051,7 +2007,6 @@ impl<E: CatalogExt> AacStream<E> {
 			// Every ADTS frame is 1024 samples.
 			pts = advance_pts(pts, 1024, header.sample_rate)?;
 			offset = end;
-			index += 1;
 		}
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
@@ -2064,42 +2019,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		self.burst(run_start, pending.pts, index, sample_rate)?;
 		Ok(index > 0)
-	}
-
-	/// Report the TS audio burst to the estimator. MPEG-TS delivers audio in clumps (several ADTS
-	/// frames per PES, and runs of audio PES between video) rather than one frame at a time, and
-	/// the loop above cuts every one of those frames into its own group in a single pass. Without
-	/// the burst the catalog would advertise the 23 ms frame the estimator sees between writes, and
-	/// the player would under-buffer and stutter between bursts. The burst is the PTS span from the
-	/// start of the current audio run to this PES's last frame.
-	fn burst(
-		&mut self,
-		run_start: Option<u64>,
-		pes_pts: Option<u64>,
-		frames: u64,
-		sample_rate: Option<u32>,
-	) -> anyhow::Result<()> {
-		let (Some(start), Some(pts), Some(rate)) = (run_start, pes_pts, sample_rate) else {
-			return Ok(());
-		};
-		if frames == 0 {
-			return Ok(());
-		}
-
-		let frame = 1024 * 90_000 / rate as u64;
-		// Span from the run start through this PES's frames, plus one frame slack.
-		let span = pts.saturating_sub(start) + frames * frame;
-		// Ignore implausible spans (e.g. across a 33-bit PTS wrap).
-		if span > 90_000 * 4 {
-			return Ok(());
-		}
-
-		if let Some(import) = &mut self.import {
-			import.burst(Timestamp::from_scale(span, 90_000)?);
-		}
-		Ok(())
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2137,7 +2057,7 @@ impl<E: CatalogExt> AacStream<E> {
 		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
-			self.write(Pending::empty(), None)?;
+			self.write(Pending::empty())?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -2300,8 +2220,7 @@ fn parse_opus_control_header(data: &[u8]) -> anyhow::Result<(usize, usize)> {
 /// One stream of legacy broadcast audio (MP2, AC-3, E-AC-3), carried verbatim:
 /// whole self-describing frames, split out of the PES by the codec's header
 /// parser. Like AAC, import creation is deferred until the first frame header
-/// (the config isn't in the PMT). No jitter hint: it only matters to browser
-/// players, which cannot decode these codecs.
+/// (the config isn't in the PMT).
 struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
 	import: Option<legacy::Import<E>>,

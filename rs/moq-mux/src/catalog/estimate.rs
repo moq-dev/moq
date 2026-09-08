@@ -116,17 +116,6 @@ impl Estimator {
 		self.jitter.reorder(delay);
 	}
 
-	/// Observe one synchronous publish burst covering `span` of media: the time from its first
-	/// frame's timestamp to its last frame's end.
-	///
-	/// A publisher that hands over a whole fMP4 fragment, or every AAC frame packed into one PES,
-	/// makes its consumer wait that long between flushes no matter how tightly the frames inside
-	/// are spaced. Only the source's structure says so, so the container importer reads it off the
-	/// fragment or packet it just unpacked; arrival timing never enters it.
-	pub fn burst(&mut self, span: Timestamp) {
-		self.jitter.burst(span);
-	}
-
 	/// Everything measured so far. Hand it to
 	/// [`Rendition::estimate`](super::Rendition::estimate) to publish it.
 	pub fn estimate(&self) -> Estimate {
@@ -245,20 +234,17 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 /// Tracks the catalog `jitter` for a video/audio track: the maximum delay between a frame being
 /// ready and the publisher flushing it, so a player sizes its buffer to at least this much.
 ///
-/// Three things contribute, and the reported value is the largest ever seen:
-/// - the burst span (see [`Estimator::burst`]), how much media one synchronous flush covers,
+/// Two things contribute, and the reported value is the largest ever seen:
 /// - the reorder delay (`max(PTS - DTS)`), non-zero only for reordered (B-frame) streams and
 ///   which a transmuxer also reuses as the decode-clock reserve, and
-/// - the steady inter-frame spacing, the floor for a track that flushes each frame on its own.
+/// - the steady inter-frame spacing, the floor for a track that flushes each write on its own.
 ///
-/// So a non-reordered, frame-at-a-time track reports the frame duration; a B-frame stream reports
-/// the deeper reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration); a track
-/// flushed in fragments reports the fragment.
+/// So a non-reordered, frame-at-a-time track reports the frame duration, and a B-frame stream
+/// reports the deeper reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
 ///
-/// It never shrinks. A publisher that flushed a 162 ms burst once can do it again, so walking the
+/// It never shrinks. A publisher that held frames back once can do it again, so walking the
 /// advertised value back on a later, tighter measurement would just hand the player a buffer too
-/// small for the next burst. Every input is the publisher's own structure, so nothing here is a
-/// measurement of the network.
+/// small for the next time.
 ///
 /// Contributions are kept as [`Duration`]s, since the inputs are independently scaled (frame PTS
 /// vs a 90 kHz reorder delay) and only compare once normalized. See [`nanos`].
@@ -291,10 +277,6 @@ impl Jitter {
 
 	fn reorder(&mut self, delay: Timestamp) {
 		self.max = self.max.max(Duration::from(delay));
-	}
-
-	fn burst(&mut self, span: Timestamp) {
-		self.max = self.max.max(Duration::from(span));
 	}
 
 	fn discontinuity(&mut self) {
@@ -330,39 +312,6 @@ mod tests {
 			Some(Duration::from_millis(40)),
 			"a tighter pair never lowers what was already advertised"
 		);
-	}
-
-	/// The publish burst is the whole point of the field: a track whose frames are 23 ms apart but
-	/// which arrive seven at a time makes its consumer wait for the burst, not for one frame.
-	#[test]
-	fn burst_span_wins_over_frame_spacing() {
-		let mut estimator = Estimator::new();
-
-		for i in 0..7u64 {
-			estimator.write(micros(i * 23_000), 1);
-		}
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(23)));
-
-		estimator.burst(micros(161_000));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(161)));
-
-		// A later, smaller burst doesn't walk it back: the publisher can burst again.
-		estimator.burst(micros(23_000));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(161)));
-	}
-
-	/// A fragmented source whose fragments shrink keeps the span it already advertised, and a
-	/// degenerate fragment (every sample on one timestamp) can never drag it to zero.
-	#[test]
-	fn burst_span_never_shrinks() {
-		let mut estimator = Estimator::new();
-
-		estimator.burst(micros(2_000_000));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_secs(2)));
-
-		estimator.burst(micros(0));
-		estimator.burst(micros(23_000));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_secs(2)));
 	}
 
 	#[test]

@@ -97,16 +97,6 @@ impl<C: Container> Producer<C> {
 		self.estimator.reorder(delay);
 	}
 
-	/// Record that the frames just written arrived as one synchronous burst covering `span` of
-	/// media, raising the measured jitter to what a consumer waits between flushes.
-	///
-	/// Like [`reorder`](Self::reorder), the writes alone can't reveal this: a caller that unpacked a
-	/// fragment or a PES packet knows the frames went out together, and the timestamps inside only
-	/// say how tightly they are spaced.
-	pub fn burst(&mut self, span: moq_net::Timestamp) {
-		self.estimator.burst(span);
-	}
-
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///
@@ -348,24 +338,6 @@ impl<C: Container> Producer<C> {
 		};
 
 		self.container.write(group, &self.buffer)?;
-
-		// Latency buffering hands the whole batch over at once, so a consumer waits its full media
-		// span between flushes however tightly the frames inside are spaced. It runs from the
-		// earliest timestamp to the latest end, taken over every frame: the durations differ, and
-		// frames are in decode order, so neither the first nor the last frame is reliably either
-		// edge.
-		if self.buffer.len() >= 2 {
-			let mut frames = self.buffer.iter();
-			let first = frames.next().expect("buffer is not empty");
-			let (start, end) = frames.fold((first.timestamp, frame_end(first)), |(start, end), frame| {
-				(start.min(frame.timestamp), end.max(frame_end(frame)))
-			});
-			// A mixed-timescale buffer can't be timed; that is not a burst we can describe.
-			if let Ok(span) = end.checked_sub(start) {
-				self.estimator.burst(span);
-			}
-		}
-
 		self.buffer.clear();
 
 		Ok(())
@@ -396,15 +368,6 @@ impl<C: Container> Producer<C> {
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)
 	}
-}
-
-/// Where a frame's media stops: its own end when it carries a duration, else its timestamp, which
-/// understates the batch rather than overstating it.
-fn frame_end(frame: &Frame) -> moq_net::Timestamp {
-	frame
-		.duration
-		.and_then(|duration| frame.timestamp.checked_add(duration).ok())
-		.unwrap_or(frame.timestamp)
 }
 
 impl<C: Container> std::ops::Deref for Producer<C> {
@@ -480,28 +443,6 @@ mod tests {
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, Some(std::time::Duration::from_millis(25)));
 		assert_eq!(estimate.bitrate, Some(1_600_000));
-	}
-
-	/// Latency buffering packs several frames into one container frame, so the consumer waits for
-	/// the batch and not for the 25 ms between the frames inside it. The producer records that
-	/// itself: a caller that asked for buffering shouldn't also have to describe it.
-	#[tokio::test]
-	async fn buffered_batches_measure_their_own_span() {
-		let track = track_producer("test", hang::container::track_info());
-		let mut producer = Producer::new(track, Container::Legacy).with_latency(std::time::Duration::from_millis(100));
-
-		// 25ms frames, a keyframe every 8, so the latency budget flushes mid-group rather than
-		// only at the group boundary.
-		for i in 0..32u64 {
-			producer.write(frame(i * 25_000, i % 8 == 0)).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let jitter = producer.estimate().jitter.expect("a jitter");
-		assert!(
-			jitter >= std::time::Duration::from_millis(100),
-			"the batch span is the flush cadence, not the 25 ms between frames: {jitter:?}"
-		);
 	}
 
 	/// One group per frame (how the importer facade drives audio) closes each group with an

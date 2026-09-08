@@ -475,7 +475,7 @@ The maximum delay, in milliseconds, between a frame being ready and the publishe
 A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
 If absent, a consumer SHOULD assume each frame is flushed immediately.
 
-This describes the publisher's own structure: how long its encoder, packetizer, or segmenter holds a frame before handing it to the transport.
+It is measured at the publisher: how far behind the media clock a frame is when the publisher hands it to the transport, whether an encoder, a reorder buffer, or a segmenter held it.
 It is never a measurement of the network, which a consumer observes for itself and which no two consumers of the same broadcast would agree on.
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.

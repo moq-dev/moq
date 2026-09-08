@@ -60,8 +60,8 @@ export const VideoConfigSchema = z.object({
 	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
 	// If not provided, the player should assume each frame is flushed immediately.
 	//
-	// This is the publisher's own structure (frame duration, segment size, B-frame reordering),
-	// never a measurement of the network. It only ever grows over the life of a stream.
+	// This is measured at the publisher (encoder latency, segment size, B-frame reordering),
+	// never on the network a consumer sees. It only ever grows over the life of a stream.
 	//
 	// ex:
 	// - If each frame is flushed immediately, this would be 1000/fps.

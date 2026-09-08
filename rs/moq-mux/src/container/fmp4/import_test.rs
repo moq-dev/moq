@@ -1082,11 +1082,11 @@ fn audio_fragment_samples(base_media_decode_time: u64, duration: u32, size: u32,
 	buf
 }
 
-/// The whole fragment is one flush, so a consumer waits its full media span. A source whose
+/// Each fragment is one write, so the advertised jitter is the fragment cadence. A source whose
 /// fragments shrink (or whose last fragment holds a single sample) must not walk the advertised
 /// value back down: the publisher can emit a long fragment again at any point.
 #[test]
-fn fragment_span_never_shrinks() {
+fn fragment_jitter_never_shrinks() {
 	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
 	let mut init = Vec::new();
 	ftyp.encode(&mut init).unwrap();
@@ -1110,56 +1110,23 @@ fn fragment_span_never_shrinks() {
 
 	// bbb's AAC track runs at 44100; eight 1024-sample frames span 8192 ticks (~186 ms).
 	fmp4.decode(&audio_fragment_samples(0, 1024, 327, 8)).unwrap();
-	let burst = audio_jitter(&catalog).expect("a fragment span is published");
+	fmp4.decode(&audio_fragment_samples(8192, 1024, 327, 8)).unwrap();
+	let cadence = audio_jitter(&catalog).expect("the fragment cadence is published");
 	assert!(
-		burst >= std::time::Duration::from_millis(180) && burst <= std::time::Duration::from_millis(190),
-		"the whole fragment is one flush: {burst:?}"
+		cadence >= std::time::Duration::from_millis(180) && cadence <= std::time::Duration::from_millis(190),
+		"two fragments establish the cadence: {cadence:?}"
 	);
 
-	// A single-sample fragment spans one frame. Publishing that would tell a consumer to size its
-	// buffer for 23 ms when the next fragment is 186 ms again.
-	fmp4.decode(&audio_fragment_samples(8192, 1024, 327, 1)).unwrap();
+	// Single-sample fragments 23 ms apart. Publishing that spacing would tell a consumer to size
+	// its buffer for one frame when the next fragment is 186 ms again.
+	fmp4.decode(&audio_fragment_samples(16384, 1024, 327, 1)).unwrap();
+	fmp4.decode(&audio_fragment_samples(17408, 1024, 327, 1)).unwrap();
 	assert_eq!(
 		audio_jitter(&catalog),
-		Some(burst),
-		"a shorter fragment lowered the jitter"
+		Some(cadence),
+		"a tighter fragment pair lowered the jitter"
 	);
 
 	fmp4.finish().unwrap();
-	assert_eq!(audio_jitter(&catalog), Some(burst));
-}
-
-/// A fragment's media stops at its samples' declared ends, not a fixed step past the latest
-/// timestamp. A one-sample fragment declaring a long duration is that long a flush, however
-/// tightly the track's other samples were spaced.
-#[test]
-fn fragment_span_uses_the_declared_sample_duration() {
-	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
-	let mut init = Vec::new();
-	ftyp.encode(&mut init).unwrap();
-	moov.encode(&mut init).unwrap();
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	fmp4.decode(&init).unwrap();
-
-	// Two 1024-tick samples establish a ~23 ms steady spacing...
-	fmp4.decode(&audio_fragment_samples(0, 1024, 327, 2)).unwrap();
-	// ...then one sample covering 8192 ticks (~186 ms) of media on its own.
-	fmp4.decode(&audio_fragment_samples(2048, 8192, 327, 1)).unwrap();
-
-	let jitter = catalog
-		.snapshot()
-		.audio
-		.renditions
-		.values()
-		.next()
-		.expect("an audio rendition")
-		.jitter
-		.expect("a jitter");
-	assert!(
-		jitter >= std::time::Duration::from_millis(180),
-		"the long sample's own duration is the flush span: {jitter:?}"
-	);
+	assert_eq!(audio_jitter(&catalog), Some(cadence));
 }

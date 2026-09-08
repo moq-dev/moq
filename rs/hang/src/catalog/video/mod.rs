@@ -221,8 +221,8 @@ pub struct VideoConfig {
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
-	/// This is the publisher's own structure (frame duration, segment size, B-frame
-	/// reordering), never a measurement of the network. It only ever grows over the life of a
+	/// This is measured at the publisher (encoder latency, segment size, B-frame
+	/// reordering), never on the network a consumer sees. It only ever grows over the life of a
 	/// stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never

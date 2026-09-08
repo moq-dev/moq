@@ -140,14 +140,8 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// keyframe fragment rather than through `with_recorder`.
 	recorder: Option<crate::timeline::Recorder>,
 
-	// The last timestamp seen for this track.
-	last_timestamp: Option<Timestamp>,
-
 	// The decode time of the last fragment, which the next one has to advance past.
 	last_decode_time: Option<u64>,
-
-	// The minimum duration between frames for this track.
-	min_duration: Option<Timestamp>,
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
@@ -156,9 +150,8 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
 
-	// Measures the track's catalog jitter and bitrate. Each fragment is one flush, so its media
-	// span is what a consumer waits between them; the descriptor's own bitrate, when it declares
-	// one, still wins over what this measures.
+	// Measures the track's catalog jitter and bitrate from the fragments; the descriptor's own
+	// bitrate, when it declares one, still wins over what this measures.
 	estimator: Estimator,
 }
 
@@ -362,9 +355,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					group: None,
 					segment: None,
 					recorder: Some(recorder),
-					last_timestamp: None,
 					last_decode_time: None,
-					min_duration: None,
 					pending_sequence: None,
 					estimator: Estimator::new(),
 				},
@@ -741,11 +732,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				return Err(Error::MissingTrun.into());
 			}
 
-			// Keep track of the minimum and maximum timestamp for this track to compute the jitter,
-			// plus the latest sample end, which is where the fragment's media actually stops.
 			let mut min_timestamp = None;
-			let mut max_timestamp = None;
-			let mut max_end: Option<Timestamp> = None;
 			let mut contains_keyframe = false;
 			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 			let mut sample_index = 0usize;
@@ -811,29 +798,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 					contains_keyframe |= keyframe;
 
-					if max_timestamp.is_none_or(|max| timestamp >= max) {
-						max_timestamp = Some(timestamp);
-					}
 					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
 					}
-					// Sample durations vary, so the fragment ends at the latest sample end rather
-					// than a fixed step past the latest timestamp.
-					if let Some(duration) = duration {
-						let end = timestamp.checked_add(moq_net::Timestamp::new(duration as u64, timescale)?)?;
-						if max_end.is_none_or(|max| end > max) {
-							max_end = Some(end);
-						}
-					}
-
-					if let Some(last_timestamp) = track.last_timestamp
-						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
-						&& track.min_duration.is_none_or(|min| duration < min)
-					{
-						track.min_duration = Some(duration);
-					}
-
-					track.last_timestamp = Some(timestamp);
 
 					if let Some(duration) = duration {
 						dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
@@ -991,35 +958,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			track.group = Some(g);
 
+			// Each fragment is one write, so the estimator's frame spacing is the fragment cadence.
 			track.estimator.write(timestamp, fragment_len);
-
-			// Report how far this fragment presents. Every group but the last is bounded by the
-			// next one's open, so this is what keeps the final segment from being published a
-			// group short. Same timescale throughout, so the add can't mismatch scales.
-			if let Some(recorder) = track.recorder.as_mut()
-				&& let Some(max) = max_timestamp
-			{
-				let end = track.min_duration.and_then(|d| max.checked_add(d).ok()).unwrap_or(max);
-				recorder.end(end);
-			}
-
-			// The whole fragment goes out as one frame, so a consumer waits its full media span
-			// between flushes however tightly the samples inside are spaced. It stops at whichever
-			// is later: the latest declared sample end, or one steady frame past the latest
-			// timestamp, which covers the final sample legally leaving its duration unset.
-			// Everything here shares the track timescale.
-			let cadence = match (max_timestamp, track.min_duration) {
-				(Some(max), Some(min_duration)) => max.checked_add(min_duration).ok(),
-				_ => None,
-			};
-			let end = match (max_end, cadence) {
-				(Some(end), Some(cadence)) => Some(end.max(cadence)),
-				(end, cadence) => end.or(cadence),
-			};
-			if let (Some(min), Some(end)) = (min_timestamp, end) {
-				track.estimator.burst(end.checked_sub(min)?);
-			}
-
 			track.rendition.estimate(track.estimator.estimate());
 		}
 

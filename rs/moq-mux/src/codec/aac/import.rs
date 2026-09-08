@@ -55,15 +55,6 @@ impl<E: CatalogExt> Import<E> {
 		self.track.track().demand()
 	}
 
-	/// Record that the frames just decoded went out as one burst covering `span` of media.
-	///
-	/// The TS importer cuts every ADTS frame of a PES into its own group in one pass, so the
-	/// catalog jitter has to describe the PES rather than the 23 ms frames inside it.
-	pub(crate) fn burst(&mut self, span: moq_net::Timestamp) {
-		self.track.burst(span);
-		self.estimate();
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;

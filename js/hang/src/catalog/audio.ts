@@ -48,8 +48,8 @@ export const AudioConfigSchema = z.object({
 	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
 	// If not provided, the player should assume each frame is flushed immediately.
 	//
-	// This is the publisher's own structure (frame duration, packet packing, reordering),
-	// never a measurement of the network. It only ever grows over the life of a stream.
+	// This is measured at the publisher (encoder latency, packet packing, reordering),
+	// never on the network a consumer sees. It only ever grows over the life of a stream.
 	//
 	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
