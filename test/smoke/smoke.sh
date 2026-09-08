@@ -787,6 +787,17 @@ else
     done
 fi
 
+# The cells alone cannot tell you the relay survived. Most of them pass on the
+# first byte, and a byte that arrived before the relay died still counts, so a
+# crash halfway through the matrix can be reported as a clean run. It is not
+# one: nothing after the crash was actually tested. Checked here rather than
+# per-cell, because it is a property of the run.
+if [[ -n "$RELAY_PID" ]] && ! kill -0 "$RELAY_PID" 2>/dev/null; then
+    echo "  FAIL  relay (exited during the matrix)"
+    bundle_result relay fail "" "exited during the matrix"
+    overall=1
+fi
+
 if [[ "$overall" -eq 0 ]]; then
     echo "smoke: all checks passed"
 else
