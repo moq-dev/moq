@@ -658,33 +658,34 @@ EOF
     record behavior.awk-select behavior ok true "$suites" "awk selects a multi-crate diff" "" 10 "$BOUNDED_ELAPSED"
 }
 
+# Resolve a command from the directory that will invoke it.
+command_path() {
+    (cd "$1" && command -v "$2" 2>/dev/null)
+}
+
 # Report the configured C compiler without putting a dynamic path in the
 # whitespace-delimited tool map.
 probe_c_compiler() {
-    local suites=$1 cc=${CC:-cc} path status kind version
-    path=$(command -v "$cc" 2>/dev/null)
+    local suites=$1 cc=${CC:-cc} path display status kind version
+    path=$(command_path "$REPO/test" "$cc")
     if [ -z "$path" ]; then
         record behavior.c-compiler behavior missing true "$suites" \
             "configured C compiler is missing: $cc" \
             "install the configured C compiler, or enter the dev shell: nix develop" 10 0
         return
     fi
-    if [ ! -x "$path" ]; then
-        record behavior.c-compiler behavior denied true "$suites" "$path is not executable" \
-            "grant execute permission on $path" 10 0
-        return
-    fi
-    bounded 10 "$path" --version
+    case $path in /*) display=$path ;; *) display="$REPO/test/$path" ;; esac
+    bounded 10 bash -c 'cd "$1" && exec "$2" --version' _ "$REPO/test" "$cc"
     status=$?
     version=$(first_line "$BOUNDED_OUT")
     kind=$(classify "$status" "$BOUNDED_OUT")
     if ((status != 0)) && [ "$kind" != degraded ]; then
         record behavior.c-compiler behavior "$kind" true "$suites" \
-            "$path: $(error_line "$BOUNDED_OUT")" "allow executing $path" 10 "$BOUNDED_ELAPSED"
+            "$display: $(error_line "$BOUNDED_OUT")" "allow executing $display" 10 "$BOUNDED_ELAPSED"
         return
     fi
     record behavior.c-compiler behavior ok true "$suites" \
-        "$path${version:+ ($version)}" "" 10 "$BOUNDED_ELAPSED"
+        "$display${version:+ ($version)}" "" 10 "$BOUNDED_ELAPSED"
 }
 
 # Ask Cargo for the HOST and TARGET it gives build scripts. This incorporates
@@ -710,7 +711,10 @@ build = "build.rs"
 EOF
     cat >"$crate/build.rs" <<'EOF'
 fn main() {
-    println!("cargo:warning=moq-doctor-target:{}:{}", std::env::var("HOST").unwrap(), std::env::var("TARGET").unwrap());
+    let host = std::env::var("HOST").unwrap();
+    let target = std::env::var("TARGET").unwrap();
+    let explicit = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).components().any(|part| part.as_os_str() == target.as_str());
+    println!("cargo:warning=moq-doctor-target:{host}:{target}:{explicit}");
 }
 EOF
     printf 'fn main() {}\n' >"$crate/src/main.rs"
@@ -718,10 +722,43 @@ EOF
     cd "$cargo_dir" || return 1
     bounded 30 "${command[@]}"
     cd "$previous" || return 1
-    marker=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/.*moq-doctor-target:\([^:]*\):\([^:]*\)$/\1 \2/p' | tail -1)
+    marker=$(printf '%s\n' "$BOUNDED_OUT" | sed -n 's/.*moq-doctor-target:\([^:]*\):\([^:]*\):\([^:]*\)$/\1 \2 \3/p' | tail -1)
     CARGO_PROBE_HOST=${marker%% *}
-    CARGO_PROBE_TARGET=${marker#* }
-    [ -n "$marker" ] && [ -n "$CARGO_PROBE_HOST" ] && [ -n "$CARGO_PROBE_TARGET" ]
+    marker=${marker#* }
+    CARGO_PROBE_TARGET=${marker%% *}
+    CARGO_PROBE_EXPLICIT_TARGET=${marker##* }
+    [ -n "$CARGO_PROBE_HOST" ] && [ -n "$CARGO_PROBE_TARGET" ] &&
+        { [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ] || [ "$CARGO_PROBE_EXPLICIT_TARGET" = false ]; }
+}
+
+# The smoke harness reads artifacts from target/{debug,release}; any explicit
+# Cargo target writes them below target/<triple>/ instead, even for HOST.
+probe_smoke_cargo_target() {
+    local suites=$1 status
+    CARGO_TARGET_READY=0
+    if ! command -v cargo >/dev/null 2>&1; then
+        record behavior.smoke-cargo-target behavior missing true "$suites" \
+            "cargo is missing, so its artifact layout cannot be resolved" \
+            "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
+        return
+    fi
+    cargo_targets
+    status=$?
+    if ((status != 0)); then
+        record behavior.smoke-cargo-target behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
+            "cargo could not resolve its artifact layout: $(error_line "$BOUNDED_OUT")" \
+            "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
+        return
+    fi
+    if [ "$CARGO_PROBE_EXPLICIT_TARGET" = true ]; then
+        record behavior.smoke-cargo-target behavior degraded true "$suites" \
+            "Cargo writes artifacts below target/$CARGO_PROBE_TARGET, but smoke reads target directly" \
+            "unset Cargo build.target for smoke, including CARGO_BUILD_TARGET and .cargo configuration" 30 "$BOUNDED_ELAPSED"
+        return
+    fi
+    CARGO_TARGET_READY=1
+    record behavior.smoke-cargo-target behavior ok true "$suites" \
+        "Cargo uses the host artifact layout for $CARGO_PROBE_TARGET" "" 30 "$BOUNDED_ELAPSED"
 }
 
 # Print the same target-qualified environment value pkg-config-rs selects.
@@ -747,22 +784,32 @@ pkg_config_executable() {
     targeted_env PKG_CONFIG "$1" "$2" || printf 'pkg-config\n'
 }
 
+# True when resolving a command depends on the caller's working directory.
+relative_command() {
+    case $1 in
+        /*) return 1 ;;
+        */*) return 0 ;;
+    esac
+    local entry old_ifs=$IFS
+    IFS=:
+    for entry in ${PATH:-}; do
+        case $entry in /*) ;; *)
+            IFS=$old_ifs
+            return 0
+            ;;
+        esac
+    done
+    IFS=$old_ifs
+    return 1
+}
+
 # Verify the native metadata the requested GStreamer smoke client links against.
 probe_gstreamer_devel() {
     local suites=$1 status host target pkg_config source display base value
     local pkg_env=(env)
-    if ! command -v cargo >/dev/null 2>&1; then
-        record behavior.gstreamer-devel behavior missing true "$suites" \
-            "cargo is missing, so its pkg-config target cannot be resolved" \
-            "install the Rust toolchain, or enter the dev shell: nix develop" 30 0
-        return
-    fi
-    cargo_targets
-    status=$?
-    if ((status != 0)); then
-        record behavior.gstreamer-devel behavior "$(classify "$status" "$BOUNDED_OUT")" true "$suites" \
-            "cargo could not resolve its build target: $(error_line "$BOUNDED_OUT")" \
-            "use the dev shell's Rust toolchain and a valid Cargo configuration: nix develop" 30 "$BOUNDED_ELAPSED"
+    if [ "${CARGO_TARGET_READY:-0}" != 1 ]; then
+        record behavior.gstreamer-devel behavior skip false "$suites" \
+            "Cargo's smoke artifact layout is unavailable" "" 10 0
         return
     fi
     host=$CARGO_PROBE_HOST
@@ -774,6 +821,12 @@ probe_gstreamer_devel() {
         source="Cargo's default pkg-config executable"
     fi
     display=${pkg_config:-'<empty pkg-config override>'}
+    if relative_command "$pkg_config"; then
+        record behavior.gstreamer-devel behavior degraded true "$suites" \
+            "$source depends on Cargo's build-script working directory: $display" \
+            "use an absolute pkg-config override and absolute PATH entries" 10 0
+        return
+    fi
     if ! command -v "$pkg_config" >/dev/null 2>&1; then
         record behavior.gstreamer-devel behavior missing true "$suites" \
             "$source is missing: $display" \
@@ -1560,6 +1613,10 @@ self_test() {
     check 'smoke-full needs uv' "$(tools_for_suite smoke-full | grep -c '^uv$')" 1
     check 'smoke-full needs a gstreamer' "$(tools_for_suite smoke-full | grep -c '^gst-launch-1.0$')" 1
     check 'dynamic C compiler stays out of tool words' "$(CC='/tmp/c compiler' tools_for_suite smoke-full | grep -c 'c compiler')" 0
+    mkdir -p "$SCRATCH/compiler dir"
+    ln -sf "$(command -v env)" "$SCRATCH/compiler dir/c compiler"
+    check 'relative C compiler resolves from smoke cwd' \
+        "$(command_path "$SCRATCH/compiler dir" './c compiler')" './c compiler'
     check 'dynamic pkg-config stays out of tool words' "$(tools_for_suite smoke-full | grep -c 'pkg-config')" 0
     check 'pkg-config target override wins' \
         "$(PKG_CONFIG_doctor_test_host=/target HOST_PKG_CONFIG=/host PKG_CONFIG=/generic targeted_env PKG_CONFIG doctor-test-host doctor-test-host)" /target
@@ -1572,14 +1629,23 @@ self_test() {
             unset PKG_CONFIG HOST_PKG_CONFIG PKG_CONFIG_doctor_test_host
             pkg_config_executable doctor-test-host doctor-test-host
         )" pkg-config
+    relative_command ./tools/pkg-config
+    check 'relative pkg-config override is context dependent' "$?" 0
+    PATH=/usr/bin:/bin relative_command pkg-config
+    check 'absolute PATH keeps pkg-config stable' "$?" 1
     if command -v cargo >/dev/null 2>&1; then
         mkdir -p "$SCRATCH/cargo-config/.cargo"
         cat >"$SCRATCH/cargo-config/.cargo/config.toml" <<'EOF'
 [build]
 target = "wasm32-unknown-unknown"
 EOF
-        cargo_targets "" "$SCRATCH/cargo-config"
-        check 'Cargo config selects the pkg-config target' "$CARGO_PROBE_TARGET" wasm32-unknown-unknown
+        local configured_target
+        configured_target=$(
+            unset CARGO_BUILD_TARGET
+            cargo_targets "" "$SCRATCH/cargo-config"
+            printf '%s %s' "$CARGO_PROBE_TARGET" "$CARGO_PROBE_EXPLICIT_TARGET"
+        )
+        check 'Cargo config selects an explicit artifact target' "$configured_target" 'wasm32-unknown-unknown true'
     fi
     check 'plain smoke needs no gstreamer' "$(tools_for_suite smoke | grep -c '^gst-launch-1.0$')" 0
 
@@ -1787,6 +1853,13 @@ if [ -n "$(selected check)" ]; then
     probe_bun_yaml
 else
     record behavior.bun-yaml behavior skip false "" "check is not selected" "" 10 0
+fi
+
+SMOKE_SUITES=$(selected 'smoke smoke-full')
+if [ -n "$SMOKE_SUITES" ]; then
+    probe_smoke_cargo_target "$SMOKE_SUITES"
+else
+    record behavior.smoke-cargo-target behavior skip false "" "smoke is not selected" "" 30 0
 fi
 
 SMOKE_FULL_SUITES=$(selected smoke-full)
