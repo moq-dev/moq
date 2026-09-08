@@ -636,6 +636,9 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
 			case 0x0e: {
+				// v14: TRACK_STATUS_OK, which answers a TRACK_STATUS we never send. Routing it to
+				// a SubscribeNamespace stream would hand that stream a SUBSCRIBE_OK body.
+				if (this.version === Version.DRAFT_14) throw new Error("unsolicited TRACK_STATUS_OK");
 				// v15: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
 				const subNs0e = this.#subscribeNamespaces.values().next().value;
 				if (subNs0e === undefined) throw new Error("unexpected message 0x0e: no SubscribeNamespace stream");

@@ -728,7 +728,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// On a routed broadcast the live edge only becomes readable once a subscription's
 		// demand attaches a route, so subscribe before snapshotting it. The subscription is
-		// dropped as soon as the edge is read: a TRACK_STATUS delivers nothing.
+		// dropped as soon as the edge is read: a TRACK_STATUS delivers nothing. The answer is
+		// the edge this cache holds, so a route that has answered with track info but no
+		// groups yet reports an empty track rather than the origin's largest location.
+		// Carrying that location back from upstream is the status forwarding quest's job.
 		let subscribed = match track.subscribe(Subscription::default()).await {
 			Ok(subscribed) => subscribed,
 			Err(err) => {
@@ -2450,7 +2453,7 @@ mod serve_tests {
 		session: ScriptedSession,
 		log: Log,
 		track: track::Producer,
-		_origin: origin::Producer,
+		origin: origin::Producer,
 		_broadcast: crate::broadcast::Producer,
 	}
 
@@ -2481,7 +2484,7 @@ mod serve_tests {
 			session,
 			log,
 			track,
-			_origin: origin,
+			origin,
 			_broadcast: broadcast,
 		}
 	}
@@ -2513,10 +2516,15 @@ mod serve_tests {
 		Version::Draft20,
 	];
 
-	/// `create_broadcast` registers the broadcast from a spawned task, so a lookup before
-	/// the runtime has run it 404s.
-	async fn registered() {
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+	/// Wait until `create_broadcast`'s spawned registration is observable, so a lookup cannot
+	/// race it. The announcement arriving is the registration: `request_broadcast` answers on
+	/// the spot, so asking it first would report the live broadcast as missing.
+	async fn registered(h: &Serve) {
+		h.origin
+			.consume()
+			.announced_broadcast("room")
+			.await
+			.expect("broadcast never announced");
 	}
 
 	fn track_status(namespace: &'static str) -> ietf::TrackStatus<'static> {
@@ -2562,7 +2570,7 @@ mod serve_tests {
 			group.write_frame(timestamp(), b"a".as_slice()).unwrap();
 			group.write_frame(timestamp(), b"b".as_slice()).unwrap();
 
-			registered().await;
+			registered(&h).await;
 
 			let stream = Stream::open(&h.session, version).await.unwrap();
 			h.publisher
@@ -2590,7 +2598,7 @@ mod serve_tests {
 	async fn track_status_answers_an_empty_track() {
 		for version in VERSIONS {
 			let h = serve(version);
-			registered().await;
+			registered(&h).await;
 
 			let stream = Stream::open(&h.session, version).await.unwrap();
 			h.publisher
@@ -2619,7 +2627,7 @@ mod serve_tests {
 
 		for version in VERSIONS {
 			let h = serve(version);
-			registered().await;
+			registered(&h).await;
 
 			let stream = Stream::open(&h.session, version).await.unwrap();
 			h.publisher
@@ -2649,11 +2657,9 @@ mod serve_tests {
 	/// dropped without ever being decoded, so nothing reached the peer at all.
 	#[tokio::test]
 	async fn track_status_is_dispatched_off_its_stream() {
-		use crate::coding::Encode as _;
-
 		for version in VERSIONS {
 			let h = serve(version);
-			registered().await;
+			registered(&h).await;
 
 			let mut body = bytes::BytesMut::new();
 			track_status("room").encode_msg(&mut body, version).unwrap();

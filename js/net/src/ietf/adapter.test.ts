@@ -171,3 +171,24 @@ test("withdrawals distinguish the same namespace by direction", async () => {
 	await cancel(peer, namespace);
 	expect(await closed(outgoing)).toBe(true);
 });
+
+/**
+ * 0x0e is TRACK_STATUS_OK on draft-14 and a NAMESPACE_DONE entry only from draft-15 on.
+ * Routing the draft-14 message to a SubscribeNamespace stream would hand that stream a
+ * SUBSCRIBE_OK body to read as a namespace, so it refuses the session instead.
+ */
+test("draft-14 refuses a track status response it never asked for", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+
+	const control = await Stream.open(pair.server, { version: Version.DRAFT_14 });
+	const adapter = new ControlStreamAdapter(pair.server, control, Version.DRAFT_14, 100n, true);
+	const running = adapter.run();
+
+	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
+	if (!peer) throw new Error("no control stream");
+
+	await peer.writer.u53(0x0e);
+	await peer.writer.u16(0);
+
+	await expect(running).rejects.toThrow("unsolicited TRACK_STATUS_OK");
+});
