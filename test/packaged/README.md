@@ -41,9 +41,21 @@ anywhere under the repo would quietly rejoin it.
 1. `audit.sh` refuses a publishable crate whose path dependency carries no
    version, naming the crate and the dependency. Cargo refuses too, but from
    inside a `Packaging` step whose message reads as a cargo internal.
-2. `cargo package --locked --no-verify --allow-dirty` per candidate, which is
-   the same archive `release-plz` uploads, built against the committed
-   `Cargo.lock`.
+2. `cargo package --locked --no-verify --exclude-lockfile --allow-dirty` for
+   every candidate in one invocation, assembling the same archive contents
+   `release-plz` uploads. One invocation rather than one per crate: packaging
+   rewrites path dependencies to registry requirements, so a crate packaged alone
+   resolves its siblings from crates.io, and a sibling whose current version is
+   already published with different contents then decides what the archive is
+   checked against. The whole set lets cargo resolve each sibling from the
+   archive beside it, which is what a release publishes.
+   `--exclude-lockfile` because generating the archive's `Cargo.lock` is the only
+   step needing a resolvable graph, and it cannot have one here: the workspace
+   lock already holds a registry `kio` at the same version as the workspace's own,
+   pulled in by a third-party dependency. That embedded lock is also the one part
+   of the archive nothing below reads, since the consumer resolves through its own
+   `[patch.crates-io]`, so excluding it costs no coverage and leaves the file set
+   (where an archive defect lives) unchanged.
    `--no-verify` because cargo's own verification build resolves siblings from
    crates.io, where an unreleased version does not exist. Step 4 replaces it and
    is stronger: it patches the staged siblings in, so it reports what the
@@ -88,18 +100,28 @@ combination a change actually touches, e.g.
    a `file:` specifier, and `node_modules/@moq` must contain no symlinks. A
    candidate served from the registry is the one outcome that looks like a pass
    and is not one.
-5. Every documented entry point (the `exports` keys of the published manifest)
+5. The peer dependencies the candidates declare are installed at the ranges they
+   declare, because an entry point behind an optional peer (`@moq/signals/react`)
+   is still an entry point a consumer imports.
+6. Every documented entry point (the `exports` keys of the published manifest)
    is imported under node, then bundled for the browser with `bun build`. A
    package that declares side-effectful entry points is a web-component package
    whose entry points need a DOM, so those go to the bundle only. The bundle is
    where the assets get checked: the audio worklets are inlined as blob URLs by
    each package's own vite build, and the libav WASM arrives as a normal
    dependency.
-6. `@moq/net` is the layer everything else rides on, so when it is a candidate
+7. `@moq/net` is the layer everything else rides on, so when it is a candidate
    the consumer also connects to a relay built from this checkout, publishes a
    frame through it, and reads that frame back. That one runs under bun, because
    `@moq/web-transport` ships TypeScript sources node refuses to strip inside
    `node_modules`. `PACKAGED_ROUNDTRIP=0` skips it.
+
+`@moq/hang` and `@moq/msf` are listed in `NODE_IMPORT_BROKEN` in `js.sh`. Their
+published `dist` carries directory and extensionless relative imports that node's
+ESM resolver refuses, which the first run of this harness is what found;
+[the fix](/quest/m0/js-published-esm-resolution.md) is its own quest. The list is
+an expectation, not an exemption: both are still imported, and a package that
+starts resolving fails the run until its entry is removed.
 
 The committed `js/consumer/package-lock.json` is the one npm lockfile in a bun
 repo, and `.gitignore` has a negation for it. It exists because the consumer

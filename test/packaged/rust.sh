@@ -56,10 +56,6 @@ version_of() {
     jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version' <<<"$metadata"
 }
 
-manifest_of() {
-    jq -r --arg name "$1" '.packages[] | select(.name == $name) | .manifest_path' <<<"$metadata"
-}
-
 is_publishable() {
     grep -qx -- "$1" <<<"$publishable"
 }
@@ -103,25 +99,49 @@ echo "packaged: rust candidates: ${candidates[*]}"
 "$PACKAGED_DIR/audit.sh" "$WORKSPACE/Cargo.toml" "${candidates[@]}"
 
 # ── package ─────────────────────────────────────────────────────────────────
-# `--no-verify` because cargo's own verification build resolves siblings from
-# crates.io, where an unreleased version does not exist. That check is what the
-# consumer below replaces, and the consumer is the stronger one: it patches the
-# staged siblings in, so it reports what the archive does rather than what the
-# registry happens to hold.
+# One invocation for every candidate, not one per crate. Packaging a crate
+# rewrites its path dependencies to registry requirements, so a crate packaged
+# alone resolves its siblings from crates.io -- and a sibling whose current
+# version is already published with different contents then decides what this
+# archive is checked against. Handing cargo the whole set lets it resolve each
+# sibling from the archive it is building alongside, which is the set a release
+# publishes together.
+#
+# `--exclude-lockfile` because generating the archive's Cargo.lock is the only
+# step that needs a resolvable graph, and it cannot have one here: the workspace
+# lock already holds a registry `kio` at the same version as the workspace's own,
+# pulled in by a third-party dependency, so the in-flight archive collides with
+# it. The embedded lock is also the one part of the archive this harness does not
+# read -- the consumer below resolves through its own `[patch.crates-io]` -- so
+# excluding it costs no coverage. The file set, which is what an archive defect
+# lives in, is unchanged.
+#
+# `--no-verify` because cargo's own verification build resolves from crates.io,
+# where an unreleased version does not exist. That check is what the consumer
+# below replaces, and the consumer is the stronger one: it patches the staged
+# siblings in, so it reports what the archive does rather than what the registry
+# happens to hold.
 #
 # `--allow-dirty` because this runs on a working tree, which is the point.
+package_args=()
+for name in "${candidates[@]}"; do
+    package_args+=(--package "$name")
+done
+
+# An archive an earlier run left behind would be copied and consumed below as if
+# this run had built it. The directory is cargo's packaging output and nothing
+# else reads it.
+rm -rf "$WORKSPACE/target/package"
+
+echo "packaged: cargo package ${#candidates[@]} crates"
+"$CARGO" package --locked --no-verify --exclude-lockfile --allow-dirty \
+    --manifest-path "$WORKSPACE/Cargo.toml" \
+    "${package_args[@]}" >/dev/null
+
 for name in "${candidates[@]}"; do
     version=$(version_of "$name")
-    echo "packaged: cargo package -p $name ($version)"
-    "$CARGO" package --locked --no-verify --allow-dirty \
-        --manifest-path "$(manifest_of "$name")" \
-        --package "$name" >/dev/null
-
     archive="$WORKSPACE/target/package/$name-$version.crate"
-    [[ -f "$archive" ]] || {
-        echo "packaged: cargo produced no archive at $archive" >&2
-        exit 1
-    }
+    [[ -f "$archive" ]] || die "cargo produced no archive at $archive"
     cp "$archive" "$ARCHIVES/"
     tar -xzf "$archive" -C "$EXTRACT"
 done

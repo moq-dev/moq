@@ -142,6 +142,29 @@ mv "$CONSUMER/package.json.next" "$CONSUMER/package.json"
 echo "packaged: npm install (candidate archives)"
 (cd "$CONSUMER" && npm install --no-audit --no-fund >/dev/null)
 
+# An entry point behind an optional peer is still a documented entry point, and a
+# consumer that imports it has the peer installed. `@moq/signals/react` is the
+# case: react is optional, so npm installs nothing and the import fails on a
+# package the manifest declares correctly. Install what the candidates ask for,
+# at the range they ask for, rather than keeping a second list here or skipping
+# the entry points those peers gate. `@moq/*` peers are left out: they are
+# candidates themselves, staged as tarballs above.
+peers=$(
+    for name in "${candidates[@]}"; do
+        jq -r '
+			(.peerDependencies // {})
+			| to_entries[]
+			| select(.key | startswith("@moq/") | not)
+			| "\(.key)@\(.value)"
+		' "$CONSUMER/node_modules/$name/package.json"
+    done | sort -u
+)
+if [[ -n "$peers" ]]; then
+    echo "packaged: npm install (declared peers)"
+    # shellcheck disable=SC2086  # deliberately word-split into one arg per peer
+    (cd "$CONSUMER" && npm install --no-audit --no-fund $peers >/dev/null)
+fi
+
 # ── resolution ──────────────────────────────────────────────────────────────
 # npm records where each installed package came from, so assert it directly
 # rather than trusting that the overrides applied. A candidate served from the
@@ -170,6 +193,16 @@ symlinked=$(find "$CONSUMER/node_modules/@moq" -maxdepth 1 -type l 2>/dev/null |
 # ── entry points ────────────────────────────────────────────────────────────
 # Documented entry points are the `exports` keys of the published manifest, so
 # read them back out of the tarball rather than keeping a second list here.
+#
+# These two publish relative imports that node's ESM resolver refuses -- `tsc`
+# emits specifiers as the source writes them, and these are written as directory
+# and extensionless ones. The first run of this harness is what found it, and
+# /quest/m0/js-published-esm-resolution.md fixes it. Listed here as an
+# expectation rather than an exemption: each is still imported below, and a
+# package that starts resolving fails the run until its entry here is removed.
+NODE_IMPORT_BROKEN=("@moq/hang" "@moq/msf")
+broken_set=$(printf '%s\n' "${NODE_IMPORT_BROKEN[@]}")
+
 node_specs=()
 browser_specs=()
 for name in "${candidates[@]}"; do
@@ -185,7 +218,9 @@ for name in "${candidates[@]}"; do
     for subpath in $subpaths; do
         spec="$name${subpath#.}"
         browser_specs+=("$spec")
-        [[ "$browser_only" == "yes" ]] || node_specs+=("$spec")
+        [[ "$browser_only" == "yes" ]] && continue
+        grep -qx -- "$name" <<<"$broken_set" && continue
+        node_specs+=("$spec")
     done
 done
 
@@ -193,6 +228,18 @@ if ((${#node_specs[@]} > 0)); then
     echo "packaged: importing ${#node_specs[@]} entry points under node"
     (cd "$CONSUMER" && node imports.mjs "${node_specs[@]}")
 fi
+
+for name in "${NODE_IMPORT_BROKEN[@]}"; do
+    grep -qx -- "$name" <<<"$requested_set" || continue
+    broken_specs=()
+    while read -r subpath; do
+        broken_specs+=("$name${subpath#.}")
+    done < <(jq -r '.exports | keys[]' "$CONSUMER/node_modules/$name/package.json")
+    if (cd "$CONSUMER" && node imports.mjs "${broken_specs[@]}" >/dev/null 2>&1); then
+        die "$name now imports under node; remove it from NODE_IMPORT_BROKEN in test/packaged/js.sh"
+    fi
+    echo "  xfail $name (unresolvable under node; quest/m0/js-published-esm-resolution.md)"
+done
 
 # ── browser bundle ──────────────────────────────────────────────────────────
 # A browser-target bundle is the resolution a real consumer's bundler performs:
