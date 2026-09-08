@@ -34,3 +34,4 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
+- [Audio codecs](/quest/m2/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through libmoq

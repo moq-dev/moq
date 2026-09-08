@@ -15,3 +15,7 @@ MoQ publishing can encode OBS's mixed audio with moq-audio Opus while preserving
 ## Required
 
 - [Encoder presets](/quest/m2/obs-moq-video/presets.md) - shared policy and truthful reporting
+
+## Related
+
+- [Encode seam](/quest/m2/audio-codecs/encode-backend.md) - `Codec::Aac` lets the adapter offer AAC instead of leaving it to the OBS encoder mode
