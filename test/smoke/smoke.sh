@@ -686,8 +686,18 @@ run_round() {
         sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
     fi
     if [[ -n "$pub_pid" ]]; then
-        kill_tree "$pub_pid"
-        wait "$pub_pid" 2>/dev/null || true
+        # A retained session promises the client side too, and reaping here is
+        # what breaks that promise: by the time cleanup runs, the publisher that
+        # was streaming into the failed round is already gone. Leave it up, and
+        # let teardown.sh reap it with everything else the run recorded. Only for
+        # a round that actually failed, since a passing round has nothing to
+        # inspect and its publisher would otherwise stream for the whole run.
+        if [[ "$round_pass" -eq 0 ]] && [[ ${#pids[@]} -gt 0 ]] && bundle_retained; then
+            echo "  INFO  publisher '$pub' left running for the retained session (pid $pub_pid)"
+        else
+            kill_tree "$pub_pid"
+            wait "$pub_pid" 2>/dev/null || true
+        fi
         # Don't let cleanup() later signal this now-reaped (possibly recycled) PID.
         [[ "${PUB_PID:-}" == "$pub_pid" ]] && PUB_PID=""
     fi

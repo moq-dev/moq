@@ -123,8 +123,6 @@ analyze() {
     python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 }
 
-require_tools
-
 rerun=(just test ts --duration "$DURATION" --bitrate "$BITRATE" --port "$PORT")
 [[ -z "$SOURCE" ]] || rerun+=(--source "$SOURCE")
 [[ -z "$STRICT" ]] || rerun+=(--strict)
@@ -135,7 +133,10 @@ rerun=(just test ts --duration "$DURATION" --bitrate "$BITRATE" --port "$PORT")
 rerun+=(${PASSTHRU[@]+"${PASSTHRU[@]}"})
 
 # ── analyze-only: no relay, no build ────────────────────────────────────────
+# No processes, no round-trip, and the analyzer prints its own verdict, so this
+# arm has nothing for a bundle to retain and opens none.
 if [[ -n "$ANALYZE_ONLY" ]]; then
+    require_tools
     [[ -f "$ANALYZE_ONLY" ]] || {
         echo "error: no such file: $ANALYZE_ONLY" >&2
         exit 1
@@ -145,9 +146,9 @@ if [[ -n "$ANALYZE_ONLY" ]]; then
 fi
 
 # ── round-trip capture ──────────────────────────────────────────────────────
-# The bundle opens before anything that can fail, so a build that never produces
-# a relay still leaves the run identity and the toolchain behind for the upload
-# to collect. Same order as the smoke and WASM harnesses.
+# The bundle opens before anything that can fail -- the tool check included, so
+# a missing TSDuck still leaves the run identity and the toolchain behind for
+# the upload to collect. Same order as the smoke and WASM harnesses.
 bundle_init ts
 bundle_rerun "${rerun[@]}"
 TMP="$BUNDLE_WORK"
@@ -191,6 +192,8 @@ cleanup() {
     bundle_finish "$status"
 }
 trap cleanup EXIT
+
+require_tools
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')

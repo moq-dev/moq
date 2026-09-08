@@ -109,29 +109,57 @@ if (traceDir) {
 
 let errors: BrowserErrors = { page: [], console: [] };
 
-// A trace is worth its megabytes only for a run that failed; a passing one
-// discards everything it recorded.
-async function saveTrace(page: Page | undefined, failed: boolean): Promise<void> {
-	if (!traceDir) {
-		await context.close().catch(() => {});
-		return;
+// A capture step that threw is the one case worth naming: a crashed Chromium
+// rejects `tracing.stop` and the bundle then holds no trace, which is
+// indistinguishable from a trace nobody asked for. Collected rather than
+// discarded, and never fatal -- the failure under investigation is the run's,
+// not the recorder's.
+const captureFailures: string[] = [];
+async function attempt(what: string, fn: () => Promise<unknown>): Promise<boolean> {
+	try {
+		await fn();
+		return true;
+	} catch (err) {
+		captureFailures.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+		return false;
 	}
+}
+
+// A trace is worth its megabytes only for a run that failed; a passing one
+// discards everything it recorded. Returns the trace path when one was written.
+async function saveTrace(page: Page | undefined, failed: boolean): Promise<string | undefined> {
+	if (!traceDir) {
+		await attempt("context.close", () => context.close());
+		return undefined;
+	}
+	const tracePath = join(traceDir, `${label}.trace.zip`);
+	let wrote = false;
 	if (failed) {
-		await context.tracing.stop({ path: join(traceDir, `${label}.trace.zip`) }).catch(() => {});
-		await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true }).catch(() => {});
+		wrote = await attempt("tracing.stop", () => context.tracing.stop({ path: tracePath }));
+		await attempt("screenshot", async () => {
+			await page?.screenshot({ path: join(traceDir, `${label}.png`), fullPage: true });
+		});
 		const log = [...errors.page.map((e) => `page: ${e}`), ...errors.console.map((e) => `console: ${e}`)];
-		await writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`).catch(() => {});
+		await attempt("console log", () => writeFile(join(traceDir, `${label}.console.log`), `${log.join("\n")}\n`));
 	} else {
-		await context.tracing.stop().catch(() => {});
+		await attempt("tracing.stop", () => context.tracing.stop());
 	}
 	// The HAR is only written on close, so it has to happen either way.
-	await context.close().catch(() => {});
-	if (!failed) await rm(join(traceDir, `${label}.har`), { force: true }).catch(() => {});
+	await attempt("context.close", () => context.close());
+	if (!failed) await attempt("har cleanup", () => rm(join(traceDir, `${label}.har`), { force: true }));
+
+	if (captureFailures.length > 0 && failed) {
+		await writeFile(join(traceDir, `${label}.capture-failed.log`), `${captureFailures.join("\n")}\n`).catch(
+			() => {},
+		);
+	}
+	return wrote ? tracePath : undefined;
 }
 
 let code = 1;
 let page: Page | undefined;
 let failure: unknown;
+let tracePath: string | undefined;
 try {
 	[page, errors] = await open(context, pageUrl(server.origin, role, { url, broadcast }));
 	if (role === "subscribe") await waitForWatch(page);
@@ -218,7 +246,7 @@ try {
 } catch (err) {
 	failure = err;
 } finally {
-	await saveTrace(page, code !== 0);
+	tracePath = await saveTrace(page, code !== 0);
 	await browser.close().catch(() => {});
 	server.stop();
 }
@@ -226,5 +254,8 @@ try {
 if (failure !== undefined) {
 	console.error(failure instanceof Error ? (failure.stack ?? failure.message) : String(failure));
 }
-if (code !== 0 && traceDir) console.error(`browser trace: ${join(traceDir, `${label}.trace.zip`)}`);
+// Only claim a trace that exists. Pointing at one that was never written is
+// worse than saying nothing, because it ends the search in the wrong place.
+if (tracePath) console.error(`browser trace: ${tracePath}`);
+for (const problem of captureFailures) console.error(`browser capture failed: ${problem}`);
 process.exit(code);
