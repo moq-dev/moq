@@ -48,11 +48,6 @@ use super::track::{self, TrackState};
 /// access-time sum below u64 (see [`TICK_MS`]).
 pub(crate) const ENTRY_OVERHEAD: u64 = group::CACHE_OVERHEAD + track::CACHE_OVERHEAD;
 
-/// Bytes an `Arc<T>` allocation occupies: the value behind its two reference counts.
-pub(crate) const fn arc_bytes<T>() -> u64 {
-	(2 * size_of::<usize>() + size_of::<T>()) as u64
-}
-
 /// Sub-tick boosts applied to the last-access stamp, breaking ties within one
 /// coarse tick: a frame write outranks merely-inserted content, and a read (a
 /// delivered or fetched group, a frame read, a backfill's birth) outranks both.

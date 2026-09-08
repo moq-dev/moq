@@ -35,6 +35,21 @@ impl<T: Default> Default for Producer<T> {
 }
 
 impl<T> Producer<T> {
+	/// Heap bytes this channel occupies, for callers budgeting memory per channel.
+	///
+	/// A channel owns two allocations regardless of how it is used: the state cell
+	/// holding `T`, its mutex and the three waiter lists, plus the reference counts
+	/// beside it. Both are sized at compile time, so a caller charging per channel can
+	/// derive its constant from this rather than measuring a process and pasting the
+	/// number.
+	///
+	/// [`Consumer`] has no counterpart because it shares these same two allocations:
+	/// [`consume`](Self::consume) hands back two more pointers and bumps a count, so a
+	/// channel costs this whether it has one consumer or a thousand.
+	///
+	/// Excludes whatever `T` allocates on its own.
+	pub const HEAP: usize = crate::arc_heap::<crate::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
+
 	/// Create a new producer with the given initial value.
 	pub fn new(value: T) -> Self {
 		Self {

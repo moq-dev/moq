@@ -34,11 +34,15 @@ const FRAME_SLOTS: usize = 4;
 /// bookkeeping in [`track::CACHE_OVERHEAD`].
 ///
 /// A group is one kio channel (allocated whether or not anything ever parks on it), the
-/// `Alive` its producer clones share, and the frame slots the first write rounds up to.
-/// Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is derived rather than
+/// `Arc<Alive>` its producer clones share, and the frame slots the first write rounds up
+/// to. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is derived rather than
 /// measured.
-pub(crate) const CACHE_OVERHEAD: u64 =
-	kio::footprint::<GroupState>() as u64 + cache::arc_bytes::<Alive>() + (FRAME_SLOTS * size_of::<Frame>()) as u64;
+pub(crate) const CACHE_OVERHEAD: u64 = (kio::Producer::<GroupState>::HEAP
+	// `Alive` behind an `Arc`'s two reference counts, which it is pointer-aligned to sit
+	// straight after.
+	+ 2 * size_of::<usize>()
+	+ size_of::<Alive>()
+	+ FRAME_SLOTS * size_of::<Frame>()) as u64;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
