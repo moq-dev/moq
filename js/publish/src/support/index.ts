@@ -4,9 +4,9 @@
  *
  * @module
  */
-import * as Util from "@moq/hang/util";
 import { Connection } from "@moq/net";
 import { workerSupported } from "../video/processor";
+import { probe } from "./video";
 
 export type Level = "full" | "partial" | "none";
 
@@ -64,30 +64,6 @@ async function audioEncoderSupported(codec: keyof typeof CODECS): Promise<boolea
 	return res.supported === true;
 }
 
-async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec> {
-	const software = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-software",
-	});
-
-	const hardware = await VideoEncoder.isConfigSupported({
-		codec: CODECS[codec],
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-hardware",
-	});
-
-	// Safari accepts software codecs under "prefer-hardware", so report hardware support as unknown.
-	const unknown = Util.Hacks.isSafari || hardware.config?.hardwareAcceleration !== "prefer-hardware";
-
-	return {
-		hardware: unknown ? undefined : hardware.supported === true,
-		software: software.supported === true,
-	};
-}
-
 export async function isSupported(): Promise<Full> {
 	return {
 		// Report "partial" when @moq/net forces the WebSocket fallback.
@@ -113,11 +89,11 @@ export async function isSupported(): Promise<Full> {
 			encoding:
 				typeof VideoEncoder !== "undefined"
 					? {
-							h264: await videoEncoderSupported("h264"),
-							h265: await videoEncoderSupported("h265"),
-							vp8: await videoEncoderSupported("vp8"),
-							vp9: await videoEncoderSupported("vp9"),
-							av1: await videoEncoderSupported("av1"),
+							h264: await probe(CODECS.h264),
+							h265: await probe(CODECS.h265),
+							vp8: await probe(CODECS.vp8),
+							vp9: await probe(CODECS.vp9),
+							av1: await probe(CODECS.av1),
 						}
 					: undefined,
 		},

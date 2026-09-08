@@ -1,6 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import {
@@ -14,8 +13,9 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
-import { isStreamTrack, type Source } from "./types";
+import { normalizeSource, type Source } from "./types";
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -428,7 +428,7 @@ export class Encoder {
 		let maxPixels =
 			user?.maxPixels ??
 			sourceConstraintPixels(source) ??
-			(user?.maxScale === undefined ? screenPixels(source) : undefined) ??
+			(user?.maxScale === undefined ? scaledPixels(source) : undefined) ??
 			sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
@@ -515,7 +515,7 @@ export class Encoder {
 		// VideoToolbox only hardware-encodes H.264 and HEVC. Skip the hardware pass and let it fall
 		// through to the software pass, which is H.264 first, since Safari routes that through
 		// VideoToolbox anyway regardless of the hint.
-		if (!Util.Hacks.isSafari) {
+		if (hardwareReliable()) {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 
@@ -569,7 +569,7 @@ export class Encoder {
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.
 function sourceFrameRate(source: Source): number | undefined {
-	return isStreamTrack(source) ? source.getSettings().frameRate : source.frameRate;
+	return "frames" in source ? source.frameRate : normalizeSource(source).track.getSettings().frameRate;
 }
 
 // A hardware probe result, carrying the inputs it ran against so a consumer can tell whether it
@@ -598,25 +598,28 @@ function codecBitrateScale(codec: string): number {
 
 function sourceConstraintPixels(source: Source): number | undefined {
 	// Only a capture track has constraints; a frame stream is whatever size it produces.
-	if (!isStreamTrack(source)) return undefined;
+	if ("frames" in source) return undefined;
 
-	const constraints = source.getConstraints();
+	const constraints = normalizeSource(source).track.getConstraints();
 	const width = constraintMax(constraints.width);
 	const height = constraintMax(constraints.height);
 
 	return width !== undefined && height !== undefined ? width * height : undefined;
 }
 
-function screenPixels(source: Source): number | undefined {
-	const ratio = source.getSettings().screenPixelRatio;
-	if (ratio === undefined || !Number.isFinite(ratio) || ratio <= 1) return;
+function scaledPixels(source: Source): number | undefined {
+	if ("frames" in source) return;
+	const { track, scale } = normalizeSource(source);
+	if (scale === undefined) return;
+	if (!Number.isFinite(scale) || scale <= 0)
+		throw new Error(`scale must be a finite number greater than 0: ${scale}`);
 
 	// Cap against the native surface, not the current frame, which may already be downscaled.
-	const capabilities = source.getCapabilities();
+	const capabilities = track.getCapabilities();
 	const width = capabilities.width?.max;
 	const height = capabilities.height?.max;
 	if (!width || !height) return;
-	return (width * height) / ratio ** 2;
+	return (width * height) / scale ** 2;
 }
 
 function constraintMax(value: MediaTrackConstraints["width"]): number | undefined {

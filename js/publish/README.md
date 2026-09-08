@@ -95,9 +95,10 @@ const publish = new Publish.Broadcast(connection, {
 publish.source.camera.enabled.set(true);
 ```
 
-Video encoders prefer hardware encoding, including on Firefox. AV1 is only
+Video encoders prefer hardware encoding, including on Firefox 143 and newer. AV1 is only
 considered with hardware acceleration; software selection starts with H.264.
-Screen tracks default to logical resolution when the browser supplies
+Screen capture passes `{ track, scale: screenPixelRatio }` as its video source.
+Encoders default to logical resolution when the browser supplies
 `screenPixelRatio` and native dimensions: a 5120×2880 surface at 2× encodes at
 2560×1440. Browsers without that metadata keep the captured resolution.
 Explicit `maxPixels`, `maxScale`, or source width/height limits override this

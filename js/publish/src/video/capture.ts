@@ -1,7 +1,7 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
-import { isStreamTrack, type Source } from "./types";
+import { normalizeSource, type Source } from "./types";
 
 // The raw capture source to pump frames from.
 export type CaptureInput = {
@@ -49,7 +49,7 @@ export class Capture {
 		// A capture track goes through MediaStreamTrackProcessor, which rewrites timestamps onto our
 		// wall clock so they stay consistent when the source changes or the encoder reloads. A
 		// FrameSource already stamps against that clock, so take its frames as they are.
-		const stream = isStreamTrack(source) ? TrackProcessor(source) : source.frames;
+		const stream = "frames" in source ? source.frames : TrackProcessor(normalizeSource(source).track);
 
 		const fanout = new Fanout(stream.pipeThrough(this.#measure()), {
 			// A frame is a resource with an explicit lifetime, so every reader needs its own handle

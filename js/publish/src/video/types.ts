@@ -2,7 +2,20 @@
  * Where video comes from: a live capture track, or a stream of frames we produce ourselves (a
  * decoded file, an image, a canvas you drive yourself).
  */
-export type Source = StreamTrack | FrameSource;
+export type Source = StreamTrack | SourceConfig | FrameSource;
+
+/** A video track and its native pixels per logical pixel. */
+export interface SourceConfig {
+	/** The track to capture. */
+	track: StreamTrack;
+	/** Native pixels per logical pixel; defaults to 1. */
+	scale?: number;
+}
+
+/** Return the track and sizing options for either capture source form. */
+export function normalizeSource(source: StreamTrack | SourceConfig): SourceConfig {
+	return "track" in source ? source : { track: source };
+}
 
 /**
  * A stream of frames from something that isn't a capture device.
@@ -19,10 +32,10 @@ export interface FrameSource {
 	frameRate?: number;
 }
 
-/** Whether this source is a live capture track rather than a {@link FrameSource}. */
+/** Whether this source is a bare live capture track. */
 export function isStreamTrack(source: Source): source is StreamTrack {
 	// Structural check rather than `instanceof MediaStreamTrack` so this stays correct across realms.
-	return !("frames" in source);
+	return !("frames" in source) && !("track" in source);
 }
 
 // Stronger typing for the MediaStreamTrack interface.
@@ -43,8 +56,6 @@ export interface TrackSettings {
 	height: number;
 	resizeMode: "none" | "crop-and-scale";
 	width: number;
-	/** Physical pixels per logical pixel on the captured screen. */
-	screenPixelRatio?: number;
 }
 
 export type Constraints = Omit<

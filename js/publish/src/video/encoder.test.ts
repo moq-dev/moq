@@ -243,7 +243,7 @@ test("hardware encoding takes priority over software H.264", async () => {
 	}));
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
-		out: { frame: new Signal({ codedWidth: 1920, codedHeight: 1080 }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
 	};
 	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
 	try {
@@ -264,7 +264,7 @@ test("software-only AV1 is refused even when explicitly requested", async () => 
 	const error = spyOn(console, "error").mockImplementation(() => {});
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
-		out: { frame: new Signal({ codedWidth: 1920, codedHeight: 1080 }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
 	};
 	const encoder = new Encoder("video", { enabled: true, capture: capture as never, config: { codec: "av01" } });
 	try {
@@ -285,22 +285,25 @@ test("screen encoders default to logical pixels without scaling an already reduc
 	const capture = {
 		in: {
 			source: new Signal({
-				getSettings: () => ({ frameRate: 30, screenPixelRatio: 2 }),
-				getConstraints: () => ({}),
-				getCapabilities: () => ({ width: { max: 5120 }, height: { max: 2880 } }),
+				scale: 2,
+				track: {
+					getSettings: () => ({ frameRate: 30 }),
+					getConstraints: () => ({}),
+					getCapabilities: () => ({ width: { max: 5120 }, height: { max: 2880 } }),
+				},
 			}),
 		},
-		out: { frame: new Signal({ codedWidth: 5120, codedHeight: 2880 }) },
+		out: { display: new Signal({ width: 5120, height: 2880 }) },
 	};
 	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
 	try {
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 2560, height: 1440 });
-		capture.out.frame.set({ codedWidth: 2560, codedHeight: 1440 });
+		capture.out.display.set({ width: 2560, height: 1440 });
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 2560, height: 1440 });
 
-		capture.out.frame.set({ codedWidth: 5120, codedHeight: 2880 });
+		capture.out.display.set({ width: 5120, height: 2880 });
 		encoder.config.set({ maxScale: 1 });
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 5120, height: 2880 });
@@ -309,5 +312,53 @@ test("screen encoders default to logical pixels without scaling an already reduc
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1920, height: 1072 });
 	} finally {
 		encoder.close();
+	}
+});
+
+for (const version of [140, 142, 143, 152]) {
+	test(`Firefox ${version} uses trustworthy hardware probes only`, async () => {
+		using _videoEncoder = installFakeVideoEncoder();
+		const userAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+		Object.defineProperty(navigator, "userAgent", {
+			configurable: true,
+			value: `Mozilla/5.0 Firefox/${version}.0`,
+		});
+		const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async () => ({
+			supported: true,
+		}));
+		const capture = {
+			in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+			out: { display: new Signal({ width: 1920, height: 1080 }) },
+		};
+		const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+		try {
+			await settle();
+			expect(encoder.out.resolved.peek()?.hardwareAcceleration).toBe(
+				version < 143 ? "prefer-software" : "prefer-hardware",
+			);
+			if (version < 143) expect(encoder.out.resolved.peek()?.codec.startsWith("avc1")).toBe(true);
+		} finally {
+			encoder.close();
+			probe.mockRestore();
+			if (userAgent) Object.defineProperty(navigator, "userAgent", userAgent);
+			else Reflect.deleteProperty(navigator, "userAgent");
+		}
+	});
+}
+
+test("frame sources retain their dimensions and nominal frame rate", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const frames = new ReadableStream<VideoFrame>();
+	const capture = {
+		in: { source: new Signal({ frames, frameRate: 24 }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	try {
+		await settle();
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1920, height: 1072, framerate: 24 });
+	} finally {
+		encoder.close();
+		await frames.cancel();
 	}
 });
