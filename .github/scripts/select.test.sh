@@ -30,7 +30,8 @@ select_for() {
 expect() {
     local files=$1 lane=$2 want=$3
     local got
-    got="$(select_for "$files" | sed -n "s/^$lane=//p")"
+    select_for "$files" >/dev/null
+    got="$(sed -n "s/^$lane=//p" <<<"${memo[$files]}")"
     [[ -n "$got" ]] || fail "no lane named $lane"
     [[ "$got" == "$want" ]] || fail "$lane=$got for [${files//$'\n'/, }], expected $want"
 }
@@ -122,6 +123,17 @@ expect 'bun.lock' smoke_full true
 # the only thing that type-checks the harness against the generated @moq/wasm
 # declarations: the workspace has no `check` script for `just js check` to run.
 expect 'js/tsconfig.json' wasm true
+
+# Every shell harness sources this process, port, and readiness machinery. A
+# change there has to run each consumer rather than relying on their own paths.
+shared_harness='test/lib/harness.sh'
+expect "$shared_harness" smoke_full true
+expect "$shared_harness" smoke false
+expect "$shared_harness" wasm true
+expect "$shared_harness" ts true
+
+# The TS round trip rewrites the smoke relay config before launching it.
+expect 'test/smoke/smoke.toml' ts true
 
 # Docs cannot change behavior, and this is the case that must finish without
 # waiting on a lane: it is why the aggregate exists.

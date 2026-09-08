@@ -100,6 +100,7 @@ touches() {
 # paths. Nothing in the Cargo or bun graph names it, so without this a lock bump
 # selects no lane at all.
 shell='^flake\.(nix|lock)$'
+harness='^test/lib/harness\.sh$'
 
 # The full interop matrix, per the Cross-Package Sync rule in CLAUDE.md: wire,
 # FFI, and gateway changes run every publisher against every subscriber.
@@ -114,7 +115,7 @@ shell='^flake\.(nix|lock)$'
 if edits moq-net moq-ffi libmoq moq-gst moq-rtmp moq-srt moq-rtc moq-hls ||
     touches '^(py/|pyproject\.toml$|uv\.lock$)' ||
     touches '^go/' ||
-    touches '^(test/smoke/|test/justfile$|package\.json$|bun\.lock$)'; then
+    touches '^(test/smoke/|test/justfile$|package\.json$|bun\.lock$)' || touches "$harness"; then
     selected[smoke_full]=true
 elif reaches moq-relay moq-cli libmoq moq-ffi moq-gst ||
     touches '^(js/|demo/web/)' || touches "$shell"; then
@@ -149,14 +150,15 @@ fi
 # `just js check` to run.
 if reaches moq-wasm moq-relay ||
     touches '^(js/(wasm|net|signals)/|js/tsconfig\.json$|test/wasm/|\.cargo/config\.toml$)' ||
-    touches '^(package\.json|bun\.lock)$' || touches "$shell"; then
+    touches '^(package\.json|bun\.lock)$' || touches "$shell" || touches "$harness"; then
     selected[wasm]=true
 fi
 
 # The MPEG-TS exporter graded against a real analyzer. moq-mux owns the muxer and
 # moq-cli owns the `export ts` that drives it; TSDuck grades the output and comes
 # from the dev shell.
-if reaches moq-mux moq-cli || touches '^test/ts/' || touches "$shell"; then
+if reaches moq-mux moq-cli || touches '^test/ts/' || touches '^test/smoke/smoke\.toml$' ||
+    touches "$shell" || touches "$harness"; then
     selected[ts]=true
 fi
 
