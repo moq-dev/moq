@@ -1,8 +1,17 @@
 //! The `play` verb's command-line surface.
 
+use std::time::Duration;
+
 use moq_mux::catalog::CatalogFormat;
 
 use crate::subscribe::{CatalogFormatArg, SelectArgs};
+
+/// The longest delay the speaker can hold, which is what bounds `--delay`.
+///
+/// Duplicated from `moq_audio::playback::Input::LATENCY_MAX` because this module
+/// compiles without the `play` feature, and so without that crate. The test
+/// below pins the two together in a build that has both.
+const DELAY_MAX: Duration = Duration::from_secs(10);
 
 /// Play one MoQ broadcast through a native window and speaker.
 #[derive(usage::Args, Clone)]
@@ -73,10 +82,9 @@ impl Args {
 		);
 		// The delay is the speaker's ring depth, so a value it cannot hold is
 		// refused here rather than after the pipeline has opened a device.
-		let max = moq_audio::playback::Input::LATENCY_MAX;
 		anyhow::ensure!(
-			self.delay.into_std() <= max,
-			"--delay must be at most {max:?}; it is the depth the speaker buffers"
+			self.delay.into_std() <= DELAY_MAX,
+			"--delay must be at most {DELAY_MAX:?}; it is the depth the speaker buffers"
 		);
 		Ok(())
 	}
@@ -129,6 +137,20 @@ mod tests {
 			assert!(refusal.contains("--max-age"), "{refusal}");
 			assert!(refusal.contains("--delay"), "{refusal}");
 		}
+	}
+
+	/// A depth the speaker cannot hold is refused up front, rather than after the
+	/// pipeline has opened a device.
+	#[test]
+	fn the_delay_is_bounded_by_the_speakers_ring() {
+		let err = parse(&["--delay", "11s"]).validate().unwrap_err().to_string();
+		assert!(err.contains("--delay must be at most"), "{err}");
+		parse(&["--delay", "10s"]).validate().unwrap();
+
+		// The bound has to be the sink's own, which only a build carrying the sink
+		// can say.
+		#[cfg(feature = "play")]
+		assert_eq!(DELAY_MAX, moq_audio::playback::Input::LATENCY_MAX);
 	}
 
 	/// The suffix picks the format, and the flag overrides it.
