@@ -1061,19 +1061,15 @@ mod tests {
 	/// has to run to a clean end: the consumer reads it out and then sees the
 	/// track finish, rather than the group going away under it.
 	///
-	/// Which half produces group 0 is a race. A rung consumer is demand on its
-	/// own, so `live` starts the moment the track is taken below, and it usually
-	/// wins: by the time `fetch_group` is called the group is already in the
-	/// track cache, so the fetch resolves from there and the fetch handler is
-	/// never asked. What that ordering pins down is `live` riding out the group
-	/// it is part way through after retirement, plus `serve` joining its two
-	/// halves rather than letting either cancel the other.
-	///
-	/// If the fetch handler produces group 0, the awaited fetch returns only
-	/// after it has opened its decoder and accepted the group. Retirement below
-	/// therefore cannot exercise a fetch that is still opening its decoder.
+	/// A rung consumer is demand on its own, so `live` starts the moment the
+	/// track is taken below and produces group 0 from the still-open source
+	/// group. The fetch below then resolves straight from the track cache. What
+	/// that pins down is `live` riding out the group it is part way through after
+	/// retirement, plus `serve` joining its two halves rather than letting either
+	/// cancel the other. [`retirement_waits_for_an_unclaimed_fetch`] covers the
+	/// other half of the boundary.
 	#[tokio::test]
-	async fn retirement_finishes_an_in_flight_fetch() {
+	async fn retirement_rides_out_an_open_live_group() {
 		let mut source = source_catalog(320, 240);
 		let mut group = source._track.create_group(0u64.into()).unwrap();
 		write_keyframe(&mut group);
@@ -1130,6 +1126,101 @@ mod tests {
 		.await
 		.expect("the accepted fetch never finished");
 		assert!(finished.is_ok(), "retirement aborted the accepted group: {finished:?}");
+
+		transcoder.abort();
+	}
+
+	/// The other half of the retirement boundary: a fetch that is still opening
+	/// its decoder has claimed no output group, so retirement must not declare a
+	/// final sequence until it has. Finishing at retirement instead computes the
+	/// boundary from the groups produced so far (none) and refuses the very fetch
+	/// the handler drained its loop to keep.
+	///
+	/// Reaching the fetch handler takes a group the live path cannot produce.
+	/// Holding the consumer needed to fetch is itself the demand that starts the
+	/// live path, and the live path serves the same sequences from the same
+	/// source, so the source publishes no group at all and serves this one
+	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
+	/// fetch at exactly the point in question: past the rung's handler, before
+	/// its `GroupRequest::accept`.
+	#[tokio::test]
+	async fn retirement_waits_for_an_unclaimed_fetch() {
+		let mut source = source_catalog(320, 240);
+		// The source track carries no live groups; this serves them on demand, so
+		// the test decides when the rung's fetch gets past its source read.
+		let source_fetches = source._track.dynamic();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, 100_000)]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// Resolving the info waits for the transcoder to accept the track, so the
+		// fetch below reaches a rung that is already serving.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.info().await.unwrap();
+
+		// Queued synchronously, so the rung's handler can pop it without this task
+		// polling the fetch. Sequence 7 is one the live path never reaches.
+		let fetching = rung.fetch_group(7, None);
+
+		// The rung's fetch task is now inside its source read, which is upstream of
+		// both its decoder and the `GroupRequest::accept` that claims output group 7.
+		let request = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
+			.await
+			.expect("the rung never fetched the source group")
+			.expect("the source track closed");
+		assert_eq!(request.sequence(), 7);
+
+		// Retire the rung with the fetch parked there, and let the retirement land
+		// before the source group exists.
+		source.resize(160, 90);
+		tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			await_catalog(&mut catalogs, |snapshot| {
+				!snapshot.video.renditions.contains_key("video/120p")
+			}),
+		)
+		.await
+		.expect("the ladder never retired the rung");
+
+		// Release the fetch: it opens its decoder and only now claims output group
+		// 7, which retirement had to leave writable.
+		let mut group = request.accept(None).unwrap();
+		write_keyframe(&mut group);
+		group.finish().unwrap();
+
+		let mut fetched = tokio::time::timeout(std::time::Duration::from_secs(5), fetching)
+			.await
+			.expect("the fetch never resolved")
+			.expect("retirement finished the track before the fetch claimed its group");
+		let frames = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while fetched.read_frame().await?.is_some() {}
+			fetched.finished().await
+		})
+		.await
+		.expect("the accepted fetch never finished")
+		.expect("retirement aborted the accepted group");
+		assert!(frames > 0, "the fetch claimed its group but produced no frames");
 
 		transcoder.abort();
 	}
