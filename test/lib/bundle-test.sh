@@ -572,7 +572,9 @@ missing_python_case() {
     source "$DIR/harness.sh"
     HARNESS_RUN="$BUNDLE_WORK"
     mkdir "$BUNDLE_WORK/no-tools"
-    ! PATH="$BUNDLE_WORK/no-tools" harness_spawn missing-python "$BUNDLE_WORK/missing-python.log" true
+    if PATH="$BUNDLE_WORK/no-tools" harness_spawn missing-python "$BUNDLE_WORK/missing-python.log" true; then
+        return 1
+    fi
     test ! -e "$BUNDLE_WORK/.harness"
     bundle_finish 1
 }
