@@ -22,14 +22,17 @@ CLIENTS="$SMOKE_DIR/clients"
 # its logs, configs, browser traces, and stacks. See test/README.md.
 # shellcheck source=../lib/bundle.sh disable=SC1091
 source "$WORKSPACE/test/lib/bundle.sh"
+# shellcheck source=../lib/harness.sh disable=SC1091
+source "$WORKSPACE/test/lib/harness.sh"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
 TIMEOUT="${SMOKE_TIMEOUT:-20}"
 FPS="${SMOKE_FPS:-30}"
 SIZE="${SMOKE_SIZE:-320x240}"
-PORT="${SMOKE_PORT:-4443}"
-URL="http://127.0.0.1:${PORT}"
+# Empty means "any reserved port"; SMOKE_PORT pins one instead.
+PORT="${SMOKE_PORT:-}"
+URL=""
 NEGATIVE=0
 MEDIA=0
 
@@ -97,7 +100,7 @@ done
     echo "error: timeout must be a positive number (got '$TIMEOUT')" >&2
     exit 2
 }
-[[ "$PORT" =~ ^[0-9]+$ ]] || {
+[[ -z "$PORT" || "$PORT" =~ ^[0-9]+$ ]] || {
     echo "error: port must be numeric (got '$PORT')" >&2
     exit 2
 }
@@ -155,6 +158,7 @@ bundle_rerun env "${rerun_env[@]}" "${rerun[@]}"
 # scratch dir instead: they are large, and the binaries they came from are
 # recorded by identity below.
 TMP="$BUNDLE_WORK"
+HARNESS_RUN="$TMP"
 RELAY_PID=""
 RELAY_FAILED=0
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
@@ -177,14 +181,6 @@ is_broken() {
     return 1
 }
 
-kill_tree() {
-    # SIGKILL, depth-first. moq-cli ignores SIGTERM (handles only SIGINT), so a
-    # polite kill would leak it; these are ephemeral test processes, so -9 is fine.
-    local pid="$1" child
-    for child in $(pgrep -P "$pid" 2>/dev/null || true); do kill_tree "$child"; done
-    kill -KILL "$pid" 2>/dev/null || true
-}
-
 # shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
     local status=$?
@@ -203,22 +199,17 @@ cleanup() {
     # A retained session is the whole point of MOQ_QA_RETAIN: the ports stay
     # held and the processes stay attachable until teardown.sh runs.
     if [[ "$status" -eq 0 ]] || ! bundle_retained; then
-        # Reap the last publisher too; subscribers self-terminate via their timeouts.
-        # `wait` after each kill consumes the job status: bundle_finish below runs
-        # long enough for the shell to otherwise report "Killed" on its own, which
-        # reads like a failure in a run that passed.
-        if [[ -n "${PUB_PID:-}" ]]; then
-            kill_tree "$PUB_PID"
-            wait "$PUB_PID" 2>/dev/null || true
-        fi
-        if [[ -n "$RELAY_PID" ]]; then
-            kill_tree "$RELAY_PID"
-            wait "$RELAY_PID" 2>/dev/null || true
-        fi
+        harness_reap_all
+        harness_release_ports
+    elif ! harness_retain_ports; then
+        bundle_note "the retained session had no live process to own its port reservations"
+        harness_release_ports
     fi
     bundle_finish "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -227,7 +218,7 @@ require_tools() {
     # missing per-client toolchain (uv / bun / node / cc) just marks that client
     # broken in prepare, so it fails its own cells instead of the whole run.
     local missing=() t
-    for t in cargo ffmpeg curl pgrep timeout; do
+    for t in cargo ffmpeg curl timeout; do
         have "$t" || missing+=("$t")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -291,15 +282,15 @@ prepare_python() {
         return
     }
     echo "building python client (workspace moq via maturin)..."
-    if (cd "$WORKSPACE" && just py build) >"$TMP/py-build.log" 2>&1; then
+    if (cd "$WORKSPACE" && just py build) >"$HARNESS_RUN/py-build.log" 2>&1; then
         PY="$WORKSPACE/.venv/bin/python"
         [[ -x "$PY" ]] || {
             mark_broken python "workspace .venv python not found after build"
-            sed 's/^/        /' "$TMP/py-build.log" >&2 || true
+            sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
         }
     else
         mark_broken python "just py build failed"
-        sed 's/^/        /' "$TMP/py-build.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/py-build.log" >&2 || true
     fi
 }
 
@@ -311,22 +302,22 @@ prepare_js() {
         return
     }
     echo "installing js clients (workspace @moq/* via bun)..."
-    if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$TMP/js-install.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$HARNESS_RUN/js-install.log" 2>&1; then
         for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
-        sed 's/^/        /' "$TMP/js-install.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return
     fi
     if needs js; then
         # Nix provides Chromium via PLAYWRIGHT_BROWSERS_PATH; otherwise fetch it.
-        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium) >"$TMP/js-chromium.log" 2>&1; then
+        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium) >"$HARNESS_RUN/js-chromium.log" 2>&1; then
             mark_broken js "playwright chromium install failed"
-            sed 's/^/        /' "$TMP/js-chromium.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bun run check) >"$TMP/js-check.log" 2>&1; then
+            sed 's/^/        /' "$HARNESS_RUN/js-chromium.log" >&2 || true
+        elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
-            sed 's/^/        /' "$TMP/js-check.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bunx vite build) >"$TMP/js-vite.log" 2>&1; then
+            sed 's/^/        /' "$HARNESS_RUN/js-check.log" >&2 || true
+        elif ! (cd "$CLIENTS/js" && bunx vite build) >"$HARNESS_RUN/js-vite.log" 2>&1; then
             mark_broken js "vite build failed"
-            sed 's/^/        /' "$TMP/js-vite.log" >&2 || true
+            sed 's/^/        /' "$HARNESS_RUN/js-vite.log" >&2 || true
         fi
     fi
     if needs js-native-node && ! have node; then
@@ -349,17 +340,17 @@ prepare_go() {
         return
     }
     echo "building go client (workspace moq-go via uniffi-bindgen-go)..."
-    local staged ffi_pkg wrapper_pkg src="$TMP/go-client"
-    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$TMP/go-stage.log"); then
+    local staged ffi_pkg wrapper_pkg src="$HARNESS_RUN/go-client"
+    if ! staged=$(bash "$WORKSPACE/go/scripts/stage.sh" 2>"$HARNESS_RUN/go-stage.log"); then
         mark_broken go "go/scripts/stage.sh failed"
-        sed 's/^/        /' "$TMP/go-stage.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/go-stage.log" >&2 || true
         return
     fi
     ffi_pkg=$(printf '%s\n' "$staged" | sed -n 1p)
     wrapper_pkg=$(printf '%s\n' "$staged" | sed -n 2p)
     mkdir -p "$src"
     cp "$CLIENTS/go/go.mod" "$CLIENTS/go/main.go" "$src/"
-    GO_SMOKE="$TMP/go-smoke"
+    GO_SMOKE="$HARNESS_RUN/go-smoke"
     if ! (
         cd "$src"
         export CGO_ENABLED=1 GOFLAGS=-mod=mod
@@ -367,9 +358,9 @@ prepare_go() {
             -replace="github.com/moq-dev/moq-go=$wrapper_pkg" \
             -replace="github.com/moq-dev/moq-go-ffi=$ffi_pkg"
         go build -o "$GO_SMOKE" .
-    ) >"$TMP/go-build.log" 2>&1; then
+    ) >"$HARNESS_RUN/go-build.log" 2>&1; then
         mark_broken go "go build failed"
-        sed 's/^/        /' "$TMP/go-build.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
     fi
 }
 
@@ -385,9 +376,9 @@ prepare_c() {
     echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq) >"$TMP/c-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq) >"$HARNESS_RUN/c-build.log" 2>&1; then
         mark_broken c "cargo build -p libmoq failed"
-        sed 's/^/        /' "$TMP/c-build.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
     header="$TARGET_BASE/include/moq.h"
@@ -414,7 +405,7 @@ prepare_c() {
     C_SMOKE="$BUNDLE_SCRATCH/c-smoke"
     if ! "$cc" "$CLIENTS/c/subscribe.c" -I"$TARGET_BASE/include" -L"$TARGET_BASE/$PROFILE" -lmoq "${os_libs[@]}" -o "$C_SMOKE" >"$TMP/c-compile.log" 2>&1; then
         mark_broken c "cc compile failed"
-        sed 's/^/        /' "$TMP/c-compile.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/c-compile.log" >&2 || true
     fi
 }
 
@@ -436,9 +427,9 @@ prepare_gst() {
     echo "building gstreamer client (workspace moq-gst plugin)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-gst) >"$TMP/gst-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-gst) >"$HARNESS_RUN/gst-build.log" 2>&1; then
         mark_broken gst "cargo build -p moq-gst failed"
-        sed 's/^/        /' "$TMP/gst-build.log" >&2 || true
+        sed 's/^/        /' "$HARNESS_RUN/gst-build.log" >&2 || true
         return
     fi
     GST_PLUGIN_DIR="$TARGET_BASE/$PROFILE"
@@ -465,7 +456,15 @@ needs_js && prepare_js
 needs c && prepare_c
 needs gst && prepare_gst
 
-if curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+# Held for the rest of the run, so a concurrent harness cannot pick the same
+# number between here and the relay's bind.
+harness_port relay "$PORT"
+PORT="$HARNESS_PORT"
+URL="http://127.0.0.1:${PORT}"
+
+# The reservation covers other harness runs, not the rest of the machine, so
+# still refuse a port some unrelated process is already serving on.
+if harness_probe "$URL/certificate.sha256"; then
     echo "error: something is already listening on 127.0.0.1:${PORT} (stale relay?)" >&2
     exit 1
 fi
@@ -476,8 +475,8 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 sed "s/4443/${PORT}/g" "$SMOKE_DIR/smoke.toml" >"$TMP/relay.toml"
 relay_args=("$TMP/relay.toml")
 [[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG_LIVE")
-"$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
-RELAY_PID=$!
+harness_spawn relay "$TMP/relay.log" "$RELAY" "${relay_args[@]}"
+RELAY_PID="$HARNESS_PID"
 # The wire version is negotiated per session rather than pinned here, so the
 # relay log is what records which one each client ended up on.
 bundle_endpoint relay "$URL" "negotiated per session"
@@ -488,15 +487,17 @@ for _ in $(seq 1 60); do
 done
 if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
     echo "relay never became ready" >&2
-    sed 's/^/  relay: /' "$TMP/relay.log" >&2 || true
+    sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
 fi
+harness_endpoint relay "$URL"
 
 # ── client dispatch ─────────────────────────────────────────────────────────
 # Encode an endless H.264 Annex-B stream from a synthetic source to stdout.
 # Paced with -re so the broadcast streams in real time until the reader closes.
 # Baseline + repeat-headers re-emits SPS/PPS before every keyframe so a late
 # subscriber (or the stream importer) can initialize without the first packet.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 ffmpeg_h264() {
     ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
         -an -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
@@ -504,36 +505,43 @@ ffmpeg_h264() {
         -f h264 -
 }
 
-# Sets global PUB_PID. Called in the current shell (no command substitution) so
-# $! refers to the backgrounded job and kill_tree can reap the whole pipeline.
-# Every non-browser publisher consumes the same ffmpeg Annex-B stream on stdin;
-# the client frames it (moq-cli / the FFI importers only frame-and-forward).
-PUB_PID=""
-start_publisher() {
-    local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
+# The publisher pipeline, run in a process group of its own by `harness_spawn`
+# so reaping it takes ffmpeg with it. Every non-browser publisher consumes the
+# same ffmpeg Annex-B stream on stdin; the client frames it (moq-cli / the FFI
+# importers only frame-and-forward).
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+run_publisher() {
+    local lang="$1" broadcast="$2"
     case "$lang" in
         rust)
-            (ffmpeg_h264 | "$MOQ" --client-connect "$URL" --broadcast "$broadcast" import avc3) >"$log" 2>&1 &
+            ffmpeg_h264 | "$MOQ" --client-connect "$URL" --broadcast "$broadcast" import avc3
             ;;
         python)
-            (ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
-                publish --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+            ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
+                publish --url "$URL" --broadcast "$broadcast"
             ;;
         go)
-            (ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+            ffmpeg_h264 | "$GO_SMOKE" publish --url "$URL" --broadcast "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
             # WebCodecs (lazily, once a subscriber creates demand).
             (cd "$CLIENTS/js" && MOQ_QA_LABEL="publish-js" bun driver.ts publish \
-                --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+                --url "$URL" --broadcast "$broadcast")
             ;;
         *)
             echo "unknown publisher: $lang" >&2
             return 1
             ;;
     esac
-    PUB_PID=$!
+}
+
+# Sets global PUB_PID to the publisher's process group leader.
+PUB_PID=""
+start_publisher() {
+    local lang="$1" broadcast="$2"
+    harness_spawn "pub-$lang" "$HARNESS_RUN/pub-$lang.log" run_publisher "$lang" "$broadcast"
+    PUB_PID="$HARNESS_PID"
 }
 
 # Run a native-JS subscriber and judge it by the "received N bytes" marker it
@@ -541,6 +549,7 @@ start_publisher() {
 # during the runtime's exit teardown *after* a frame has arrived (an upstream bug
 # under bun), which would turn a real success into a signal exit. The data path
 # is what we test, so a printed marker is the verdict; the crash is swallowed.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_native() {
     local out
     out=$( (cd "$CLIENTS/js-native" && "$@") 2>&1) || true
@@ -548,6 +557,7 @@ run_native() {
     printf '%s\n' "$out" | grep -q '^received '
 }
 
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_subscriber() {
     local lang="$1" broadcast="$2" publisher="${3:-}"
     case "$lang" in
@@ -623,9 +633,27 @@ run_subscriber() {
 overall=0
 FAULT_DONE=0
 
+# One matrix cell, run in its own process group so cancelling the round reaps
+# whatever the subscriber spawned (a browser, a gst pipeline) along with it.
+#
+# Records how long the cell took. Every subscriber shares one budget, so the
+# spread is the diagnostic: a cell that burns the whole timeout while its
+# siblings finish in a couple of seconds is stalled, not merely slow, and one
+# creeping up on $TIMEOUT is a near-miss worth seeing before it fails.
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+run_cell() {
+    local pub="$1" sub="$2" broadcast="$3" started=$SECONDS status=0
+    # `|| status=$?` rather than a bare call: under `set -e` a failing subscriber
+    # would exit before it recorded anything, and a failure is exactly when the
+    # duration is worth reading.
+    run_subscriber "$sub" "$broadcast" "$pub" || status=$?
+    echo "$((SECONDS - started))" >"$HARNESS_RUN/$pub-$sub.secs"
+    return "$status"
+}
+
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3"
-    local pids=() names=() i sub round_failed=0
+    local pids=() names=() watchdogs=() i sub round_failed=0
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
@@ -638,38 +666,18 @@ run_round() {
         # spread is the diagnostic: a cell that burns the whole timeout while its
         # siblings finish in a couple of seconds is stalled, not merely slow, and one
         # creeping up on $TIMEOUT is a near-miss worth seeing before it fails.
-        (
-            started=$SECONDS
-            # `|| status=$?` rather than a bare call: under `set -e` a failing subscriber
-            # would exit the subshell before it recorded anything, and a failure is exactly
-            # when the duration is worth reading.
-            status=0
-            run_subscriber "$sub" "$broadcast" "$pub" &
-            cell=$!
-            # A cell still running at STACK_AT is out of budget, and the client's
-            # own timeout is about to kill it. That kill is what erases where it
-            # was stuck, so read the stacks first.
-            #
-            # Not in the negative control, where every cell is supposed to run
-            # its timeout out, and not for the browser: it spends two budgets by
-            # design (startup, then the interaction checks), so a healthy cell is
-            # still running here, and its evidence is the Playwright trace rather
-            # than a backtrace through bun and a Chromium process tree.
-            watchdog=""
-            if [[ "$NEGATIVE" -eq 0 && "$sub" != js ]]; then
-                (
-                    sleep "$STACK_AT"
-                    bundle_stack "$pub-$sub" "$cell" wrapper
-                ) &
-                watchdog=$!
-            fi
-            wait "$cell" || status=$?
-            [[ -z "$watchdog" ]] || kill_tree "$watchdog"
-            echo "$((SECONDS - started))" >"$TMP/$pub-$sub.secs"
-            exit "$status"
-        ) >"$TMP/$pub-$sub.log" 2>&1 &
-        pids+=("$!")
+        harness_spawn "$pub-$sub" "$TMP/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast"
+        pids+=("$HARNESS_PID")
         names+=("$sub")
+        watchdog=""
+        if [[ "$NEGATIVE" -eq 0 && "$sub" != js ]]; then
+            (
+                sleep "$STACK_AT"
+                bundle_stack "$pub-$sub" "$HARNESS_PID" wrapper
+            ) &
+            watchdog=$!
+        fi
+        watchdogs+=("$watchdog")
     done
     # Deliver the relay drill only after subscriber cells exist. A fixed timer
     # races the default Rust cell, which can pass on its first byte and finish
@@ -678,8 +686,7 @@ run_round() {
     if [[ "$FAULT" == relay && "$FAULT_DONE" -eq 0 && ${#pids[@]} -gt 0 ]]; then
         FAULT_DONE=1
         echo "=== fault injection: killing the relay with subscriber cells active ==="
-        kill -KILL "$RELAY_PID" 2>/dev/null || true
-        wait "$RELAY_PID" 2>/dev/null || true
+        harness_reap "$RELAY_PID"
         RELAY_PID=""
         RELAY_FAILED=1
     fi
@@ -687,15 +694,16 @@ run_round() {
     # subscriber failures below are a publisher bug, so surface its log.
     if [[ -n "$pub_pid" ]] && ! kill -0 "$pub_pid" 2>/dev/null; then
         echo "  WARN  publisher '$pub' exited early:"
-        sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
+        sed 's/^/        /' "$HARNESS_RUN/pub-$pub.log" 2>/dev/null || true
     fi
     local want_pass=1 got round_pass=0 elapsed
     [[ "$NEGATIVE" -eq 1 ]] && want_pass=0
     # ${arr[@]+...} guard: a round may have no live subscribers (all broken),
     # and bash 3.2 (macOS) errors on "${!pids[@]}" for an empty array under `set -u`.
     for i in ${pids[@]+"${!pids[@]}"}; do
-        if wait "${pids[$i]}"; then got=1; else got=0; fi
-        elapsed=$(cat "$TMP/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
+        if harness_wait "${pids[$i]}"; then got=1; else got=0; fi
+        [[ -z "${watchdogs[$i]}" ]] || kill "${watchdogs[$i]}" 2>/dev/null || true
+        elapsed=$(cat "$HARNESS_RUN/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
         if [[ "$got" -eq "$want_pass" ]]; then
             echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"
             bundle_result "$pub -> ${names[$i]}" pass "$elapsed"
@@ -712,8 +720,10 @@ run_round() {
     # process is still alive (e.g. connected and announcing but producing nothing).
     if [[ "$NEGATIVE" -eq 0 && "$round_pass" -eq 0 && ${#pids[@]} -gt 0 && -n "$pub_pid" ]]; then
         echo "  INFO  publisher '$pub' log:"
-        sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
+        sed 's/^/        /' "$HARNESS_RUN/pub-$pub.log" 2>/dev/null || true
     fi
+    # `harness_reap` retires the entry, so teardown never signals this now-reaped
+    # (possibly recycled) PID again.
     if [[ -n "$pub_pid" ]]; then
         # A retained session promises the client side too, and reaping here is
         # what breaks that promise: by the time cleanup runs, the publisher that
@@ -724,8 +734,7 @@ run_round() {
         if [[ "$round_failed" -eq 1 || "$RELAY_FAILED" -eq 1 ]] && bundle_retained; then
             echo "  INFO  publisher '$pub' left running for the retained session (pid $pub_pid)"
         else
-            kill_tree "$pub_pid"
-            wait "$pub_pid" 2>/dev/null || true
+            harness_reap "$pub_pid"
         fi
         # Don't let cleanup() later signal this now-reaped (possibly recycled) PID.
         if [[ "$round_failed" -eq 0 && "$RELAY_FAILED" -eq 0 ]] || ! bundle_retained; then
@@ -820,6 +829,6 @@ else
     # (auth rejection, protocol error, close codes), so surface it on failure.
     echo "smoke: FAILURES detected" >&2
     echo "--- relay log (last 150 lines) ---" >&2
-    tail -n 150 "$TMP/relay.log" 2>/dev/null | sed 's/^/  relay: /' >&2 || true
+    tail -n 150 "$HARNESS_RUN/relay.log" 2>/dev/null | sed 's/^/  relay: /' >&2 || true
 fi
 exit "$overall"

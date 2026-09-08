@@ -35,12 +35,15 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # test/README.md.
 # shellcheck source=../lib/bundle.sh disable=SC1091
 source "$WORKSPACE/test/lib/bundle.sh"
+# shellcheck source=../lib/harness.sh disable=SC1091
+source "$WORKSPACE/test/lib/harness.sh"
 
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
 DURATION="${TSC_DURATION:-20}"
 BITRATE="${TSC_BITRATE:-10000000}"
-PORT="${TSC_PORT:-4443}"
+# Empty means "any reserved port"; TSC_PORT or --port pins one instead.
+PORT="${TSC_PORT:-}"
 PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
 WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
@@ -88,7 +91,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-URL="http://127.0.0.1:${PORT}"
+URL="" # set once a port is reserved, below
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -98,9 +101,8 @@ require_tools() {
         have "$t" || missing+=("$t")
     done
     # ffmpeg + cargo are only needed for the round-trip, not for --analyze-only.
-    # pgrep backs kill_tree; without it grandchild tsp/moq processes would leak.
     if [[ -z "$ANALYZE_ONLY" ]]; then
-        for t in cargo ffmpeg curl timeout pgrep; do have "$t" || missing+=("$t"); done
+        for t in cargo ffmpeg curl timeout; do have "$t" || missing+=("$t"); done
     fi
     # The EIT fixture reads the service triplet out of the stream and may need to pad a
     # stuffing-free clip to make room for the table.
@@ -152,18 +154,13 @@ fi
 bundle_init ts
 bundle_rerun env "TSC_PROFILE=$PROFILE" "${rerun[@]}"
 TMP="$BUNDLE_WORK"
+HARNESS_RUN="$TMP"
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
 SRC_TS="$TMP/source.ts"
 SUB_TS="$TMP/sub.ts"
 RELAY_PID=""
 PUB_PID=""
 SUB_PID=""
-
-kill_tree() {
-    local pid="$1" child
-    for child in $(pgrep -P "$pid" 2>/dev/null || true); do kill_tree "$child"; done
-    kill -KILL "$pid" 2>/dev/null || true
-}
 
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
@@ -179,19 +176,17 @@ cleanup() {
         fi
     fi
     if [[ "$status" -eq 0 ]] || ! bundle_retained; then
-        # `wait` after each kill consumes the job status: bundle_finish below runs
-        # long enough for the shell to otherwise report "Killed" on its own, which
-        # reads like a failure in a run that passed.
-        local pid
-        for pid in "$SUB_PID" "$PUB_PID" "$RELAY_PID"; do
-            [[ -n "$pid" ]] || continue
-            kill_tree "$pid"
-            wait "$pid" 2>/dev/null || true
-        done
+        harness_reap_all
+        harness_release_ports
+    elif ! harness_retain_ports; then
+        bundle_note "the retained session had no live process to own its port reservations"
+        harness_release_ports
     fi
     bundle_finish "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_tools
 
@@ -221,8 +216,8 @@ if [[ -n "$SOURCE" ]]; then
     }
     echo "### cutting ~${DURATION}s from $SOURCE with TSDuck (all PIDs preserved)"
     PKTS=$((DURATION * BITRATE / 8 / 188))
-    tsp -I file "$SOURCE" -P until --packets "$PKTS" -O file "$SRC_TS" 2>"$TMP/tsp-cut.log" || {
-        sed 's/^/  tsp: /' "$TMP/tsp-cut.log" >&2 || true
+    tsp -I file "$SOURCE" -P until --packets "$PKTS" -O file "$SRC_TS" 2>"$HARNESS_RUN/tsp-cut.log" || {
+        sed 's/^/  tsp: /' "$HARNESS_RUN/tsp-cut.log" >&2 || true
         exit 1
     }
 else
@@ -244,8 +239,23 @@ fi
 # No capture in this repository carries EIT, so the import path's EIT handling is
 # otherwise untestable. Synthesise one, and report below which SI PIDs came back.
 if [[ -n "$WITH_EIT" ]]; then
-    "$DIR/make-eit-fixture.sh" "$SRC_TS" "$TMP/source-eit.ts"
-    mv "$TMP/source-eit.ts" "$SRC_TS"
+    "$DIR/make-eit-fixture.sh" "$SRC_TS" "$HARNESS_RUN/source-eit.ts"
+    mv "$HARNESS_RUN/source-eit.ts" "$SRC_TS"
+fi
+
+# Held for the rest of the run, so a concurrent harness cannot pick the same
+# number between here and the relay's bind.
+harness_port relay "$PORT"
+PORT="$HARNESS_PORT"
+URL="http://127.0.0.1:${PORT}"
+
+# The reservation covers other harness runs, not the rest of the machine, so
+# still refuse a port some unrelated process is already serving on. Without this
+# the readiness probe below would be satisfied by that relay while ours died on
+# its failed bind, and the round-trip would grade a binary nobody built here.
+if harness_probe "$URL/certificate.sha256"; then
+    echo "error: something is already listening on 127.0.0.1:${PORT} (stale relay?)" >&2
+    exit 1
 fi
 
 # Which binaries the stacks and logs came out of, and what was fed in: a
@@ -258,8 +268,8 @@ echo "### starting relay on 127.0.0.1:${PORT}"
 sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$TMP/relay.toml"
 relay_args=("$TMP/relay.toml")
 [[ -z "${MOQ_QA_QLOG:-}" ]] || relay_args+=(--server-quic-qlog "$BUNDLE_QLOG_LIVE")
-"$RELAY" "${relay_args[@]}" >"$TMP/relay.log" 2>&1 &
-RELAY_PID=$!
+harness_spawn relay "$TMP/relay.log" "$RELAY" "${relay_args[@]}"
+RELAY_PID="$HARNESS_PID"
 bundle_endpoint relay "$URL" "negotiated per session"
 bundle_process moq-relay "$RELAY_PID"
 for _ in $(seq 1 60); do
@@ -268,9 +278,10 @@ for _ in $(seq 1 60); do
 done
 if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
     echo "error: relay never became ready" >&2
-    sed 's/^/  relay: /' "$TMP/relay.log" >&2 || true
+    sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
 fi
+harness_endpoint relay "$URL"
 
 # Start the subscriber first so it is waiting on the announce before the
 # publisher appears; a live broadcast has no history, so a late joiner would miss
@@ -280,28 +291,36 @@ fi
 # stamps each 188-byte read, which is the only way release timing survives at all
 # (a file has none left in it). It stops itself after its own window, so the
 # round-trip below still bounds the run.
+
+# Both halves matter and `wait` can only report one, so record each. The
+# exporter's own status is not incidental here: it decides whether the grader saw
+# the whole window or graded a stream that ended under it.
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+grade_live() {
+    # `set -e` would abort on the pipeline's own failure, which is exactly the
+    # status we are here to record.
+    set +e
+    timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts 2>"$HARNESS_RUN/sub.log" |
+        python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
+            ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
+    printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+capture() {
+    timeout -k 3 $((DURATION + 20)) \
+        "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
+}
+
 if [[ -n "$LIVE" ]]; then
     echo "### grading subscriber output live (export ts | pcr-timing.py)"
-    # Both halves matter and `wait` can only report one, so record each. The
-    # exporter's own status is not incidental here: it decides whether the grader
-    # saw the whole window or graded a stream that ended under it.
-    (
-        # `set -e` would abort the subshell on the pipeline's own failure, which is
-        # exactly the status we are here to record.
-        set +e
-        timeout -k 3 $((DURATION + 20)) \
-            "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts 2>"$TMP/sub.log" |
-            python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
-                ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$TMP/timing.out" 2>&1
-        printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$TMP/timing.rc"
-    ) &
-    SUB_PID=$!
+    harness_spawn sub - grade_live
 else
     echo "### capturing subscriber output (export ts)"
-    timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
-    SUB_PID=$!
+    harness_spawn sub - capture
 fi
+SUB_PID="$HARNESS_PID"
 sleep 1
 
 # Pace on the source PCR (real media time), not a fixed bitrate: a synthetic clip
@@ -315,38 +334,40 @@ sleep 1
 # ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
 # pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
-# shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
-timeout -k 3 $((DURATION + 20)) bash -c '
-    tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
-        "$2" --client-connect "$3" --broadcast "$4" import ts
-' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
-PUB_PID=$!
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+publish() {
+    # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
+    timeout -k 3 $((DURATION + 20)) bash -c '
+        tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
+            "$2" --client-connect "$3" --broadcast "$4" import ts
+    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"
+}
+harness_spawn pub "$HARNESS_RUN/pub.log" publish
+PUB_PID="$HARNESS_PID"
 
 # Keep the publisher's exit status: `timeout` returns 124 when it had to kill a
 # stalled `moq import ts`, non-zero/non-124 means the import itself errored. Both
 # explain a truncated capture, so surface it alongside the logs on failure.
-wait "$PUB_PID" 2>/dev/null && PUB_RC=0 || PUB_RC=$?
-PUB_PID=""
+harness_wait "$PUB_PID" && PUB_RC=0 || PUB_RC=$?
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
     echo "  publisher exit status: $PUB_RC" >&2
-    sed 's/^/  pub: /' "$TMP/pub.log" >&2 || true
-    sed 's/^/  sub: /' "$TMP/sub.log" >&2 || true
+    sed 's/^/  pub: /' "$HARNESS_RUN/pub.log" >&2 || true
+    sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
 }
 
 # ── live: the grader owns the verdict ───────────────────────────────────────
 if [[ -n "$LIVE" ]]; then
-    wait "$SUB_PID" 2>/dev/null || true
-    SUB_PID=""
-    if [[ ! -s "$TMP/timing.rc" ]]; then
+    harness_wait "$SUB_PID" || true
+    if [[ ! -s "$HARNESS_RUN/timing.rc" ]]; then
         echo "error: the live grader never reported a status" >&2
         dump_logs
         exit 1
     fi
-    read -r EXPORT_RC GRADE_RC <"$TMP/timing.rc"
+    read -r EXPORT_RC GRADE_RC <"$HARNESS_RUN/timing.rc"
     echo
-    cat "$TMP/timing.out"
+    cat "$HARNESS_RUN/timing.out"
     # 124 is `timeout` reaching the end of the window, which is how the exporter is
     # meant to stop; SIGPIPE (141) is the grader closing the pipe on its own window.
     # Anything else ended the stream under the grader, so say so: it graded a
@@ -356,7 +377,7 @@ if [[ -n "$LIVE" ]]; then
     if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 124 && "$EXPORT_RC" -ne 141 ]]; then
         echo >&2
         echo "warning: the exporter exited $EXPORT_RC before the window closed" >&2
-        sed 's/^/  sub: /' "$TMP/sub.log" >&2 || true
+        sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
     fi
     if [[ "$GRADE_RC" -ne 0 ]]; then
         echo >&2
@@ -383,8 +404,7 @@ if [[ -n "$LIVE" ]]; then
 fi
 
 sleep 3
-kill_tree "$SUB_PID" 2>/dev/null || true
-SUB_PID=""
+harness_reap "$SUB_PID"
 
 if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2

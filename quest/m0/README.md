@@ -17,7 +17,6 @@ regression test per Root Cause First.
 
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - js/watch: auto latency follows measured arrivals, and the audio ring holds slack and re-buffers
 - [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - moq-mux: catalog jitter is the publisher's maximum flush span, never a running minimum
-- [Audio identity](/quest/m0/3479-watch-audio-identity.md) - js/watch: a catalog republish rebuilds the audio graph only when the decoder identity changes
 - [Encoder lag](/quest/m0/publish-audio-lag-measure.md) - js/publish: measure the audio encoder's input-to-output lag on a high-RTT path
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - every code on a moq-transport wire is a registered value for the negotiated draft, requests and stream resets alike
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
@@ -27,7 +26,6 @@ regression test per Root Cause First.
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [PR behavioral gates](/quest/m0/pr-behavioral-gates.md) - run the applicable interop and platform gates on source PRs before merge
 - [Verification preflight](/quest/m0/verification-preflight.md) - diagnose missing tools, denied access, and unusable runtimes before building
-- [Worktree QA isolation](/quest/m0/worktree-qa-isolation.md) - give concurrent worktrees explicit bases, endpoints, and process ownership
 - [Browser permission QA](/quest/m0/browser-permission-qa.md) - nothing covers what the publisher does when the user denies the camera or microphone
 - [Publisher audio unlock](/quest/m0/publish-audio-unlock.md) - the publisher's capture AudioContext stays suspended when the page had no gesture, so no audio is ever encoded
 - [Media QA on other engines](/quest/m0/browser-media-qa-engines.md) - the media output checks only run on the pinned Chromium

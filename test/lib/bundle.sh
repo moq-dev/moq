@@ -96,7 +96,10 @@ _bundle_record() {
 # bundle_init <harness>: create the run's directory and seed its identity.
 bundle_init() {
     BUNDLE_HARNESS=$1
-    local root="${MOQ_QA_ARTIFACTS:-$BUNDLE_WORKSPACE/target/qa}"
+    local root="${MOQ_QA_ARTIFACTS:-${MOQ_TEST_RUNS:-$BUNDLE_WORKSPACE/target/qa}}"
+    if [[ -n "${MOQ_TEST_KEEP:-}" && -z "${MOQ_QA_KEEP:-}" ]]; then
+        MOQ_QA_KEEP="$MOQ_TEST_KEEP"
+    fi
     local knob value expected
     for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX; do
         value=${!knob:-}
@@ -240,6 +243,13 @@ bundle_process() {
     [[ -z "$started" ]] || printf '%s' "$started" >"$BUNDLE_META/process-starts/$2"
     _bundle_record processes \
         "{ \"name\": $(_bundle_json "$1"), \"pid\": $2, \"command\": $(_bundle_json "$command") }"
+}
+
+# Record an exact port reservation for retained-session teardown. This stays
+# out of the manifest because it is local allocator bookkeeping, not evidence.
+bundle_reservation() {
+    [[ -n "$BUNDLE_META" ]] || return 0
+    printf '%s\n' "$1" >>"$BUNDLE_META/reservations.txt"
 }
 
 # bundle_result <name> <status> <seconds> [detail]: one matrix cell or case.
@@ -607,7 +617,7 @@ set -uo pipefail
 kill_tree() {
     local pid="$1" child
     for child in $(pgrep -P "$pid" 2> /dev/null || true); do kill_tree "$child"; done
-    kill -KILL "$pid" 2> /dev/null || true
+    kill -KILL -- -"$pid" 2> /dev/null || kill -KILL "$pid" 2> /dev/null || true
 }
 
 reap() {
@@ -633,6 +643,12 @@ PRELUDE
             pid=${start_file##*/}
             printf 'reap %s %q\n' "$pid" "$(<"$start_file")"
         done
+        local reservation
+        if [[ -f "$BUNDLE_META/reservations.txt" ]]; then
+            while IFS= read -r reservation; do
+                printf 'rm -rf -- %q\n' "$reservation"
+            done <"$BUNDLE_META/reservations.txt"
+        fi
         if [[ -d "$BUNDLE_LIVE" ]]; then
             printf 'rm -rf -- %q\n' "$BUNDLE_LIVE"
             printf 'rmdir %q 2>/dev/null || true\n' "$(dirname "$BUNDLE_LIVE")"

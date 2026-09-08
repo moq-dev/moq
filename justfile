@@ -50,10 +50,227 @@ bench $BASE="":
     #!/usr/bin/env bash
     exec rs/scripts/bench.sh "$BASE"
 
+# A linked worktree's Git metadata does not live under its own root: the
+# per-worktree directory is `--git-dir` and everything shared (objects, remote
+# refs, the branch namespace) is under `--git-common-dir`, which for an agent
+# checkout is inside the main repository. Write access to the source tree
+# therefore says nothing about whether this checkout can fetch, branch, or
+# rebase; the answer is a property of those two directories, and finding out by
+# running `git fetch` and reading the error is the slow way.
+#
+# `check` reports; `setup` fetches, points the branch at its base, and records
+# the SHA it fetched under the per-worktree Git directory, where `check` reads it
+# back to say how stale the recorded base has become. Neither ever resets,
+# rebases, cleans, or checks anything out: a dirty tree is someone's work in
+# progress, and adopting a checkout must not be able to destroy it.
+#
+# BASE follows the same rule as the rest of the repo (see `_base`): `main`
+# unless the branch's upstream says otherwise.
+
+# Report a worktree's base, Git metadata access, and state; `setup` also fetches.
+worktree ACTION="check" $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ ACTION }}" in
+    	check | setup) ;;
+    	*)
+    		echo "usage: just worktree [check|setup] [BASE]" >&2
+    		exit 2
+    		;;
+    esac
+
+    root=$(git rev-parse --show-toplevel)
+    git_dir=$(cd "$(git rev-parse --git-dir)" && pwd)
+    common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+    branch=$(git branch --show-current || true)
+
+    # A written probe rather than `[[ -w ]]`: the directory can be readable and
+    # nominally writable while the sandbox, a read-only mount, or an ACL refuses
+    # the create, and it is the create that fetch and branch creation need.
+    access() {
+    	local dir="$1" probe
+    	[[ -d "$dir" ]] || { echo missing; return; }
+    	[[ -r "$dir" ]] || { echo denied; return; }
+    	probe="$dir/.moq-access-probe.$$"
+    	if (umask 077 && : > "$probe") 2>/dev/null; then
+    		rm -f "$probe"
+    		echo write
+    	else
+    		echo read-only
+    	fi
+    }
+
+    # A directory git will create on demand is only as writable as its nearest
+    # existing parent, so probe upward instead of reporting it missing.
+    access_or_parent() {
+    	local dir="$1" parent
+    	while [[ ! -d "$dir" ]]; do
+    		parent=$(dirname "$dir")
+    		[[ "$parent" != "$dir" ]] || { echo missing; return; }
+    		dir="$parent"
+    	done
+    	access "$dir"
+    }
+
+    base=$(just _base "$BASE")
+    stamp="$git_dir/moq-base"
+    # Whichever remote provides the base, not always origin. A base whose first
+    # segment names no remote (a local branch, a tag) leaves origin.
+    remote="${base%%/*}"
+    git remote | grep -qx "$remote" || remote=origin
+
+    objects=$(access "$common_dir/objects")
+    heads=$(access "$common_dir/refs/heads")
+    worktree_meta=$(access "$git_dir")
+    worktree=$(access "$root")
+    # Tracking is `branch.<name>.remote`/`.merge` in the repository config, which
+    # lives in the common directory alongside the `config.lock` the write needs,
+    # not in the branch's ref. Probing refs/heads for it would refuse on a
+    # writable config and, worse, proceed on a read-only one.
+    config=$(access "$common_dir")
+    # A fetch writes three places, not one: objects, the remote-tracking refs it
+    # updates, and FETCH_HEAD in the per-worktree directory. The refs are the
+    # narrow one: `refs/remotes/<remote>` is where `<branch>.lock` is created, so
+    # probing `refs/remotes` stops a directory short and passes a split that git
+    # then fails on.
+    tracking=$(access_or_parent "$common_dir/refs/remotes/$remote")
+
+    echo "worktree:    $root"
+    echo "branch:      ${branch:-(detached)} $(git rev-parse --short HEAD)"
+    echo "git-dir:     $git_dir ($worktree_meta)"
+    echo "common-dir:  $common_dir ($config)"
+    echo "  fetch needs $common_dir/objects: $objects"
+    echo "             $common_dir/refs/remotes/$remote: $tracking"
+    echo "             $git_dir (FETCH_HEAD): $worktree_meta"
+    echo "  branch needs $common_dir/refs/heads: $heads"
+    echo "  upstream needs $common_dir/config: $config"
+    echo "  rebase needs $git_dir: $worktree_meta"
+    echo "               $root: $worktree"
+    echo "               $common_dir/refs/heads: $heads"
+
+    dirty=$(git status --porcelain | wc -l | tr -d ' ')
+    echo "dirty:       $dirty tracked/untracked path(s)"
+
+    if [[ "{{ ACTION }}" == setup ]]; then
+    	blocked=""
+    	[[ "$objects" == write ]] || blocked="$blocked $common_dir/objects ($objects)"
+    	[[ "$tracking" == write ]] || blocked="$blocked $common_dir/refs/remotes/$remote ($tracking)"
+    	[[ "$worktree_meta" == write ]] || blocked="$blocked $git_dir ($worktree_meta)"
+    	if [[ -n "$blocked" ]]; then
+    		echo "error: cannot fetch;$blocked" >&2
+    		echo "       grant write access to the main repository's Git directory, not just this worktree" >&2
+    		exit 1
+    	fi
+    	# The remote resolved above, not always origin: recording a stamp against a
+    	# ref nobody refreshed is worse than recording none, and `just check` would
+    	# scope the branch against a base that has since moved.
+    	git fetch --quiet "$remote"
+    	# Repointing an upstream someone chose would silently change what `just
+    	# check` scopes against, so only three cases write it: no upstream, an
+    	# upstream `_base` discards anyway (the branch's own remote copy, which
+    	# `git push -u` leaves behind and which says nothing about what the branch
+    	# merges into), and a base the caller named on the command line.
+    	upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || true)
+    	# Two things stop the write, and they fail identically: a detached HEAD has
+    	# no branch to hang an upstream on, and the config it lands in may be
+    	# read-only. Skipping either silently would report a setup that recorded
+    	# the caller's base while `just check` still scoped against origin/main.
+    	blocker=""
+    	if [[ -z "$branch" ]]; then
+    		blocker="HEAD is detached"
+    	elif [[ "$config" != write ]]; then
+    		blocker="$common_dir/config is $config"
+    	fi
+    	if [[ -z "$upstream" ]] || [[ "$upstream" == */"$branch" ]] || [[ -n "$BASE" ]]; then
+    		if [[ -z "$blocker" ]]; then
+    			git branch --set-upstream-to "$base" "$branch"
+    		elif [[ "$base" == origin/main ]]; then
+    			# Nothing is lost: with no upstream `_base` falls back to
+    			# origin/main, which is what this would have written.
+    			echo "warning: cannot record the upstream; $blocker" >&2
+    		else
+    			# The upstream is the only place this choice survives, so a setup
+    			# that could not write it did not do what it was asked.
+    			echo "error: cannot set the upstream to $base; $blocker" >&2
+    			echo "       the branch would keep scoping against origin/main" >&2
+    			exit 1
+    		fi
+    	fi
+    	# Resolved, written, then renamed into place. A redirect straight into the
+    	# stamp truncates it before git runs, so a failure there would leave an
+    	# empty file that reads back as a recorded base that never existed. Each
+    	# setup needs its own temporary file so concurrent runs cannot rename or
+    	# overwrite each other's in-progress stamp.
+    	if [[ "$worktree_meta" == write ]]; then
+    		stamp_tmp=$(mktemp "$git_dir/.moq-base.XXXXXXXX")
+    		if ! git rev-parse "$base" > "$stamp_tmp"; then
+    			rm -f "$stamp_tmp"
+    			exit 1
+    		fi
+    		mv "$stamp_tmp" "$stamp"
+    	fi
+    fi
+
+    if ! git rev-parse --verify --quiet "$base^{commit}" > /dev/null; then
+    	echo "base:        $base (NOT FETCHED; run 'just worktree setup')"
+    	exit 0
+    fi
+
+    head=$(git rev-parse "$base")
+    echo "base:        $base $(git rev-parse --short "$base")"
+    echo "upstream:    $(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || echo '(unset)')"
+    echo "behind:      $(git rev-list --count "HEAD..$base") commit(s)"
+
+    recorded=""
+    [[ -f "$stamp" ]] && recorded=$(cat "$stamp")
+
+    # A stamp that no longer names a commit is worse than none: reporting it would
+    # abort here on the `rev-parse --short` rather than say what to do about it.
+    # An interrupted setup, or a base garbage-collected out of the repository.
+    if [[ -z "$recorded" ]]; then
+    	echo "recorded:    (none; run 'just worktree setup')"
+    elif ! git rev-parse --verify --quiet "$recorded^{commit}" > /dev/null; then
+    	echo "recorded:    $recorded (UNKNOWN COMMIT; run 'just worktree setup')"
+    elif [[ "$recorded" == "$head" ]]; then
+    	echo "recorded:    $(git rev-parse --short "$recorded") (current)"
+    else
+    	echo "recorded:    $(git rev-parse --short "$recorded") (STALE; $base has moved since setup)"
+    fi
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
     cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
+
+# Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
+# upstream is the branch it merges into, which is the base a `dev`-targeted
+# branch needs. `git push -u` repoints upstream at the branch's own remote copy,
+# which would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+# GITHUB_BASE_REF outranks the upstream because a PR checkout has no upstream
+# configured, and the branch being merged into is exactly the base GitHub is
+# asking about.
+#
+# Shared by `_changed` and `worktree`, so a checkout's scope and its reported
+# base can never disagree.
+
+# Print the ref this branch is based on.
+[private]
+_base $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    base="$BASE"
+    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
+    	base="origin/${GITHUB_BASE_REF}"
+    fi
+    if [[ -z "$base" ]]; then
+    	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
+    		base="origin/main"
+    	fi
+    fi
+    printf '%s\n' "$base"
 
 # Reports the base it picked on stderr, so a surprising scope is traceable.
 #
@@ -66,23 +283,7 @@ _changed $BASE $LIMIT=changed_max:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
-    # upstream is the branch it merges into, which is the base a `dev`-targeted
-    # branch needs. `git push -u` repoints upstream at the branch's own remote
-    # copy, which would diff HEAD against itself, so ignore that case (see
-    # CLAUDE.md). GITHUB_BASE_REF outranks the upstream because a PR checkout
-    # has no upstream configured, and the branch being merged into is exactly
-    # the base GitHub is asking about.
-    base="$BASE"
-    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
-    	base="origin/${GITHUB_BASE_REF}"
-    fi
-    if [[ -z "$base" ]]; then
-    	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-    	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
-    		base="origin/main"
-    	fi
-    fi
+    base=$(just _base "$BASE")
 
     merge_base=$(git merge-base "$base" HEAD) || {
     	echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
@@ -607,10 +808,29 @@ wasm:
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 
-# Delete build artifacts and caches, including per-language outputs and agent worktrees.
-clean:
+# Only this checkout by default. Agent worktrees each carry their own artifacts
+# now that the shared target dir is gone, and another agent is usually building
+# in one right now: `cargo clean` under a running build fails it, and there is no
+# way to tell a finished worktree from a busy one from out here. `just clean all`
+# is the explicit opt-in for a machine the caller knows is idle.
+#
+# Source is never touched either way, dirty or untracked: this deletes build
+# output, not work. Nothing here reaches a machine-wide store -- no Nix garbage
+# collection, no cargo/bun/uv home cache -- because those are shared with every
+# other checkout and rebuilding them costs far more than the space they hold.
+
+# Delete this checkout's build artifacts and caches; `all` includes agent worktrees.
+clean SCOPE="here":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    case "{{ SCOPE }}" in
+    	here | all) ;;
+    	*)
+    		echo "usage: just clean [here|all]" >&2
+    		exit 2
+    		;;
+    esac
 
     just rs clean
     just js clean
@@ -624,14 +844,15 @@ clean:
     rm -rf result .direnv
     find . -name .claude -prune -o -type d -name .wrangler -prune -exec rm -rf {} +
 
-    # Agent worktrees each carry their own artifacts now that the shared
-    # target dir is gone. Worktrees don't nest, so this recurses exactly one
-    # level. Tolerate stale worktrees on branches that predate this recipe.
-    for wt in .claude/worktrees/*/; do
-    	[ -f "${wt}justfile" ] || continue
-    	echo "==> cleaning ${wt}"
-    	(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
-    done
+    # Worktrees don't nest, so this recurses exactly one level. Tolerate stale
+    # worktrees on branches that predate this recipe.
+    if [[ "{{ SCOPE }}" == all ]]; then
+    	for wt in .claude/worktrees/*/; do
+    		[ -f "${wt}justfile" ] || continue
+    		echo "==> cleaning ${wt}"
+    		(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
+    	done
+    fi
 
 # Upgrade any tooling
 update:

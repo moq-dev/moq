@@ -40,6 +40,20 @@ command that reproduces the run.
 Each run writes a new directory, so re-running to investigate never overwrites
 the bundle that captured the original failure.
 
+### Isolation
+
+Concurrent runs reserve ports under `${TMPDIR:-/tmp}/moq-test-ports-<uid>` and
+hold those reservations until teardown. Each child is launched as its own
+process group, so cleanup reaches grandchildren such as ffmpeg, Chromium, and
+`tsp` without scanning for unrelated processes. A pinned `SMOKE_PORT`,
+`WASM_PORT`, or `TSC_PORT` either reserves that exact port or fails clearly;
+otherwise the allocator walks from `MOQ_TEST_PORT_BASE` (4500).
+
+Normal exit, cancellation, and startup failure all release reservations and
+reap only the process groups created by that run. A retained failure marks its
+reservations and records them in `teardown.sh`, so its ports remain held until
+the session is explicitly torn down.
+
 ### Knobs
 
 | Variable           | Effect                                                    |
@@ -51,6 +65,8 @@ the bundle that captured the original failure.
 | `MOQ_QA_LOG_CAP`   | per-text-file byte budget (default 2 MiB, `0` disables)    |
 | `MOQ_QA_FILE_CAP`  | per-binary-file byte budget (default 8 MiB, `0` disables)  |
 | `MOQ_QA_STACKS=0`  | skip stack capture                                         |
+| `MOQ_TEST_PORTS`   | where cross-worktree port reservations live                |
+| `MOQ_TEST_PORT_BASE` | first automatically allocated port (default 4500)        |
 
 ### What a bundle can and cannot see
 

@@ -312,6 +312,34 @@ check "a rerun writes a new bundle" test "$first" != "$second"
 check "a rerun keeps the original bundle" test -f "$first/manifest.json"
 check "a rerun keeps its own bundle" test -f "$second/manifest.json"
 
+# ── retained sessions keep their reserved ports ─────────────────────────────
+retained_port_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_port retained 4557
+    harness_retain_ports
+    bundle_finish 1
+}
+port_root="$ROOT/ports"
+bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case retained-port retained_port_case)
+check "a retained session marks its port reservation" test -f "$port_root/4557/retained"
+if (
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$ROOT/contender"
+    export MOQ_TEST_PORTS="$port_root"
+    status=0
+    harness_port contender 4557 || status=$?
+    [[ "$status" -ne 0 ]]
+) >/dev/null 2>&1; then
+    ok "a retained session keeps its port reservation"
+else
+    bad "a retained session keeps its port reservation"
+fi
+bash "$bundle/teardown.sh" >/dev/null
+check "retained teardown releases its port reservation" test ! -d "$port_root/4557"
+
 if ((failures > 0)); then
     echo "bundle: $failures checks failed" >&2
     exit 1

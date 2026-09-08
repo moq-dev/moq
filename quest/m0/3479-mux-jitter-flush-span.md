@@ -61,6 +61,5 @@ The work:
 
 ## Related
 
-- [Audio identity](/quest/m0/3479-watch-audio-identity.md) - the player half: a refined jitter must not rebuild the audio graph
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - reads this field as its codec floor
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - the same ceiling rule for Opus frame durations

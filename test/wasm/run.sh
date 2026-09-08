@@ -24,9 +24,12 @@ WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
 # its relay logs, browser trace, and stacks. See test/README.md.
 # shellcheck source=../lib/bundle.sh disable=SC1091
 source "$WORKSPACE/test/lib/bundle.sh"
+# shellcheck source=../lib/harness.sh disable=SC1091
+source "$WORKSPACE/test/lib/harness.sh"
 
 TIMEOUT="${WASM_TIMEOUT:-30}"
-PORT="${WASM_PORT:-4460}"
+# Empty means "any reserved port per flavour"; WASM_PORT pins the first instead.
+PORT="${WASM_PORT:-}"
 
 # Cargo profile for the relay. Debug compiles faster, which is what a test
 # fixture wants; the workload is three connections and a few hundred KiB.
@@ -65,11 +68,11 @@ FLAVOURS=(
     "setup:moq-lite-02:moq-lite-02"
 )
 
-# The relays take PORT and the next few, so the whole span has to be bindable.
-# Port 0 is the trap worth naming: the relay would bind an arbitrary port while
-# this script polls 0 forever.
-if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT + ${#FLAVOURS[@]} - 1 > 65535)); then
-    echo "error: port must be 1024..$((65535 - ${#FLAVOURS[@]} + 1)) (got '$PORT')" >&2
+# WASM_PORT pins the first relay and the rest are reserved individually, so only
+# the first has to be a real port. Port 0 is the trap worth naming: the relay
+# would bind an arbitrary port while this script polls 0 forever.
+if [[ -n "$PORT" ]] && ! harness_valid_port "$PORT"; then
+    echo "error: port must be 1024..65535 (got '$PORT')" >&2
     exit 2
 fi
 
@@ -78,6 +81,7 @@ rerun_env=("WASM_PORT=$PORT" "WASM_PROFILE=$PROFILE")
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
 bundle_rerun env "${rerun_env[@]}" just test wasm --timeout "$TIMEOUT"
 TMP="$BUNDLE_WORK"
+HARNESS_RUN="$TMP"
 RELAY_PIDS=()
 
 # shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
@@ -94,14 +98,17 @@ cleanup() {
         fi
     fi
     if [[ "$status" -eq 0 ]] || ! bundle_retained; then
-        for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        done
+        harness_reap_all
+        harness_release_ports
+    elif ! harness_retain_ports; then
+        bundle_note "the retained session had no live process to own its port reservations"
+        harness_release_ports
     fi
     bundle_finish "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for tool in cargo bun; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -159,15 +166,21 @@ bun build src/main.ts --outdir dist --target browser >/dev/null
 cp index.html dist/index.html
 
 # ── relays ──────────────────────────────────────────────────────────────────
+# One reservation per flavour rather than a span from a fixed base: a span means
+# every concurrent run needs a different base, and nothing was handing them out.
 entries=()
-offset=0
+want="$PORT"
 for flavour in "${FLAVOURS[@]}"; do
     IFS=':' read -r name version_flag expected <<<"$flavour"
-    port=$((PORT + offset))
-    offset=$((offset + 1))
+    harness_port "$name" "$want"
+    port="$HARNESS_PORT"
+    # WASM_PORT pins only the first; the rest come from the reservation walk.
+    want=""
     url="http://127.0.0.1:${port}"
 
-    if curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
+    # The reservation covers other harness runs, not the rest of the machine, so
+    # still refuse a port some unrelated process is already serving on.
+    if harness_probe "$url/certificate.sha256"; then
         echo "error: something is already listening on 127.0.0.1:${port} (stale relay?)" >&2
         exit 1
     fi
@@ -182,8 +195,8 @@ for flavour in "${FLAVOURS[@]}"; do
     }
 
     echo "starting $name relay on 127.0.0.1:${port}..."
-    "$RELAY" "${args[@]}" >"$TMP/relay-$name.log" 2>&1 &
-    relay_pid=$!
+    harness_spawn "relay-$name" "$TMP/relay-$name.log" "$RELAY" "${args[@]}"
+    relay_pid="$HARNESS_PID"
     RELAY_PIDS+=("$relay_pid")
     bundle_endpoint "$name" "$url" "$expected"
     bundle_process "moq-relay-$name" "$relay_pid"
@@ -196,9 +209,10 @@ for flavour in "${FLAVOURS[@]}"; do
     done
     if ! curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
         echo "$name relay never became ready" >&2
-        sed 's/^/  relay: /' "$TMP/relay-$name.log" >&2 || true
+        sed 's/^/  relay: /' "$HARNESS_RUN/relay-$name.log" >&2 || true
         exit 1
     fi
+    harness_endpoint "$name" "$url"
 
     entries+=("{\"name\":\"$name\",\"url\":\"$url\",\"version\":\"$expected\"}")
 done
@@ -206,24 +220,28 @@ done
 printf '[%s]\n' "$(
     IFS=,
     echo "${entries[*]}"
-)" >"$TMP/relays.json"
+)" >"$HARNESS_RUN/relays.json"
 
 # ── run ─────────────────────────────────────────────────────────────────────
-# `set +e` around the pipeline rather than `|| status=...`: PIPESTATUS is reset
-# by the next simple command, so the `||` branch would read the status of its
-# own assignment. Both halves matter -- a `tee` that could not write leaves the
-# bundle without the transcript the driver just printed.
-set +e
-MOQ_QA_LABEL=wasm bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" 2>&1 |
-    tee "$TMP/driver.log"
-pipe=("${PIPESTATUS[@]}")
-set -e
-
-status="${pipe[0]}"
-if [[ "${pipe[1]}" -ne 0 ]]; then
-    echo "error: the driver log could not be written to $TMP/driver.log" >&2
-    status=1
-fi
+# Keep Chromium in a process group owned by the harness while preserving the
+# transcript on the terminal and in the bundle.
+run_driver() {
+    local pipe status
+    set +e
+    MOQ_QA_LABEL=wasm bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" 2>&1 |
+        tee "$TMP/driver.log"
+    pipe=("${PIPESTATUS[@]}")
+    set -e
+    status="${pipe[0]}"
+    if [[ "${pipe[1]}" -ne 0 ]]; then
+        echo "error: the driver log could not be written to $TMP/driver.log" >&2
+        return 1
+    fi
+    return "$status"
+}
+status=0
+harness_spawn driver - run_driver
+harness_wait "$HARNESS_PID" || status=$?
 if [[ $status -eq 0 ]]; then
     bundle_result suite pass
 else
@@ -234,7 +252,7 @@ if [[ $status -ne 0 ]]; then
     for flavour in "${FLAVOURS[@]}"; do
         name="${flavour%%:*}"
         echo "── $name relay log ──" >&2
-        sed 's/^/  /' "$TMP/relay-$name.log" >&2 || true
+        sed 's/^/  /' "$HARNESS_RUN/relay-$name.log" >&2 || true
     done
 fi
 
