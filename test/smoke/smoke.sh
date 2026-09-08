@@ -146,6 +146,7 @@ rerun_env=("SMOKE_PROFILE=$PROFILE" "SMOKE_PORT=$PORT" "SMOKE_FPS=$FPS" "SMOKE_S
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
 [[ -z "$MOQ" ]] || rerun_env+=("MOQ_BIN=$MOQ")
 [[ -z "$FAULT" ]] || rerun_env+=("MOQ_QA_FAULT=$FAULT")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 rerun=(just test smoke --publishers "$PUBLISHERS" --subscribers "$SUBSCRIBERS" --timeout "$TIMEOUT")
 [[ "$NEGATIVE" -eq 0 ]] || rerun+=(--negative)
 [[ "$MEDIA" -eq 0 ]] || rerun+=(--media)
@@ -481,11 +482,7 @@ RELAY_PID="$HARNESS_PID"
 # relay log is what records which one each client ended up on.
 bundle_endpoint relay "$URL" "negotiated per session"
 bundle_process moq-relay "$RELAY_PID"
-for _ in $(seq 1 60); do
-    curl -sf "$URL/certificate.sha256" >/dev/null 2>&1 && break
-    sleep 0.5
-done
-if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+if ! harness_ready "$URL/certificate.sha256" 30 "$RELAY_PID"; then
     echo "relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
@@ -651,6 +648,22 @@ run_cell() {
     return "$status"
 }
 
+# Hold one real subscription open for the relay-loss drill. The marker is
+# written only after the subscriber receives media, so killing the relay after
+# it appears exercises loss of an established session rather than connection
+# refusal during startup.
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+run_fault_probe() {
+    local broadcast="$1" marker="$2" first="$BUNDLE_SCRATCH/fault-first-byte"
+    "$MOQ" --client-connect "$URL" --broadcast "$broadcast" export fmp4 |
+        {
+            dd bs=1 count=1 of="$first" 2>/dev/null
+            [[ -s "$first" ]] || return 1
+            : >"$marker"
+            cat >/dev/null
+        }
+}
+
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3"
     local pids=() names=() watchdogs=() i sub round_failed=0
@@ -684,11 +697,26 @@ run_round() {
     # before the timer fires. The final relay-health gate makes this injected
     # crash fail even if a cell happened to receive data first.
     if [[ "$FAULT" == relay && "$FAULT_DONE" -eq 0 && ${#pids[@]} -gt 0 ]]; then
-        FAULT_DONE=1
-        echo "=== fault injection: killing the relay with subscriber cells active ==="
-        harness_reap "$RELAY_PID"
-        RELAY_PID=""
-        RELAY_FAILED=1
+        local marker="$HARNESS_RUN/fault-subscriber-ready" fault_pid deadline=$((SECONDS + 30))
+        harness_spawn fault-subscriber "$HARNESS_RUN/fault-subscriber.log" run_fault_probe "$broadcast" "$marker"
+        fault_pid="$HARNESS_PID"
+        while [[ ! -f "$marker" ]] && ((SECONDS < deadline)); do
+            harness_exited "$fault_pid" && break
+            sleep 0.05
+        done
+        if [[ -f "$marker" ]]; then
+            FAULT_DONE=1
+            echo "=== fault injection: killing the relay with a subscriber connected ==="
+            harness_reap "$RELAY_PID"
+            RELAY_PID=""
+            RELAY_FAILED=1
+            harness_reap "$fault_pid"
+        else
+            echo "error: relay fault drill never observed a connected subscriber" >&2
+            harness_reap "$fault_pid"
+            round_failed=1
+            overall=1
+        fi
     fi
     # A publisher that streams forever should still be alive; if it died, the
     # subscriber failures below are a publisher bug, so surface its log.

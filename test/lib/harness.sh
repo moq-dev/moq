@@ -363,11 +363,19 @@ harness_release_ports() {
 # Mark retained reservations so the allocator keeps refusing them after this
 # shell exits. Record the exact directories so teardown removes the claims.
 harness_retain_ports() {
-    local reservation
-    for reservation in ${HARNESS_PORTS[@]+"${HARNESS_PORTS[@]}"}; do
-        : >"$reservation/retained"
-        bundle_reservation "$reservation"
+    local reservation i pid
+    for i in ${HARNESS_PIDS[@]+"${!HARNESS_PIDS[@]}"}; do
+        [[ "${HARNESS_STATES[$i]}" == live ]] || continue
+        pid=${HARNESS_PIDS[$i]}
+        if ! harness_exited "$pid" || kill -0 -- -"$pid" 2>/dev/null; then
+            for reservation in ${HARNESS_PORTS[@]+"${HARNESS_PORTS[@]}"}; do
+                : >"$reservation/retained"
+                bundle_reservation "$reservation"
+            done
+            return 0
+        fi
     done
+    return 1
 }
 
 # ── teardown ────────────────────────────────────────────────────────────────

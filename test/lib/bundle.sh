@@ -141,6 +141,7 @@ bundle_init() {
     BUNDLE_QLOG_LIVE="$BUNDLE_LIVE/qlog"
     mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
         "$BUNDLE_QLOG_LIVE" "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
+    chmod 700 "$BUNDLE_DIR" "$BUNDLE_LIVE"
 
     # The drivers write browser traces here without knowing the layout.
     export MOQ_QA_BUNDLE="$BUNDLE_DIR"
@@ -472,11 +473,24 @@ _bundle_redact_stream() {
         -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' |
         LC_ALL=C awk '
+            function closing_quote(text,    i, ch, slashes) {
+                slashes = 0
+                for (i = 1; i <= length(text); i++) {
+                    ch = substr(text, i, 1)
+                    if (ch == "\\") {
+                        slashes++
+                    } else {
+                        if (ch == "\"" && slashes % 2 == 0) return i
+                        slashes = 0
+                    }
+                }
+                return 0
+            }
             function redact_value(    start, tail, quote) {
                 if (!match($0, /"value"[[:space:]]*:[[:space:]]*"/)) return
                 start = RSTART + RLENGTH
                 tail = substr($0, start)
-                quote = index(tail, "\"")
+                quote = closing_quote(tail)
                 if (quote) $0 = substr($0, 1, start - 1) "<redacted>" substr(tail, quote)
             }
             {

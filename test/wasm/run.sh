@@ -79,6 +79,7 @@ fi
 bundle_init wasm
 rerun_env=("WASM_PORT=$PORT" "WASM_PROFILE=$PROFILE")
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 bundle_rerun env "${rerun_env[@]}" just test wasm --timeout "$TIMEOUT"
 TMP="$BUNDLE_WORK"
 HARNESS_RUN="$TMP"
@@ -201,13 +202,7 @@ for flavour in "${FLAVOURS[@]}"; do
     bundle_endpoint "$name" "$url" "$expected"
     bundle_process "moq-relay-$name" "$relay_pid"
 
-    # Polled tight rather than on a half-second tick: a relay binds in about
-    # 130ms, so a coarse interval spends most of the wait asleep, three times over.
-    for _ in $(seq 1 600); do
-        curl -sf "$url/certificate.sha256" >/dev/null 2>&1 && break
-        sleep 0.05
-    done
-    if ! curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
+    if ! harness_ready "$url/certificate.sha256" 30 "$relay_pid"; then
         echo "$name relay never became ready" >&2
         sed 's/^/  relay: /' "$HARNESS_RUN/relay-$name.log" >&2 || true
         exit 1

@@ -32,6 +32,10 @@ check() {
     if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
 }
 
+mode() {
+    stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+}
+
 # Each case runs in its own subshell so a `bundle_init` cannot leak into the
 # next one, under its own artifacts root unless CASE_ROOT shares one. The
 # bundle's path lands in $ROOT/<name>.path for the caller to inspect.
@@ -71,6 +75,7 @@ fail_case() {
 bundle=$(run_case fail fail_case)
 manifest="$bundle/manifest.json"
 check "a failing run retains its bundle" test -f "$manifest"
+check "a bundle is private to its owner" test "$(mode "$bundle")" = 700
 check "per-process logs are retained" test -f "$bundle/work/relay.log"
 check "tool versions are recorded" test -f "$bundle/versions.txt"
 check "a teardown command is written" test -f "$bundle/teardown.sh"
@@ -109,14 +114,29 @@ secret_case() {
 }
 HAR
     } >"$BUNDLE_WORK/client.log"
+    cat >"$BUNDLE_TRACE/cookies.har" <<'HAR'
+{
+  "log": {
+    "entries": [{
+      "request": {
+        "headers": [
+          {"name": "Cookie", "value": "session=\"opaque-escaped-cookie-secret\""}
+        ]
+      }
+    }]
+  }
+}
+HAR
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
 for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
     opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential \
-    opaque-har-credential; do
+    opaque-har-credential opaque-escaped-cookie-secret; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
+check "redaction keeps escaped-string HAR valid" python3 -c \
+    'import json,sys; json.load(open(sys.argv[1]))' "$bundle/trace/cookies.har"
 check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
 check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
 check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"
@@ -341,6 +361,7 @@ retained_port_case() {
     source "$DIR/harness.sh"
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port retained 4557
+    harness_spawn retained "$BUNDLE_WORK/retained.log" sleep 120
     harness_retain_ports
     bundle_finish 1
 }
@@ -362,6 +383,22 @@ else
 fi
 bash "$bundle/teardown.sh" >/dev/null
 check "retained teardown releases its port reservation" test ! -d "$port_root/4557"
+
+unowned_port_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    HARNESS_RUN="$BUNDLE_WORK"
+    harness_port unowned 4558
+    if harness_retain_ports; then
+        return 1
+    fi
+    harness_release_ports
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case unowned-port unowned_port_case)
+check "a retained failure without live processes releases its port" test ! -d "$port_root/4558"
+live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
+check "a live evidence directory is private to its owner" test "$(mode "$live")" = 700
 
 if ((failures > 0)); then
     echo "bundle: $failures checks failed" >&2

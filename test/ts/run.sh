@@ -152,7 +152,9 @@ fi
 # a missing TSDuck still leaves the run identity and the toolchain behind for
 # the upload to collect. Same order as the smoke and WASM harnesses.
 bundle_init ts
-bundle_rerun env "TSC_PROFILE=$PROFILE" "${rerun[@]}"
+rerun_env=("TSC_PROFILE=$PROFILE")
+[[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
+bundle_rerun env "${rerun_env[@]}" "${rerun[@]}"
 TMP="$BUNDLE_WORK"
 HARNESS_RUN="$TMP"
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
@@ -272,11 +274,7 @@ harness_spawn relay "$TMP/relay.log" "$RELAY" "${relay_args[@]}"
 RELAY_PID="$HARNESS_PID"
 bundle_endpoint relay "$URL" "negotiated per session"
 bundle_process moq-relay "$RELAY_PID"
-for _ in $(seq 1 60); do
-    curl -sf "$URL/certificate.sha256" >/dev/null 2>&1 && break
-    sleep 0.5
-done
-if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+if ! harness_ready "$URL/certificate.sha256" 30 "$RELAY_PID"; then
     echo "error: relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
@@ -349,6 +347,7 @@ PUB_PID="$HARNESS_PID"
 # stalled `moq import ts`, non-zero/non-124 means the import itself errored. Both
 # explain a truncated capture, so surface it alongside the logs on failure.
 harness_wait "$PUB_PID" && PUB_RC=0 || PUB_RC=$?
+PUB_PID=""
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
@@ -360,6 +359,7 @@ dump_logs() {
 # ── live: the grader owns the verdict ───────────────────────────────────────
 if [[ -n "$LIVE" ]]; then
     harness_wait "$SUB_PID" || true
+    SUB_PID=""
     if [[ ! -s "$HARNESS_RUN/timing.rc" ]]; then
         echo "error: the live grader never reported a status" >&2
         dump_logs
@@ -405,6 +405,7 @@ fi
 
 sleep 3
 harness_reap "$SUB_PID"
+SUB_PID=""
 
 if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
