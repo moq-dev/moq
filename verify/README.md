@@ -97,7 +97,16 @@ A required result is `pass` only when GitHub says `success`. `missing`,
 reported as themselves, because a required job that never ran looks exactly like
 a green one in a summary that only counts failures. Cancelled and timed-out runs
 are failures. A rerun repeats a job name, so the newest attempt is the one that
-counts.
+counts. A rule may also pin the app that has to report a context, and then a
+same-named run from anything else is not that required result.
+
+A feed that could not be read is not an empty feed. Unreadable rules, check
+runs, commit statuses, or base comparison each make the report `incomplete`,
+because "nothing failed" and "nothing was read" print the same way otherwise.
+
+Last, GitHub's own `mergeStateStatus` has to agree. Anything but `CLEAN` or
+`HAS_HOOKS` is `incomplete`: something is gating the merge that this report
+cannot see, and a green verdict would be claiming otherwise.
 
 The report's verdict is `failed`, `incomplete`, `pending`, `stale`, or `green`,
 and only `green` exits zero. `stale` is the interesting one: it means every

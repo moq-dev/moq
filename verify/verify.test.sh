@@ -223,4 +223,62 @@ extra_rerun='.checks += [
     {name: "Smoke", id: 4, status: "completed", conclusion: "success", started_at: "2"}]'
 [[ "$(grade "$extra_rerun")" == green ]] || fail "a rerun extra lane must be graded on its newest attempt"
 
+# A gate can pin the app that has to report it, and a same-named run from
+# anything else is then not the required result.
+pinned='.rules[0].parameters.required_status_checks[0].integration_id = 15368
+    | .checks[0].app = 15368 | .checks[1].app = 15368'
+[[ "$(grade "$pinned")" == green ]] || fail "the pinned app reporting the check must pass"
+[[ "$(grade "$pinned | .checks[0].app = 99")" == incomplete ]] ||
+    fail "a same-named check from another app must not satisfy a pinned gate"
+
+# A feed that could not be read is not an empty feed.
+[[ "$(grade '.statuses = null')" == incomplete ]] || fail "unreadable commit statuses must block"
+
+# Everything known can be clean while GitHub still refuses the merge, and the
+# one verdict that claims readiness must not be the one that hides that.
+[[ "$(grade '.pr.mergeStateStatus = "BLOCKED"')" == incomplete ]] ||
+    fail "an unexplained merge state must not be green"
+[[ "$(grade '.pr.mergeStateStatus = "HAS_HOOKS"')" == green ]] ||
+    fail "a merge state that only means hooks must stay green"
+
+# `report` prints the receipts and the pull request together, and one verdict
+# has to decide its exit status, or its two forms disagree about the same
+# candidate: `status` alone fails when nothing was recorded locally, while a
+# required result on this exact head is green with no receipt at all.
+cat >"$FIXTURE/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+head=$(git rev-parse HEAD)
+case "$1 ${2:-}" in
+    "repo view") echo moq-dev/moq ;;
+    "pr view")
+        jq -n --arg head "$head" '{
+            number: 1, title: "t", url: "u", state: "OPEN", isDraft: false,
+            headRefName: "work", headRefOid: $head, baseRefName: "main",
+            mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", reviewDecision: null}' ;;
+    "api "*compare*) echo '{"behind_by": 0, "ahead_by": 1, "status": "ahead"}' ;;
+    "api "*rules*)
+        echo '[{"type": "required_status_checks", "parameters": {
+            "strict_required_status_checks_policy": false,
+            "required_status_checks": [{"context": "Check"}]}}]' ;;
+    "api "*check-runs*)
+        echo '[{"id": 1, "name": "Check", "status": "completed",
+            "conclusion": "success", "started_at": "1", "html_url": "u"}]' ;;
+    "api "*status*) echo '[]' ;;
+    *) echo "unexpected gh invocation: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$FIXTURE/bin/gh"
+
+rm -rf "${FIXTURE:?}/.verify"
+! run status >/dev/null 2>&1 || fail "no local receipt must fail status"
+run report >/dev/null 2>&1 || fail "a hosted pass on this head must make report exit zero"
+run report --json >/dev/null 2>&1 || fail "both forms of report must agree on the verdict"
+
+# ...and evidence describing a different candidate still fails it, so the
+# unified status is not just a status that never fails.
+run record local demo "" -- true >/dev/null 2>&1 || fail "recording must succeed"
+git -C "$FIXTURE" commit --quiet --allow-empty -m "report moves on"
+! run report >/dev/null 2>&1 || fail "a receipt from another head must fail report"
+
 echo "verify: receipt and readiness regression ok"

@@ -477,7 +477,8 @@ cmd_pr() {
     rules=$(gh api "repos/$repo/rules/branches/$base" 2>/dev/null) || rules=null
 
     checks=$(gh api "repos/$repo/commits/$head/check-runs?per_page=100" \
-        --jq '[.check_runs[] | {id, name, status, conclusion, started_at, html_url}]' 2>/dev/null) ||
+        --jq '[.check_runs[] | {id, name, status, conclusion, started_at, html_url, app: .app.id}]' \
+        2>/dev/null) ||
         checks=null
     # Commit statuses predate check runs and spell the same thing differently:
     # one `state` field covering both "has it finished" and "did it pass".
@@ -514,16 +515,19 @@ cmd_classify() {
         # A rerun repeats the name. Ordering by id as well as start time matters
         # because a queued attempt can carry no start time at all, and sorting it
         # to the front would hand the grade back to the attempt it replaced.
-        def attempts($runs; $name): $runs
-            | map(select(.name == $name))
+        # A gate can also pin the app that has to report it, in which case a
+        # same-named run from anything else is not the required result.
+        def attempts($runs; $gate): $runs
+            | map(select(.name == $gate.context
+                and (($gate.integration_id // null) == null or .app == $gate.integration_id)))
             | sort_by([(.started_at // ""), (.id // 0)]);
 
         # A result is green only when it says so. Everything else -- absent,
         # unfinished, cancelled, skipped, neutral -- is its own state. Any
         # unfinished attempt makes the context pending, whatever an older one
         # concluded: a rerun in flight is a result nobody has yet.
-        def state($runs; $name):
-            attempts($runs; $name) as $tries
+        def state($runs; $gate):
+            attempts($runs; $gate) as $tries
             | if ($tries | length) == 0 then "missing"
             elif ($tries | map(.status != "completed") | any) then "pending"
             else ($tries | last | .conclusion
@@ -538,11 +542,13 @@ cmd_classify() {
         | (.rules // []) as $rules
         | ([(.checks // []), (.statuses // [])] | add) as $runs
         | ($rules | map(select(.type == "required_status_checks"))) as $gates
-        | ($gates | map(.parameters.required_status_checks[].context) | unique) as $required
+        | ($gates | map(.parameters.required_status_checks[])
+            | map({context, integration_id: (.integration_id // null)}) | unique) as $gated
+        | ($gated | map(.context) | unique) as $required
         | ($gates | map(.parameters.strict_required_status_checks_policy == true) | any) as $strict
         | (($rules | map(select(.type == "merge_queue")) | length) > 0) as $queue
-        | ($required | map({
-            context: .,
+        | ($gated | map({
+            context: .context,
             state: state($runs; .),
             url: (attempts($runs; .) | last | if . == null then null else .html_url end)
           })) as $graded
@@ -550,8 +556,9 @@ cmd_classify() {
         # green must not keep failing the report on its first attempt.
         | ($runs | map(.name) | unique
             | map(select(. as $name | $required | index($name) | not))
+            | map({context: ., integration_id: null})
             | map({
-                context: .,
+                context: .context,
                 state: state($runs; .),
                 url: (attempts($runs; .) | last | .html_url)
               })) as $extra
@@ -567,6 +574,7 @@ cmd_classify() {
         | [
             (if $input.rules == null then "branch policy could not be read" else empty end),
             (if $input.checks == null then "check runs could not be read" else empty end),
+            (if $input.statuses == null then "commit statuses could not be read" else empty end),
             (if $input.compare == null then "the base comparison could not be read" else empty end),
             (if ($required | length) == 0 and $input.rules != null
                 then "the base branch requires no status check" else empty end),
@@ -589,6 +597,9 @@ cmd_classify() {
                 + " commits behind " + $input.pr.baseRefName
                 + (if $strict then "" else ", and no rule requires it to be current" end)
              else empty end),
+            (if (["CLEAN", "HAS_HOOKS"] | index($input.pr.mergeStateStatus)) == null
+                then "GitHub reports the merge state as "
+                    + ($input.pr.mergeStateStatus // "unknown") else empty end),
             (if ($evidence | length) == 0
                 then "no local receipt; this record is the hosted results only" else empty end),
             ($evidence[] | select(.state != "current") | "local " + .lane + " evidence is " + .state)
@@ -599,7 +610,8 @@ cmd_classify() {
                 or $input.pr.reviewDecision == "CHANGES_REQUESTED"
                 or $input.pr.state != "OPEN" then "failed"
             elif ($graded | map(.state) | any(. == "missing" or . == "skipped" or . == "unknown"))
-                or $input.rules == null or $input.checks == null or $input.compare == null
+                or $input.rules == null or $input.checks == null or $input.statuses == null
+                or $input.compare == null
                 or ($required | length) == 0
                 or $input.pr.isDraft
                 or $input.pr.reviewDecision == "REVIEW_REQUIRED" then "incomplete"
@@ -612,6 +624,11 @@ cmd_classify() {
             # to credit this candidate with what a different one proved.
             elif ($input.compare.behind_by // 0) > 0
                 or ($evidence | map(.state) | any(. != "current")) then "stale"
+            # Last, because every state above explains itself. If nothing here
+            # is outstanding and GitHub still will not call the branch mergeable,
+            # something is gating the merge that this report cannot see, and a
+            # green verdict would be claiming otherwise.
+            elif (["CLEAN", "HAS_HOOKS"] | index($input.pr.mergeStateStatus)) == null then "incomplete"
             else "green"
             end) as $verdict
         | {
@@ -672,6 +689,9 @@ cmd_report() {
         esac
     done
 
+    # One verdict decides the exit status in both forms. `cmd_pr` already grades
+    # the local receipts into its own evidence, so folding in `cmd_status` here
+    # would make the text form disagree with the JSON one about the same PR.
     local status=0
     if ((json)); then
         local receipts pull
@@ -681,7 +701,7 @@ cmd_report() {
             '{receipts: $receipts, pull_request: $pull}'
     else
         echo "LOCAL RECEIPTS"
-        cmd_status || status=$?
+        cmd_status || true
         echo
         cmd_pr ${arguments[0]:+"${arguments[0]}"} || status=$?
     fi
