@@ -112,9 +112,12 @@ non_pr_workflow_names() {
 
     printf "%s\n" "${files[@]}" | bun -e '
 const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
-// Both report their failure as a check on the PR itself, so alert.yml skips
-// them at runtime and a workflow triggered only by these needs no entry.
-const PR_EVENTS = new Set(["pull_request", "pull_request_target"]);
+// Triggers that report somewhere else, so a workflow with only these needs no
+// entry. The pull request events report as a check on the PR itself, which is
+// what alert.yml skips at runtime. workflow_call reports as part of the caller:
+// a reusable workflow raises no workflow_run event of its own, so an entry for
+// one would sit in alert.yml never firing.
+const DELEGATED_EVENTS = new Set(["pull_request", "pull_request_target", "workflow_call"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());
@@ -131,7 +134,7 @@ for (const file of files) {
         console.error("alert.sh: cannot read the on: value of " + file);
         process.exit(2);
     }
-    if (!triggers.some((t) => !PR_EVENTS.has(t))) continue;
+    if (!triggers.some((t) => !DELEGATED_EVENTS.has(t))) continue;
 
     const name = doc.name;
     if (typeof name !== "string" || name.trim() === "") {

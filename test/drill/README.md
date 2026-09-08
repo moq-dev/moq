@@ -105,6 +105,6 @@ corpus nobody replays.
 - An impaired path (delay, loss, rate limits). Loopback is the only path these
   drills see; `quest/m0/transport-impairment-profile.md` adds the Linux
   network-namespace profile they run under.
-- CI lane scheduling, which belongs to `quest/m0/pr-behavioral-gates.md`.
+- CI lane scheduling, which belongs to the shared impact map.
 - Failure bundles beyond what the test harness prints, which are documented in
   [Debug bundles](../README.md#debug-bundles).

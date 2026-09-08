@@ -71,15 +71,26 @@ if (role === "publish") {
 	watchResources();
 	let stop = attach(el);
 
+	// Where the leaked-session control parks the player it refuses to tear down.
+	const leak = document.createElement("div");
+	leak.hidden = true;
+	document.body.appendChild(leak);
+
 	publish({
 		detach: () => {
 			stop();
 			el.remove();
 		},
-		detachLeaky: () => {
-			// Inject the application defect directly: the detach command forgets to remove the
-			// already-active player, so its established session and media graph remain observable.
-			stop();
+		startLeak: () => {
+			// Stand up a second player on the same broadcast and leave it connected. The driver proves
+			// its session exists before detaching the real player, so a zero-resource instant cannot
+			// satisfy the negative control before the deliberate leak has started.
+			const stray = document.createElement("moq-watch") as MoqWatch;
+			stray.setAttribute("url", url);
+			stray.setAttribute("name", broadcast);
+			stray.setAttribute("visible", "always");
+			stray.appendChild(document.createElement("canvas"));
+			leak.appendChild(stray);
 		},
 		reattach: () => {
 			stop();

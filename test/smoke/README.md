@@ -71,6 +71,10 @@ just test smoke
 # Full matrix: rust/python/go/browser publish; everyone subscribes.
 just test smoke-full
 
+# The representative set a pull request runs: rust/browser publish; rust,
+# browser and C subscribe. See the CI table in CONTRIBUTING.md.
+just test smoke-core
+
 # Pick your own axes:
 just test smoke --publishers rust,python --subscribers rust,c,js-native-bun
 
@@ -133,7 +137,7 @@ names the assertion that has to catch it, and passes only by failing there:
 | tone muted at the source | `audio tone` |
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
-| detach command leaves the player connected | `resource baseline` |
+| the detached player's session never torn down | `resource baseline` |
 
 Not covered yet: other browser engines (the capability probe is the groundwork),
 camera/microphone permission denial, asserting the gesture gate rather than only
@@ -176,7 +180,9 @@ their rendered or internal contents cannot be safely redacted.
 
 ## CI
 
-`.github/workflows/smoke.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/smoke/`). A red cell means a real interop break in the
-current tree, and the job uploads its debug bundles; `just test fetch <run id>`
-downloads them.
+`.github/workflows/smoke.yml` runs the full matrix nightly and on demand. Pull
+requests reach it through the `Gates` workflow: the impact map selects the full
+matrix for `test/smoke/` and wide interop inputs, or the representative core
+matrix for ordinary delivery-path changes. A red cell means a real interop break
+in the current tree. The job uploads its finalized debug bundles; `just test
+fetch <run id>` downloads them.

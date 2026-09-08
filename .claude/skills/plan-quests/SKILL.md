@@ -40,5 +40,6 @@ Commit and make a PR then:
 - Monitor it for CI failures and reviews.
 - Address any automated review findings (Codex/CodeRabbit) you agree with. Turn down any you disagree with with a comment.
 - Push any changes you made to the PR, updating the summary if needed.
+- Repeat at most once, avoiding a loop of back-and-forth review/feedback cycles.
 
 Merge the PR when ready.

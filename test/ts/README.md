@@ -233,10 +233,14 @@ anything still running, and the exact command that reproduces it. See
 
 ## CI
 
-`.github/workflows/smoke.yml` runs `just test ts` after the interop
-matrix (nightly, on demand, and on PRs touching `test/ts/`). TSDuck
-comes from the `nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a
-local developer would.
+`.github/workflows/gates.yml` runs `just test ts` as its own `ts` lane, on any
+pull request the impact map says can reach moq-mux or moq-cli, plus one touching
+`test/ts/` or the dev shell. TSDuck comes from the `nix develop` shell, so the run
+uses the same `tsp`/`tsanalyze` a local developer would.
+
+This used to ride along in `smoke.yml` after the interop matrix. It does not any
+more, so a manually dispatched or scheduled Smoke run is the matrix alone and
+proves nothing about the exporter.
 
 `.github/workflows/nightly.yml` runs `just test ts --live --duration 120` as
 well. It stays off the PR path because release timing needs a real-time window to

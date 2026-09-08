@@ -6,52 +6,25 @@ name: WASM
 # compile gate: it catches a moq-net change that stops the bindings building,
 # never one that stops them working. See test/wasm/README.md.
 #
-# Narrow trigger, like obs.yml and swift.yml. The filter covers what the bindings
-# are built out of: moq-net, because that is the break this exists to catch in
-# review (they are a thin wrapper over it, and every other gate compiles them to
-# nothing), and kio underneath it, because a lost wakeup or a timer regression
-# reaches the browser through moq-net without touching a file named here
-# otherwise. Those two are the whole in-repo dependency graph of the crate.
+# Pull requests reach this through gates.yml, which selects it whenever the diff
+# can reach moq-wasm through the dependency graph, plus the machinery that turns
+# the crate into the package under test: `js/wasm`, the harness under `test/wasm`,
+# and `.cargo/config.toml`, which carries the wasm32 rustflags
+# (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not compile
+# at all.
 #
-# The rest of the filter is the machinery that turns the crate into the package
-# under test, which is just as able to break it: the root `justfile` owns the
-# `wasm` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
-# (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not
-# compile at all.
-#
-# Two things the harness needs are deliberately out, because they are fixtures
-# rather than the code under test, and both are already gated elsewhere:
-# `js/net/**` (the publisher; its own unit tests plus the smoke matrix) and
-# `rs/moq-relay/**` (the server; the Rust test suite plus smoke). Naming either
-# would launch a browser on a large share of pull requests. The cost is that a
-# break arriving through one of them lands on `main` and shows up the next time
-# this runs.
+# The harness's own fixtures are in as well: run.sh builds a real `moq-relay` and
+# publishes from `@moq/net`. The `paths:` filter this replaced left both out on
+# purpose, because naming them would have launched a browser on a large share of
+# pull requests, and accepted that a break arriving through either lands on `main`
+# and shows up the next run. Selection makes them affordable: a diff reaching
+# either already runs the smoke lane, so this one runs beside it, not after it.
 
 permissions:
   contents: read
 
 on:
-  pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - "rs/moq-wasm/**"
-      - "rs/moq-net/**"
-      - "rs/kio/**"
-      - "js/wasm/**"
-      - "test/wasm/**"
-      - "justfile"
-      - "test/justfile"
-      - ".cargo/config.toml"
-      - "package.json"
-      - "bun.lock"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/wasm.yml"
+  workflow_call:
 
 concurrency:
   group: wasm-${{ github.ref }}
@@ -60,7 +33,6 @@ concurrency:
 jobs:
   wasm:
     name: WASM
-    if: github.event.action != 'closed'
     # x64, not the arm runner the other jobs use: this is the configuration
     # smoke.yml already launches Playwright's Chromium on.
     runs-on: ubuntu-latest
