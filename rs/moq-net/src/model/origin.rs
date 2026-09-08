@@ -662,6 +662,12 @@ struct OriginNode {
 	// [`Producer::create_broadcast`]).
 	broadcast: Option<OriginBroadcast>,
 
+	// Sources whose lifecycle task is running at this node, counted from
+	// [`Producer::create_broadcast`] rather than from the attach. Keeps the node in
+	// the tree across the window where it holds nothing yet (see
+	// [`SourceReservation`]).
+	sources: usize,
+
 	// Nested nodes, one level down the tree.
 	nested: HashMap<String, Lock<OriginNode>>,
 
@@ -673,6 +679,7 @@ impl OriginNode {
 	fn new(parent: Option<Lock<NotifyNode>>) -> Self {
 		Self {
 			broadcast: None,
+			sources: 0,
 			nested: HashMap::new(),
 			notify: Lock::new(NotifyNode::new(parent)),
 		}
@@ -714,6 +721,23 @@ impl OriginNode {
 		} else {
 			notify.unannounce(&path);
 		}
+	}
+
+	/// Register `id` at `relative`, creating the nodes on the way down.
+	///
+	/// Descends under the caller's lock rather than resolving the node and locking
+	/// it separately: an empty node can be pruned the instant the tree lock is
+	/// released, so a two-step register would land in an orphan and then panic in
+	/// [`Self::detach`], which would find no node to unregister from.
+	fn consume_at(&mut self, id: ConsumerId, notify: AnnounceConsumerNotify, relative: impl AsPath) {
+		let relative = relative.as_path();
+
+		let Some((dir, relative)) = relative.next_part() else {
+			return self.consume(id, notify);
+		};
+
+		let nested = self.entry(dir);
+		nested.lock().consume_at(id, notify, &relative);
 	}
 
 	fn consume(&mut self, id: ConsumerId, mut notify: AnnounceConsumerNotify) {
@@ -789,28 +813,50 @@ impl OriginNode {
 		}
 	}
 
-	/// Drop `id`'s registration at `relative`, pruning empty nodes on the way back
-	/// up. The mirror of [`Self::remove`]: subscribing to a path nobody broadcasts
-	/// creates the node, so unsubscribing has to take it away again, or the tree
-	/// grows by one node per distinct idle path and never shrinks.
-	fn unconsume(&mut self, id: ConsumerId, relative: impl AsPath) {
+	/// Give up a claim at `relative`, pruning every node the removal empties on the
+	/// way back up.
+	///
+	/// The mirror of [`Self::remove`], and the reason an origin's tree does not grow
+	/// forever: creating the node is what registering a claim does, so releasing one
+	/// has to be able to take the node away again. Otherwise the tree gains a node
+	/// per distinct path anyone ever asked about and never gives one back.
+	fn detach(&mut self, claim: Claim, relative: impl AsPath) {
 		let relative = relative.as_path();
 
 		let Some((dir, relative)) = relative.next_part() else {
-			self.notify.lock().consumers.remove(&id).expect("consumer not found");
+			match claim {
+				Claim::Consumer(id) => {
+					self.notify.lock().consumers.remove(&id).expect("consumer not found");
+				}
+				Claim::Source => self.sources -= 1,
+			}
 			return;
 		};
 
-		// The registration itself keeps every node on the way down non-empty, so
-		// nothing can have pruned the chain out from under us.
-		let nested = self.nested.get(dir).expect("consumer node missing").clone();
+		// The claim itself keeps every node on the way down non-empty, so nothing can
+		// have pruned the chain out from under us.
+		let nested = self.nested.get(dir).expect("claimed node missing").clone();
 		let mut locked = nested.lock();
-		locked.unconsume(id, &relative);
+		locked.detach(claim, &relative);
 
 		if locked.is_empty() {
 			drop(locked);
 			self.nested.remove(dir);
 		}
+	}
+
+	/// Claim this node for a source at `relative`, creating the nodes on the way
+	/// down. Released by [`Self::detach`]; see [`SourceReservation`].
+	fn reserve(&mut self, relative: impl AsPath) {
+		let relative = relative.as_path();
+
+		let Some((dir, relative)) = relative.next_part() else {
+			self.sources += 1;
+			return;
+		};
+
+		let nested = self.entry(dir);
+		nested.lock().reserve(&relative);
 	}
 
 	/// Remove the broadcast at `relative` if it is `expect`, unannouncing it if
@@ -840,7 +886,10 @@ impl OriginNode {
 	}
 
 	fn is_empty(&self) -> bool {
-		self.broadcast.is_none() && self.nested.is_empty() && self.notify.lock().consumers.is_empty()
+		self.broadcast.is_none()
+			&& self.sources == 0
+			&& self.nested.is_empty()
+			&& self.notify.lock().consumers.is_empty()
 	}
 
 	/// Nodes in this subtree, counting self. Test-only: pruning is invisible
@@ -848,6 +897,45 @@ impl OriginNode {
 	#[cfg(test)]
 	fn count(&self) -> usize {
 		1 + self.nested.values().map(|nested| nested.lock().count()).sum::<usize>()
+	}
+}
+
+/// What a [`OriginNode::detach`] walk gives up at the leaf. Both kinds keep a node
+/// in the tree, so both have to be able to take it back out.
+#[derive(Clone, Copy)]
+enum Claim {
+	/// An announce cursor registered at the node.
+	Consumer(ConsumerId),
+	/// A source whose lifecycle task is running at the node.
+	Source,
+}
+
+/// Keeps a source's node in the tree for as long as its lifecycle task runs.
+///
+/// A source spends its whole pre-attach life at a node that holds nothing yet, and
+/// a node holding nothing is exactly what pruning removes. Without this claim the
+/// node could be pruned between [`Producer::create_broadcast`] and the attach - an
+/// announce cursor on that exact path dropping is enough - and the attach would
+/// then publish into an orphan: still wired to its parents' notify chain, so it
+/// announces normally, but off the tree every lookup walks, so nobody can resolve
+/// what was announced.
+///
+/// Held by [`run_source`] and released on every exit, including a cancelled task.
+struct SourceReservation {
+	tree: Lock<OriginNode>,
+	path: PathOwned,
+}
+
+impl SourceReservation {
+	fn new(tree: Lock<OriginNode>, path: PathOwned) -> Self {
+		tree.lock().reserve(&path);
+		Self { tree, path }
+	}
+}
+
+impl Drop for SourceReservation {
+	fn drop(&mut self) {
+		self.tree.lock().detach(Claim::Source, &self.path);
 	}
 }
 
@@ -950,16 +1038,6 @@ impl OriginNodes {
 		}
 
 		None
-	}
-
-	/// The node at an absolute path, creating it and any missing ancestor.
-	fn leaf(&self, absolute: impl AsPath) -> Lock<OriginNode> {
-		let absolute = absolute.as_path();
-		if absolute.is_empty() {
-			self.tree.clone()
-		} else {
-			self.tree.lock().leaf(&absolute)
-		}
 	}
 }
 
@@ -1168,9 +1246,12 @@ impl Producer {
 			"create_broadcast called with a looping hop chain",
 		);
 
-		let rest = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
+		// `get` resolves the path against the tree root, which is the same absolute
+		// path the handle's own root produces: an allowed prefix is always stored
+		// alongside its absolute position. So one path serves both the front's
+		// identity and its position in the tree.
+		let full = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
 		let tree = self.nodes.tree.clone();
-		let full = self.root.join(&path).to_owned();
 
 		// A decoded announce prefix and suffix are each within the wire limit, but their
 		// join might not be. Enforcing here bounds the tree depth and guarantees the path
@@ -1189,7 +1270,17 @@ impl Producer {
 			.with_stats(ingress.clone());
 		source.set_route(route).expect("fresh producer");
 
-		web_async::spawn(run_source(self.info(), tree, full, rest, source.consume(), ingress));
+		// Claimed here, synchronously, rather than inside the spawned task: the node
+		// is prunable until the source attaches.
+		let reservation = SourceReservation::new(tree.clone(), full.clone());
+		web_async::spawn(run_source(
+			self.info(),
+			tree,
+			full,
+			source.consume(),
+			ingress,
+			reservation,
+		));
 
 		Ok(source)
 	}
@@ -1610,15 +1701,15 @@ async fn run_source(
 	origin: Info,
 	tree: Lock<OriginNode>,
 	full: PathOwned,
-	rest: PathOwned,
 	mut source: broadcast::Consumer,
 	ingress: stats::Scope,
+	// Held, not read: dropping it releases this source's claim on the node.
+	_reservation: SourceReservation,
 ) {
 	let ctx = AttachContext {
 		origin: &origin,
 		tree: &tree,
 		full: &full,
-		rest: &rest,
 	};
 
 	// The first `route_changed` yields the current route immediately; nothing is
@@ -1641,17 +1732,16 @@ async fn run_source(
 	// announced is a separate gate, owned by `attach_source`.
 	let mut may_take_over = true;
 
-	'attach: loop {
-		// Re-resolved every attempt: between attaches the previous front's
-		// teardown may have pruned the (then-empty) leaf from the tree, and
-		// attaching to the stale lock would publish into an orphan that lookups
-		// can no longer reach.
-		let leaf = if rest.is_empty() {
-			tree.clone()
-		} else {
-			tree.lock().leaf(&rest)
-		};
+	// Resolved once: `_reservation` holds this node in the tree for as long as this
+	// source lives, so no teardown between attaches can prune it and leave us
+	// attaching to an orphan. The root is its own leaf and is never pruned.
+	let leaf = if full.is_empty() {
+		tree.clone()
+	} else {
+		tree.lock().leaf(&full)
+	};
 
+	'attach: loop {
 		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone(), may_take_over) {
 			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
 			Attach::Parked(incumbent) => {
@@ -1786,13 +1876,12 @@ enum Attach {
 /// Everything about a source's attach that does not change between attempts.
 struct AttachContext<'a> {
 	origin: &'a Info,
-	/// The origin's tree root: the one node pruning never removes, so every attach
-	/// re-resolves the leaf from here rather than pinning it.
+	/// The origin's tree root: the one node pruning never removes, so the leaf is
+	/// resolved from here rather than pinned by a handle that a prune can orphan.
 	tree: &'a Lock<OriginNode>,
-	/// Absolute path, for the front's identity and log lines.
+	/// Absolute path: the front's identity, its log lines, and its position under
+	/// `tree` are all the same path.
 	full: &'a PathOwned,
-	/// Path under `tree`, for locating (and later pruning) the leaf.
-	rest: &'a PathOwned,
 }
 
 /// Whether two sources carry the same content and may therefore splice.
@@ -1935,7 +2024,7 @@ fn attach_source(
 		state.clone(),
 		broadcast.clone(),
 		ctx.tree.clone(),
-		ctx.rest.clone(),
+		ctx.full.clone(),
 	));
 
 	Attach::Ready(state, broadcast, 0)
@@ -1947,7 +2036,7 @@ async fn run_front(
 	state: kio::Producer<FrontState>,
 	mut broadcast: broadcast::Producer,
 	tree: Lock<OriginNode>,
-	rest: PathOwned,
+	full: PathOwned,
 ) {
 	enum Step {
 		Serve(Arc<str>, super::resume::Producer),
@@ -2039,7 +2128,7 @@ async fn run_front(
 
 	// Remove the broadcast from the tree (identity-checked, so a replacement is
 	// untouched) and prune empty nodes.
-	tree.lock().remove(&state, &rest);
+	tree.lock().remove(&state, &full);
 }
 
 /// Serves one spliced logical track: splices in the best source's copy of the
@@ -3048,8 +3137,7 @@ impl AnnounceConsumer {
 				state: state.clone(),
 				exclude,
 			};
-			let node = nodes.leaf(absolute);
-			node.lock().consume(id, notify);
+			nodes.tree.lock().consume_at(id, notify, absolute);
 		}
 
 		Self {
@@ -3147,7 +3235,7 @@ impl AnnounceConsumer {
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
 		for (_, absolute) in &self.nodes.nodes {
-			self.nodes.tree.lock().unconsume(self.id, absolute);
+			self.nodes.tree.lock().detach(Claim::Consumer(self.id), absolute);
 		}
 	}
 }
@@ -3825,6 +3913,87 @@ mod tests {
 		broadcast.finish();
 		settle().await;
 		assert_eq!(origin.node_count(), bare);
+	}
+
+	/// One cursor scoped to two sibling prefixes registers at both, so its drop has
+	/// to unwind both branches and the ancestor they share. Also pins that scoping
+	/// alone creates nothing: the handle names its subtrees, it does not build them.
+	#[tokio::test]
+	async fn test_multi_prefix_cursor_prunes_both_branches() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let bare = origin.node_count();
+
+		let scoped = consumer
+			.scope(&[Path::new("room/a"), Path::new("room/b")])
+			.expect("in scope");
+		assert_eq!(origin.node_count(), bare, "scoping should not create nodes");
+		assert!(consumer.with_root("room/c").is_some());
+		assert_eq!(origin.node_count(), bare, "rooting should not create nodes");
+
+		let announced = scoped.announced();
+		assert_eq!(origin.node_count(), bare + 3, "room, room/a and room/b");
+
+		drop(announced);
+		assert_eq!(origin.node_count(), bare, "a two-branch cursor left nodes behind");
+	}
+
+	/// A node with a live descendant is not empty, so pruning a deep cursor stops
+	/// where the tree is still in use rather than unwinding to the root.
+	#[tokio::test]
+	async fn test_prune_stops_at_a_live_ancestor() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let bare = origin.node_count();
+
+		let outer = consumer.scope(&[Path::new("room/a")]).expect("in scope").announced();
+		let inner = consumer
+			.scope(&[Path::new("room/a/deep/leaf")])
+			.expect("in scope")
+			.announced();
+		assert_eq!(origin.node_count(), bare + 4, "room, a, deep and leaf");
+
+		drop(inner);
+		assert_eq!(origin.node_count(), bare + 2, "pruning ran past the cursor above it");
+
+		drop(outer);
+		assert_eq!(origin.node_count(), bare);
+	}
+
+	/// A source claims its node from `create_broadcast`, before it has attached
+	/// anything to it. A cursor on that exact path dropping inside that window must
+	/// not prune the node away: the attach would then publish into an orphan that
+	/// announces through its parents but that no lookup can reach.
+	#[tokio::test]
+	async fn test_pending_source_holds_its_node() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let bare = origin.node_count();
+
+		// A cursor waiting on the exact path the publisher is about to take.
+		let waiting = consumer
+			.scope(&[Path::new("channel/chat")])
+			.expect("in scope")
+			.announced();
+		assert_eq!(origin.node_count(), bare + 2);
+
+		let _broadcast = origin.create_broadcast("channel/chat", announce()).unwrap();
+
+		// The source holds the node, but has not attached to it yet.
+		drop(waiting);
+		assert_eq!(origin.node_count(), bare + 2, "a pending source's node was pruned");
+
+		settle().await;
+		assert!(
+			consumer.get_broadcast("channel/chat").is_some(),
+			"the source attached into an orphan"
+		);
 	}
 
 	/// A scoped handle names its subtree by path, not by node, so a prune between
