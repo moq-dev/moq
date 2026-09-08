@@ -157,6 +157,18 @@ else
 fi
 check "a malformed cap retains no partial bundle" test ! -d "$ROOT/invalid-cap.d"
 
+if (
+    export MOQ_QA_ARTIFACTS="$ROOT/invalid-stack.d" MOQ_QA_STACK_MAX=bogus
+    # shellcheck source=/dev/null
+    source "$DIR/bundle.sh"
+    bundle_init selftest
+) >/dev/null 2>&1; then
+    bad "a malformed stack cap is refused"
+else
+    ok "a malformed stack cap is refused"
+fi
+check "a malformed stack cap retains no partial bundle" test ! -d "$ROOT/invalid-stack.d"
+
 # ── a hung process is described before it is killed ─────────────────────────
 # The stack itself may be unavailable (ptrace_scope, no debugger, a hardened
 # runtime); the requirement is that the attempt is recorded and does not block.
@@ -180,18 +192,22 @@ teardown_case() {
     # The argument exercises a credential-shaped command without exposing it in
     # teardown.sh. Ownership is checked by process birth identity instead.
     : >"$BUNDLE_WORK/live.log"
+    : >"$BUNDLE_QLOG/live.qlog"
     mkfifo "$ROOT/continue" "$ROOT/written"
     exec 9>>"$BUNDLE_WORK/live.log"
+    exec 10>>"$BUNDLE_QLOG/live.qlog"
     python3 -c 'import os,sys,time
 with open(sys.argv[1], "rb", buffering=0) as ready:
  ready.read(1)
 os.write(9, b"still running\n")
+os.write(10, b"still running\n")
 with open(sys.argv[2], "wb", buffering=0) as written:
  written.write(b"done\n")
 while True:
  time.sleep(120)' "$ROOT/continue" "$ROOT/written" '?token=teardown-secret' &
     mine=$!
     exec 9>&-
+    exec 10>&-
     bundle_process mine "$mine"
     # A changed birth identity stands in for a PID the kernel has recycled:
     # teardown has to leave the current owner alone.
@@ -216,13 +232,16 @@ check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
     "$bundle/teardown.sh"
-live=$(sed -n 's/^Live logs continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
+live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
-before=$(wc -c <"$live/live.log" | tr -d '[:space:]')
+before_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
+before_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
 printf 'continue\n' >"$ROOT/continue"
 IFS= read -r _ <"$ROOT/written"
-after=$(wc -c <"$live/live.log" | tr -d '[:space:]')
-check "retained logs continue after bundling" test "$after" -gt "$before"
+after_log=$(wc -c <"$live/work/live.log" | tr -d '[:space:]')
+after_qlog=$(wc -c <"$live/qlog/live.qlog" | tr -d '[:space:]')
+check "retained logs continue after bundling" test "$after_log" -gt "$before_log"
+check "retained qlogs continue after bundling" test "$after_qlog" -gt "$before_qlog"
 if running "$mine"; then
     ok "a retained session leaves its processes running"
     output=$(bash "$bundle/teardown.sh" 2>&1 || true)

@@ -94,7 +94,7 @@ bundle_init() {
     BUNDLE_HARNESS=$1
     local root="${MOQ_QA_ARTIFACTS:-$BUNDLE_WORKSPACE/target/qa}"
     local knob value
-    for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP; do
+    for knob in MOQ_QA_LOG_CAP MOQ_QA_FILE_CAP MOQ_QA_STACK_MAX; do
         value=${!knob:-}
         if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
             echo "error: $knob must be a non-negative integer (got '$value')" >&2
@@ -117,7 +117,7 @@ bundle_init() {
     BUNDLE_TRACE="$BUNDLE_DIR/trace"
     BUNDLE_QLOG="$BUNDLE_DIR/qlog"
     BUNDLE_META="$BUNDLE_DIR/.meta"
-    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID/work"
+    BUNDLE_LIVE="${root}-live/$BUNDLE_HARNESS-$BUNDLE_RUN_ID"
     mkdir -p "$BUNDLE_WORK" "$BUNDLE_SCRATCH" "$BUNDLE_TRACE" "$BUNDLE_QLOG" \
         "$BUNDLE_META/process-starts" "$BUNDLE_DIR/stacks"
 
@@ -530,7 +530,7 @@ _bundle_session() {
     {
         printf '# Retained session\n\n'
         printf 'Processes from this run are still alive. They hold their ports until torn down.\n\n'
-        printf 'Live logs continue in `%s`; `work/` is the redacted failure-time snapshot.\n\n' "$BUNDLE_LIVE"
+        printf 'Live captures continue in `%s`; the bundle is the redacted failure-time snapshot.\n\n' "$BUNDLE_LIVE"
         printf '## Endpoints\n\n'
         [[ -f "$BUNDLE_META/endpoints.jsonl" ]] &&
             sed -n 's/.*"url": "\([^"]*\)".*/- \1/p' "$BUNDLE_META/endpoints.jsonl"
@@ -593,8 +593,8 @@ PRELUDE
             printf 'reap %s %q\n' "$pid" "$(<"$start_file")"
         done
         if [[ -d "$BUNDLE_LIVE" ]]; then
-            printf 'rm -rf -- %q\n' "${BUNDLE_LIVE%/work}"
-            printf 'rmdir %q 2>/dev/null || true\n' "$(dirname "${BUNDLE_LIVE%/work}")"
+            printf 'rm -rf -- %q\n' "$BUNDLE_LIVE"
+            printf 'rmdir %q 2>/dev/null || true\n' "$(dirname "$BUNDLE_LIVE")"
         fi
     } >"$BUNDLE_DIR/teardown.sh"
     chmod +x "$BUNDLE_DIR/teardown.sh"
@@ -632,10 +632,15 @@ bundle_finish() {
         # Keep the live inodes outside the upload root, then sweep a snapshot.
         # Processes continue writing to BUNDLE_LIVE while the uploadable bundle
         # remains bounded and redacted.
-        mkdir -p "$(dirname "$BUNDLE_LIVE")"
-        mv "$BUNDLE_WORK" "$BUNDLE_LIVE"
+        mkdir -p "$BUNDLE_LIVE"
+        mv "$BUNDLE_WORK" "$BUNDLE_LIVE/work"
         mkdir -p "$BUNDLE_WORK"
-        cp -R "$BUNDLE_LIVE/." "$BUNDLE_WORK/"
+        cp -R "$BUNDLE_LIVE/work/." "$BUNDLE_WORK/"
+        if [[ -d "$BUNDLE_QLOG" ]]; then
+            mv "$BUNDLE_QLOG" "$BUNDLE_LIVE/qlog"
+            mkdir -p "$BUNDLE_QLOG"
+            cp -R "$BUNDLE_LIVE/qlog/." "$BUNDLE_QLOG/"
+        fi
         _bundle_session
     fi
     _bundle_teardown_script

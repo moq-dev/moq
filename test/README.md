@@ -91,7 +91,7 @@ going to exist.
 `MOQ_QA_RETAIN=1` leaves a failing run's processes alive, holding their ports,
 so the relay can be attached to rather than reconstructed. The bundle then also
 carries `session.md`, listing the endpoint URLs, the live PIDs, the debugger
-command for each, the external path where live logs continue, and the teardown
+command for each, the external path where live logs and qlogs continue, and the teardown
 command. The bundle's `work/` remains a bounded, redacted failure-time snapshot.
 Nothing else reaps them:
 
