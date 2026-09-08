@@ -164,6 +164,7 @@ suites_for_tool() {
 # path pattern here could reproduce safely.
 rust_packages() {
     local changed=$1
+    [ -n "$changed" ] || return 0
     command -v just >/dev/null 2>&1 || return 1
     [ "$changed" = ALL ] && {
         printf 'ALL\n'
@@ -189,6 +190,17 @@ needs_awk_select() {
 rust_suites() {
     [ -n "$1" ] || return
     selected "check test"
+}
+
+# True when the selected Rust packages contain tests that bind real sockets.
+# Pure protocol/container crates use in-memory transports; keep them runnable in
+# sandboxes that deny bind. Update this set when a crate adds or removes an OS
+# socket test.
+rust_tests_bind() {
+    local packages=$1
+    [ -n "$packages" ] || return 1
+    [ "$packages" = ALL ] && return 0
+    printf '%s\n' "$packages" | grep -qwE '(moq-ffi|moq-hls|moq-native|moq-relay|moq-rtc|moq-rtmp|moq-srt)'
 }
 
 # Print Cargo's writable cache directory without assuming HOME exists. Minimal
@@ -246,7 +258,7 @@ nix_suites() {
 # use mock transport pairs and bind nothing.
 bind_suites() {
     local changed=$1 packages=$2 out="" suite
-    if [ -n "$packages" ] ||
+    if rust_tests_bind "$packages" ||
         printf '%s\n' "$changed" | grep -qE '^py/'; then
         out=$(selected test)
     fi
@@ -545,21 +557,30 @@ EOF
     record behavior.awk-select behavior ok true "$suites" "awk selects a multi-crate diff" "" 10 "$BOUNDED_ELAPSED"
 }
 
+# Print the nearest existing directory at or above a requested path. Cargo
+# creates nested cache and target paths recursively, so their immediate parent
+# need not exist yet.
+existing_ancestor() {
+    local path=$1 parent
+    while [ ! -e "$path" ]; do
+        parent=$(dirname "$path")
+        [ "$parent" != "$path" ] || return 1
+        path=$parent
+    done
+    [ -d "$path" ] || return 1
+    printf '%s\n' "$path"
+}
+
 # A directory that exists is not a directory this session may write to.
 probe_writable() {
-    local id=$1 dir=$2 suites=$3 probe note=""
-    if [ ! -d "$dir" ]; then
-        # A directory that does not exist yet is fine as long as its parent takes
-        # a mkdir, which is the same question one level up.
-        local parent
-        parent=$(dirname "$dir")
-        if [ ! -d "$parent" ]; then
-            record "storage.$id" storage missing true "$suites" "$dir does not exist and neither does $parent" \
-                "create $parent" 5 0
-            return
-        fi
-        note=", which will hold $dir"
-        dir=$parent
+    local id=$1 requested=$2 suites=$3 probe note="" dir
+    if ! dir=$(existing_ancestor "$requested"); then
+        record "storage.$id" storage missing true "$suites" \
+            "$requested has no existing directory ancestor" "create a directory ancestor for $requested" 5 0
+        return
+    fi
+    if [ "$dir" != "$requested" ]; then
+        note=", the nearest existing ancestor of $requested"
     fi
     probe="$dir/.moq-doctor.$$"
     if : >"$probe" 2>/dev/null; then
@@ -575,7 +596,10 @@ probe_writable() {
 # which is where all of it lands.
 probe_disk() {
     local dir=$1 suites=$2 free_kb free_gib
-    [ -d "$dir" ] || dir=$(dirname "$dir")
+    if ! dir=$(existing_ancestor "$dir"); then
+        record storage.disk storage degraded false "$suites" "cannot locate a filesystem for the target path" "" 5 0
+        return
+    fi
     free_kb=$(df -Pk "$dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
     if [ -z "$free_kb" ]; then
         record storage.disk storage degraded false "$suites" "cannot read free space on $dir" "" 5 0
@@ -656,8 +680,12 @@ edition = "2021"
 EOF
     printf 'fn main() {}\n' >"$crate/src/main.rs"
 
-    local status label="for the host" remedy
-    remedy="allow writing ${CARGO_HOME:-$HOME/.cargo} and ${TMPDIR:-/tmp}, and executing the linker"
+    local status label="for the host" remedy cargo_cache
+    if cargo_cache=$(cargo_home); then
+        remedy="allow writing $cargo_cache and ${TMPDIR:-/tmp}, and executing the linker"
+    else
+        remedy="set HOME or CARGO_HOME to a writable directory, allow writing ${TMPDIR:-/tmp}, and execute the linker"
+    fi
     if [ -n "$target" ]; then
         label="for $target"
         remedy="install the target: rustup target add $target, or enter the dev shell: nix develop"
@@ -1066,7 +1094,10 @@ self_test_ownership() {
     check 'a docs diff binds nothing' "$(bind_suites 'doc/a.md' '')" ''
     check 'a js diff binds nothing under test' "$(bind_suites 'js/hang/src/index.ts' '')" ''
     check 'a Python diff binds under test' "$(bind_suites 'py/moq-rs/tests/test_server.py' '')" test
-    check 'a rust diff binds under test' "$(bind_suites 'rs/moq-net/src/lib.rs' packages)" test
+    check 'a socket-testing Rust diff binds under test' \
+        "$(bind_suites 'rs/moq-native/src/lib.rs' '--package path+file:///repo/rs/moq-native#0.0.0')" test
+    check 'a pure Rust diff binds nothing under test' \
+        "$(bind_suites 'rs/quest/src/lib.rs' '--package path+file:///repo/rs/quest#0.0.0')" ''
     check 'a Go diff binds nothing under test' "$(bind_suites 'go/wrapper/moq/lib.go' '')" ''
     check 'a Go diff uses Cargo under check only' \
         "$(cargo_suites 'go/wrapper/moq/lib.go' '')" check
@@ -1081,6 +1112,9 @@ self_test_ownership() {
         cargo_home >/dev/null
     )
     check 'Cargo home rejects an unknown location' "$?" 1
+    check 'an empty diff selects no Rust packages' "$(rust_packages '')" ''
+    check 'a nested path uses its existing ancestor' \
+        "$(existing_ancestor "$SCRATCH/new/parent/cache")" "$SCRATCH"
     check 'one Rust seed skips the multiline awk probe' \
         "$(needs_awk_select 'rs/moq-net/src/lib.rs' && printf yes || printf no)" no
     check 'two Rust seeds require the multiline awk probe' \
