@@ -113,6 +113,13 @@ worktree ACTION="check" $BASE="":
     	fi
     }
 
+    base=$(just _base "$BASE")
+    stamp="$git_dir/moq-base"
+    # Whichever remote provides the base, not always origin. A base whose first
+    # segment names no remote (a local branch, a tag) leaves origin.
+    remote="${base%%/*}"
+    git remote | grep -qx "$remote" || remote=origin
+
     objects=$(access "$common_dir/objects")
     heads=$(access "$common_dir/refs/heads")
     worktree_meta=$(access "$git_dir")
@@ -122,17 +129,18 @@ worktree ACTION="check" $BASE="":
     # writable config and, worse, proceed on a read-only one.
     config=$(access "$common_dir")
     # A fetch writes three places, not one: objects, the remote-tracking refs it
-    # updates (with their lock files), and FETCH_HEAD in the per-worktree
-    # directory. Checking only the object store promises a diagnosis and then
-    # hands the caller a raw git error from whichever of the other two is denied.
-    remotes=$(access_or_parent "$common_dir/refs/remotes")
+    # updates, and FETCH_HEAD in the per-worktree directory. The refs are the
+    # narrow one: `refs/remotes/<remote>` is where `<branch>.lock` is created, so
+    # probing `refs/remotes` stops a directory short and passes a split that git
+    # then fails on.
+    tracking=$(access_or_parent "$common_dir/refs/remotes/$remote")
 
     echo "worktree:    $root"
     echo "branch:      ${branch:-(detached)} $(git rev-parse --short HEAD)"
     echo "git-dir:     $git_dir ($worktree_meta)"
     echo "common-dir:  $common_dir ($config)"
     echo "  fetch needs $common_dir/objects: $objects"
-    echo "             $common_dir/refs/remotes: $remotes"
+    echo "             $common_dir/refs/remotes/$remote: $tracking"
     echo "             $git_dir (FETCH_HEAD): $worktree_meta"
     echo "  branch needs $common_dir/refs/heads: $heads"
     echo "  upstream needs $common_dir/config: $config"
@@ -141,25 +149,19 @@ worktree ACTION="check" $BASE="":
     dirty=$(git status --porcelain | wc -l | tr -d ' ')
     echo "dirty:       $dirty tracked/untracked path(s)"
 
-    base=$(just _base "$BASE")
-    stamp="$git_dir/moq-base"
-
     if [[ "{{ ACTION }}" == setup ]]; then
     	blocked=""
     	[[ "$objects" == write ]] || blocked="$blocked $common_dir/objects ($objects)"
-    	[[ "$remotes" == write ]] || blocked="$blocked $common_dir/refs/remotes ($remotes)"
+    	[[ "$tracking" == write ]] || blocked="$blocked $common_dir/refs/remotes/$remote ($tracking)"
     	[[ "$worktree_meta" == write ]] || blocked="$blocked $git_dir ($worktree_meta)"
     	if [[ -n "$blocked" ]]; then
     		echo "error: cannot fetch;$blocked" >&2
     		echo "       grant write access to the main repository's Git directory, not just this worktree" >&2
     		exit 1
     	fi
-    	# Whichever remote provides the base, not always origin: recording a stamp
-    	# against a ref nobody refreshed is worse than recording none, and `just
-    	# check` would scope the branch against a base that has since moved. A base
-    	# whose first segment names no remote (a local branch, a tag) leaves origin.
-    	remote="${base%%/*}"
-    	git remote | grep -qx "$remote" || remote=origin
+    	# The remote resolved above, not always origin: recording a stamp against a
+    	# ref nobody refreshed is worse than recording none, and `just check` would
+    	# scope the branch against a base that has since moved.
     	git fetch --quiet "$remote"
     	# Repointing an upstream someone chose would silently change what `just
     	# check` scopes against, so only three cases write it: no upstream, an
