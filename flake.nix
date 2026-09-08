@@ -492,6 +492,12 @@
           '';
 
           env = {
+            # How `just doctor` tells this dev shell from any other nix shell.
+            # IN_NIX_SHELL only says a shell was entered, not which one, and the
+            # difference decides whether a missing tool is a bug or a wrong
+            # shell.
+            MOQ_DEV_SHELL = "moq";
+
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS
             # release everywhere, rather than whatever the host happens to have.
