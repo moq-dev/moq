@@ -112,6 +112,20 @@ for field in '"rerun"' '"run_id"' '"commit"' 'moq-lite-05' 'rust -> rust' 'WebTr
     if grep -q -- "$field" "$manifest"; then ok "the manifest records $field"; else bad "the manifest records $field"; fi
 done
 
+rerun_env_case() {
+    # shellcheck source=/dev/null
+    source "$DIR/harness.sh"
+    harness_env_array
+    bundle_rerun env "${HARNESS_ENV[@]}" just test smoke
+    bundle_finish 1
+}
+bundle=$(MOQ_TEST_PORT_BASE=5540 MOQ_TEST_PORTS="$ROOT/ports with spaces" \
+    run_case rerun-env rerun_env_case)
+check "recorded reruns preserve the automatic port base" \
+    grep -q 'MOQ_TEST_PORT_BASE=5540' "$bundle/manifest.json"
+check "recorded reruns preserve the port reservation root" \
+    grep -q 'MOQ_TEST_PORTS=' "$bundle/manifest.json"
+
 # ── credentials never reach the bundle ──────────────────────────────────────
 # A JWT-shaped token, a token query parameter, an Authorization header, and URL
 # credentials: the four shapes a harness log can carry one in. The harnesses run

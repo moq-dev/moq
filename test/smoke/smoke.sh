@@ -157,7 +157,8 @@ needs_js() {
     needs js || needs js-native-node || needs js-native-bun
 }
 
-rerun_env=("SMOKE_PROFILE=$PROFILE" "SMOKE_PORT=$PORT" "SMOKE_FPS=$FPS" "SMOKE_SIZE=$SIZE")
+harness_env_array
+rerun_env=("${HARNESS_ENV[@]}" "SMOKE_PROFILE=$PROFILE" "SMOKE_PORT=$PORT" "SMOKE_FPS=$FPS" "SMOKE_SIZE=$SIZE")
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
 [[ -z "$MOQ" ]] || rerun_env+=("MOQ_BIN=$MOQ")
 [[ -z "$FAULT" ]] || rerun_env+=("MOQ_QA_FAULT=$FAULT")

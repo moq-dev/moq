@@ -77,7 +77,8 @@ if [[ -n "$PORT" ]] && ! harness_valid_port "$PORT"; then
 fi
 
 bundle_init wasm
-rerun_env=("WASM_PORT=$PORT" "WASM_PROFILE=$PROFILE")
+harness_env_array
+rerun_env=("${HARNESS_ENV[@]}" "WASM_PORT=$PORT" "WASM_PROFILE=$PROFILE")
 [[ -z "$RELAY" ]] || rerun_env+=("RELAY_BIN=$RELAY")
 [[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 bundle_rerun env "${rerun_env[@]}" just test wasm --timeout "$TIMEOUT"

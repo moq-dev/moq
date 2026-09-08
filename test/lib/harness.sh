@@ -64,11 +64,22 @@ harness_argv() {
 # each harness to remember: they move the allocator and the artifact root, which
 # is exactly what a collision or a filesystem failure depends on.
 harness_env() {
+    local assignment
+    harness_env_array "$@"
+    for assignment in "${HARNESS_ENV[@]}"; do
+        printf '%q ' "$assignment"
+    done
+}
+
+# Populate HARNESS_ENV with the same environment as harness_env, ready to pass
+# to `env` without reparsing shell-quoted text.
+harness_env_array() {
     local name value
+    HARNESS_ENV=()
     for name in MOQ_TEST_RUNS MOQ_TEST_PORTS MOQ_TEST_PORT_BASE MOQ_TEST_KEEP "$@"; do
         value="${!name-}"
         [[ -n "$value" ]] || continue
-        printf '%s=%q ' "$name" "$value"
+        HARNESS_ENV+=("$name=$value")
     done
 }
 

@@ -152,7 +152,8 @@ fi
 # a missing TSDuck still leaves the run identity and the toolchain behind for
 # the upload to collect. Same order as the smoke and WASM harnesses.
 bundle_init ts
-rerun_env=("TSC_PROFILE=$PROFILE")
+harness_env_array
+rerun_env=("${HARNESS_ENV[@]}" "TSC_PROFILE=$PROFILE")
 [[ -z "${MOQ_QA_QLOG:-}" ]] || rerun_env+=("MOQ_QA_QLOG=$MOQ_QA_QLOG")
 bundle_rerun env "${rerun_env[@]}" "${rerun[@]}"
 TMP="$BUNDLE_WORK"
