@@ -53,6 +53,19 @@ harness_argv() {
     printf ' %q' "$@"
 }
 
+# Print the environment overrides among NAMES that are set, as a requoted prefix
+# for the rerun command: `harness_env SMOKE_PORT SMOKE_PROFILE`. Timing, port,
+# and profile knobs arrive this way rather than in argv, so a command built from
+# argv alone reruns with the defaults and reproduces a different test.
+harness_env() {
+    local name value
+    for name in "$@"; do
+        value="${!name-}"
+        [[ -n "$value" ]] || continue
+        printf '%s=%q ' "$name" "$value"
+    done
+}
+
 # Start a run named NAME, reproducible with RERUN. Creates the run directory and
 # installs the teardown trap; every other function needs this called first.
 harness_begin() {

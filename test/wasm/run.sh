@@ -25,8 +25,8 @@ WORKSPACE=$(cd "$WASM_DIR/../.." && pwd)
 source "$WASM_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
-# flag this run was actually given.
-RERUN="just test wasm$(harness_argv "$@")"
+# flag and every environment override this run was actually given.
+RERUN="$(harness_env WASM_TIMEOUT WASM_PORT WASM_PROFILE RELAY_BIN)just test wasm$(harness_argv "$@")"
 
 TIMEOUT="${WASM_TIMEOUT:-30}"
 # Empty means "any reserved port per flavour"; WASM_PORT pins the first instead.

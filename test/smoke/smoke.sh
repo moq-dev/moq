@@ -23,8 +23,8 @@ CLIENTS="$SMOKE_DIR/clients"
 source "$SMOKE_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
-# flag this run was actually given.
-RERUN="just test smoke$(harness_argv "$@")"
+# flag and every environment override this run was actually given.
+RERUN="$(harness_env SMOKE_TIMEOUT SMOKE_FPS SMOKE_SIZE SMOKE_PORT SMOKE_PROFILE RELAY_BIN MOQ_BIN)just test smoke$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"

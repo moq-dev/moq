@@ -35,8 +35,9 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 source "$DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries the
-# source capture, mux rate, EIT fixture, and analyzer thresholds this run used.
-RERUN="just test ts$(harness_argv "$@")"
+# source capture, mux rate, EIT fixture, and analyzer thresholds this run used,
+# whether they arrived as flags or as environment overrides.
+RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE)just test ts$(harness_argv "$@")"
 
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip

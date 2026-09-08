@@ -104,13 +104,19 @@ worktree ACTION="check" $BASE="":
     objects=$(access "$common_dir/objects")
     heads=$(access "$common_dir/refs/heads")
     worktree_meta=$(access "$git_dir")
+    # Tracking is `branch.<name>.remote`/`.merge` in the repository config, which
+    # lives in the common directory alongside the `config.lock` the write needs,
+    # not in the branch's ref. Probing refs/heads for it would refuse on a
+    # writable config and, worse, proceed on a read-only one.
+    config=$(access "$common_dir")
 
     echo "worktree:    $root"
     echo "branch:      ${branch:-(detached)} $(git rev-parse --short HEAD)"
     echo "git-dir:     $git_dir ($worktree_meta)"
-    echo "common-dir:  $common_dir"
+    echo "common-dir:  $common_dir ($config)"
     echo "  fetch needs $common_dir/objects: $objects"
     echo "  branch needs $common_dir/refs/heads: $heads"
+    echo "  upstream needs $common_dir/config: $config"
     echo "  rebase needs $git_dir and the worktree: $worktree_meta"
 
     dirty=$(git status --porcelain | wc -l | tr -d ' ')
@@ -129,10 +135,10 @@ worktree ACTION="check" $BASE="":
     	# Only when unset: repointing an upstream someone chose would silently
     	# change what `just check` scopes against.
     	if [[ -n "$branch" ]] && ! git rev-parse --abbrev-ref '@{upstream}' > /dev/null 2>&1; then
-    		if [[ "$heads" == write ]]; then
+    		if [[ "$config" == write ]]; then
     			git branch --set-upstream-to "$base" "$branch"
     		else
-    			echo "warning: cannot set upstream; $common_dir/refs/heads is $heads" >&2
+    			echo "warning: cannot set upstream; $common_dir/config is $config" >&2
     		fi
     	fi
     	if [[ "$worktree_meta" == write ]]; then
