@@ -22,17 +22,20 @@ handed into the request before acceptance, and cloned into the origins, scopes
 and meters, so rebuilding a local handle would retag nothing.
 
 - `Recheck::Valid` carries the reply's `tier` beside the hints, never the whole
-  `AuthToken`. The revalidation loop compares it with the tier the session was
-  admitted under and, on change, retags the session's accounting: the tier
-  becomes a label the shared `stats::Session` state swaps in place, so every
-  clone the origins and meters hold records subsequent bytes under the new
-  tier. Earlier counters are not migrated: the old tier was truthfully what
-  paid until then. This is the substantive piece; size it before the alias
-  half.
-- `Expired` gains an `Alias` variant, additive under `#[non_exhaustive]`, raised
-  when the reply's alias no longer matches the admitted root (v0) or the
-  canonical alias transform relay auth defines for v1 grants. `covered_by`
-  keeps failing it; only the reason changes.
+  `AuthToken`. The revalidation loop hands it to the shared `stats::Session`
+  state, which holds the current tier behind an in-place swap and treats an
+  unchanged tier as a no-op, so `A -> B -> B` retags once and `A -> B -> C`
+  twice, and every clone the origins and meters hold records subsequent bytes
+  under the current tier. Earlier counters are not migrated: the old tier was
+  truthfully what paid until then. This is the substantive piece; size it
+  before the alias half.
+- `Auth::recheck` compares the alias explicitly before scoring coverage, and a
+  changed alias becomes its own `Recheck` outcome rather than falling through
+  `covered_by` into `Recheck::Revoked`. The loop maps it to a new
+  `Expired::Alias` variant, additive under `#[non_exhaustive]`; scope loss and
+  refusals keep `Expired::Revoked`. Under v0 the comparison is against the
+  admitted root; under v1 it is the canonical alias transform relay auth
+  defines. Alias takes precedence when both alias and tier change.
 - Tests: a re-check that moves the tier records subsequent bytes under the new
   meter through an already-cloned handle and leaves earlier bytes where they
   were; a re-check that changes the alias closes with `Expired::Alias`; a reply

@@ -41,7 +41,10 @@ needs a bystander.
   reset clock sits a few milliseconds below video's next frame, so video
   re-joins within one frame. Implement it in `Track::admit` against the
   exporter's watermark rather than as a timer: the exit is a clock comparison,
-  never a deadline.
+  never a deadline. A frame at or below the watermark is admitted, a frame
+  above it stays fenced, and `rewind()` clears the watermark, so nothing
+  re-joins until a joined track has emitted; `fill` passes the current
+  watermark into admission so the rule has one definition.
 - Regression test in `export_test.rs`: two tracks on a continuous transport
   timeline whose content restarts, the audio track alone stepping back by less
   than one frame at the join; video and audio keep emitting across it, and the

@@ -4,11 +4,12 @@
 
 A non-Rust publisher follows the connection's send estimate the way Rust does.
 The bindings mirror `bandwidth::Allocator` and `bandwidth::Reservation`: a
-session mints the allocator, a publisher reserves a share for a track at its
-configured ceiling, the built-in video and audio encoders in moq-ffi and libmoq
-follow the grant when handed a reservation, and an application that owns its
-encoder reads the reservation's current grant. A Python, Swift, Kotlin, Go or C
-publisher stops holding its configured bitrate through congestion.
+session mints the allocator, the built-in video encoder in moq-ffi and libmoq
+reserves its configured bitrate against it and follows the grant, the built-in
+audio encoder reserves its bitrate and holds it (following comes with #2848, as
+in Rust today), and an application that owns its encoder reserves a share for
+its own track and reads the current grant. A Python, Swift, Kotlin, Go or C
+video publisher stops holding its configured bitrate through congestion.
 
 Boundaries: the allocation rules are Rust's (strict priority tiers, max-min fair
 within a tier, ceilings never observed rates) and the bindings add no policy.
@@ -31,21 +32,27 @@ estimate. Today `rs/moq-ffi/src/video.rs` and `audio.rs` never set
   registry. The allocator consumes the live `bandwidth::Consumer`, and because a
   moq-ffi session reconnects on its own, that consumer is the reconnecting
   one: it reports no estimate while disconnected and resumes on the next
-  connection, and reservations survive the gap. `MoqBandwidth::reserve(track,
-  max_bps) -> MoqReservation` is keyed on the track producer's demand.
+  connection, and reservations survive the gap. Two ways in, because a
+  reservation needs the track's demand and the built-in encoders create their
+  track inside the publish call: an app-owned encoder calls
+  `MoqBandwidth::reserve(track, max_bps) -> MoqReservation` on a track producer
+  it already holds, while the video and audio publish options take the
+  `MoqBandwidth` handle and the publish call reserves at the configured bitrate
+  itself, exposing the result as `producer.reservation()`.
   `MoqReservation::grant() -> Option<u64>` is the current share as a snapshot
   (an encoder that asks before each frame needs nothing more); `None` means the
   allocator has no estimate or the track is not demanded, hold the current
   rate, and `Some(0)` is a real zero grant, exactly the distinction
   `Reservation::peek` draws. `update(max_bps)` moves the ceiling and dropping
-  the reservation releases the share. Video and audio publish options accept an
-  optional reservation; the built-in encoders feed its consumer to
-  `Options::bandwidth` unchanged, so the same `None` versus zero semantics
-  reach `rate::Control`. `set_bitrate` stays as the manual ceiling.
+  the reservation releases the share. The built-in video encoder feeds the
+  reservation's consumer to `Options::bandwidth` unchanged, so the same `None`
+  versus zero semantics reach `rate::Control`; audio registers the reservation
+  and ignores the grant until #2848 lands. `set_bitrate` stays as the manual
+  ceiling.
 - libmoq: `moq_session_bandwidth`, `moq_bandwidth_reserve`,
   `moq_reservation_grant`, `moq_reservation_update`, `moq_reservation_close`,
-  and a reservation parameter on the raw video and audio publish calls.
-  Regenerate `moq.h`.
+  a bandwidth-handle parameter on the raw video and audio publish calls, and a
+  reservation accessor on their producers. Regenerate `moq.h`.
 - Wrappers `py/moq-rs`, `swift`, `kt`, `go/wrapper/moq` and
   `doc/lib/{py,swift,kt,go,c}` per the Cross-Package Sync table; dart after dev
   merges. Run `just test smoke-full`.
