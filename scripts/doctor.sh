@@ -245,10 +245,10 @@ cargo_home() {
 # Resolve the same per-user roots as test/lib/harness.sh. Explicit overrides are
 # shared across worktrees by definition; defaults are namespaced by uid.
 harness_root() {
-    local kind=$1 root
+    local kind=$1 root tmpdir=${HARNESS_TMPDIR:-${TMPDIR:-/tmp}}
     case $kind in
-        runs) root=${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}} ;;
-        ports) root=${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}} ;;
+        runs) root=${MOQ_TEST_RUNS:-$tmpdir} ;;
+        ports) root=${MOQ_TEST_PORTS:-$tmpdir} ;;
         *) return 1 ;;
     esac
     while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do
@@ -264,6 +264,16 @@ harness_root() {
         root="$root/moq-test-ports-$(id -u)"
     fi
     printf '%s\n' "$root"
+}
+
+# Print an absolute root for doctor's private scratch files. A relative TMPDIR
+# belongs to test/ for the harness recipes and must not be reinterpreted from
+# doctor's repository-root working directory.
+doctor_tmpdir() {
+    case ${TMPDIR:-/tmp} in
+        /*) printf '%s\n' "${TMPDIR:-/tmp}" ;;
+        *) printf '/tmp\n' ;;
+    esac
 }
 
 # True when a configured harness port is in the range the shared allocator accepts.
@@ -1247,6 +1257,8 @@ self_test_ownership() {
     check 'the filesystem root is preserved' "$(MOQ_TEST_PORTS=/ harness_root ports)" /
     check 'the shared harness preserves the filesystem root' \
         "$(bash -c 'source "$1"; harness_normalize_root /' _ "$REPO/test/lib/harness.sh")" /
+    check 'doctor preserves an absolute temporary root' "$(TMPDIR=/custom doctor_tmpdir)" /custom
+    check 'doctor isolates a relative harness temporary root' "$(TMPDIR=relative doctor_tmpdir)" /tmp
     valid_harness_port 1024
     check 'the first harness port is valid' "$?" 0
     valid_harness_port 65536
@@ -1479,17 +1491,22 @@ if [ -z "$REPO" ]; then
 fi
 cd "$REPO" || exit 2
 
-# Every fixture, probe crate, and captured output lands here. Without it the
-# paths below would resolve against the filesystem root, and the report would be
-# a list of unrelated root-level write failures instead of the one real problem.
-SCRATCH=$(mktemp -d 2>/dev/null)
+# Every fixture, probe crate, and captured output lands here. A relative TMPDIR
+# is a harness path rooted under test/, so doctor uses a private absolute root
+# rather than interpreting that same setting from a different working directory.
+HARNESS_TMPDIR=${TMPDIR:-/tmp}
+SCRATCH_ROOT=$(doctor_tmpdir)
+SCRATCH=$(TMPDIR="$SCRATCH_ROOT" mktemp -d 2>/dev/null)
 if [ -z "$SCRATCH" ] || [ ! -d "$SCRATCH" ]; then
-    printf 'doctor: cannot create a scratch directory in %s\n' "${TMPDIR:-/tmp}" >&2
-    printf '        grant write access to %s, or set TMPDIR to a writable path\n' "${TMPDIR:-/tmp}" >&2
+    printf 'doctor: cannot create a scratch directory in %s\n' "$SCRATCH_ROOT" >&2
+    printf '        grant write access to %s, or set TMPDIR to a writable absolute path\n' "$SCRATCH_ROOT" >&2
     exit 2
 fi
 BOUNDED_TMP="$SCRATCH/out"
 trap 'rm -rf "$SCRATCH"' EXIT
+# Keep just and every private probe from reinterpreting a relative harness
+# TMPDIR at doctor's repository-root working directory.
+export TMPDIR="$SCRATCH_ROOT"
 
 # Scope. `_changed` is the same resolver `check` and `test` use, so the scope
 # reported here is the scope those will pick.
