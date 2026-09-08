@@ -121,7 +121,7 @@ pub struct AudioConfig {
 	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
-	#[serde_as(as = "Option<MillisCeil>")]
+	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }

@@ -348,6 +348,27 @@ impl<C: Container> Producer<C> {
 		};
 
 		self.container.write(group, &self.buffer)?;
+
+		// Latency buffering hands the whole batch over at once, so a consumer waits its full media
+		// span between flushes however tightly the frames inside are spaced. Presentation order,
+		// not decode order: a B-frame's timestamp can trail its predecessor's. The durations
+		// backfilled above give the last frame's end, and without one the span stops at its
+		// timestamp, which understates rather than overstates.
+		if self.buffer.len() >= 2 {
+			let mut iter = self.buffer.iter();
+			let first = iter.next().expect("buffer is not empty");
+			let (min, max) = iter.fold((first, first), |(min, max), frame| {
+				let min = if frame.timestamp < min.timestamp { frame } else { min };
+				let max = if frame.timestamp > max.timestamp { frame } else { max };
+				(min, max)
+			});
+			// A mixed-timescale buffer can't be timed; that is not a burst we can describe.
+			if let Ok(span) = max.timestamp.checked_sub(min.timestamp) {
+				let span = max.duration.and_then(|end| span.checked_add(end).ok()).unwrap_or(span);
+				self.estimator.burst(span);
+			}
+		}
+
 		self.buffer.clear();
 
 		Ok(())
@@ -453,6 +474,28 @@ mod tests {
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, Some(std::time::Duration::from_millis(25)));
 		assert_eq!(estimate.bitrate, Some(1_600_000));
+	}
+
+	/// Latency buffering packs several frames into one container frame, so the consumer waits for
+	/// the batch and not for the 25 ms between the frames inside it. The producer records that
+	/// itself: a caller that asked for buffering shouldn't also have to describe it.
+	#[tokio::test]
+	async fn buffered_batches_measure_their_own_span() {
+		let track = track_producer("test", hang::container::track_info());
+		let mut producer = Producer::new(track, Container::Legacy).with_latency(std::time::Duration::from_millis(100));
+
+		// 25ms frames, a keyframe every 8, so the latency budget flushes mid-group rather than
+		// only at the group boundary.
+		for i in 0..32u64 {
+			producer.write(frame(i * 25_000, i % 8 == 0)).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let jitter = producer.estimate().jitter.expect("a jitter");
+		assert!(
+			jitter >= std::time::Duration::from_millis(100),
+			"the batch span is the flush cadence, not the 25 ms between frames: {jitter:?}"
+		);
 	}
 
 	/// One group per frame (how the importer facade drives audio) closes each group with an
