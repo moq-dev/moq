@@ -27,7 +27,8 @@ cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
 # `moq-net-fuzz` is a workspace member only so it shares the root lockfile; libFuzzer
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, and a new
-# one that forgets it pays a vendored C++ libFuzzer build for nothing.
+# one that forgets it pays a vendored C++ libFuzzer build for nothing. The root
+# justfile's `check-all` and `fix-all` spell it out, since a module cannot read this.
 no_fuzz := "--exclude moq-net-fuzz"
 
 default:
@@ -177,7 +178,11 @@ _select $FILES:
     # `moq-net-fuzz` lives at `rs/moq-net/fuzz`, so its seed is already `moq-net`,
     # and leaving it in the graph would select it as a dependent of the crate it
     # fuzzes and compile libFuzzer on every moq-net diff.
-    metadata=$(jq '.packages |= map(select(.manifest_path | split("/")[-3] == "rs"))' <<< "$metadata")
+    #
+    # `manifest_path` is a native path, so normalize the separator before splitting
+    # on it. Windows would otherwise match no segment, drop every package, and
+    # select nothing at all, where the assertion below fails safe to ALL.
+    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select(.manifest_path | split("/")[-3] == "rs"))' <<< "$metadata")
 
     # Every remaining crate directory is named after the crate it holds, which is
     # what makes a changed path a seed below. Verify it rather than trust it: under-

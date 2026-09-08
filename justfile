@@ -552,7 +552,7 @@ check $BASE="":
 check-all *args:
     just _tools ALL
     just js check
-    just rs check --workspace {{ args }}
+    just rs check --workspace --exclude moq-net-fuzz {{ args }}
     cargo run --quiet --locked --package quest -- check
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
@@ -776,7 +776,7 @@ fix $BASE="":
 # Auto-fix every JavaScript workspace and every default Rust member.
 fix-all:
     just js fix
-    just rs fix --workspace
+    just rs fix --workspace --exclude moq-net-fuzz
     just py fix
     just dart fix
     just obs fix
