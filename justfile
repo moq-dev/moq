@@ -147,6 +147,7 @@ worktree ACTION="check" $BASE="":
     echo "  upstream needs $common_dir/config: $config"
     echo "  rebase needs $git_dir: $worktree_meta"
     echo "               $root: $worktree"
+    echo "               $common_dir/refs/heads: $heads"
 
     dirty=$(git status --porcelain | wc -l | tr -d ' ')
     echo "dirty:       $dirty tracked/untracked path(s)"

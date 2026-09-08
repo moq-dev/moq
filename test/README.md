@@ -26,6 +26,9 @@ released on the way out. That reservation is the point: probing for a free port 
 releasing it is a race, and two runs that probe at the same moment pick the same
 number. The walk starts at `MOQ_TEST_PORT_BASE` (4500). A reservation whose owner
 process is gone is reclaimed, atomically, so two reclaimers cannot both win.
+Replacement is serialized by `flock` on Linux or `lockf` on macOS, and the
+reservation records the owner's process start so a reused PID is not mistaken
+for the original run.
 
 Both roots carry the user id because `TMPDIR` is usually unset on Linux: a fixed
 name in a world-writable `/tmp` belongs to whoever ran first, and everyone else
