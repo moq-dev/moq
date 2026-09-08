@@ -179,6 +179,14 @@ kill_tree() {
 cleanup() {
     local status=$?
 
+    # First, before any of the reaping below: the fault timer holds a PID it is
+    # about to SIGKILL, and that PID stops being the relay the moment we reap it.
+    if [[ -n "${FAULT_PID:-}" ]]; then
+        kill_tree "$FAULT_PID"
+        wait "$FAULT_PID" 2>/dev/null || true
+        FAULT_PID=""
+    fi
+
     # Whatever is still running here never finished: a relay that wedged, a
     # publisher that stopped producing. Their stacks are the only thing left
     # that says where, and reaping them is what destroys it, so read first.
@@ -712,12 +720,18 @@ STACK_AT=$(awk -v t="$TIMEOUT" 'BEGIN { v = t - 2; if (v < 1) v = 1; printf "%.1
 # The relay is killed mid-matrix, which is how a crash reaches the clients:
 # every in-flight session drops at once, with nothing in their own logs to say
 # why. The relay log and its stack are the only account of it.
+#
+# Tracked in FAULT_PID and reaped by cleanup: a matrix that finishes inside the
+# delay would otherwise leave this subshell holding a PID the run has already
+# reaped, to fire at whatever the kernel hands that number to next.
+FAULT_PID=""
 if [[ "$FAULT" == relay ]]; then
     echo "=== fault injection: killing the relay in 3s ==="
     (
         sleep 3
         kill -KILL "$RELAY_PID" 2>/dev/null || true
     ) &
+    FAULT_PID=$!
 fi
 
 if [[ "$MEDIA" -eq 1 ]]; then

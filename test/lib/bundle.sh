@@ -263,24 +263,32 @@ bundle_stack() {
     done
 }
 
+# Run a debugger under `timeout` where the host has one, and directly where it
+# does not. A function rather than a prefix array, because an empty array is
+# exactly what bash 3.2 refuses to expand under `set -u`, and aborting here
+# would take the cleanup that follows down with it.
+_bundle_stack_timeout() {
+    if _bundle_have timeout; then
+        timeout -k 5 "${MOQ_QA_STACK_TIMEOUT:-20}" "$@"
+    else
+        "$@"
+    fi
+}
+
 # One process, whichever debugger this host has. Bounded so a wedged debugger
 # cannot become the hang it was called to explain.
 _bundle_stack_one() {
-    local pid=$1 budget="${MOQ_QA_STACK_TIMEOUT:-20}"
-    # ${arr[@]+...} guard: bash 3.2 errors on an empty array under `set -u`.
-    local runner=()
-    _bundle_have timeout && runner=(timeout -k 5 "$budget")
-    local run=(${runner[@]+"${runner[@]}"})
+    local pid=$1
 
     if _bundle_have eu-stack; then
-        "${run[@]}" eu-stack -p "$pid" && return 0
+        _bundle_stack_timeout eu-stack -p "$pid" && return 0
     elif _bundle_have gdb; then
-        "${run[@]}" gdb -p "$pid" -batch -nx -ex "thread apply all bt" && return 0
+        _bundle_stack_timeout gdb -p "$pid" -batch -nx -ex "thread apply all bt" && return 0
     elif _bundle_have sample; then
         # macOS: samples without ptrace, so it works where lldb needs approval.
-        "${run[@]}" sample "$pid" 1 -f /dev/stdout && return 0
+        _bundle_stack_timeout sample "$pid" 1 -f /dev/stdout && return 0
     elif _bundle_have lldb; then
-        "${run[@]}" lldb -p "$pid" --batch -o "thread backtrace all" -o detach -o quit && return 0
+        _bundle_stack_timeout lldb -p "$pid" --batch -o "thread backtrace all" -o detach -o quit && return 0
     else
         echo "no stack capture tool found (looked for eu-stack, gdb, sample, lldb)"
         return 0
@@ -331,36 +339,93 @@ _bundle_is_text() {
     LC_ALL=C grep -qI '' "$1" 2>/dev/null
 }
 
+# Spell a literal as a case-insensitive ERE. BSD sed has no `I` flag, and a
+# pattern that fails to compile there is a redaction that silently does not
+# happen, so the case folding is written into the pattern instead.
+_bundle_anycase() {
+    local word=$1 out="" ch upper i
+    for ((i = 0; i < ${#word}; i++)); do
+        ch=${word:i:1}
+        if [[ "$ch" == [a-z] ]]; then
+            upper=$(printf '%s' "$ch" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            out="${out}[${ch}${upper}]"
+        else
+            out="$out$ch"
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# Alternations of folded literals, built once: the sweep redacts every file in
+# the bundle and the pattern never changes within a run.
+_BUNDLE_RE_PARAMS=""
+_BUNDLE_RE_HEADERS=""
+_bundle_patterns() {
+    [[ -z "$_BUNDLE_RE_PARAMS" ]] || return 0
+    local word
+    for word in jwt token access_token auth key secret; do
+        _BUNDLE_RE_PARAMS="${_BUNDLE_RE_PARAMS:+$_BUNDLE_RE_PARAMS|}$(_bundle_anycase "$word")"
+    done
+    # Longest first, so `proxy-authorization` is not matched as `authorization`
+    # with a stray prefix left behind.
+    for word in proxy-authorization authorization set-cookie cookie x-api-key; do
+        _BUNDLE_RE_HEADERS="${_BUNDLE_RE_HEADERS:+$_BUNDLE_RE_HEADERS|}$(_bundle_anycase "$word")"
+    done
+}
+
 # Strip anything credential-shaped before the bundle can be uploaded. The
 # harnesses run anonymous by design, so this is a floor rather than the plan:
 # the plan is that no real credential is ever in scope.
+#
+# Fails closed: a file this cannot rewrite is replaced by its identity rather
+# than shipped unread, because "the redactor errored" and "there was nothing to
+# redact" are indistinguishable once the bundle leaves the machine.
 _bundle_redact() {
     local file=$1
     local tmp="$file.redacted"
+    _bundle_patterns
+    # A header value runs to the closing quote or the end of the line, not to
+    # the first space: `Bearer <token>` is two words and the second is the one
+    # worth having.
     if LC_ALL=C sed -E \
         -e 's#(eyJ[A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})\.([A-Za-z0-9_-]{6,})#<redacted-jwt>#g' \
-        -e 's#([?&](jwt|token|access_token|auth|key|secret)=)[^&[:space:]"'"'"']+#\1<redacted>#gI' \
-        -e 's#((authorization|proxy-authorization|cookie|set-cookie|x-api-key)"?[:=][[:space:]]*"?)[^"[:space:]]+#\1<redacted>#gI' \
+        -e "s#([?&]($_BUNDLE_RE_PARAMS)=)[^\&[:space:]\"']+#\1<redacted>#g" \
+        -e "s#(($_BUNDLE_RE_HEADERS)\"?[:=][[:space:]]*\"?)[^\"]*#\1<redacted>#g" \
         -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/[:space:]@"]+:[^/[:space:]@"]+@#\1<redacted>@#g' \
         "$file" >"$tmp" 2>/dev/null; then
         mv "$tmp" "$file"
-    else
-        rm -f "$tmp"
+        return 0
     fi
+    rm -f "$tmp"
+    {
+        printf 'withheld: the redactor could not rewrite this file, so it is not shipped\n'
+        printf 'sha256: %s\n' "$(_bundle_sha256 "$file")"
+        printf 'reproduce it with the rerun command in manifest.json\n'
+    } >"$file.withheld"
+    rm -f "$file"
+    return 1
 }
 
 # Walk everything retained: bound it, then redact it. Order matters, because
 # bounding is what makes redacting a multi-megabyte log affordable.
 _bundle_sweep() {
     local log_cap="${MOQ_QA_LOG_CAP:-2097152}" file_cap="${MOQ_QA_FILE_CAP:-8388608}" file
+    local withheld=0
     while IFS= read -r -d '' file; do
         if _bundle_is_text "$file"; then
             ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
-            _bundle_redact "$file"
+            _bundle_redact "$file" || withheld=$((withheld + 1))
         else
             ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
         fi
     done < <(find "$BUNDLE_DIR" -type f ! -path "$BUNDLE_META/*" -print0)
+    # Named in the bundle as well as on stderr: the bundle is what travels, and
+    # a reader has to be able to tell a withheld file from one that was clean.
+    if ((withheld > 0)); then
+        printf 'redaction failed on %s file(s); they were withheld rather than shipped\n' "$withheld" \
+            >"$BUNDLE_DIR/REDACTION-FAILED.txt"
+        printf 'warning: %s file(s) were withheld because the redactor failed on them\n' "$withheld" >&2
+    fi
 }
 
 # ── manifest ────────────────────────────────────────────────────────────────

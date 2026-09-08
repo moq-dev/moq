@@ -89,14 +89,25 @@ secret_case() {
         echo "authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzbW9rZSJ9.c2lnbmF0dXJl"
         echo "dialing https://smoke:hunter2@relay.example/anon"
         echo "x-api-key: totally-not-a-secret-value"
+        # An opaque bearer credential: the secret is the second word, so a
+        # pattern that stops at the first space ships it.
+        echo "Authorization: Bearer opaque-bearer-credential"
+        echo "Proxy-Authorization: Basic opaque-proxy-credential"
+        echo 'set-cookie: session=opaque-cookie-value; Path=/'
+        # Upper case, because BSD sed has no case-insensitive substitution and a
+        # pattern that only matches lower case would pass every check above.
+        echo "GET /watch?TOKEN=opaque-query-credential"
     } >"$BUNDLE_WORK/client.log"
     bundle_finish 1
 }
 bundle=$(run_case secret secret_case)
-for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value; do
+for leak in eyJhbGciOiJIUzI1NiJ9 hunter2 totally-not-a-secret-value \
+    opaque-bearer-credential opaque-proxy-credential opaque-cookie-value opaque-query-credential; do
     if grep -rq -- "$leak" "$bundle"; then bad "the redactor removes $leak"; else ok "the redactor removes $leak"; fi
 done
 check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/work/client.log"
+check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
+check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"
 
 # ── logs are bounded, with both ends kept ───────────────────────────────────
 bound_case() {
@@ -146,14 +157,24 @@ teardown_case() {
     printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
     bundle_finish 1
 }
+# `kill -0` is not "is it running": it succeeds on a zombie, and the case above
+# exits the parent that would have reaped this one, so on a host whose PID 1
+# does not adopt orphans the killed sleep stays visible forever. Read the state
+# instead, and treat an unreaped corpse as gone.
+running() {
+    local state
+    state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "$state" && "$state" != Z* ]]
+}
+
 bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
-if kill -0 "$mine" 2>/dev/null; then
+if running "$mine"; then
     ok "a retained session leaves its processes running"
     output=$(bash "$bundle/teardown.sh" 2>&1 || true)
-    if kill -0 "$mine" 2>/dev/null; then bad "teardown reaps the run's process"; else ok "teardown reaps the run's process"; fi
+    if running "$mine"; then bad "teardown reaps the run's process"; else ok "teardown reaps the run's process"; fi
     if grep -q 'reused by another process' <<<"$output"; then
         ok "teardown skips a recycled pid"
     else

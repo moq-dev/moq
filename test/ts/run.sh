@@ -130,6 +130,9 @@ rerun=(just test ts --duration "$DURATION" --bitrate "$BITRATE" --port "$PORT")
 [[ -z "$STRICT" ]] || rerun+=(--strict)
 [[ -z "$WITH_EIT" ]] || rerun+=(--with-eit)
 [[ -z "$LIVE" ]] || rerun+=(--live)
+# The analyzer thresholds ride along too: a rerun without them grades the same
+# capture against different limits, which is a different question.
+rerun+=(${PASSTHRU[@]+"${PASSTHRU[@]}"})
 
 # ── analyze-only: no relay, no build ────────────────────────────────────────
 if [[ -n "$ANALYZE_ONLY" ]]; then
@@ -142,23 +145,9 @@ if [[ -n "$ANALYZE_ONLY" ]]; then
 fi
 
 # ── round-trip capture ──────────────────────────────────────────────────────
-TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
-    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
-[[ -n "$TARGET_BASE" ]] || {
-    echo "error: could not resolve cargo target directory" >&2
-    exit 1
-}
-
-echo "### building moq-relay + moq-cli ($PROFILE)"
-flag=()
-[[ "$PROFILE" == "release" ]] && flag=(--release)
-# qlog is a cargo feature, so capturing traces means building a different relay.
-# Opt-in for that reason: it recompiles quinn with the qlog encoder.
-[[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
-(cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
-RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-MOQ="$TARGET_BASE/$PROFILE/moq"
-
+# The bundle opens before anything that can fail, so a build that never produces
+# a relay still leaves the run identity and the toolchain behind for the upload
+# to collect. Same order as the smoke and WASM harnesses.
 bundle_init ts
 bundle_rerun "${rerun[@]}"
 TMP="$BUNDLE_WORK"
@@ -202,6 +191,23 @@ cleanup() {
     bundle_finish "$status"
 }
 trap cleanup EXIT
+
+TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+[[ -n "$TARGET_BASE" ]] || {
+    echo "error: could not resolve cargo target directory" >&2
+    exit 1
+}
+
+echo "### building moq-relay + moq-cli ($PROFILE)"
+flag=()
+[[ "$PROFILE" == "release" ]] && flag=(--release)
+# qlog is a cargo feature, so capturing traces means building a different relay.
+# Opt-in for that reason: it recompiles quinn with the qlog encoder.
+[[ -z "${MOQ_QA_QLOG:-}" ]] || flag+=(--features moq-relay/qlog)
+(cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
+RELAY="$TARGET_BASE/$PROFILE/moq-relay"
+MOQ="$TARGET_BASE/$PROFILE/moq"
 
 # Source TS: a real capture (preserves all PIDs/PSI) or a generated broadcast-like
 # clip (H.264 + AAC, one-second GOP, per-frame PES so audio interleaves evenly).

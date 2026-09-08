@@ -200,9 +200,21 @@ printf '[%s]\n' "$(
 )" >"$TMP/relays.json"
 
 # ── run ─────────────────────────────────────────────────────────────────────
-status=0
+# `set +e` around the pipeline rather than `|| status=...`: PIPESTATUS is reset
+# by the next simple command, so the `||` branch would read the status of its
+# own assignment. Both halves matter -- a `tee` that could not write leaves the
+# bundle without the transcript the driver just printed.
+set +e
 MOQ_QA_LABEL=wasm bun driver.ts --relays "$TMP/relays.json" --timeout "$TIMEOUT" 2>&1 |
-    tee "$TMP/driver.log" || status=${PIPESTATUS[0]}
+    tee "$TMP/driver.log"
+pipe=("${PIPESTATUS[@]}")
+set -e
+
+status="${pipe[0]}"
+if [[ "${pipe[1]}" -ne 0 ]]; then
+    echo "error: the driver log could not be written to $TMP/driver.log" >&2
+    status=1
+fi
 if [[ $status -eq 0 ]]; then
     bundle_result suite pass
 else
