@@ -684,6 +684,7 @@ run_fault_probe() {
 
 # Capture a slow cell's stack in an owned process group, so cancelling this
 # watchdog also reaps a debugger or timeout process it started.
+# shellcheck disable=SC2329 # harness_spawn invokes this function indirectly.
 run_stack_watchdog() {
     local label="$1" pid="$2"
     sleep "$STACK_AT"

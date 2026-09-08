@@ -221,6 +221,7 @@ printf '[%s]\n' "$(
 # ── run ─────────────────────────────────────────────────────────────────────
 # Keep Chromium in a process group owned by the harness while preserving the
 # transcript on the terminal and in the bundle.
+# shellcheck disable=SC2329 # harness_spawn invokes this function indirectly.
 run_driver() {
     local pipe status
     set +e

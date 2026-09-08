@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031 # Test cases intentionally isolate exported state in subshells.
 # Regression test for the debug-bundle library.
 #
 # The library's whole job happens on the failure path, which is the path a green
@@ -252,6 +253,7 @@ snapshot_failure_case() {
     printf 'Authorization: Bearer partial-snapshot-secret\n' >"$BUNDLE_TRACE_LIVE/browser.har"
     # Simulate cp observing a live capture and then losing it to Playwright's
     # close-time rename. The partial destination must never become uploadable.
+    # shellcheck disable=SC2329 # bundle_finish invokes this test double indirectly.
     cp() {
         printf 'Authorization: Bearer partial-snapshot-secret\n' >"$3/partial.har"
         return 1
@@ -270,6 +272,7 @@ fi
 qlog_completion_failure_case() {
     printf '\036{"time":1}\npartial' >"$BUNDLE_QLOG_LIVE/bad.sqlog"
     printf '\036{"time":2}\n' >"$BUNDLE_QLOG_LIVE/good.sqlog"
+    # shellcheck disable=SC2329 # bundle_finish invokes this test double indirectly.
     mv() {
         if [[ "$1" == *bad.sqlog.complete ]]; then
             return 1
@@ -331,6 +334,7 @@ qlog_cap_case() {
 bundle=$(MOQ_QA_LOG_CAP=128 MOQ_QA_FILE_CAP=8192 run_case qlog-cap qlog_cap_case)
 count=$(LC_ALL=C tr -cd '\036' <"$bundle/qlog/relay.sqlog" | wc -c | tr -d '[:space:]')
 check "qlog byte caps preserve complete JSON-SEQ records" test "$count" -eq 20
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a live qlog snapshot drops its incomplete final record" \
     sh -c '! grep -q partial "$1"' _ "$bundle/qlog/relay.sqlog"
 
@@ -428,6 +432,7 @@ started=$SECONDS
 bundle=$(run_case stack stack_case)
 check "stack capture is bounded" test "$((SECONDS - started))" -lt 90
 check "the hung process is described" test -s "$bundle/stacks/hung.txt"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a direct process stack is not called a harness shell" sh -c \
     '! grep -q "this is the harness shell" "$1"' _ "$bundle/stacks/hung.txt"
 check "the owned process is recorded" grep -q '"name": "hung"' "$bundle/manifest.json"
@@ -510,17 +515,20 @@ mine=$(<"$bundle/mine.pid")
 wrapper=$(<"$bundle/wrapper.pid")
 wrapper_child=$(<"$bundle/wrapper-child.pid")
 unowned=$(<"$bundle/unowned.pid")
-unowned_child=$(<"$bundle/unowned-child.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
     "$bundle/teardown.sh"
 check "surviving groups carry a member birth identity" \
     grep -q "reap_group $wrapper " "$bundle/teardown.sh"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a group without a verified leader acquires no witness" sh -c \
     '! grep -q "reap_group $1 " "$2"' _ "$unowned" "$bundle/teardown.sh"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
 check "a process without a verified birth identity is omitted from the session" sh -c \
     '! grep -q "pid $1 " "$2"' _ "$unowned" "$bundle/session.md"
+# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "retained logs live outside the uploadable bundle" test -d "$live"
 printf '\036{"time":1,"name":"transport:connection_started"}\n' >"$live/qlog/later.sqlog"
@@ -599,6 +607,7 @@ check "a rerun keeps its own bundle" test -f "$second/manifest.json"
 retained_port_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
+    # shellcheck disable=SC2034 # Sourced harness functions consume this path.
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port retained 4557
     harness_spawn retained "$BUNDLE_WORK/retained.log" sleep 120
@@ -627,6 +636,7 @@ check "retained teardown releases its port reservation" test ! -d "$port_root/45
 unowned_port_case() {
     # shellcheck source=/dev/null
     source "$DIR/harness.sh"
+    # shellcheck disable=SC2034 # Sourced harness functions consume this path.
     HARNESS_RUN="$BUNDLE_WORK"
     harness_port unowned 4558
     if harness_retain_ports; then
@@ -637,6 +647,7 @@ unowned_port_case() {
 }
 bundle=$(MOQ_QA_RETAIN=1 MOQ_TEST_PORTS="$port_root" run_case unowned-port unowned_port_case)
 check "a retained failure without live processes releases its port" test ! -d "$port_root/4558"
+# shellcheck disable=SC2016 # The sed expression matches literal Markdown backticks.
 live=$(sed -n 's/^Live captures continue in `\([^`]*\)`.*/\1/p' "$bundle/session.md")
 check "a live evidence directory is private to its owner" test "$(mode "$live")" = 700
 

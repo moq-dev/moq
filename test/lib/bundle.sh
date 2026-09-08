@@ -723,6 +723,7 @@ _bundle_session() {
     {
         printf '# Retained session\n\n'
         printf 'Processes from this run are still alive. They hold their ports until torn down.\n\n'
+        # shellcheck disable=SC2016 # Backticks are Markdown here, not a subshell.
         printf 'Live captures continue in `%s`; the bundle is the redacted failure-time snapshot.\n\n' "$BUNDLE_LIVE"
         printf '## Endpoints\n\n'
         [[ -f "$BUNDLE_META/endpoints.jsonl" ]] &&
@@ -795,6 +796,7 @@ reap_group() {
 }
 
 PRELUDE
+        # shellcheck disable=SC2016 # The generated function expands its own argument.
         printf 'process_start() { %q "$1" 2>/dev/null; }\n\n' "$BUNDLE_LIB_DIR/process-start.py"
         local start_file pid pid_start current_start member member_start members
         for start_file in "$BUNDLE_META/process-starts"/*; do
