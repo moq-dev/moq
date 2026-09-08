@@ -6,7 +6,9 @@
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
+		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
+		"@moq/signals": "workspace:*",
 		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
