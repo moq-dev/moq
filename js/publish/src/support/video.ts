@@ -10,12 +10,14 @@ export function hardwareReliable(): boolean {
 
 /** Probe the browser's software and hardware support for a video codec. */
 export async function probe(codec: string): Promise<Codec> {
-	const software = await VideoEncoder.isConfigSupported({
-		codec,
-		width: 1280,
-		height: 720,
-		hardwareAcceleration: "prefer-software",
-	});
+	const software = codec.startsWith("av01")
+		? { supported: false }
+		: await VideoEncoder.isConfigSupported({
+				codec,
+				width: 1280,
+				height: 720,
+				hardwareAcceleration: "prefer-software",
+			});
 
 	const hardware = await VideoEncoder.isConfigSupported({
 		codec,

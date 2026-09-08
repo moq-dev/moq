@@ -293,17 +293,22 @@ test("screen encoders default to logical pixels without scaling an already reduc
 				},
 			}),
 		},
-		out: { display: new Signal({ width: 5120, height: 2880 }) },
+		out: { display: new Signal({ width: 5120, height: 2880, scale: 2 }) },
 	};
 	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
 	try {
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 2560, height: 1440 });
-		capture.out.display.set({ width: 2560, height: 1440 });
+		capture.out.display.set({ width: 2560, height: 1440, scale: 2 });
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 2560, height: 1440 });
 
-		capture.out.display.set({ width: 5120, height: 2880 });
+		capture.out.display.set({ width: 5120, height: 2880, scale: 2 });
+		await settle();
+		capture.out.display.set({ width: 5120, height: 2880, scale: 1 });
+		await settle();
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 5120, height: 2880 });
+		capture.out.display.set({ width: 5120, height: 2880, scale: 2 });
 		encoder.config.set({ maxScale: 1 });
 		await settle();
 		expect(encoder.out.resolved.peek()).toMatchObject({ width: 5120, height: 2880 });

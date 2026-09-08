@@ -97,7 +97,9 @@ publish.source.camera.enabled.set(true);
 
 Video encoders prefer hardware encoding, including on Firefox 143 and newer. AV1 is only
 considered with hardware acceleration; software selection starts with H.264.
-Screen capture passes `{ track, scale: screenPixelRatio }` as its video source.
+Screen capture passes `{ track, get scale() { ... } }` as its video source, reading
+the current `screenPixelRatio` for each captured frame. Custom sources can use a
+fixed `scale: 2` or a live property getter.
 Encoders default to logical resolution when the browser supplies
 `screenPixelRatio` and native dimensions: a 5120×2880 surface at 2× encodes at
 2560×1440. Browsers without that metadata keep the captured resolution.

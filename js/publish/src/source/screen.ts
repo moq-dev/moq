@@ -123,8 +123,10 @@ export class Screen {
 				video: v
 					? {
 							track: v,
-							scale: (v.getSettings() as MediaTrackSettings & { screenPixelRatio?: number })
-								.screenPixelRatio,
+							get scale() {
+								return (v.getSettings() as MediaTrackSettings & { screenPixelRatio?: number })
+									.screenPixelRatio;
+							},
 						}
 					: undefined,
 				audio: a ? { track: a, kind: "music" } : undefined,

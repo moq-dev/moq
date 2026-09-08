@@ -26,3 +26,22 @@ for (const version of [140, 142, 143, 152]) {
 		}
 	});
 }
+
+test("software-only AV1 is not advertised as usable encoding", async () => {
+	const encoder = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: {
+			isConfigSupported: async (config: VideoEncoderConfig) => ({
+				supported: config.hardwareAcceleration === "prefer-software",
+				config,
+			}),
+		},
+	});
+	try {
+		expect(await probe("av01.0.08M.08")).toEqual({ software: false, hardware: false });
+	} finally {
+		if (encoder) Object.defineProperty(globalThis, "VideoEncoder", encoder);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+	}
+});

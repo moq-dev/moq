@@ -8,7 +8,7 @@ export type Source = StreamTrack | SourceConfig | FrameSource;
 export interface SourceConfig {
 	/** The track to capture. */
 	track: StreamTrack;
-	/** Native pixels per logical pixel; defaults to 1. */
+	/** Native pixels per logical pixel; sampled per frame, so a property getter can provide live values. */
 	scale?: number;
 }
 

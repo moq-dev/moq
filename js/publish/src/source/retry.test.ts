@@ -446,7 +446,11 @@ for (const screenPixelRatio of [undefined, 2]) {
 		const screen = new Screen({ enabled: true });
 		try {
 			await settle();
-			expect(screen.out.source.peek()?.video).toMatchObject({ track: media.video, scale: screenPixelRatio });
+			const source = screen.out.source.peek()?.video;
+			expect(source).toMatchObject({ track: media.video, scale: screenPixelRatio });
+			settings.mockReturnValue({ deviceId: "default", screenPixelRatio: 1 } as MediaTrackSettings);
+			expect(source).toMatchObject({ track: media.video, scale: 1 });
+			expect(screen.out.source.peek()?.video).toBe(source);
 		} finally {
 			screen.close();
 			settings.mockRestore();

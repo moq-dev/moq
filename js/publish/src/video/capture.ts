@@ -12,8 +12,8 @@ type CaptureOutput = {
 	// The captured frames, replaced whenever the source changes. Subscribe for a stream of your own;
 	// each reader owns the frames it receives and must close them.
 	frames: Signal<Fanout<VideoFrame> | undefined>;
-	// The captured (coded) dimensions, tracked from each frame.
-	display: Signal<{ width: number; height: number } | undefined>;
+	// The captured dimensions and source scale, sampled together for each frame.
+	display: Signal<{ width: number; height: number; scale?: number } | undefined>;
 };
 
 /**
@@ -28,7 +28,7 @@ export class Capture {
 
 	readonly #out: CaptureOutput = {
 		frames: new Signal<Fanout<VideoFrame> | undefined>(undefined),
-		display: new Signal<{ width: number; height: number } | undefined>(undefined),
+		display: new Signal<{ width: number; height: number; scale?: number } | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -51,7 +51,7 @@ export class Capture {
 		// FrameSource already stamps against that clock, so take its frames as they are.
 		const stream = "frames" in source ? source.frames : TrackProcessor(normalizeSource(source).track);
 
-		const fanout = new Fanout(stream.pipeThrough(this.#measure()), {
+		const fanout = new Fanout(stream.pipeThrough(this.#measure(source)), {
 			// A frame is a resource with an explicit lifetime, so every reader needs its own handle
 			// and closes it. Sharing one would let the first reader close it under the others.
 			clone: (frame) => frame.clone(),
@@ -65,13 +65,18 @@ export class Capture {
 		});
 	}
 
-	// Read the coded size off each frame on its way past. The signal only notifies when the size
-	// actually changes, so this costs nothing per frame beyond the comparison.
-	#measure(): TransformStream<VideoFrame, VideoFrame> {
+	// Sample live source metadata even when the coded dimensions stay unchanged.
+	#measure(source: Source): TransformStream<VideoFrame, VideoFrame> {
 		return new TransformStream<VideoFrame, VideoFrame>({
 			transform: (frame, controller) => {
-				this.#out.display.set({ width: frame.codedWidth, height: frame.codedHeight });
-				controller.enqueue(frame);
+				try {
+					const scale = "frames" in source ? undefined : normalizeSource(source).scale;
+					this.#out.display.set({ width: frame.codedWidth, height: frame.codedHeight, scale });
+					controller.enqueue(frame);
+				} catch (error) {
+					frame.close();
+					throw error;
+				}
 			},
 		});
 	}

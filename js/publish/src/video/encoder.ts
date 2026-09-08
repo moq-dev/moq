@@ -428,7 +428,7 @@ export class Encoder {
 		let maxPixels =
 			user?.maxPixels ??
 			sourceConstraintPixels(source) ??
-			(user?.maxScale === undefined ? scaledPixels(source) : undefined) ??
+			(user?.maxScale === undefined ? scaledPixels(source, display.scale) : undefined) ??
 			sourcePixels;
 		if (user?.maxScale !== undefined) {
 			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
@@ -607,9 +607,9 @@ function sourceConstraintPixels(source: Source): number | undefined {
 	return width !== undefined && height !== undefined ? width * height : undefined;
 }
 
-function scaledPixels(source: Source): number | undefined {
+function scaledPixels(source: Source, scale: number | undefined): number | undefined {
 	if ("frames" in source) return;
-	const { track, scale } = normalizeSource(source);
+	const { track } = normalizeSource(source);
 	if (scale === undefined) return;
 	if (!Number.isFinite(scale) || scale <= 0)
 		throw new Error(`scale must be a finite number greater than 0: ${scale}`);
