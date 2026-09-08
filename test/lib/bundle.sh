@@ -522,8 +522,8 @@ _bundle_redact_stream() {
         '
 }
 
-# Walk everything retained: bound it, then redact it. Order matters, because
-# bounding is what makes redacting a multi-megabyte log affordable.
+# Walk everything retained: redact text while its context is intact, then bound
+# it. Binary artifacts are either bounded whole or withheld by type.
 _bundle_sweep() {
     local log_cap="${MOQ_QA_LOG_CAP:-2097152}" file_cap="${MOQ_QA_FILE_CAP:-8388608}" file
     local withheld=0
@@ -551,12 +551,18 @@ _bundle_sweep() {
                 ;;
             *)
                 if _bundle_is_text "$file"; then
-                    # Byte-splicing structured metadata makes invalid JSON. Its
-                    # fields are individually small, so keep the manifest whole.
-                    if [[ "$file" != "$BUNDLE_DIR/manifest.json" ]]; then
-                        ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
+                    # Redact while every credential still has its header or
+                    # query-parameter context. Truncating first can strand an
+                    # unrecognizable secret suffix in the retained tail.
+                    if _bundle_redact "$file"; then
+                        # Byte-splicing structured metadata makes invalid JSON.
+                        # Its fields are individually small, so keep it whole.
+                        if [[ "$file" != "$BUNDLE_DIR/manifest.json" ]]; then
+                            ((log_cap == 0)) || _bundle_bound_text "$file" "$log_cap"
+                        fi
+                    else
+                        withheld=$((withheld + 1))
                     fi
-                    _bundle_redact "$file" || withheld=$((withheld + 1))
                 else
                     ((file_cap == 0)) || _bundle_bound_binary "$file" "$file_cap"
                 fi
@@ -659,7 +665,12 @@ reap() {
     local pid="$1" want="$2" have started
     have=$(ps -o command= -p "$pid" 2> /dev/null | head -n 1 || true)
     if [[ -z "$have" ]]; then
-        echo "pid $pid: gone"
+        if kill -0 -- -"$pid" 2>/dev/null; then
+            echo "pid $pid: leader exited; killing remaining process group"
+            kill -KILL -- -"$pid" 2>/dev/null || true
+        else
+            echo "pid $pid: gone"
+        fi
         return
     fi
     started=$(ps -o lstart= -p "$pid" 2> /dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)

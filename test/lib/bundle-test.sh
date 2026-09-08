@@ -150,6 +150,16 @@ check "redaction keeps the endpoint readable" grep -q "127.0.0.1:4443" "$bundle/
 check "redaction ships the file it rewrote" test -f "$bundle/work/client.log"
 check "a clean sweep leaves no failure marker" test ! -f "$bundle/REDACTION-FAILED.txt"
 
+split_secret_case() {
+    printf 'Authorization: Bearer ' >"$BUNDLE_WORK/long-secret.log"
+    head -c 1000 /dev/zero | tr '\0' x >>"$BUNDLE_WORK/long-secret.log"
+    printf '\n' >>"$BUNDLE_WORK/long-secret.log"
+    bundle_finish 1
+}
+bundle=$(MOQ_QA_LOG_CAP=256 run_case split-secret split_secret_case)
+check "redaction precedes log truncation" python3 -c \
+    'import sys; assert "x" * 100 not in open(sys.argv[1]).read()' "$bundle/work/long-secret.log"
+
 # ── logs are bounded, with both ends kept ───────────────────────────────────
 bound_case() {
     {
@@ -294,7 +304,16 @@ while True:
     # teardown has to leave the current owner alone.
     bundle_process stranger "$$"
     printf 'Mon Jan  1 00:00:00 1900' >"$BUNDLE_META/process-starts/$$"
+    mkfifo "$ROOT/wrapper-go"
+    set -m
+    bash -c 'sleep 120 & echo $! >"$1"; IFS= read -r _ <"$2"' _ "$ROOT/wrapper-child" "$ROOT/wrapper-go" &
+    wrapper=$!
+    set +m
+    bundle_process wrapper "$wrapper"
+    printf 'go\n' >"$ROOT/wrapper-go"
+    wait "$wrapper"
     printf '%s\n' "$mine" >"$BUNDLE_DIR/mine.pid"
+    cp "$ROOT/wrapper-child" "$BUNDLE_DIR/wrapper-child.pid"
     bundle_finish 1
 }
 # `kill -0` is not "is it running": it succeeds on a zombie, and the case above
@@ -309,6 +328,7 @@ running() {
 
 bundle=$(MOQ_QA_RETAIN=1 run_case teardown teardown_case)
 mine=$(<"$bundle/mine.pid")
+wrapper_child=$(<"$bundle/wrapper-child.pid")
 check "a retained session is documented" test -f "$bundle/session.md"
 check "the session names a debugger attach command" grep -q "lldb -p" "$bundle/session.md"
 check "the teardown script contains no recorded secret" sh -c '! grep -q teardown-secret "$1"' _ \
@@ -343,6 +363,12 @@ if running "$mine"; then
         printf '%s\n' "$output" >&2
     else
         ok "teardown reaps the run's process"
+    fi
+    if running "$wrapper_child"; then
+        bad "teardown reaps a surviving process group"
+        kill -KILL "$wrapper_child" 2>/dev/null || true
+    else
+        ok "teardown reaps a surviving process group"
     fi
     if grep -q 'reused by another process' <<<"$output"; then
         ok "teardown skips a recycled pid"
