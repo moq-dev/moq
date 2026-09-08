@@ -17,15 +17,20 @@ is what keeps them apart.
 
 Every run owns three things and touches nothing else.
 
-**A private run directory.** `mktemp -d` under `$TMPDIR/moq-test`, mode 700,
+**A private run directory.** `mktemp -d` under `$TMPDIR/moq-test-<uid>`, mode 700,
 holding every log, generated config, and capture. `MOQ_TEST_RUNS` moves the root.
 
 **Reserved ports.** A port is claimed by creating a directory under
-`$TMPDIR/moq-test-ports` (`MOQ_TEST_PORTS`), held for the whole run, and released
-on the way out. That reservation is the point: probing for a free port and then
+`$TMPDIR/moq-test-ports-<uid>` (`MOQ_TEST_PORTS`), held for the whole run, and
+released on the way out. That reservation is the point: probing for a free port and then
 releasing it is a race, and two runs that probe at the same moment pick the same
 number. The walk starts at `MOQ_TEST_PORT_BASE` (4500). A reservation whose owner
-process is gone is reclaimed.
+process is gone is reclaimed, atomically, so two reclaimers cannot both win.
+
+Both roots carry the user id because `TMPDIR` is usually unset on Linux: a fixed
+name in a world-writable `/tmp` belongs to whoever ran first, and everyone else
+would fail to create anything under it. Two worktrees still share, since they run
+as the same user, which is what makes the reservations mean anything.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already

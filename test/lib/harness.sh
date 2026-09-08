@@ -75,11 +75,9 @@ harness_env() {
 harness_begin() {
     local name="$1" rerun="${2:-}"
 
-    # macOS sets TMPDIR with a trailing slash, which would print every path with a
-    # doubled separator.
     local root="${MOQ_TEST_RUNS:-${TMPDIR:-/tmp}}"
     root="${root%/}"
-    [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test"
+    [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
     HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
     # A run directory holds relay configs and generated keys, so keep it to the
@@ -101,10 +99,16 @@ harness_begin() {
 
 # Where port reservations live. Shared across worktrees on purpose: the point is
 # that a run in one worktree cannot hand out a port another already took.
+#
+# The default is suffixed with the user id, like the run root. On Linux TMPDIR is
+# usually unset, so both would land in a world-writable /tmp under a fixed name
+# owned by whoever ran first: a second user's `mkdir` would then fail for every
+# port and the walk would report the whole range taken with nothing reserved. Two
+# worktrees still share, because they run as the same user.
 harness_port_root() {
     local root="${MOQ_TEST_PORTS:-${TMPDIR:-/tmp}}"
     root="${root%/}"
-    [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports"
+    [[ -n "${MOQ_TEST_PORTS:-}" ]] || root="$root/moq-test-ports-$(id -u)"
     echo "$root"
 }
 

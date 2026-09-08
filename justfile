@@ -169,8 +169,12 @@ worktree ACTION="check" $BASE="":
     			echo "warning: cannot set upstream; $common_dir/config is $config" >&2
     		fi
     	fi
+    	# Resolved, written, then renamed into place. A redirect straight into the
+    	# stamp truncates it before git runs, so a failure there would leave an
+    	# empty file that reads back as a recorded base that never existed.
     	if [[ "$worktree_meta" == write ]]; then
-    		git rev-parse "$base" > "$stamp"
+    		git rev-parse "$base" > "$stamp.tmp"
+    		mv "$stamp.tmp" "$stamp"
     	fi
     fi
 
@@ -184,15 +188,20 @@ worktree ACTION="check" $BASE="":
     echo "upstream:    $(git rev-parse --abbrev-ref '@{upstream}' 2> /dev/null || echo '(unset)')"
     echo "behind:      $(git rev-list --count "HEAD..$base") commit(s)"
 
-    if [[ -f "$stamp" ]]; then
-    	recorded=$(cat "$stamp")
-    	if [[ "$recorded" == "$head" ]]; then
-    		echo "recorded:    $(git rev-parse --short "$recorded") (current)"
-    	else
-    		echo "recorded:    $(git rev-parse --short "$recorded") (STALE; $base has moved since setup)"
-    	fi
-    else
+    recorded=""
+    [[ -f "$stamp" ]] && recorded=$(cat "$stamp")
+
+    # A stamp that no longer names a commit is worse than none: reporting it would
+    # abort here on the `rev-parse --short` rather than say what to do about it.
+    # An interrupted setup, or a base garbage-collected out of the repository.
+    if [[ -z "$recorded" ]]; then
     	echo "recorded:    (none; run 'just worktree setup')"
+    elif ! git rev-parse --verify --quiet "$recorded^{commit}" > /dev/null; then
+    	echo "recorded:    $recorded (UNKNOWN COMMIT; run 'just worktree setup')"
+    elif [[ "$recorded" == "$head" ]]; then
+    	echo "recorded:    $(git rev-parse --short "$recorded") (current)"
+    else
+    	echo "recorded:    $(git rev-parse --short "$recorded") (STALE; $base has moved since setup)"
     fi
 
 # Install repo-wide tooling. Per-language deps install on first check.
