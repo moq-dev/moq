@@ -518,6 +518,31 @@ recycled_stack_case() {
 bundle=$(run_case recycled-stack recycled_stack_case)
 check "a recycled process receives no debugger attachment" test ! -e "$bundle/stacks/recycled.txt"
 
+unrelated_stack_case() {
+    sleep 120 &
+    root=$!
+    sleep 120 &
+    unrelated=$!
+    bundle_process root "$root"
+    # shellcheck disable=SC2329 # bundle_stack invokes these test doubles indirectly.
+    _bundle_descendants() { printf '%s\n' "$root" "$unrelated"; }
+    # shellcheck disable=SC2329 # bundle_stack invokes these test doubles indirectly.
+    _bundle_stack_one() { printf '%s\n' "$1" >>"$BUNDLE_WORK/attached"; }
+    bundle_stack root "$root"
+    printf '%s\n' "$root" >"$BUNDLE_DIR/root.pid"
+    printf '%s\n' "$unrelated" >"$BUNDLE_DIR/unrelated.pid"
+    kill "$root" "$unrelated" 2>/dev/null || true
+    wait "$root" "$unrelated" 2>/dev/null || true
+    bundle_finish 1
+}
+bundle=$(run_case unrelated-stack unrelated_stack_case)
+root_pid=$(<"$bundle/root.pid")
+unrelated_pid=$(<"$bundle/unrelated.pid")
+check "stack capture includes the verified root" grep -qx "$root_pid" "$bundle/work/attached"
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+check "stack capture skips an unrelated enumerated pid" \
+    sh -c '! grep -qx "$1" "$2"' _ "$unrelated_pid" "$bundle/work/attached"
+
 # ── teardown reaps only what the run owned ──────────────────────────────────
 teardown_case() {
     # The argument exercises a credential-shaped command without exposing it in

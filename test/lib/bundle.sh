@@ -317,6 +317,18 @@ _bundle_descendants() {
     for child in $(pgrep -P "$pid" 2>/dev/null || true); do _bundle_descendants "$child"; done
 }
 
+_bundle_descendant_of() {
+    local root=$1 current=$2 parent
+    [[ "$current" == "$root" ]] && return 0
+    while [[ "$current" =~ ^[0-9]+$ && "$current" -gt 1 ]]; do
+        parent=$(ps -o ppid= -p "$current" 2>/dev/null | tr -d '[:space:]' || true)
+        [[ "$parent" =~ ^[0-9]+$ && "$parent" != "$current" ]] || return 1
+        [[ "$parent" == "$root" ]] && return 0
+        current=$parent
+    done
+    return 1
+}
+
 bundle_stack() {
     local name=$1 pid=$2 wrapper=${3:-} start_file wanted current
     [[ -n "$BUNDLE_DIR" ]] || return 0
@@ -336,6 +348,7 @@ bundle_stack() {
             printf 'stopped after %s processes (MOQ_QA_STACK_MAX)\n' "${MOQ_QA_STACK_MAX:-8}" >>"$out"
             break
         fi
+        _bundle_descendant_of "$pid" "$target" || continue
         target_start=$(_bundle_process_start "$target" || true)
         [[ -n "$target_start" ]] || continue
         current=$(_bundle_process_start "$pid" || true)
@@ -351,6 +364,7 @@ bundle_stack() {
         [[ -n "$current" && "$current" == "$wanted" ]] || break
         current=$(_bundle_process_start "$target" || true)
         [[ -n "$current" && "$current" == "$target_start" ]] || continue
+        _bundle_descendant_of "$pid" "$target" || continue
         _bundle_stack_one "$target" >>"$out" 2>&1
     done
 
