@@ -55,9 +55,9 @@ MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. A
 `discontinuity_indicator` on the program's PCR PID is a system time-base reset,
 so it breaks every track's timeline and the exported clock declares the break in
-turn. The same flag on an elementary PID, a continuity-counter gap, and the
-33-bit timestamp rollover move no clock and declare nothing. FLV covers
-H.264 + AAC.
+turn. The same flag on an elementary PID other than the program PCR PID, a
+continuity-counter gap, and the 33-bit timestamp rollover move no clock and
+declare nothing. FLV covers H.264 + AAC.
 
 MPEG-TS export restarts its clock and table cadence after a publisher rewind,
 discarding the old mux buffer. The first new clock packet signals the break and
