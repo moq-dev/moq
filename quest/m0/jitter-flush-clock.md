@@ -44,4 +44,3 @@ clock-free estimates from the media span of each emitted batch.
 ## Related
 
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - reads this field as its floor
-- [Encoder lag](/quest/m0/publish-audio-lag-measure.md) - the js/publish measurement this replaces the hint with
