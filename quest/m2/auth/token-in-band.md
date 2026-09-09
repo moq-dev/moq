@@ -30,9 +30,10 @@ AUTH-capable.
   stream. A token that went into the URL or the setup option is the
   connection credential, and the empty-token stream is its one and only
   stream; every other configured token gets its own AUTH stream on an
-  AUTH-capable session, so no token is ever granted twice. On moq-transport the first token also rides the AUTHORIZATION
-  TOKEN setup option (`ParameterBytes::AuthorizationToken`, `USE_VALUE`,
-  token type 0), which scopes at accept the way the URL does.
+  AUTH-capable session, so no token is ever granted twice. On moq-transport
+  the first token also rides the AUTHORIZATION TOKEN setup option
+  (`ParameterBytes::AuthorizationToken`, `USE_VALUE`, token type 0), which
+  scopes at accept the way the URL does.
 - The relay admits on the URL, then widens. An anonymous connection today is
   admitted with the public grant when one is configured and refused
   otherwise; with this quest a connection with no URL credential and no
