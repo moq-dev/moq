@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.8...moq-srt-v0.2.9) - 2026-09-09
+
+### Fixed
+
+- *(moq-srt)* re-anchor egress pacing after a publisher rewind ([#3488](https://github.com/moq-dev/moq/pull/3488))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.7...moq-srt-v0.2.8) - 2026-09-02
 
 ### Other

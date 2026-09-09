@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19](https://github.com/moq-dev/moq/compare/moq-net-v0.2.18...moq-net-v0.2.19) - 2026-09-09
+
+### Added
+
+- *(obs)* add connection stats and encoding controls to the MoQ dock ([#3453](https://github.com/moq-dev/moq/pull/3453))
+- *(moq-net)* stitch a draft-20 fill into the group it joined ([#3325](https://github.com/moq-dev/moq/pull/3325))
+
+### Fixed
+
+- *(moq-net)* prune origin nodes that nothing is using ([#3537](https://github.com/moq-dev/moq/pull/3537))
+- *(moq-net)* a group consumer is one cursor, so an evicted group skips instead of ending the export ([#3515](https://github.com/moq-dev/moq/pull/3515))
+- *(moq-net)* keep the draft-14/15 namespace map consistent and let it shrink ([#3481](https://github.com/moq-dev/moq/pull/3481))
+- *(relay)* stop the cache headroom governor with its pool ([#3487](https://github.com/moq-dev/moq/pull/3487))
+- *(moq-net)* answer for a name the broadcast never served ([#3366](https://github.com/moq-dev/moq/pull/3366))
+- *(moq-net)* give control streams a send order above the media ([#3389](https://github.com/moq-dev/moq/pull/3389))
+
+### Other
+
+- fold the moq-net fuzz harness into the workspace ([#3543](https://github.com/moq-dev/moq/pull/3543))
+- run orphaned test suites nightly ([#3538](https://github.com/moq-dev/moq/pull/3538))
+- make the agent guides minimal and situational ([#3469](https://github.com/moq-dev/moq/pull/3469))
+- *(moq-net)* guard the fuzz workspace lockfile ([#3465](https://github.com/moq-dev/moq/pull/3465))
+- abandon the track re-announce quest ([#3459](https://github.com/moq-dev/moq/pull/3459))
+
 ## [0.2.18](https://github.com/moq-dev/moq/compare/moq-net-v0.2.17...moq-net-v0.2.18) - 2026-09-02
 
 ### Added

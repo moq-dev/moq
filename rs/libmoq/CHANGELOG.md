@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14](https://github.com/moq-dev/moq/compare/libmoq-v0.5.13...libmoq-v0.5.14) - 2026-09-09
+
+### Added
+
+- *(obs)* add connection stats and encoding controls to the MoQ dock ([#3453](https://github.com/moq-dev/moq/pull/3453))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(native)* default noq and iroh to BBRv3 now that noq 1.2.0 lands the loss fix ([#3536](https://github.com/moq-dev/moq/pull/3536))
+
+### Other
+
+- take every feature that needs a library or libclang at build time off the defaults ([#3464](https://github.com/moq-dev/moq/pull/3464))
+
 ### Added
 
 - `moq_session_snapshot` for statistics and negotiated protocol from the same live connection
