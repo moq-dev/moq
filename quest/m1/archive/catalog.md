@@ -1,43 +1,55 @@
-# [S] Archive catalog
+# [M] Archive catalog
 
 ## Goal
 
-A HANG catalog can advertise a durable archive, its Window timeline, and its
-stable replay identity through one root `archive` entry.
+A HANG catalog advertises its segment index and any durable archive through
+one root `archive` entry that replaces `timeline`: the timeline track, the
+replay MoQ broadcast path, the object-store URL, and the format version.
 
 ## Plan
 
-Add `archive` as a distinct root capability, not an alias for the current live
-`timeline`. The entry keeps the timeline track, timescale, maximum duration, and
-wall-clock anchor, then adds the archive format version, stable replay URL, and
-broadcast epoch. The catalog supplies the timeline track's name and
-configuration; it has no reserved physical identity.
+One breaking catalog change: the root `archive` entry subsumes `timeline`
+(`rs/hang/src/catalog/root.rs:39-42`), so exactly one entry names the segment
+index. It carries:
 
-The entry promises that every range in the advertised timeline is durably
-FETCHable. A broadcast with no archive store has no `archive` entry. The latest
-catalog group still comes from ordinary SUBSCRIBE, and authorization for the
-replay URL remains external so managed and customer-owned stores share one
-format.
+- the timeline fields as they stand in `rs/hang/src/catalog/timeline.rs:24-55`
+  (`track`, `timescale`, `durationMax`, `wall`)
+- the replay MoQ broadcast path the archive is served back from, if any
+- the object-store URL the objects live under, if the publisher exposes one
+- the format version from [format](/quest/m1/archive/format.md)
 
-Catalog composition preserves a child's archive entry instead of synthesizing
-one for a derivative. A catch-all replay route may expose the stable URL, but
-the catalog epoch identifies the exact recording generation.
+A live publisher without a store advertises `archive` with the timeline
+fields alone, and the store-less HLS export
+(`rs/moq-hls/src/export/mod.rs:3-8`) reads `archive.timeline` where it reads
+`timeline` today, so nothing loses HLS across the change. The entry promises
+that every range in the advertised timeline is FETCHable; with a store it
+promises the ranges are durable. There is no alias, dual-write, or fallback
+`timeline` entry, and no epoch: a wildcard replay path names no generation,
+and a client that must tell recordings apart compares the entry's replay path
+and store URL.
 
-This entry is portable discovery while the catalog exists. It does not keep a
-source catalog alive or enumerate offline recordings. Managed deployments
-(moq.pro) use their durable recordings API after source teardown and can expose
-a growing deep window through a separate live archive contribution downstream.
+The catalog supplies the timeline track's name and configuration; the
+timeline has no reserved physical identity. The latest catalog group still
+comes from ordinary SUBSCRIBE, and authorization for the replay path and
+store URL stays external so managed and customer-owned stores share one
+format. Catalog composition preserves a child's `archive` entry instead of
+synthesizing one for a derivative.
 
-Keep the existing `timeline` entry during migration so publishers without a
-store remain exportable. [Archive catalog cutover](/quest/m1/archive/cutover.md)
-deletes it after every supported publisher can emit `archive`; do not make
-either entry a compatibility alias for the other.
+The entry is portable discovery while the catalog exists. It does not keep a
+source catalog alive or enumerate offline recordings; managed deployments
+(moq.pro) use their recordings API after source teardown.
+
+Land it as one change across `rs/hang` (the catalog type, `moq-mux`
+`Producer::section` at `rs/moq-mux/src/timeline.rs:907`, `moq-hls`), the
+`js/hang` mirror (`js/hang/src/catalog/root.ts:27`,
+`js/hang/src/container/timeline.ts:131`), and a new Catalog Section in the
+draft's Timeline chapter (`drafts/draft-lcurley-moq-hang.md:560`) replacing
+`timeline`.
 
 ## Required
 
-- [Archive timeline](/quest/m1/archive/timeline.md)
+- [Recording format](/quest/m1/archive/format.md) - the version the entry advertises
 
 ## Related
 
-- [Catalog version binding](/quest/m1/archive/catalog-version.md) - explicit
-  historic applicability is deliberately separate
+- [Catalog version binding](/quest/m1/archive/catalog-version.md) - explicit historic applicability is deliberately separate

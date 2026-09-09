@@ -1,40 +1,41 @@
-# [S] libmoq: C ABI catch-up with the moq-ffi surface
+# [M] libmoq: dynamic track serving and server-side accept
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2152](https://github.com/moq-dev/moq/issues/2152)
-within the issue's stated scope and boundaries.
+A C embedder serves tracks on demand inside a broadcast it publishes, and
+accepts sessions itself through the same two-phase SETUP the FFI exposes.
+These are the two `moq-ffi` capabilities `rs/libmoq` still lacks that ride
+the request records #3190 reshapes.
 
 ## Plan
 
-Rescoped during the 2026-08 grooming: subscription options, track info, abort
-codes, and client TLS roots landed in dev's rs/libmoq. Remaining gaps:
-fetch_group, dynamic track serving within a broadcast, server-side accept, and
-datagrams, tracked against the dev FFI surface. Broadcast serving is not in
-this quest: the announce handle that advertises a prefix and yields its
-requests reaches C through the bindings quest linked below, so do not add a
-separate `requested_broadcast` path here.
+Most of the catch-up #2152 lists has landed in dev's `rs/libmoq/src/api.rs`:
+subscription options, track info, abort codes, client TLS roots, datagrams
+(`moq_datagram` :462-468, `moq_publish_track_datagram` :1948, and
+`moq_consume_datagrams` with its read, free, and close :2599-2650), and raw
+frame timestamps (:2538-2541). Two gaps remain:
 
-### Issue context
+- Dynamic track serving. moq-ffi's `MoqBroadcastProducer::requested_track`
+  yields a `MoqTrackRequest` whose `accept(info)` returns the producer
+  (rs/moq-ffi/src/producer.rs:483, :624); api.rs has no `requested` symbol.
+  Mirror it as a callback-delivered request handle with accept and reject,
+  on the datagram task's handle and terminal-status contract. Broadcast
+  requests are not in this quest: `requested_broadcast` reaches C through
+  #3190's dynamic handle, so do not add a separate path here.
+- Server-side accept. moq-ffi's `MoqServer::accept` yields a `MoqRequest`
+  whose own `accept()` completes SETUP (rs/moq-ffi/src/server.rs:54, :144,
+  :186, :259); a C embedder cannot accept sessions at all.
 
-The libmoq C ABI (`rs/libmoq/src/api.rs`) has fallen well behind moq-ffi. All of these are additive (new symbols), so none block the dev->main merge, but the backlog is getting long:
+Each addition regenerates `moq.h`, touches `cpp/obs/src` only if used, and
+updates `doc/lib/c/index.md`. That page's capability list (:39) already
+claims dynamic tracks for C; the request handle makes it true.
 
-- **Subscription options**: `moq_consume_track` takes no options; no priority/ordered/stale/group-range equivalent of `MoqSubscription`, and no mid-stream update.
-- **Track info on publish**: `moq_publish_track` cannot set `timescale`/`priority`/`ordered`/`cache` (no `MoqTrackInfo` equivalent).
-- **Fetch**: no `fetch_group`, and no dynamic group serving (moq-ffi gains these in #2142; mirror the shape).
-- **Dynamic track/broadcast serving**: no `requested_track`/`requested_broadcast` path at all.
-- **abort with error code**: only clean close/finish exists; no abort(code) for tracks/groups.
-- **Server / two-phase accept**: no server-side API (moq-ffi has `MoqServer`/`MoqRequest` with the SETUP path); C embedders cannot accept sessions.
-- **Client TLS knobs**: roots/system-roots/fingerprints/disable-verify are env-only; moq-ffi exposes them as options.
-- **Datagrams**: tracked with the moq-ffi datagram issue; mirror whatever lands there.
-- **Raw-frame timestamps**: raw consume reports `timestamp_us = 0`; tracked with the raw-frame timestamps issue.
+Branch from `dev`, after #3190. Fetch and the video format knob are additive,
+so they ship on main through the related quest.
 
-Suggest splitting off pieces as they're picked up rather than one mega-PR. Each addition also touches `cpp/obs` consumers only if used, plus `doc/lib/c` per the Cross-Package Sync table.
+## Required
 
-Video decode is the widest hole on the C side: `moq-ffi` has a `video`
-feature over `moq-video` (NVIDIA and VAAPI on), but `libmoq`'s
-`moq_consume_video_raw` is H.264-only with no format or resolution knob.
-`moq play` is the worked example of what the shape should be.
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the dynamic handle and request records these calls share
 
 ## Closes
 
@@ -42,4 +43,4 @@ feature over `moq-video` (NVIDIA and VAAPI on), but `libmoq`'s
 
 ## Related
 
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - brings the announce handle and broadcast request serving to C
+- [libmoq fetch](/quest/m2/libmoq-fetch.md) - fetch_group and the video format knob, on main

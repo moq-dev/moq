@@ -71,7 +71,7 @@ fork's worth of work and its top two levels already match.
 Measure against the two configurations reachable without any of this, both
 real options: a scalar send order of `[track][group]`, which buys strict
 priority and newest-first while giving up fairness (see
-[Send order width](/quest/m1/perf/send-order-width.md)), and a scalar of
+[Send order width](/quest/m2/perf/send-order-width.md)), and a scalar of
 `track` alone, which lets quinn's fairness through and gives up newest-first.
 A congested session carrying two equal-priority tracks of different group
 cadence, audio against video, must keep both progressing rather than draining
@@ -87,7 +87,7 @@ the same scenarios through raw QUIC and qmux.
 
 ## Required
 
-- [Send order width](/quest/m1/perf/send-order-width.md) - the scalar lands first; the prototype is measured against it
+- [Send order width](/quest/m2/perf/send-order-width.md) - the scalar lands first; the prototype is measured against it
 - [Establish the noq relationship](/quest/m2/quic/parent.md) - the scheduler
   is proposed to noq first
 
@@ -101,5 +101,5 @@ the same scenarios through raw QUIC and qmux.
 - [moq#3320](https://github.com/moq-dev/moq/pull/3320) - removes the current
   dense-rank queue from the wide scalar path and records why a scalar cannot
   provide this fairness level
-- [Transmission order](/quest/m1/ladder/transmit.md) - rendition priority is a
-  policy consumer of the same hierarchy
+- [Ladder controller](/quest/m2/ladder/controller.md) - rendition priority is
+  a policy consumer of the same hierarchy

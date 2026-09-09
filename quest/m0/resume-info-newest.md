@@ -37,11 +37,11 @@ mismatch is reachable from any client.
 
 ### Not covered by an existing tracker
 
-[#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md)
+[#2991](/quest/m2/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md)
 is about sequence continuity across replacement, not info resolution. #2610's
 epoch remedy was removed from the draft by #3225, so there is no wire-level
 generation marker to lean on; the fix is local.
 
 ## Related
 
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - sequence continuity across the same replacement
+- [#2991](/quest/m2/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - sequence continuity across the same replacement

@@ -43,7 +43,7 @@ dependency.
   under `acme.dir`, and the existing `notify` file watcher swaps it in on the
   next handshake, so no new `moq-tokio` surface is needed and per-worker
   rotation rides
-  [TLS rotation atomicity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md).
+  [TLS rotation atomicity](/quest/m2/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md).
   One file is what makes the rotation atomic: the watcher reloads both paths
   on every event and refuses a mismatched pair, so separate key and chain
   files would open a window where a new chain meets the old key, and a
@@ -117,7 +117,7 @@ reload.
 
 ## Required
 
-- [TLS rotation atomicity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every supported worker must share one reloadable identity before ACME can promise renewal
+- [TLS rotation atomicity](/quest/m2/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every supported worker must share one reloadable identity before ACME can promise renewal
 
 ## Closes
 

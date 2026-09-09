@@ -1,50 +1,36 @@
-# [M] Preserve structured protocol error codes across FFI and C bindings
+# [L] Preserve structured protocol error codes across FFI and C bindings
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3187](https://github.com/moq-dev/moq/issues/3187)
-within the issue's stated scope and boundaries.
+Every binding (Python, Swift, Kotlin, Go, Dart, C) can read the exact session
+or stream code a peer sent, tell session scope from stream scope, match a known
+kind, and keep an application or unknown code without loss. Transport and
+internal failures stay separate from protocol failures.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Rust keeps the structure: `SessionError::App(u16)` and `Unknown(u32)`
+(`rs/moq-net/src/error.rs:60-108`). The UniFFI boundary throws it away:
+`MoqError` is `#[uniffi(flat_error)]` (`rs/moq-ffi/src/error.rs:2-7`), so every
+`moq_net::Error` reaches a binding as `Protocol` plus a message. The C facade
+does the same through `libmoq::Error::Moq` (`rs/libmoq/src/error.rs:9-21`) and
+the thread-local `moq_error()` string (`rs/libmoq/src/api.rs:736`). Callers can
+send application codes through abort and cancel but cannot inspect a received
+one, so protocol-defined recovery or policy is impossible outside Rust.
 
-### Issue context
+- Remove `flat_error` and export a structured error record: scope (session or
+  stream), the numeric code, the known kind when recognized, and the message.
+  Keep the broad categories matchable.
+- `to_code` is deliberately not injective (`error.rs:89-96`: a received 32-63
+  decodes as `Unknown`), so the record carries the received code verbatim
+  rather than re-deriving it from the kind.
+- C gets getters or an output record; parsing `moq_error()` is not the API.
+- Cross-language tests cover a known code, an application code, and an unknown
+  code.
 
-#### Problem
-
-Rust preserves structured session and stream failures, including known protocol variants, application codes, and unknown future codes:
-
-- [`SessionError::App(u16)` and `Unknown(u32)`](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/rs/moq-net/src/error.rs#L60-L108)
-- [TypeScript session and stream code types](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/js/net/src/error.ts#L10-L145)
-
-The UniFFI boundary flattens every `moq_net::Error` into the broad `MoqError::Protocol` variant:
-
-- [FFI error mapping](https://github.com/moq-dev/moq/blob/7494084aaf7e2fa6abe553ac83101ac4ef19f33a/rs/moq-ffi/src/error.rs#L1-L8)
-
-The C facade similarly reports a broad status with textual detail. Python, Swift, Kotlin, Go, and C callers can send application error codes through abort and cancel APIs, but cannot reliably inspect a received code. This prevents applications from implementing protocol-defined recovery or policy.
-
-#### Proposed direction
-
-Expose a portable structured protocol error shape that preserves:
-
-- session versus stream scope
-- the exact numeric code
-- a known semantic kind when recognized
-- unknown future codes without lossy conversion
-- a human-readable message for diagnostics
-
-Keep transport and internal failures separate from protocol failures. C should expose equivalent getters or an output record rather than requiring callers to parse `moq_error()`.
-
-#### Acceptance criteria
-
-- Every binding can recover the exact received session or stream code.
-- Application-defined and unknown codes round-trip without loss.
-- Callers can still match broad error categories ergonomically.
-- Cross-language tests cover a known code, an application code, and an unknown code.
-- The public shape is designed on `dev` before the next binding compatibility release.
+Breaking on the binding surface, so it lands on dev. Sized [L]: a `moq-ffi`
+shape change walks the whole cross-package sync table (`rs/libmoq`, `py`,
+`swift`, `kt`, `dart`, `go/wrapper`, and `doc/lib`).
 
 ## Closes
 

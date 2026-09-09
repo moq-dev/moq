@@ -19,9 +19,8 @@ kind, at its priority rank.
 
 - [m0: bug fixes](/quest/m0/README.md) - defects in what main ships today,
   security first
-- [m1: the dev line](/quest/m1/README.md) - the thread-per-core runtime, net
-  model follow-ups, breaking bindings work, and the archive line that gates
-  the dev merge
+- [m1: the dev line](/quest/m1/README.md) - the breaking API and wire
+  changes, the archive line that gates the dev merge, and the merge itself
 - [m2: features](/quest/m2/README.md) - new capabilities on stable surfaces,
   from wire extensions to E2EE to developer packages
 - [m3: prototypes](/quest/m3/README.md) - experiments, spikes, hardware

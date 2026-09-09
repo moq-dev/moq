@@ -36,4 +36,4 @@ degree and adds a second, more specific route per carried broadcast.
 ## Related
 
 - [Routes per broadcast gauge](/quest/m2/route-gauge.md) - the operator-facing count, shippable on its own
-- [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost
+- [Perf](/quest/m2/perf/README.md) - the hot-path work that owns the remaining per-cell cost

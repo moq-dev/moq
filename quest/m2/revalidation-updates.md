@@ -55,4 +55,4 @@ On main, additive.
 ## Related
 
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the scope contract this inherits
-- [Auth verdict](/quest/m2/auth-verdict.md) - the proxy mode whose re-check this also governs
+- the proxy auth verdict mode, whose re-check this also governs (no quest yet)

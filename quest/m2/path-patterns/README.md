@@ -91,5 +91,5 @@ CAT cannot represent `pid/*/chat`.
 
 ## Related
 
-- [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
+- [Wildcard advertisements](/quest/m1/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work

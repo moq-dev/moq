@@ -17,9 +17,12 @@ When a player requests media, use the recording reader to GET only the selected
 `(track, segment)` object and transmux its groups on demand. Switching between
 360p and 1080p must not download both rendition objects. No LL-HLS parts.
 
-Emit `EXT-X-ENDLIST` only when the caller supplies terminal state out of band.
-The portable archive has no completion marker in the first version, so a
-standalone or BYOB archive without such a caller remains a reloadable playlist.
+Emit `EXT-X-ENDLIST` exactly when the timeline track the exporter reads
+finishes cleanly, as the live export already does
+(`rs/moq-hls/src/export/mod.rs:325-327`, `rendition.rs:243-246`). The store
+holds no completion marker: the reader finishes the replayed timeline track
+when its caller supplies finality out of band, so a standalone or BYOB archive
+without such a caller stays a reloadable playlist.
 
 Initially select the historic catalog snapshot by the existing moq-net timestamp
 rule. Explicit group-to-catalog identity belongs to the related

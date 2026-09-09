@@ -62,6 +62,12 @@ transport API change, not a MoQ wire change.
   fork
 - [Probe by early retransmission](/quest/m2/quic/probe.md) - measure capacity
   with useful retransmissions instead of padding
+- [#2296](/quest/m2/quic/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) -
+  the quiche backend honors every listen/connect setting quinn and noq do, or
+  refuses it by name, and can serve a worker group
+- [#2853](/quest/m2/quic/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) -
+  a quiche dial with a pinned source port waits for the all-family DNS answer
+  before taking its one candidate
 
 ## Related
 

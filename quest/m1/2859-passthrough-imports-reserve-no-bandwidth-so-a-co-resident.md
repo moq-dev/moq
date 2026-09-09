@@ -1,44 +1,103 @@
-# [M] Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
+# [L] Passthrough imports reserve their measured peak bitrate
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2859](https://github.com/moq-dev/moq/issues/2859)
-within the issue's stated scope and boundaries.
+A passthrough import (`moq import rtmp`, `srt`, `rtc`, `hls`, or a container
+on stdin) sharing a connection with a capture encoder claims each of its
+tracks' peak-hold bitrate on the connection's allocator, so the encoder
+targets what is left of the uplink instead of the whole of it. Passthrough
+tracks reserve and never follow: nobody here chose their bitrate, so a grant
+is nothing they can act on.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+Only encoders reserve today: the moq-video capture loop
+(`rs/moq-video/src/encode/producer.rs:467-469`) and moq-audio's capture
+driver (`rs/moq-audio/src/encode/capture.rs:471-474`). Passthrough tracks are
+minted by `moq_mux::import::Track::{audio,video}`
+(`rs/moq-mux/src/import/track.rs:195-202`, `:233-239`), which register
+nothing, so a capture encoder over-targets by exactly the import's bitrate.
+[#2809](https://github.com/moq-dev/moq/pull/2809) made running the two
+together routine.
 
-### Issue context
+### The number
 
-Follow-up to [#2854](https://github.com/moq-dev/moq/pull/2854), which divides a connection's send estimate among the tracks sharing it.
+A passthrough track has no configured ceiling, and the allocator's rule is to
+reserve a ceiling, never a measurement (`rs/moq-net/src/model/bandwidth.rs:213-218`).
+`moq_mux::catalog::Estimate::bitrate` is the exception: it is the maximum
+over 1 s windows, a peak-hold that only ever rises
+(`rs/moq-mux/src/catalog/estimate.rs:6`, `:194-212`). Every container
+`Producer` already keeps an `Estimator` (`rs/moq-mux/src/container/producer.rs:59`)
+and the codec importers push it into the catalog rendition on every cut
+(`rs/moq-mux/src/codec/legacy.rs:181-184`).
 
-#### Problem
-
-Only tracks that *encode* register a reservation today: `moq-video` and `moq-audio`'s `publish_capture`. A passthrough import (`moq import rtmp`, `srt`, `hls`) republishes media that arrived already encoded, and those tracks are minted by the container importers, which register nothing.
-
-So a capture publish and an rtmp import sharing one connection are invisible to each other: the capture encoder targets the whole uplink while the rtmp stream independently consumes a chunk of it, and the encoder over-targets by exactly the rtmp stream's bitrate. It's [#2815](https://github.com/moq-dev/moq/issues/2815) one layer up, and [#2809](https://github.com/moq-dev/moq/pull/2809) is what makes running the two together routine.
-
-#### The wrinkle, and why it's resolvable
-
-A passthrough track has **no configured ceiling**. Nobody here chose its bitrate; the upstream encoder did. The only number available is measured, which normally fails the rule the allocator is built on: reserve the maximum a track can ever send, never what it happens to be sending. A VBR source sitting on a black screen at 1 Mbps can jump to 6 Mbps between one frame and the next, and a reservation that had followed it down would already have handed that room to somebody else.
-
-`moq_mux::catalog::Estimate::bitrate` is the exception. It is documented as *the maximum* bitrate, measured over a 1s window, so it's a peak-hold rather than an instantaneous rate, and it satisfies the ceiling rule as-is. The importers already feed it (`catalog::Estimator`), so the number is sitting there.
-
-#### What to build
-
-Register each passthrough track with its catalog-estimated bitrate, in the reserve-only mode `moq-audio` already uses: claim the budget, never follow the grant. A passthrough track can't be asked to back off, so its entry means "subtract this from everyone else's budget" rather than a ceiling anyone will respect. That's the same shape PCM audio needs, so no new mode.
+Update cadence: the container `Producer` calls `Reservation::update` whenever
+`estimate().bitrate` exceeds the ceiling it reserved, which happens at most
+once per closed window and only upward. That is legitimate under
+`Reservation::update`'s contract (`bandwidth.rs:320-325`): the ceiling
+genuinely moved. A ratchet discovers a ceiling late; it never follows a VBR
+source down and never hands room away when the picture goes still.
 
 Two known limits, neither fatal:
 
-- **A peak-hold starts at zero.** Until the source's first peak, the reservation understates and a co-resident encoder over-targets by the difference. It converges within seconds, and it is strictly better than the reservation of zero these tracks hold today.
-- **The estimate updates as the source's peak grows**, so the reservation ratchets up over the life of the stream and never down. That's the conservative direction, which is the right one here.
+- The first window closes after 1 s of media, so until then the track claims
+  nothing and a co-resident encoder over-targets by the difference. Take the
+  reservation on the first estimate rather than reserving zero.
+- The claim never shrinks over the life of the stream. That is the
+  conservative direction.
 
-Priority falls out of [#2854](https://github.com/moq-dev/moq/pull/2854): the importers now stamp `hang::catalog::PRIORITY` per kind, so an imported audio track already outranks an imported video one.
+### Plumbing
+
+`spawn_import` receives the connection's allocator and discards it without
+the capture feature (`rs/moq-cli/src/main.rs:448`, `:451-454`).
+`crate::moq::ImportTarget { origin, name, max_age }`
+(`rs/moq-cli/src/moq.rs:15-26`, minted at `main.rs:465-469`) gains
+`bandwidth: moq_net::bandwidth::Allocator`, and every importer takes it the
+way it takes `max_age`:
+
+- rtmp and srt: `listen_import` / `connect_import` (`rs/moq-cli/src/rtmp.rs:47`,
+  `:113`; `rs/moq-cli/src/srt.rs:35`, `:99`) hand it to
+  `moq_rtmp`'s `Publish::accept` (`rs/moq-rtmp/src/server.rs:518-535`, into
+  `Publisher::new`) and `moq_srt`'s (`rs/moq-srt/src/server.rs:333-337`,
+  `serve_publish` `:414-418`) beside `with_max_age`.
+- rtc: the same two entry points in `rs/moq-cli/src/rtc.rs:60`, `:88`.
+- hls: `hls::import(origin, name, playlist, max_age)`
+  (`rs/moq-cli/src/hls.rs:45-50`) takes an `ImportTarget` instead of the
+  three loose fields and passes the allocator to
+  `moq_hls::import::Import::new` (`rs/moq-hls/src/import.rs:613`).
+- stdin containers: `Publish::new(broadcast, &format, max_age)`
+  (`main.rs:476`, `rs/moq-cli/src/publish.rs:257`).
+
+Each lands in `moq_mux::container::Producer`, which owns the track and the
+`Estimator`, so the reservation sits beside the number that drives it. The
+allocator rides the same constructor path `max_age` does; where that reaches
+four arguments, fold the options into a struct.
+
+Naming: `reserve` and `Reserved` in `rs/moq-mux/src/catalog/` are the catalog
+gate that withholds the first snapshot (`rs/moq-mux/src/catalog/producer.rs:25`,
+`:51`, `:360`; `rs/moq-mux/src/catalog/tracks.rs:283`). The bandwidth claim is
+named explicitly, `bandwidth: Option<moq_net::bandwidth::Reservation>` and
+`with_bandwidth(allocator)`, never a bare `reserve`.
+
+Priority needs nothing: the importers stamp `hang::catalog::PRIORITY` per
+kind (`track.rs:202`, `:239`; `rs/hang/src/catalog/priority.rs:21-26`), so an
+imported audio track already outranks an imported video one.
+
+Tests: next to `writes_measure_the_catalog_estimate`
+(`rs/moq-mux/src/container/producer.rs:433`), a container `Producer` with an
+allocator claims nothing before the first window, reserves the first
+estimate, raises the ceiling on a larger later window and holds it on a
+smaller one; an allocator test where a passthrough want at its peak lowers a
+co-resident encoder's grant by exactly that amount.
+
+Branch from dev.
 
 ## Closes
 
 - [#2859](https://github.com/moq-dev/moq/issues/2859) - close this issue when the quest finishes
 
+## Related
+
+- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - two capture stages sharing one allocator
+- [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - the same allocator mirrored in js/net
+- [Ladder](/quest/m2/ladder/README.md) - a transcode ladder dividing the same estimate

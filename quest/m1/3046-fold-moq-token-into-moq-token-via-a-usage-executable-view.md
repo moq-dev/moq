@@ -1,50 +1,40 @@
-# [M] Fold moq-token into moq token via a Usage executable view
+# [M] Retire the standalone moq-token binary
 
 ## Goal
 
-Implement and verify the behavior tracked in [#3046](https://github.com/moq-dev/moq/issues/3046)
-within the issue's stated scope and boundaries.
+`moq token` is the only spelling of the token CLI: one binary, one help tree,
+one completion tree, one release artifact. After one deprecation release the
+`moq-token-cli` crate, its release workflow, and its packaging are deleted.
+The `moq-token` library is untouched.
 
 ## Plan
 
-Use the public issue's scope, implementation notes, and acceptance criteria
-below as the starting plan. Reconcile paths and assumptions with the current
-tree before implementation.
+`moq-token-cli` is a lib+bin. Its `Args` is nested by `moq-cli` as `moq token`
+(rs/moq-cli/src/main.rs:197-199, the only consumer, rs/moq-cli/Cargo.toml:101)
+and wrapped by the standalone binary's own `Root` (rs/moq-token-cli/src/lib.rs:
+12-22). The logic is shared; the surface is duplicated: two spec roots, two
+help renderings, two completion trees, two release artifacts, and two places
+for a flag to drift. The docs already point at `moq token` (#3557).
 
-### Issue context
+usage-rs 6.3.0 can dispatch a second root off argv0 (executable views,
+`executable_views_emit_and_dispatch_from_argv0` in its tests/facade.rs), so
+`moq-token` could survive as a renamed copy of `moq`. That keeps a name nobody
+depends on and makes it an alias of the full media router, so the binary goes
+instead.
 
-#### Summary
+1. Deprecation release: `moq-token` prints a notice naming `moq token` on
+   every run and keeps working. Ship it as an ordinary `moq-token-cli` patch.
+2. Delete the crate. Move `Args` and its subcommands into `moq-cli`, and
+   remove `.github/workflows/moq-token-cli.yml`,
+   `packaging/moq-token-cli/nfpm.yaml`,
+   `.github/homebrew/Formula/moq-token-cli.rb.tmpl`, and the
+   `moq-token-cli` triggers and entries in `.github/workflows/docker.yml:8`,
+   `cachix.yml:7,47`, `alert.yml:37`, `release-brew.yml:22,152`, and
+   `release-winget.yml:28,92`.
+3. Grep the repo for `moq-token ` invocations and `moq-token-cli`, and fix
+   every remaining doc, demo recipe, and install page.
 
-Fold the standalone `moq-token` binary into `moq token`, so there is one binary and one command surface instead of two build artifacts sharing a library.
-
-#### Where we are
-
-`moq-token-cli` is a lib+bin. The command surface lives in `moq_token_cli::Args`, which the standalone `moq-token` binary wraps in its own `Root` spec root and `moq-cli` nests under `moq token`. The implementation is genuinely shared, so this is not about duplicated logic. What is duplicated is the *surface*: two spec roots, two help renderings, two completion trees, two release artifacts, and two places for a flag to drift.
-
-#### Why now
-
-Now that #3030 has landed on `dev`, Usage has the mechanism for exactly this: an **executable view**. A view is argv0 dispatch against a single binary's own spec, so one binary can present a different root depending on the name it was invoked under. `moq-token generate ...` and `moq token generate ...` become one spec with two surfaces, and help renders the right prefix for each (`page_view` / `render_failure_view` already exist for this).
-
-The blocker today is not the CLI plumbing, it is that they are separate build artifacts. Views cannot span two binaries.
-
-#### Sketch
-
-- `moq-cli` declares `#[usage(view("moq-token", bin = "moq-token", root = "token"))]`.
-- Ship `moq-token` as a symlink, hardlink, or a thin renamed copy of `moq`, rather than as its own compiled binary.
-- Drop `moq-token-cli`'s `Root` struct; the crate keeps exporting `Args` for `moq-cli` to nest.
-- `moq-token` (the library) is unaffected -- it stays free of CLI concerns either way.
-
-#### Things to decide
-
-- **Packaging.** `moq-token` is currently released as its own artifact with its own version. A symlink changes what the release workflow produces and what a package manager installs. This is the bulk of the work.
-- **Binary size.** `moq-token` today is a small binary; making it an alias of `moq` means anyone who wants only token tooling pulls the full media router.
-- **Whether the standalone name survives at all**, or whether `moq token` simply becomes the only spelling after a deprecation period. That is the simpler end state if nobody depends on the separate binary.
-
-The second point may be the one that kills it. Worth measuring `moq` vs `moq-token` stripped sizes before committing.
-
-#### Depends on
-
-\#3030 (Usage migration), merged to `dev` on 2026-08-26, which is why this branches from `dev`.
+Branch from `dev`, where the CLI lives on `usage`.
 
 ## Closes
 

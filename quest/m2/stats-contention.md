@@ -40,6 +40,6 @@ Reference: [Linux cache-line contention analysis](https://www.kernel.org/doc/htm
 
 ## Related
 
-- [Ingest batch](/quest/m1/perf/ingest-batch.md) - owns the ingress write path; this quest measures cross-worker contention and egress fanout
-- [Cache shard](/quest/m1/perf/cache-shard.md) - separate shared recency-counter bottleneck
+- [Ingest batch](/quest/m2/perf/ingest-batch.md) - owns the ingress write path; this quest measures cross-worker contention and egress fanout
+- [Cache shard](/quest/m2/perf/cache-shard.md) - separate shared recency-counter bottleneck
 - [Relay profiling](/quest/m2/performance-profiles.md) - reproducible CPU attribution

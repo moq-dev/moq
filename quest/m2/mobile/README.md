@@ -32,5 +32,5 @@ follow that.
 
 ## Related
 
-- [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - rotation metadata from a mobile camera
+- [#933](/quest/m2/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - rotation metadata from a mobile camera
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence for each claimed GPU path

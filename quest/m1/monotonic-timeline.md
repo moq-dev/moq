@@ -5,10 +5,10 @@
 A track's timestamps never fall below the live edge its earlier groups
 reached. A publisher that has to reset (a flush, a seek, a source restart)
 declares a discontinuity by leaving a gap in the group sequence and
-continues forward from where it was; it can no longer rewind. Inside a group timestamps still reorder freely,
-since B-frames present before the frames that precede them in decode order,
-and open-GOP leading pictures still qualify because they sit above the
-previous group's reach.
+continues forward from where it was; it cannot rewind. Inside a group
+timestamps still reorder freely, since B-frames present before the frames
+that precede them in decode order, and open-GOP leading pictures still qualify
+because they sit above the previous group's reach.
 
 Consumers stop detecting and re-anchoring on undeclared rewinds. A group that
 breaks the rule is a malformed track, not a timeline event.
@@ -16,13 +16,16 @@ breaks the rule is a malformed track, not a timeline event.
 ## Plan
 
 Today both container consumers (`Rewind` in
-`rs/moq-mux/src/container/consumer.rs` and in
-`js/hang/src/container/consumer.ts`) classify a newer group whose timestamps
-land before the live edge as a rewind, drop the reneged buffer, and bump the
-same counter a declared discontinuity bumps. The hang draft says a declared
-discontinuity applies "whether the resumed timestamps move backward or
-forward". That machinery is what goes; how a publisher declares one is
-[Gap discontinuity](/quest/m1/gap-discontinuity.md).
+`rs/moq-mux/src/container/consumer.rs:83` and in
+`js/hang/src/container/consumer.ts:76`) classify a newer group whose
+timestamps land before the live edge as a rewind, drop the reneged buffer, and
+bump the same counter a declared discontinuity bumps. The hang draft
+(`drafts/draft-lcurley-moq-hang.md:507`) says a declared discontinuity applies
+"whether the resumed timestamps move backward or forward". That machinery is
+what goes; how a publisher declares one is
+[Gap discontinuity](/quest/m1/gap-discontinuity.md). This quest changes the
+hang container rule in both languages but nothing that is dev-only; it ranks
+in m1 only because it requires gap-discontinuity.
 
 - **Publisher side, in both container producers.** The track producer refuses
   a frame whose timestamp is below the live edge established by the groups
@@ -38,24 +41,29 @@ forward". That machinery is what goes; how a publisher declares one is
   classification in both languages. A group below the live edge aborts the
   track as malformed. The discontinuity counter stays, counting declared
   discontinuities only; `js/watch` keeps resetting its decoders on it
-  ([#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md)).
+  ([#3056](/quest/m2/3056-watch-video-decoder-captures-the-rewind-generation-at.md)).
 - **Draft.** `drafts/draft-lcurley-moq-hang.md` loses the backward clause and
   states the rule: after a discontinuity the timeline continues forward. The
   moq-lite draft is unchanged; enforcement lives above the relay, in the
   media layer that knows what a group is.
-- **TS export.** [moq#3375](https://github.com/moq-dev/moq/pull/3375) lands
-  first and keys its reset on the discontinuity counter, which keeps working
-  once the counter only counts declared discontinuities. After it, remove the
-  `last_psi` / `last_si` / `last_pcr` reset a forward jump makes redundant and
-  reword its docs; keep `discontinuity_indicator` on the PCR packet, since a
-  PCR jump over 100 ms without it is a TR 101 290 error whichever direction
-  the jump goes.
+- **TS export.** `Exporter::rewind(backwards)`
+  (`rs/moq-mux/src/container/ts/export.rs:928-952`) restarts the program
+  clock on a source discontinuity, clearing `last_pcr`, `last_psi`, and every
+  `si[*].last_emit`; it is keyed on the source's discontinuity counter
+  (`:696`), which keeps working once that counter only counts declared
+  discontinuities. The `backwards` flag (decided at `:581` and `:1145`, and
+  what fences peers across a backward boundary at `:948`) disappears with
+  backward rewinds, so the reset takes no argument and its docs lose the
+  backward case; keep `pcr_discontinuity`, the `discontinuity_indicator` on
+  the PCR packet, since a PCR jump over 100 ms without it is a TR 101 290
+  error whichever direction the jump goes.
 
 Tests, in both languages: the producer refuses a group below the live edge;
-the consumer aborts on one; a group with reordered B-frames is accepted; an open-GOP group whose
-leading pictures sit below its keyframe but above the previous group passes;
-a declared discontinuity followed by a forward jump passes and bumps the
-counter once; moqsink's flush re-anchor produces a forward timeline.
+the consumer aborts on one; a group with reordered B-frames is accepted; an
+open-GOP group whose leading pictures sit below its keyframe but above the
+previous group passes; a declared discontinuity followed by a forward jump
+passes and bumps the counter once; moqsink's flush re-anchor produces a
+forward timeline.
 
 Branch from `dev`, where the container consumers carry the current `Rewind`
 state.
@@ -63,11 +71,9 @@ state.
 ## Required
 
 - [Gap discontinuity](/quest/m1/gap-discontinuity.md) - settles how a publisher declares the discontinuity this rule continues from
-- [moq#3375](https://github.com/moq-dev/moq/pull/3375) has merged, so the TS export reset it adds is keyed on the discontinuity counter before this quest trims it
 
 ## Related
 
-- [Duration marker](/quest/m2/duration-marker.md) - the empty frame that closes a group, which is not a discontinuity
-- [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - the watch decoder reset that keeps mattering for declared discontinuities
+- [Duration marker](/quest/m1/duration-marker.md) - the empty frame that closes a group, which is not a discontinuity
+- [#3056](/quest/m2/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - the watch decoder reset that keeps mattering for declared discontinuities
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink's generation model after EOS, the same publisher
-- [#3375](https://github.com/moq-dev/moq/pull/3375) - the TS export fix this trims once it lands

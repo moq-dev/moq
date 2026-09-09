@@ -66,4 +66,4 @@ The profile starts from IETF Secure Objects where its object model maps exactly,
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
-- [HLS playable](/quest/m1/hls-playable.md) - stock HLS and DASH require plaintext media and exclude `.e2ee` broadcasts
+- [Merge dev](/quest/m1/merge-dev.md) - its HLS soak (a fresh viewer joining a days-old broadcast, playable since #3240) covers plaintext broadcasts only; stock HLS and DASH exclude `.e2ee` broadcasts

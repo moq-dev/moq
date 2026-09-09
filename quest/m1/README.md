@@ -2,66 +2,47 @@
 
 ## Goal
 
-Everything that lands on the dev branch or with its merge to main: the
-thread-per-core runtime (moq-uring, moq-tokio, quiche), the net model and
-allocator follow-ups, breaking bindings work, and the archive line that gates
-the merge itself, because moq.pro needs archive-backed recording on the release
-that `dev` produces before it can adopt it.
+Everything that must land on `dev` before it merges to `main`: the breaking
+API and wire changes (the announce and wildcard surface, error codes, the
+allocator mirrors, the bindings), the merge gates (the archive line, because
+moq.pro needs archive-backed recording on the release that `dev` produces),
+and the merge itself.
 
 ## Plan
 
-Branch these quests from dev, not main. Several were rescoped during the
-2026-08 grooming because dev already moved under them; reconcile each plan
-with the current dev tree before starting.
+Branch these quests from `dev`, not `main`. A quest stays here only if it
+breaks a published API or wire, or gates the merge. Work that is identical on
+`main`, additive, or targets a `0.0.x` crate lives in
+[m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
+`main` after the merge. The 2026-09-09 grooming reconciled every quest here
+with the dev tree.
 
 ## Quests
 
-- [Compressed delta regression](/quest/m1/json-compressed-delta-test-timeout.md) - diagnose the encoded-size test timeout under load
-
-- [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
-- [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model: copies, locks, clock reads, allocations, syscalls
-- [#2296](/quest/m1/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) - moq-tokio: bring the quiche backend to quinn/noq feature parity
-- [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
-- [#2964](/quest/m1/2964-quic-workers-dropping-one-split-server-resizes-the.md) - QUIC workers: dropping one split() Server resizes the reuseport group
-- [Transport feature](/quest/m1/tokio-transport-feature.md) - moq-tokio has one gate for "has a transport", and its backend-less build passes `-D warnings`
-- [#2853](/quest/m1/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence is the discontinuity unless the boundary proves continuity; no marker has to arrive
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
-- [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
-- [Control timeout code](/quest/m1/control-timeout-code.md) - a request stream the peer never answered stops claiming its content was late
-- [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, announce/unannounce on the broadcast, and dynamic(prefix, route) with one meaning
-- [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, a broadcast-owned announcement, and the dynamic handle
-- [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper mirrors the same three operations once dev merges
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
-- [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
-- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - moq-cli runs several adaptive import stages on one connection now that the allocator divides the estimate
-- [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation
-- [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
-- [Ladder](/quest/m1/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
-- [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
-- [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
-- [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - returning demand during IETF setup keeps its track across microtasks
-- [IETF stream types](/quest/m1/ietf-uni-stream-types.md) - accept padding and close sessions for genuinely unknown uni-stream types
-- [HLS cache misses](/quest/m1/hls-cache-miss-codes.md) - moq-hls: a segment the relay dropped is served as a 500, because the miss is matched against a table the wire stopped using
-- [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - Preserve structured protocol error codes across FFI and C bindings
-- [#2318](/quest/m1/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net: remaining capability gaps vs rs/moq-net (SETUP role, finish_at and final sequence, range controls, typed errors)
-- [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition
-- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - Collapse Reload and Shared into one Connection class
-- [HLS dead publisher](/quest/m1/hls-closed-publisher-500.md) - a segment whose publisher disconnected answers 500 instead of 404
-- [HLS sibling identity](/quest/m1/hls-sibling-epoch-identity.md) - validate sibling media against the epoch described by its catalog
-- [#2075](/quest/m1/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - Mirror catalog reservation gating in @moq/hang (js/hang)
-- [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - Video rotation metadata not propagated from mobile camera publish to watch renderer
-- [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: video decoder captures the rewind generation at output time, not submit time
-- [Plan: A/V clock](/quest/m1/plan-av-clock.md) - settle how the audio playhead drives Sync.reference while audio plays, then build it
-- [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so TOML survives CLI defaults and empty lists, and env outranks the file
-- [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
-- [Abort on drop](/quest/m1/abort-on-drop.md) - one abort-on-drop task guard per crate, replacing five copies of the same Drop
-- [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - Fold moq-token into moq token via a Usage executable view
-- [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
-- [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
+- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the whole line gates the dev merge
+- [Duration marker](/quest/m1/duration-marker.md) - every video group ends with an empty frame at its exclusive end; audio loses its end marker; lands on main but gates gap-discontinuity
+- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence resets the decoder unless the boundary is contiguous within 1 ms; empty groups stop meaning anything
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - producers refuse a group below the live edge and consumers drop rewind detection
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`
+- [JS announce](/quest/m1/js-announce.md) - js/net drops `publish()` and `RouteProvider` for `createBroadcast`, `announce(route)`, and a `dynamic(pattern, route)` handle
+- [Wildcard](/quest/m1/wildcard/README.md) - a service advertises a path pattern priced at its start-up cost; Advertise gates the merge, Resolve and Demand are additive
 - [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
-- [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - moq-net: ban Hop ID 0 from hop chains
+- [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - a hop chain names real hops only; Hop ID 0 stays the absence marker
+- [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
+- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one cloneable refcounted `Connection` mirroring `moq_tokio::Connection`; close releases a handle
+- [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition
+- [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - protocol error codes cross moq-ffi and C as a scope, code, and kind instead of a message string
+- [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
+- [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
+- [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports claim their peak-hold catalog bitrate on the allocator so a co-resident encoder targets what is left
+- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - moq-cli accepts several adaptive import stages on one connection now that the allocator divides the estimate
+- [HLS 404](/quest/m1/hls-cache-miss-codes.md) - a relay miss and a disconnected publisher answer 404 over moq-lite; IETF upstreams stay 500
+- [HLS sibling restart](/quest/m1/hls-sibling-epoch-identity.md) - a replaced sibling publisher restarts its rendition instead of serving stale rows
+- [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
+- [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so an empty TOML list survives the environment and env outranks the file
+- [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
+- [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - retire the standalone moq-token binary after one deprecation release; `moq token` is the only spelling
+- [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
+- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
+- [Transport feature](/quest/m1/tokio-transport-feature.md) - moq-tokio has one `_transport` gate and its backend-less build passes `-D warnings`
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

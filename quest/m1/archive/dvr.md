@@ -7,10 +7,13 @@ same timeline and `(track, segment)` objects as an unbounded archive.
 
 ## Plan
 
-The writer owns retention. It pops expired records from the archive Window,
-persists the new timeline group, waits a short grace period, then deletes each
-expired track segment. The timeline never advertises an object after deletion,
-and no manifest or head must be rewritten.
+The writer owns retention. It pops expired records from the archive Window
+(`Producer::pop`, `rs/moq-mux/src/timeline.rs:983`), stores the new timeline
+group as an ordinary `(track, segment)` object per
+[format](/quest/m1/archive/format.md), waits a short grace period, then
+deletes each expired track segment. The timeline never advertises an object
+after deletion, and nothing is rewritten: no manifest, head, or timeline
+object.
 
 The player reads the archive timeline, FETCHes old groups through the normal
 miss chain, and splices back to SUBSCRIBE at the live edge without opening a

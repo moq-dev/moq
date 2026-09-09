@@ -38,5 +38,5 @@ while extending this harness rather than creating another benchmark runner.
 
 ## Related
 
-- [Windowed latency](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - owns histogram/window semantics
+- [Windowed latency](/quest/m2/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - owns histogram/window semantics
 - [Relay profiling](/quest/m2/performance-profiles.md) - shares workload and artifact conventions
