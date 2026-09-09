@@ -114,10 +114,12 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 	}
 });
 
-test("Message Parameters: Location keeps its length prefix on every draft", async () => {
-	// 0x09 is odd, so the Key-Value-Pair rule gives the value a Length on every draft;
-	// only the inner varint format differs (QUIC-style before draft-17, leading-ones
-	// after). These bytes are pinned against the Rust codec's wire vectors.
+test("Message Parameters: Location loses its length prefix at draft-17", async () => {
+	// Draft-16 section 9.2 serializes every Message Parameter as a Key-Value-Pair and
+	// section 9.2.2.7 calls LARGEST_OBJECT "a length-prefixed Location structure". Draft-17
+	// section 9.3, and section 10.2 from draft-18 on, drops the Length and defines the value
+	// as "Two consecutive varints (Group, Object)". These bytes are pinned against the Rust
+	// codec's wire vectors.
 	const params = new Parameters();
 	params.largest = { groupId: 255n, objectId: 128n };
 
@@ -135,7 +137,6 @@ test("Message Parameters: Location keeps its length prefix on every draft", asyn
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
-			0x04, // byte-string length
 			0x80,
 			0xff, // leading-ones varint 255
 			0x80,
@@ -1084,6 +1085,65 @@ test("SubscribeOk v18: no requestId", async () => {
 
 	expect(decoded.requestId).toBe(undefined);
 	expect(decoded.trackAlias).toBe(42n);
+});
+
+// The regression from #3558: a draft-18 peer sends the Group as a two-byte varint, and reading
+// the parameter as length-prefixed turned that first byte into a demand for 427 bytes of value,
+// failing the message on a short buffer.
+test("SubscribeOk v18: reads a multi-byte LARGEST_OBJECT group", async () => {
+	const body = [
+		0x04, // track alias
+		0x01, // one message parameter
+		0x09, // LARGEST_OBJECT
+		0x81,
+		0xab, // group 427, a two-byte leading-ones varint
+		0x00, // object 0
+	];
+	const bytes = new Uint8Array([0x00, body.length, ...body]);
+
+	const decoded = await decodeVersioned(bytes, Subscribe.SubscribeOk.decode, Version.DRAFT_18);
+	expect(decoded.largest).toEqual({ groupId: 427n, objectId: 0n });
+});
+
+// LARGEST_OBJECT is required once the track has content, so every draft that defines it carries
+// it: length-prefixed through draft-16, two bare varints after.
+test("SubscribeOk: LARGEST_OBJECT rides every draft in that draft's form", async () => {
+	const largest = { groupId: 9n, objectId: 3n };
+
+	expect(
+		Array.from(
+			await encodeVersioned(
+				new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n, largest }),
+				Version.DRAFT_16,
+			),
+		),
+	).toEqual([
+		0x00,
+		0x07, // u16 message length
+		7, // request id
+		42, // track alias
+		0x01, // one message parameter
+		0x09, // LARGEST_OBJECT
+		0x02, // byte-string length
+		0x09, // QUIC varint 9
+		0x03, // QUIC varint 3
+	]);
+
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+		const encoded = await encodeVersioned(new Subscribe.SubscribeOk({ trackAlias: 42n, largest }), version);
+		expect(Array.from(encoded)).toEqual([
+			0x00,
+			0x05, // u16 message length
+			42, // track alias
+			0x01, // one message parameter
+			0x09, // LARGEST_OBJECT
+			0x09, // leading-ones varint 9
+			0x03, // leading-ones varint 3
+		]);
+
+		const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, version);
+		expect(decoded.largest).toEqual(largest);
+	}
 });
 
 // GROUP_ORDER (0x22) is only a legal SUBSCRIBE_OK *message parameter* through draft-15; a

@@ -5,6 +5,8 @@ set fallback
 
 # Lint GitHub Actions workflows.
 check:
+    python3 {{ source_directory() }}/scripts/install-formula.test.py
+    @if command -v nfpm >/dev/null 2>&1 && command -v envsubst >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then python3 {{ source_directory() }}/../rs/scripts/package-rename.test.py; fi
     @if command -v actionlint >/dev/null 2>&1; then actionlint; fi
     {{ source_directory() }}/scripts/alert.sh check-coverage
     @if command -v rustc >/dev/null 2>&1; then {{ source_directory() }}/scripts/package-binary.test.sh; fi
