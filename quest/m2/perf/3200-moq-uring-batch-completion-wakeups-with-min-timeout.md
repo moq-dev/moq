@@ -35,6 +35,10 @@ The kernel returns when `N` CQEs arrive, when `t` expires after partial progress
 
 Benchmark chat, 1:1 video, and fanout workloads with `N = 1/4/8/16` and `t = 0/5/10/20 us`. Record CQEs per wake, enters per second, CPU per message, p50, p99, and p999 latency. Pick no production default until the latency budget and CPU win are both demonstrated.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3200](https://github.com/moq-dev/moq/issues/3200) - close this issue when the quest finishes

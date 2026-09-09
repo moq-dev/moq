@@ -10,8 +10,11 @@ and the merge itself.
 
 ## Plan
 
-Branch these quests from `dev`, not `main`. A quest stays here only if it
-breaks a published API or wire, or gates the merge. Work that is identical on
+Branch a quest from `dev` when it breaks a published API or wire. A merge
+gate that lands on `main` (the duration marker, the additive Resolve and
+Demand halves of the wildcard line) branches from `main` and ranks here only
+because the merge waits on it. A quest stays here only if it breaks a
+published API or wire, or gates the merge. Work that is identical on
 `main`, additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
 `main` after the merge. The 2026-09-09 grooming reconciled every quest here

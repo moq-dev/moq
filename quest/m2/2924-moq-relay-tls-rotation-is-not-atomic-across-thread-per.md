@@ -77,6 +77,10 @@ Sized XL because it reshapes `tls::Listen` (a published `moq-tokio` API used
 by every binary), touches both worker runtimes, and needs a rotation test
 that proves every worker flips in one step.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#2924](https://github.com/moq-dev/moq/issues/2924) - close this issue when the quest finishes

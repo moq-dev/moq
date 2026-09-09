@@ -37,6 +37,10 @@ Acceptance: a test that parks each handle on its own waiter, calls `set_track`
 on the front entry within a range where it stays first, and asserts no other
 handle woke. No regression on the `priority_queue_insert_front` benches.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Related
 
 - [Send order width](/quest/m2/perf/send-order-width.md) - makes this moot if the queue goes away

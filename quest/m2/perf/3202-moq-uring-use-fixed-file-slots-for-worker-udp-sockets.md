@@ -30,6 +30,10 @@ Registered files let SQEs address a stable table slot with `types::Fixed`. This 
 
 Benchmark steady-state send/receive traffic and high socket-churn workloads. Record CPU, cycles, instructions, throughput, and socket lifetime cost. Keep the implementation only if the hot-path win justifies the slot-lifecycle complexity.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3202](https://github.com/moq-dev/moq/issues/3202) - close this issue when the quest finishes

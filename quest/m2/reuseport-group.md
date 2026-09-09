@@ -34,3 +34,7 @@ which is why this has not bitten. It is still a hole in the public API.
 
 The runtime-side consumer of this shape is
 [#2964](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md).
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

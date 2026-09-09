@@ -25,6 +25,10 @@ The relay already pins one worker and one ring per core. io_uring NAPI busy poll
 
 Measure on bare metal with the deployment NIC and queue affinity configured, not loopback. Compare disabled and several busy-poll durations under low, medium, and saturated load. Record p50, p99, and p999 packet latency, relay CPU, CPU idle residency, interrupts, drops, goodput, and power if available. Ship only as opt-in unless fleet-level data shows an acceptable idle-cost tradeoff.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3203](https://github.com/moq-dev/moq/issues/3203) - close this issue when the quest finishes

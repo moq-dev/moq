@@ -114,6 +114,10 @@ Acceptance: the wide backends open and close a group without touching a shared
 lock, the existing send-order and ordering tests pass unmodified, and `just
 bench BASE` shows no relay regression on the narrow path.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Related
 
 - [Priority set_track wakes](/quest/m2/perf/priority-set-track-wakes.md) - dead if the queue goes away

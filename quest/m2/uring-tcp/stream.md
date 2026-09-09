@@ -29,3 +29,7 @@ Cover it the way the UDP path is covered: tests that run against whichever
 backend is compiled, an HTTP round trip through hyper on the worker, and a
 WebSocket upgrade. Everything skips loudly below the kernel floor, as the
 existing suite does.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

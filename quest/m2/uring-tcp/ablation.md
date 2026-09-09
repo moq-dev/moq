@@ -24,3 +24,7 @@ Exit criteria: the ablation attributes the gain (or the absence of one) to
 specific mechanisms, and the result is recorded where the next two quests can
 be judged against it. A result showing no meaningful win is a valid outcome
 and abandons the rest of the line.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

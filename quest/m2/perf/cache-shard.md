@@ -58,6 +58,10 @@ where available), relay CPU and RSS at the fanout shape via
 behavior covered by the existing cache tests plus new ones for the staleness
 bound.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Related
 
 - [#3122](/quest/m2/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - the remaining clock reads one layer down; a pool epoch driven by its per-turn timestamp is the way to drop the last per-frame read, and the model should drink from that cup rather than grow a second clock

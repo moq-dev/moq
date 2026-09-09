@@ -30,6 +30,10 @@ had that shape. What is left is the budget.
 Acceptance: CPU per Gbps and throughput ceiling via `just bench BASE` on
 Linux. Latency must not regress at the chosen budget. A no-win keeps 1.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3120](https://github.com/moq-dev/moq/issues/3120) - close this issue when the quest finishes

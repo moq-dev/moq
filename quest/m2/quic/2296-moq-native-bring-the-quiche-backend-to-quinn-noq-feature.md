@@ -89,6 +89,7 @@ Or on a local lower-level integration that skips their `ez` layer:
 ## Required
 
 - [noq parity gate](/quest/m2/quic/noq-parity.md) - decides whether quiche stays a supported backend; if it is retired this quest is abandoned with the verdict
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
 
 ## Closes
 

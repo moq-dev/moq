@@ -31,6 +31,10 @@ The reason it is not a small change: `poll_open_uni` would have to hold a half-o
 
 Worth confirming the trade too: making `open` block on credit moves the backpressure earlier, which is more correct but changes when a caller learns about it.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3129](https://github.com/moq-dev/moq/issues/3129) - close this issue when the quest finishes

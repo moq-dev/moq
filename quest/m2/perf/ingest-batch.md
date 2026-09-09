@@ -40,3 +40,7 @@ Acceptance: ingest CPU per Gbps on the video shape and the chat shape
 (`just bench BASE` on Linux), plus `group_write_frames` in
 `rs/moq-net/benches/group.rs`. Frame delivery latency at the live edge must
 not regress.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

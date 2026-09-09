@@ -66,6 +66,10 @@ ignores every grant.
 This targets 0.0.x crates and needs the allocator on main, so it starts after
 the dev merge.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

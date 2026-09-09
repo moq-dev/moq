@@ -55,6 +55,10 @@ Acceptance: `[vdso]` share in the `perf` profile on both flavors, relay CPU
 via `just bench BASE` on Linux, and the existing keep-alive and idle-timeout
 tests unchanged.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3122](https://github.com/moq-dev/moq/issues/3122) - close this issue when the quest finishes

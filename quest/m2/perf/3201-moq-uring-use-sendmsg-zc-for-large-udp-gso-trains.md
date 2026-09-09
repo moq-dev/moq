@@ -29,6 +29,10 @@ The UDP path already assembles up to 64 KiB GSO trains in stable pool buffers, t
 
 Sweep the threshold across realistic chat and media packet trains. Record relay CPU, goodput, CQEs per send, copy-fallback rate, TX-pool pressure, p99 latency, and memory residency at fixed offered load. Enable it by default only where the end-to-end result beats regular `SendMsg`.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
+
 ## Closes
 
 - [#3201](https://github.com/moq-dev/moq/issues/3201) - close this issue when the quest finishes

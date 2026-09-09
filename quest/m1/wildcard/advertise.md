@@ -11,11 +11,12 @@ Following the draft, this goes in `rs/moq-net/src/lite/announce.rs` alongside
 `AnnounceBroadcast` (`:38`), gated on the lite-06 version check the route cost
 already uses so older peers neither send nor receive it.
 
-The API surface is already pattern-shaped when this starts:
+This starts after
 [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md)
-and [js-announce](/quest/m1/js-announce.md) make `dynamic(pattern, route)`
-take a `moq_net::path::Pattern` in every language and refuse anything that is
-not prefix-shaped. This quest lifts that refusal; no signature changes.
+makes `dynamic(pattern, route)` take a `moq_net::path::Pattern` in Rust and
+the bindings, refusing anything that is not prefix-shaped;
+[js-announce](/quest/m1/js-announce.md) mirrors that in js/net. This quest
+lifts the refusal on the Rust side; no signature changes.
 
 The draft settled on a message of its own: ANNOUNCE_PATTERN (type 0x3 on the
 announce stream) carries the pattern as typed segments (kind 0 literal, 1
@@ -100,8 +101,11 @@ aggregated into one entry, and withdrawal firing only when the last advertiser
 leaves. Cover that a pattern and a literal prefix coexist in one route table
 and that a literal-only deployment behaves exactly as it does today.
 
+## Required
+
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the Pattern parameter this quest widens
+
 ## Related
 
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the binding signature this quest widens
 - [js-announce](/quest/m1/js-announce.md) - the js/net signature this quest widens
 - [path-patterns/origin](/quest/m2/path-patterns/origin.md) - replaces the prefix scope the containment check runs against

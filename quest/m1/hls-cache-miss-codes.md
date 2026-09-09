@@ -44,8 +44,10 @@ The work:
   `:292-312` assigns only NO_CAPACITY 0x30 there). Encode and decode them in
   `StreamError` so a received one is the named variant, not `Unknown`, and
   extend `stream_codes_round_trip` (`error.rs:691`). Mirror in
-  `js/net/src/error.ts` `StreamCode` (:88-92 still carries the 0x20 values)
-  and in `js/net/src/ietf/error.ts`.
+  `js/net/src/error.ts` `StreamCode` (:88-92 still carries the 0x20 values).
+  They are lite-only: `js/net/src/ietf/error.ts` `sharedStreamCode` keeps
+  treating them as unshared, pinned by a negative test, so no unassigned lite
+  value ever reaches a moq-transport peer.
 - `is_cache_miss` matches variants (`NotFound`, `Old`, `Evicted`) and nothing
   by code. Rebuild the tests from the wire registry (`StreamError::to_code`,
   `ietf::error::to_stream_code`) so they fail when the two drift.
