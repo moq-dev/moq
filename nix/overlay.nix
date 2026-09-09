@@ -9,22 +9,7 @@ let
   # `final.cargo`, which nixpkgs resolves to its own default Rust.
   #
   rustToolchain = final.rust-bin.stable."1.95.0".default;
-  craneLib = ((crane.mkLib final).overrideToolchain rustToolchain).overrideScope (
-    _: cranePrev: {
-      # Registry dependencies use the workspace's patched kio API, so their
-      # dependency build needs real kio sources instead of Crane's empty stub.
-      mkDummySrc =
-        args:
-        cranePrev.mkDummySrc (
-          args
-          // {
-            extraDummyScript = (args.extraDummyScript or "") + ''
-              cp -Rf ${../rs/kio/src}/. "$out/rs/kio/src/"
-            '';
-          }
-        );
-    }
-  );
+  craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
