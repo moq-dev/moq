@@ -28,9 +28,10 @@ tables. It declares:
   Correlation is the Sequence, never the Request ID, which the allocator
   hands out from zero and so cannot double as an update marker. Track
   namespaces are tuples on this wire, so a prefix is a namespace tuple,
-  matching how SUBSCRIBE_NAMESPACE spells one. Sent only after negotiation; an endpoint that receives one
-  without negotiating closes with PROTOCOL_VIOLATION, which is what moq-net
-  already does for an unknown request stream.
+  matching how SUBSCRIBE_NAMESPACE spells one. Sent only after negotiation;
+  an endpoint that receives one without negotiating closes with
+  PROTOCOL_VIOLATION, which is what moq-net already does for an unknown
+  request stream.
 - Which existing codes AUTH_ERROR reuses: `UNAUTHORIZED`, `EXPIRED_AUTH_TOKEN`,
   `MALFORMED_AUTH_TOKEN` from the request error registry.
 - A note relating it to the AUTHORIZATION TOKEN setup option: a token

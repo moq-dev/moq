@@ -37,10 +37,10 @@ when the grant changes, so an update and a reply are never confused however
 they interleave; the latest AUTH_OK is always the grant in effect. An
 AUTH_ERROR leaves the previous grant in effect. A reply whose Sequence was
 never sent, or was already answered, is a protocol violation. The stream
-lives as long as the session; resetting it is not a refusal, and a peer that resets an AUTH stream it does not understand (the
-existing unknown-stream rule at the STREAM_TYPE section) leaves the opener
-with no grant, which the client reports as `Unsupported` rather than treating
-as a refusal. Record it in the lite-06 changelog. Run `just drafts check`.
+lives as long as the session; resetting it is not a refusal, and a peer that
+resets an AUTH stream it does not understand (the existing unknown-stream rule
+at the STREAM_TYPE section) leaves the opener with no grant, which the client
+reports as `Unsupported` rather than treating as a refusal. Record it in the lite-06 changelog. Run `just drafts check`.
 
 ### Model
 
