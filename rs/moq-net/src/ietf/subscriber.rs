@@ -147,6 +147,20 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await.
+		// Active receive tasks abort their own groups. Cancel any head waiting for
+		// its tail here, along with the track. Ordinary unsubscribe removes its entry.
+		for (_, track) in self.subscribes.drain() {
+			if let Fill::Ready { producer, .. } = &*track.fill.read() {
+				let _ = producer.clone().abort(Error::Cancel);
+			}
+			let _ = track.producer.abort(Error::Cancel);
+		}
+	}
+}
+
 /// The head of a joined group, delivered on the subscription's fill fetch stream.
 ///
 /// Draft-20's current-group join (section 5.1.6) splits one group across two streams: the
@@ -1739,7 +1753,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
-		let (mut producer, start) = {
+		let (producer, start) = {
 			let mut opening = track.clone();
 			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, group.group_id));
 			kio::wait(|waiter| {
@@ -1750,6 +1764,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			})
 			.await?
 		};
+
+		let producer = crate::recv::Group::new(producer);
 
 		let res = {
 			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), timescale, start));
@@ -1927,7 +1943,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `create_frame` is the allocation chokepoint and rejects an oversized
 				// `size` before allocating, so no pre-check is needed.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
+				let mut frame = crate::recv::Frame::new(producer.create_frame(frame::Info { size, timestamp })?);
 
 				if let Err(err) = self.run_frame(stream, &mut frame).await {
 					let _ = frame.abort(err.clone());
@@ -2042,14 +2058,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
 	) -> Result<Fill, Error> {
-		let mut head: Option<(u64, u64, group::Producer)> = None;
+		let mut head: Option<(u64, u64, crate::recv::Group)> = None;
 
 		match self.run_fill_objects(stream, track, timescale, &mut head).await {
 			Ok(()) => Ok(match head {
 				Some((sequence, next, producer)) => Fill::Ready {
 					sequence,
 					next,
-					producer,
+					producer: producer.into_inner(),
 				},
 				None => Fill::Done,
 			}),
@@ -2073,7 +2089,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
-		head: &mut Option<(u64, u64, group::Producer)>,
+		head: &mut Option<(u64, u64, crate::recv::Group)>,
 	) -> Result<(), Error> {
 		while let Some(object) = stream.decode_maybe::<ietf::FetchObject>().await? {
 			let ietf::FetchObject::Object {
@@ -2110,7 +2126,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					};
 
 					let producer = track.create_group(group::Info { sequence })?;
-					*head = Some((sequence, 0, producer));
+					*head = Some((sequence, 0, crate::recv::Group::new(producer)));
 				}
 				// A Group ID on a later object names a different group. We ask for the
 				// current group only, and a publisher refuses a wider fill rather than
@@ -2154,7 +2170,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// `create_frame` is the allocation chokepoint and rejects an oversized `size`
 			// before allocating, so no pre-check is needed.
-			let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
+			let mut frame = crate::recv::Frame::new(producer.create_frame(frame::Info { size, timestamp })?);
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
 				let _ = frame.abort(err.clone());
 				return Err(err);
@@ -4556,6 +4572,64 @@ mod stitch_tests {
 			let (_, recv) = web_transport_trait::Session::open_bi(&self.session).await.unwrap();
 			Reader::new(recv, VERSION)
 		}
+	}
+
+	/// Both subgroup and fill handlers can be cancelled between objects or mid-payload.
+	#[tokio::test]
+	async fn cancelled_group_receive() {
+		for filling in [false, true] {
+			for partial in [false, true] {
+				let mut wire = if filling {
+					fill_stream(SEQUENCE, &[b"frame"])
+				} else {
+					tail_stream(SEQUENCE, 0, &[b"frame"])
+				};
+				if partial {
+					wire.pop();
+				}
+				let mut h = Harness::new(if filling { Fill::Serving(None) } else { Fill::Done }, vec![]);
+				h.session = ScriptedSession::new(wire);
+				let mut reader = h.stream().await;
+				let mut consumer = h.track.subscribe(None);
+				let mut receiving = Box::pin(async {
+					if filling {
+						h.subscriber.recv_fill(&mut reader).await
+					} else {
+						h.subscriber.recv_group(&mut reader).await
+					}
+				});
+				assert!(futures::poll!(receiving.as_mut()).is_pending());
+				let mut group = consumer.next_group().await.unwrap().unwrap();
+				drop(receiving);
+				assert!(
+					matches!(
+						futures::poll!(Box::pin(group.read_frame())),
+						Poll::Ready(Err(Error::Cancel))
+					),
+					"fill={filling}, partial={partial}"
+				);
+				drop(h.subscriber);
+				assert!(matches!(
+					futures::poll!(Box::pin(consumer.next_group())),
+					Poll::Ready(Err(Error::Cancel))
+				));
+			}
+		}
+	}
+
+	/// A completed fill still owns an unfinished group while waiting for its live tail.
+	#[tokio::test]
+	async fn cancelled_session_aborts_waiting_fill() {
+		let mut h = Harness::new(Fill::Serving(None), vec![fill_stream(SEQUENCE, &[b"frame"])]);
+		let mut reader = h.stream().await;
+		let mut consumer = h.track.subscribe(None);
+		h.subscriber.recv_fill(&mut reader).await.unwrap();
+		let mut group = consumer.next_group().await.unwrap().unwrap();
+		drop(h.subscriber);
+		assert!(matches!(
+			futures::poll!(Box::pin(group.read_frame())),
+			Poll::Ready(Err(Error::Cancel))
+		));
 	}
 
 	/// Every frame of the next group, once it finishes.

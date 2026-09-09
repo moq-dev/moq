@@ -87,6 +87,7 @@ mod ietf;
 mod lite;
 mod model;
 mod path;
+mod recv;
 mod server;
 mod session;
 mod setup;

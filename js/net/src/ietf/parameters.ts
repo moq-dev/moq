@@ -244,6 +244,11 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 	}
 }
 
+/**
+ * The draft-16 and earlier form: draft-16 section 9.2 serializes every Message Parameter as
+ * a Key-Value-Pair, and section 9.2.2.7 calls LARGEST_OBJECT "a length-prefixed Location
+ * structure", so the two QUIC-style varints sit inside a byte string.
+ */
 function decodeLocation(data: Uint8Array): MessageLocation {
 	const [groupId, objectData] = Varint.decodeBigInt(data);
 	const [objectId, trailing] = Varint.decodeBigInt(objectData);
@@ -483,13 +488,11 @@ export class Parameters {
 						const location = this.#locations.get(key);
 						if (location === undefined)
 							throw new Error(`invalid Location message parameter: ${key.toString()}`);
-						// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it
-						// a Length on every draft: two varints inside the value.
-						const group = Varint.encodeLeadingOnes(location.groupId);
-						const object = Varint.encodeLeadingOnes(location.objectId);
-						await w.u53(group.length + object.length);
-						await w.write(group);
-						await w.write(object);
+						// Draft-17 section 9.3, and section 10.2 from draft-18 on, drops the
+						// Length from a Message Parameter and defines a Location value as
+						// "Two consecutive varints (Group, Object)", so they go out bare.
+						await w.u62(location.groupId);
+						await w.u62(location.objectId);
 						break;
 					}
 					case "bytes": {
@@ -561,14 +564,9 @@ export class Parameters {
 					params.vars.set(id, (await r.bool()) ? 1n : 0n);
 					break;
 				case "location": {
-					// LARGEST_OBJECT is an odd type, so the Key-Value-Pair rule gives it a
-					// Length on every draft: two varints inside the value.
-					const size = await r.u53();
-					const [groupId, objectData] = Varint.decodeLeadingOnes(await r.read(size));
-					const [objectId, trailing] = Varint.decodeLeadingOnes(objectData);
-					if (trailing.length !== 0) {
-						throw new Error("trailing bytes in message parameter Location");
-					}
+					// Two bare varints from draft-17 on; see the matching comment in encode.
+					const groupId = await r.u62();
+					const objectId = await r.u62();
 					params.#locations.set(id, { groupId, objectId });
 					break;
 				}

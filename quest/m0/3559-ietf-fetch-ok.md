@@ -92,5 +92,4 @@ covers what the publisher actually writes:
 ## Related
 
 - [IETF error codes](/quest/m0/ietf-error-codes.md) - replaces the 500 the refusals still use
-- [LARGEST_OBJECT](/quest/m0/3558-ietf-largest-object-encoding.md) - the other draft-18 interop defect from the same reporter
 - [TRACK_STATUS refusal](/quest/m0/3492-ietf-track-status-refusal.md) - the same shape: answer the request properly instead of leaving the peer guessing
