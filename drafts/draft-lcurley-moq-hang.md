@@ -476,7 +476,7 @@ A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
 If absent, a consumer SHOULD assume each frame is flushed immediately.
 
 It is measured at the publisher: how far behind the media clock a frame is when the publisher hands it to the transport, whether an encoder, a reorder buffer, or a segmenter held it.
-An importer can estimate this delay from the media span of a batch, such as a TS PES or an fMP4 fragment, without measuring the time spent waiting for input.
+An importer can estimate this delay from the media span of a batch, such as a run of audio PES packets between video packets in TS or an fMP4 fragment, without measuring the time spent waiting for input.
 It is never a measurement of the network, which a consumer observes for itself and which no two consumers of the same broadcast would agree on.
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.

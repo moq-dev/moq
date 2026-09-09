@@ -108,3 +108,48 @@ test("catalog producer refuses zero jitter before retaining an edit", () => {
 		expect(value).toEqual({});
 	});
 });
+
+for (const section of ["audio", "video"] as const) {
+	test(`catalog refuses ${section} jitter decreases without retaining them`, () => {
+		const catalog = new CatalogProducer();
+		catalog.mutate((value) => {
+			Object.assign(value, {
+				[section]: {
+					renditions: {
+						media: {
+							codec: "opus",
+							container: { kind: "legacy" },
+							sampleRate: 48000,
+							numberOfChannels: 2,
+							jitter: 100,
+						},
+					},
+				},
+			});
+		});
+		for (const jitter of [50, undefined]) {
+			expect(() =>
+				catalog.mutate((value) => {
+					value[section]!.renditions.media.jitter = jitter;
+				}),
+			).toThrow("jitter cannot decrease");
+			catalog.mutate((value) => {
+				expect(value[section]!.renditions.media.jitter).toBe(100);
+			});
+		}
+		catalog.mutate((value) => {
+			delete value[section]!.renditions.media;
+		});
+		catalog.mutate((value) => {
+			Object.assign(value[section]!.renditions, {
+				media: {
+					codec: "opus",
+					container: { kind: "legacy" },
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					jitter: 50,
+				},
+			});
+		});
+	});
+}

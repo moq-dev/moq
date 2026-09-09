@@ -49,10 +49,10 @@ impl Estimate {
 /// use moq_mux::catalog::hang::Container;
 /// let mut track = catalog.media_producer(net, Container::Legacy)?;
 /// let mut rendition = reserved.video(track.name())?;
-/// rendition.set(config);
+/// rendition.set(config)?;
 ///
 /// track.write(frame)?;
-/// rendition.estimate(track.estimate());
+/// rendition.estimate(track.estimate())?;
 /// # Ok(())
 /// # }
 /// ```

@@ -434,39 +434,41 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.timestamp(hint)
 	}
 
-	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
+	/// Validate and publish the rendition, fulfilling its reservation only after the edit succeeds.
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
 	/// rest are filled by [`estimate`](Self::estimate), seeded with anything already measured before
 	/// the rendition existed (a dirty start or a B-frame reorder). A caller who wants to pre-empt
 	/// detection sets the field on the config, or (for a config an importer builds out of the
 	/// bitstream) hands the importer a hint like [`VideoHint`].
-	pub fn set(&mut self, mut config: C) {
-		self.supplied = config.estimate();
-		let resolved = self.resolved();
-		self.published = Some(resolved.clone());
-		config.set_estimate(resolved);
-
-		// Write the config first (still withheld, since we're holding our reservation), then release
-		// the reservation. If this was the last one, the release flushes a complete snapshot.
+	pub fn set(&mut self, mut config: C) -> crate::Result<()> {
+		let supplied = config.estimate();
+		let resolved = Self::resolved(&supplied, &self.detected);
+		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.lock();
-			// Mark the slot filled before the write, not after. `insert` is caller code that can panic
-			// partway, and whatever it managed to write still has to be retired when we drop.
+			let mut next = (*guard).clone();
+			config.insert(&mut next, &self.name);
+			// Serialization must succeed before the reserved snapshot retains the edit.
+			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
-			config.insert(&mut guard, &self.name);
+			*guard = next;
+			guard.commit()?;
 		}
+		self.supplied = supplied;
+		self.published = Some(resolved);
 		self.gate = None;
+		Ok(())
 	}
 
 	/// The supplied fields, with anything absent filled from what was detected.
-	fn resolved(&self) -> Estimate {
-		let mut estimate = self.supplied.clone();
+	fn resolved(supplied: &Estimate, detected: &Estimate) -> Estimate {
+		let mut estimate = supplied.clone();
 		if estimate.jitter.is_none() {
-			estimate.jitter = self.detected.jitter;
+			estimate.jitter = detected.jitter;
 		}
 		if estimate.bitrate.is_none() {
-			estimate.bitrate = self.detected.bitrate;
+			estimate.bitrate = detected.bitrate;
 		}
 		estimate
 	}
@@ -481,27 +483,29 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
-	pub fn estimate(&mut self, estimate: Estimate) {
-		self.detected = estimate;
-
-		let resolved = self.resolved();
-		if self.published.as_ref() == Some(&resolved) {
-			return;
+	pub fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+		let resolved = Self::resolved(&self.supplied, &estimate);
+		if self.published.as_ref() != Some(&resolved) {
+			self.update(|config| config.set_estimate(resolved.clone()))?;
+			self.published = Some(resolved);
 		}
-		self.published = Some(resolved.clone());
-
-		self.update(|config| config.set_estimate(resolved));
+		self.detected = estimate;
+		Ok(())
 	}
 
-	/// Refine the rendition in place (e.g. a synthesized description), publishing if present.
-	pub fn update(&mut self, f: impl FnOnce(&mut C)) {
+	/// Refine the rendition, refusing an unserializable edit before retaining it.
+	pub fn update(&mut self, f: impl FnOnce(&mut C)) -> crate::Result<()> {
 		if !self.present {
-			return;
+			return Ok(());
 		}
 		let mut guard = self.catalog.lock();
-		if let Some(config) = C::get_mut(&mut guard, &self.name) {
+		let mut next = (*guard).clone();
+		if let Some(config) = C::get_mut(&mut next, &self.name) {
 			f(config);
 		}
+		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
+		*guard = next;
+		guard.commit()
 	}
 }
 
@@ -549,6 +553,40 @@ mod tests {
 		config
 	}
 
+	#[test]
+	fn rejected_jitter_is_not_retained() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		for jitter in [Duration::ZERO, Duration::MAX] {
+			assert!(rendition.set(config(None, Some(jitter))).is_err());
+			assert!(catalog.snapshot().video.renditions.is_empty());
+		}
+		rendition.set(config(None, Some(Duration::from_millis(100)))).unwrap();
+		assert!(rendition.update(|config| config.jitter = Some(Duration::ZERO)).is_err());
+		assert_eq!(
+			catalog.snapshot().video.renditions.values().next().unwrap().jitter,
+			Some(Duration::from_millis(100))
+		);
+	}
+
+	#[test]
+	fn importer_returns_rejected_jitter() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let reserved = catalog.reserve();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut config: hang::catalog::AudioConfig = crate::codec::aac::Config {
+			profile: 2,
+			sample_rate: 48_000,
+			channel_count: 2,
+		}
+		.into();
+		config.jitter = Some(Duration::ZERO);
+		assert!(crate::codec::aac::Import::new(track, reserved, config).is_err());
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+	}
+
 	fn ts(micros: u64) -> moq_net::Timestamp {
 		moq_net::Timestamp::from_micros(micros).unwrap()
 	}
@@ -576,14 +614,14 @@ mod tests {
 			let t = ts(i * 40_000);
 			estimator.cut(Some(t));
 			estimator.write(t, 100_000);
-			rendition.estimate(estimator.estimate());
+			rendition.estimate(estimator.estimate()).unwrap();
 		}
 	}
 
 	#[test]
 	fn detects_absent_jitter_and_bitrate() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(None, None));
+		rendition.set(config(None, None)).unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -595,7 +633,9 @@ mod tests {
 	#[test]
 	fn keeps_provided_jitter_and_bitrate() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(Some(123), Some(Duration::from_millis(50))));
+		rendition
+			.set(config(Some(123), Some(Duration::from_millis(50))))
+			.unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -624,7 +664,7 @@ mod tests {
 		// both the up-front publish and a later one the stream resolved.
 		let mut first = config(None, None);
 		hint.apply(&mut first);
-		rendition.set(first);
+		rendition.set(first).unwrap();
 		feed(&mut rendition);
 		assert_eq!(
 			catalog.snapshot().video.renditions.get("v").unwrap().label.as_deref(),
@@ -636,7 +676,7 @@ mod tests {
 		resolved.coded_width = Some(1280);
 		resolved.coded_height = Some(720);
 		hint.apply(&mut resolved);
-		rendition.set(resolved);
+		rendition.set(resolved).unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -662,7 +702,7 @@ mod tests {
 		let mut config = config(None, None);
 		hint.apply(&mut config);
 
-		rendition.set(config);
+		rendition.set(config).unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -677,7 +717,7 @@ mod tests {
 	fn measurements_before_set_seed_the_config() {
 		let (_broadcast, catalog, mut rendition) = video_track();
 		feed(&mut rendition);
-		rendition.set(config(None, None));
+		rendition.set(config(None, None)).unwrap();
 
 		let snapshot = catalog.snapshot();
 		let config = snapshot.video.renditions.get("v").unwrap();
@@ -695,11 +735,11 @@ mod tests {
 	#[test]
 	fn resetting_recaptures_supplied() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(None, None));
+		rendition.set(config(None, None)).unwrap();
 		feed(&mut rendition);
 		assert!(catalog.snapshot().video.renditions.get("v").unwrap().bitrate.is_some());
 
-		rendition.set(config(Some(789), None));
+		rendition.set(config(Some(789), None)).unwrap();
 		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
@@ -726,7 +766,7 @@ mod tests {
 		assert!(matches!(err, crate::Error::Hang(hang::Error::Duplicate(name)) if name == "v"));
 
 		// The refusal left nothing behind, so the importer's own config is what lands.
-		rendition.set(config(Some(123), None));
+		rendition.set(config(Some(123), None)).unwrap();
 		assert_eq!(
 			catalog.snapshot().video.renditions.get("v").unwrap().bitrate,
 			Some(123),
@@ -738,7 +778,7 @@ mod tests {
 	#[test]
 	fn a_resolved_rendition_still_owns_its_name() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(Some(789), None));
+		rendition.set(config(Some(789), None)).unwrap();
 
 		assert!(catalog.reserve().video("v").is_err(), "owned by the live rendition");
 		assert_eq!(
@@ -753,7 +793,7 @@ mod tests {
 	#[test]
 	fn dropping_a_rendition_frees_its_name() {
 		let (_broadcast, catalog, mut rendition) = video_track();
-		rendition.set(config(None, None));
+		rendition.set(config(None, None)).unwrap();
 		drop(rendition);
 		assert!(
 			catalog.snapshot().video.renditions.is_empty(),
@@ -764,7 +804,7 @@ mod tests {
 			.reserve()
 			.video("v")
 			.expect("the name is free once the rendition drops");
-		replacement.set(config(Some(456), None));
+		replacement.set(config(Some(456), None)).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions.get("v").unwrap().bitrate, Some(456));
 	}
 
@@ -900,7 +940,7 @@ mod tests {
 
 			let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 				let mut boom = reserved.init::<Exploding>("gps").unwrap();
-				boom.set(Exploding { wrote: false });
+				boom.set(Exploding { wrote: false }).unwrap();
 			}))
 			.expect_err("the config's insert panics");
 			assert!(
@@ -942,7 +982,7 @@ mod tests {
 			let reserved = catalog.reserve();
 
 			let mut rendition = reserved.init::<Stubborn>("gps").unwrap();
-			rendition.set(Stubborn);
+			rendition.set(Stubborn).unwrap();
 
 			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rendition)))
 				.expect_err("the config's remove panics");
@@ -952,9 +992,7 @@ mod tests {
 				.expect("a name held by a blown-up cleanup hook would be lost forever");
 		}
 
-		/// The partial-application case: `insert` writes its entry and then panics, so `set` never
-		/// reaches `present = true`. The entry still has to go when the rendition unwinds, or it sits
-		/// in the catalog under a name no handle owns and every later reservation of it is refused.
+		/// An insert that writes and then panics must leave no entry behind or strand its name.
 		#[test]
 		fn an_unwinding_rendition_retires_a_partially_written_entry() {
 			let (_broadcast, catalog) = produce();
@@ -962,7 +1000,7 @@ mod tests {
 
 			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 				let mut boom = reserved.init::<Exploding>("gps").unwrap();
-				boom.set(Exploding { wrote: true });
+				boom.set(Exploding { wrote: true }).unwrap();
 			}))
 			.expect_err("the config's insert panics after writing");
 
@@ -983,7 +1021,7 @@ mod tests {
 			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 
-			rendition.set(telemetry(None));
+			rendition.set(telemetry(None)).unwrap();
 			feed(&mut rendition);
 
 			let snapshot = catalog.snapshot();
@@ -1006,7 +1044,7 @@ mod tests {
 			let reserved = catalog.reserve();
 			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
-			rendition.set(telemetry(None));
+			rendition.set(telemetry(None)).unwrap();
 
 			let net = broadcast.create_track("gps", None).unwrap();
 			let mut track = catalog
@@ -1023,7 +1061,7 @@ mod tests {
 						keyframe: true,
 					})
 					.unwrap();
-				rendition.estimate(track.estimate());
+				rendition.estimate(track.estimate()).unwrap();
 			}
 
 			let snapshot = catalog.snapshot();
@@ -1039,7 +1077,7 @@ mod tests {
 			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 
-			rendition.set(telemetry(Some(4_200)));
+			rendition.set(telemetry(Some(4_200))).unwrap();
 			feed(&mut rendition);
 
 			let snapshot = catalog.snapshot();
@@ -1058,13 +1096,13 @@ mod tests {
 			drop(reserved);
 
 			let waiter = kio::Waiter::noop();
-			video.set(config(None, None));
+			video.set(config(None, None)).unwrap();
 			assert!(
 				matches!(consumer.poll_next(&waiter), std::task::Poll::Pending),
 				"the catalog stays withheld while the telemetry rendition is unresolved"
 			);
 
-			gps.set(telemetry(None));
+			gps.set(telemetry(None)).unwrap();
 
 			let mut latest = None;
 			while let std::task::Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {

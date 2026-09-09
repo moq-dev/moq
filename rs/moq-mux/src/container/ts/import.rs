@@ -455,6 +455,7 @@ impl<E: catalog::Catalog> Import<E> {
 				tail: Vec::new(),
 				tail_pts: None,
 				resync: Resync::new(pid.as_u16(), ".aac"),
+				burst: std::time::Duration::ZERO,
 			})),
 			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
 			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
@@ -605,6 +606,11 @@ impl<E: catalog::Catalog> Import<E> {
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
 		if is_video {
+			for stream in self.streams.values_mut() {
+				if let Stream::Aac(audio) = stream {
+					audio.burst = std::time::Duration::ZERO;
+				}
+			}
 			// Advance the media clock here, not at flush: unbounded video only
 			// flushes on the next PES, so a SCTE-35 section arriving during this
 			// frame must be timestamped with this frame's PTS ("now"), not the
@@ -652,10 +658,14 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
+		let batched = self
+			.streams
+			.values()
+			.any(|stream| matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock));
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		self.published |= stream.write(pending)?;
+		self.published |= stream.write(pending, batched)?;
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -706,7 +716,6 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
-		self.audio_burst = None;
 		self.published = false;
 		tracing::debug!("MPEG-TS system time-base discontinuity");
 		Ok(())
@@ -1434,7 +1443,7 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
@@ -1448,7 +1457,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				}
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
-					import.observe_reorder(reorder);
+					import.observe_reorder(reorder)?;
 				}
 				Ok(published)
 			}
@@ -1463,11 +1472,11 @@ impl<E: catalog::Catalog> Stream<E> {
 					published |= skip_missing_keyframe(import.decode([frame]))?;
 				}
 				if let Some(reorder) = reorder {
-					import.observe_reorder(reorder);
+					import.observe_reorder(reorder)?;
 				}
 				Ok(published)
 			}
-			Stream::Aac(stream) => stream.write(pending),
+			Stream::Aac(stream) => stream.write(pending, batched),
 			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
@@ -1848,10 +1857,12 @@ struct AacStream<E: CatalogExt = ()> {
 	/// covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
 	resync: Resync,
+	// Completed audio duration since the last video PES, measured independently for each PID.
+	burst: std::time::Duration,
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2013,7 +2024,8 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 
 		if let Some(import) = &mut self.import {
-			import.burst(burst);
+			self.burst = if batched { self.burst + burst } else { burst };
+			import.burst(self.burst)?;
 		}
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
@@ -2026,7 +2038,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		Ok(index > 0)
+		Ok(!burst.is_zero())
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2050,6 +2062,7 @@ impl<E: CatalogExt> AacStream<E> {
 	/// The partial frame will never see its end, and whatever vouched for the next frame
 	/// boundary no longer applies.
 	fn desync(&mut self) {
+		self.burst = std::time::Duration::ZERO;
 		self.tail.clear();
 		self.tail_pts = None;
 		self.resync.desynced();
@@ -2064,7 +2077,7 @@ impl<E: CatalogExt> AacStream<E> {
 		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
-			self.write(Pending::empty())?;
+			self.write(Pending::empty(), true)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -3165,6 +3178,58 @@ mod test {
 		p.extend_from_slice(&pes);
 		assert_eq!(p.len(), 188, "audio PES packet must fill exactly one TS packet");
 		p
+	}
+
+	#[test]
+	fn aac_jitter_accumulates_adjacent_pes_per_pid() {
+		const AUDIO: u16 = 0x60;
+		const VIDEO: u16 = 0x61;
+		const OTHER: u16 = 0x62;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(
+				&[
+					(StreamType::AdtsAac, AUDIO),
+					(StreamType::Mpeg2Video, VIDEO),
+					(StreamType::AdtsAac, OTHER),
+				],
+				false,
+			))
+			.unwrap();
+		let mut frame = super::adts::write_header(2, 44_100, 2, 8).unwrap().to_vec();
+		frame.extend_from_slice(&[0; 8]);
+		for i in 0..4 {
+			import
+				.decode(&audio_pes_packet(
+					AUDIO,
+					i,
+					90_000 + u64::from(i) * 4180,
+					&frame.repeat(2),
+				))
+				.unwrap();
+		}
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let jitter = catalog.snapshot().audio.renditions[&name].jitter.unwrap();
+		import
+			.decode(&audio_pes_packet(OTHER, 0, 900_000, &frame.repeat(2)))
+			.unwrap();
+		let snapshot = catalog.snapshot();
+		let other = snapshot
+			.audio
+			.renditions
+			.iter()
+			.find(|(key, _)| *key != &name)
+			.unwrap()
+			.1;
+		assert_eq!(other.jitter.unwrap().as_nanos().div_ceil(1_000_000), 47);
+		assert_eq!(jitter.as_nanos().div_ceil(1_000_000), 186);
+		import.decode(&pes_packet(VIDEO, 110_000)).unwrap();
+		import
+			.decode(&audio_pes_packet(AUDIO, 4, 110_000, &frame.repeat(2)))
+			.unwrap();
+		assert_eq!(catalog.snapshot().audio.renditions[&name].jitter, Some(jitter));
 	}
 
 	#[test]

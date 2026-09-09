@@ -65,7 +65,7 @@ impl<E: CatalogExt> Import<E> {
 			last_sps: None,
 		};
 		if let Some(config) = import.catalog.initial_config() {
-			import.apply_config(config);
+			import.apply_config(config)?;
 		}
 		Ok(import)
 	}
@@ -94,7 +94,7 @@ impl<E: CatalogExt> Import<E> {
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
 		self.hvc1 = true;
-		self.apply_config(config);
+		self.apply_config(config)?;
 		Ok(())
 	}
 
@@ -128,7 +128,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -140,14 +140,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) {
-		self.rendition.estimate(self.track.estimate());
+	fn estimate(&mut self) -> crate::Result<()> {
+		self.rendition.estimate(self.track.estimate())
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.track.cut(end)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -156,23 +156,24 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
-	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) {
+	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) -> crate::Result<()> {
 		self.track.reorder(reorder);
-		self.estimate();
+		self.estimate()?;
+		Ok(())
 	}
 
 	/// Resolve the config from an inline SPS, updating the rendition in place on a
@@ -183,7 +184,7 @@ impl<E: CatalogExt> Import<E> {
 		}
 		let config = config_from_sps(sps_nal)?;
 		self.last_sps = Some(sps_nal.clone());
-		self.apply_config(config);
+		self.apply_config(config)?;
 		Ok(())
 	}
 
@@ -191,8 +192,8 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
 	/// reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
-		self.catalog.publish(&mut self.rendition, config);
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		self.catalog.publish(&mut self.rendition, config)
 	}
 
 	/// Write split frames to the track, resolving the config from the first
@@ -219,7 +220,7 @@ impl<E: CatalogExt> Import<E> {
 			self.track.write(frame)?;
 		}
 
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 

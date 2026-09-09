@@ -193,7 +193,7 @@ impl<E: CatalogExt> Reserved<E> {
 			)?)
 		};
 
-		self.rendition.set(encoder.catalog());
+		self.rendition.set(encoder.catalog())?;
 
 		Ok(Registered { encoder, resampler })
 	}

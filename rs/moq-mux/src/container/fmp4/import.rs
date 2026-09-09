@@ -118,7 +118,7 @@ enum Rendition<E: crate::catalog::hang::CatalogExt> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
-	fn estimate(&mut self, estimate: crate::catalog::Estimate) {
+	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
 		match self {
 			Self::Video(rendition) => rendition.estimate(estimate),
 			Self::Audio(rendition) => rendition.estimate(estimate),
@@ -328,8 +328,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			// Enroll every track in the broadcast's timeline: passthrough writes groups by hand
 			// (no `container::Producer`), so the recorder is fed directly at each group open.
-			// Enrolling on the timeline directly rather than through `catalog::Producer::enroll`,
-			// because the catalog is already locked here; the root section is advertised below.
+			// The root timeline section is advertised before any rendition releases its reservation.
 			let recorder = timeline.pacing_track(track.name())?;
 
 			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
@@ -337,14 +336,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let rendition = match kind {
 				TrackKind::Video => {
 					let config = self.init_video(trak, &moov)?;
-					let mut rendition = reserved.video(track.name());
-					rendition.set(config);
+					let mut rendition = reserved.video(track.name())?;
+					rendition.set(config)?;
 					Rendition::Video(rendition)
 				}
 				TrackKind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
-					let mut rendition = reserved.audio(track.name());
-					rendition.set(config);
+					let mut rendition = reserved.audio(track.name())?;
+					rendition.set(config)?;
 					Rendition::Audio(rendition)
 				}
 			};
@@ -974,9 +973,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.group = Some(g);
 
 			track.estimator.write(timestamp, fragment_len);
-			let span = max_end.ok_or(Error::MissingTrun)?.checked_sub(timestamp)?;
+			let end = max_end.ok_or(Error::MissingTrun)?;
+			if let Some(recorder) = track.recorder.as_mut() {
+				recorder.end(end);
+			}
+			let span = end.checked_sub(timestamp)?;
 			track.estimator.burst(span.into());
-			track.rendition.estimate(track.estimator.estimate());
+			track.rendition.estimate(track.estimator.estimate())?;
 		}
 
 		Ok(())
@@ -988,7 +991,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
-			track.rendition.estimate(track.estimator.estimate());
+			track.rendition.estimate(track.estimator.estimate())?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -1016,7 +1019,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
-			track.rendition.estimate(track.estimator.estimate());
+			track.rendition.estimate(track.estimator.estimate())?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -1034,4 +1037,3 @@ fn is_sync_sample(flags: u32) -> bool {
 	let non_sync = (flags >> 16) & 0x1 == 0x1;
 	depends_on_none && !non_sync
 }
-
