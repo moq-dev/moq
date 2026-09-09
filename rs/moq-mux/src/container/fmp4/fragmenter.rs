@@ -165,6 +165,7 @@ impl Fragmenter {
 			track_id: self.track_id,
 			timescale: self.timescale,
 			sequence_number: self.sequence,
+			audio: !self.is_video,
 		};
 		let ticks = frame
 			.duration
@@ -297,7 +298,7 @@ mod tests {
 		);
 
 		for (fragment, expected) in fragments.iter().zip(&input) {
-			let decoded = super::super::decode(fragment.data.clone(), timescale).unwrap();
+			let decoded = super::super::decode(fragment.data.clone(), timescale, false).unwrap();
 			assert_eq!(decoded.len(), 1);
 			assert_eq!(decoded[0].timestamp, expected.timestamp, "pts survives the reorder");
 		}

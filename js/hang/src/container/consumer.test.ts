@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Group, Time, Track, Varint } from "@moq/net";
-import type { InitSegment } from "./cmaf/decode.ts";
-import { encodeDataSegment } from "./cmaf/encode.ts";
+import { AudioConfigSchema } from "../catalog/audio.ts";
+import { decodeInitSegment, type InitSegment } from "./cmaf/decode.ts";
+import { createAudioInitSegment, encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";
 import { Consumer } from "./consumer.ts";
 import type { Format as ContainerFormat } from "./format.ts";
@@ -12,6 +13,7 @@ const TIMESCALE = 90_000;
 const TEST_INIT: InitSegment = {
 	timescale: TIMESCALE,
 	trackId: 1,
+	audio: false,
 	defaultSampleDuration: 0,
 	defaultSampleSize: 0,
 	defaultSampleFlags: 0,
@@ -113,6 +115,32 @@ test("CmafFormat decodes a valid keyframe segment", () => {
 	expect(result[0].payload).toEqual(new Uint8Array([0xca, 0xfe]));
 	expect(result[0].timestamp).toBe(0 as Time.Micro);
 	expect(result[0].keyframe).toBe(true);
+});
+
+// Packagers flag every audio sample a sync sample. Reported as a keyframe, each would open
+// its own group, so audio never decodes one: the consumer marks the group start instead.
+test("CmafFormat never reports an audio keyframe", () => {
+	const config = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48000,
+		numberOfChannels: 2,
+	});
+	const init = decodeInitSegment(createAudioInitSegment(config));
+	expect(init.audio).toBe(true);
+
+	const format = new CmafFormat(init);
+	const segment = encodeDataSegment({
+		data: new Uint8Array([0xca, 0xfe]),
+		timestamp: 0,
+		duration: 20000,
+		keyframe: true,
+		sequence: 0,
+	});
+
+	const result = format.decode(segment);
+	expect(result).toHaveLength(1);
+	expect(result[0].keyframe).toBe(false);
 });
 
 test("CmafFormat decodes a delta frame segment", () => {

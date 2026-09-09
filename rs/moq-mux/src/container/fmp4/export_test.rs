@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
@@ -476,7 +476,8 @@ async fn single_track_export_init_matches_fragment_track_id() {
 		.await
 		.expect("catalog consumer");
 	let selected = catalog_stream.select(crate::select::Broadcast::default().audio(crate::select::Audio::default()));
-	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), selected);
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer), selected)
+		.with_max_age(RECORDING_MAX_AGE);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -484,13 +485,14 @@ async fn single_track_export_init_matches_fragment_track_id() {
 		.expect("exporter result")
 		.expect("expected init bytes");
 
-	// The next non-init fragment is a moof+mdat for the same (only) track.
+	// A fragment is a group, and ending the track is what closes the last one. The
+	// next non-init fragment is a moof+mdat for the same (only) track.
+	importer.finish().unwrap();
 	let fragment = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
 		.expect("expected a fragment");
-
 	drop(importer);
 
 	// init moov: exactly one trak, whose id must equal its trex id.
@@ -657,12 +659,14 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert_eq!(fragment.duration, std::time::Duration::from_secs_f64(1.0 / 30.0));
 	let timescale = moq_net::Timescale::new(90_000).unwrap();
-	let decoded = super::decode(fragment.data, timescale).unwrap();
+	let decoded = super::decode(fragment.data, timescale, false).unwrap();
 	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 }
 
+/// A one-packet audio group is a one-sample fragment, timed by the catalog cadence
+/// rather than by the next group, which may sit across a pause.
 #[tokio::test(start_paused = true)]
-async fn audio_only_default_mode_emits_without_successor() {
+async fn one_packet_audio_group_is_timed_by_the_catalog() {
 	use hang::catalog::{AAC, AudioConfig};
 
 	let aac = crate::codec::aac::Config {
@@ -675,8 +679,13 @@ async fn audio_only_default_mode_emits_without_successor() {
 
 	let mut live = Live::audio(config);
 	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
+	// The next group opens well past one frame, as it would after a pause.
+	live.track
+		.write(raw_frame(500_000, &[0x01, 0x02, 0x03, 0x04], true))
+		.unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
 	chunk_now(&mut exporter)
 		.await
 		.init()
@@ -684,12 +693,86 @@ async fn audio_only_default_mode_emits_without_successor() {
 
 	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert!(fragment.independent, "audio fragments are always independent");
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 1)]);
 	// An AAC frame is 1024 samples, so the catalog fallback is the real duration.
 	assert!(
 		(fragment.duration.as_secs_f64() - 1024.0 / 44100.0).abs() < 1e-4,
 		"expected one AAC frame of duration, got {:?}",
 		fragment.duration
 	);
+}
+
+/// An audio group the publisher filled with several packets comes out as one fragment,
+/// not one per packet: the boundary in the file is the one on the wire.
+#[tokio::test(start_paused = true)]
+async fn audio_fragment_is_the_publisher_group() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let mut live = Live::audio(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+	// Three 20 ms packets in one group, then a packet opening the next.
+	for i in 0..4u64 {
+		live.track
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], i % 3 == 0))
+			.unwrap();
+	}
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
+
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+	assert!(fragment.independent, "audio fragments are always independent");
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 3)]);
+	assert!(
+		(fragment.duration.as_secs_f64() - 0.06).abs() < 1e-4,
+		"expected three 20 ms packets, got {:?}",
+		fragment.duration
+	);
+	// The one-frame-per-fragment mode is the explicit way back to per-packet output.
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_max_age(RECORDING_MAX_AGE)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	chunk_now(&mut exporter).await.init().expect("init");
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 1)]);
+}
+
+/// An audio track nobody cuts buffers until something does. The explicit cap is that
+/// something, and it says out loud how much latency the caller accepts.
+#[tokio::test(start_paused = true)]
+async fn uncut_audio_waits_for_the_explicit_cap() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let mut live = Live::audio(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+	// Two seconds of 20 ms packets in one group.
+	for i in 0..100u64 {
+		live.track
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], i == 0))
+			.unwrap();
+	}
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+	assert!(
+		drain_now(&mut exporter).await.is_empty(),
+		"an open group is not a fragment yet"
+	);
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_max_age(RECORDING_MAX_AGE)
+		.with_fragment_duration(std::time::Duration::from_millis(200));
+	chunk_now(&mut exporter).await.init().expect("init");
+	let fragments = drain_now(&mut exporter).await;
+	// Ten packets per cap; the last ten wait for a successor that never comes.
+	let counts: Vec<usize> = fragments.iter().map(|f| traf_samples(&f.data)[0].1).collect();
+	assert_eq!(counts, vec![10; 9]);
+	for fragment in &fragments {
+		assert_eq!(fragment.duration, std::time::Duration::from_millis(200));
+	}
 }
 
 #[tokio::test(start_paused = true)]
@@ -699,8 +782,13 @@ async fn opus_frame_duration_from_toc() {
 	let mut live = Live::audio(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 	// TOC 0x08: config 1 (SILK 20 ms), code 0 (one frame) = 960 samples at 48 kHz.
 	live.track.write(raw_frame(0, &[0x08, 0xaa, 0xbb, 0xcc], true)).unwrap();
+	// The next group closes the first packet's fragment.
+	live.track
+		.write(raw_frame(20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+		.unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
 	chunk_now(&mut exporter)
 		.await
 		.init()
@@ -834,6 +922,262 @@ fn a_long_gop_does_not_cost_a_stack_frame_per_sample() {
 		.expect("spawn");
 
 	run.join().expect("a long GOP overflowed the stack");
+}
+
+/// A live A/V broadcast: one Legacy Opus track beside the H.264 one.
+fn live_av() -> (Live, crate::container::Producer<crate::catalog::hang::Container>) {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let mut live = Live::avc3();
+	let audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+	(live, audio)
+}
+
+/// Three GOPs of three 30 fps frames and twelve 20 ms Opus packets cut into groups of
+/// `group` packets, exported whole: the `(track, samples)` of every fragment, with the
+/// init's `(video, audio)` track ids.
+async fn export_av(group: u64) -> (Vec<(u32, usize)>, (u32, u32)) {
+	let (mut live, mut audio) = live_av();
+	for i in 0..9u64 {
+		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+	}
+	for i in 0..12u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], i % group == 0))
+			.unwrap();
+	}
+	live.track.finish().unwrap();
+	audio.finish().unwrap();
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let ids = track_ids(&init);
+
+	let fragments = drain_now(&mut exporter).await;
+	assert_each_track_ascends(&init, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
+	let counts = fragments
+		.iter()
+		.map(|fragment| {
+			let trafs = traf_samples(&fragment.data);
+			assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+			trafs[0]
+		})
+		.collect();
+	(counts, ids)
+}
+
+/// A publisher that cut its audio groups on the video GOP gets a file whose audio
+/// fragments line up with the video ones, and the exporter did nothing to arrange it.
+#[tokio::test(start_paused = true)]
+async fn aligned_audio_groups_give_aligned_fragments() {
+	let (counts, (video, audio)) = export_av(5).await;
+	let mut per_track: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
+	for (id, samples) in counts {
+		per_track.entry(id).or_default().push(samples);
+	}
+	assert_eq!(per_track[&video], vec![3, 3, 3]);
+	assert_eq!(per_track[&audio], vec![5, 5, 2]);
+}
+
+/// A live encoder cuts one group per packet, so its file carries one audio fragment
+/// per packet: the wire's boundaries, not ones the exporter made up, and nothing left
+/// buffered behind the video.
+#[tokio::test(start_paused = true)]
+async fn per_packet_audio_groups_give_per_packet_fragments() {
+	let (counts, (video, audio)) = export_av(1).await;
+	let video_fragments: Vec<usize> = counts.iter().filter(|(id, _)| *id == video).map(|(_, n)| *n).collect();
+	let audio_fragments: Vec<usize> = counts.iter().filter(|(id, _)| *id == audio).map(|(_, n)| *n).collect();
+	assert_eq!(video_fragments, vec![3, 3, 3]);
+	assert_eq!(audio_fragments, vec![1; 12]);
+}
+
+/// A video track that ends while the audio plays on must not leave its last GOP
+/// behind the whole rest of the audio.
+///
+/// A source with another packet always ready (a recording, a fetch) hands back a
+/// fragment on every poll, so the exporter never reaches the idle step that drains a
+/// finished track's buffer. The video's tail would then land after every audio
+/// fragment, however long the audio runs on: a `tfdt` inversion with no bound on it.
+#[tokio::test(start_paused = true)]
+async fn video_that_ends_first_writes_its_tail_in_order() {
+	let (mut live, mut audio) = live_av();
+
+	// Two 30 fps GOPs of three frames each, and then the video ends.
+	for i in 0..6u64 {
+		live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+	}
+	live.track.finish().unwrap();
+	// The audio runs on for another half second in 100 ms groups, always ready.
+	for i in 0..30u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], i % 5 == 0))
+			.unwrap();
+	}
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let (video_id, audio_id) = track_ids(&init);
+
+	let fragments = drain_now(&mut exporter).await;
+	assert_ascending_starts(&init, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
+
+	let counts: Vec<(u32, usize)> = fragments
+		.iter()
+		.map(|fragment| traf_samples(&fragment.data)[0])
+		.collect();
+	// The video tail goes out as soon as the video ends, right after the audio group
+	// that overlaps its first GOP; the open audio group at the end stays buffered.
+	assert_eq!(
+		counts,
+		vec![
+			(video_id, 3),
+			(audio_id, 5),
+			(video_id, 3),
+			(audio_id, 5),
+			(audio_id, 5),
+			(audio_id, 5),
+			(audio_id, 5),
+		],
+		"the video tail must not trail the audio",
+	);
+}
+
+/// The `(video, audio)` track ids declared by an init segment.
+fn track_ids(init: &Bytes) -> (u32, u32) {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut video = None;
+	let mut audio = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		let mp4_atom::Any::Moov(moov) = atom else {
+			continue;
+		};
+		for trak in &moov.trak {
+			let id = trak.tkhd.track_id;
+			let slot = match trak.mdia.hdlr.handler.to_string().as_str() {
+				"vide" => &mut video,
+				"soun" => &mut audio,
+				other => panic!("unexpected handler {other}"),
+			};
+			assert!(
+				slot.replace(id).is_none(),
+				"several traks of one kind: ids are ambiguous"
+			);
+		}
+	}
+	(video.expect("a video trak"), audio.expect("an audio trak"))
+}
+
+/// The `(track_id, sample count)` of every `traf` in a media fragment.
+fn traf_samples(fragment: &Bytes) -> Vec<(u32, usize)> {
+	let mut cursor = Cursor::new(fragment.as_ref());
+	let mut trafs = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+		let mp4_atom::Any::Moof(moof) = atom else {
+			continue;
+		};
+		for traf in moof.traf {
+			let samples = traf.trun.iter().map(|trun| trun.entries.len()).sum();
+			trafs.push((traf.tfhd.track_id, samples));
+		}
+	}
+	trafs
+}
+
+/// The presentation time each fragment starts at (its `tfdt`), in seconds, read
+/// at the timescale its track declares in the init segment.
+fn fragment_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) -> Vec<(u32, f64)> {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut scales = std::collections::BTreeMap::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			for trak in &moov.trak {
+				scales.insert(trak.tkhd.track_id, f64::from(trak.mdia.mdhd.timescale));
+			}
+		}
+	}
+	fragments
+		.iter()
+		.map(|fragment| {
+			let traf = super::first_traf(&fragment.data);
+			let track_id = traf.tfhd.track_id;
+			let tfdt = traf.tfdt.expect("a tfdt").base_media_decode_time;
+			(track_id, tfdt as f64 / scales[&track_id])
+		})
+		.collect()
+}
+
+/// Assert the fragments' start times never go backwards, across every track.
+fn assert_ascending_starts(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) {
+	let starts = fragment_starts(init, fragments);
+	for pair in starts.windows(2) {
+		let [(previous_id, previous), (id, start)] = pair else {
+			unreachable!();
+		};
+		assert!(
+			start >= previous,
+			"track {id} starts at {start}s after track {previous_id} started at {previous}s: {starts:?}",
+		);
+	}
+}
+
+/// Every track's own fragments must ascend in start time, whatever the order
+/// they are interleaved in.
+fn assert_each_track_ascends(init: &Bytes, fragments: &[crate::container::fmp4::Fragment]) {
+	let starts = fragment_starts(init, fragments);
+	let mut previous: std::collections::BTreeMap<u32, f64> = std::collections::BTreeMap::new();
+	for (id, start) in &starts {
+		if let Some(previous) = previous.insert(*id, *start) {
+			assert!(
+				*start > previous,
+				"track {id} starts at {start}s after starting at {previous}s: {starts:?}",
+			);
+		}
+	}
+}
+
+/// The `mfhd` sequence numbers must ascend from one fragment to the next, which
+/// is what ISO/IEC 14496-12 section 8.8.5 asks of a file.
+fn assert_ascending_sequence_numbers(fragments: &[crate::container::fmp4::Fragment]) {
+	let numbers: Vec<u32> = fragments
+		.iter()
+		.map(|fragment| {
+			let mut cursor = Cursor::new(fragment.data.as_ref());
+			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode fragment") {
+				if let mp4_atom::Any::Moof(moof) = atom {
+					return moof.mfhd.sequence_number;
+				}
+			}
+			panic!("a fragment with no moof");
+		})
+		.collect();
+	for pair in numbers.windows(2) {
+		assert!(
+			pair[1] > pair[0],
+			"sequence numbers must ascend in file order, got {numbers:?}",
+		);
+	}
+}
+
+/// Every media fragment the exporter can produce without waiting for more input.
+async fn drain_now(
+	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
+) -> Vec<crate::container::fmp4::Fragment> {
+	let mut fragments = Vec::new();
+	while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+		match next.expect("exporter failed") {
+			Some(chunk) => fragments.push(chunk.fragment().expect("a media fragment after the init")),
+			None => break,
+		}
+	}
+	fragments
 }
 
 /// The next chunk, required to be ready without another frame arriving.

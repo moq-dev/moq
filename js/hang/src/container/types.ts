@@ -6,7 +6,7 @@ export interface Frame {
 	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
 	timestamp: Time.Micro;
-	/** Whether this frame is a keyframe (can be decoded standalone). */
+	/** Whether this frame opens a group, or is a video keyframe. Audio carries it only on a group start. */
 	keyframe: boolean;
 
 	// How long this frame occupies the presentation timeline. CMAF carries a

@@ -62,13 +62,16 @@ pub struct Frame {
 	/// Encoded codec payload.
 	pub payload: Bytes,
 
-	/// Whether this frame is a keyframe.
+	/// Whether this frame opens a group, or is a video keyframe.
 	///
 	/// Containers that carry the bit on the wire (CMAF reads it from
-	/// trun sample-flags) should set it; containers that don't (Legacy,
+	/// trun sample-flags) set it for video; containers that don't (Legacy,
 	/// LOC) leave it `false`. The wrapping [`Consumer`] still asserts
 	/// "first frame in a group is a keyframe" as a fallback, so the
-	/// Legacy/LOC case lands correctly without anyone having to know.
+	/// Legacy/LOC case lands correctly without anyone having to know. For
+	/// audio, whose samples are all independently decodable, that fallback
+	/// is the only source: the bit marks the group boundary the publisher
+	/// drew, never a per-sample sync flag.
 	pub keyframe: bool,
 }
 

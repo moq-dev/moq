@@ -5,9 +5,11 @@
 
 import type { Time } from "@moq/net";
 import {
+	type HandlerReferenceBox,
 	type MediaHeaderBox,
 	type ParsedIsoBox,
 	readAvc1,
+	readHdlr,
 	readHev1,
 	readHvc1,
 	readIsoBoxes,
@@ -38,6 +40,7 @@ const INIT_READERS = {
 	mp4a: readMp4a,
 	stsd: readStsd,
 	mdhd: readMdhd,
+	hdlr: readHdlr,
 	tkhd: readTkhd,
 	trex: readTrex,
 };
@@ -83,6 +86,14 @@ export interface InitSegment {
 	timescale: number;
 	/** Track ID from the init segment */
 	trackId: number;
+	/**
+	 * Whether the track is audio, whose samples are all independently decodable.
+	 *
+	 * Packagers flag every audio sample a sync sample. Reported as a keyframe, each would
+	 * open its own group, so audio samples decode with `keyframe` false and the consumer
+	 * marks the group start instead.
+	 */
+	audio: boolean;
 	/** Default sample duration from moov/mvex/trex, used when not overridden in tfhd/trun. */
 	defaultSampleDuration: number;
 	/** Default sample size from moov/mvex/trex, used when not overridden in tfhd/trun. */
@@ -105,7 +116,7 @@ export interface Sample {
 	data: Uint8Array;
 	/** Timestamp in microseconds */
 	timestamp: number;
-	/** Whether this is a keyframe (sync sample) */
+	/** Whether this is a video keyframe (sync sample). Always false for audio; see {@link InitSegment.audio}. */
 	keyframe: boolean;
 	/** Sample duration in microseconds (0 when the fragment doesn't carry one) */
 	duration: number;
@@ -145,6 +156,13 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 	const tkhd = findBox(boxes, isBoxType<any>("tkhd"));
 	const trackId = tkhd?.trackId ?? 1;
 
+	// Find moov > trak > mdia > hdlr for the track kind
+	const hdlr = findBox(boxes, isBoxType<HandlerReferenceBox & ParsedIsoBox>("hdlr"));
+	if (!hdlr) {
+		throw new Error("No hdlr box found in init segment");
+	}
+	const audio = hdlr.handlerType === "soun";
+
 	// Find moov > trak > mdia > minf > stbl > stsd for sample description
 	const stsd = findBox(boxes, isBoxType<SampleDescriptionBox & ParsedIsoBox>("stsd"));
 	if (!stsd?.entries || stsd.entries.length === 0) {
@@ -167,6 +185,7 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 		description,
 		timescale: mdhd.timescale,
 		trackId,
+		audio,
 		defaultSampleDuration: trex?.defaultSampleDuration ?? 0,
 		defaultSampleSize: trex?.defaultSampleSize ?? 0,
 		defaultSampleFlags: trex?.defaultSampleFlags ?? 0,
@@ -397,8 +416,9 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 		const duration = Math.round((sampleDuration * 1_000_000) / init.timescale);
 
 		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
-		// If flag is 0, treat as keyframe for safety
-		const keyframe = sampleFlags === 0 || (sampleFlags & 0x00010000) === 0;
+		// If flag is 0, treat as keyframe for safety. Audio never reports one: every
+		// audio sample is a sync sample, and the group start is the consumer's to mark.
+		const keyframe = !init.audio && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
 
 		samples.push({
 			data,
