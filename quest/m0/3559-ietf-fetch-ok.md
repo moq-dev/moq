@@ -55,10 +55,11 @@ The work:
   what the type's own assertions require.
 - Give the fetch the one fact it needs to name a legal range: the group
   `run_subscribe_stream` already snapshots from `live_edge`, recorded under its
-  request id in state shared across the session's streams and dropped when the
-  subscription ends. `Publisher` is `Clone` and carries no per-request map
-  today, so this is a new field on it; keep it to the group, since serving the
-  range is explicitly out of scope.
+  request id and dropped when the subscription ends. Every stream runs on its
+  own `Publisher` clone, so a plain field would be copied per stream and the
+  fetch would never see the subscribe's entry; the map has to sit behind a
+  shared handle so all clones read one table. Keep the entry to the group, since
+  serving the range is explicitly out of scope.
 - End Location becomes the fetch's own Start, `{group, 0}` for the offset-0
   joining fetch we accept: the empty range, and the smallest answer that is not
   smaller than Start. `end_of_track` stays false.
@@ -71,12 +72,18 @@ The work:
 Tests, per version, since the message type is version-dependent and no test
 covers what the publisher actually writes:
 
-- A relative joining FETCH with offset 0 yields 0x18 with that draft's field
-  layout, and 0x7 appears nowhere in the bytes.
+- A relative joining FETCH with offset 0, arriving while its subscription is
+  still active, yields a response whose decoded message type is FETCH_OK
+  (0x18) rather than REQUEST_OK (0x7), with that draft's field layout. Assert
+  on the decoded type, not on 0x7 being absent from the bytes: 0x7 is a legal
+  group id, object id or length, so scanning for it would fail a correct
+  response.
 - On a track whose live edge is past group 0, the End Location is that group
   with object 0 rather than `{0, 0}`. This is the regression test for the
   session close.
-- The refused forms still produce their error message and close the writer.
+- The refused forms still produce their error message and close the writer, and
+  a joining FETCH arriving after its subscription ended finds no entry and is
+  refused rather than reading a stale group.
 
 ## Closes
 
