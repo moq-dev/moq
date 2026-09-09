@@ -345,6 +345,8 @@ mod tests {
 			Ok(_) => panic!("cancelled flush must poison the sink"),
 		};
 		assert!(err.to_string().contains("cancelled call"), "unexpected error: {err}");
+		assert!(matches!(err, crate::Error::CodecGone(_)));
+		assert!(consumer.read().await.unwrap().is_none());
 	}
 
 	/// VAAPI returns its buffered tail before the consumer reports track end.
