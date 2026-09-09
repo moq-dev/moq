@@ -531,6 +531,9 @@
               test -f "${overlayPkgs.libmoq.src}/$asset"
             done
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
+            # Patched registry dependencies must see kio's real API even in
+            # Crane's dependency-only source tree.
+            diff -r ${./rs/kio/src} ${overlayPkgs.libmoq.cargoArtifacts.src}/rs/kio/src
             touch "$out"
           '';
         };
