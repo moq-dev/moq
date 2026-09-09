@@ -4,15 +4,14 @@
 # ones. No-op for anyone without direnv or an .envrc, so non-nix setups are
 # unaffected.
 #
-# direnv only *approves* the .envrc; the actual env is exported into
-# $CLAUDE_ENV_FILE, which Claude Code inlines into every later Bash command.
+# Claude Code inlines $CLAUDE_ENV_FILE into the command string of every Bash
+# call, and Linux caps a single argv entry at MAX_ARG_STRLEN, 128KB. This dev
+# shell exports around 190KB, so the environment goes in a sidecar file and
+# $CLAUDE_ENV_FILE gets only a line sourcing it. macOS has no per-argument cap,
+# which is why inlining the whole environment appeared to work there.
 
 set -u
 
-# Because it is inlined, the file counts against MAX_ARG_STRLEN, the 128KB Linux
-# cap on a single argv entry. Refuse to write more than half of that: past the
-# cap every Bash command dies with E2BIG before the shell even starts.
-MAX_BYTES=65536
 MARKER='# moq dev shell'
 
 # Nothing to export into without this; older Claude Code versions won't set it.
@@ -27,7 +26,7 @@ cd "$CLAUDE_PROJECT_DIR" || exit 0
 [ -f .envrc ] || exit 0
 
 # SessionStart fires again on resume and clear, and the env file outlives it, so
-# an unguarded append stacks another full copy each time.
+# an unguarded append would stack another copy each time.
 grep -qF "$MARKER" "$CLAUDE_ENV_FILE" 2>/dev/null && exit 0
 
 # Clear any inherited direnv state so the dev shell is recomputed in full.
@@ -37,30 +36,37 @@ unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
 
 direnv allow . 2>/dev/null || exit 0
 
-# Snapshot the environment from inside the dev shell rather than using `direnv
-# export`, which also emits DIRENV_DIFF and DIRENV_WATCHES: base64 images of the
-# entire environment, hundreds of KB under a flake, that only direnv reads.
-scratch=$(mktemp) || exit 0
-trap 'rm -f "$scratch"' EXIT
+raw=$(mktemp) || exit 1
+trap 'rm -f "$raw"' EXIT
 
-direnv exec . bash -c '
-	for name in $(compgen -e); do
-		case $name in
-		DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
-		esac
-		printf "export %s=%q\n" "$name" "${!name}"
-	done
-' >"$scratch" 2>/dev/null
-
-size=$(wc -c <"$scratch")
-[ "$size" -gt 0 ] || exit 0
-
-if [ "$size" -gt "$MAX_BYTES" ]; then
-    echo "direnv hook: dev shell env is $size bytes, over the $MAX_BYTES cap. Refusing to export it, since Bash would then fail with E2BIG." >&2
-    exit 1
+# Read the environment with `env -0` rather than a shell builtin: nixpkgs builds
+# the non-interactive `bash` without programmable completion, so `compgen` does
+# not exist inside the very dev shell this hook is here to load.
+if ! direnv exec . env -0 >"$raw"; then
+	echo "direnv hook: could not load the dev shell, see the direnv output above." >&2
+	exit 1
 fi
 
-{
-    echo "$MARKER"
-    cat "$scratch"
-} >>"$CLAUDE_ENV_FILE"
+sidecar=$CLAUDE_ENV_FILE.direnv
+
+while IFS= read -r -d '' entry; do
+	name=${entry%%=*}
+
+	# Skip exported functions (BASH_FUNC_foo%%) and anything else that is not a
+	# plain identifier, since `export` cannot restore those.
+	[[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+	# direnv's bookkeeping, and the shell's own state, are not ours to restore.
+	case $name in
+	DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
+	esac
+
+	printf 'export %s=%q\n' "$name" "${entry#*=}"
+done <"$raw" >"$sidecar"
+
+if [ ! -s "$sidecar" ]; then
+	echo "direnv hook: the dev shell exported nothing, so no tools would resolve." >&2
+	exit 1
+fi
+
+printf '%s\n. %q\n' "$MARKER" "$sidecar" >>"$CLAUDE_ENV_FILE"
