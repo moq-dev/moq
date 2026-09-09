@@ -467,36 +467,46 @@ impl Consumer {
 	/// Stays pending until a segment exists and its track's info is known (the
 	/// serving session may not have accepted it yet).
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<track::Info>> {
-		// Wait for a segment (or a terminal state), then poll the newest one's info.
-		// The track is copied out of the guard: resolving it takes the underlying
-		// track's own lock.
-		let track = match ready!(
-			self.state
-				.poll(waiter, |state| match (&state.abort, state.segments.last()) {
+		loop {
+			// Poll the underlying track outside the resume lock, then validate the
+			// generation under that lock before returning or registering a waiter.
+			let (epoch, track) = match ready!(self.state.poll(waiter, |state| {
+				match (&state.abort, state.segments.last()) {
 					(Some(err), _) => Poll::Ready(Err(err.clone())),
-					(None, Some(segment)) => Poll::Ready(Ok(segment.track.clone())),
+					(None, Some(segment)) => Poll::Ready(Ok((state.epoch, segment.track.clone()))),
 					(None, None) => Poll::Pending,
-				})
-		) {
-			Ok(res) => res?,
-			Err(state) => match (&state.abort, state.segments.last()) {
-				(Some(err), _) => return Poll::Ready(Err(err.clone())),
-				(None, Some(segment)) => segment.track.clone(),
-				// Closed without ever getting a segment: nothing will resolve this.
-				(None, None) => return Poll::Ready(Err(Error::Dropped)),
-			},
-		};
+				}
+			})) {
+				Ok(res) => res?,
+				Err(state) => match (&state.abort, state.segments.last()) {
+					(Some(err), _) => return Poll::Ready(Err(err.clone())),
+					(None, Some(segment)) => (state.epoch, segment.track.clone()),
+					(None, None) => return Poll::Ready(Err(Error::Dropped)),
+				},
+			};
 
-		if let Poll::Ready(info) = track.info().poll_ok(waiter) {
-			return Poll::Ready(info);
+			let info = track.info().poll_ok(waiter);
+			#[cfg(test)]
+			test::INFO_POLLED.with(|hook| {
+				if let Some(hook) = hook.take() {
+					hook();
+				}
+			});
+			match self.state.poll(waiter, |state| {
+				if state.epoch != epoch {
+					Poll::Ready(false)
+				} else if info.is_ready() {
+					Poll::Ready(true)
+				} else {
+					// Registration and validation share the lock, so a switch cannot
+					// slip between them and leave us waiting on a retired segment.
+					Poll::Pending
+				}
+			}) {
+				Poll::Ready(Ok(false)) => continue,
+				_ => return info,
+			}
 		}
-
-		// The newest segment has not been accepted yet, so park on the segment list
-		// too: a takeover superseding it must re-resolve against the successor rather
-		// than answer with a generation nobody will read. Ready means the producer is
-		// gone and this segment is the last one, leaving only its info to wait on.
-		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
-		Poll::Pending
 	}
 
 	/// Return the track's [`track::Info`], resolved from the newest segment.
@@ -1260,6 +1270,38 @@ mod test {
 	use crate::{Timestamp, broadcast};
 	use futures::FutureExt;
 	use std::sync::Arc;
+
+	thread_local! {
+		pub(super) static INFO_POLLED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+	}
+
+	#[tokio::test]
+	async fn info_rechecks_a_concurrent_takeover() {
+		for accepted in [false, true] {
+			let request = track::Request::new(Arc::new(broadcast::Info::default()), "a");
+			let consumer_a = request.consume();
+			let mut request = Some(request);
+			let _track_a = accepted.then(|| request.take().unwrap().accept(track::Info::default()));
+			let (_track_b, consumer_b) =
+				track_pair_info("b", track::Info::default().with_timescale(crate::Timescale::MICRO));
+			let mut producer = Producer::new();
+			let consumer = producer.consume();
+			producer.switch(&consumer_a, None).unwrap();
+
+			// Force the switch between the underlying poll and generation validation.
+			INFO_POLLED.with(|hook| {
+				hook.replace(Some(Box::new(move || {
+					producer.switch(&consumer_b, 1).unwrap();
+				})));
+			});
+			let info = consumer
+				.info()
+				.now_or_never()
+				.expect("takeover must not lose a wakeup")
+				.unwrap();
+			assert_eq!(info.timescale, crate::Timescale::MICRO);
+		}
+	}
 
 	fn track_pair(name: &str) -> (track::Producer, track::Consumer) {
 		track_pair_info(name, None)
