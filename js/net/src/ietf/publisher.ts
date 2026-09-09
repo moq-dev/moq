@@ -268,8 +268,16 @@ export class Publisher {
 						: undefined,
 				trackAlias: msg.requestId,
 				// Required once the track has content; a fill-requesting subscriber sizes its
-				// backfill against this.
-				largest: edge.largest && { groupId: edge.largest.group, objectId: edge.largest.object },
+				// backfill against this. Below draft-20 round it down to the start of its
+				// group, matching what the subscription serves there: a draft-20 subscriber
+				// recovers a group's head with a FILL, which we serve, while older drafts
+				// recover it with a joining FETCH, which we do not, so naming a mid-group
+				// start would strand them.
+				largest:
+					edge.largest &&
+					(Filter.isDraft20(version)
+						? { groupId: edge.largest.group, objectId: edge.largest.object }
+						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
 					? // Declaring the timescale is what opts the track into timestamps; every
 						// object Timestamp below is in these units. We serve the newest group

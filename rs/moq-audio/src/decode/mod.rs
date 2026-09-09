@@ -19,4 +19,4 @@ mod decoder;
 
 pub use consumer::Consumer;
 pub use decoded::Decoded;
-pub use decoder::{Config, Decoder};
+pub use decoder::{Config, Decoder, Start};

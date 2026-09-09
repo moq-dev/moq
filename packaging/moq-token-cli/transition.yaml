@@ -1,0 +1,12 @@
+# Keep apt upgrades following the renamed package.
+name: moq-token-cli
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: oldlibs
+priority: optional
+maintainer: MoQ Project <admin@moq.dev>
+description: Transitional package for moq-token.
+license: MIT OR Apache-2.0
+depends:
+  - moq-token (>= ${VERSION})

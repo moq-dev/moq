@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 
-use super::decoder::{Config, Decoder};
+use super::decoder::{Config, Decoder, Start};
 use crate::resample::{Resampler, remix, validate_channels};
 use crate::{Activity, Error, Frame};
 
@@ -82,10 +82,30 @@ impl Consumer {
 		};
 
 		let name = name.into();
-		let track = broadcast
-			.track(&name)?
+		let track = broadcast.track(&name)?;
+		let mut subscriber = track
 			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 			.await?;
+		// A decoder often opens on a track that is already cached: a replacement
+		// decoder subscribes while its predecessor still holds groups, and a
+		// rendition switched away from and back to stays warm for
+		// `TRACK_IDLE_LINGER`. A caller that asked for `Start::Latest` wants
+		// none of that backlog, because a cursor starting at sequence zero
+		// replays every cached group at decode speed before reaching live
+		// media, which on a thirty-second retention is half a minute of sound raced
+		// through.
+		//
+		// This moves the local read cursor and deliberately not
+		// `Subscription::group_start`. That field is a request to the publisher,
+		// aggregated across every live subscriber, so naming a stale cached
+		// sequence there asks the publisher to rewind the track for everyone
+		// reading it. What a player wants is to skip what it already has.
+		if config.start == Start::Latest
+			&& let Some(live_edge) = track.latest()
+		{
+			subscriber.start_at(live_edge);
+		}
+		let track = subscriber;
 		let latency_max = config.latency_max.unwrap_or_default().min(track.info().latency_max);
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a

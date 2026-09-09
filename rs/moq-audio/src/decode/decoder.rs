@@ -23,6 +23,32 @@ use crate::{Activity, Error, Format};
 /// Opus packets cap at 120 ms (RFC 6716 §2.1.4).
 const MAX_FRAME_MS: usize = 120;
 
+/// Where a decoder starts on a track that already holds groups.
+///
+/// A track keeps its groups for a while after they are read, so a decoder does
+/// not always open on an empty one: a player rebuilding its decoder subscribes
+/// while its predecessor still holds groups, and a rendition switched away from
+/// and back to stays warm for the track's idle linger. What to do with that
+/// backlog depends on the consumer, and the two answers are opposites, so it is
+/// asked rather than guessed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Start {
+	/// The oldest group the track still holds, decoding everything cached.
+	///
+	/// What a recorder, an export, or anything reading a complete track wants,
+	/// and the default because dropping media a caller has not asked to drop is
+	/// the worse mistake.
+	#[default]
+	Oldest,
+	/// The newest group, skipping whatever is already cached.
+	///
+	/// What a live player wants. Without it a rebuilt decoder walks the whole
+	/// backlog at decode speed before reaching live media, which a viewer sees
+	/// as playback jumping backwards and then sprinting to catch up.
+	Latest,
+}
+
 /// Decoder configuration: the PCM layout to emit, plus the subscription's
 /// latency budget.
 ///
@@ -53,6 +79,8 @@ pub struct Config {
 	/// newer data is already this far ahead. A companion `latency_min` for
 	/// jitter-buffer padding will land in a follow-up.
 	pub latency_max: Option<Duration>,
+	/// Where to start on a track that already holds groups.
+	pub start: Start,
 }
 
 impl Config {

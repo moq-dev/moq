@@ -434,6 +434,34 @@ pub fn seeds() -> Vec<Seed> {
 		});
 	}
 
+	// A SUBSCRIBE_OK carrying LARGEST_OBJECT, whose value encoding changed at draft-17
+	// from a length-prefixed Location to two bare varints. A uniform fill never lands a
+	// valid parameter count followed by a Location, so build it from the encoder.
+	for (index, version) in IETF_VERSIONS.iter().enumerate() {
+		let subscribe_ok = ietf::SubscribeOk {
+			request_id: matches!(
+				version,
+				ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+			)
+			.then_some(ietf::RequestId(0)),
+			track_alias: 0,
+			largest: Some(ietf::Location { group: 427, object: 0 }),
+			properties: Default::default(),
+		};
+
+		let Ok(encoded) = subscribe_ok.encode_bytes(*version) else {
+			continue;
+		};
+
+		let mut data = vec![index as u8, 19];
+		data.extend_from_slice(&encoded);
+		seeds.push(Seed {
+			target: "ietf",
+			kind: 19,
+			data,
+		});
+	}
+
 	// One of each length tag in both codecs, plus the all-ones forms that only the
 	// leading-ones codec accepts.
 	for selector in 0..12u8 {

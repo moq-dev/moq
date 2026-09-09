@@ -607,7 +607,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				track_alias: request_id.0,
 				// Required once the track has content; a fill-requesting subscriber
 				// sizes its backfill against this.
-				largest: edge.largest,
+				//
+				// Below draft-20 round it down to the start of its group, matching what
+				// `subscribe_range` serves there. A draft-20 subscriber recovers a group's
+				// head with a FILL, which we serve; older drafts recover it with a joining
+				// FETCH, which we do not, so naming a mid-group start would strand them.
+				largest: match Filter::is_draft20(self.version) {
+					true => edge.largest,
+					false => edge.largest.map(|largest| Location {
+						group: largest.group,
+						object: 0,
+					}),
+				},
 				properties: match timescale {
 					// The declared timescale; every object Timestamp below is in these units.
 					// We serve the newest group first, matching moq-lite.
@@ -2289,6 +2300,7 @@ mod unstamped_tests {
 #[cfg(test)]
 mod serve_tests {
 	use super::*;
+	use crate::coding::Decode;
 	use crate::lite::test_transport::{Log, ScriptedSession, SinkSession};
 
 	fn occurrences(log: &Log, needle: &[u8]) -> usize {
@@ -2512,6 +2524,57 @@ mod serve_tests {
 
 		assert_eq!(occurrences(&h.log, FETCH_STREAM), 0);
 		assert!(h.log.resets().is_empty());
+	}
+
+	/// What LARGEST_OBJECT names has to match what the subscription actually starts from.
+	/// Below draft-20 `subscribe_range` ignores the filter and serves from the start of
+	/// the group, and the only way to ask for a head we skipped is a joining FETCH, which
+	/// we answer with an empty stream. Naming a mid-group object there would advertise a
+	/// backfill nothing can deliver, so the advertised Location drops to the group start.
+	/// Draft-20 serves the head with a FILL, so it advertises the true edge.
+	async fn subscribe_ok_largest(version: Version) -> Option<Location> {
+		let mut h = serve(version);
+
+		// A live edge in the middle of group 5: objects 0 through 3.
+		let mut group = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+		for payload in [b"5-0", b"5-1", b"5-2", b"5-3"] {
+			group.write_frame(timestamp(), payload.as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+
+		run_live(&mut h, subscribe(Filter::Unfiltered, None)).await;
+
+		// SUBSCRIBE_OK is the first thing written, before any group stream opens.
+		let writes = h.log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		assert_eq!(u64::decode(&mut buf, version).unwrap(), ietf::SubscribeOk::ID);
+		ietf::SubscribeOk::decode(&mut buf, version).unwrap().largest
+	}
+
+	#[tokio::test]
+	async fn largest_object_is_the_group_start_before_draft20() {
+		for version in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+		] {
+			assert_eq!(
+				subscribe_ok_largest(version).await,
+				Some(Location { group: 5, object: 0 }),
+				"{version:?} serves the whole group, so that is what it may advertise"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn largest_object_is_the_live_edge_on_draft20() {
+		assert_eq!(
+			subscribe_ok_largest(Version::Draft20).await,
+			Some(Location { group: 5, object: 3 }),
+			"a fill sizes its backfill against the true edge"
+		);
 	}
 
 	/// The filter's object bounds trim what `run_group` writes: the skipped head is not
