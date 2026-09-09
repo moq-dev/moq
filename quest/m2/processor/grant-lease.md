@@ -36,5 +36,5 @@ Land the implementation and tests here. The release and the moq.pro
 
 ## Related
 
-- [Relay refresh](/quest/m2/auth/relay-refresh.md) - the in-band token
-  refresh a lease renewal rides on
+- [Relay tokens](/quest/m2/auth/relay-refresh.md) - the in-band token a
+  lease renewal presents

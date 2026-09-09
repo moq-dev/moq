@@ -2,52 +2,66 @@
 
 ## Goal
 
-A client's credential travels inside the session instead of the URL. Every
-client in this repository connects without `?jwt=`, presents the token as its
-first AUTH, and the relay admits the session on the anonymous grant and widens
-it when the token verifies. The URL query keeps working as a legacy path so
-existing deployments and the HTTP endpoints are unaffected, and the token no
-longer appears in access logs, browser history, or the WebSocket fallback's
-request line.
+A client's credentials can travel inside the session instead of the URL, and
+several of them can ride one connection. Every client in this repository
+takes tokens as configuration separate from the address, presents each on its
+own AUTH stream at setup, and the relay admits the session on what the URL
+carried and widens it as the streams are answered. Peers below lite-06 keep
+working unchanged: the client puts the first token in the URL whenever any
+version it offers has no AUTH stream, so nothing is refused and nothing goes
+silent, and the token leaves the URL for good only once the offered set is
+AUTH-capable.
 
 ## Plan
 
-- Client configuration separates the credential from the address:
-  `moq_native::ClientConfig` gains `token`, the `moq` CLI a `--token` and
-  `MOQ_TOKEN` beside the URL, moq-ffi `MoqClient::set_token`, libmoq
-  `moq_client_set_token` (mirrored in the wrappers and `cpp/obs/src`), and
-  `js/net`'s `connect` an options field. A token in both places is a
-  configuration error, refused at connect.
-- moq-net presents it: a lite session sends the configured token as its first
-  AUTH instead of the empty one; a moq-transport session sends it as the
-  AUTHORIZATION TOKEN setup option (`ParameterBytes::AuthorizationToken`,
-  `USE_VALUE`, token type 0) and still opens the AUTH stream with an empty
-  token to learn its grant.
-- The relay admits first, scopes second. An anonymous connection today is
+- Client configuration separates the credential from the address on dev's
+  API: `moq_tokio::connect::Config` gains `tokens`, repeatable as
+  `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial
+  the client makes. A `?jwt=` in the URL stays a member of the union, which is
+  how cluster dial targets keep their per-peer credential, and per-dial
+  extras use the session's `auth().add()` once connected. moq-ffi
+  `MoqClient::set_tokens`, libmoq `moq_client_set_tokens` (mirrored in the
+  wrappers and `cpp/obs/src`), and `js/net`'s `connect` options field follow.
+- Presenting: WebTransport negotiates the moq version as a subprotocol of
+  the CONNECT request that carries the URL, so the client cannot wait to
+  learn whether the peer speaks AUTH. The client copies the first configured
+  token into the URL query whenever any offered version lacks AUTH (today,
+  everything below lite-06), and omits it once every offered version has the
+  stream; either way every configured token gets its own AUTH stream on an
+  AUTH-capable session, and the URL copy is what the empty-token stream
+  refers to. On moq-transport the first token also rides the AUTHORIZATION
+  TOKEN setup option (`ParameterBytes::AuthorizationToken`, `USE_VALUE`,
+  token type 0), which scopes at accept the way the URL does.
+- The relay admits on the URL, then widens. An anonymous connection today is
   admitted with the public grant when one is configured and refused
-  otherwise; with this quest the refusal waits for the first AUTH, bounded by
-  a short deadline after SETUP, so a client that never presents anything is
-  still refused and a token-bearing one is scoped by the existing widening
-  path from [Relay refresh](/quest/m2/auth/relay-refresh.md). A token in the
-  setup option scopes at accept, as the URL does. `AuthParams::from_url` and
-  `from_path_query` stay for the legacy query.
+  otherwise; with this quest a connection with no URL credential and no
+  public grant is held for a short deadline after SETUP for its first
+  accepted AUTH before being refused, so an AUTH-capable client with tokens
+  only in band gets in and a client that never presents anything is still
+  refused. `AuthParams::from_url` and `from_path_query` stay as the URL path.
 - The WebSocket 403 in [Connect auth race](/quest/m0/3532-connect-auth-race.md)
-  becomes an in-band AUTH_ERROR on the QUIC arm as well; the race keeps its
-  auth-only semantics.
-- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (legacy query, the
-  admission deadline), `doc/lib/*` client configuration, and every example
-  invocation that carries `?jwt=` in `doc/`, `demo/`, and the READMEs.
-- Tests: a client with a token and no query is scoped exactly as the URL
-  variant; an anonymous client with no public grant is refused at the
-  deadline; a token in both places is refused at connect; the cross-language
-  harness runs with tokens in band.
+  keeps its meaning: a URL credential is still refused at connect on either
+  arm, and an in-band refusal is an AUTH_ERROR after connect.
+- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (the admission deadline and
+  that the URL token is one member of the union), `doc/lib/*` client
+  configuration, and the example invocations carrying `?jwt=` in `doc/`,
+  `demo/`, and the READMEs, keeping the URL form documented as the way to
+  reach an older relay.
+- Tests: a client with a configured token against an AUTH-capable relay is
+  scoped exactly as the URL variant and the URL carries the token only while
+  an old version is offered; the same client against a lite-05 relay still
+  authenticates through the URL; two configured tokens union; a client with
+  in-band tokens only and no public grant is admitted, and one that presents
+  nothing is refused at the deadline; the cross-language harness runs with
+  tokens configured.
 
-On main, additive.
+Branch from dev, or from main once [merge-dev](/quest/m1/merge-dev.md) lands.
+Additive.
 
 ## Required
 
-- [Relay refresh](/quest/m2/auth/relay-refresh.md) - supplies the verify and
-  widen path the first AUTH reuses
+- [Relay tokens](/quest/m2/auth/relay-refresh.md) - supplies the verify and
+  widen path the configured tokens reuse
 - [Bindings](/quest/m2/auth/bindings.md) - supplies the client surface the new
   token setters sit beside
 - [moq-transport](/quest/m2/auth/moq-transport.md) - supplies the IETF AUTH
