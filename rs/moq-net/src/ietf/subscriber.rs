@@ -148,6 +148,20 @@ struct State {
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
+impl Drop for State {
+	fn drop(&mut self) {
+		// The session dispatcher owns this state and can be dropped at any await.
+		// Active receive tasks abort their own groups. Cancel any head waiting for
+		// its tail here, along with the track. Ordinary unsubscribe removes its entry.
+		for (_, track) in self.subscribes.drain() {
+			if let Fill::Ready { producer, .. } = &*track.fill.read() {
+				let _ = producer.clone().abort(Error::Cancel);
+			}
+			let _ = track.producer.abort(Error::Cancel);
+		}
+	}
+}
+
 /// The head of a joined group, delivered on the subscription's fill fetch stream.
 ///
 /// Draft-20's current-group join (section 5.1.6) splits one group across two streams: the
@@ -1828,7 +1842,7 @@ where
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
-		let (mut producer, start) = {
+		let (producer, start) = {
 			let mut opening = track.clone();
 			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, group.group_id));
 			kio::wait(|waiter| {
@@ -1839,6 +1853,10 @@ where
 			})
 			.await?
 		};
+
+		// Guarded: this handler can be dropped at any await below, and a group producer
+		// that dies without a terminal leaves its consumer waiting on nothing.
+		let producer = crate::recv::Group::new(producer);
 
 		let res = {
 			let mut ingest = GroupIngest::new(&group, timescale, self.version, start);
@@ -2129,14 +2147,14 @@ where
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
 	) -> Result<Fill, Error> {
-		let mut head: Option<(u64, u64, group::Producer)> = None;
+		let mut head: Option<(u64, u64, crate::recv::Group)> = None;
 
 		match self.run_fill_objects(stream, track, timescale, &mut head).await {
 			Ok(()) => Ok(match head {
 				Some((sequence, next, producer)) => Fill::Ready {
 					sequence,
 					next,
-					producer,
+					producer: producer.into_inner(),
 				},
 				None => Fill::Done,
 			}),
@@ -2160,7 +2178,7 @@ where
 		stream: &mut Reader<S::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
-		head: &mut Option<(u64, u64, group::Producer)>,
+		head: &mut Option<(u64, u64, crate::recv::Group)>,
 	) -> Result<(), Error> {
 		while let Some(object) = stream.decode_maybe::<ietf::FetchObject>().await? {
 			let ietf::FetchObject::Object {
@@ -2197,7 +2215,7 @@ where
 					};
 
 					let producer = track.create_group(group::Info { sequence })?;
-					*head = Some((sequence, 0, producer));
+					*head = Some((sequence, 0, crate::recv::Group::new(producer)));
 				}
 				// A Group ID on a later object names a different group. We ask for the
 				// current group only, and a publisher refuses a wider fill rather than
@@ -4824,6 +4842,35 @@ mod stitch_tests {
 		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, SEQUENCE);
 		assert_eq!(frames.len(), 2, "the head is published once, not twice");
+	}
+
+	/// A fill head parked waiting for its tail is still a live group producer. Dropping the
+	/// session has to end it, or the consumer waits on a group nobody will ever write again.
+	/// The guard is `State`'s own `Drop`, so it runs however the driver was torn down.
+	#[tokio::test]
+	async fn a_cancelled_session_aborts_a_waiting_fill_head() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+
+		// The head exists and is waiting for the tail that never comes.
+		let mut group = consumer
+			.recv_group()
+			.await
+			.expect("track aborted")
+			.expect("track finished");
+
+		drop(h);
+
+		assert!(
+			matches!(group.read_frame().await, Err(Error::Cancel)),
+			"a waiting fill head must be cancelled, not left parked"
+		);
 	}
 
 	/// The same contradiction as above, with the streams the other way round: the whole

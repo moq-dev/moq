@@ -95,5 +95,3 @@ jobs:
       # the platform's CI preset.
       - name: Build
         run: nix develop --command just obs ci
-        env:
-          RUST_CARGO: mbx

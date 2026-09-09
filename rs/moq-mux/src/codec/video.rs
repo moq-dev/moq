@@ -46,13 +46,14 @@ impl Catalog {
 		&mut self,
 		rendition: &mut VideoTrack<impl CatalogExt>,
 		mut config: hang::catalog::VideoConfig,
-	) {
+	) -> crate::Result<()> {
 		self.hint.apply(&mut config);
 		if self.last.as_ref() == Some(&config) {
-			return;
+			return Ok(());
 		}
 		tracing::debug!(name = ?rendition.name(), ?config, "starting track");
-		rendition.set(config.clone());
+		rendition.set(config.clone())?;
 		self.last = Some(config);
+		Ok(())
 	}
 }

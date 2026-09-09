@@ -11,6 +11,7 @@ mod compression;
 mod container;
 mod hex;
 mod json;
+mod millis;
 mod mode;
 mod priority;
 mod root;

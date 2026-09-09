@@ -14,10 +14,11 @@ use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, DurationMilliSeconds};
+use serde_with::DisplayFromStr;
 
 use crate::catalog::Container;
 use crate::catalog::hex::Hex;
+use crate::catalog::millis::MillisCeil;
 
 /// Information about a video track in the catalog.
 ///
@@ -216,17 +217,22 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum jitter before the next frame is emitted in milliseconds.
+	/// The maximum delay between a frame being ready and the publisher flushing it.
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
-	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	/// This is measured at the publisher (encoder latency, segment size, B-frame
+	/// reordering), never on the network a consumer sees. It only ever grows over the life of a
+	/// stream.
+	///
+	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
+	/// rounds down into a promise the publisher can't keep.
 	///
 	/// ex:
 	/// - If each frame is flushed immediately, this would be 1000/fps.
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
-	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }

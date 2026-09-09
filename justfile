@@ -3,10 +3,6 @@
 
 set unstable
 
-# Plain `cargo` unless set; CI sets it to `mbx`. See rs/justfile for the rule.
-_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
-cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
-
 # Per-language modules. Language-specific recipes live in their own justfiles.
 mod js
 mod rs
@@ -443,7 +439,7 @@ _tools $FILES="":
     scoped() { [[ "$FILES" == ALL ]] || grep -qE "$1" <<< "$FILES"; }
 
     # `_check-common` runs on every invocation, so its tools are unconditional.
-    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
+    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
     scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
@@ -816,7 +812,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
-    {{ cargo_compile }} build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 

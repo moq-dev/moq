@@ -184,7 +184,7 @@ For example:
       "bitrate": 6000000,
       "stalled": true,
       "framerate": 30.0,
-      "jitter": 33
+      "jitter": 34
     },
     "480p": {
       "codec": "avc1.64001e",
@@ -193,7 +193,7 @@ For example:
       "codedHeight": 480,
       "bitrate": 2000000,
       "framerate": 30.0,
-      "jitter": 33
+      "jitter": 34
     }
   },
   "display": {
@@ -475,14 +475,24 @@ The maximum delay, in milliseconds, between a frame being ready and the publishe
 A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
 If absent, a consumer SHOULD assume each frame is flushed immediately.
 
+It is measured at the publisher: how far behind the media clock a frame is when the publisher hands it to the transport, whether an encoder, a reorder buffer, or a segmenter held it.
+An importer can estimate this delay from the media span of a batch, such as a run of audio PES packets between video packets in TS or an fMP4 fragment, without measuring the time spent waiting for input.
+It is never a measurement of the network, which a consumer observes for itself and which no two consumers of the same broadcast would agree on.
+
+A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
+A publisher MUST NOT advertise `0`; a track that flushes each frame immediately omits the field instead.
+A consumer receiving `0` SHOULD treat the field as absent, since it is a publisher rounding down rather than a claim of zero delay.
+A publisher MUST NOT lower a previously advertised value, since a burst it emitted once it may emit again.
+
 For example:
 
-- If each frame is flushed immediately, a video track's `jitter` is `1000/framerate`.
+- If each frame is flushed immediately, a video track's `jitter` is `1000/framerate` rounded up: 34 at 30 fps.
 - If up to 3 B-frames may be emitted in a row, it is `3 * 1000/framerate`.
 - If frames are buffered into 2 second segments, it is `2000`.
+- If frames are flushed several at a time, it is the media span of the whole burst, not of one frame.
 
 An audio frame's duration is codec dependent.
-AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 23.
+AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 24.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -932,6 +942,12 @@ This document has no IANA actions.
 
 
 --- back
+
+# Appendix A: Changelog
+
+## moq-hang-03
+- Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
+- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
 
 # Acknowledgments
 {:numbered="false"}

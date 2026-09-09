@@ -35,7 +35,7 @@ const AMPLITUDE = 0.5;
 // A canvas capture track is a MediaStreamTrack with requestFrame(); the publish types describe a
 // getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half
 // is ever touched at runtime.
-type CanvasSource = Publish.Video.Source & Pick<CanvasCaptureMediaStreamTrack, "requestFrame">;
+type CanvasSource = Publish.Video.StreamTrack & Pick<CanvasCaptureMediaStreamTrack, "requestFrame">;
 
 /**
  * A running fixture publisher.
@@ -81,14 +81,14 @@ export class Fixture {
 		const audioTrack = destination.stream.getAudioTracks()[0] as unknown as Publish.Audio.StreamTrack;
 		this.#signals.cleanup(() => audioTrack.stop());
 
-		const connection = new Moq.Connection.Reload({ url: new URL(url), enabled: true });
+		const connection = new Moq.Connection.Shared({ url: new URL(url), enabled: true });
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });
 		this.#signals.cleanup(() => capture.close());
 
 		const broadcast = new Publish.Broadcast({
-			connection: connection.established,
+			origin: connection.origin,
 			enabled: true,
 			name: Moq.Path.from(name),
 			display: capture.out.display,
@@ -103,21 +103,27 @@ export class Fixture {
 		});
 		this.#signals.cleanup(() => video.close());
 
-		// Handed to the encoder only once this page has user activation. The encoder builds its own
-		// capture AudioContext the moment a source appears and never resumes it, so one built before
-		// the first gesture stays suspended and no audio is ever captured. See
+		// Handed to the capture only once this page has user activation. The capture builds its own
+		// AudioContext the moment a source appears and never resumes it, so one built before the
+		// first gesture stays suspended and no audio is ever captured. See
 		// /quest/m0/publish-audio-unlock.md; until that lands, giving it the source late is what keeps
 		// this fixture measuring the player rather than that gap.
 		const audioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
 
-		// A MediaStreamAudioDestinationNode track reports no rate or channel count of its own, and the
-		// encoder would otherwise fall back to whatever the graph defaults to.
+		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
+		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix
+		// whose output drops PCM under load, which reaches the player as gaps of silence. Publishing
+		// the destination node's own format costs nothing here, since the tone is the same in both
+		// channels.
+		const audioCapture = new Publish.Audio.Capture({
+			source: audioSource,
+		});
+		this.#signals.cleanup(() => audioCapture.close());
+
 		const audio = new Publish.Audio.Encoder("audio", {
 			broadcast,
+			capture: audioCapture,
 			enabled: true,
-			source: audioSource,
-			sampleRate: SAMPLE_RATE,
-			channelCount: 1,
 		});
 		this.#signals.cleanup(() => audio.close());
 
@@ -152,7 +158,7 @@ export class Fixture {
 				frameId: effect.get(this.#frameId),
 				audioState: effect.get(this.#audioState),
 				ready:
-					effect.get(connection.established) !== undefined &&
+					effect.get(connection.status) === "connected" &&
 					effect.get(video.out.catalog) !== undefined &&
 					effect.get(audio.out.catalog) !== undefined,
 				videoActive: effect.get(video.out.active),

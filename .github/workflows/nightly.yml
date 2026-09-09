@@ -15,6 +15,11 @@ name: Nightly
 # `#[cfg(target_os = ...)]` code that no Linux job compiles at all, and those
 # runners are throttled too hard to gate every PR on.
 #
+# `nix` is diff-independent because the flake packages are only ever built on a
+# release tag, so a change that compiles under plain cargo can still break every
+# release artifact (crane vendors and stubs sources in ways cargo never does) and
+# nothing notices until the tag is pushed.
+#
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
 
@@ -120,6 +125,35 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
+
+  # The release workflows build these flake attributes from a tag. crane splits a
+  # build into a dependency-only stage over stubbed workspace sources and the real
+  # one, so a `[patch.crates-io]` entry or a source filter can break here while
+  # plain cargo stays green. Two packages cover both install phases (staticlib and
+  # binary) and the whole dependency tree between them; the rest share the stages
+  # that actually break.
+  nix:
+    name: Nix (${{ matrix.package }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [libmoq, moq-relay]
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+      - name: Build
+        run: nix build ".#${{ matrix.package }}" --print-build-logs
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

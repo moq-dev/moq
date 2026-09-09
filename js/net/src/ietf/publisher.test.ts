@@ -20,7 +20,7 @@ import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
-import { ALPN, Version } from "./version.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -712,21 +712,34 @@ interface ServedFill {
 	reset?: Error;
 }
 
+/** The subprotocol each draft negotiates, so the mock pair names the version under test. */
+const ALPNS: Record<IetfVersion, string> = {
+	[Version.DRAFT_14]: ALPN.DRAFT_14,
+	[Version.DRAFT_15]: ALPN.DRAFT_15,
+	[Version.DRAFT_16]: ALPN.DRAFT_16,
+	[Version.DRAFT_17]: ALPN.DRAFT_17,
+	[Version.DRAFT_18]: ALPN.DRAFT_18,
+	[Version.DRAFT_19]: ALPN.DRAFT_19,
+	[Version.DRAFT_20]: ALPN.DRAFT_20,
+};
+
 /**
- * A publisher serving one broadcast over draft-20, with the subscribe stream already open.
+ * A publisher serving one broadcast over `version` (draft-20 unless a test says otherwise),
+ * with the subscribe stream already open.
  *
  * The uni reader is taken up front: a group stream opened before the test asks for one still
  * queues, but taking the reader late races the publisher rather than the test.
  */
-function fixture(): {
+function fixture(version: IetfVersion = V20): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
 	broadcast: BroadcastProducer;
 	uni: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
+	version: IetfVersion;
 	close: () => void;
 } {
-	const pair = createMockTransportPair(ALPN.DRAFT_20);
-	const session = new NativeSession(pair.server, V20, true);
+	const pair = createMockTransportPair(ALPNS[version]);
+	const session = new NativeSession(pair.server, version, true);
 	const { pub, origin } = publisher(pair.server, { session });
 	const broadcast = origin.publish(Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -738,6 +751,7 @@ function fixture(): {
 		pub,
 		broadcast,
 		uni,
+		version,
 		close: () => {
 			uni.releaseLock();
 			origin.close();
@@ -759,14 +773,14 @@ async function runSubscribe(
 	fx: ReturnType<typeof fixture>,
 	msg: Subscribe,
 ): Promise<{ client: Stream; ok: SubscribeOk }> {
-	const client = await Stream.open(fx.pair.client, { version: V20 });
-	const server = await Stream.accept(fx.pair.server, V20);
+	const client = await Stream.open(fx.pair.client, { version: fx.version });
+	const server = await Stream.accept(fx.pair.server, fx.version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	void fx.pub.runSubscribe(msg, server);
 
 	expect(await client.reader.u53()).toBe(SubscribeOk.id);
-	return { client, ok: await SubscribeOk.decode(client.reader, V20) };
+	return { client, ok: await SubscribeOk.decode(client.reader, fx.version) };
 }
 
 /** Take the next uni stream the publisher opened, or undefined if it opened none. */
@@ -1105,6 +1119,62 @@ test("draft-20: an empty track opens no fill stream", async () => {
 		fx.close();
 		client.close();
 	}
+});
+
+/**
+ * Subscribe over `version` to a track whose live edge is object 3 of group 5, and report the
+ * Largest Location the SUBSCRIBE_OK advertised.
+ */
+async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["largest"]> {
+	const fx = fixture(version);
+	const track = fx.broadcast.createTrack("video");
+
+	const group = new GroupProducer(5);
+	track.writeGroup(group);
+	for (let i = 0; i < 4; i++) {
+		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
+	}
+	group.close();
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "unfiltered" },
+		}),
+	);
+
+	try {
+		return ok.largest;
+	} finally {
+		fx.close();
+		client.close();
+	}
+}
+
+/**
+ * What LARGEST_OBJECT names has to match where the subscription actually starts. Below
+ * draft-20 the filter is ignored and the whole group is served, and the only way to ask for a
+ * head we skipped is a joining FETCH, which we answer with an empty stream. Advertising the
+ * mid-group edge there promises a backfill nothing can deliver, so the Location drops to the
+ * start of the group.
+ */
+test.each([
+	["draft-15", Version.DRAFT_15],
+	["draft-16", Version.DRAFT_16],
+	["draft-17", Version.DRAFT_17],
+	["draft-18", Version.DRAFT_18],
+	["draft-19", Version.DRAFT_19],
+] as const)("%s: LARGEST_OBJECT is the start of the group it serves", async (_draft, version) => {
+	expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 0n });
+});
+
+/** Draft-20 serves a skipped head with a FILL, so it advertises the true live edge. */
+test("draft-20: LARGEST_OBJECT is the live edge", async () => {
+	expect(await subscribeOkLargest(Version.DRAFT_20)).toEqual({ groupId: 5n, objectId: 3n });
 });
 
 /**

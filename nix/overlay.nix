@@ -24,6 +24,31 @@ let
     filter = filterCargoSources;
   };
 
+  # rs/kio on its own, so the dependency layer below only rebuilds when kio does.
+  kioSource = final.lib.cleanSourceWith {
+    src = ../rs/kio;
+    name = "kio-source";
+    filter = filterCargoSources;
+  };
+
+  # `[patch.crates-io] kio = { path = "rs/kio" }` in the root Cargo.toml points
+  # registry crates (web-transport-quinn, web-transport-iroh) at the workspace
+  # member. crane's dependency-only stage stubs every workspace crate down to an
+  # empty lib.rs, so those registry crates no longer find kio's API and fail to
+  # compile. Put kio's real source back into the dummy tree.
+  buildPackage =
+    args:
+    craneLib.buildPackage (
+      args
+      // {
+        extraDummyScript = ''
+          rm -rf $out/rs/kio
+          cp -r ${kioSource} --no-target-directory $out/rs/kio
+          chmod -R +w $out/rs/kio
+        '';
+      }
+    );
+
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-relay --features jemalloc";
@@ -69,7 +94,7 @@ let
     # The crate is `moq-token-cli`, but its `[[bin]]` ships as `moq-token`.
     meta.mainProgram = "moq-token";
   };
-  moqTokenPackage = craneLib.buildPackage moqTokenCliArgs;
+  moqTokenPackage = buildPackage moqTokenCliArgs;
 
   moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {
     src = cleanCargoSource;
@@ -258,24 +283,25 @@ let
   };
 
   # CI checks run via `just check` (clippy / doc) and `just test` (nextest), not
-  # through crane/`nix flake check`. CI selects mbx with RUST_CARGO, while local
-  # commands default to plain Cargo. Which compiler cache backs those runs is a
-  # workflow concern (`.github/actions/rust-cache`), not configured here.
+  # through crane/`nix flake check`. Both reach mbx through the Cargo shim the
+  # dev shell puts on PATH, so nothing spells a wrapper out. Which compiler
+  # cache backs those runs is a workflow concern
+  # (`.github/actions/rust-cache`), not configured here.
   # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
   # crane checks were introduced to fix doesn't recur.
   # Release artifacts still build via crane `buildPackage` below.
 in
 {
-  moq-relay = craneLib.buildPackage moqRelayArgs;
+  moq-relay = buildPackage moqRelayArgs;
 
-  moq-cli = craneLib.buildPackage moqCliArgs;
+  moq-cli = buildPackage moqCliArgs;
 
-  moq-bench = craneLib.buildPackage moqBenchArgs;
+  moq-bench = buildPackage moqBenchArgs;
 
   moq-token = moqTokenPackage;
   moq-token-cli = moqTokenPackage;
 
-  moq-boy = craneLib.buildPackage (
+  moq-boy = buildPackage (
     crateInfo ../rs/moq-boy/Cargo.toml
     // {
       src = cleanCargoSource;
@@ -294,9 +320,9 @@ in
     }
   );
 
-  libmoq = craneLib.buildPackage libmoqArgs;
+  libmoq = buildPackage libmoqArgs;
 
-  moq-gst-plugin = craneLib.buildPackage moqGstPluginArgs;
+  moq-gst-plugin = buildPackage moqGstPluginArgs;
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
   # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /

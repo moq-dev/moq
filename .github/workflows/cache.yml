@@ -106,13 +106,11 @@ jobs:
       - name: Check
         run: nix develop --command just check-all
         env:
-          RUST_CARGO: mbx
           MOQ_STRICT: 1
 
       - name: Test
         if: ${{ !cancelled() }}
         run: nix develop --command just test all
         env:
-          RUST_CARGO: mbx
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci

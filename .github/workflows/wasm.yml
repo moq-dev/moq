@@ -101,5 +101,3 @@ jobs:
       - name: WASM
         run: nix develop --command just test wasm
         shell: bash -leo pipefail {0}
-        env:
-          RUST_CARGO: mbx

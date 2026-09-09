@@ -17,6 +17,9 @@ Land reader-first: readers accept v1 before any writer emits it.
   one.
 - Revalidation compares the full versioned grant and resizes a live session
   without a prefix-only widening window.
+- An in-band token expiry ([Relay tokens](/quest/m2/auth/relay-refresh.md))
+  goes through the same resize, so a shrinking union cancels the handles
+  outside it instead of closing the session.
 - Keep auth failures explicit: unsupported versions, mixed fields, invalid
   patterns, and scope escapes reject the connection or refresh.
 - Cover JWT, public, static, alias, auth-API, revalidation, HLS, and cluster

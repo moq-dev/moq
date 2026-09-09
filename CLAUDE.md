@@ -22,7 +22,9 @@ WebSocket, TLS, UDS, etc are fallback transports via qmux. Reliable transports c
 
 # Guides
 
-Area guides live beside the code as nested `CLAUDE.md` files (the root `AGENTS.md` is a symlink). Read the one for the area you touch. Changes ripple across languages; follow the Cross-Package Sync checklist below. Prefer a quest under `quest/` over a GitHub issue for work needing durable scope.
+Area guides live beside the code as nested `CLAUDE.md` files (the root `AGENTS.md` is a symlink).
+Read the one for the area you touch. Changes ripple across languages; follow the Cross-Package Sync checklist below.
+Prefer a quest over a GitHub issue for work needing durable scope.
 
 # Libraries
 
@@ -52,6 +54,7 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 
 # Required
 
+- Pull the latest origin changes before working.
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout.
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.

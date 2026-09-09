@@ -9,20 +9,6 @@
 
 set working-directory := '..'
 
-# Plain `cargo` unless set. CI sets it to `mbx`, and so can a developer who
-# wants mbx's shared build store instead of a target/ per worktree.
-#
-# Every recipe that compiles reads it, with three exceptions. `package` hands
-# nfpm a literal target/release path, and a managed target/ is a symlink.
-# `fix`/`wasm-fix` run `cargo fix`, which drops rustc wrappers. `fuzz` puts
-# nightly on PATH so a bare cargo/rustc resolve to it, and the sanitizer flags
-# are what break if anything else sits in front.
-# Empty counts as unset: `RUST_CARGO= just build` is how you opt one command out
-# of a shell that exports it, and just would otherwise hand the recipes an empty
-# program name.
-_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
-cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
-
 # `moq-net-fuzz` is a workspace member only so it shares the root lockfile; libFuzzer
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, and a new
@@ -55,10 +41,10 @@ check *args:
     just rs _publish-test
     just rs _doc-names-test
     rs/scripts/package-nfpm.test.sh
-    {{ cargo_compile }} clippy --locked --all-targets {{ args }} -- -D warnings
+    cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     just rs _doc-names
-    RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --no-deps {{ args }}
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
 
@@ -402,21 +388,21 @@ tokio-features:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features
-    {{ cargo_compile }} check --locked -p moq-tokio --all-features
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quiche
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features quinn,ring
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
-    {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features noq,ring
+    cargo check --locked -p moq-tokio --no-default-features
+    cargo check --locked -p moq-tokio --all-features
+    cargo check --locked -p moq-tokio --no-default-features --features quiche
+    cargo check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
+    cargo check --locked -p moq-tokio --no-default-features --features quinn,ring
+    cargo check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
+    cargo check --locked -p moq-tokio --no-default-features --features noq,ring
 
     for feature in aws-lc-rs ring tcp uds websocket; do
-        {{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features "$feature"
+        cargo check --locked -p moq-tokio --no-default-features --features "$feature"
     done
 
     want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
     for backend in quinn noq; do
-        if output=$({{ cargo_compile }} check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
+        if output=$(cargo check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
             echo "rs: moq-tokio with only $backend should reject its missing crypto provider" >&2
             exit 1
         fi
@@ -465,7 +451,7 @@ fix-changed $FILES:
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
-    {{ cargo_compile }} check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
@@ -508,7 +494,7 @@ uring *args:
 
 # Compile the Apple-only code paths. Must run ON macOS.
 macos *args:
-    {{ cargo_compile }} check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+    cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
 # Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
 # decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
@@ -551,7 +537,7 @@ android *args:
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 wasm *args:
-    {{ cargo_compile }} clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
+    cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
 
 # The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
 # because this runs alongside `fix`, which already formats everything else.
@@ -573,7 +559,7 @@ audit:
 
 # Verify relay startup validation without a QUIC backend.
 relay-minimal:
-    {{ cargo_compile }} nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
+    cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
 
 # The feature permutations `check` leaves out. Each is a full workspace compile
 # at a feature set that shares almost no artifacts with the default one (~6min
@@ -596,16 +582,16 @@ relay-minimal:
 
 # Compile the workspace at the feature extremes.
 features:
-    {{ cargo_compile }} check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    {{ cargo_compile }} hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
-    {{ cargo_compile }} check --locked -p moq-relay --no-default-features
+    cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
+    cargo hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
+    cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
-    {{ cargo_compile }} check --locked -p moq-cli --no-default-features
-    {{ cargo_compile }} check --locked -p moq-bench --no-default-features
-    {{ cargo_compile }} check --locked -p moq-boy --no-default-features
-    {{ cargo_compile }} clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
-    RUSTDOCFLAGS="-D warnings" {{ cargo_compile }} doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
-    {{ cargo_compile }} nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
+    cargo check --locked -p moq-cli --no-default-features
+    cargo check --locked -p moq-bench --no-default-features
+    cargo check --locked -p moq-boy --no-default-features
+    cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
+    cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is
@@ -638,7 +624,7 @@ features:
 
 # Run the test suite, reporting clippy findings from the same compile.
 test *args:
-    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" {{ cargo_compile }} nextest run --locked --all-targets {{ args }}
+    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.
@@ -665,7 +651,7 @@ test-changed $FILES:
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
-    {{ cargo_compile }} test --locked --doc {{ args }}
+    cargo test --locked --doc {{ args }}
 
 # Permutation-test the concurrent handoffs with loom.
 #
@@ -684,8 +670,8 @@ doctest *args:
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.
 loom *args:
-    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p kio --lib loom:: {{ args }}
-    RUSTFLAGS="--cfg loom" {{ cargo_compile }} test --locked --release -p moq-net --test loom {{ args }}
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: {{ args }}
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom {{ args }}
 
 # Coverage-guided fuzzing of the moq-net wire codecs (libFuzzer, via cargo-fuzz).
 #
@@ -729,12 +715,12 @@ fuzz target *args:
     	rs/moq-net/fuzz/corpus/{{ target }} rs/moq-net/fuzz/seeds/{{ target }} {{ args }}
 
 build:
-    {{ cargo_compile }} build --locked
+    cargo build --locked
 
 # Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
 # Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
 bench preset url *args:
-    {{ cargo_compile }} run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
+    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
 
 # Measure the Linux Tokio/epoll UDP syscall path. Extra args pass to Criterion,
 # e.g. `just rs bench-udp-tokio --quick`.
@@ -764,7 +750,7 @@ bench-session *args:
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:
-    {{ cargo_compile }} run --release -p moq-bench --bin moq-bench-host -- {{ args }}
+    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
 
 # Remove the Rust target directory.
 clean:
@@ -825,4 +811,8 @@ package crate packager:
     mkdir -p dist
     VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
         rs/scripts/package-nfpm.sh packaging/{{ crate }}/nfpm.yaml {{ packager }} dist/
+    if [[ "{{ packager }}" == deb && -f "packaging/{{ crate }}/transition.yaml" ]]; then
+        VERSION="$version" ARCH="$arch" \
+            rs/scripts/package-nfpm.sh packaging/{{ crate }}/transition.yaml deb dist/
+    fi
     ls -1 dist/
