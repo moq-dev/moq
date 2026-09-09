@@ -101,7 +101,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.10.9",
@@ -155,7 +155,7 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
@@ -176,7 +176,7 @@
     },
     "js/msf": {
       "name": "@moq/msf",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@moq/net": "workspace:^",
         "@zod/mini": "^4.5.4",
@@ -189,7 +189,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "dependencies": {
         "@moq/qmux": "^0.3.3",
         "@moq/signals": "workspace:*",
@@ -211,7 +211,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -252,7 +252,7 @@
     },
     "js/token": {
       "name": "@moq/token",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "bin": {
         "moq-token": "./src/cli.ts",
       },
@@ -276,7 +276,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.5.3",
+      "version": "0.5.4",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
