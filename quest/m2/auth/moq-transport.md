@@ -21,11 +21,14 @@ tables. It declares:
   negotiated only when both did, per the moqt extension rule that the set is
   fixed once both SETUPs are seen. Draft-17 and later only, since that is the
   first unified SETUP, the same gate `cluster::supported` applies.
-- Control messages `AUTH`, `AUTH_OK`, `AUTH_ERROR` with the lite field shapes,
-  each carrying a Request ID so an AUTH_OK answers a specific AUTH and an
-  unprompted grant update uses Request ID zero. Track namespaces are tuples on
-  this wire, so a prefix is a namespace tuple, matching how SUBSCRIBE_NAMESPACE
-  spells one. Sent only after negotiation; an endpoint that receives one
+- One long-lived AUTH request stream per direction, the way a subscribe
+  request stream outlives its SUBSCRIBE_OK. The first AUTH carries a Request
+  ID like every request; every AUTH also carries the lite Sequence, and
+  AUTH_OK and AUTH_ERROR echo it, with Sequence 0 for an unprompted update.
+  Correlation is the Sequence, never the Request ID, which the allocator
+  hands out from zero and so cannot double as an update marker. Track
+  namespaces are tuples on this wire, so a prefix is a namespace tuple,
+  matching how SUBSCRIBE_NAMESPACE spells one. Sent only after negotiation; an endpoint that receives one
   without negotiating closes with PROTOCOL_VIOLATION, which is what moq-net
   already does for an unknown request stream.
 - Which existing codes AUTH_ERROR reuses: `UNAUTHORIZED`, `EXPIRED_AUTH_TOKEN`,

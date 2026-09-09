@@ -50,3 +50,5 @@ On main, additive.
   widen path the first AUTH reuses
 - [Bindings](/quest/m2/auth/bindings.md) - supplies the client surface the new
   token setters sit beside
+- [moq-transport](/quest/m2/auth/moq-transport.md) - supplies the IETF AUTH
+  exchange the setup-option token pairs with

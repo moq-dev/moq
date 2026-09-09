@@ -19,20 +19,25 @@ in `drafts/draft-lcurley-moq-lite.md` and a section beside Probe modeled on
 it. Messages, encoded like PROBE with the `(i)`, `(b)`, `(s)` notation the
 draft uses:
 
-- `AUTH { Token (b) }`, written only by the opener. An empty token means the
-  credential the connection already presented, or nothing.
-- `AUTH_OK { Publish Count (i), Publish Prefix (s)..., Subscribe Count (i),
-  Subscribe Prefix (s)..., Expires (i) }`, written only by the acceptor. The
-  prefixes use the encoding and rules ANNOUNCE_REQUEST's prefix uses: a list
-  holding the empty prefix grants everything, an empty list grants nothing.
-  Expires is milliseconds until the grant lapses, zero for never.
-- `AUTH_ERROR { Code (i), Reason (s) }`, written only by the acceptor.
+- `AUTH { Sequence (i), Token (b) }`, written only by the opener. Sequence
+  starts at 1 and increments per AUTH. An empty token means the credential the
+  connection already presented, or nothing.
+- `AUTH_OK { Sequence (i), Publish Count (i), Publish Prefix (s)...,
+  Subscribe Count (i), Subscribe Prefix (s)..., Expires (i) }`, written only
+  by the acceptor. The prefixes use the encoding and rules ANNOUNCE_REQUEST's
+  prefix uses: a list holding the empty prefix grants everything, an empty
+  list grants nothing. Expires is milliseconds until the grant lapses, zero
+  for never.
+- `AUTH_ERROR { Sequence (i), Code (i), Reason (s) }`, written only by the
+  acceptor.
 
-Every AUTH is answered in order by exactly one AUTH_OK or AUTH_ERROR. The
-acceptor MAY also write an AUTH_OK unprompted when the grant changes; the
-latest AUTH_OK is always the grant in effect. An AUTH_ERROR leaves the previous
-grant in effect. The stream lives as long as the session; resetting it is not
-a refusal, and a peer that resets an AUTH stream it does not understand (the
+Every AUTH is answered by exactly one AUTH_OK or AUTH_ERROR echoing its
+Sequence. The acceptor MAY also write an AUTH_OK with Sequence 0 unprompted
+when the grant changes, so an update and a reply are never confused however
+they interleave; the latest AUTH_OK is always the grant in effect. An
+AUTH_ERROR leaves the previous grant in effect. A reply whose Sequence was
+never sent, or was already answered, is a protocol violation. The stream
+lives as long as the session; resetting it is not a refusal, and a peer that resets an AUTH stream it does not understand (the
 existing unknown-stream rule at the STREAM_TYPE section) leaves the opener
 with no grant, which the client reports as `Unsupported` rather than treating
 as a refusal. Record it in the lite-06 changelog. Run `just drafts check`.
@@ -47,11 +52,15 @@ New module `rs/moq-net/src/auth.rs`, public as `moq_net::auth`:
   watchable current value (`None` until the first AUTH_OK, the `kio` shared
   cell the session already uses for the peer SETUP is the pattern), and
   `refresh(token) -> Result<Grant, Error>` writes an AUTH and resolves with the
-  next AUTH_OK or AUTH_ERROR. `requests()` yields `auth::Request { token,
+  reply carrying its Sequence. `requests()` yields `auth::Request { token,
   accept(Grant), reject(code, reason) }` for the acceptor side; a request left
   unanswered is a bug, so dropping one rejects with `Unauthorized`.
-- The default acceptor needs no app code: when nothing consumes `requests()`,
-  an empty token is answered from the session's own origin handles, publish
+- The default acceptor needs no app code, and whether it is in charge is
+  decided once, before the driver starts, never per message: the server-side
+  `moq_net::Request` builder exposes `auth()` before `.ok()`, and a caller
+  that takes `requests()` there owns every AUTH the session receives, the
+  initial empty one included. With no such consumer, the driver answers every
+  empty token from the session's own origin handles, publish
   from the subscriber half's `origin::Producer::allowed()` and subscribe from
   the publisher half's `origin::Consumer::allowed()`, with no expiry. A missing
   half grants nothing. That is what makes the cluster case free: both relays
@@ -107,8 +116,9 @@ and the version gate; both sides receive a grant from scoped origins,
 including the empty-prefix and empty-list spellings; a publish-only session
 grants no subscribe; an out-of-scope announce aborts with `Unauthorized` and
 names the path in the reason, while an in-scope one does not; a refresh
-resolves with the next reply and an unprompted AUTH_OK replaces the grant; a
-reset AUTH stream reports `Unsupported`; Rust to JS and JS to Rust interop in
+resolves with the reply echoing its Sequence even when an unprompted AUTH_OK
+arrives first, and the unprompted one still replaces the grant; a reset AUTH
+stream reports `Unsupported`; Rust to JS and JS to Rust interop in
 the existing cross-language harness.
 
 On main, additive.

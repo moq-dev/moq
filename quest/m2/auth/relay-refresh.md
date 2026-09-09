@@ -11,8 +11,10 @@ expiry, and `doc/bin/relay/auth.md` documents the exchange.
 
 ## Plan
 
-- `Connection::run` in `rs/moq-relay/src/connection.rs` consumes
-  `session.auth().requests()`. An empty token is answered from the origin
+- `Connection::run` in `rs/moq-relay/src/connection.rs` takes
+  `requests()` from the `moq_net::Request` builder before `.ok()`, so the
+  relay owns the initial empty AUTH too and the driver's fallback never races
+  it. An empty token is answered from the origin
   handles as the default does, plus `token.expires` from the admitted
   `AuthToken`. A non-empty token goes through `Auth::verify` with
   `AuthParams { path, jwt, transport }` built from the admitted session's path
@@ -32,7 +34,8 @@ expiry, and `doc/bin/relay/auth.md` documents the exchange.
   the refresh path replaces and re-enter `expired` on change, so the JWT
   `exp`, the revalidation cadence, and the staleness window all follow the new
   token. When revalidation lowers `exp` on a proxy-mode session, write an
-  unprompted AUTH_OK with the new expiry so the client can refresh in time.
+  unprompted AUTH_OK (Sequence 0) with the new expiry so the client can
+  refresh in time.
 - Refusals from the auth API in proxy mode map as connect-time ones do: `404`,
   empty grant, `401`, `403` are `AUTH_ERROR { Unauthorized }`; an outage keeps
   the session on its current grant and is reported as `AUTH_ERROR
