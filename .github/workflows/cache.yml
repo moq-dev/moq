@@ -5,8 +5,8 @@ name: Cache
 #
 # Actions scopes cache reads to the current branch plus the default branch, so
 # only caches written here on `main` are reachable from a pull request. This
-# workflow is therefore the single trusted writer. The action keys the store by
-# runner architecture and toolchain, and refuses to publish from a pull request.
+# workflow is therefore the single trusted writer, with one store per runner
+# architecture. The action refuses to publish from a pull request regardless.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
@@ -27,9 +27,9 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/cache.yml"
-      # The action pin and the toolchain read both live here, and either can
-      # roll the cache key. Without this the sole writer would not re-run after
-      # such a change, leaving every PR reader cold until something else landed.
+      # The action pin and the cache key both live here, and either can roll
+      # the store. Without this the sole writer would not re-run after such a
+      # change, leaving every PR reader cold until something else landed.
       - ".github/actions/rust-cache/**"
   # Priming a cold cache by hand, e.g. after a toolchain bump rolls the key.
   workflow_dispatch:

@@ -9,32 +9,35 @@ inputs:
 runs:
   using: composite
   steps:
-    # The toolchain keys the cache, so reading rust-toolchain.toml keeps it tied
-    # to the one thing that decides which rustc actually runs. The action's own
-    # probe reads `rustc` off PATH, which at this point in the job is whatever
-    # the runner image ships, not the dev shell's pinned compiler.
-    - name: Read toolchain
-      id: toolchain
-      shell: bash
-      run: |
-        channel=$(grep -m1 '^channel' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
-        if [ -z "$channel" ]; then
-          echo "could not read channel from rust-toolchain.toml" >&2
-          exit 1
-        fi
-        echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
     - uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
       with:
         version: 1.10.0
-        toolchain: ${{ steps.toolchain.outputs.channel }}
-        # Build scripts link against Nix store paths from the dev shell. Roll the
-        # cache when that shell changes so Cargo never restores executables whose
-        # dynamic linker has disappeared.
-        cache-generation: nix-${{ hashFiles('flake.nix', 'flake.lock') }}
-        save-on-workflow-dispatch: ${{ inputs.save-on-dispatch }}
         # `github-cache-mode` is left at its `target` default. That transports
         # Cargo's pruned target tree, the same payload Swatinem carried, with
         # mbx's per-compilation store on top. The `objects` closure is portable
         # across differing target directories, which nothing here needs, and
         # measured slower.
+        #
+        # The key is spelled out because the generated one cannot name this
+        # repository's compiler. It keys on `rustc -vV` from PATH, which here is
+        # whatever the runner image ships: the compiler these jobs build with
+        # exists only inside `nix develop`. The `toolchain` input is no help
+        # either, since it names a rustup toolchain and probes
+        # `rustc +<name> -vV`, and nothing installs 1.95.0 through rustup.
+        #
+        # flake.lock pins that compiler, so hashing the flake identifies it more
+        # precisely than `rustc -vV` would, and rolls the cache when the dev
+        # shell changes. Build scripts link against Nix store paths, so a
+        # restored executable whose dynamic linker moved is worse than a cold
+        # cache. rust-toolchain.toml is in the hash because it picks the channel,
+        # even though it is kept in sync with the flake.
+        #
+        # Every segment the generated layout carries has to be carried here too:
+        # the runner pair, so the two architectures cache.yml warms cannot read
+        # each other, and `target`, so changing `github-cache-mode` cannot
+        # restore the other payload. The trailing run id rolls the key on every
+        # run, which is what lets a repeated `workflow_dispatch` seed a cold
+        # cache against GitHub's immutable entries.
+        cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-
+        save-on-workflow-dispatch: ${{ inputs.save-on-dispatch }}
