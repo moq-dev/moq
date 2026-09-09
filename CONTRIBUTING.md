@@ -37,6 +37,7 @@ Codex reacts with thumbs up if there are no findings.
 CodeRabbit may be rate-limited, treat it as optional.
 
 For each finding:
+
 - If you don't agree with it, reply to the finding and move on.
 - If it's a simple improvement, fix it and push. Update the summary if needed.
 - If it's out of scope, trigger `/plan-quests` to create/update a follow-up quest.
