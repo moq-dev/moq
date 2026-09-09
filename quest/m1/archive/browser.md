@@ -22,6 +22,12 @@ Add the JS equivalent of `track::Dynamic` so the publisher can answer FETCH
 misses from memory or OPFS after relay eviction. Keep the bounded bytes in an
 LRU and use the same timeline-before-delete ordering for DVR retention.
 
+Implement the currently unsupported IETF FETCH request dispatch and codecs in
+`js/net`. Cover relative joining requests with subscription lifetime bookkeeping,
+draft-specific FETCH_OK encoding, a legal End Location, and clean stream finish.
+Test browser publishers against native subscribers across supported drafts;
+PR #3562 fixes the existing Rust response path but does not add JS FETCH support.
+
 Ship the contract in the `@moq/*` packages. A dashboard browser-to-HLS proof
 remains downstream (moq.pro) work.
 

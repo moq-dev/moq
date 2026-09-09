@@ -2420,9 +2420,8 @@ mod serve_tests {
 	/// Serve `msg` against the live track, then finish the track so the subscription
 	/// completes. Subscribing after the finish would be rejected instead of served.
 	async fn run_live(h: &mut Serve, msg: ietf::Subscribe<'static>) {
-		// `create_broadcast` registers the broadcast from a spawned task, so yield to the
-		// runtime before subscribing or the lookup 404s.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		// Wait for the source to attach before the subscription looks it up.
+		h.publisher.origin.announced_broadcast("room").await.unwrap();
 
 		let stream = Stream::open(&h.session, h.publisher.version).await.unwrap();
 		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
@@ -2616,8 +2615,8 @@ mod serve_tests {
 			let mut h = serve(version);
 			publish_groups(&mut h, LATEST);
 
-			// `create_broadcast` registers from a spawned task, so let it land before subscribing.
-			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+			// Wait for the source to attach before the subscription looks it up.
+			h.publisher.origin.announced_broadcast("room").await.unwrap();
 
 			let stream = Stream::open(&h.session, version).await.unwrap();
 			let mut serve = std::pin::pin!(
