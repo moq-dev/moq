@@ -15,11 +15,15 @@ Three binaries and two plugins ship prebuilt:
 | GStreamer plugin | `moqsink`, `moqsrc` | [GStreamer](/bin/gstreamer) elements |
 | OBS plugin | | [OBS Studio](/bin/obs) output and source |
 
+Use `moq token` for keys and tokens; installing `moq-cli` includes it.
+The standalone `moq-token` is optional for users who only need token tooling:
+install it with `cargo install moq-token-cli`.
+
 ## Any platform
 
 ```bash
 # crates.io (needs a Rust toolchain)
-cargo install moq-relay moq-cli moq-token-cli
+cargo install moq-relay moq-cli
 
 # Homebrew (macOS and Linux)
 brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
@@ -48,7 +52,7 @@ is available on Debian 12+ and Ubuntu 24.04+.
 curl -fsSL https://apt.moq.dev/moq-keyring.gpg | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
 echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" | sudo tee /etc/apt/sources.list.d/moq.list
 sudo apt update
-sudo apt install moq-relay moq-cli moq-token-cli gstreamer1.0-moq
+sudo apt install moq-relay moq-cli gstreamer1.0-moq
 ```
 
 ## Fedora, RHEL, and openSUSE
@@ -57,7 +61,7 @@ Fedora 39+, RHEL 9, Rocky 9, AlmaLinux 9. On openSUSE use `zypper addrepo`.
 
 ```bash
 sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
-sudo dnf install moq-relay moq-cli moq-token-cli gstreamer1-moq
+sudo dnf install moq-relay moq-cli gstreamer1-moq
 ```
 
 Both repositories are signed with the project key, served at
@@ -82,7 +86,6 @@ works without root, and config edits survive upgrades.
 ```powershell
 winget install moq-dev.moq-relay
 winget install moq-dev.moq-cli
-winget install moq-dev.moq-token-cli
 ```
 
 The OBS plugin ships as a zip for Windows x64 and macOS arm64 on the
