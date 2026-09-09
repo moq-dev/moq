@@ -33,3 +33,8 @@ Land the implementation and tests here. The release and the moq.pro
   minting and the audience shape this lease extends
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - supplies the v1 native
   authorization owner that enforces handle deadlines
+
+## Related
+
+- [Relay tokens](/quest/m2/auth/relay-refresh.md) - the in-band token a
+  lease renewal presents

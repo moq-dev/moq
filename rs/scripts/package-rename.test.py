@@ -7,10 +7,15 @@ import tempfile
 import unittest
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 class PackageRenameTest(unittest.TestCase):
     def test_packages(self):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
+            rpm_query = ["rpm", "--dbpath", str(scratch / "rpmdb")]
+            subprocess.run([*rpm_query, "--initdb"], check=True)
             binary = scratch / "binary"
             binary.write_text("#!/bin/sh\necho packaged\n")
             binary.chmod(0o755)
@@ -24,8 +29,16 @@ class PackageRenameTest(unittest.TestCase):
                         subprocess.run([
                             "bash", "rs/scripts/package-nfpm.sh",
                             f"packaging/{old}/{config}.yaml", packager, str(output),
-                        ], env=env, check=True)
+                        ], env=env, cwd=ROOT, check=True)
                         outputs[config, packager] = output
+
+                    rpm = str(outputs["nfpm", "rpm"])
+                    for flag, expected in (("--provides", f"{old} = 99.0.0"),
+                                           ("--obsoletes", f"{old} < 99.0.0")):
+                        metadata = subprocess.check_output([*rpm_query, "-qp", flag, rpm], text=True)
+                        self.assertIn(expected, metadata.splitlines())
+                    payload = subprocess.check_output([*rpm_query, "-qpl", rpm], text=True)
+                    self.assertEqual(payload.splitlines(), [f"/usr/bin/{name}"])
 
                     def field(config, key):
                         return subprocess.check_output([

@@ -20,8 +20,9 @@ that wants the relay's path rules.
 cargo add moq-token
 ```
 
-The CLI is `moq token` in [moq-cli](/bin/cli) or the standalone
-`moq-token-cli` package; both wrap this crate. Examples:
+For command-line use, install the [moq CLI](/setup/install) and run
+`moq token`. The optional standalone `moq-token` executable comes from
+`cargo install moq-token-cli`; both wrap this crate. Examples:
 [`basic.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/basic.rs)
 and
 [`asymmetric.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/asymmetric.rs).

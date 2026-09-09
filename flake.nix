@@ -195,6 +195,7 @@
         # `just rs package` works from `nix develop` on both Linux and macOS.
         packagingDeps = with pkgs; [
           nfpm
+          rpm
           dpkg
           gettext
 
@@ -213,7 +214,6 @@
           lib.optionals (!stdenv.hostPlatform.isDarwin) [
             apt
             createrepo_c
-            rpm
             rclone
             gnupg
             gzip
@@ -475,15 +475,14 @@
           # host had, which shadows the Cargo shim `mbx setup` installs. Put it
           # back in front, so a bare `cargo` in this shell reaches the same
           # wrapper it reaches outside. `setup --status` is what knows where
-          # that shim lives; it exits non-zero when the host has none, which is
+          # that shim lives; it exits non-zero when there is none, which is
           # every machine that made a different caching choice.
           #
-          # Never in CI, which selects mbx explicitly with RUST_CARGO and
-          # configures it through `.github/actions/rust-cache`. A host shim
-          # would be a second, unconfigured way in, on whichever runner happened
-          # to have been set up that way.
+          # CI included: `.github/actions/rust-cache` runs `mbx setup` so this
+          # finds a shim there too. That is the only way mbx reaches a build
+          # that spawns Cargo itself, which release-plz does.
           shellHook = ''
-            if [ -z "''${CI:-}" ] && status=$(mbx setup --status 2>/dev/null); then
+            if status=$(mbx setup --status 2>/dev/null); then
               shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
               if [ -x "$shim" ]; then
                 export PATH="$(dirname "$shim"):$PATH"
@@ -510,8 +509,8 @@
         formatter = pkgs.nixfmt-tree;
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
-        # test` (see rs/justfile). CI selects mbx with RUST_CARGO; local commands
-        # default to plain cargo. Neither path goes through crane.
+        # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
+        # shell puts on PATH. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release

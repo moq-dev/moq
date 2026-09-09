@@ -20,14 +20,18 @@ Windows package IDs retain `moq-cli` and `moq-token-cli`. Existing Homebrew
 installs migrate through formula renames; apt upgrades use transitional
 packages, and dnf replaces the old packages.
 
+Use `moq token` for keys and tokens; installing `moq` includes it.
+The standalone `moq-token` is optional for users who only need token tooling:
+install it with `cargo install moq-token-cli`.
+
 ## Any platform
 
 ```bash
 # crates.io (needs a Rust toolchain)
-cargo install moq-relay moq-cli moq-token-cli
+cargo install moq-relay moq-cli
 
 # Homebrew (macOS and Linux)
-brew install moq-dev/tap/moq-relay moq-dev/tap/moq moq-dev/tap/moq-token
+brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
 # Nix (pin a release tag to use the binary cache)
 nix run github:moq-dev/moq#moq-relay -- relay.toml
@@ -53,7 +57,7 @@ is available on Debian 12+ and Ubuntu 24.04+.
 curl -fsSL https://apt.moq.dev/moq-keyring.gpg | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
 echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" | sudo tee /etc/apt/sources.list.d/moq.list
 sudo apt update
-sudo apt install moq-relay moq moq-token gstreamer1.0-moq
+sudo apt install moq-relay moq gstreamer1.0-moq
 ```
 
 ## Fedora, RHEL, and openSUSE
@@ -62,7 +66,7 @@ Fedora 39+, RHEL 9, Rocky 9, AlmaLinux 9. On openSUSE use `zypper addrepo`.
 
 ```bash
 sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
-sudo dnf install moq-relay moq moq-token gstreamer1-moq
+sudo dnf install moq-relay moq gstreamer1-moq
 ```
 
 Both repositories are signed with the project key, served at
@@ -87,7 +91,6 @@ works without root, and config edits survive upgrades.
 ```powershell
 winget install moq-dev.moq-relay
 winget install moq-dev.moq-cli
-winget install moq-dev.moq-token-cli
 ```
 
 The OBS plugin ships as a zip for Windows x64 and macOS arm64 on the

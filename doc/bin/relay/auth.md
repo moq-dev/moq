@@ -18,8 +18,10 @@ prefixes, and the session can only see that part of the tree.
 
 ## Tokens
 
-Generate a key, sign a token, hand it to the client. `moq token` inside
-[moq-cli](/bin/cli) and the standalone `moq-token` are the same tool.
+Generate a key, sign a token, hand it to the client. Install the
+[moq CLI](/setup/install) and use its `moq token` subcommand.
+For token tooling alone, `cargo install moq-token-cli` installs the standalone
+`moq-token` executable with the same subcommands and options.
 
 ```bash
 # Asymmetric: the relay only needs public.jwk.

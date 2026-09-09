@@ -25,9 +25,10 @@ DRILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DRILL_DIR/../.." && pwd)
 MUTATIONS="$DRILL_DIR/mutations"
 
-# Plain `cargo` unless set, matching the rs/ recipes: a compile-caching wrapper
-# is what keeps the snapshot build from being a cold build of the world.
-CARGO="${RUST_CARGO:-cargo}"
+# The dev shell puts mbx's Cargo shim ahead of the pinned toolchain, so the
+# plain name is already the compile-caching wrapper that keeps the snapshot
+# build from being a cold build of the world.
+CARGO=cargo
 
 KEEP=0
 BASELINE=1
