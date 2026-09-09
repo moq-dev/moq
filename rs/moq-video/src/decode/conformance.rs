@@ -182,9 +182,10 @@ struct AccessUnit {
 /// Split an Annex-B elementary stream into one access unit per coded picture.
 ///
 /// A slice NAL (1 non-IDR, 5 IDR) opens a new access unit unless the one being
-/// built has no slice yet, so the parameter sets and SEI ahead of a picture
-/// travel with it. That is enough for these fixtures: single-slice pictures, no
-/// redundant slices, no access unit delimiters.
+/// built has no slice yet. A parameter set (7 SPS, 8 PPS) after a slice also
+/// closes that picture, so repeated parameter sets travel with the following
+/// IDR. That is enough for these fixtures: single-slice pictures, no redundant
+/// slices, no access unit delimiters.
 fn access_units(vector: &Vector) -> Vec<AccessUnit> {
 	let mut buf = Bytes::from_static(vector.bitstream);
 	let mut iter = annexb::NalIterator::new(&mut buf);
@@ -196,11 +197,12 @@ fn access_units(vector: &Vector) -> Vec<AccessUnit> {
 	nals.extend(iter.flush().expect("fixture is valid Annex-B"));
 
 	let is_slice = |nal: &Bytes| matches!(nal_type(nal), 1 | 5);
+	let is_parameter_set = |nal: &Bytes| matches!(nal_type(nal), 7 | 8);
 	let mut units: Vec<AccessUnit> = Vec::new();
 	let mut current: Vec<Bytes> = Vec::new();
 
 	for nal in nals {
-		if is_slice(&nal) && current.iter().any(is_slice) {
+		if current.iter().any(is_slice) && (is_slice(&nal) || is_parameter_set(&nal)) {
 			units.push(access_unit(&current, units.len()));
 			current.clear();
 		}
@@ -227,6 +229,20 @@ fn access_unit(nals: &[Bytes], index: usize) -> AccessUnit {
 		timestamp: Timestamp::from_micros(index as u64 * FRAME_MICROS).expect("fixture timestamp"),
 		keyframe: nals.iter().any(|nal| nal_type(nal) == 5),
 	}
+}
+
+#[test]
+fn repeated_parameter_sets_start_the_following_access_unit() {
+	let units = access_units(&IDR_BLUE);
+	let mut payload = units[1].payload.clone();
+	let mut iter = annexb::NalIterator::new(&mut payload);
+	let mut types: Vec<u8> = iter
+		.by_ref()
+		.map(|nal| nal_type(&nal.expect("access unit is valid Annex-B")))
+		.collect();
+	types.extend(iter.flush().expect("access unit is valid Annex-B").iter().map(nal_type));
+
+	assert_eq!(types, [7, 8, 5]);
 }
 
 /// Decode a whole fixture with one backend, in stream order.
