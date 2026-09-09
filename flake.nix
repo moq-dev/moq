@@ -195,6 +195,7 @@
         # `just rs package` works from `nix develop` on both Linux and macOS.
         packagingDeps = with pkgs; [
           nfpm
+          rpm
           dpkg
           gettext
 
@@ -213,7 +214,6 @@
           lib.optionals (!stdenv.hostPlatform.isDarwin) [
             apt
             createrepo_c
-            rpm
             rclone
             gnupg
             gzip

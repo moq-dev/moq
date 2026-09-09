@@ -135,10 +135,8 @@ jobs:
           GIT_COMMITTER_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: |
           cd homebrew-tap
-          mkdir -p Formula
-          cp "../rendered/${CRATE}.rb" "Formula/${CRATE}.rb"
 
-          # Seed a README the first time the tap repo receives a push.
+          # Seed the tap README; install-formula updates each name as it ships.
           if [[ ! -f README.md ]]; then
             cat > README.md <<'EOF'
           # moq Homebrew tap
@@ -160,11 +158,13 @@ jobs:
           EOF
           fi
 
+          python3 ../.github/scripts/install-formula.py "$CRATE" "../rendered/${CRATE}.rb" .
+
           if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit (formula already up to date)."
             exit 0
           fi
 
-          git add Formula/ README.md
+          git add -A Formula/ README.md formula_renames.json
           git commit -m "${CRATE}: bump to v${VERSION}"
           git push
