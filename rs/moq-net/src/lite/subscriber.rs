@@ -98,8 +98,8 @@ struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
 
 impl Drop for SubscriptionCleanup {
 	fn drop(&mut self) {
-		// Abort the model producer before receive tasks release their open group
-		// handles. This records session cancellation as the track's terminal state.
+		// Group handlers own their cancellation cleanup independently. This records
+		// session cancellation as the track's terminal state.
 		for (_, entry) in self.0.lock().drain() {
 			let _ = entry.producer.abort(Error::Cancel);
 		}
@@ -737,7 +737,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, timescale) = {
+		let (group, track, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
@@ -747,6 +747,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group = entry.producer.create_group(group_info)?;
 			(group, entry.producer.clone(), entry.timescale)
 		};
+
+		let group = crate::recv::Group::new(group);
 
 		// The timescale came from TRACK_INFO (read before this subscription was even
 		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
@@ -818,7 +820,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// `size` before allocating, so no pre-check is needed. No wire timestamp
 			// (pre-lite-05) means local receive time.
 			let timestamp = timestamp.unwrap_or_else(Timestamp::now);
-			let mut frame = group.create_frame(frame::Info { size, timestamp })?;
+			let mut frame = crate::recv::Frame::new(group.create_frame(frame::Info { size, timestamp })?);
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
 				let _ = frame.abort(err.clone());
@@ -866,6 +868,69 @@ mod tests {
 	use crate::util::TaskSet;
 
 	const VERSION: Version = Version::Lite05;
+
+	/// Cancelling a receive task must terminate both an open group and a partial frame.
+	#[tokio::test]
+	async fn cancelled_group_receive() {
+		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
+
+		for partial in [false, true] {
+			let mut wire = Vec::new();
+			lite::Group {
+				subscribe: 0,
+				sequence: 7,
+			}
+			.encode(&mut wire, VERSION)
+			.unwrap();
+			if partial {
+				4u64.encode(&mut wire, VERSION).unwrap();
+				wire.push(1);
+			}
+			let session = ScriptedSession::new(wire);
+			let (_, recv) = web_transport_trait::Session::open_bi(&session).await.unwrap();
+			let (tasks, _task_set) = TaskSet::new();
+			let mut subscriber = Subscriber::new(SubscriberConfig {
+				session,
+				origin: origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version: VERSION,
+				peer_setup: Default::default(),
+				cost: None,
+				peer_origin: None,
+				tasks,
+			});
+			let producer = track::Producer::new(
+				Arc::new(crate::broadcast::Info::default()),
+				"video",
+				track::Info::default(),
+			);
+			let mut consumer = producer.subscribe(None);
+			subscriber.subscribes.lock().insert(
+				0,
+				TrackEntry {
+					producer,
+					timescale: None,
+				},
+			);
+			let mut reader = Reader::new(recv, VERSION);
+			let mut receiving = Box::pin(subscriber.recv_group(&mut reader));
+			assert!(futures::poll!(receiving.as_mut()).is_pending());
+			let mut group = consumer.next_group().await.unwrap().unwrap();
+			drop(receiving);
+			assert!(
+				matches!(
+					futures::poll!(Box::pin(group.read_frame())),
+					Poll::Ready(Err(Error::Cancel))
+				),
+				"partial={partial}"
+			);
+			drop(SubscriptionCleanup(subscriber.subscribes.clone()));
+			assert!(matches!(
+				futures::poll!(Box::pin(consumer.next_group())),
+				Poll::Ready(Err(Error::Cancel))
+			));
+		}
+	}
 
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
 	/// before any of it reaches the transport.
