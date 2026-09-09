@@ -1325,15 +1325,42 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
+		// Request streams can arrive out of order. Wait on registration, while bounding
+		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
-			let joins = self
-				.joins
-				.wait(|joins| match joins.get(&subscribe_id) {
-					Some(None) => Poll::Pending,
-					_ => Poll::Ready(()),
-				})
-				.await;
-			joins.get(&subscribe_id).cloned().flatten()
+			let mut pending = false;
+			let mut deadline = kio::time::Deadline::after(std::time::Duration::from_secs(10));
+			let mut closed = std::pin::pin!(stream.writer.closed());
+			kio::wait(|waiter| {
+				if waiter.poll_future(closed.as_mut()).is_ready() {
+					return Poll::Ready(Err(Error::Cancel));
+				}
+				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
+					Some(Some(_)) => Poll::Ready(()),
+					Some(None) => {
+						pending = true;
+						Poll::Pending
+					}
+					None if pending => Poll::Ready(()),
+					None => Poll::Pending,
+				});
+				if let Poll::Ready(joins) = joins {
+					return Poll::Ready(Ok(joins.get(&subscribe_id).cloned().flatten()));
+				}
+				if deadline.poll(waiter).is_ready() {
+					return Poll::Ready(if pending { Err(Error::Timeout) } else { Ok(None) });
+				}
+				Poll::Pending
+			})
+			.await
+		};
+		let joined = match joined {
+			Err(Error::Timeout) => {
+				return self
+					.reject_fetch(stream, msg.request_id, 0x2, "subscription not ready")
+					.await;
+			}
+			result => result?,
 		};
 		let (end, cache, timescale) = match joined {
 			None => {
@@ -2841,6 +2868,34 @@ mod serve_tests {
 	}
 
 	#[tokio::test]
+	async fn a_joining_fetch_waits_for_a_reordered_subscription() {
+		let version = Version::Draft19;
+		let mut h = serve(version);
+		publish_groups(&mut h, 5);
+		h.publisher.origin.announced_broadcast("room").await.unwrap();
+		let mut fetching = Box::pin(joining_fetch(&h, 0));
+		assert!(
+			futures::poll!(fetching.as_mut()).is_pending(),
+			"allow SUBSCRIBE to arrive on its stream"
+		);
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		let mut data = bytes::BytesMut::new();
+		subscribe(Filter::NextObject, None)
+			.encode_msg(&mut data, version)
+			.unwrap();
+		let mut serving = h
+			.publisher
+			.handle_stream(ietf::Subscribe::ID, data.freeze(), stream)
+			.unwrap();
+		tokio::select! {
+			response = &mut fetching => { response.unwrap(); }
+			_ = &mut serving => panic!("subscription ended before FETCH"),
+		}
+		assert_eq!(occurrences(&h.log, b"frame"), 1);
+		assert!(h.log.resets().is_empty());
+	}
+
+	#[tokio::test]
 	async fn a_joining_fetch_wakes_when_its_pending_subscription_is_dropped() {
 		for version in [
 			Version::Draft14,
@@ -2883,6 +2938,25 @@ mod serve_tests {
 		}
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn a_joining_fetch_times_out_an_unresolved_subscription() {
+		let version = Version::Draft17;
+		let h = serve(version);
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		let _serving = h
+			.publisher
+			.clone()
+			.run_subscribe_stream(stream, subscribe(Filter::NextObject, None));
+		let mut response = bytes::Bytes::from(joining_fetch(&h, 0).await.unwrap());
+		assert_eq!(u64::decode(&mut response, version).unwrap(), ietf::RequestError::ID);
+		assert_eq!(
+			ietf::RequestError::decode(&mut response, version).unwrap().error_code,
+			0x2
+		);
+		assert!(response.is_empty());
+		assert!(h.log.resets().is_empty());
+	}
+
 	#[tokio::test]
 	async fn a_joining_fetch_refuses_an_evicted_prefix_before_fetch_ok() {
 		let version = Version::Draft17;
@@ -2912,7 +2986,7 @@ mod serve_tests {
 
 	/// A joining FETCH that arrives after its subscription ended has no live edge to name, so
 	/// it is refused rather than answered from a group that is no longer the edge of anything.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_joining_fetch_without_its_subscription_is_refused() {
 		use crate::coding::Decode as _;
 		for version in [
@@ -3071,6 +3145,7 @@ mod serve_tests {
 	#[tokio::test]
 	async fn largest_object_is_the_live_edge_before_draft20() {
 		for version in [
+			Version::Draft14,
 			Version::Draft15,
 			Version::Draft16,
 			Version::Draft17,

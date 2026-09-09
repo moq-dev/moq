@@ -32,7 +32,9 @@ current-group prefix, and the subscription delivers later objects. Standalone,
 absolute joining, and nonzero-offset fetches are refused. Draft-20 uses
 subscription fills instead. JavaScript publishing does not yet serve `FETCH`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
-because they do not issue joining fetches.
+because they do not issue joining fetches. Other publishers may replay a cached
+backlog for that filter; selecting the next group instead would leave static
+tracks waiting for a group that never arrives.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,

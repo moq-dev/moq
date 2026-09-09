@@ -232,7 +232,11 @@ export class SubscribeOk {
 		if (version === Version.DRAFT_14) {
 			await w.u62(0n); // expires = 0
 			await w.u8(this.properties.groupOrder ?? GROUP_ORDER);
-			await w.bool(false); // content exists = false
+			await w.bool(this.largest !== undefined);
+			if (this.largest !== undefined) {
+				await w.u62(this.largest.groupId);
+				await w.u62(this.largest.objectId);
+			}
 			await w.u53(0); // no parameters
 		} else {
 			// v15+: just parameters after track_alias
