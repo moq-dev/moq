@@ -21,6 +21,7 @@ can act on. Each still carries its own plan and regression test.
 - [Generation](/quest/m2/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
 - [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
+- [In-band auth](/quest/m2/auth/README.md) - a session tells its peer what it may publish and subscribe to, refreshes its token in band, and fails loud on an out-of-scope publish
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m2/audio-codecs/README.md) - a broadcast that plays in the browser plays natively: platform decoders and encoders behind a backend seam, HE-AAC, and channel layouts up to 7.1
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
