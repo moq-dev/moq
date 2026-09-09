@@ -40,7 +40,8 @@ never sent, or was already answered, is a protocol violation. The stream
 lives as long as the session; resetting it is not a refusal, and a peer that
 resets an AUTH stream it does not understand (the existing unknown-stream rule
 at the STREAM_TYPE section) leaves the opener with no grant, which the client
-reports as `Unsupported` rather than treating as a refusal. Record it in the lite-06 changelog. Run `just drafts check`.
+reports as `Unsupported` rather than treating as a refusal. Record it in the
+lite-06 changelog. Run `just drafts check`.
 
 ### Model
 
