@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
@@ -127,14 +127,14 @@ for (const section of ["audio", "video"] as const) {
 				},
 			});
 		});
-		for (const jitter of [50, undefined]) {
+		for (const jitter of [Catalog.u53(50), undefined]) {
 			expect(() =>
 				catalog.mutate((value) => {
 					value[section]!.renditions.media.jitter = jitter;
 				}),
 			).toThrow("jitter cannot decrease");
 			catalog.mutate((value) => {
-				expect(value[section]!.renditions.media.jitter).toBe(100);
+				expect(value[section]!.renditions.media.jitter).toBe(Catalog.u53(100));
 			});
 		}
 		catalog.mutate((value) => {
