@@ -36,4 +36,5 @@ degree and adds a second, more specific route per carried broadcast.
 ## Related
 
 - [Routes per broadcast gauge](/quest/m2/route-gauge.md) - the operator-facing count, shippable on its own
+- [Frame slot charge](/quest/m0/frame-slot-charge.md) - the group-cache half: frame slots are held but not billed
 - [Perf](/quest/m1/perf/README.md) - the hot-path work that owns the remaining per-cell cost

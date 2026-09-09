@@ -24,6 +24,7 @@ regression test per Root Cause First.
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-native: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight; moq-ffi can disable the fallback
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
 - [TS restart stall](/quest/m0/3533-ts-export-restart-stall.md) - moq export ts: a content restart on a continuous timeline no longer fences video and primary audio for good
+- [Frame slot charge](/quest/m0/frame-slot-charge.md) - moq-net: a group's frame slots count against the cache budget, including the capacity it keeps after eviction
 - [uring all-features](/quest/m0/uring-all-features-build.md) - moq-uring does not compile with `--all-features`, so the nightly features gate fails on it
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
 - [Harness drive-bys](/quest/m0/harness-drive-bys.md) - decide whether the relay listening kind field that came with #3509 stays
