@@ -186,6 +186,12 @@ web-transport-trait = "0.4.0"
 web-transport-wasm = "0.6"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 
+[patch.crates-io]
+# web-transport-quinn and web-transport-iroh depend on kio from crates.io. Without
+# this, the lock carries a second kio whose pin drifts behind the member, and the
+# next publish that reaches both fails to resolve a single version (#3551).
+kio = { path = "rs/kio" }
+
 [profile.dev]
 panic = "abort"
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
