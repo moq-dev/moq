@@ -3,10 +3,6 @@
 
 set unstable
 
-# Plain `cargo` unless set; CI sets it to `mbx`. See rs/justfile for the rule.
-_rust_cargo := env_var_or_default("RUST_CARGO", "cargo")
-cargo_compile := if _rust_cargo == "" { "cargo" } else { _rust_cargo }
-
 # Per-language modules. Language-specific recipes live in their own justfiles.
 mod js
 mod rs
@@ -804,7 +800,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
-    {{ cargo_compile }} build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 

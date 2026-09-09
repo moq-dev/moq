@@ -75,8 +75,6 @@ Delete:
   `just sub`, `just web` are the only spelling, and `--list` stops showing
   each twice. `just demo` remains the default recipe and `just dev` its
   documented alias.
-- `_rust_cargo`/`cargo_compile`, declared three times. Recipe lines read
-  `${RUST_CARGO:-cargo}` directly.
 
 Rename:
 

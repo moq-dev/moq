@@ -1,9 +1,12 @@
 name: Rust cache
-description: Install mbx and restore the Rust build cache cache.yml warms on the default branch.
+description: Install mbx, put its Cargo shim on PATH, and restore the build cache the default branch warms.
 
 inputs:
+  scope:
+    description: Key space for the store. A workflow that builds a different set of artifacts needs its own.
+    default: shared
   save-on-dispatch:
-    description: Let a trusted workflow_dispatch seed the cache (cache.yml only).
+    description: Let a trusted workflow_dispatch seed the cache (the warming workflow only).
     default: "false"
 
 runs:
@@ -16,7 +19,9 @@ runs:
         # Cargo's pruned target tree, the same payload Swatinem carried, with
         # mbx's per-compilation store on top. The `objects` closure is portable
         # across differing target directories, which nothing here needs, and
-        # measured slower.
+        # measured slower. It transports `./target` relative to the working
+        # directory and ignores CARGO_TARGET_DIR, so a workflow that sets one
+        # has to point it there.
         #
         # The key is spelled out because the generated one cannot name this
         # repository's compiler. It keys on `rustc -vV` from PATH, which here is
@@ -33,11 +38,26 @@ runs:
         # even though it is kept in sync with the flake.
         #
         # Every segment the generated layout carries has to be carried here too:
-        # the runner pair, so the two architectures cache.yml warms cannot read
-        # each other, and `target`, so changing `github-cache-mode` cannot
+        # the runner pair, so the two architectures the warm job builds cannot
+        # read each other, and `target`, so changing `github-cache-mode` cannot
         # restore the other payload. The trailing run id rolls the key on every
         # run, which is what lets a repeated `workflow_dispatch` seed a cold
         # cache against GitHub's immutable entries.
-        cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-
+        cache-key: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ inputs.scope }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-mbx-target-${{ inputs.scope }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}-
         save-on-workflow-dispatch: ${{ inputs.save-on-dispatch }}
+
+    # The shim is how mbx reaches Cargo. The action above only puts `mbx` itself
+    # on PATH, which reaches a build that spells the wrapper out; nothing here
+    # does, and release-plz spawns Cargo where no environment variable could.
+    # `mbx setup` installs a `cargo` launcher instead, and flake.nix puts its
+    # directory in front of the dev shell's pinned toolchain.
+    #
+    # `--status` is the assertion, not decoration: the shim is the only thing
+    # routing Cargo through mbx, so a setup that quietly did nothing would build
+    # every job uncached and still report success.
+    - name: Cargo shim
+      shell: bash
+      run: |
+        mbx setup --yes
+        mbx setup --status
