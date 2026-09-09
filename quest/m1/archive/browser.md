@@ -18,7 +18,7 @@ deferred commit Rust has (`Producer::deferred`,
 Persist one object per `(track, segment)` after all included groups complete,
 then publish the archive timeline record. A typical audio segment contains many
 one-group-per-frame audio groups. Match the Rust binary envelope and `.info`
-bytes exactly, per [format](/quest/m1/archive/format.md), and share the
+bytes exactly, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), and share the
 writer's commit prerequisites so a failed catalog snapshot never leaves
 dependent media ranges advertised.
 
@@ -33,7 +33,6 @@ remains downstream (moq.pro) work.
 
 ## Required
 
-- [Recording format](/quest/m1/archive/format.md)
 - [Archive catalog](/quest/m1/archive/catalog.md)
 - [Archive store](/quest/m1/archive/store.md)
 - [Recording writer](/quest/m1/archive/writer.md)

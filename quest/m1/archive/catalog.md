@@ -16,7 +16,7 @@ index. It carries:
   (`track`, `timescale`, `durationMax`, `wall`)
 - the replay MoQ broadcast path the archive is served back from, if any
 - the object-store URL the objects live under, if the publisher exposes one
-- the format version from [format](/quest/m1/archive/format.md)
+- the format version from the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording)
 
 A live publisher without a store advertises `archive` with the timeline
 fields alone, and the store-less HLS export
@@ -45,10 +45,6 @@ Land it as one change across `rs/hang` (the catalog type, `moq-mux`
 `js/hang/src/container/timeline.ts:131`), and a new Catalog Section in the
 draft's Timeline chapter (`drafts/draft-lcurley-moq-hang.md:560`) replacing
 `timeline`.
-
-## Required
-
-- [Recording format](/quest/m1/archive/format.md) - the version the entry advertises
 
 ## Related
 

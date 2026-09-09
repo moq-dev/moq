@@ -40,9 +40,9 @@ the percent encoding of track names is unimplemented.
 
 ### Format
 
-The format is the draft's Recording section as rewritten by
-[format](/quest/m1/archive/format.md). The application chooses the object
-prefix, selected tracks, retention, and credentials; `moq-archive` owns the
+The format is the draft's
+[Recording section](/drafts/draft-lcurley-moq-hang.md#recording).
+The application chooses the object prefix, selected tracks, retention, and credentials; `moq-archive` owns the
 portable layout and codecs:
 
 ```text
@@ -79,11 +79,12 @@ implementation.
 
 ### Retention
 
-An unbounded archive only pushes records. A DVR pops records, stores the new
-timeline group, waits a short grace period, then deletes the expired
-`(track, segment)` objects, so the index stops advertising an object before it
-can disappear. HLS is a derived view of the archive, never a second stored
-copy.
+An unbounded archive only pushes records. During each new segment commit, a
+DVR pops expired records before closing and storing that segment's timeline
+groups, then waits the configured grace period before deleting expired objects. Timeline
+objects use the segment being committed as their key. Retention stops after
+the final segment; no existing object is rewritten. HLS is a derived view of
+the archive, never a second stored copy.
 
 ### Managed boundary
 
@@ -95,7 +96,6 @@ protected broadcasts are out of scope.
 
 ## Quests
 
-- [Recording format](/quest/m1/archive/format.md) - the draft's Recording section becomes the `(track, segment)` layout with the timeline stored as an ordinary track
 - [Archive catalog](/quest/m1/archive/catalog.md) - one root `archive` entry subsumes `timeline` and names the timeline track, replay path, store URL, and format version
 - [Archive store](/quest/m1/archive/store.md) - `moq-archive` puts, gets, lists, and deletes the versioned objects over `object_store`
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record

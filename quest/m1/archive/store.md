@@ -2,8 +2,8 @@
 
 ## Goal
 
-`moq-archive` stores the versioned `(track, segment)` objects of
-[format](/quest/m1/archive/format.md) on memory, local disk, and
+`moq-archive` stores the versioned `(track, segment)` objects of the
+[Recording section](/drafts/draft-lcurley-moq-hang.md#recording) on memory, local disk, and
 S3-compatible storage through a generic `T: object_store::ObjectStore`.
 
 ## Plan
@@ -42,7 +42,3 @@ recovery. Do not add presigned-URL handling; credential policy belongs to the
 application.
 
 Land the crate in the moq workspace beside `hang`.
-
-## Required
-
-- [Recording format](/quest/m1/archive/format.md) - the layout and codecs this crate implements

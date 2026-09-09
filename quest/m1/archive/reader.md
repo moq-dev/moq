@@ -37,6 +37,5 @@ missing its tail, and remains readable.
 
 ## Required
 
-- [Recording format](/quest/m1/archive/format.md)
 - [Archive catalog](/quest/m1/archive/catalog.md)
 - [Archive store](/quest/m1/archive/store.md)
