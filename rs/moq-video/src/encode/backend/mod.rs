@@ -280,7 +280,7 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 		return match &config.kind {
 			Kind::Named(name) => Err(Error::UnknownEncoder {
 				name: name.clone(),
-				codec: format!("{:?}", config.codec),
+				codec: config.codec,
 				available: available.join(", "),
 			}),
 			kind => Err(Error::NoEncoder(format!(
@@ -488,8 +488,9 @@ mod tests {
 		config.kind = Kind::Named("vappi".to_owned());
 
 		match open(&config) {
-			Err(Error::UnknownEncoder { name, available, .. }) => {
+			Err(Error::UnknownEncoder { name, codec, available }) => {
 				assert_eq!(name, "vappi");
+				assert_eq!(codec, config.codec);
 				// openh264 is unconditional, so every build has one to offer.
 				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
 			}

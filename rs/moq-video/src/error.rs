@@ -15,12 +15,12 @@ pub enum Error {
 	/// `Kind::Named` asked for an encoder this build does not have for that
 	/// codec: a name that is not a backend, one whose feature is off, or one
 	/// that does not encode the codec requested.
-	#[error("no encoder named {name} for {codec} (this build has: {available})")]
+	#[error("no encoder named {name} for {codec:?} (this build has: {available})")]
 	UnknownEncoder {
 		/// The name that was asked for.
 		name: String,
 		/// The codec it was asked for.
-		codec: String,
+		codec: crate::encode::Codec,
 		/// The encoders this build does have for that codec.
 		available: String,
 	},
