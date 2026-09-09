@@ -2,6 +2,7 @@ use crate::{frame, group, origin, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use web_async::Lock;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
@@ -266,7 +267,28 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	peer_origin: Option<crate::Origin>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
+	// The live edge group each active subscription joined at, keyed by its request id.
+	// A joining FETCH names only that id, so this is the one fact that lets it answer
+	// with a range the subscriber accepts. Shared because every stream runs on its own
+	// clone of this struct: a plain field would be copied per stream and a fetch would
+	// never see the subscribe's entry.
+	joins: Lock<HashMap<RequestId, u64>>,
 	version: Version,
+}
+
+/// One subscription's entry in [`Publisher::joins`], removed when the subscription ends.
+///
+/// A fetch that arrives afterwards then finds nothing and is refused, rather than being
+/// answered from a group that is no longer the edge of anything.
+struct Join {
+	joins: Lock<HashMap<RequestId, u64>>,
+	request_id: RequestId,
+}
+
+impl Drop for Join {
+	fn drop(&mut self) {
+		self.joins.lock().remove(&self.request_id);
+	}
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
@@ -285,6 +307,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			control,
 			peer_origin,
 			peer_setup,
+			joins: Default::default(),
 			version,
 		}
 	}
@@ -571,6 +594,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// lets the draft's current-group join (Next Object plus a StartGroup=1 fill)
 		// cover the group with no gap and no overlap.
 		let edge = live_edge(&cache);
+
+		// A joining FETCH carries this request id and nothing else, so publish the group it
+		// joins at for as long as the subscription lasts. It is the group of the Largest
+		// Object announced right below, which is what the subscriber derives the fetch's
+		// Start Location from; an empty track announces nothing, so group 0 it is.
+		let _join = self.register_join(request_id, edge.largest.map_or(0, |largest| largest.group));
+
 		let range = subscribe_range(&msg, edge, self.version);
 		let _ = track.update(Subscription {
 			priority,
@@ -1222,9 +1252,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// Record the group a joining FETCH may name for this subscription, until the returned
+	/// guard drops.
+	fn register_join(&self, request_id: RequestId, group: u64) -> Join {
+		self.joins.lock().insert(request_id, group);
+		Join {
+			joins: self.joins.clone(),
+			request_id,
+		}
+	}
+
 	/// Handle a FETCH on its bidi stream.
+	///
+	/// Only the relative joining form with an offset of 0 is answered, and its response is
+	/// empty: below draft-20 a subscription serves from the start of the latest group, so the
+	/// group a joining fetch would backfill is already arriving on the subscription itself.
 	async fn run_fetch_stream(self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
-		let _subscribe_id = match msg.fetch_type {
+		let subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
 				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 			}
@@ -1242,8 +1286,36 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
-		// Send FetchOk/RequestOk
-		self.write_fetch_ok(&mut stream.writer, msg.request_id).await?;
+		// The subscription is the only source for the group this fetch joins at. Without it
+		// there is no End Location we know to be legal, and one below the subscriber's own
+		// Start Location earns a PROTOCOL_VIOLATION, so refuse instead of guessing.
+		let group = self.joins.lock().get(&subscribe_id).copied();
+		let Some(group) = group else {
+			return self
+				.reject_fetch(stream, msg.request_id, 500, "no such subscription")
+				.await;
+		};
+
+		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
+		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
+		// requests it answers without ever naming this one.
+		stream.writer.encode(&ietf::FetchOk::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::FetchOk {
+				request_id: match self.version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
+					_ => None,
+				},
+				// Only draft-14 encodes it, and only as the publisher restating the order.
+				group_order: GroupOrder::Descending,
+				end_of_track: false,
+				// The empty range at the fetch's own Start Location, which for an offset of 0
+				// is the group the subscription joined at. End Location must not be below
+				// Start, and nothing is being sent, so this is the smallest legal answer.
+				end_location: Location { group, object: 0 },
+			})
+			.await?;
 
 		// Create a uni stream with just a FetchHeader and FIN it
 		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
@@ -1256,39 +1328,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.await?;
 		writer.close().await?;
 
-		Ok(())
-	}
+		// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
+		// without the finish the answer is discarded before the peer ever reads it, exactly
+		// as it would be for a refusal. The peer dropping the stream first is a normal end.
+		let _ = stream.writer.close().await;
 
-	async fn write_fetch_ok(
-		&self,
-		writer: &mut Writer<S::SendStream, Version>,
-		request_id: RequestId,
-	) -> Result<(), Error> {
-		match self.version {
-			Version::Draft14 => {
-				writer.encode(&ietf::FetchOk::ID).await?;
-				writer
-					.encode(&ietf::FetchOk {
-						request_id: Some(request_id),
-						group_order: GroupOrder::Descending,
-						end_of_track: false,
-						end_location: Location { group: 0, object: 0 },
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				writer.encode(&ietf::RequestOk::ID).await?;
-				writer
-					.encode(&ietf::RequestOk {
-						request_id: Some(request_id),
-					})
-					.await?;
-			}
-			_ => {
-				writer.encode(&ietf::RequestOk::ID).await?;
-				writer.encode(&ietf::RequestOk { request_id: None }).await?;
-			}
-		}
 		Ok(())
 	}
 
@@ -2503,6 +2547,145 @@ mod serve_tests {
 
 		assert_eq!(occurrences(&h.log, FETCH_STREAM), 1, "the promised stream still opens");
 		assert_eq!(h.log.resets().len(), 1, "and is reset as the failure signal");
+	}
+
+	/// The request id of the joining FETCH, distinct from the subscription's.
+	const FETCH_ID: RequestId = RequestId(0x2C);
+
+	/// Fill the track with finished groups 0..=`latest`, so the live edge is a group past 0
+	/// and a `{0, 0}` End Location would be below the subscriber's own Start.
+	fn publish_groups(h: &mut Serve, latest: u64) {
+		for sequence in 0..=latest {
+			let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+			group.finish().unwrap();
+		}
+	}
+
+	/// Run a relative joining FETCH with an offset of 0, returning what the peer reads off
+	/// the fetch's own request stream.
+	///
+	/// Every stream shares one write log, so the caller passes the length it had before the
+	/// fetch ran; the subscription is parked at the live edge and writes nothing meanwhile.
+	async fn joining_fetch(h: &Serve, mark: usize) -> Vec<u8> {
+		let version = h.publisher.version;
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					fetch_type: FetchType::RelativeJoining {
+						subscriber_request_id: RequestId(REQUEST_ID),
+						group_offset: 0,
+					},
+				},
+			)
+			.await
+			.unwrap();
+
+		h.log.writes.lock().unwrap()[mark..].to_vec()
+	}
+
+	/// Every draft answers a FETCH with FETCH_OK, never REQUEST_OK, and its End Location names
+	/// the group the subscription joined at.
+	///
+	/// The type is asserted after decoding rather than by scanning for REQUEST_OK's 0x7: that
+	/// byte is a legal group id, object id or length, so a correct response would fail such a
+	/// scan. The End Location is the regression: the literal `{0, 0}` sits below the Start
+	/// Location the subscriber derives for itself, and section 10.13 has it close the session
+	/// with a PROTOCOL_VIOLATION over that.
+	#[tokio::test]
+	async fn a_joining_fetch_is_answered_with_fetch_ok() {
+		use crate::coding::Decode as _;
+
+		const LATEST: u64 = 5;
+
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+		] {
+			let mut h = serve(version);
+			publish_groups(&mut h, LATEST);
+
+			// `create_broadcast` registers from a spawned task, so let it land before subscribing.
+			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+			let stream = Stream::open(&h.session, version).await.unwrap();
+			let mut serve = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+
+			// Drive it until SUBSCRIBE_OK is out and it parks at the live edge, which is
+			// where the group a joining fetch names is recorded.
+			for _ in 0..200 {
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"{version}: subscription ended early"
+				);
+				tokio::task::yield_now().await;
+			}
+			let mark = h.log.writes.lock().unwrap().len();
+
+			let response = joining_fetch(&h, mark).await;
+
+			let mut buf = bytes::Bytes::from(response);
+			let id = u64::decode(&mut buf, version).unwrap();
+			assert_eq!(id, ietf::FetchOk::ID, "{version}: not a FETCH_OK");
+
+			let ok = ietf::FetchOk::decode(&mut buf, version).unwrap();
+			assert_eq!(
+				ok.request_id,
+				match version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(FETCH_ID),
+					_ => None,
+				},
+				"{version}: wrong request id"
+			);
+			assert!(!ok.end_of_track, "{version}: the track has not ended");
+			assert_eq!(
+				ok.end_location,
+				Location {
+					group: LATEST,
+					object: 0
+				},
+				"{version}: End Location is below the fetch's Start Location"
+			);
+
+			assert!(h.log.resets().is_empty(), "{version}: an answered fetch must not reset");
+		}
+	}
+
+	/// A joining FETCH that arrives after its subscription ended has no live edge to name, so
+	/// it is refused rather than answered from a group that is no longer the edge of anything.
+	#[tokio::test]
+	async fn a_joining_fetch_without_its_subscription_is_refused() {
+		for version in [Version::Draft17, Version::Draft20] {
+			let mut h = serve(version);
+			publish_groups(&mut h, 5);
+
+			run_live(&mut h, subscribe(Filter::NextObject, None)).await;
+
+			let mark = h.log.writes.lock().unwrap().len();
+			let response = joining_fetch(&h, mark).await;
+
+			assert_eq!(
+				response.first().copied(),
+				Some(ietf::RequestError::ID as u8),
+				"{version}: not a REQUEST_ERROR"
+			);
+			assert!(h.log.resets().is_empty(), "{version}: the refusal was reset away");
+		}
 	}
 
 	/// A fill against an empty track has an empty range: no fetch stream is owed.
