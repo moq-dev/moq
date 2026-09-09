@@ -1427,6 +1427,9 @@ struct FrontState {
 	/// an exact tie toward the newest source.
 	next_route: u64,
 	routes: Vec<FrontRoute>,
+	/// Immutable track metadata, retained across idle release and aborted attempts.
+	/// Every route of this broadcast must serve the same content.
+	track_info: HashMap<Arc<str>, track::Info>,
 	/// Peers this front is exposed to, refcounted by live [`ExclusionGuard`]s: those
 	/// reading it through the shared broadcast, and those we merely advertise it to.
 	/// The resolve-time check only proves the table is clean for a requester at that
@@ -1453,6 +1456,31 @@ struct FrontState {
 }
 
 impl FrontState {
+	/// Admit only copies with the broadcast's established track properties.
+	fn accept_track_info(&mut self, name: &Arc<str>, info: track::Info) -> Result<(), Error> {
+		if self.closed {
+			return Err(Error::Closed);
+		}
+		if let Some(expected) = self.track_info.get(name) {
+			let track::Info {
+				timescale,
+				latency_max,
+				priority,
+				ordered,
+			} = info;
+			if timescale != expected.timescale
+				|| latency_max != expected.latency_max
+				|| priority != expected.priority
+				|| ordered != expected.ordered
+			{
+				return Err(Error::Unsupported);
+			}
+		} else {
+			self.track_info.insert(name.clone(), info);
+		}
+		Ok(())
+	}
+
 	/// The one selection primitive every picker goes through: the best route by
 	/// [`route_order`] among those surviving `keep`. With `untainted`, the pick
 	/// also steers away from routes that flow through a peer currently reading
@@ -1987,6 +2015,7 @@ fn attach_source(
 		publisher,
 		next_route: 1,
 		excluded: HashMap::new(),
+		track_info: HashMap::new(),
 		routes: vec![FrontRoute {
 			id: 0,
 			route,
@@ -2133,8 +2162,9 @@ async fn run_front(
 
 /// Serves one spliced logical track: splices in the best source's copy of the
 /// track, re-splicing on handover or failure, until the track completes or the
-/// front closes. A refusal (a source rejecting the track, or its copy dying
-/// before delivering anything) is authoritative and never retried: the refuser
+/// front closes. A refusal (a source rejecting the track, returning incompatible
+/// metadata, or dying before delivering anything) is authoritative and never
+/// retried: the refuser
 /// is skipped for this track so a joining standby cannot kill a subscription
 /// the incumbent is serving, and once every attached source has refused, the
 /// track aborts with the last refusal's error. The verdict belongs to this
@@ -2375,9 +2405,12 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							None => continue,
 							// A copy that is already aborted can't be spliced;
 							// its error is the source's answer for the track.
-							Some(Ok(_)) => match track.poll_complete(&kio::Waiter::noop()) {
+							Some(Ok(info)) => match track.poll_complete(&kio::Waiter::noop()) {
 								Poll::Ready(Err(err)) => Err(err),
-								_ => Ok(track),
+								_ => match state.write() {
+									Ok(mut state) => state.accept_track_info(&name, info).map(|()| track),
+									Err(_) => Err(Error::Dropped),
+								},
 							},
 							Some(Err(err)) => Err(err),
 						}
@@ -3340,6 +3373,7 @@ mod tests {
 			publisher: routes.first().and_then(|r| r.hops.iter().next().copied()),
 			next_route: routes.len() as u64,
 			excluded: HashMap::new(),
+			track_info: HashMap::new(),
 			routes: routes
 				.into_iter()
 				.enumerate()
@@ -4183,66 +4217,89 @@ mod tests {
 		sub.assert_not_closed();
 	}
 
-	/// A track's immutable properties belong to whichever source is serving it.
-	/// The successor picks its own timescale, and a reader handed the
-	/// predecessor's would silently rescale every frame it is about to receive.
+	/// A source claiming the same content cannot change immutable track metadata.
 	#[tokio::test]
-	async fn test_track_info_follows_the_serving_source() {
+	async fn test_failover_rejects_different_track_info() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
-		let consumer = origin.consume();
+		for replacement in [
+			track::Info::default().with_timescale(Timescale::MICRO),
+			track::Info::default().with_priority(7),
+			track::Info::default().with_ordered(true),
+			track::Info::default().with_latency_max(Duration::from_secs(7)),
+		] {
+			let origin = Origin::random().produce();
+			let consumer = origin.consume();
 
-		// Both routes share the first hop: interchangeable content.
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+			// Both routes share the first hop: interchangeable content.
+			let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+			let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
 
-		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
-		let mut dynamic_a = source_a.dynamic();
-		settle().await;
-		settle().await;
-		let broadcast = consumer.request_broadcast("test").await.unwrap();
+			let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
+			let mut dynamic_a = source_a.dynamic();
+			settle().await;
+			settle().await;
+			let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
-		let mut dynamic_b = source_b.dynamic();
-		settle().await;
-		settle().await;
+			let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+			let mut dynamic_b = source_b.dynamic();
+			settle().await;
+			settle().await;
 
-		// Held for the whole test: the reader's handle is what keeps the logical
-		// track spliced across the failover instead of releasing it.
-		let track = broadcast.track("video").unwrap();
+			// Held for the whole test: the reader's handle is what keeps the logical
+			// track spliced across the failover instead of releasing it.
+			let track = broadcast.track("video").unwrap();
 
-		// A is dispatched the track and serves it on the default grid.
-		let querying = track.info();
-		let producer = accept_track(&mut dynamic_a, "video").await;
-		let info = tokio::time::timeout(std::time::Duration::from_secs(1), querying)
-			.await
-			.expect("timed out resolving the first source's info")
-			.unwrap();
-		assert_eq!(info.timescale, Timescale::default());
+			// A is dispatched the track and serves it on the default grid.
+			let querying = track.info();
+			let mut producer = accept_track(&mut dynamic_a, "video").await;
+			let info = tokio::time::timeout(std::time::Duration::from_secs(1), querying)
+				.await
+				.expect("timed out resolving the first source's info")
+				.unwrap();
+			assert_eq!(info.timescale, Timescale::default());
 
-		// A dies; B re-serves the same track on a microsecond grid.
-		producer.abort(Error::Dropped).unwrap();
-		source_a.abort(Error::Dropped).unwrap();
-		drop(dynamic_a);
-		settle().await;
+			let mut reader = track.subscribe(None).await.unwrap();
+			producer
+				.create_group(group::Info { sequence: 0 })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(reader.recv_group().await.unwrap().unwrap().sequence, 0);
 
-		let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic_b.requested_track())
-			.await
-			.expect("timed out waiting for a track request")
-			.expect("source closed");
-		let _producer = request.accept(track::Info::default().with_timescale(Timescale::MICRO));
-		settle().await;
+			// Establish a subscriber but do not read its cached predecessor group yet.
+			let mut joining = track.subscribe(None).await.unwrap();
 
-		let info = tokio::time::timeout(std::time::Duration::from_secs(1), track.info())
-			.await
-			.expect("timed out resolving the successor's info")
-			.unwrap();
-		assert_eq!(
-			info.timescale,
-			Timescale::MICRO,
-			"info must come from the source now serving the track"
-		);
+			// A dies; B claims the same content with incompatible metadata.
+			source_a.abort(Error::Dropped).unwrap();
+			drop(dynamic_a);
+			settle().await;
+
+			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic_b.requested_track())
+				.await
+				.expect("timed out waiting for a track request")
+				.expect("source closed");
+			let mut successor = request.accept(replacement);
+			successor
+				.create_group(group::Info { sequence: 1 })
+				.unwrap()
+				.finish()
+				.unwrap();
+			settle().await;
+
+			assert!(matches!(track.info().await, Err(Error::Unsupported)));
+			let cached = joining.recv_group().await.unwrap().unwrap();
+			assert_eq!(cached.sequence, 0);
+			assert_eq!(cached.timescale(), info.timescale);
+			assert!(matches!(joining.recv_group().await, Err(Error::Unsupported)));
+			assert!(matches!(track.subscribe(None).await, Err(Error::Unsupported)));
+			assert!(matches!(reader.recv_group().await, Err(Error::Unsupported)));
+			assert!(matches!(track.fetch_group(1, None).await, Err(Error::Unsupported)));
+
+			// Reopening an aborted logical track must not forget the broadcast's metadata.
+			let reopened = broadcast.track("video").unwrap();
+			assert!(matches!(reopened.info().await, Err(Error::Unsupported)));
+		}
 	}
 
 	/// Failover restores *every* subscribed track, not just one. A single-track
@@ -4716,63 +4773,76 @@ mod tests {
 	/// re-requesting the track (and its info) every linger.
 	#[tokio::test(start_paused = true)]
 	async fn test_idle_track_releases_without_respinning() {
-		let origin = Info::new(Origin::random()).produce();
-		let consumer = origin.consume();
+		for incompatible in [false, true] {
+			let origin = Info::new(Origin::random()).produce();
+			let consumer = origin.consume();
 
-		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
-		let mut dynamic = source.dynamic();
-		settle().await;
-		let broadcast = consumer.request_broadcast("test").await.unwrap();
+			let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+			let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+			let mut dynamic = source.dynamic();
+			settle().await;
+			let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let producer = accept_track(&mut dynamic, "video").await;
-		settle().await;
-		let sub = subscribing.await.unwrap();
+			let subscribing = broadcast.track("video").unwrap().subscribe(None);
+			let producer = accept_track(&mut dynamic, "video").await;
+			settle().await;
+			let sub = subscribing.await.unwrap();
 
-		// The reader leaves, but the copy stays warm inside the window so a viewer
-		// coming back (or a follow-up fetch) reuses it.
-		drop(sub);
-		tokio::time::sleep(TRACK_IDLE_LINGER / 2).await;
-		settle().await;
-		assert!(
-			producer.poll_unused(&kio::Waiter::noop()).is_pending(),
-			"the copy must stay spliced inside the linger",
-		);
+			// The reader leaves, but the copy stays warm inside the window so a viewer
+			// coming back (or a follow-up fetch) reuses it.
+			drop(sub);
+			tokio::time::sleep(TRACK_IDLE_LINGER / 2).await;
+			settle().await;
+			assert!(
+				producer.poll_unused(&kio::Waiter::noop()).is_pending(),
+				"the copy must stay spliced inside the linger",
+			);
 
-		// Past the window the segment is released, so the serving session sees its
-		// copy go unused and can drop it (along with the track info).
-		tokio::time::sleep(TRACK_IDLE_LINGER).await;
-		settle().await;
-		assert!(
-			producer.poll_unused(&kio::Waiter::noop()).is_ready(),
-			"an idle copy must be released after the linger",
-		);
-
-		// The anti-spin property: the release must not re-arm the splice. Ungated,
-		// the loop re-attaches the copy immediately and drops it again every linger,
-		// re-requesting the track (and its info) from the session each time it dies.
-		for _ in 0..3 {
+			// Past the window the segment is released, so the serving session sees its
+			// copy go unused and can drop it (along with the track info).
 			tokio::time::sleep(TRACK_IDLE_LINGER).await;
 			settle().await;
 			assert!(
 				producer.poll_unused(&kio::Waiter::noop()).is_ready(),
-				"an unread copy must stay released, not be re-spliced",
+				"an idle copy must be released after the linger",
 			);
-		}
-		assert!(
-			dynamic.requested_track().now_or_never().is_none(),
-			"an unread track must not be re-requested",
-		);
-		drop(producer);
 
-		// A returning reader re-splices: the origin asks the source for a fresh copy.
-		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-		let mut producer = accept_track(&mut dynamic, "video").await;
-		settle().await;
-		let mut sub = subscribing.await.unwrap();
-		producer.append_group().unwrap();
-		assert_eq!(sub.assert_group().sequence, 0);
+			// The anti-spin property: the release must not re-arm the splice. Ungated,
+			// the loop re-attaches the copy immediately and drops it again every linger,
+			// re-requesting the track (and its info) from the session each time it dies.
+			for _ in 0..3 {
+				tokio::time::sleep(TRACK_IDLE_LINGER).await;
+				settle().await;
+				assert!(
+					producer.poll_unused(&kio::Waiter::noop()).is_ready(),
+					"an unread copy must stay released, not be re-spliced",
+				);
+			}
+			assert!(
+				dynamic.requested_track().now_or_never().is_none(),
+				"an unread track must not be re-requested",
+			);
+			drop(producer);
+
+			// A returning reader re-splices: the origin asks the source for a fresh copy.
+			let subscribing = broadcast.track("video").unwrap().subscribe(None);
+			let request = dynamic.requested_track().await.unwrap();
+			let info = track::Info::default().with_timescale(if incompatible {
+				Timescale::MICRO
+			} else {
+				Timescale::MILLI
+			});
+			let mut producer = request.accept(info);
+			if incompatible {
+				assert!(matches!(subscribing.await, Err(Error::Unsupported)));
+				continue;
+			}
+
+			settle().await;
+			let mut sub = subscribing.await.unwrap();
+			producer.append_group().unwrap();
+			assert_eq!(sub.assert_group().sequence, 0);
+		}
 	}
 
 	/// Back-to-back fetches reuse the source's copy: only the first asks the source
@@ -5847,62 +5917,69 @@ mod tests {
 	/// refused, so the subscription aborts and the consumer's next request asks
 	/// afresh.
 	#[tokio::test]
-	async fn test_standby_missing_track_keeps_incumbent() {
+	async fn test_standby_refusal_keeps_incumbent() {
 		tokio::time::pause();
+		for incompatible in [false, true] {
+			let origin = Origin::random().produce();
+			let consumer = origin.consume();
 
-		let origin = Origin::random().produce();
-		let consumer = origin.consume();
+			let publisher = Origin::new(1).unwrap();
+			let peer = Origin::new(5).unwrap();
+			let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+			let local = OriginList::try_from(vec![publisher]).unwrap();
 
-		let publisher = Origin::new(1).unwrap();
-		let peer = Origin::new(5).unwrap();
-		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
-		let local = OriginList::try_from(vec![publisher]).unwrap();
+			// Carrying via the peer, with a live subscriber mid-stream.
+			let source_remote = origin
+				.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+				.unwrap();
+			let mut dynamic_remote = source_remote.dynamic();
+			settle().await;
+			settle().await;
+			let broadcast = consumer.request_broadcast("test").await.unwrap();
+			let subscribing = broadcast.track("audio").unwrap().subscribe(None);
+			let mut producer_remote = accept_track(&mut dynamic_remote, "audio").await;
+			settle().await;
+			let mut sub = subscribing.await.unwrap();
+			producer_remote.append_group().unwrap();
+			assert_eq!(sub.assert_group().sequence, 0);
 
-		// Carrying via the peer, with a live subscriber mid-stream.
-		let source_remote = origin
-			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
-			.unwrap();
-		let mut dynamic_remote = source_remote.dynamic();
-		settle().await;
-		settle().await;
-		let broadcast = consumer.request_broadcast("test").await.unwrap();
-		let subscribing = broadcast.track("audio").unwrap().subscribe(None);
-		let mut producer_remote = accept_track(&mut dynamic_remote, "audio").await;
-		settle().await;
-		let mut sub = subscribing.await.unwrap();
-		producer_remote.append_group().unwrap();
-		assert_eq!(sub.assert_group().sequence, 0);
+			// The standby wins dispatch but either lacks audio or serves incompatible
+			// metadata. Its refusal must cost the incumbent nothing.
+			let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+			let mut dynamic_local = source_local.dynamic();
+			settle().await;
+			let request = dynamic_local.requested_track().await.unwrap();
+			assert_eq!(request.name(), "audio");
+			let incompatible_track = if incompatible {
+				Some(request.accept(track::Info::default().with_timescale(Timescale::MICRO)))
+			} else {
+				request.reject(Error::NotFound);
+				None
+			};
+			settle().await;
 
-		// The standby joins and wins dispatch, but has not created "audio" yet.
-		// Its refusal must cost the incumbent nothing.
-		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
-		let mut dynamic_local = source_local.dynamic();
-		settle().await;
-		let request = dynamic_local.requested_track().await.unwrap();
-		assert_eq!(request.name(), "audio");
-		request.reject(Error::NotFound);
-		settle().await;
+			// Still spliced to the incumbent, still delivering.
+			producer_remote.append_group().unwrap();
+			assert_eq!(sub.assert_group().sequence, 1);
+			sub.assert_not_closed();
 
-		// Still spliced to the incumbent, still delivering.
-		producer_remote.append_group().unwrap();
-		assert_eq!(sub.assert_group().sequence, 1);
-		sub.assert_not_closed();
+			// The incumbent leaving exhausts the table (the standby's refusal is
+			// never retried): the subscription aborts.
+			source_remote.abort(Error::Dropped).unwrap();
+			settle().await;
+			settle().await;
+			sub.assert_closed();
+			dynamic_local.assert_no_request();
 
-		// The incumbent leaving exhausts the table (the standby's refusal is
-		// never retried): the subscription aborts.
-		source_remote.abort(Error::Dropped).unwrap();
-		settle().await;
-		settle().await;
-		sub.assert_closed();
-		dynamic_local.assert_no_request();
-
-		// A fresh consumer request asks the standby anew, which has the track now.
-		let retry = broadcast.track("audio").unwrap().subscribe(None);
-		let mut producer_local = accept_track(&mut dynamic_local, "audio").await;
-		settle().await;
-		let mut sub = retry.await.expect("a fresh request must reach the standby");
-		producer_local.create_group(group::Info { sequence: 2 }).unwrap();
-		assert_eq!(sub.assert_group().sequence, 2);
+			drop(incompatible_track);
+			// A fresh consumer request asks the standby anew, which has the track now.
+			let retry = broadcast.track("audio").unwrap().subscribe(None);
+			let mut producer_local = accept_track(&mut dynamic_local, "audio").await;
+			settle().await;
+			let mut sub = retry.await.expect("a fresh request must reach the standby");
+			producer_local.create_group(group::Info { sequence: 2 }).unwrap();
+			assert_eq!(sub.assert_group().sequence, 2);
+		}
 	}
 
 	/// A refused track aborts, but the verdict is not cached: it belongs to the

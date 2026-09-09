@@ -457,59 +457,37 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for the track's [`track::Info`], resolved from the newest segment.
-	///
-	/// The newest segment is the generation a reader is served: every future group
-	/// is written there and fetches route there. Resolving from an older one hands
-	/// a subscriber the predecessor's `timescale`, which silently rescales the
-	/// successor's frame timestamps rather than failing.
+	/// Poll for the track's [`track::Info`], resolved from the first segment.
 	///
 	/// Stays pending until a segment exists and its track's info is known (the
 	/// serving session may not have accepted it yet).
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<track::Info>> {
-		loop {
-			// Poll the underlying track outside the resume lock, then validate the
-			// generation under that lock before returning or registering a waiter.
-			let (epoch, track) = match ready!(self.state.poll(waiter, |state| {
-				match (&state.abort, state.segments.last()) {
-					(Some(err), _) => Poll::Ready(Err(err.clone())),
-					(None, Some(segment)) => Poll::Ready(Ok((state.epoch, segment.track.clone()))),
-					(None, None) => Poll::Pending,
-				}
-			})) {
-				Ok(res) => res?,
-				Err(state) => match (&state.abort, state.segments.last()) {
-					(Some(err), _) => return Poll::Ready(Err(err.clone())),
-					(None, Some(segment)) => (state.epoch, segment.track.clone()),
-					(None, None) => return Poll::Ready(Err(Error::Dropped)),
-				},
-			};
-
-			let info = track.info().poll_ok(waiter);
-			#[cfg(test)]
-			test::INFO_POLLED.with(|hook| {
-				if let Some(hook) = hook.take() {
-					hook();
-				}
-			});
-			match self.state.poll(waiter, |state| {
-				if state.epoch != epoch {
-					Poll::Ready(false)
-				} else if info.is_ready() {
-					Poll::Ready(true)
-				} else {
-					// Registration and validation share the lock, so a switch cannot
-					// slip between them and leave us waiting on a retired segment.
-					Poll::Pending
-				}
-			}) {
-				Poll::Ready(Ok(false)) => continue,
-				_ => return info,
+		// Wait for the first segment (or a terminal state), then poll its info.
+		let track = match ready!(self.state.poll(waiter, |state| {
+			if state.abort.is_some() || !state.segments.is_empty() {
+				Poll::Ready(
+					state
+						.abort
+						.clone()
+						.map_or_else(|| Ok(state.segments[0].track.clone()), Err),
+				)
+			} else {
+				Poll::Pending
 			}
-		}
+		})) {
+			Ok(res) => res?,
+			Err(state) => match (&state.abort, state.segments.first()) {
+				(Some(err), _) => return Poll::Ready(Err(err.clone())),
+				(None, Some(segment)) => segment.track.clone(),
+				// Closed without ever getting a segment: nothing will resolve this.
+				(None, None) => return Poll::Ready(Err(Error::Dropped)),
+			},
+		};
+
+		track.info().poll_ok(waiter)
 	}
 
-	/// Return the track's [`track::Info`], resolved from the newest segment.
+	/// Return the track's [`track::Info`], resolved from the first segment.
 	#[cfg(test)]
 	pub async fn info(&self) -> Result<track::Info> {
 		kio::wait(|waiter| self.poll_info(waiter)).await
@@ -1271,44 +1249,8 @@ mod test {
 	use futures::FutureExt;
 	use std::sync::Arc;
 
-	thread_local! {
-		pub(super) static INFO_POLLED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-	}
-
-	#[tokio::test]
-	async fn info_rechecks_a_concurrent_takeover() {
-		for accepted in [false, true] {
-			let request = track::Request::new(Arc::new(broadcast::Info::default()), "a");
-			let consumer_a = request.consume();
-			let mut request = Some(request);
-			let _track_a = accepted.then(|| request.take().unwrap().accept(track::Info::default()));
-			let (_track_b, consumer_b) =
-				track_pair_info("b", track::Info::default().with_timescale(crate::Timescale::MICRO));
-			let mut producer = Producer::new();
-			let consumer = producer.consume();
-			producer.switch(&consumer_a, None).unwrap();
-
-			// Force the switch between the underlying poll and generation validation.
-			INFO_POLLED.with(|hook| {
-				hook.replace(Some(Box::new(move || {
-					producer.switch(&consumer_b, 1).unwrap();
-				})));
-			});
-			let info = consumer
-				.info()
-				.now_or_never()
-				.expect("takeover must not lose a wakeup")
-				.unwrap();
-			assert_eq!(info.timescale, crate::Timescale::MICRO);
-		}
-	}
-
 	fn track_pair(name: &str) -> (track::Producer, track::Consumer) {
-		track_pair_info(name, None)
-	}
-
-	fn track_pair_info(name: &str, info: impl Into<Option<track::Info>>) -> (track::Producer, track::Consumer) {
-		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, info.into());
+		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, None);
 		let consumer = producer.consume();
 		(producer, consumer)
 	}
@@ -1530,14 +1472,8 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn info_from_newest_segment() {
+	async fn info_from_first_segment() {
 		let (_track_a, consumer_a) = track_pair("a");
-		let (_track_b, consumer_b) = track_pair_info(
-			"b",
-			track::Info::default()
-				.with_timescale(crate::Timescale::MICRO)
-				.with_priority(7),
-		);
 
 		let mut producer = Producer::new();
 		let consumer = producer.consume();
@@ -1548,36 +1484,6 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let info = consumer.info().now_or_never().unwrap().unwrap();
 		assert_eq!(info.timescale, crate::Timescale::default());
-
-		// A track republished on the path serves the successor's generation, so its
-		// info is the answer: the predecessor's timescale would silently rescale
-		// every frame timestamp the reader is about to receive.
-		producer.switch(&consumer_b, 1).unwrap();
-		let info = consumer.info().now_or_never().unwrap().unwrap();
-		assert_eq!(info.timescale, crate::Timescale::MICRO);
-		assert_eq!(info.priority, 7);
-	}
-
-	#[tokio::test]
-	async fn info_waits_for_a_takeover_superseding_an_unaccepted_segment() {
-		// An unaccepted request: it has a consumer, but no info yet.
-		let request = track::Request::new(Arc::new(broadcast::Info::default()), "a");
-		let consumer_a = request.consume();
-		let (_track_b, consumer_b) =
-			track_pair_info("b", track::Info::default().with_timescale(crate::Timescale::MICRO));
-
-		let mut producer = Producer::new();
-		let consumer = producer.consume();
-		producer.switch(&consumer_a, None).unwrap();
-
-		let info = consumer.info();
-		let mut info = std::pin::pin!(info);
-		assert!(futures::poll!(info.as_mut()).is_pending(), "info should wait");
-
-		// The takeover supersedes it, so the answer comes from the successor rather
-		// than staying parked on a generation nobody will read.
-		producer.switch(&consumer_b, 1).unwrap();
-		assert_eq!(info.await.unwrap().timescale, crate::Timescale::MICRO);
 	}
 
 	#[tokio::test]
