@@ -706,4 +706,8 @@ package crate packager:
     mkdir -p dist
     VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
         rs/scripts/package-nfpm.sh packaging/{{ crate }}/nfpm.yaml {{ packager }} dist/
+    if [[ "{{ packager }}" == deb && -f "packaging/{{ crate }}/transition.yaml" ]]; then
+        VERSION="$version" ARCH="$arch" \
+            rs/scripts/package-nfpm.sh packaging/{{ crate }}/transition.yaml deb dist/
+    fi
     ls -1 dist/

@@ -75,7 +75,9 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.deb-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq-token
-        run: rs/scripts/package-nfpm.sh packaging/moq-token-cli/nfpm.yaml deb dist/
+        run: |
+          rs/scripts/package-nfpm.sh packaging/moq-token-cli/nfpm.yaml deb dist/
+          rs/scripts/package-nfpm.sh packaging/moq-token-cli/transition.yaml deb dist/
 
       - name: Package .rpm
         shell: bash
