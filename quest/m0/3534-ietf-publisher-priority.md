@@ -67,4 +67,4 @@ specifies the field.
 
 ## Related
 
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the sibling sweep of the moq-transport registries
+- [IETF error codes](https://github.com/moq-dev/moq/pull/3531) - the sibling sweep of the moq-transport registries

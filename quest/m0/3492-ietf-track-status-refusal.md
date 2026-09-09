@@ -18,7 +18,7 @@ answers PUBLISH with NOT_SUPPORTED and closes the writer explicitly (#3348):
 
 - Decode the request so the stream is consumed, reply with the per-draft
   refusal (TRACK_STATUS_ERROR on draft-14, REQUEST_ERROR from draft-15 on) using
-  the code type [IETF error codes](/quest/m0/ietf-error-codes.md) introduces,
+  the code type [IETF error codes](https://github.com/moq-dev/moq/pull/3531) introduces,
   and close the writer. On draft-14 and 15 the request rides a virtual stream
   over the control stream whose reset is a no-op, so the explicit reply is the
   only way bytes reach the peer.
@@ -30,7 +30,7 @@ Branch from dev, where the error registry lands.
 
 ## Required
 
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the registered NOT_SUPPORTED value per draft comes from its code type
+- [IETF error codes](https://github.com/moq-dev/moq/pull/3531) - the registered NOT_SUPPORTED value per draft comes from its code type
 
 ## Closes
 
