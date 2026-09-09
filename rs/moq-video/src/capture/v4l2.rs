@@ -21,7 +21,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
-use super::{Config, Mode, Stream};
+use super::{Config, Mode, Rate, Stream};
 use crate::frame::{I420, Surface};
 use crate::{Error, Size};
 
@@ -74,27 +74,19 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 /// either way, so which format carried a mode is not something a caller can act
 /// on.
 pub(super) fn modes(selector: Option<&str>) -> Result<Vec<Mode>, Error> {
-	let (device, name) = open_device(selector)?;
-	let mut sizes: BTreeMap<(u32, u32), BTreeSet<u32>> = BTreeMap::new();
+	let (device, _) = open_device(selector)?;
+	let mut sizes: BTreeMap<(u32, u32), BTreeSet<Rate>> = BTreeMap::new();
 
 	for candidate in Source::ALL {
 		let fourcc = candidate.fourcc();
-		let enumerated = match Capture::enum_framesizes(&device, fourcc) {
-			Ok(enumerated) => enumerated,
-			Err(error) => {
-				// A driver that offers a format need not enumerate sizes for it,
-				// and one that does not offer it at all answers the same way, so
-				// this is normal rather than a fault.
-				tracing::debug!(device = %name, %fourcc, %error, "V4L2 node enumerated no frame sizes");
-				continue;
-			}
-		};
+		let enumerated = frame_sizes(&device, fourcc)?;
 		for size in enumerated {
-			for (width, height) in reported_sizes(size.size) {
-				sizes
-					.entry((width, height))
-					.or_default()
-					.extend(framerates(&device, fourcc, width, height));
+			for (width, height) in reported_sizes(size) {
+				sizes.entry((width, height)).or_default().extend(framerates(
+					&device,
+					fourcc,
+					Size::new(width, height),
+				)?);
 			}
 		}
 	}
@@ -120,7 +112,7 @@ pub(super) fn modes(selector: Option<&str>) -> Result<Vec<Mode>, Error> {
 /// so only its corners are reported. Those are the two a caller sizing a capture
 /// against the device needs; everything between them follows from the step.
 fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
-	match size {
+	let sizes = match size {
 		FrameSizeEnum::Discrete(discrete) => vec![(discrete.width, discrete.height)],
 		FrameSizeEnum::Stepwise(stepwise) => {
 			let smallest = (stepwise.min_width, stepwise.min_height);
@@ -131,30 +123,84 @@ fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
 				vec![smallest, largest]
 			}
 		}
+	};
+	sizes
+		.into_iter()
+		.filter(|&(width, height)| Size::new(width, height).validate("camera resolution").is_ok())
+		.collect()
+}
+
+// Read one entry at a time: v4l's collection helpers treat every error after
+// the first entry as end-of-list, hiding device failures and malformed replies.
+fn frame_sizes(device: &Device, fourcc: FourCC) -> Result<Vec<FrameSizeEnum>, Error> {
+	let mut sizes = Vec::new();
+	for index in 0..=u32::MAX {
+		// All fields are integers or integer unions; reserved fields must be zero.
+		let mut entry: v4l::v4l_sys::v4l2_frmsizeenum = unsafe { std::mem::zeroed() };
+		entry.index = index;
+		entry.pixel_format = fourcc.into();
+		// The request matches the initialized argument's type and size.
+		let result = unsafe {
+			v4l::v4l2::ioctl(
+				device.handle().fd(),
+				v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMESIZES,
+				&mut entry as *mut _ as *mut std::ffi::c_void,
+			)
+		};
+		if enumeration(result)?.is_none() {
+			return Ok(sizes);
+		}
+		sizes.push(FrameSizeEnum::try_from(entry).map_err(|e| Error::Codec(anyhow::anyhow!(e)))?);
+	}
+	Err(Error::Codec(anyhow::anyhow!("V4L2 frame size index overflow")))
+}
+
+fn enumeration<T>(result: std::io::Result<T>) -> Result<Option<T>, Error> {
+	match result {
+		Ok(value) => Ok(Some(value)),
+		Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+		Err(error) => Err(Error::SourceUnavailable(format!("V4L2 enumeration: {error}"))),
 	}
 }
 
-/// The frame rates the device lists for one format and size, in whole frames per
-/// second.
-///
-/// A stepwise or continuous interval is dropped. It says the device accepts
-/// anything in a range rather than naming modes, and turning that into a list
-/// would report rates the driver never advertised as such.
-fn framerates(device: &Device, fourcc: FourCC, width: u32, height: u32) -> Vec<u32> {
-	let intervals = match Capture::enum_frameintervals(device, fourcc, width, height) {
-		Ok(intervals) => intervals,
-		Err(_) => return Vec::new(),
-	};
-	intervals
-		.into_iter()
-		.filter_map(|interval| match interval.interval {
-			// The interval is seconds per frame, so the rate is its reciprocal.
-			FrameIntervalEnum::Discrete(fraction) if fraction.numerator != 0 => {
-				Some((fraction.denominator / fraction.numerator).max(1))
-			}
-			_ => None,
-		})
-		.collect()
+/// Exact discrete rates; continuous and stepwise intervals have no finite list.
+fn framerates(device: &Device, fourcc: FourCC, size: Size) -> Result<Vec<Rate>, Error> {
+	let mut rates = Vec::new();
+	for index in 0..=u32::MAX {
+		// All fields are integers or integer unions; reserved fields must be zero.
+		let mut entry: v4l::v4l_sys::v4l2_frmivalenum = unsafe { std::mem::zeroed() };
+		entry.index = index;
+		entry.pixel_format = fourcc.into();
+		entry.width = size.width;
+		entry.height = size.height;
+		// The request matches the initialized argument's type and size.
+		let result = unsafe {
+			v4l::v4l2::ioctl(
+				device.handle().fd(),
+				v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMEINTERVALS,
+				&mut entry as *mut _ as *mut std::ffi::c_void,
+			)
+		};
+		if enumeration(result)?.is_none() {
+			return Ok(rates);
+		}
+		let interval = FrameIntervalEnum::try_from(entry).map_err(|e| Error::Codec(anyhow::anyhow!(e)))?;
+		if let FrameIntervalEnum::Discrete(interval) = interval {
+			rates.push(rate(interval)?);
+		}
+	}
+	Err(Error::Codec(anyhow::anyhow!("V4L2 frame interval index overflow")))
+}
+
+fn rate(interval: v4l::Fraction) -> Result<Rate, Error> {
+	let frames = std::num::NonZeroU32::new(interval.denominator);
+	let seconds = std::num::NonZeroU32::new(interval.numerator);
+	match (frames, seconds) {
+		(Some(frames), Some(seconds)) => Ok(Rate { frames, seconds }),
+		_ => Err(Error::Codec(anyhow::anyhow!(
+			"V4L2 reported a zero frame interval component"
+		))),
+	}
 }
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
@@ -209,7 +255,7 @@ enum Source {
 
 impl Source {
 	/// Every format we can convert, cheapest first. The order only breaks ties
-	/// between modes that fit the requested size equally well.
+	/// between modes that fit the requested size and rate equally well.
 	const ALL: [Self; 2] = [Self::Yuyv, Self::Mjpeg];
 
 	fn fourcc(self) -> FourCC {
@@ -248,15 +294,18 @@ impl Camera {
 		let width = config.width.unwrap_or(DEFAULT_WIDTH);
 		let height = config.height.unwrap_or(DEFAULT_HEIGHT);
 
-		let (format, source) = negotiate(&device, &name, Size::new(width, height))?;
+		let (format, source) = negotiate(
+			&device,
+			&name,
+			Request {
+				size: Size::new(width, height),
+				framerate: config.framerate,
+			},
+		)?;
 
 		let (width, height, stride) = (format.width, format.height, format.stride);
 		Size::new(width, height).validate("camera resolution")?;
 
-		// Best-effort framerate request; many cameras clamp or ignore it.
-		if let Some(fps) = config.framerate {
-			let _ = Capture::set_params(&device, &Parameters::with_fps(fps));
-		}
 		let framerate = Capture::params(&device).ok().and_then(|p| {
 			// interval is seconds-per-frame (num/denom), so fps = denom/num.
 			(p.interval.numerator != 0).then(|| (p.interval.denominator / p.interval.numerator).max(1))
@@ -344,12 +393,17 @@ fn open_error(device: &str, error: std::io::Error) -> Error {
 	}
 }
 
+struct Request {
+	size: Size,
+	framerate: Option<u32>,
+}
+
 /// Negotiate the format we can convert to I420 that lands closest to `want`.
 ///
 /// V4L2's non-mutating `VIDIOC_TRY_FMT` is optional, so use the required
 /// `VIDIOC_S_FMT`. It asks and applies in one step, substituting the driver's
 /// nearest supported mode for anything it doesn't have. Each format we handle
-/// is applied in turn and scored against the requested geometry, then the
+/// is applied in turn and scored against the requested geometry and frame rate, then the
 /// winner is applied again to leave the device on it.
 ///
 /// Taking the first reply instead would pin most laptop webcams to VGA: USB
@@ -357,20 +411,39 @@ fn open_error(device: &str, error: std::io::Error) -> Error {
 /// at small sizes and reach HD through MJPEG alone. Asking such a camera for
 /// YUYV at 1080p gets 640x480 back, which is a valid YUYV mode and nowhere near
 /// what the caller asked for.
-fn negotiate(device: &Device, name: &str, want: Size) -> Result<(Format, Source), Error> {
-	negotiate_with(name, want, |format| set_format(device, format))
+fn negotiate(device: &Device, name: &str, want: Request) -> Result<(Format, Source), Error> {
+	let framerate = want.framerate;
+	negotiate_with(name, want, |format| {
+		let format = set_format(device, format)?;
+		if let Some(fps) = framerate {
+			match Capture::set_params(device, &Parameters::with_fps(fps)) {
+				Ok(_) => {}
+				Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTTY)) => {}
+				Err(error) => return Err(open_error(name, error)),
+			}
+		}
+		let rate = match Capture::params(device) {
+			Ok(params) if params.interval.numerator != 0 && params.interval.denominator != 0 => {
+				Some(rate(params.interval)?)
+			}
+			Ok(_) => None,
+			Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTTY)) => None,
+			Err(error) => return Err(open_error(name, error)),
+		};
+		Ok((format, rate))
+	})
 }
 
 fn negotiate_with(
 	name: &str,
-	want: Size,
-	mut apply: impl FnMut(Format) -> Result<Format, Error>,
+	want: Request,
+	mut apply: impl FnMut(Format) -> Result<(Format, Option<Rate>), Error>,
 ) -> Result<(Format, Source), Error> {
 	let mut replies = Vec::with_capacity(Source::ALL.len());
 	let mut offered = Vec::new();
 	let mut probe_error = None;
 	for candidate in Source::ALL {
-		let got = match apply(Format::new(want.width, want.height, candidate.fourcc())) {
+		let (got, rate) = match apply(Format::new(want.size.width, want.size.height, candidate.fourcc())) {
 			Ok(got) => got,
 			Err(error) => {
 				probe_error = Some(error);
@@ -382,11 +455,11 @@ fn negotiate_with(
 			offered.push(description);
 		}
 		if let Some(source) = Source::from_fourcc(got.fourcc) {
-			replies.push((got, source));
+			replies.push((got, source, rate));
 		}
 	}
 
-	let Some((best, source)) = closest(replies, want) else {
+	let Some((best, source, _)) = closest(replies, want) else {
 		if offered.is_empty() {
 			let Some(error) = probe_error else {
 				return Err(Error::Codec(anyhow::anyhow!("camera {name} has no formats to probe")));
@@ -401,7 +474,7 @@ fn negotiate_with(
 	};
 
 	// A successful probe may have left the device on another candidate.
-	let applied = apply(Format::new(best.width, best.height, best.fourcc))?;
+	let (applied, _) = apply(Format::new(best.width, best.height, best.fourcc))?;
 	if applied.fourcc != best.fourcc || applied.width != best.width || applied.height != best.height {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"camera {name} would not re-apply the {}x{} {} mode it just negotiated",
@@ -413,17 +486,41 @@ fn negotiate_with(
 	Ok((applied, source))
 }
 
-/// The encodable reply nearest the requested geometry, ties going to the cheaper
-/// returned format.
-fn closest(replies: impl IntoIterator<Item = (Format, Source)>, want: Size) -> Option<(Format, Source)> {
+/// Prefer geometry, then the accepted rate nearest the request, then conversion cost.
+fn closest(
+	replies: impl IntoIterator<Item = (Format, Source, Option<Rate>)>,
+	want: Request,
+) -> Option<(Format, Source, Option<Rate>)> {
 	replies
 		.into_iter()
-		.filter(|(format, _)| {
+		.filter(|(format, _, _)| {
 			Size::new(format.width, format.height)
 				.validate("camera resolution")
 				.is_ok()
 		})
-		.min_by_key(|(format, source)| (distance(*format, want), source.cost()))
+		.min_by(|(left, left_source, left_rate), (right, right_source, right_rate)| {
+			distance(*left, want.size)
+				.cmp(&distance(*right, want.size))
+				.then_with(|| rate_distance(*left_rate, *right_rate, want.framerate))
+				.then_with(|| left_source.cost().cmp(&right_source.cost()))
+		})
+}
+
+fn rate_distance(left: Option<Rate>, right: Option<Rate>, want: Option<u32>) -> std::cmp::Ordering {
+	let Some(want) = want else {
+		return std::cmp::Ordering::Equal;
+	};
+	match (left, right) {
+		(Some(left), Some(right)) => {
+			let delta =
+				|rate: Rate| u64::from(rate.frames.get()).abs_diff(u64::from(want) * u64::from(rate.seconds.get()));
+			(u128::from(delta(left)) * u128::from(right.seconds.get()))
+				.cmp(&(u128::from(delta(right)) * u128::from(left.seconds.get())))
+		}
+		(Some(_), None) => std::cmp::Ordering::Less,
+		(None, Some(_)) => std::cmp::Ordering::Greater,
+		(None, None) => std::cmp::Ordering::Equal,
+	}
 }
 
 /// How far a negotiated mode lands from the requested geometry, summed over both
@@ -442,8 +539,15 @@ mod tests {
 
 	use v4l::framesize::{Discrete, Stepwise};
 
-	fn reply(width: u32, height: u32, source: Source) -> (Format, Source) {
-		(Format::new(width, height, source.fourcc()), source)
+	fn request(width: u32, height: u32) -> Request {
+		Request {
+			size: Size::new(width, height),
+			framerate: None,
+		}
+	}
+
+	fn reply(width: u32, height: u32, source: Source) -> (Format, Source, Option<Rate>) {
+		(Format::new(width, height, source.fourcc()), source, None)
 	}
 
 	fn stepwise(min: (u32, u32), max: (u32, u32), step: u32) -> FrameSizeEnum {
@@ -467,6 +571,83 @@ mod tests {
 		assert_eq!(reported_sizes(size), vec![(1280, 720)]);
 	}
 
+	#[test]
+	fn unencodable_frame_sizes_are_not_reported() {
+		for (width, height) in [(0, 480), (640, 0), (641, 480), (640, 481)] {
+			assert!(reported_sizes(FrameSizeEnum::Discrete(Discrete { width, height })).is_empty());
+		}
+	}
+
+	#[test]
+	fn rates_preserve_fractional_and_sub_one_fps_intervals() {
+		let ntsc = rate(v4l::Fraction::new(1001, 30000)).unwrap();
+		assert_eq!(ntsc.frames.get(), 30000);
+		assert_eq!(ntsc.seconds.get(), 1001);
+		let slow = rate(v4l::Fraction::new(2, 1)).unwrap();
+		assert_eq!(slow.frames.get(), 1);
+		assert_eq!(slow.seconds.get(), 2);
+		assert!(slow < ntsc);
+		assert!(rate(v4l::Fraction::new(0, 30)).is_err());
+		assert!(rate(v4l::Fraction::new(1, 0)).is_err());
+	}
+
+	#[test]
+	fn equivalent_rates_deduplicate_and_sort_numerically() {
+		let rates: BTreeSet<_> = [(1001, 30000), (1, 30), (2, 60), (2, 1)]
+			.into_iter()
+			.map(|(n, d)| rate(v4l::Fraction::new(n, d)).unwrap())
+			.collect();
+		assert_eq!(rates.len(), 3);
+		assert_eq!(*rates.last().unwrap(), rate(v4l::Fraction::new(1, 30)).unwrap());
+		assert_eq!(*rates.first().unwrap(), rate(v4l::Fraction::new(2, 1)).unwrap());
+	}
+
+	#[test]
+	fn enumeration_only_stops_on_einval() {
+		assert_eq!(enumeration(Ok(42)).unwrap(), Some(42));
+		assert!(
+			enumeration::<()>(Err(std::io::Error::from_raw_os_error(libc::EINVAL)))
+				.unwrap()
+				.is_none()
+		);
+		for code in [libc::EIO, libc::ENODEV, libc::EACCES] {
+			assert!(enumeration::<()>(Err(std::io::Error::from_raw_os_error(code))).is_err());
+		}
+	}
+
+	#[test]
+	fn negotiation_selects_and_reapplies_the_format_accepting_the_requested_rate() {
+		let mut formats = Vec::new();
+		let want = Request {
+			size: Size::new(1280, 720),
+			framerate: Some(60),
+		};
+		let (_, source) = negotiate_with("camera", want, |format| {
+			formats.push(format.fourcc);
+			let fps = if format.fourcc == Source::Yuyv.fourcc() { 30 } else { 60 };
+			Ok((format, Some(rate(v4l::Fraction::new(1, fps)).unwrap())))
+		})
+		.unwrap();
+		assert_eq!(source, Source::Mjpeg);
+		assert_eq!(
+			formats,
+			[Source::Yuyv.fourcc(), Source::Mjpeg.fourcc(), Source::Mjpeg.fourcc()]
+		);
+	}
+
+	#[test]
+	fn rate_scoring_preserves_fractional_precision_and_handles_unknown_rates() {
+		let ntsc = Some(rate(v4l::Fraction::new(1001, 60000)).unwrap());
+		let thirty = Some(rate(v4l::Fraction::new(1, 30)).unwrap());
+		assert!(rate_distance(ntsc, thirty, Some(60)).is_lt());
+		assert!(rate_distance(thirty, ntsc, Some(30)).is_lt());
+		assert!(rate_distance(ntsc, None, Some(60)).is_lt());
+		assert!(rate_distance(ntsc, thirty, None).is_eq());
+		let tiny = Some(rate(v4l::Fraction::new(u32::MAX, 1)).unwrap());
+		let huge = Some(rate(v4l::Fraction::new(1, u32::MAX)).unwrap());
+		assert!(rate_distance(tiny, huge, Some(u32::MAX)).is_gt());
+	}
+
 	/// A one-pixel step over a 4K range is 8 million modes, and reporting them
 	/// would say nothing the two corners do not.
 	#[test]
@@ -488,7 +669,7 @@ mod tests {
 	#[test]
 	fn prefers_the_nearer_mode_over_the_cheaper_one() {
 		let replies = [reply(640, 480, Source::Yuyv), reply(1280, 720, Source::Mjpeg)];
-		let (format, source) = closest(replies, Size::new(1280, 720)).expect("a reply is usable");
+		let (format, source, _) = closest(replies, request(1280, 720)).expect("a reply is usable");
 		assert_eq!(source, Source::Mjpeg);
 		assert_eq!((format.width, format.height), (1280, 720));
 	}
@@ -498,7 +679,7 @@ mod tests {
 	#[test]
 	fn breaks_ties_toward_the_cheaper_format() {
 		let replies = [reply(640, 480, Source::Mjpeg), reply(640, 480, Source::Yuyv)];
-		let (_, source) = closest(replies, Size::new(640, 480)).expect("a reply is usable");
+		let (_, source, _) = closest(replies, request(640, 480)).expect("a reply is usable");
 		assert_eq!(source, Source::Yuyv);
 	}
 
@@ -507,7 +688,7 @@ mod tests {
 	#[test]
 	fn ignores_a_nearer_mode_the_pipeline_cannot_encode() {
 		let replies = [reply(1279, 719, Source::Mjpeg), reply(1280, 720, Source::Yuyv)];
-		let (format, source) = closest(replies, Size::new(1279, 719)).expect("an even reply is usable");
+		let (format, source, _) = closest(replies, request(1279, 719)).expect("an even reply is usable");
 		assert_eq!(source, Source::Yuyv);
 		assert_eq!((format.width, format.height), (1280, 720));
 	}
@@ -517,12 +698,12 @@ mod tests {
 	#[test]
 	fn keeps_a_valid_mode_when_another_probe_fails() {
 		let mut calls = 0;
-		let (format, source) = negotiate_with("camera", Size::new(640, 480), |requested| {
+		let (format, source) = negotiate_with("camera", request(640, 480), |requested| {
 			calls += 1;
 			match calls {
-				1 => Ok(Format::new(640, 480, Source::Yuyv.fourcc())),
+				1 => Ok((Format::new(640, 480, Source::Yuyv.fourcc()), None)),
 				2 => Err(Error::Codec(anyhow::anyhow!("MJPEG is unsupported"))),
-				3 => Ok(requested),
+				3 => Ok((requested, None)),
 				_ => panic!("unexpected format probe"),
 			}
 		})
@@ -537,7 +718,7 @@ mod tests {
 	#[test]
 	fn returns_an_error_when_every_probe_fails() {
 		let mut calls = 0;
-		let error = negotiate_with("camera", Size::new(640, 480), |_| {
+		let error = negotiate_with("camera", request(640, 480), |_| {
 			calls += 1;
 			Err(Error::Codec(anyhow::anyhow!("probe {calls} failed")))
 		})
@@ -551,7 +732,7 @@ mod tests {
 	#[test]
 	fn no_usable_reply_is_none() {
 		let replies = [reply(0, 720, Source::Yuyv), reply(1279, 719, Source::Mjpeg)];
-		assert!(closest(replies, Size::new(1280, 720)).is_none());
+		assert!(closest(replies, request(1280, 720)).is_none());
 	}
 
 	/// Distance is symmetric in the two dimensions and zero only on an exact hit,

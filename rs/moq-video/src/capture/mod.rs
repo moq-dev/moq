@@ -10,7 +10,7 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use crate::Error;
 use crate::frame::Surface;
@@ -146,25 +146,51 @@ impl Camera {
 	}
 }
 
-/// A capture mode a source reports: one frame size, and the frame rates it
-/// offers at that size.
+/// An exact frame rate, expressed as a positive number of frames per interval.
+#[derive(Clone, Copy, Debug, Eq)]
+pub struct Rate {
+	/// Number of frames in the interval.
+	pub frames: NonZeroU32,
+	/// Length of the interval in seconds.
+	pub seconds: NonZeroU32,
+}
+
+impl Ord for Rate {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		(u64::from(self.frames.get()) * u64::from(other.seconds.get()))
+			.cmp(&(u64::from(other.frames.get()) * u64::from(self.seconds.get())))
+	}
+}
+
+impl PartialOrd for Rate {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for Rate {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other).is_eq()
+	}
+}
+
+/// A capture mode a source reports: one frame size and its exact frame rates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mode {
 	/// Frame width in pixels.
 	pub width: u32,
 	/// Frame height in pixels.
 	pub height: u32,
-	/// The frame rates offered at this size, in whole frames per second,
-	/// highest first.
+	/// The exact frame rates offered at this size, highest first.
 	///
 	/// Empty when the driver describes a continuous range instead of listing
-	/// rates: the size is supported, but nothing says at which rates.
-	pub framerates: Vec<u32>,
+	/// rates, or cannot enumerate intervals for this size.
+	pub framerates: Vec<Rate>,
 }
 
 impl Mode {
 	/// The highest rate this mode offers, or `None` when the driver listed none.
-	pub fn max_framerate(&self) -> Option<u32> {
+	pub fn max_framerate(&self) -> Option<Rate> {
 		self.framerates.first().copied()
 	}
 }
@@ -470,10 +496,10 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 /// are ones [`open`] could negotiate rather than everything the driver
 /// advertises.
 ///
-/// Linux only. The other platforms' camera APIs report the mode they picked
-/// rather than the modes they have, so they answer with
-/// [`Error::Unsupported`] and a caller learns the geometry by opening the
-/// device and reading [`Stream::framerate`].
+/// Linux only; other backends return [`Error::Unsupported`].
+/// Rates are exact device reports; [`Config::framerate`] still requests whole
+/// frames per second. V4L2 prefers the closest geometry, then the accepted rate
+/// nearest that request, then the cheaper conversion format.
 ///
 /// An empty list is not a failure: it means the driver enumerated nothing this
 /// crate can convert.

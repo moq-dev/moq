@@ -26,6 +26,19 @@ Highlights:
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
+With `capture` enabled, `capture::camera_modes` lists a Linux camera's convertible
+sizes and exact rates before configuring it. `capture::Rate` expresses frames
+per interval in seconds using two nonzero integers, preserving rates such as 30000/1001.
+Sizes and rates shared by YUYV and MJPEG are combined; invalid I420 dimensions
+are excluded. A size range contributes its valid minimum and maximum corners,
+and an empty rate list means no discrete intervals were reported. Device errors
+are returned rather than treated as an empty list. Other platforms return
+`Error::Unsupported`.
+
+`capture::Config::framerate` remains a request in whole frames per second.
+V4L2 chooses the closest geometry, then the format whose accepted rate is
+nearest the request, then the cheaper conversion when both match equally well.
+
 ```rust
 let mut video = moq_video::decode::Consumer::new(&broadcast, &rendition, "video", Default::default()).await?;
 let mut renderer = moq_video::render::Renderer::new(&device, &queue, Default::default())?;
