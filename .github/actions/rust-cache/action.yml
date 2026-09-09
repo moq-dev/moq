@@ -1,5 +1,5 @@
 name: Rust cache
-description: Restore the Cargo build cache cache.yml warms on the default branch.
+description: Install mbx and restore the Rust build cache cache.yml warms on the default branch.
 
 inputs:
   save-on-dispatch:
@@ -9,14 +9,32 @@ inputs:
 runs:
   using: composite
   steps:
-    # One shared key lets differently named jobs restore the cache warmed by
-    # cache.yml. Pull requests stay read-only, while a trusted manual run can
-    # explicitly seed a cold cache.
-    - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+    # The toolchain keys the cache, so reading rust-toolchain.toml keeps it tied
+    # to the one thing that decides which rustc actually runs. The action's own
+    # probe reads `rustc` off PATH, which at this point in the job is whatever
+    # the runner image ships, not the dev shell's pinned compiler.
+    - name: Read toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        channel=$(grep -m1 '^channel' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
+        if [ -z "$channel" ]; then
+          echo "could not read channel from rust-toolchain.toml" >&2
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+    - uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
       with:
-        # Build scripts link against Nix store paths from the dev shell. Roll
-        # the cache when that shell changes so Cargo never restores executables
-        # whose dynamic linker has disappeared.
-        shared-key: rust-${{ hashFiles('flake.nix', 'flake.lock') }}
-        cache-on-failure: true
-        save-if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.save-on-dispatch == 'true') }}
+        version: 1.10.0
+        toolchain: ${{ steps.toolchain.outputs.channel }}
+        # Build scripts link against Nix store paths from the dev shell. Roll the
+        # cache when that shell changes so Cargo never restores executables whose
+        # dynamic linker has disappeared.
+        cache-generation: nix-${{ hashFiles('flake.nix', 'flake.lock') }}
+        save-on-workflow-dispatch: ${{ inputs.save-on-dispatch }}
+        # `github-cache-mode` is left at its `target` default. That transports
+        # Cargo's pruned target tree, the same payload Swatinem carried, with
+        # mbx's per-compilation store on top. The `objects` closure is portable
+        # across differing target directories, which nothing here needs, and
+        # measured slower.

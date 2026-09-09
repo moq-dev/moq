@@ -478,10 +478,10 @@
           # that shim lives; it exits non-zero when the host has none, which is
           # every machine that made a different caching choice.
           #
-          # Never in CI, where check.yml enters this shell and the `target/`
-          # the workflow restored is the one the job has to build in. A shim
-          # would silently move it into a machine-wide managed target instead,
-          # on whichever runner happens to have been set up that way.
+          # Never in CI, which selects mbx explicitly with RUST_CARGO and
+          # configures it through `.github/actions/rust-cache`. A host shim
+          # would be a second, unconfigured way in, on whichever runner happened
+          # to have been set up that way.
           shellHook = ''
             if [ -z "''${CI:-}" ] && status=$(mbx setup --status 2>/dev/null); then
               shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
@@ -510,9 +510,8 @@
         formatter = pkgs.nixfmt-tree;
 
         # Heavy Rust CI (clippy / doc / test) runs via `just check` and `just
-        # test` (see rs/justfile). CI and local commands default to plain Cargo;
-        # local development can select a compatible wrapper with RUST_CARGO.
-        # Neither path goes through crane.
+        # test` (see rs/justfile). CI selects mbx with RUST_CARGO; local commands
+        # default to plain cargo. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
         # dev shell -- but no longer compiles the workspace, so it's cheap
         # enough that `just check` runs it on any Nix/Rust input change. Release
