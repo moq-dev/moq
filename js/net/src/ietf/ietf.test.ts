@@ -101,7 +101,7 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 		0xff, // QUIC varint 255
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x20, // SUBSCRIBER_PRIORITY
@@ -133,7 +133,7 @@ test("Message Parameters: Location loses its length prefix at draft-17", async (
 		0x80, // QUIC varint 128
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
@@ -177,7 +177,7 @@ test("Message Parameters: Location preserves full uint64 values in draft 17", as
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -1484,7 +1484,7 @@ test("group flags round-trip firstObject", async () => {
 			},
 		});
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		for (const firstObject of [true, false]) {
 			const encoded = await encodeVersioned(makeGroup(firstObject), version);
 			const decoded = await decodeVersioned(encoded, Group.decode, version);
