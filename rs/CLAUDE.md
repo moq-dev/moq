@@ -5,7 +5,7 @@ The `/rs` Cargo workspace. Extends the root `CLAUDE.md`.
 One crate per component from the root list, named `moq-<component>` (`hang` and `libmoq` are the exceptions). Keep them modular; a crate does one thing. Beyond that list:
 
 - `kio`: "easy async" primitives everything else polls through.
-- `moq-tokio`: configures the QUIC backends (Quinn/Quiche/Noq/Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io_uring runtime.
+- `moq-tokio`: configures the QUIC backends (Quinn/Quiche/Noq/Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
 `moq-net`, `moq-mux`, `moq-relay` (including the config conventions every binary shares), and `moq-ffi` have their own `CLAUDE.md`.
