@@ -27,9 +27,10 @@ AUTH-capable.
   learn whether the peer speaks AUTH. The client copies the first configured
   token into the URL query whenever any offered version lacks AUTH (today,
   everything below lite-06), and omits it once every offered version has the
-  stream; either way every configured token gets its own AUTH stream on an
-  AUTH-capable session, and the URL copy is what the empty-token stream
-  refers to. On moq-transport the first token also rides the AUTHORIZATION
+  stream. A token that went into the URL or the setup option is the
+  connection credential, and the empty-token stream is its one and only
+  stream; every other configured token gets its own AUTH stream on an
+  AUTH-capable session, so no token is ever granted twice. On moq-transport the first token also rides the AUTHORIZATION
   TOKEN setup option (`ParameterBytes::AuthorizationToken`, `USE_VALUE`,
   token type 0), which scopes at accept the way the URL does.
 - The relay admits on the URL, then widens. An anonymous connection today is

@@ -25,8 +25,11 @@ expiry, an expiry that leaves the union intact ends only that token, and
   must carry the admitted root, else `AUTH_ERROR { Unauthorized }` naming the
   root. The session's origin handles are rebuilt through `Cluster::publisher`
   and `Cluster::subscriber` from the union of the set's publish and subscribe
-  prefixes and swapped in whenever the set grows, the first live re-scope the
-  relay performs; keep it behind one function that
+  prefixes, intersected with the role the client declared at SETUP so a
+  publish-only session never starts receiving announcements because a later
+  token happened to carry subscribe prefixes, and swapped in whenever the set
+  grows, the first live re-scope the relay performs; keep it behind one
+  function that
   [Relay auth](/quest/m2/path-patterns/relay-auth.md) later extends to a
   shrinking union.
 - Expiry: the deadline today is a future borrowing the admitted token inside
@@ -43,9 +46,11 @@ expiry, an expiry that leaves the union intact ends only that token, and
   new token is `AUTH_ERROR { Timeout }`, and an outage during re-check keeps
   the token as the staleness rule already does, never a close on its own.
 - The client side names dev's API: `moq_tokio::Connection` gains `auth()`
-  returning the live session's handle (`None` while disconnected, the shape
-  its stats reader already uses), and tokens added through it are presented
-  again on every reconnect. Branch from dev, or from main once
+  returning a handle the connection owns, not the current session's. It
+  stores every token added through it, presents them on each new session as
+  it attaches, unions the live session's grant, and its `add` resolves against
+  the session that is up at the time; a token the app drops is withdrawn from
+  the live session and forgotten. Branch from dev, or from main once
   [merge-dev](/quest/m1/merge-dev.md) lands.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
