@@ -18,6 +18,7 @@ on:
     # or its API shouldn't queue one.
     paths:
       - "rs/**"
+      - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
