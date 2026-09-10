@@ -11,6 +11,17 @@
 
 version: 2
 updates:
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      nix:
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -50,7 +61,11 @@ updates:
         versions: [">=0.32"]
 
   - package-ecosystem: "bun"
-    directory: "/"
+    directories:
+      - "/"
+      - "/infra/apt"
+      - "/infra/rpm"
+      - "/demo/pub"
     schedule:
       interval: "weekly"
     cooldown:
@@ -70,3 +85,33 @@ updates:
       uv:
         patterns:
           - "*"
+
+  - package-ecosystem: "gradle"
+    directory: "/kt"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      gradle:
+        patterns:
+          - "*"
+    ignore:
+      # The published bindings range is maintained alongside the wrapper API.
+      - dependency-name: "dev.moq:moq-ffi"
+
+  - package-ecosystem: "pub"
+    directories:
+      - "/dart/moq"
+      - "/dart/moq_ffi"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      pub:
+        patterns:
+          - "*"
+    ignore:
+      # The published bindings floor is maintained alongside the wrapper API.
+      - dependency-name: "moq_ffi"
