@@ -31,7 +31,7 @@ default = ["mediacodec", "nvidia", "render"]
 # (the `v4l` crate) runs bindgen over the kernel's videodev2.h, so the build host
 # needs libclang and the Linux headers; macOS and Windows use OS frameworks and
 # would pay nothing. moq-cli's `capture` turns it on.
-capture = ["dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
+capture = ["dep:libc", "dep:v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.

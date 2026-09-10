@@ -74,7 +74,9 @@ Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
 the platform hardware decoder where available. `--video-name` and
 `--audio-name` pick a rendition; `--latency-max` (default 500 ms) bounds how
 far a stalled group may lag before it is skipped. Each role follows the catalog
-for as long as it lasts, so a publisher that retires the rendition being played
+for as long as it lasts. Each decoder starts at the newest cached group, including
+when a rendition is reopened, so playback does not replay the retained backlog.
+A publisher that retires the rendition being played
 ends that track and the role picks a replacement. Playback is behind the
 `play` feature, since it pulls in windowing and audio-device dependencies:
 

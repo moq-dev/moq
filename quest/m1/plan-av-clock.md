@@ -40,5 +40,5 @@ implementation quest, and re-estimate it.
 
 ## Related
 
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the estimator this sits on
+- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the estimator this sits on
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward

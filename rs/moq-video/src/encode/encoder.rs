@@ -514,7 +514,14 @@ mod tests {
 			kind: Kind::Named("definitely_not_a_codec".into()),
 			..Config::new(320, 240, 30)
 		};
-		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
+		// Not `NoEncoder`: that reads "no usable video encoder found (tried: )"
+		// and describes a machine with no encoder rather than a name that is not
+		// one. The name asked for and the names available are both here.
+		let err = Encoder::new(&config).err().expect("an unknown name cannot open");
+		assert!(
+			matches!(&err, Error::UnknownEncoder { name, .. } if name == "definitely_not_a_codec"),
+			"unexpected error: {err:?}",
+		);
 	}
 
 	/// Exercises the hand-rolled VideoToolbox backend end to end on macOS:

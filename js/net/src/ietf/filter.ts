@@ -38,7 +38,14 @@ const TAG_ABSOLUTE_RANGE = 0x4n;
  * present selects the meaning.
  */
 export function isDraft20(version: IetfVersion): boolean {
-	return version === Version.DRAFT_20;
+	return (
+		version !== Version.DRAFT_14 &&
+		version !== Version.DRAFT_15 &&
+		version !== Version.DRAFT_16 &&
+		version !== Version.DRAFT_17 &&
+		version !== Version.DRAFT_18 &&
+		version !== Version.DRAFT_19
+	);
 }
 
 /**

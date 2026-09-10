@@ -15,12 +15,17 @@
 // output with the software decoder (an in-crate, ffmpeg-free encode->decode
 // check that catches input-pitch corruption).
 pub(crate) mod backend;
+// H.264 decode against committed libx264 bitstreams, the one place here that
+// decodes something no encoder in this crate produced.
+#[cfg(test)]
+mod conformance;
 mod consumer;
 mod decoder;
 mod sink;
 
+pub use backend::{Codec, NAMES};
 pub use consumer::Consumer;
-pub use decoder::{Config, Decoder, Kind};
+pub use decoder::{Config, Decoder, Kind, Start};
 pub use sink::Sink;
 
 #[cfg(test)]

@@ -17,10 +17,11 @@ moq-lite space and the abstraction, not the registry.
 
 ## Plan
 
-What the tree does today, identically on main and dev:
+Remaining code sites:
 
 - `rs/moq-net/src/ietf/publisher.rs` `run_subscribe` rejects with the literal
-  `404` at three sites and `run_fetch_stream` with `500`;
+  `404` at three sites; `run_fetch_stream` uses draft-specific registered
+  literals that should move into the shared registry types.
   `rs/moq-net/src/ietf/subscriber.rs` `write_error` uses `400`.
   `reject_subscribe`, `reject_fetch`, and `write_error` take a bare `u64`, and
   `ietf::SubscribeError`, `ietf::FetchError`, and `ietf::RequestError` carry a

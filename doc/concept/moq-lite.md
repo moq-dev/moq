@@ -29,7 +29,7 @@ implement in an afternoon. The wire spec is
 The ALPN picks the protocol family, and a single `SETUP` message from each side
 negotiates the version and capabilities. Neither side waits for the other. The
 Rust and TypeScript stacks currently speak moq-lite 01 through 05 (06 is in
-progress) and moq-transport drafts 14 through 20, and a client offers all of
+progress) and moq-transport drafts 14 through 21, and a client offers all of
 them by default.
 
 ## Discovery

@@ -140,7 +140,8 @@ impl PublishDoneStatus {
 			| Version::Draft19
 			// Draft-20 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
 			// emitted, and left the rest of the registry alone.
-			| Version::Draft20 => match self {
+			| Version::Draft20
+			| Version::Draft21 => match self {
 				Self::InternalError => 0x0,
 				Self::TrackEnded => 0x2,
 			},

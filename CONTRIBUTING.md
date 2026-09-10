@@ -19,14 +19,7 @@ When taking over someone else's PR, push commits on top of theirs so they keep c
 
 Create a draft PR.
 Switch it to "Ready for review" when you're finished and local `just check` and `just test` pass.
-
-# CI
-
-`Check` and `Test` compile the packages a branch changed and run their unit tests.
-
-Every test suite must run in CI, at least nightly. The Nightly workflow runs
-Rust doctests, Loom, drill sensitivity, and all four fuzz targets (five minutes
-each); ordinary fuzz regression replay stays in the PR test suite.
+Fix any merge conflicts and failing CI checks.
 
 # AI
 
@@ -37,9 +30,16 @@ Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commi
 
 # Reviews
 
-Codex and CodeRabbit review every push on their own. Never request a review; an @codex or @coderabbitai mention is banned.
+Codex and CodeRabbit review every push on their own.
+Never request a review from @codex or @coderabbitai.
+
+Codex reacts with thumbs up if there are no findings.
 CodeRabbit may be rate-limited, treat it as optional.
 
-Fix the findings you agree with, reply to the ones you do not, and push once.
-If the next automatic review still has findings, stop and report to the user.
-If a finding is out of scope, make or update a follow-up quest.
+For each finding:
+
+- If you don't agree with it, reply to the finding and move on.
+- If it's a simple improvement, fix it and push. Update the summary if needed.
+- If it's out of scope, trigger `/plan-quests` to create/update a follow-up quest.
+
+Otherwise, interactively prompt the user what to do next, including a recommended course of action.
