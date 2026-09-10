@@ -59,4 +59,9 @@ LARGE=1 bash "$hook"
 [[ $(wc -c <"$CLAUDE_ENV_FILE.direnv") -gt 131072 ]]
 [[ $(wc -c <"$CLAUDE_ENV_FILE") -lt 1024 ]]
 bash -c "$(cat "$CLAUDE_ENV_FILE")"
+(
+    export SHELLOPTS
+    bash "$hook"
+    bash -ec '. "$CLAUDE_ENV_FILE"; [[ ${REMOVED_BY_DIRENV+x} != x ]]'
+)
 echo 'direnv hook: regression tests passed'

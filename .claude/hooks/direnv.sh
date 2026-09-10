@@ -44,7 +44,7 @@ while IFS= read -r -d '' entry; do
     name=${entry%%=*}
     [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     case $name in
-        DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
+        DIRENV_* | PWD | OLDPWD | SHLVL | _ | SHELLOPTS | BASHOPTS | BASH_VERSINFO | UID | EUID | PPID) continue ;;
     esac
     inherited+=("$name")
 done <"$raw"
@@ -80,7 +80,7 @@ scratch=$(mktemp "$sidecar.XXXXXX")
 
         # direnv's bookkeeping, and the shell's own state, are not ours to restore.
         case $name in
-            DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
+            DIRENV_* | PWD | OLDPWD | SHLVL | _ | SHELLOPTS | BASHOPTS | BASH_VERSINFO | UID | EUID | PPID) continue ;;
         esac
 
         printf 'export %s=%q\n' "$name" "${entry#*=}"
