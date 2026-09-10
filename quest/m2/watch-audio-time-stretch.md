@@ -31,4 +31,4 @@ Branch from dev.
 
 - [Plan: A/V clock](/quest/m1/plan-av-clock.md) - stretching against a free-running ring only moves the drift
 
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the recorded traces this replays
+- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the recorded traces this replays, and the target it converges toward

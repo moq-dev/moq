@@ -61,5 +61,5 @@ The work:
 
 ## Related
 
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - reads this field as its codec floor
+- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - reads this field as its codec floor
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - the same ceiling rule for Opus frame durations
