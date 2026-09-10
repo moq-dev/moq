@@ -956,6 +956,7 @@ mod tests {
 	}
 	#[tokio::test]
 	async fn fixed_addresses_verify_hostname_fail_over_and_share_endpoint() {
+		tokio::time::pause();
 		let rcgen::CertifiedKey { cert, signing_key } =
 			rcgen::generate_simple_self_signed(["relay.invalid".to_string()]).unwrap();
 		let cert = rustls::pki_types::CertificateDer::from(cert);
@@ -1005,7 +1006,7 @@ mod tests {
 		let client = QuinnClient::new(&connect::Config::default(), &crate::quic::Config::default()).unwrap();
 		let url = format!("moqt://relay.invalid:{}", peer.port()).parse().unwrap();
 		let blocked = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), peer.port());
-		let addr = connect::Addr::resolved(url, [blocked, peer]).unwrap();
+		let addr = connect::Addr::pinned(url, [blocked, peer]).unwrap();
 		let first = client
 			.connect(&tls, addr.clone(), &moq_net::Versions::default())
 			.await

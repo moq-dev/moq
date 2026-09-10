@@ -25,6 +25,21 @@ pub(crate) const DEFAULT_RACE: std::time::Duration = std::time::Duration::from_m
 /// Lives here for the same reason as [`DEFAULT_RACE`].
 pub(crate) const DEFAULT_RESOLUTION_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Invalid input for a pinned connection target.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// No transport destination was supplied.
+	#[error("pinned target has no socket addresses")]
+	EmptyAddresses,
+	/// This transport does not support pinned socket addresses.
+	#[error("scheme {0} does not support pinned socket addresses")]
+	UnsupportedScheme(String),
+	/// The URL cannot identify the TLS peer or request authority.
+	#[error("pinned target URL has no host")]
+	MissingHost,
+}
+
 /// A peer URL with optional fixed socket addresses for its transport dials.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Addr {
@@ -40,15 +55,21 @@ impl Addr {
 
 	/// Dial only these addresses, retaining the URL for TLS and request authority.
 	///
-	/// Returns `None` for an empty list or an unsupported scheme. Fixed addresses
+	/// Returns an error for an empty list, unsupported scheme, or missing host. Fixed addresses
 	/// survive reconnects; peer redirects are refused. Create a new connection to
 	/// refresh DNS and apply the caller's address policy again.
-	pub fn resolved(url: Url, addrs: impl IntoIterator<Item = net::SocketAddr>) -> Option<Self> {
-		if !matches!(url.scheme(), "https" | "wss" | "moqt" | "moql") || url.host().is_none() {
-			return None;
+	pub fn pinned(url: Url, addrs: impl IntoIterator<Item = net::SocketAddr>) -> Result<Self, Error> {
+		if !matches!(url.scheme(), "https" | "wss" | "moqt" | "moql") {
+			return Err(Error::UnsupportedScheme(url.scheme().to_owned()));
+		}
+		if url.host().is_none() {
+			return Err(Error::MissingHost);
 		}
 		let addrs: Vec<_> = addrs.into_iter().collect();
-		(!addrs.is_empty()).then_some(Self {
+		if addrs.is_empty() {
+			return Err(Error::EmptyAddresses);
+		}
+		Ok(Self {
 			url,
 			resolved: Some(addrs),
 		})
@@ -713,11 +734,15 @@ mod addr_tests {
 		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
 		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
 			let url = format!("{scheme}://relay.example/path").parse().unwrap();
-			assert!(Addr::resolved(url, [peer]).is_none());
+			assert_eq!(Addr::pinned(url, [peer]), Err(Error::UnsupportedScheme(scheme.into())));
 		}
 		let url = Url::parse("https://relay.example/path?jwt=secret").unwrap();
-		assert!(Addr::resolved(url.clone(), []).is_none());
-		let target = Addr::resolved(url.clone(), [peer]).unwrap();
+		assert_eq!(Addr::pinned(url.clone(), []), Err(Error::EmptyAddresses));
+		assert_eq!(
+			Addr::pinned(Url::parse("moqt:/path").unwrap(), [peer]),
+			Err(Error::MissingHost)
+		);
+		let target = Addr::pinned(url.clone(), [peer]).unwrap();
 		assert_eq!(target.url(), &url);
 		assert_eq!(target.addresses(), Some([peer].as_slice()));
 		assert_eq!(Addr::new(url).addresses(), None);

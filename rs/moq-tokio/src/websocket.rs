@@ -672,6 +672,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
+		tokio::time::pause();
 		check_tls_authority(true).await;
 	}
 
@@ -740,7 +741,7 @@ mod tests {
 		// A TCP-only race would select this silent TLS peer and strand the dial.
 		let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let target = if fixed {
-			crate::connect::Addr::resolved(url, [silent.local_addr().unwrap(), addr]).unwrap()
+			crate::connect::Addr::pinned(url, [silent.local_addr().unwrap(), addr]).unwrap()
 		} else {
 			url.into()
 		};

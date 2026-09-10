@@ -704,6 +704,23 @@ mod tests {
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	#[tokio::test]
 	async fn fixed_target_preserves_request_and_refuses_redirect() {
+		check_fixed_redirect(false, true).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[tokio::test]
+	async fn one_shot_fixed_target_refuses_redirect() {
+		check_fixed_redirect(true, true).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[tokio::test]
+	async fn unused_fixed_fallback_does_not_restrict_connected_target() {
+		check_fixed_redirect(true, false).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	async fn check_fixed_redirect(once: bool, pinned: bool) {
 		let mut listen = crate::listen::Config {
 			bind: Some("127.0.0.1:0".into()),
 			..Default::default()
@@ -723,19 +740,36 @@ mod tests {
 		});
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
+		config.once = Some(once);
 		let client = config.init(Default::default()).unwrap().with_publisher(&origin);
 		let url: url::Url = format!("https://relay.invalid:{}/room?jwt=secret", peer.port())
 			.parse()
 			.unwrap();
-		let target = crate::connect::Addr::resolved(url.clone(), [peer]).unwrap();
-		let connection = client.connect(target);
+		let target = crate::connect::Addr::pinned(url.clone(), [peer]).unwrap();
+		let targets = if pinned {
+			crate::connect::Addrs::new(target)
+		} else {
+			let mut direct = url.clone();
+			direct.set_ip_host(peer.ip()).unwrap();
+			crate::connect::Addrs::new(direct).or(target)
+		};
+		let connection = client.connect(targets);
 		let connection = connection.established().await.unwrap();
 		let (_server, server_session) = accepted.await.unwrap();
+		let mut redirect = url;
+		if !pinned {
+			redirect.set_ip_host(peer.ip()).unwrap();
+		}
 		server_session
 			.drain()
-			.send(moq_net::goaway::Goaway::redirect(url.to_string()))
+			.send(moq_net::goaway::Goaway::redirect(redirect.to_string()))
 			.unwrap();
-		assert!(matches!(connection.closed().await, Err(crate::Error::PinnedRedirect)));
+		let result = connection.closed().await;
+		if pinned {
+			assert!(matches!(result, Err(crate::Error::PinnedRedirect)));
+		} else {
+			assert!(result.is_ok());
+		}
 	}
 
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
