@@ -112,9 +112,13 @@ downloads it through I420 for you. Every frame carries a `Surface`, a
 `I420`). Match it to take a zero-copy path for a representation you recognize, and fall back to
 `Surface::into_i420()`, which always works. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
-`Surface::into_rgba()` is the portable exit for CPU image and UI toolkits,
-returning owned, tightly packed RGBA8 pixels with the surface's color metadata
-applied.
+`Surface::to_rgba()` and `Surface::to_bgra()` are the portable exits for CPU
+image and UI toolkits, returning owned, tightly packed pixels with the surface's
+color metadata applied. Both orders are there because toolkits disagree and the
+conversion is a full pass over the frame: producing the order the caller wants
+costs nothing extra, while producing the other one and swapping two channels
+afterwards costs a second pass. They borrow the surface, so a frame held behind
+an `Arc` shared with something else converts without being unwrapped first.
 Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |
