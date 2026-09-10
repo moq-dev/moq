@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to announce: once a `source` is live (default), `always`, or `never`. |
+| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. The broadcast is created while connected either way; this only flips discoverability. |
 
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.

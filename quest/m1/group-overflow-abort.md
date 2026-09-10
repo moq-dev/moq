@@ -48,9 +48,8 @@ prefix.
   `StreamError::GroupTooLarge` in `rs/moq-net/src/error.rs`, and extend
   `stream_codes_round_trip` (`error.rs:691`): the new code joins the
   registered list rather than the reserved-range loop at `:707-715`, which
-  asserts the 0x20-0x3f codes decode to `Unknown`. `StreamCode` in js/net
-  lacks `NoCapacity: 0x30` as well; [js-announce](/quest/m1/js-announce.md)
-  adds it, and whichever lands first carries it.
+  asserts the 0x20-0x3f codes decode to `Unknown`. js/net already has
+  `NoCapacity: 0x30`.
 - **A frame-count cap in both languages, at 8192.** JS caps at 1024 today and
   Rust has no count cap at all, so a JS publisher dies where an identical Rust
   one holds 100,000 frames. 8192 gives JS eight times its current headroom and
@@ -142,4 +141,3 @@ define today; fix it with the sweep.
 ## Related
 
 - [Control timeout code](/quest/m2/control-timeout-code.md) - takes 0x31, the neighbouring code in the same range
-- [JS announce](/quest/m1/js-announce.md) - adds `StreamCode.NoCapacity`, the other missing js/net code

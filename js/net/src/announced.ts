@@ -6,7 +6,8 @@
 import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type * as broadcast from "./broadcast.js";
 import type { Established } from "./connection/established.js";
-import type { Request as OriginRequest, Table as OriginTable } from "./origin.js";
+import type { Route } from "./hop.js";
+import type { Table as OriginTable } from "./origin.js";
 import * as Path from "./path.js";
 
 /**
@@ -24,6 +25,8 @@ export interface Event {
 	prefix: Path.Valid;
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
+	/** Hops and cost of an active advertisement; omitted on a retraction. */
+	route?: Route;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */
@@ -339,21 +342,22 @@ export class Broadcast {
 		const announced = origin.announced(this.path);
 		effect.cleanup(() => announced.close());
 
-		let current: broadcast.Consumer | undefined;
-
 		// Held open while the path is announced. A request resolves to the table's route when
 		// there is one, and a session skips answering a path the table routes, so within the
-		// announced window this can only ever produce the announced broadcast.
-		let request: OriginRequest | undefined;
-
-		const offline = () => {
-			current?.close();
-			current = undefined;
-			request?.close();
-			request = undefined;
-			table.set(undefined);
-		};
-		effect.cleanup(offline);
+		// announced window this can only ever produce the announced broadcast. Follow
+		// `active` rather than peeking once: a dynamic accept lands after the announcement.
+		const live = new Signal(false);
+		effect.run((nested) => {
+			if (!nested.get(live)) {
+				nested.set(table, undefined);
+				return;
+			}
+			const request = origin.request(this.path);
+			nested.cleanup(() => request.close());
+			nested.run((inner) => {
+				inner.set(table, inner.get(request.active), undefined);
+			});
+		});
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -362,21 +366,11 @@ export class Broadcast {
 
 				// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
 				if (event.prefix !== Path.empty()) continue;
-
-				if (event.active) {
-					current?.close();
-					request ??= origin.request(this.path);
-					// Cloned: the request borrows the table's front, and this handle owns what
-					// it hands out.
-					current = request.active.peek()?.clone();
-					table.set(current);
-				} else {
-					offline();
-				}
+				live.set(event.active);
 			}
 
 			// The origin closed, or this run was torn down. Either way nothing routes the path.
-			offline();
+			live.set(false);
 		});
 
 		// Blind fallback: while any attached session cannot announce, the table is an

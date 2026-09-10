@@ -64,3 +64,62 @@ export function randomHop(): Hop {
 	// Guard against the (astronomically unlikely) zero draw.
 	return HopSchema.parse(raw === 0n ? 1n : raw);
 }
+
+/**
+ * What pulling content via a route costs, in two magnitudes accumulated together
+ * and compared in that order: lower {@link Cost.warm} wins, and {@link Cost.cold}
+ * breaks the tie.
+ *
+ * Both price the same path against different cache states. `warm` is what one more
+ * subscription would cost the mesh right now, so it collapses to zero at any relay
+ * already carrying the broadcast. `cold` prices the identical path as if nothing were
+ * cached, so it keeps flowing through a warm relay unchanged and still says which of
+ * two warm relays sits closer to the publisher.
+ */
+export interface Cost {
+	/** The cost as the mesh stands today, discounted to zero at every carrying relay. */
+	warm: bigint;
+	/** The same path with every warm discount removed. */
+	cold: bigint;
+}
+
+/** A free path in both magnitudes: what a live publisher seeds. */
+export const ZERO_COST: Cost = { warm: 0n, cold: 0n };
+
+/**
+ * The path a route took through the mesh and what using it costs.
+ *
+ * The metadata half of an advertisement: an origin `dynamic()` pairs it with the
+ * pattern it covers, a broadcast `announce()` with the broadcast's exact path, and
+ * an announce event carries it so consumers can read it back.
+ */
+export interface Route {
+	/** The chain of hops the route has traversed, oldest first. */
+	hops: Hop[];
+	/** What pulling content via this route costs; lower wins. */
+	cost: Cost;
+}
+
+/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
+export const DEFAULT_ROUTE: Route = { hops: [], cost: ZERO_COST };
+
+/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
+export function normalizeRoute(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
+	const hops = route.hops ? [...route.hops] : [];
+	const cost = route.cost;
+	if (cost === undefined) return { hops, cost: ZERO_COST };
+	if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
+	return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+}
+
+/** Whether two routes name the same hop chain and cost. */
+export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	return (
+		a.cost.warm === b.cost.warm &&
+		a.cost.cold === b.cost.cold &&
+		a.hops.length === b.hops.length &&
+		a.hops.every((hop, i) => hop === b.hops[i])
+	);
+}

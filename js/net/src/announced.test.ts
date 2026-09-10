@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import * as Announce from "./announced.ts";
+import type { Producer as BroadcastProducer } from "./broadcast.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+
+function publish(origin: OriginProducer, path: Path.Valid): BroadcastProducer {
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	return broadcast;
+}
 
 const p = (s: string) => Path.from(s);
 
@@ -60,14 +67,14 @@ test("an origin handle resolves a local publish with no session attached", async
 
 	// Loopback needs no connection: the table routes the local publish directly, even
 	// though `discovery` is still undefined (nothing is attached).
-	const first = origin.publish(path);
+	const first = publish(origin, path);
 	await settle();
 	const held = watch.active.peek();
 	expect(held).toBeDefined();
 
 	// A republish swaps the handle to the new broadcast rather than clinging to the
 	// superseded one.
-	const second = origin.publish(path);
+	const second = publish(origin, path);
 	await settle();
 	expect(watch.active.peek()).toBeDefined();
 	expect(watch.active.peek()).not.toBe(held);
@@ -89,7 +96,7 @@ test("the local route wins over a blind request on a no-discovery origin", async
 	// A session without discovery is attached, so the handle stands a request; but the
 	// local publish must still resolve through the table, not wait on an answer.
 	const detach = origin.attach(false);
-	const broadcast = origin.publish(path);
+	const broadcast = publish(origin, path);
 
 	const watch = new Announce.Broadcast({ origin, path });
 	await settle();

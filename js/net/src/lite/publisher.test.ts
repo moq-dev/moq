@@ -17,6 +17,12 @@ import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_05, ALPN_06_WIP, Version } from "./version.ts";
 
+function publish(origin: OriginProducer, path: Path.Valid) {
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	return broadcast;
+}
+
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
 const TEST_MAX_AGE_MS = 30_000;
 
@@ -34,7 +40,7 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.publish(Path.from("static"));
+		const broadcast = publish(origin, Path.from("static"));
 		await Promise.resolve();
 		const failure = new Error("peer stopped receiving announcements");
 		const stream = new Stream({
@@ -84,7 +90,7 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -147,7 +153,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -231,7 +237,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -284,7 +290,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	// Hold the group's stream open call until the test releases it.
@@ -344,7 +350,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -398,7 +404,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const group = new GroupProducer(7);
@@ -493,7 +499,7 @@ async function servedSubscription(
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { maxAge: options.maxAge });
 
 	const client = await Stream.open(pair.client);
@@ -972,7 +978,7 @@ async function serve(
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -1153,7 +1159,7 @@ async function saturatedGroup() {
 
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
 	const client = await Stream.open(pair.client);
@@ -1233,7 +1239,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
-	const broadcast = origin.publish(Path.from("test"));
+	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);

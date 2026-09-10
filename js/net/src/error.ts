@@ -92,6 +92,8 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x23 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. Reserved range. */
 		FrameTooLarge: 0x25 as StreamCode,
+		/** The publisher could serve this request but has no capacity for it now. */
+		NoCapacity: 0x30 as StreamCode,
 	} as const),
 );
 

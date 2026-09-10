@@ -4,8 +4,8 @@
  * @module
  */
 import type { Dispose } from "@moq/signals";
-import type { Producer as OriginProducer, RequestSlot } from "../origin.ts";
-import type * as Path from "../path.ts";
+import { DEFAULT_ROUTE, type Dynamic, type Producer as OriginProducer, type RequestSlot } from "../origin.ts";
+import * as Path from "../path.ts";
 import type { Established } from "./established.ts";
 
 /**
@@ -45,7 +45,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	}
 
 	const announced = conn.announced();
-	const inserted = new Map<Path.Valid, Dispose>();
+	const inserted = new Map<Path.Valid, Dynamic>();
 
 	// End the stream the moment the session closes rather than waiting for the wire to
 	// error it, so the retractions below land promptly.
@@ -59,13 +59,19 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				if (!event) break;
 
 				if (event.active) {
-					// A same-prefix re-announce supersedes: retract the old route first.
-					inserted.get(event.prefix)?.();
-					inserted.set(event.prefix, origin.announce(event.prefix, conn));
+					const existing = inserted.get(event.prefix);
+					const route = event.route ?? DEFAULT_ROUTE;
+					if (existing) {
+						existing.update(route);
+					} else {
+						const handle = origin.receive(Path.Pattern.subtree(event.prefix), route);
+						inserted.set(event.prefix, handle);
+						void drive(handle, conn);
+					}
 				} else {
-					const dispose = inserted.get(event.prefix);
+					const handle = inserted.get(event.prefix);
 					inserted.delete(event.prefix);
-					dispose?.();
+					handle?.close();
 				}
 			}
 		} catch (err) {
@@ -73,7 +79,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			// cleanup below retracts everything this stream fed either way.
 			failure = err;
 		} finally {
-			for (const dispose of inserted.values()) dispose();
+			for (const handle of inserted.values()) handle.close();
 			inserted.clear();
 			announced.close();
 
@@ -102,6 +108,16 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
  */
+async function drive(handle: Dynamic, conn: Established): Promise<void> {
+	try {
+		for await (const request of handle.requested()) {
+			request.accept(conn.consume(request.path));
+		}
+	} catch {
+		handle.close();
+	}
+}
+
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
 	// The withdraws for the answers this session provided, so a dead session only takes
 	// back its own. Keyed by path but remembering the slot, because a path outlives its

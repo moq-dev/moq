@@ -1,5 +1,5 @@
 import { ProtocolViolation } from "../error.ts";
-import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
+import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -17,22 +17,7 @@ const ANNOUNCE_START = 0;
 const ANNOUNCE_END = 1;
 const ANNOUNCE_RESTART = 2;
 
-/**
- * What pulling a broadcast via a route costs, in two magnitudes accumulated together
- * and compared in that order: lower `warm` wins, and `cold` breaks the tie.
- *
- * Both price the same path against different cache states. `warm` is what one more
- * subscription would cost the mesh right now, so it collapses to zero at any relay
- * already carrying the broadcast. `cold` prices the identical path as if nothing were
- * cached, so it keeps flowing through a warm relay unchanged and still says which of
- * two warm relays sits closer to the publisher.
- */
-export interface Cost {
-	/** The cost as the mesh stands today, discounted to zero at every carrying relay. */
-	warm: bigint;
-	/** The same path with every warm discount removed. */
-	cold: bigint;
-}
+export type { Cost };
 
 /**
  * An announcement on the Announce Stream, advertising or retracting a broadcast.

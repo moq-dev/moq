@@ -87,5 +87,4 @@ Branch from `dev`: every rename is breaking.
 ## Related
 
 - [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the rest of the C ABI catch-up
-- [JS announce](/quest/m1/js-announce.md) - the same alignment for js/net
 - [Advertise](/quest/m1/wildcard-advertise.md) - lifts the prefix-only refusal so `dynamic()` accepts any pattern

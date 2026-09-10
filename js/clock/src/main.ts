@@ -78,7 +78,8 @@ async function publish(config: Config) {
 	console.log("✅ Connected to relay:", config.url);
 
 	// Create a new "broadcast", which is a collection of tracks.
-	const broadcast = origin.publish(Moq.Path.from(config.broadcast));
+	const broadcast = origin.createBroadcast(Moq.Path.from(config.broadcast));
+	broadcast.announce();
 
 	console.log("✅ Published broadcast:", config.broadcast);
 

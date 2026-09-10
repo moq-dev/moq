@@ -30,7 +30,7 @@ across the fleet in resident memory.
 [Advertise](/quest/m1/wildcard-advertise.md) sits in m1 so the announce API
 breaks once: `dynamic(pattern, route)` takes a path Pattern from day one in
 [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md)
-and [js-announce](/quest/m1/js-announce.md), with a prefix spelled `foo/**`
+and js/net, with a prefix spelled `foo/**`
 and anything else refused until Advertise lands. Advertise alone gates the
 merge; Resolve and Demand here are additive and land on main after it.
 

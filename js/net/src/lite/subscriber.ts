@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { type Hop, UNKNOWN_HOP } from "../hop.ts";
+import { type Cost, DEFAULT_ROUTE, type Hop, type Route, UNKNOWN_HOP, ZERO_COST } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -257,7 +257,7 @@ export class Subscriber {
 						}
 						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ prefix: suffix, active: true });
+						announced.append({ prefix: suffix, active: true, route: DEFAULT_ROUTE });
 					}
 					break;
 				}
@@ -286,12 +286,14 @@ export class Subscriber {
 				let active: boolean;
 				// Present on active/restart; ended messages never carry hops worth checking.
 				let hops: Hop[] | undefined;
+				let cost: Cost | undefined;
 
 				switch (announce.status) {
 					case "active":
 						suffix = announce.suffix;
 						active = true;
 						hops = announce.hops;
+						cost = announce.cost;
 						if (hasAnnounceId(this.version)) {
 							announcedById.set(nextAnnounceId++, announce.suffix);
 						}
@@ -316,6 +318,7 @@ export class Subscriber {
 						suffix = path;
 						active = true;
 						hops = announce.hops;
+						cost = announce.cost;
 						break;
 					}
 				}
@@ -404,7 +407,10 @@ export class Subscriber {
 				}
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ prefix: suffix, active: true });
+				const fullHops =
+					hops !== undefined && responderOrigin !== undefined ? [...hops, responderOrigin] : (hops ?? []);
+				const route: Route = { hops: fullHops, cost: cost ?? ZERO_COST };
+				announced.append({ prefix: suffix, active: true, route });
 			}
 
 			announced.close();

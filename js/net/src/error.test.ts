@@ -215,17 +215,18 @@ test("the code tables match the spec", () => {
 		expect(code).toBeLessThan(32);
 	}
 
-	// The stream table adds the reserved-range placeholders this implementation sends, and
-	// nothing else lands there: 32-63 carries no meaning the draft publishes, so a code we
-	// put in it is an agreement with our own Rust implementation rather than a spec value.
+	// The stream table adds the reserved-range placeholders this implementation sends,
+	// plus the assigned 48-63 codes the draft publishes (NO_CAPACITY). 32-47 stays
+	// placeholders; 48-63 is moq-lite's own.
 	const placeholders: StreamCode[] = [
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
 		StreamCode.FrameTooLarge,
 	];
+	const assigned = [StreamCode.NoCapacity];
 	for (const code of Object.values(StreamCode)) {
-		if (placeholders.includes(code)) {
+		if (placeholders.includes(code) || assigned.includes(code)) {
 			expect(code).toBeGreaterThanOrEqual(32);
 			expect(code).toBeLessThan(64);
 		} else {
@@ -237,6 +238,7 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.Old)).toBe(0x22);
 	expect(Number(StreamCode.Evicted)).toBe(0x23);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
+	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));

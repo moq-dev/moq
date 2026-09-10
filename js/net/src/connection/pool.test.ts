@@ -1,9 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
+import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { accept } from "./index.ts";
 import { resetShared, Shared } from "./pool.ts";
+
+function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	return broadcast;
+}
 
 const url = new URL("https://example.com/pool");
 
@@ -187,7 +194,7 @@ test("a publish through one handle resolves locally for another", async () => {
 
 	const origin = publisher.origin.peek();
 	if (!origin) throw new Error("expected an origin");
-	const broadcast = origin.publish(Path.from("mine"));
+	const broadcast = publish(origin, Path.from("mine"));
 	broadcast.createTrack("chat");
 
 	// Loopback: the shared origin serves the page's own publish with no round trip, so the

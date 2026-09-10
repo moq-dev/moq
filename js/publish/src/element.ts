@@ -82,7 +82,7 @@ export default class MoqPublish extends HTMLElement {
 		invisible: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
-		// When to announce/publish the broadcast: always, never, or only once a source is selected.
+		// When to advertise the broadcast: always, never, or only once a source is live.
 		announce: new Signal<AnnounceMode>("source"),
 	};
 
@@ -135,8 +135,8 @@ export default class MoqPublish extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Whether to actually publish the broadcast: connected to the DOM and allowed by the `announce` mode.
-	#publishEnabled = new Signal(false);
+	// Whether to advertise the broadcast, driven by the `announce` mode.
+	#announcing = new Signal(false);
 
 	/**
 	 * Effects scoped to this element's lifetime, closed on disconnect.
@@ -171,15 +171,13 @@ export default class MoqPublish extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const enabled = effect.get(this.#enabled);
 			const announce = effect.get(this.controls.announce);
 			// "source" waits until media is actually being captured -- a live audio or
 			// video track exists -- not merely a source *type* selected. Otherwise we'd
 			// announce an empty broadcast while the getUserMedia/getDisplayMedia
 			// permission prompt is still pending (or after the user denies it).
 			const hasMedia = effect.get(this.#videoSource) !== undefined || effect.get(this.#audioSource) !== undefined;
-			const announcing = announce === "always" || (announce === "source" && hasMedia);
-			this.#publishEnabled.set(enabled && announcing);
+			this.#announcing.set(announce === "always" || (announce === "source" && hasMedia));
 		});
 
 		// Track the connection's send bandwidth estimate, the encoder's bitrate cap. The
@@ -220,7 +218,8 @@ export default class MoqPublish extends HTMLElement {
 
 		this.broadcast = new Broadcast({
 			origin: this.connection.origin,
-			enabled: this.#publishEnabled,
+			enabled: this.#enabled,
+			announce: this.#announcing,
 			name: this.#name,
 			display: this.capture.out.display,
 			flip: this.#flip,

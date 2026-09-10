@@ -5,8 +5,19 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "./group.ts";
+import { DEFAULT_ROUTE, normalizeRoute, type Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
 import * as track from "./track.ts";
+
+/** The origin callback a created broadcast uses to advertise its exact path. @internal */
+export interface Announcer {
+	/** Advertise or re-price this broadcast's path. */
+	announce(route: Route): void;
+	/** Retract the advertisement, leaving the broadcast reachable by exact path. */
+	unannounce(): void;
+}
+
+let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
@@ -144,6 +155,14 @@ async function fetchGroup(
  */
 export class Producer implements track.Broadcast {
 	#state = new BroadcastState();
+	#announcer?: Announcer;
+
+	static {
+		attachAnnouncer = (producer, announcer) => {
+			producer.#announcer = announcer;
+		};
+		hooks.attachAnnouncer = attachAnnouncer;
+	}
 
 	/**
 	 * Settles once the broadcast closes: `null` on a clean close, or the abort {@link Error}.
@@ -224,8 +243,31 @@ export class Producer implements track.Broadcast {
 		return new track.Consumer(name, this);
 	}
 
+	/**
+	 * Advertise this broadcast's exact path, or re-price a standing advertisement in place.
+	 *
+	 * Call it once the tracks a subscriber needs first (a catalog) exist. The broadcast is
+	 * reachable by exact path either way; announcing only makes it discoverable. Retracts on
+	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
+	 * origin, or if the broadcast is already closed.
+	 */
+	announce(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = DEFAULT_ROUTE): void {
+		if (this.#state.closed.peek() !== undefined) {
+			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
+		}
+		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
+		this.#announcer.announce(normalizeRoute(route));
+	}
+
+	/** Retract the advertisement of this broadcast's path, if any. */
+	unannounce(): void {
+		this.#announcer?.unannounce();
+	}
+
 	/** Close the broadcast, optionally with an error to abort waiters. Idempotent. */
 	close(abort?: Error) {
+		this.#announcer?.unannounce();
+		this.#announcer = undefined;
 		closeState(this.#state, abort);
 	}
 }

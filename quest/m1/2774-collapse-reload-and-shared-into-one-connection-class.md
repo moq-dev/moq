@@ -44,4 +44,3 @@ Breaking on `@moq/net`, so it lands on dev.
 ## Related
 
 - [Bandwidth allocator](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - the send-side estimate hangs off the same connection handle
-- [JS announce](/quest/m1/js-announce.md) - the broadcast-owned announcement rides the connection's origin

@@ -5,12 +5,18 @@ import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 
+function publish(origin: Origin.Producer, path: Path.Valid) {
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	return broadcast;
+}
+
 // A real origin with local broadcasts at the given paths. Resolution is proven by
 // discrimination: `relativeBroadcast` resolves blind against the table (reload: false), so
 // a defined result means the reference resolved to a published path and nothing else.
 function origin(paths: string[]): Origin.Producer {
 	const producer = new Origin.Producer();
-	for (const path of paths) producer.publish(Path.from(path));
+	for (const path of paths) publish(producer, Path.from(path));
 	return producer;
 }
 
@@ -247,7 +253,7 @@ describe("cross-broadcast renditions", () => {
 			expect(videoRenditions(source)).toEqual(["local"]);
 
 			// The source is announced, so it becomes usable without a new catalog.
-			const published = owner.publish(Path.from("private/source"));
+			const published = publish(owner, Path.from("private/source"));
 			await settle();
 			expect(videoRenditions(source)).toEqual(["local", "remote"]);
 
