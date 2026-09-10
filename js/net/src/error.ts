@@ -153,7 +153,7 @@ export interface StreamErrorOptions {
  * try {
  *   frame = await group.readFrame();
  * } catch (err) {
- *   if (err instanceof StreamError && err.code === StreamCode.Cancel) return;
+ *   if (isCancel(err)) return;
  *   throw err;
  * }
  * ```
@@ -173,6 +173,17 @@ export class StreamError extends Error {
 		this.name = "StreamError";
 		this.code = code;
 	}
+}
+
+/**
+ * True when `err` is a requested stream end ({@link StreamCode.Cancel}), not a fault.
+ *
+ * Finish is the other clean end: `closed` settling to `null`. This is the abort-with-Cancel
+ * half, matching the Rust `Error::Cancel` versus `finish`. The test is the code, not the
+ * message: a plain `Error("cancel")` is still a fault.
+ */
+export function isCancel(err: unknown): err is StreamError {
+	return err instanceof StreamError && err.code === StreamCode.Cancel;
 }
 
 /**

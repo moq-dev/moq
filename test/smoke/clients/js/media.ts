@@ -22,7 +22,6 @@ import {
 	type BrowserErrors,
 	check,
 	command,
-	drainPageErrors,
 	Failure,
 	launch,
 	open,
@@ -141,14 +140,12 @@ async function waitFrozen(
 	errors: BrowserErrors,
 	assertion: string,
 	description: string,
-	tolerateErrors = false,
 ): Promise<number> {
 	const deadline = Date.now() + SETTLE_MS;
 	let frame: number | undefined;
 	let since = Date.now();
 	while (Date.now() < deadline) {
-		if (tolerateErrors) drainPageErrors(errors);
-		else throwPageErrors(errors);
+		throwPageErrors(errors);
 		const current = (await readPlayerState(page).catch(() => undefined))?.frameId;
 		if (current !== frame) {
 			frame = current;
@@ -158,7 +155,7 @@ async function waitFrozen(
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
-	if (!tolerateErrors) throwPageErrors(errors);
+	throwPageErrors(errors);
 	throw new Failure(assertion, `${description}: the presented frame is still advancing, now ${frame}`);
 }
 
@@ -446,14 +443,11 @@ try {
 	if (wants("rejoin")) {
 		console.error("=== unsubscribe and rejoin ===");
 		await player.locator(SELECTORS.watch).evaluate((el) => el.setAttribute("name", "smoke-media-nowhere.hang"));
-		// Leaving a broadcast aborts its subscriptions, which the player reports; that is the change
-		// taking effect, not a fault.
 		const left = await waitFrozen(
 			player,
 			playerErrors,
 			"unsubscribe stops playback",
 			"the player kept presenting a broadcast it no longer subscribes to",
-			true,
 		);
 
 		await player.locator(SELECTORS.watch).evaluate((el, name) => el.setAttribute("name", name), broadcast);
@@ -462,7 +456,6 @@ try {
 			assertion: "rejoin resumes playback",
 			description: `the presented frame to move past the ${left} it stopped on`,
 			predicate: (state) => (state.frameId ?? 0) > left,
-			tolerateErrors: true,
 		});
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after rejoin");
 	}
@@ -513,13 +506,11 @@ try {
 		console.error("=== stop and republish ===");
 		const before = await readPlayerState(player);
 		await command(publisher, "stop");
-		// The publisher going away aborts the subscriptions reading it, and the player says so.
 		await waitFrozen(
 			player,
 			playerErrors,
 			"playback stops with the publisher",
 			"the player kept presenting new frames after the publisher went away",
-			true,
 		);
 
 		await command(publisher, "start");
@@ -530,7 +521,6 @@ try {
 			assertion: "republish serves the new stream",
 			description: `a presented frame below the ${before.frameId} reached before the publisher stopped`,
 			predicate: (state) => state.frameId !== undefined && state.frameId < (before.frameId ?? 0),
-			tolerateErrors: true,
 		});
 		console.error(`  recovered at frame ${recovered.frameId}, restarted from ${before.frameId}`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after republish");

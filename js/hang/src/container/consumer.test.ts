@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { expect, spyOn, test } from "bun:test";
+import { Group, isCancel, StreamCode, StreamError, Time, Track, Varint } from "@moq/net";
 import type { InitSegment } from "./cmaf/decode.ts";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";
@@ -280,6 +280,56 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
 	expect(frames.map((f) => f.timestamp as number)).toEqual([1, 2, 4]);
 	consumer.close();
+});
+
+test("a cancelled track is a clean end, not a spawn error", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => {});
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat(), maxAge: 500 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle();
+	track.close(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+
+	const frames = await drainFrames(consumer, 200);
+	expect(frames).toHaveLength(1);
+	expect(consumer.cancelled).toBe(true);
+	expect(isCancel(consumer.closed.peek())).toBe(true);
+	expect(logged).not.toHaveBeenCalled();
+	consumer.close();
+	logged.mockRestore();
+});
+
+test("a cancelled group is a requested end, not a spawn error", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => {});
+	const track = new Track.Producer("test");
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: encodeLegacy(0 as Time.Micro), timestamp: Time.Timestamp.now() });
+	track.writeGroup(group);
+
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat(), maxAge: 500 as Time.Milli });
+	await settle();
+	group.close(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+	await settle();
+
+	expect(consumer.cancelled).toBe(true);
+	expect(logged).not.toHaveBeenCalled();
+	consumer.close();
+	logged.mockRestore();
+});
+
+test("a track abort that is not Cancel is a fault", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => {});
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat(), maxAge: 500 as Time.Milli });
+
+	track.close(new StreamError(StreamCode.Internal, { message: "internal" }));
+	await settle();
+
+	expect(logged.mock.calls.some((call) => call[0] === "spawn error")).toBe(true);
+	expect(consumer.cancelled).toBe(false);
+	consumer.close();
+	logged.mockRestore();
 });
 
 test("Consumer close returns undefined from next()", async () => {

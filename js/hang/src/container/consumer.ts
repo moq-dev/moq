@@ -1,6 +1,6 @@
-import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
+import { isCancel, type Time } from "@moq/net";
+import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
@@ -145,6 +145,27 @@ export class Consumer {
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#signals = new Effect();
+	#closed = new Once<Error | null>();
+	#cancelled = false;
+
+	/**
+	 * Settles once the track ends: `null` on a clean finish, or the abort {@link Error}.
+	 * `StreamCode.Cancel` is a requested end, not a fault; see {@link cancelled}.
+	 */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
+
+	/**
+	 * True after a group or the track was reset with `StreamCode.Cancel`.
+	 *
+	 * Set before {@link closed} when a truncated group arrives while the track is still
+	 * open, so a decoder can classify the `DOMException` that follows from the stream's
+	 * end rather than the exception.
+	 */
+	get cancelled(): boolean {
+		return this.#cancelled;
+	}
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
@@ -162,47 +183,62 @@ export class Consumer {
 		});
 	}
 
+	#finish(end: Error | null): void {
+		if (isCancel(end)) this.#cancelled = true;
+		if (this.#closed.peek() === undefined) this.#closed.set(end);
+		this.#notify?.();
+		this.#notify = undefined;
+	}
+
 	async #run() {
 		// Start fetching groups in the background
-		for (;;) {
-			const consumer = await this.#track.recvGroup();
-			if (!consumer) break;
+		try {
+			for (;;) {
+				const consumer = await this.#track.recvGroup();
+				if (!consumer) break;
 
-			// To improve TTV, we always start with the first group.
-			// For higher latencies we might need to figure something else out, as its racey.
-			if (this.#active === undefined) {
-				this.#active = consumer.sequence;
+				// To improve TTV, we always start with the first group.
+				// For higher latencies we might need to figure something else out, as its racey.
+				if (this.#active === undefined) {
+					this.#active = consumer.sequence;
+				}
+
+				// Arriving below the delivery cursor is not a reason to drop a group. Groups are
+				// sent newest-first, so the head of a subscription arrives after the live edge it
+				// was served alongside, and both consumers can still place one: audio writes into
+				// a timestamp-indexed ring, video drops a late frame at render. How far back one
+				// may be is the subscription's own max age, applied before it ever reaches here.
+				//
+				// A group the reset boundary proves reneged is different, and still dropped: it
+				// belongs to a timeline the publisher withdrew rather than one that arrived late.
+				// An ambiguous one is admitted so #runGroup can rule on it once its timestamps
+				// arrive.
+				if (this.#rewind.boundary?.bySequence(consumer.sequence) === true) {
+					console.warn(`skipping reneged group: track=${this.#track.name} ${consumer.sequence}`);
+					consumer.close();
+					continue;
+				}
+
+				const group: Group = {
+					consumer,
+					frames: [],
+					empty: true,
+				};
+
+				// Insert into #groups based on the group sequence number (ascending).
+				// This is used to cancel old groups.
+				this.#groups.push(group);
+				this.#groups.sort((a, b) => a.consumer.sequence - b.consumer.sequence);
+
+				// Start buffering frames from this group
+				this.#signals.spawn(this.#runGroup.bind(this, group));
 			}
-
-			// Arriving below the delivery cursor is not a reason to drop a group. Groups are
-			// sent newest-first, so the head of a subscription arrives after the live edge it
-			// was served alongside, and both consumers can still place one: audio writes into
-			// a timestamp-indexed ring, video drops a late frame at render. How far back one
-			// may be is the subscription's own max age, applied before it ever reaches here.
-			//
-			// A group the reset boundary proves reneged is different, and still dropped: it
-			// belongs to a timeline the publisher withdrew rather than one that arrived late.
-			// An ambiguous one is admitted so #runGroup can rule on it once its timestamps
-			// arrive.
-			if (this.#rewind.boundary?.bySequence(consumer.sequence) === true) {
-				console.warn(`skipping reneged group: track=${this.#track.name} ${consumer.sequence}`);
-				consumer.close();
-				continue;
-			}
-
-			const group: Group = {
-				consumer,
-				frames: [],
-				empty: true,
-			};
-
-			// Insert into #groups based on the group sequence number (ascending).
-			// This is used to cancel old groups.
-			this.#groups.push(group);
-			this.#groups.sort((a, b) => a.consumer.sequence - b.consumer.sequence);
-
-			// Start buffering frames from this group
-			this.#signals.spawn(this.#runGroup.bind(this, group));
+			this.#finish(null);
+		} catch (err) {
+			const e = err instanceof Error ? err : new Error(String(err));
+			this.#finish(e);
+			if (isCancel(e)) return;
+			throw e;
 		}
 	}
 
@@ -283,11 +319,12 @@ export class Consumer {
 					}
 				}
 			}
-		} catch (_err) {
+		} catch (err) {
 			// Stop reading the group but keep already-decoded frames.
 			// A decode error or stream RESET truncates the tail of the GoP;
 			// frames decoded before the error are still valid and playable.
 			// The tail is gone though, so the next group does not continue this one.
+			if (isCancel(err)) this.#cancelled = true;
 			this.#gap = true;
 		} finally {
 			group.done = true;
@@ -559,6 +596,14 @@ export class Consumer {
 		| undefined
 	> {
 		for (;;) {
+			if (this.#groups.length === 0) {
+				const ended = this.#closed.peek();
+				if (ended !== undefined) {
+					if (ended instanceof Error && !isCancel(ended)) throw ended;
+					return undefined;
+				}
+			}
+
 			// A group may have buffered a rewind while the live edge was still behind it; catch it
 			// now that delivery has advanced the edge.
 			this.#checkBufferedReset();
@@ -724,6 +769,7 @@ export class Consumer {
 
 	/** Stop consuming and release the track and all buffered groups. */
 	close(): void {
+		this.#finish(null);
 		this.#signals.close();
 	}
 }

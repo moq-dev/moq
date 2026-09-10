@@ -4,6 +4,7 @@ import {
 	FrameTooLarge,
 	fromClose,
 	fromTransport,
+	isCancel,
 	Lagged,
 	NotFound,
 	ProtocolViolation,
@@ -200,6 +201,15 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 
 // The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
 // the Rust tables, since the two implementations talk to each other.
+test("isCancel is the code, not the message", () => {
+	expect(isCancel(new StreamError(StreamCode.Cancel))).toBe(true);
+	expect(isCancel(new StreamError(StreamCode.Cancel, { message: "unsubscribed" }))).toBe(true);
+	expect(isCancel(new Error("cancel"))).toBe(false);
+	expect(isCancel(new StreamError(StreamCode.Internal, { message: "cancel" }))).toBe(false);
+	expect(isCancel(new SessionError(SessionCode.Cancel))).toBe(false);
+	expect(isCancel(null)).toBe(false);
+});
+
 test("the code tables match the spec", () => {
 	// moq-transport's, reused unchanged.
 	expect(Number(SessionCode.Cancel)).toBe(0x0);

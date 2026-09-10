@@ -52,4 +52,3 @@ the control still fails when the leak is removed, which is what
 ## Related
 
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - reshapes the pooling this control has to see through
-- [Close classification](/quest/m1/js-close-classification.md) - the other change that makes the media harness fail for the right reason

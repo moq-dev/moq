@@ -14,6 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
+import { isDecoderEnd } from "../error";
 import { subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
@@ -347,7 +348,11 @@ export class Decoder {
 					}
 					this.#emit(data, decoded);
 				},
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => {
+					if (!isDecoderEnd(consumer, effect.abort.aborted)) {
+						console.error("audio decoder error", error);
+					}
+				},
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -444,7 +449,11 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => {
+					if (!isDecoderEnd(consumer, effect.abort.aborted)) {
+						console.error("audio decoder error", error);
+					}
+				},
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();

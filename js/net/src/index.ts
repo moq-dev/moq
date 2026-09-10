@@ -15,6 +15,7 @@ export * as Broadcast from "./broadcast.ts";
 export * as Connection from "./connection/index.ts";
 /** Session and stream errors, each carrying a code from its own registry. */
 export {
+	isCancel,
 	NotFound,
 	SessionCode,
 	SessionError,

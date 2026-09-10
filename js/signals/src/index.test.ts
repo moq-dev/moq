@@ -275,6 +275,43 @@ describe("Effect", () => {
 		}
 	});
 
+	test("a spawn rejection after close is not a spawn error", async () => {
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		const effect = new Effect();
+		const gate = Promise.withResolvers<void>();
+
+		try {
+			effect.spawn(async () => {
+				await gate.promise;
+				throw new Error("boom");
+			});
+			effect.close();
+			gate.resolve();
+			await settle();
+
+			expect(error).not.toHaveBeenCalled();
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	test("a spawn rejection while open is a spawn error", async () => {
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		const effect = new Effect();
+
+		try {
+			effect.spawn(async () => {
+				throw new Error("boom");
+			});
+			await settle();
+
+			expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
+		} finally {
+			effect.close();
+			error.mockRestore();
+		}
+	});
+
 	test("a cleanup registered during close still runs", async () => {
 		// Teardown that cascades still completes: `cleanup` appends onto the list close() is
 		// draining rather than dropping it on the floor.
