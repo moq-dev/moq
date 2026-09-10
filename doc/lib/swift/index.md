@@ -62,7 +62,8 @@ accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/
 `datagrams`, `setCatalogSection`, `used()`/`unused()`. `MoqError.isAuth` and
-`isShutdown` classify errors.
+`isShutdown` classify errors. `protocolError` is the structured protocol failure
+(scope, verbatim code, kind) when the peer sent one.
 
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac

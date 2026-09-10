@@ -31,7 +31,7 @@ and `target/include/moq.h`.
 ## Shape of the API
 
 - **Handles and callbacks.** Every object is an integer handle; every async result arrives on a callback with a `void *user_data`. A status `> 0` is a live result, `0` a clean close, `< 0` an error, and the last two are terminal: libmoq never touches `user_data` again, so free it there. `*_close` only requests shutdown; the terminal callback still fires.
-- **Errors.** Negative return codes, with `moq_error()` giving the reason for the last failure on the calling thread. Auth rejections (401, 403) have their own codes so you don't retry them.
+- **Errors.** Negative return codes, with `moq_error()` giving the reason for the last failure on the calling thread. Auth rejections (401, 403) have their own codes so you don't retry them. A protocol failure also fills `moq_error_protocol()` with the session or stream scope, the verbatim wire code, and a known kind; do not parse `moq_error()` for that.
 - **Threading.** Any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Connection health.** `moq_session_stats()` reports available metrics with per-field validity flags. `moq_session_snapshot()` samples those metrics and the negotiated draft name together from the same connection. Its protocol string is backed by static storage. Both return an offline error between reconnects and leave the destination untouched.
 - **Encoded video metadata.** `moq_video_init.hint` is a zero-initialized `moq_video_hint` with `has_*` flags for coded dimensions, bitrate (bits per second), frame rate, and latency preference. Hints seed a video codec track's catalog; detected dimensions take precedence.

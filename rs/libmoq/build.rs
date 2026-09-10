@@ -13,6 +13,8 @@ const ENUMS: &[&str] = &[
 	"moq_video_pixel_format",
 	"moq_video_codec",
 	"moq_video_encoder_kind",
+	"moq_error_scope",
+	"moq_protocol_kind",
 ];
 
 fn main() {

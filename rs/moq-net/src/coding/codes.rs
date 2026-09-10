@@ -159,14 +159,14 @@ mod tests {
 				session: Some(0x0),
 				stream: None
 			}),
-			Error::Cancel
+			Error::Session(crate::SessionError::Cancel)
 		));
 		assert!(matches!(
 			version.transport_error(Failed {
 				session: None,
 				stream: Some(0x0)
 			}),
-			Error::Remote(0)
+			Error::Stream(StreamError::Internal)
 		));
 
 		// Neither: the transport itself failed.

@@ -34,8 +34,12 @@ type (
 	Frame = ffi.MoqFrame
 	// MediaFrame is a Frame plus the codec-derived keyframe flag carried on a media track.
 	MediaFrame = ffi.MoqMediaFrame
+	// ErrorScope is whether a protocol code is from the session or stream registry.
+	ErrorScope = ffi.MoqErrorScope
 	// FetchGroupOptions configures a single FetchGroup call, currently just the delivery priority.
 	FetchGroupOptions = ffi.MoqFetchGroupOptions
+	// ProtocolKind is a recognized protocol kind, or App / Unknown when the code is not named.
+	ProtocolKind = ffi.MoqProtocolKind
 	// OriginOptions configures a new origin, such as its maximum cache size in bytes.
 	OriginOptions = ffi.MoqOriginOptions
 	// Route is the hop chain a broadcast takes to reach an origin, its cost, and whether it's announced.
@@ -231,3 +235,61 @@ const (
 func LogLevel(level string) error {
 	return ffi.MoqLogLevel(level)
 }
+
+// Protocol registries and recognized kinds carried by ProtocolError.
+const (
+	// ErrorScopeSession identifies a session close code.
+	ErrorScopeSession = ffi.MoqErrorScopeSession
+	// ErrorScopeStream identifies a stream reset code.
+	ErrorScopeStream = ffi.MoqErrorScopeStream
+	// ProtocolKindCancel identifies cancel.
+	ProtocolKindCancel = ffi.MoqProtocolKindCancel
+	// ProtocolKindInternal identifies internal.
+	ProtocolKindInternal = ffi.MoqProtocolKindInternal
+	// ProtocolKindUnauthorized identifies unauthorized.
+	ProtocolKindUnauthorized = ffi.MoqProtocolKindUnauthorized
+	// ProtocolKindProtocolViolation identifies protocol violation.
+	ProtocolKindProtocolViolation = ffi.MoqProtocolKindProtocolViolation
+	// ProtocolKindKeyValueFormatting identifies key value formatting.
+	ProtocolKindKeyValueFormatting = ffi.MoqProtocolKindKeyValueFormatting
+	// ProtocolKindGoawayTimeout identifies goaway timeout.
+	ProtocolKindGoawayTimeout = ffi.MoqProtocolKindGoawayTimeout
+	// ProtocolKindTimeout identifies timeout.
+	ProtocolKindTimeout = ffi.MoqProtocolKindTimeout
+	// ProtocolKindVersion identifies version.
+	ProtocolKindVersion = ffi.MoqProtocolKindVersion
+	// ProtocolKindRequiredExtension identifies required extension.
+	ProtocolKindRequiredExtension = ffi.MoqProtocolKindRequiredExtension
+	// ProtocolKindInvalidRole identifies invalid role.
+	ProtocolKindInvalidRole = ffi.MoqProtocolKindInvalidRole
+	// ProtocolKindUnexpectedStream identifies unexpected stream.
+	ProtocolKindUnexpectedStream = ffi.MoqProtocolKindUnexpectedStream
+	// ProtocolKindDeliveryTimeout identifies delivery timeout.
+	ProtocolKindDeliveryTimeout = ffi.MoqProtocolKindDeliveryTimeout
+	// ProtocolKindSessionClosed identifies session closed.
+	ProtocolKindSessionClosed = ffi.MoqProtocolKindSessionClosed
+	// ProtocolKindGoingAway identifies going away.
+	ProtocolKindGoingAway = ffi.MoqProtocolKindGoingAway
+	// ProtocolKindTooFarBehind identifies too far behind.
+	ProtocolKindTooFarBehind = ffi.MoqProtocolKindTooFarBehind
+	// ProtocolKindMalformedTrack identifies malformed track.
+	ProtocolKindMalformedTrack = ffi.MoqProtocolKindMalformedTrack
+	// ProtocolKindNotFound identifies not found.
+	ProtocolKindNotFound = ffi.MoqProtocolKindNotFound
+	// ProtocolKindUnroutable identifies unroutable.
+	ProtocolKindUnroutable = ffi.MoqProtocolKindUnroutable
+	// ProtocolKindOld identifies old.
+	ProtocolKindOld = ffi.MoqProtocolKindOld
+	// ProtocolKindEvicted identifies evicted.
+	ProtocolKindEvicted = ffi.MoqProtocolKindEvicted
+	// ProtocolKindWrongSize identifies wrong size.
+	ProtocolKindWrongSize = ffi.MoqProtocolKindWrongSize
+	// ProtocolKindFrameTooLarge identifies frame too large.
+	ProtocolKindFrameTooLarge = ffi.MoqProtocolKindFrameTooLarge
+	// ProtocolKindTimestampMismatch identifies timestamp mismatch.
+	ProtocolKindTimestampMismatch = ffi.MoqProtocolKindTimestampMismatch
+	// ProtocolKindApp identifies app.
+	ProtocolKindApp = ffi.MoqProtocolKindApp
+	// ProtocolKindUnknown identifies unknown.
+	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
+)

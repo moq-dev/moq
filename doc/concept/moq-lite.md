@@ -155,3 +155,13 @@ still enforces this simpler model, faking or refusing the rest.
 | moq-lite | moq-transport | yes |
 | moq-transport | moq-lite | without moq-transport-only features |
 | moq-transport | moq-transport | depends on the implementations |
+
+## Protocol errors
+
+Session close codes and stream reset codes use separate registries: session code 0
+is a clean close, while stream code 0 is an internal error. Rust preserves received
+codes as `moq_net::Error::Session(SessionError)` or `Error::Stream(StreamError)`;
+JavaScript exposes `SessionError` and `StreamError`. Match the registry before
+interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
+message; unknown and application codes retain their numeric value. Transport
+failures without a protocol code remain separate.

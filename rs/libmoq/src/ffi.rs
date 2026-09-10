@@ -6,7 +6,7 @@ use std::{
 
 use url::Url;
 
-use crate::{Error, Id};
+use crate::{Error, Id, moq_protocol_error};
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
@@ -174,11 +174,17 @@ impl ReturnCode for Id {
 	}
 }
 
+struct LastError {
+	message: CString,
+	protocol: Option<moq_protocol_error>,
+}
+
 thread_local! {
 	/// Reason for the most recent error returned on this thread. FFI functions
 	/// hand back only a numeric code, so we stash the human-readable message
-	/// here for `moq_error` to retrieve.
-	static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+	/// (and protocol details, when the failure is a session or stream code)
+	/// here for `moq_error` / `moq_error_protocol` to retrieve.
+	static LAST_ERROR: RefCell<Option<LastError>> = const { RefCell::new(None) };
 }
 
 /// Record the reason for an error return into this thread's `moq_error` slot.
@@ -190,7 +196,12 @@ fn record_error<C: ReturnCode>(ret: &C) {
 	// CString::new fails only on an interior NUL, which our messages never
 	// contain; skip storing rather than truncating if it ever happens.
 	if let Ok(msg) = CString::new(err.to_string()) {
-		LAST_ERROR.with(|cell| *cell.borrow_mut() = Some(msg));
+		LAST_ERROR.with(|cell| {
+			*cell.borrow_mut() = Some(LastError {
+				message: msg,
+				protocol: err.protocol(),
+			});
+		});
 	}
 }
 
@@ -198,7 +209,24 @@ fn record_error<C: ReturnCode>(ret: &C) {
 ///
 /// The pointer is valid until the next libmoq call on the same thread.
 pub fn last_error_ptr() -> *const c_char {
-	LAST_ERROR.with(|cell| cell.borrow().as_ref().map_or(std::ptr::null(), |msg| msg.as_ptr()))
+	LAST_ERROR.with(|cell| {
+		cell.borrow()
+			.as_ref()
+			.map_or(std::ptr::null(), |err| err.message.as_ptr())
+	})
+}
+
+/// Copy this thread's last protocol error into `out`.
+///
+/// Returns true when the last error was a protocol failure and `out` was written.
+pub fn last_protocol(out: &mut moq_protocol_error) -> bool {
+	LAST_ERROR.with(|cell| match cell.borrow().as_ref().and_then(|err| err.protocol) {
+		Some(protocol) => {
+			*out = protocol;
+			true
+		}
+		None => false,
+	})
 }
 
 /// Parse an i32 handle into an Id.

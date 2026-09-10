@@ -1,4 +1,5 @@
-use crate::{Connect, Error, State, ffi};
+use crate::ffi::ReturnCode;
+use crate::{Connect, Error, State, ffi, moq_protocol_error};
 
 use std::ffi::c_char;
 use std::ffi::c_void;
@@ -735,6 +736,33 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_error() -> *const c_char {
 	ffi::last_error_ptr()
+}
+
+/// Structured protocol details for the most recent failed call on the calling thread.
+///
+/// When that failure was a session close or stream reset, writes the scope, verbatim
+/// wire code, and recognized kind into `out` and returns 0. Returns a negative code
+/// (and leaves `out` untouched) when the last error was not a protocol failure
+/// (transport, not-found, a bad handle, ...). Do not parse [moq_error] for this.
+///
+/// The values are only meaningful after a call returned a negative code; check the
+/// code first. Same lifetime as [moq_error]: overwritten by the next libmoq call on
+/// this thread. Errors delivered through status callbacks are recorded before the
+/// callback runs, so read this from inside the callback.
+///
+/// # Safety
+/// - The caller must ensure that `out` is a valid pointer to a [moq_protocol_error].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_error_protocol(out: *mut moq_protocol_error) -> i32 {
+	// Do not go through `enter`: a miss must not overwrite the last error we are inspecting.
+	if out.is_null() {
+		return Error::InvalidPointer.code();
+	}
+	if ffi::last_protocol(unsafe { &mut *out }) {
+		0
+	} else {
+		Error::NotFound.code()
+	}
 }
 
 /// The protocol version names this build offers by default, spelled the way

@@ -156,6 +156,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Error
    is_auth
    is_shutdown
+   protocol_error
    log_level
 ```
 

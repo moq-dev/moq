@@ -40,6 +40,8 @@ moq.close();
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
+`ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
+code, kind) when the peer sent a session or stream code.
 
 Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through

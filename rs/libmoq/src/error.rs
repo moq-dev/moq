@@ -2,6 +2,91 @@ use std::sync::Arc;
 
 use crate::ffi;
 
+/// Whether a protocol code is from the session or stream registry.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_error_scope {
+	/// A session close code.
+	MOQ_ERROR_SCOPE_SESSION = 0,
+	/// A stream reset or stop code.
+	MOQ_ERROR_SCOPE_STREAM = 1,
+}
+
+/// A recognized protocol kind. Pair with [`moq_error_scope`]: `CANCEL` is 0 on a session
+/// and 1 on a stream. `APP` and `UNKNOWN` keep the numeric code in [`moq_protocol_error`].
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_protocol_kind {
+	/// Cancel.
+	MOQ_PROTOCOL_KIND_CANCEL = 0,
+	/// Internal.
+	MOQ_PROTOCOL_KIND_INTERNAL = 1,
+	/// Unauthorized.
+	MOQ_PROTOCOL_KIND_UNAUTHORIZED = 2,
+	/// Protocol violation.
+	MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION = 3,
+	/// Key value formatting.
+	MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING = 4,
+	/// Goaway timeout.
+	MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT = 5,
+	/// Timeout.
+	MOQ_PROTOCOL_KIND_TIMEOUT = 6,
+	/// Version.
+	MOQ_PROTOCOL_KIND_VERSION = 7,
+	/// Required extension.
+	MOQ_PROTOCOL_KIND_REQUIRED_EXTENSION = 8,
+	/// Invalid role.
+	MOQ_PROTOCOL_KIND_INVALID_ROLE = 9,
+	/// Unexpected stream.
+	MOQ_PROTOCOL_KIND_UNEXPECTED_STREAM = 10,
+	/// Delivery timeout.
+	MOQ_PROTOCOL_KIND_DELIVERY_TIMEOUT = 11,
+	/// Session closed.
+	MOQ_PROTOCOL_KIND_SESSION_CLOSED = 12,
+	/// Going away.
+	MOQ_PROTOCOL_KIND_GOING_AWAY = 13,
+	/// Too far behind.
+	MOQ_PROTOCOL_KIND_TOO_FAR_BEHIND = 14,
+	/// Malformed track.
+	MOQ_PROTOCOL_KIND_MALFORMED_TRACK = 15,
+	/// Not found.
+	MOQ_PROTOCOL_KIND_NOT_FOUND = 16,
+	/// Unroutable.
+	MOQ_PROTOCOL_KIND_UNROUTABLE = 17,
+	/// Old.
+	MOQ_PROTOCOL_KIND_OLD = 18,
+	/// Evicted.
+	MOQ_PROTOCOL_KIND_EVICTED = 19,
+	/// Wrong size.
+	MOQ_PROTOCOL_KIND_WRONG_SIZE = 20,
+	/// Frame too large.
+	MOQ_PROTOCOL_KIND_FRAME_TOO_LARGE = 21,
+	/// Timestamp mismatch.
+	MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH = 22,
+	/// App.
+	MOQ_PROTOCOL_KIND_APP = 23,
+	/// Unknown.
+	MOQ_PROTOCOL_KIND_UNKNOWN = 24,
+}
+
+/// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
+///
+/// Filled by [`crate::moq_error_protocol`] after a call returned a negative code. Do not parse
+/// [`crate::moq_error`] for this; that string is diagnostics only.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub struct moq_protocol_error {
+	/// [`moq_error_scope`] discriminant.
+	pub scope: u32,
+	/// The integer on the wire, kept verbatim.
+	pub code: u32,
+	/// [`moq_protocol_kind`] discriminant.
+	pub kind: u32,
+}
+
 /// Status code returned by FFI functions.
 ///
 /// Negative values indicate errors, zero indicates success,
@@ -203,6 +288,83 @@ impl From<moq_video::Error> for Error {
 impl From<tracing::metadata::ParseLevelError> for Error {
 	fn from(err: tracing::metadata::ParseLevelError) -> Self {
 		Error::Level(err.to_string())
+	}
+}
+
+impl Error {
+	/// Structured protocol details when this is a session or stream code, not a local failure.
+	pub(crate) fn protocol(&self) -> Option<moq_protocol_error> {
+		std::iter::successors(Some(self as &(dyn std::error::Error + 'static)), |err| err.source())
+			.find_map(|err| err.downcast_ref::<moq_net::Error>().and_then(protocol_of_net))
+	}
+}
+
+fn protocol_of_net(err: &moq_net::Error) -> Option<moq_protocol_error> {
+	match err {
+		moq_net::Error::Transport(_) => None,
+		moq_net::Error::Session(err) => Some(from_session(err)),
+		moq_net::Error::Stream(err) => Some(from_stream(err)),
+		moq_net::Error::App(app) => Some(from_stream(&moq_net::StreamError::App(*app))),
+		_ => None,
+	}
+}
+
+fn from_session(err: &moq_net::SessionError) -> moq_protocol_error {
+	moq_protocol_error {
+		scope: moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+		code: err.to_code(),
+		kind: session_kind(err) as u32,
+	}
+}
+
+fn from_stream(err: &moq_net::StreamError) -> moq_protocol_error {
+	moq_protocol_error {
+		scope: moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
+		code: err.to_code(),
+		kind: stream_kind(err) as u32,
+	}
+}
+
+fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
+	use moq_protocol_kind::*;
+	match err {
+		moq_net::SessionError::Cancel => MOQ_PROTOCOL_KIND_CANCEL,
+		moq_net::SessionError::Internal => MOQ_PROTOCOL_KIND_INTERNAL,
+		moq_net::SessionError::Unauthorized => MOQ_PROTOCOL_KIND_UNAUTHORIZED,
+		moq_net::SessionError::ProtocolViolation => MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION,
+		moq_net::SessionError::KeyValueFormatting => MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING,
+		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,
+		moq_net::SessionError::Timeout => MOQ_PROTOCOL_KIND_TIMEOUT,
+		moq_net::SessionError::Version => MOQ_PROTOCOL_KIND_VERSION,
+		moq_net::SessionError::RequiredExtension => MOQ_PROTOCOL_KIND_REQUIRED_EXTENSION,
+		moq_net::SessionError::InvalidRole => MOQ_PROTOCOL_KIND_INVALID_ROLE,
+		moq_net::SessionError::UnexpectedStream => MOQ_PROTOCOL_KIND_UNEXPECTED_STREAM,
+		moq_net::SessionError::App(_) => MOQ_PROTOCOL_KIND_APP,
+		moq_net::SessionError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
+		_ => MOQ_PROTOCOL_KIND_UNKNOWN,
+	}
+}
+
+fn stream_kind(err: &moq_net::StreamError) -> moq_protocol_kind {
+	use moq_protocol_kind::*;
+	match err {
+		moq_net::StreamError::Session(_) => MOQ_PROTOCOL_KIND_SESSION_CLOSED,
+		moq_net::StreamError::Internal => MOQ_PROTOCOL_KIND_INTERNAL,
+		moq_net::StreamError::Cancel => MOQ_PROTOCOL_KIND_CANCEL,
+		moq_net::StreamError::DeliveryTimeout => MOQ_PROTOCOL_KIND_DELIVERY_TIMEOUT,
+		moq_net::StreamError::GoingAway => MOQ_PROTOCOL_KIND_GOING_AWAY,
+		moq_net::StreamError::TooFarBehind => MOQ_PROTOCOL_KIND_TOO_FAR_BEHIND,
+		moq_net::StreamError::MalformedTrack => MOQ_PROTOCOL_KIND_MALFORMED_TRACK,
+		moq_net::StreamError::NotFound => MOQ_PROTOCOL_KIND_NOT_FOUND,
+		moq_net::StreamError::Unroutable => MOQ_PROTOCOL_KIND_UNROUTABLE,
+		moq_net::StreamError::Old => MOQ_PROTOCOL_KIND_OLD,
+		moq_net::StreamError::Evicted => MOQ_PROTOCOL_KIND_EVICTED,
+		moq_net::StreamError::WrongSize => MOQ_PROTOCOL_KIND_WRONG_SIZE,
+		moq_net::StreamError::FrameTooLarge => MOQ_PROTOCOL_KIND_FRAME_TOO_LARGE,
+		moq_net::StreamError::TimestampMismatch => MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH,
+		moq_net::StreamError::App(_) => MOQ_PROTOCOL_KIND_APP,
+		moq_net::StreamError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
+		_ => MOQ_PROTOCOL_KIND_UNKNOWN,
 	}
 }
 

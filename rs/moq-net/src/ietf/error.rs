@@ -138,7 +138,7 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 /// without the draft in hand tells the peer the opposite of what happened.
 pub(crate) mod request {
 	use super::Version;
-	use crate::Error;
+	use crate::{Error, SessionError, StreamError};
 
 	/// Which request the error answers, so draft-14 picks the right registry.
 	///
@@ -247,21 +247,26 @@ pub(crate) mod request {
 	/// would say something the peer's registry gives a different meaning.
 	pub(crate) fn to_code(err: &Error, kind: Kind, version: Version) -> u64 {
 		let registered = match err {
-			Error::Unauthorized => return UNAUTHORIZED,
-			Error::Timeout => return TIMEOUT,
-			Error::Unsupported | Error::Version => return NOT_SUPPORTED,
-			Error::NotFound => does_not_exist(kind, version),
+			Error::Unauthorized | Error::Session(SessionError::Unauthorized) => return UNAUTHORIZED,
+			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
+				return TIMEOUT;
+			}
+			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
+			Error::NotFound | Error::Stream(StreamError::NotFound) => does_not_exist(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
 			// cannot act on "we do not want it": what it needs to know is that we do not have
 			// it, which is the same refusal from its side. Only the requests that offer content
 			// say UNINTERESTED.
-			Error::Unroutable => match kind {
+			Error::Unroutable | Error::Stream(StreamError::Unroutable) => match kind {
 				Kind::Subscribe | Kind::Fetch => does_not_exist(kind, version),
 				Kind::Publish | Kind::PublishNamespace | Kind::SubscribeNamespace => uninterested(kind, version),
 			},
 			// Our own parse failure is, from the peer's side, a malformed track.
-			Error::Decode(_) | Error::BoundsExceeded(_) | Error::MalformedTrack => malformed_track(kind, version),
-			Error::GoingAway => going_away(version),
+			Error::Decode(_)
+			| Error::BoundsExceeded(_)
+			| Error::MalformedTrack
+			| Error::Stream(StreamError::MalformedTrack) => malformed_track(kind, version),
+			Error::GoingAway | Error::Stream(StreamError::GoingAway) => going_away(version),
 			// Everything else, a duplicate included: no draft assigns it a value, and
 			// INTERNAL_ERROR is how a peer reads an unregistered code anyway.
 			_ => return INTERNAL_ERROR,
@@ -487,7 +492,7 @@ mod tests {
 			assert_eq!(from_stream_code(CANCELLED, version), StreamError::Cancel);
 			assert!(matches!(
 				Error::from(from_stream_code(CANCELLED, version)),
-				Error::Cancel
+				Error::Stream(StreamError::Cancel)
 			));
 		}
 
@@ -617,7 +622,7 @@ mod tests {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
 			assert!(matches!(
 				Error::from(from_stream_code(code, Version::Draft20)),
-				Error::Remote(remote) if remote == code
+				Error::Stream(StreamError::Unknown(remote)) if remote == code
 			));
 		}
 	}

@@ -9,10 +9,7 @@ use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
 fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
-	timestamp
-		.as_micros()
-		.try_into()
-		.map_err(|_| MoqError::TimeOverflow(moq_net::TimeOverflow))
+	timestamp.as_micros().try_into().map_err(|_| MoqError::TimeOverflow)
 }
 
 fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {

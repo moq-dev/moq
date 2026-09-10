@@ -412,6 +412,20 @@ pub enum Error {
 	#[error("session closed")]
 	SessionClosed,
 
+	/// A session-scoped protocol error, with its registry and verbatim code.
+	///
+	/// Produced by [`from_transport`](Self::from_transport) for a session close, and by
+	/// converting a [`SessionError`]. Local conditions use the specific variants above.
+	#[error(transparent)]
+	Session(SessionError),
+
+	/// A stream-scoped protocol error, with its registry and verbatim code.
+	///
+	/// The stream counterpart to [`Self::Session`]. The two registries are disjoint, so
+	/// the same integer is a different failure in each.
+	#[error(transparent)]
+	Stream(StreamError),
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -456,6 +470,8 @@ impl Error {
 			Self::MalformedTrack => 22,
 			Self::SessionClosed => 25,
 			Self::App(app) => *app as u32 + 64,
+			Self::Session(err) => err.to_code(),
+			Self::Stream(err) => err.to_code(),
 			Self::Remote(code) => *code,
 		}
 	}
@@ -481,54 +497,17 @@ impl Error {
 	}
 }
 
-/// Map a decoded session code back into the crate's error type.
+/// Preserve the session registry when carrying a protocol error.
 impl From<SessionError> for Error {
 	fn from(err: SessionError) -> Self {
-		match err {
-			SessionError::Cancel => Self::Cancel,
-			SessionError::Unauthorized => Self::Unauthorized,
-			SessionError::ProtocolViolation => Self::ProtocolViolation,
-			SessionError::Version => Self::Version,
-			SessionError::RequiredExtension => Self::RequiredExtension,
-			SessionError::InvalidRole => Self::InvalidRole,
-			SessionError::UnexpectedStream => Self::UnexpectedStream,
-			SessionError::KeyValueFormatting => Self::TooManyParameters,
-			SessionError::GoawayTimeout => Self::GoawayTimeout,
-			SessionError::Timeout => Self::Timeout,
-			SessionError::App(app) => Self::App(app),
-			// No local counterpart, so keep the code rather than inventing a meaning.
-			SessionError::Internal => Self::Remote(err.to_code()),
-			SessionError::Unknown(code) => Self::Remote(code),
-		}
+		Self::Session(err)
 	}
 }
 
-/// Map a decoded stream code back into the crate's error type.
+/// Preserve the stream registry when carrying a protocol error.
 impl From<StreamError> for Error {
 	fn from(err: StreamError) -> Self {
-		match err {
-			StreamError::Cancel => Self::Cancel,
-			StreamError::DeliveryTimeout => Self::Timeout,
-			StreamError::GoingAway => Self::GoingAway,
-			StreamError::TooFarBehind => Self::Lagged,
-			StreamError::NotFound => Self::NotFound,
-			StreamError::Unroutable => Self::Unroutable,
-			StreamError::Old => Self::Old,
-			StreamError::Evicted => Self::Evicted,
-			StreamError::WrongSize => Self::WrongSize,
-			StreamError::FrameTooLarge => Self::FrameTooLarge,
-			StreamError::TimestampMismatch => Self::TimestampMismatch,
-			StreamError::App(app) => Self::App(app),
-			// Deliberately not `inner.into()`: that yields a session-space value, which the
-			// stream re-encode would then put back on a stream. The inner reason is always
-			// Internal off the wire anyway, since the stream never carried it.
-			StreamError::Session(_) => Self::SessionClosed,
-			// No local counterpart, so keep the code rather than inventing a meaning.
-			StreamError::MalformedTrack => Self::MalformedTrack,
-			// No local counterpart, so keep the code rather than inventing a meaning.
-			StreamError::Internal => Self::Remote(err.to_code()),
-			StreamError::Unknown(code) => Self::Remote(code),
-		}
+		Self::Stream(err)
 	}
 }
 
@@ -540,6 +519,11 @@ impl From<StreamError> for Error {
 impl From<&Error> for SessionError {
 	fn from(err: &Error) -> Self {
 		match err {
+			Error::Session(err) => err.clone(),
+			// App codes share the 64+ range in both registries.
+			Error::Stream(StreamError::App(app)) => Self::App(*app),
+			// A stream-scoped code has no meaning in this registry; don't forward the number.
+			Error::Stream(_) => Self::Internal,
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
@@ -574,6 +558,11 @@ impl From<&Error> for SessionError {
 impl From<&Error> for StreamError {
 	fn from(err: &Error) -> Self {
 		match err {
+			Error::Stream(err) => err.clone(),
+			// App codes share the 64+ range in both registries.
+			Error::Session(SessionError::App(app)) => Self::App(*app),
+			// A session-scoped code has no meaning in this registry; don't forward the number.
+			Error::Session(_) => Self::Internal,
 			Error::Cancel | Error::Closed => Self::Cancel,
 			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Old => Self::Old,
@@ -807,18 +796,18 @@ mod tests {
 		};
 
 		// A MoQ-layer auth rejection is now classifiable, because the code is specified.
-		assert!(matches!(session(0x2), Error::Unauthorized));
-		assert!(matches!(session(0x0), Error::Cancel));
+		assert!(matches!(session(0x2), Error::Session(SessionError::Unauthorized)));
+		assert!(matches!(session(0x0), Error::Session(SessionError::Cancel)));
 
 		// Same integer, different space: 0 ends a session cleanly but fails a stream.
-		assert!(matches!(stream(0x1), Error::Cancel));
-		assert!(matches!(stream(0x0), Error::Remote(0)));
-		assert!(matches!(stream(0x5), Error::Lagged));
+		assert!(matches!(stream(0x1), Error::Stream(StreamError::Cancel)));
+		assert!(matches!(stream(0x0), Error::Stream(StreamError::Internal)));
+		assert!(matches!(stream(0x5), Error::Stream(StreamError::TooFarBehind)));
 
 		// 0x22 is what our own `Old` encodes to, but the draft reserves 32-63 rather than
 		// assigning it, so a peer's 0x22 stays opaque instead of being read as `Old`.
-		assert!(matches!(stream(0x22), Error::Remote(0x22)));
-		assert!(matches!(session(0x22), Error::Remote(0x22)));
+		assert!(matches!(stream(0x22), Error::Stream(StreamError::Unknown(0x22))));
+		assert!(matches!(session(0x22), Error::Session(SessionError::Unknown(0x22))));
 
 		// Neither: the transport itself failed.
 		assert!(matches!(

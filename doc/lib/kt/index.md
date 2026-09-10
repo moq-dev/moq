@@ -55,7 +55,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/`datagrams()`,
 `setCatalogSection`, `used()`/`unused()`. `MoqException.isAuth` and
-`isShutdown` classify errors. Cancelling the collecting coroutine cancels the
+`isShutdown` classify errors. `protocolError` is the structured protocol failure
+(scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
 native side.
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)

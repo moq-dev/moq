@@ -49,6 +49,9 @@ from moq_ffi import (
     MoqDimensions as Dimensions,
 )
 from moq_ffi import (
+    MoqErrorScope as ErrorScope,
+)
+from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
@@ -56,6 +59,12 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqMediaFrame as MediaFrame,
+)
+from moq_ffi import (
+    MoqProtocolError as ProtocolError,
+)
+from moq_ffi import (
+    MoqProtocolKind as ProtocolKind,
 )
 from moq_ffi import (
     MoqRoute as Route,
@@ -124,8 +133,11 @@ __all__ = [
     "Container",
     "Datagram",
     "Dimensions",
+    "ErrorScope",
     "Frame",
     "FetchGroupOptions",
+    "ProtocolError",
+    "ProtocolKind",
     "MediaFrame",
     "Route",
     "Subscription",

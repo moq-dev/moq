@@ -43,10 +43,13 @@ impl Client {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn map_connect_error(err: moq_tokio::Error) -> MoqError {
-	match err.connect_error() {
-		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
-		Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
-		_ => MoqError::Connect(format!("{err}")),
+	match err {
+		moq_tokio::Error::MoqNet(err) => err.into(),
+		err => match err.connect_error() {
+			Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
+			Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
+			_ => MoqError::Connect(format!("{err}")),
+		},
 	}
 }
 
@@ -64,13 +67,15 @@ fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 /// broken connection.
 #[cfg(not(target_arch = "wasm32"))]
 fn map_closed_error(err: moq_tokio::Error) -> MoqError {
-	match err.connect_error() {
-		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
-		Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
-		_ => match err {
-			moq_tokio::Error::Stopped => MoqError::Closed,
-			moq_tokio::Error::MoqNet(err) => err.into(),
-			err => MoqError::Connect(format!("{err}")),
+	match err {
+		moq_tokio::Error::Stopped => MoqError::Closed,
+		// A peer's session/stream code stays structured. HTTP 401/403 are a
+		// connect-time rejection, not a protocol code, and land below.
+		moq_tokio::Error::MoqNet(err) => err.into(),
+		err => match err.connect_error() {
+			Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
+			Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
+			_ => MoqError::Connect(format!("{err}")),
 		},
 	}
 }
@@ -146,24 +151,36 @@ mod tests {
 	/// match on instead of being flattened into a `Connect` string.
 	#[test]
 	fn maps_closed_errors_without_flattening_the_reason() {
-		assert!(matches!(
-			map_closed_error(moq_net::Error::Remote(7).into()),
-			MoqError::Protocol(moq_net::Error::Remote(7))
-		));
+		match map_closed_error(moq_net::Error::from(moq_net::SessionError::Unknown(7)).into()) {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, crate::error::MoqErrorScope::Session);
+				assert_eq!(protocol.code, 7);
+				assert_eq!(protocol.kind, crate::error::MoqProtocolKind::Unknown);
+			}
+			other => panic!("expected Protocol Unknown(7), got {other:?}"),
+		}
 		assert!(matches!(
 			map_closed_error(moq_net::Error::Cancel.into()),
-			MoqError::Protocol(moq_net::Error::Cancel)
+			MoqError::Cancelled
 		));
 
 		// A local stop is an expected teardown, not a failed connection: the bindings'
 		// `is_shutdown` reads `Closed`, and `Connect` would read as a broken dial.
 		assert!(matches!(map_closed_error(moq_tokio::Error::Stopped), MoqError::Closed));
 
-		// Auth still wins, so `is_auth` keeps working on a rejection delivered as a close.
+		// HTTP auth still wins. A protocol Unauthorized is a structured Protocol error
+		// (kind Unauthorized), not this HTTP 401 variant.
 		assert!(matches!(
-			map_closed_error(moq_net::Error::Unauthorized.into()),
+			map_closed_error(moq_tokio::ConnectError::Unauthorized.into()),
 			MoqError::Unauthorized
 		));
+		match map_closed_error(moq_net::Error::from(moq_net::SessionError::Unauthorized).into()) {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.kind, crate::error::MoqProtocolKind::Unauthorized);
+				assert_eq!(protocol.code, 0x2);
+			}
+			other => panic!("expected Protocol Unauthorized, got {other:?}"),
+		}
 		assert!(matches!(
 			map_closed_error(moq_tokio::ConnectError::Forbidden.into()),
 			MoqError::Forbidden
@@ -727,7 +744,7 @@ impl MoqSession {
 	/// Close the session with the given error code, stopping any reconnect loop.
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::enter();
-		self.teardown(moq_net::Error::Remote(code));
+		self.teardown(moq_net::SessionError::from_code(code).into());
 		// NOTE: we don't abort the closed Task; the teardown above resolves it
 		// (with the close reason, or Ok once the connection loop stops).
 	}

@@ -42,7 +42,7 @@ how it looks in that language:
 - **Serve on demand**: accept track and broadcast requests as they arrive instead of publishing up front.
 - **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
 - **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
-- **Errors** distinguish auth rejection (don't retry) from shutdown (expected) from transport failure.
+- **Errors** distinguish auth rejection (don't retry) from shutdown (expected) from transport failure. A protocol error carries the peer's session or stream code, a known kind when recognized, and keeps an application or unknown code without loss.
 
 Dart is the exception on codecs: its published binaries carry no encoder or
 decoder, so it moves already-encoded frames.

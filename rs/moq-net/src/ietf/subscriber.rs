@@ -1874,8 +1874,8 @@ where
 		};
 
 		match res {
-			Err(Error::Cancel) => {
-				let _ = producer.abort(Error::Cancel);
+			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
+				let _ = producer.abort(err);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");

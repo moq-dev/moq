@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every received protocol code is `Error::Session` / `Error::Stream`, preserving
+  its registry and numeric value, including cancellation and internal-error codes.
+
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-net-v0.2.18...moq-net-v0.2.19) - 2026-09-09
 
 ### Added

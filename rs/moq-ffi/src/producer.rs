@@ -164,7 +164,7 @@ impl MoqBroadcastProducer {
 
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(state.broadcast.consume())
 	}
 
@@ -216,7 +216,7 @@ impl MoqBroadcastProducer {
 	pub fn dynamic(&self) -> Result<Arc<MoqBroadcastDynamic>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(Arc::new(MoqBroadcastDynamic {
 			task: Task::new(DynamicProducer {
 				inner: state.broadcast.dynamic(),
@@ -304,7 +304,7 @@ impl MoqBroadcastProducer {
 	pub fn publish_audio(&self, init: MoqAudioInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::AudioInit = init.into();
 		let mut broadcast = state.broadcast.clone();
@@ -326,7 +326,7 @@ impl MoqBroadcastProducer {
 	pub fn publish_video(&self, init: MoqVideoInit) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::VideoInit = init.into();
 		let mut broadcast = state.broadcast.clone();
@@ -347,7 +347,7 @@ impl MoqBroadcastProducer {
 	pub fn publish_container(&self, init: MoqContainerInit) -> Result<Arc<MoqContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::ContainerInit = init.into();
 		let import = moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &init)
@@ -367,7 +367,7 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let request = request.take()?;
 		let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init.into())
@@ -384,7 +384,7 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqMediaProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let request = request.take()?;
 		let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init.into())
@@ -399,7 +399,7 @@ impl MoqBroadcastProducer {
 	pub fn publish_video_stream(&self, init: MoqVideoInit) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::VideoInit = init.into();
 		let mut broadcast = state.broadcast.clone();
@@ -425,7 +425,7 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqContainerStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let import =
 			moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), format.into())
@@ -444,7 +444,7 @@ impl MoqBroadcastProducer {
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();
-		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 		let info = raw_track_info(info)?;
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
@@ -803,7 +803,7 @@ impl MoqGroupProducer {
 	pub fn consume(&self) -> Result<Arc<MoqGroupConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
-		let group = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let group = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(Arc::new(MoqGroupConsumer::new(group.consume())))
 	}
 
@@ -815,7 +815,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
-		let group = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
@@ -824,7 +824,7 @@ impl MoqGroupProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut group = guard.take().ok_or_else(|| MoqError::Closed)?;
+		let mut group = guard.take().ok_or(MoqError::Closed)?;
 		group.finish()?;
 		Ok(())
 	}
@@ -860,7 +860,7 @@ impl MoqMediaProducer {
 	pub fn name(&self) -> Result<String, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
-		let media = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let media = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(media.demand.name().to_string())
 	}
 
@@ -903,7 +903,7 @@ impl MoqMediaProducer {
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 
 		let timestamp = hang::container::Timestamp::from_micros(frame.timestamp_us)?;
 		media
@@ -950,7 +950,7 @@ impl MoqMediaProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut media = guard.take().ok_or_else(|| MoqError::Closed)?;
+		let mut media = guard.take().ok_or(MoqError::Closed)?;
 		media
 			.import
 			.finish()
@@ -968,7 +968,7 @@ impl MoqContainerProducer {
 	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let container = guard.as_mut().ok_or(MoqError::Closed)?;
 		container
 			.import
 			.decode(&payload)
@@ -1006,7 +1006,7 @@ impl MoqContainerProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut container = guard.take().ok_or_else(|| MoqError::Closed)?;
+		let mut container = guard.take().ok_or(MoqError::Closed)?;
 		container
 			.import
 			.finish()
@@ -1023,7 +1023,7 @@ impl MoqMediaStreamProducer {
 	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 		media
 			.import
 			.decode(&payload)
@@ -1039,7 +1039,7 @@ impl MoqMediaStreamProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut media = guard.take().ok_or_else(|| MoqError::Closed)?;
+		let mut media = guard.take().ok_or(MoqError::Closed)?;
 		media
 			.import
 			.finish()
@@ -1055,7 +1055,7 @@ impl MoqContainerStreamProducer {
 	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let container = guard.as_mut().ok_or(MoqError::Closed)?;
 		container
 			.import
 			.decode(&payload)
@@ -1067,7 +1067,7 @@ impl MoqContainerStreamProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut container = guard.take().ok_or_else(|| MoqError::Closed)?;
+		let mut container = guard.take().ok_or(MoqError::Closed)?;
 		container
 			.import
 			.finish()

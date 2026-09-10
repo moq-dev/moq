@@ -177,10 +177,13 @@ impl Session {
 }
 
 fn map_connect_error(err: moq_tokio::Error) -> Error {
-	match err.connect_error() {
-		Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,
-		Some(moq_tokio::ConnectError::Forbidden) => Error::Forbidden,
-		_ => Error::Connect(Arc::new(err.into())),
+	match err {
+		moq_tokio::Error::MoqNet(err) => err.into(),
+		err => match err.connect_error() {
+			Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,
+			Some(moq_tokio::ConnectError::Forbidden) => Error::Forbidden,
+			_ => Error::Connect(Arc::new(err.into())),
+		},
 	}
 }
 
@@ -201,7 +204,7 @@ mod tests {
 		));
 		assert!(matches!(
 			map_connect_error(moq_net::Error::Unauthorized.into()),
-			Error::Unauthorized
+			Error::Moq(moq_net::Error::Unauthorized)
 		));
 		assert!(matches!(
 			map_connect_error(moq_tokio::Error::ConnectFailed),

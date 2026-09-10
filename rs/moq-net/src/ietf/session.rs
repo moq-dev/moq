@@ -632,7 +632,7 @@ where
 			.await
 		{
 			Ok(kind) => kind,
-			Err(err @ Error::Cancel) | Err(err @ Error::Remote(_)) | Err(err @ Error::Decode(DecodeError::Short)) => {
+			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
 				continue;
 			}
@@ -789,7 +789,7 @@ where
 		// header that does not parse included, still fails the session.
 		let (id, data) = match header {
 			Ok(header) => header,
-			Err(err @ Error::Cancel) | Err(err @ Error::Remote(_)) | Err(err @ Error::Decode(DecodeError::Short)) => {
+			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
 				tracing::debug!(%err, "dropping bidi stream that died before its header");
 				continue;
 			}

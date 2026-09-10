@@ -318,6 +318,8 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
+          # Enum fields must use the record's converter name without renaming it.
+          patches = [ ./nix/uniffi-dart-record-error.patch ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
           '';
