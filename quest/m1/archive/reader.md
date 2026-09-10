@@ -8,18 +8,31 @@ advertises.
 
 ## Plan
 
-Bootstrap from an object listing under the prefix: it names the timeline
-track's segments and every track's `.info` and segments. Read the timeline
-objects in order through the Window decoder, and follow a growing archive by
-re-listing; there is no manifest, head, or completion marker. A record whose
-objects the listing cannot back is not served.
+Bootstrap by listing the timeline track's `segments/` keys, sorting them, and
+replaying from a retained Window checkpoint. Records derive each track's
+`groups/<largest>.<smallest>` key from its minimum and maximum advertised IDs.
+Follow a growing archive with GET of timeline segment N+1; media listings do
+not need refreshing. Not Found is not finality. A reader behind DVR retention
+re-bootstraps from a retained checkpoint, and timeline pops evict cached ranges.
+Alternatively enumerate timeline keys after the last replayed key with
+`list_with_offset`, consuming and sorting the full result before replay.
+Pagination tokens continue one enumeration, not future refreshes.
+
+Filename listings provide a cached group-range index without media GETs. A
+backend with verified ordered offset listing may find a cold FETCH candidate
+using `PaginatedListStore` with offset `groups/<requested-group>` (19 padded
+digits, no dot) and `max_keys = 1`. Check the lower bound and committed timeline
+membership; the table resolves internal gaps. Generic listings are unordered,
+so never take their first entry as the nearest match. A stale listing cannot
+veto a successful GET referenced by a newer durable timeline record.
 
 Use `track::Dynamic` (`rs/moq-net/src/model/track.rs:1652`, minted by
 `Producer::dynamic` :1587) to accept requested tracks and groups on the
 supplied producer; a cache-miss `Consumer::fetch_group` (:2352) parks on it.
-Map `(track, group)` to its segment through the timeline's track ranges, GET
+Map `(track, group)` to its range-named object through the cached index, GET
 that one object, validate the envelope version and every group/frame table
-entry against the retrieved length, and place it in a byte-bounded LRU.
+entry against the retrieved length, filename bounds, and exact committed
+ranges, and place it in a byte-bounded LRU.
 Adjacent group FETCHes reuse the same object. A request for one audio track or
 rendition never downloads another track's object.
 

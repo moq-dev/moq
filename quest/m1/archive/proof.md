@@ -27,8 +27,19 @@ table offsets, an unknown envelope or `.info` version treated as a missing
 segment, segment create collisions under the single-writer rule, a missing
 tail, and a clean end without a completion marker.
 
+Exercise group 0, the largest QUIC varint, consecutive zero deltas, sparse
+deltas, overflow, empty objects, mismatched filename bounds, and overlapping
+ranges across segments. Reject decreasing or duplicate group arrivals while
+allowing accepted groups to complete out of order. Verify JSON-safe timescales.
+Test ordered S3 lookup at both endpoints and between ranges, unordered paginated
+results, incremental cursor recovery, DVR expiration while a reader is offline,
+and stale media listings preceding a new timeline commit. Following N+1 must
+not refresh all media listings. Wire these cases into CI for the store, writer,
+and reader implementations; do not add an unconnected standalone proof script.
+
 Finally render and reload HLS playlists while rejecting every media-object GET
-until a segment URI is requested.
+until a segment URI is requested. The range-bearing URI must resolve one
+object directly without any listing or separate index object.
 
 ## Required
 

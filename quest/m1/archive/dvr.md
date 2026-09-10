@@ -3,7 +3,7 @@
 ## Goal
 
 A viewer seeks through a bounded archive and returns to live playback using the
-same timeline and `(track, segment)` objects as an unbounded archive.
+same timeline and group-range objects as an unbounded archive.
 
 ## Plan
 

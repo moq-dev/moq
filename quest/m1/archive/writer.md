@@ -28,9 +28,16 @@ track that stops without closing blocks segment completion on purpose; the
 application applies its own deadline and calls `cut(pts)` or removes the
 track. Storage does not invent a timeout.
 
+Accept new group IDs in strictly increasing order per track; refuse duplicate
+or decreasing arrivals. Already accepted groups may finish in any order, so
+buffer completion independently and encode in sequence order. Require
+nonoverlapping object ranges across segments, including forced cuts; never
+backfill a closed segment or move its stalled groups into an overlapping range.
+
 For each `Pending` record from `Deferred::next` (:658), encode and PUT one
-object per participating track, buffering groups independently of relay
-retention. After all PUTs settle, drop the ranges of every track whose PUT
+object per participating track at `groups/<largest>.<smallest>`, buffering
+groups independently of relay retention. The bounds come from the exact
+recorded ranges; tracks with no complete groups have no object. After all PUTs settle, drop the ranges of every track whose PUT
 failed and commit with `Producer::push` (:948). That needs a per-track
 omission on `Pending` beside `Pending::gap()` (:712-719), which clears every
 track; add it here. Never publish a range first and hope the relay still has
@@ -47,7 +54,8 @@ catalog.
 The archive timeline uses the same object envelope but is not enrolled in its
 own records. After pushing segment N and applying retention pops, close the
 recording-owned Window group and store the complete groups under the timeline
-track's segment N key. Make it durable before committing N+1; a timeline PUT
+track's `segments/N` key (19-digit padded N). Commit IDs consecutively,
+including all-gap segments. Make it durable before committing N+1; a timeline PUT
 failure stops the recording at its preceding durable timeline object. Never
 cut a source group. On a clean source end, drain with
 `Deferred::finish` (:650), commit the final partial segment, and call

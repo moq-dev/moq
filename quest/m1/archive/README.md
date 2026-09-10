@@ -47,7 +47,8 @@ portable layout and codecs:
 
 ```text
 <prefix>/<encoded-track>/.info
-<prefix>/<encoded-track>/<segment>
+<prefix>/<encoded-track>/groups/<largest>.<smallest>
+<prefix>/<encoded-timeline-track>/segments/<segment>
 ```
 
 `.info` is versioned JSON with the immutable priority and timescale. A segment
@@ -57,9 +58,12 @@ adjacent groups, while audio-only or low-rendition playback never downloads
 unrelated tracks.
 
 There is no `.head`, manifest, `.complete`, or `.timeline` object. The archive
-timeline is an ordinary track stored by the same `(track, segment)` rule and
-named by the catalog's `archive` entry. Object listing is the bootstrap and
-recovery mechanism.
+timeline uses the same envelope under `segments/<segment>`, with consecutive
+IDs for incremental GETs. Other tracks use `groups/<largest>.<smallest>` with
+19-digit zero-padded inclusive bounds, strictly increasing nonoverlapping
+ranges, and no segment number or secondary index file. The catalog names the
+timeline track; the catalog quest moves that identity into `archive`. Listing
+bootstraps recovery; following the next timeline key updates the cached ranges.
 
 ### Writer and reader
 
@@ -72,7 +76,7 @@ segment and finishes the timeline; there is no completion marker.
 
 The reader takes a `broadcast::Producer` and uses `track::Dynamic`
 (`rs/moq-net/src/model/track.rs:1652`) to answer FETCH for the tracks and
-groups the timeline advertises: map the request to `(track, segment)`, GET
+groups the timeline advertises: map the request to the track's group-range key, GET
 once, validate, cache, and replay the original timestamps. Any ingest that
 produces a broadcast (RTMP, SRT, WHIP) is archivable without its own
 implementation.
@@ -82,7 +86,7 @@ implementation.
 An unbounded archive only pushes records. During each new segment commit, a
 DVR pops expired records before closing and storing that segment's timeline
 groups, then waits the configured grace period before deleting expired objects. Timeline
-objects use the segment being committed as their key. Retention stops after
+objects use `segments/<segment>` for the segment being committed. Retention stops after
 the final segment; no existing object is rewritten. HLS is a derived view of
 the archive, never a second stored copy.
 

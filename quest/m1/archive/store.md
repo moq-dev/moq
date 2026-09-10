@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq-archive` stores the versioned `(track, segment)` objects of the
+`moq-archive` stores the versioned track objects of the
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording) on memory, local disk, and
 S3-compatible storage through a generic `T: object_store::ObjectStore`.
 
@@ -17,21 +17,37 @@ The layout is the format's:
 
 ```text
 <prefix>/<encoded-track>/.info
-<prefix>/<encoded-track>/<segment>
+<prefix>/<encoded-track>/groups/<largest>.<smallest>
+<prefix>/<encoded-timeline-track>/segments/<segment>
 ```
 
 Implement the percent encoding of track names here; nothing in `rs/hang/src`
 does it yet. `.info` is a versioned JSON body with the immutable priority and
 timescale. A segment object is the versioned binary envelope: a group/frame
 table with timestamps and payload offsets, then the original payload bytes.
-Bounds-check every table entry while decoding and refuse an unknown version.
+Encode the first group ID absolutely, then `current - previous - 1` so zero
+means consecutive. Require nonempty objects, ascending IDs, checked arithmetic,
+and, for range-named objects, agreement between the table and filename bounds. Bounds-check every
+table entry while decoding and refuse an unknown version. Restrict `.info`
+timescale to the JSON safe-integer range.
+
+Use fixed-width 19-digit decimal fields. Range-named objects have no segment ID
+or companion empty index file. Timeline objects alone use consecutive
+`segments/<segment>` keys. Listing names can build a sorted in-memory range
+index without reading payloads. `list_with_offset` supports incremental
+listing; finish the enumeration before sorting or advancing a cursor. Do not
+assume that it avoids filesystem traversal. Optional `PaginatedListStore`
+seeking with `offset` and `max_keys` requires a backend with verified lexical
+ordering and offset support; that trait is not a requirement for local stores.
 
 Every PUT is a whole-object create. One writer owns a prefix, so a
-deterministic key that already exists means the segment is already persisted;
-retries neither compare checksums nor rewrite it. Object attributes such as
-content type or cache policy are optional hints, never format metadata.
+create collision is accepted only when the existing bytes equal the intended
+object; otherwise fail. Matching bounds alone do not establish identical
+groups or payloads, including after an interrupted write. Never rewrite it.
+Object attributes such as content type or cache policy are optional hints,
+never format metadata.
 
-`.info` is the exception: if it already exists, GET it and require
+For `.info`, likewise GET an existing object and require
 byte-equivalent contents. A priority or timescale mismatch is a hard enrollment
 error, never an idempotent retry.
 

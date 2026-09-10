@@ -15,8 +15,9 @@ through the Window (`js/hang/src/container/timeline.ts:134`, `:165`, backed by
 deferred commit Rust has (`Producer::deferred`,
 `rs/moq-mux/src/timeline.rs:917`).
 
-Persist one object per `(track, segment)` after all included groups complete,
-then publish the archive timeline record. A typical audio segment contains many
+Persist one range-named object per track per segment after its groups complete,
+then publish the archive timeline record. Match the 19-digit group-bound keys,
+ascending delta-encoded IDs, and sequential timeline discovery used by Rust. A typical audio segment contains many
 one-group-per-frame audio groups. Match the Rust binary envelope and `.info`
 bytes exactly, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), and share the
 writer's commit prerequisites so a failed catalog snapshot never leaves

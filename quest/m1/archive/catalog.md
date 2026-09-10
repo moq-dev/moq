@@ -28,6 +28,11 @@ promises the ranges are durable. There is no alias, dual-write, or fallback
 and a client that must tell recordings apart compares the entry's replay path
 and store URL.
 
+Update the Recording section's discovery references from `timeline` to
+`archive` in the same change; the format currently references the defined
+`timeline` field. Preserve sequential timeline keys and range-named media
+objects when changing discovery.
+
 The catalog supplies the timeline track's name and configuration; the
 timeline has no reserved physical identity. The latest catalog group still
 comes from ordinary SUBSCRIBE, and authorization for the replay path and

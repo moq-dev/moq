@@ -14,8 +14,13 @@ playlist. Playlist generation and reloads read the timeline only; a regression
 test must fail if they GET a media segment.
 
 When a player requests media, use the recording reader to GET only the selected
-`(track, segment)` object and transmux its groups on demand. Switching between
-360p and 1080p must not download both rendition objects. No LL-HLS parts.
+range-named object and transmux its groups on demand. Switching between
+360p and 1080p must not download both rendition objects. Emit media URIs with
+the track and inclusive group bounds from the timeline record, so the handler
+can derive `groups/<largest>.<smallest>` directly without listing or a
+segment-ID lookup. HLS sequence numbers do not appear in storage keys. Keep
+one storage object per track per timeline segment; a MoQ group need not be an
+HLS segment, especially for one-group-per-frame audio. No LL-HLS parts.
 
 Emit `EXT-X-ENDLIST` exactly when the timeline track the exporter reads
 finishes cleanly, as the live export already does

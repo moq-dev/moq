@@ -753,7 +753,8 @@ A live broadcast is bounded history: moq-lite {{moql}} serves the present with S
 A *recording* is the persistent tier, writing a broadcast to a filesystem or object store so it can be served back long after the live session ended.
 
 A recording is addressed by segment.
-The timeline ({{timeline}}) already names every segment and the groups that carry it, so it is the recording's only index: the segment number names each track's object.
+The timeline ({{timeline}}) names every segment and the groups that carry it.
+Each track's object is addressed by its smallest and largest stored group IDs; the timeline supplies those bounds without reading media.
 A reader that wants segment N of a track issues one whole-object GET, with no range header and no second request, which is what both an HLS or DASH origin and a player seeking a VOD recording need.
 
 A recording covers the tracks the timeline describes, plus the catalog and the timeline itself.
@@ -764,7 +765,8 @@ A recording is a set of objects under a common prefix:
 
 ~~~
 <prefix>/<encoded-track>/.info
-<prefix>/<encoded-track>/<segment>
+<prefix>/<encoded-track>/groups/<largest>.<smallest>
+<prefix>/<encoded-timeline-track>/segments/<segment>
 ~~~
 
 The common prefix is application-defined and is not interpreted by this format.
@@ -772,10 +774,19 @@ The common prefix is application-defined and is not interpreted by this format.
 `<encoded-track>` is the track's UTF-8 name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded as `%` followed by two uppercase hexadecimal digits.
 For example, `catalog.json` becomes `catalog%2Ejson`.
 An encoded name never contains `/` or begins with `.`, so a track cannot address anything outside the prefix.
-`.info` is the only reserved object name; decimal segment numbers cannot collide with it.
+`.info`, `groups`, and `segments` are reserved within a track directory.
 
-`<segment>` is the timeline record's `segment` value in decimal without leading zeros.
-Every track is stored this way, including the catalog and the timeline track named by the catalog's `archive` entry.
+`<smallest>` and `<largest>` are the inclusive first and last group sequence numbers in the object.
+Each is a QUIC variable-length integer written as exactly 19 decimal digits, padded with leading zeros, so lexical and numeric order agree.
+A range-named object MUST contain at least one group, and its table's first and last sequences MUST match the filename.
+For each track, object ranges MUST be nonoverlapping and strictly increasing in timeline segment order; gaps are allowed both within and between objects.
+A track with no stored groups for a segment has no object or range in that record.
+There are no empty index objects or duplicate copies addressed by segment number.
+
+This layout applies to every recorded track, including the catalog, except the recording-owned timeline track identified by the catalog's `timeline` field ({{timeline-catalog}}).
+The timeline uses `segments/<segment>` with the same binary envelope and at least one complete Window group per object.
+`<segment>` is the committed timeline segment ID, encoded as 19 zero-padded decimal digits within the QUIC variable-length integer range.
+After its first segment, the recording MUST commit consecutive segment IDs, including all-gap segments.
 Each track has its own objects so a reader can fetch one rendition without downloading the others.
 
 ## Track Objects {#recording-track}
@@ -791,7 +802,7 @@ Each track has its own objects so a reader can fetch one rendition without downl
 
 All three fields are required integers.
 `version` identifies this recording format and MUST be 1.
-`priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is in the range 0 through 255, and `timescale` is nonzero and fits a QUIC variable-length integer.
+`priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is in the range 0 through 255, and `timescale` is in the range 1 through 9007199254740991, so JSON consumers can preserve it exactly.
 A reader MUST preserve integer values exactly.
 `Publisher Max Age` is not stored; a reader supplies its own serving policy.
 
@@ -807,7 +818,7 @@ Segment Object {
   Version (i) = 1
   Group Count (i)
   Group Table {
-    Sequence (i)
+    Sequence Delta (i)
     Frame Count (i)
     Frame Table {
       Timestamp (i)
@@ -821,7 +832,11 @@ Segment Object {
 
 Fields annotated `(i)` are variable-length integers using the QUIC encoding ({{!RFC9000}}, Section 16).
 `Group Count` gives the number of group entries; each `Frame Count` gives the number of frame entries in that group.
-Groups appear in strictly ascending `Sequence` order, matching the ranges in the timeline, and frame entries appear in their original order within each group.
+The first `Sequence Delta` is the absolute group sequence number.
+Each subsequent value is the group sequence number minus the previous sequence number minus one; zero therefore means the next consecutive group.
+Groups MUST have strictly ascending sequence numbers; reconstruction MUST reject values exceeding the QUIC variable-length integer limit.
+For range-named objects, the sequences MUST match the ranges in the timeline.
+Frame entries appear in their original order within each group.
 `Timestamp` is the frame's absolute timestamp in the track's `timescale` units, not a delta.
 
 `Payload Offset` is relative to the start of `Payload Bytes`, immediately after the last table entry; `Payload Length` is the frame's payload size in bytes.
@@ -841,6 +856,7 @@ The timeline uses the same envelope and stores only complete Window groups ({{ti
 Its own groups are discovered by listing, not included in the record's `tracks`, avoiding a record that must index itself.
 A reader replays their checkpoints and operations in group order, preserving group boundaries and their independent DEFLATE windows.
 Neither timeline nor media objects are appended to or rewritten.
+One writer owns a recording prefix. An existing key MAY be reused only for identical object bytes; a conflicting create MUST fail.
 
 ## Writer Behavior {#recording-writer}
 A writer subscribes to the broadcast and buffers the in-progress segment independently of the publisher or relay cache.
@@ -856,11 +872,13 @@ The segment number and timing are unchanged, including when every track is omitt
 The writer pushes the resulting record and every subsequent record through its own Window encoder.
 It MUST NOT copy source frames whose Window position or group-local DEFLATE dictionary depends on a record it changed.
 
-A group that arrives after its segment object has been written is not recorded.
-A writer SHOULD wait for the segment to be complete rather than write early, and MAY bound that wait so a track that has stopped without closing cannot stall the recording indefinitely.
-This is a deliberate trade: addressing content by segment is what makes a segment retrievable in one request, and it costs the ability to append a late group to an object already written.
+A writer MUST accept new groups for each track in strictly increasing sequence order and MUST refuse a duplicate or decreasing sequence; it does not reorder arrivals.
+Groups already accepted MAY complete in any order; the writer buffers them and writes their table in sequence order.
+An incomplete group omitted by an application-forced segment cut MUST NOT be inserted into a later object if that would overlap or precede an earlier object's range.
+The application MAY force a cut or remove a stalled track; storage does not impose a timeout.
+A writer MUST NOT insert objects for earlier segments after committing a later segment.
 
-For segment N, the writer publishes the stored ranges, applies any retention pops, closes the timeline's current Window group, and stores the complete groups under the timeline track's segment N key.
+For segment N, the writer publishes the stored ranges, applies any retention pops, closes the timeline's current Window group, and stores the complete groups under the timeline track's `segments/N` key, with N encoded as specified in {{recording-layout}}.
 It MUST make that object durable before committing the next segment or deleting expired objects.
 If the timeline object cannot be made durable, the recording stops at the preceding durable timeline object.
 
@@ -885,24 +903,38 @@ The index therefore never advertises media the retention process has already del
 Relay cache eviction does not change the recording timeline.
 
 ## Bootstrap and Recovery {#recording-recovery}
-A reader or restarting writer MUST list the prefix to discover which timeline and track segment objects exist.
-The catalog supplies the timeline track's name; it has no reserved physical identity.
-The reader loads the timeline objects in segment order and replays their Window groups, including retention operations, before serving the retained records.
-A record whose referenced track properties or segment objects cannot be backed by the listing MUST NOT be served.
+A reader or restarting writer lists the timeline track's `segments/` prefix and replays its objects in numeric segment order, including retention operations, from a retained checkpoint.
+The catalog supplies the timeline track's name ({{timeline-catalog}}).
+The recovered records determine the committed track object keys; a missing or malformed referenced object MUST NOT be served.
 Objects not referenced by the recovered timeline do not advertise content on their own.
-A reader following an active recording lists again to discover new objects; it does not use ranged GETs to follow an object.
+Listing is not an atomic snapshot across tracks; absence from an earlier listing MUST NOT override a successful GET of an object referenced by a later durable timeline record.
+
+After replaying segment N, a reader follows an active recording by GET of `segments/N+1`, without refreshing media listings.
+Not Found does not distinguish a pending commit, an expired DVR segment, or an interrupted recording.
+A reader that has fallen behind retention MUST bootstrap again from a retained checkpoint.
+Alternatively, a reader MAY list timeline keys after its last replayed key, consume all pages, sort the results, and replay them in order.
+A continuation token is used only within that enumeration; the next refresh starts from the last replayed key.
+A reader MUST NOT advance its replay cursor past a missing segment without recovering from a retained checkpoint.
+Retention operations evict expired ranges from the reader's cached index; incremental listing alone does not report deletions.
 
 ## Reader Behavior {#recording-reader}
-Reading segment N of track T is: resolve T's object name from N, GET it, and parse the groups.
+Reading segment N of track T is: take the minimum and maximum group IDs from T's ranges in record N, GET `groups/<largest>.<smallest>`, and parse the groups.
+The table MUST contain exactly the group sequences advertised for that track in the record, including its gaps.
 Nothing on that path reads media the consumer did not ask for, and nothing requires a second request.
 
 A reader MAY serve moq-lite FETCH from a recording.
-Given a group, the timeline record whose range covers it names the segment, and the object's table locates the group and any requested `frame_start` {{moql}}.
+Given a group, a reader locates the candidate object from a cached filename range index or the timeline's track ranges, then uses the table for the group and any requested `frame_start` {{moql}}.
+A filename listing requires no media GETs.
+On a backend guaranteeing lexical listing order and exclusive offsets, listing after `groups/<requested-group>` (19 padded digits, without the dot) selects the first candidate with an upper bound at least the requested group.
+A reader MUST check the lower bound and committed timeline membership before serving it; an internal gap is resolved by the candidate's table.
+An unordered listing MUST be collected and sorted before selecting a candidate; taking its first result is insufficient.
 The reader reconstructs moq-lite FRAME headers from the stored timestamps and lengths, preserving the original payload bytes.
 A group absent from the recording is a normal FETCH failure.
 
 A reader deriving a presentation-ordered format renders it from the timeline and transmuxes segment objects on demand.
 Nothing derived needs to be stored: the playlist or manifest is a function of the timeline, and a media segment is a function of one recorded object.
+An HLS segment URI can carry the track and both group bounds, allowing the handler to resolve the exact object without listing or a segment-ID index.
+HLS sequence numbers remain timeline metadata and need not occur in object names.
 
 
 # Security Considerations
@@ -931,8 +963,8 @@ This document has no IANA actions.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
-- Specified version 1 recording objects: JSON track properties and binary group/frame tables.
-- Stored the timeline as immutable segment objects, with listing for recovery and per-track omission on storage failure.
+- Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
+- Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
 
 # Acknowledgments
