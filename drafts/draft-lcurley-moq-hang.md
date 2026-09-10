@@ -841,6 +841,7 @@ Groups MUST have strictly ascending sequence numbers; reconstruction MUST reject
 For range-named objects, the sequences MUST match the ranges in the timeline.
 Frame entries appear in their original order within each group.
 `Timestamp` is the frame's absolute timestamp in the track's `timescale` units, not a delta.
+It MUST be in the range 0 through 9007199254740991 (2^53 - 1), so browser replay preserves it exactly; writers and readers MUST reject larger values.
 
 `Payload Offset` is relative to the start of `Payload Bytes`, immediately after the last table entry; `Payload Length` is the frame's payload size in bytes.
 Payloads are concatenated in table order, without gaps, overlap, or trailing bytes.
@@ -970,7 +971,7 @@ This document has no IANA actions.
 - Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
 - Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
-- Limited recorded group and segment IDs to JSON-safe integers, including delta reconstruction.
+- Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
 
 # Acknowledgments
 {:numbered="false"}

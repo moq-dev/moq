@@ -29,7 +29,7 @@ Encode the first group ID absolutely, then `current - previous - 1` so zero
 means consecutive. Require nonempty objects, ascending IDs, checked arithmetic,
 and, for range-named objects, agreement between the table and filename bounds. Bounds-check every
 table entry while decoding and refuse an unknown version. Restrict `.info`
-timescale to the JSON safe-integer range.
+timescale and absolute frame timestamps to the JSON safe-integer range.
 
 Limit recorded group and segment IDs, including reconstructed deltas, to
 0 through 9007199254740991 (2^53 - 1). Refuse larger IDs rather than rounding

@@ -32,7 +32,8 @@ QUIC varint in keys and reconstructed group IDs. Cover consecutive zero
 deltas, sparse deltas, overflow, stopping at ID exhaustion without wrapping
 or inferring clean finality, empty objects, mismatched filename bounds, and overlapping
 ranges across segments. Reject decreasing or duplicate group arrivals while
-allowing accepted groups to complete out of order. Verify JSON-safe timescales.
+allowing accepted groups to complete out of order. Verify JSON-safe timescales
+and timestamps, accepting timestamp 2^53 - 1 and rejecting 2^53.
 Test ordered S3 lookup at both endpoints and between ranges, unordered paginated
 results, incremental cursor recovery, DVR expiration while a reader is offline,
 and stale media listings preceding a new timeline commit. Following N+1 must
