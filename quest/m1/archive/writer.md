@@ -67,6 +67,12 @@ timeline group. Make it durable, wait the configured grace period, then delete
 the corresponding segment objects. No trimming occurs after the final segment
 is committed, and timeline objects are never rewritten.
 
+Before a DVR writer resumes input, recover its full retained timeline and
+reconcile a complete media-key listing under exclusive prefix ownership.
+Wait the deletion grace period from successful recovery, then delete unreferenced `groups/` objects
+left by interrupted expiration or uploads. Failed or incomplete recovery must
+prevent deletion. Preserve `.info` and timeline checkpoint objects.
+
 Keep archive policy out of protocol libraries. As the native application that
 owns its storage and track choices, `moq-cli` attaches the writer to every
 import path and enrolls the resulting `broadcast::Consumer` tracks. Downstream

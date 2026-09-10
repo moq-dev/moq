@@ -42,6 +42,12 @@ and stale media listings preceding a new timeline commit. Following N+1 must
 not refresh all media listings. Wire these cases into CI for the store, writer,
 and reader implementations; do not add an unconnected standalone proof script.
 
+Crash a DVR writer after its pop becomes durable but before media deletion.
+On exclusive restart, prove that expired and uncommitted group objects are
+removed after the grace period while retained media, `.info`, and checkpoint
+objects survive. Failed or incomplete recovery/listing must delete nothing;
+restart must finish this cleanup before accepting new groups.
+
 Finally render and reload HLS playlists while rejecting every media-object GET
 until a segment URI is requested. The range-bearing URI must resolve one
 object directly without any listing or separate index object.

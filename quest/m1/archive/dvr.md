@@ -17,6 +17,14 @@ retained window and the latest timeline object, including all-gap segments.
 The timeline never advertises an object after deletion, and no object is
 rewritten.
 
+On writer restart, hold exclusive prefix ownership, fully recover the retained
+Window, and list all track `groups/` keys before accepting new groups. After
+a fresh deletion grace period measured from recovery, remove keys absent from the retained records; this
+finishes expiration interrupted after its timeline pop and removes uncommitted
+uploads. Never delete on incomplete or failed recovery/listing. Preserve `.info`
+and checkpoint-supporting timeline objects. This resumes prior cleanup without
+popping further records after the final segment.
+
 The player reads the archive timeline, FETCHes old groups through the normal
 miss chain, and splices back to SUBSCRIBE at the live edge without opening a
 second media format. Missing groups remain ordinary gaps.

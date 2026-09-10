@@ -908,6 +908,12 @@ The writer MUST retain the latest timeline object, even for an all-gap segment, 
 The index therefore never advertises media the retention process has already deleted, although media objects MAY temporarily outlive the index.
 Relay cache eviction does not change the recording timeline.
 
+Before accepting new groups, a restarting DVR writer MUST recover the complete retained timeline and list every recorded track's `groups/` prefix under exclusive ownership of the recording prefix.
+After waiting the configured deletion grace period from successful recovery, it MUST delete group objects whose keys are absent from the recovered retained records, including expired objects and uncommitted uploads left by a crash.
+It MUST NOT perform this cleanup if timeline recovery or listing fails or is incomplete, or while another writer can create or commit objects.
+This completes previously committed expiration; it does not pop additional records after a final segment.
+Timeline objects needed for checkpoint recovery and `.info` objects are not candidates for this cleanup.
+
 ## Bootstrap and Recovery {#recording-recovery}
 A reader or restarting writer lists the timeline track's `segments/` prefix and replays its objects in numeric segment order, including retention operations, from a retained checkpoint.
 The catalog supplies the timeline track's name ({{timeline-catalog}}).
@@ -975,6 +981,7 @@ This document has no IANA actions.
 - Restricted retention updates to segment commits and removed completion markers.
 - Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
 - Compared existing track properties by parsed values rather than JSON serialization.
+- Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
 
 # Acknowledgments
 {:numbered="false"}
