@@ -170,6 +170,34 @@ test("Legacy Producer estimates the tail from the current cadence", async () => 
 	expect(end).toBe(131_000);
 });
 
+test("Legacy Producer rejects a backwards cut without closing the group", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
+	expect(() => producer.cut(10_000 as Time.Micro)).toThrow();
+	producer.encode(new Uint8Array([2]), 30_000 as Time.Micro, false);
+	producer.cut(35_000 as Time.Micro);
+	producer.close();
+	const group = await subscriber.recvGroup();
+	const timestamps = [];
+	for (;;) {
+		const frame = await group?.readFrame();
+		if (!frame) break;
+		timestamps.push(Varint.decode(frame.payload)[0]);
+	}
+	expect(timestamps).toEqual([20_000, 30_000, 35_000]);
+});
+
+test("Legacy Producer accepts a keyframe that rewinds the timeline", () => {
+	const track = new Track.Producer("test");
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
+	producer.encode(new Uint8Array([2]), 30_000 as Time.Micro, false);
+	expect(() => producer.encode(new Uint8Array([3]), 0 as Time.Micro, true)).not.toThrow();
+	producer.close();
+});
+
 test("LegacyFormat throws on truncated input", () => {
 	const format = new LegacyFormat("data");
 	// A varint that indicates more bytes follow but is truncated

@@ -93,7 +93,9 @@ export class Producer {
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
 		if (keyframe) {
-			this.cut(timestamp);
+			const rewound = this.#previous !== undefined && timestamp < this.#previous;
+			this.cut(rewound ? undefined : timestamp);
+			if (rewound) this.#interval = undefined;
 			this.#group = this.#track.appendGroup();
 			// Report the group the moment it opens: its start is this keyframe's timestamp.
 			this.#timeline?.record(this.#group.sequence, timestamp, true);
@@ -118,6 +120,15 @@ export class Producer {
 	/** Flush and close the current group at the supplied or estimated end timestamp. */
 	cut(end?: Time.Micro) {
 		if (!this.#group) return;
+		if (
+			this.#format.kind === "video" &&
+			!this.#reordered &&
+			end !== undefined &&
+			this.#previous !== undefined &&
+			end < this.#previous
+		) {
+			throw new Error("video group endpoint precedes its last frame");
+		}
 		end ??=
 			this.#end !== undefined && this.#interval !== undefined
 				? ((this.#end + this.#interval) as Time.Micro)

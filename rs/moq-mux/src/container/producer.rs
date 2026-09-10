@@ -176,7 +176,13 @@ impl<C: Container> Producer<C> {
 		// A keyframe cuts the previous group, using its timestamp as the boundary
 		// where the previous group's content ends.
 		if frame.keyframe {
-			self.cut(Some(frame.timestamp))?;
+			let rewound = self
+				.previous_timestamp
+				.is_some_and(|previous| frame.timestamp < previous);
+			self.cut((!rewound).then_some(frame.timestamp))?;
+			if rewound {
+				self.cadence = None;
+			}
 		}
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
@@ -244,8 +250,17 @@ impl<C: Container> Producer<C> {
 	/// empty frame at that bound, or at the last timestamp plus its estimated
 	/// duration. Reordered groups omit this marker because their presentation end
 	/// does not bound the last frame in decode order. The next [`write`](Self::write)
-	/// must be a keyframe.
+	/// must be a keyframe. An explicit bound before the last ordered video frame
+	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
+		if self.container.kind() == super::Kind::Video
+			&& !self.reordered
+			&& let Some((end, previous)) = end.zip(self.previous_timestamp)
+			&& end < previous
+		{
+			return Err(super::InvalidEnd.into());
+		}
+
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
 		self.estimator.cut(end);
@@ -936,6 +951,49 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(131_000, 0)));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn backwards_cut_is_rejected_before_flushing_or_closing() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
+			.with_buffer(std::time::Duration::from_secs(1));
+		producer.write(frame(20_000, true)).unwrap();
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		assert!(producer.cut(Some(Timestamp::from_micros(10_000).unwrap())).is_err());
+		assert!(!producer.needs_keyframe());
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(1), group.read_frame())
+				.await
+				.is_err()
+		);
+		producer.write(frame(30_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(35_000).unwrap())).unwrap();
+		let mut timestamps = Vec::new();
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			timestamps.push(
+				hang::container::Frame::decode(frame.payload)
+					.unwrap()
+					.timestamp
+					.as_micros(),
+			);
+		}
+		assert_eq!(timestamps, vec![20_000, 30_000, 35_000]);
+	}
+
+	#[tokio::test]
+	async fn a_rewound_keyframe_does_not_write_a_backwards_marker() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(20_000, true)).unwrap();
+		producer.write(frame(30_000, false)).unwrap();
+		producer.write(frame(0, true)).unwrap();
+		producer.finish().unwrap();
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups[0].last(), Some(&(40_000, 0)));
+		assert_eq!(groups[1], vec![(0, 2)], "a new epoch does not inherit the old cadence");
 	}
 
 	#[tokio::test]

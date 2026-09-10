@@ -155,6 +155,10 @@ pub enum Error {
 	#[error("{0}")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
+	/// An explicit video endpoint precedes its last frame.
+	#[error("{0}")]
+	InvalidEnd(#[from] crate::container::InvalidEnd),
+
 	/// A FLV video frame resolved to a negative presentation timestamp.
 	#[error("negative FLV video presentation timestamp: dts={dts_ms}ms composition_time={composition_time_ms}ms")]
 	NegativeFlvPts {
