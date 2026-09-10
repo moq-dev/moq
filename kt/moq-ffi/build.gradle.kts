@@ -64,13 +64,13 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
             }
         }
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
             }
         }
 
@@ -78,7 +78,7 @@ kotlin {
             dependsOn(commonMain)
             dependencies {
                 // compileOnly: each platform's runtime adds its own JNA artifact.
-                compileOnly("net.java.dev.jna:jna:5.18.1")
+                compileOnly("net.java.dev.jna:jna:5.19.1")
             }
         }
         val jvmAndAndroidTest by creating {
@@ -88,7 +88,7 @@ kotlin {
         val jvmMain by getting {
             dependsOn(jvmAndAndroidMain)
             dependencies {
-                implementation("net.java.dev.jna:jna:5.18.1")
+                implementation("net.java.dev.jna:jna:5.19.1")
             }
         }
         val jvmTest by getting {
@@ -99,7 +99,7 @@ kotlin {
             val androidMain by getting {
                 dependsOn(jvmAndAndroidMain)
                 dependencies {
-                    implementation("net.java.dev.jna:jna:5.18.1@aar")
+                    implementation("net.java.dev.jna:jna:5.19.1@aar")
                 }
             }
             val androidUnitTest by getting {

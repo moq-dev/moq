@@ -72,16 +72,16 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
                 // api: the typed JSON helpers are inline+reified, so they
                 // resolve serializers at the consumer's call site.
-                api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+                api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
             }
         }
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
             }
         }
 
