@@ -35,7 +35,12 @@ budget, or a schedule.
     treatment rather than being left to the reader.
   - Units and clock domain stated once. Durations in one unit, and every
     timestamp on a named clock, so a browser value and a native value are the
-    same measurement.
+    same measurement. Naming the clock is not enough on its own: the stages span
+    the publisher, the relay and the viewer, which are separate processes and
+    often separate machines, so either reduce every timestamp to one common
+    monotonic reference or define the calibration and drift correction that maps
+    between them. The ledger's sum-to-end-to-end identity is arithmetic across
+    these values, and it is meaningless if they sit on unaligned clocks.
   - Aggregation stated per metric: a count over the run, a max, or a
     percentile. "Underruns: 3" and "underruns: 3/s" grade differently.
   - Stages as exclusive, non-overlapping spans (capture, encode, publish flush,

@@ -58,8 +58,14 @@ The widely repeated "0.97" is a transitional value, not head.
 Say explicitly that the forget factor decays once per *resampled observation*,
 not once per arrival, and give the resulting wall-clock memory
 (`500ms / (1 - 0.983)`, about 29 s). Applying a per-observation factor per
-arrival is precisely the mistake #3517 made, and a number that reads plausible
-either way is exactly the kind that survives review.
+arrival is the mistake #3517 made, and a number that reads plausible either way
+is the kind that survives review.
+
+Then settle what an interval with no arrival does. An empty interval produces no
+observation and therefore no decay step, so the wall-clock memory above does not
+survive a pause unless elapsed empty intervals decay the histogram too. Either
+decay them and say so, or drop the wall-clock claim; the conformance corpus needs
+a case with a gap in it either way.
 
 Define units once, for both the algorithm and the corpus: what clock arrival
 times are on, what timescale frame timestamps use and how they convert, and
@@ -112,6 +118,17 @@ Two lessons for the document, both structural rather than a constant to retune:
   catalog field, which is the expensive option and would need the full
   cross-package sync (`rs/hang`, `js/hang`, `doc/concept`, and the hang draft).
   Pick one and say why; do not leave it to each implementation.
+
+  There is prior art to reconcile rather than ignore. `js/watch/src/audio/config.ts`
+  already derives a per-codec frame duration and then adds `WORKLET_QUANTUM`, the
+  AudioWorklet's fixed 128-sample render block, so 48 kHz stereo Opus reads as
+  23 ms rather than 20 ms. Native has no worklet and its device buffer is a
+  property of the backend, so if the shared step carries the browser's quantum
+  and native's does not, the two produce different target series from the same
+  trace and the conformance corpus cannot hold. Decide whether the render block
+  belongs in the estimator's step at all or in the ring's slack above it, and
+  give native's equivalent a name. Note also that this code assumes 20 ms Opus
+  frames, which is the same guess the catalog cannot settle.
 - **The target needs a clamp and a bounded rise.** WebRTC clamps in
   `DelayConstraints` (`delay_constraints.{h,cc}`), applied by `DecisionLogic`
   rather than by the delay manager, with a hard ceiling at 75% of buffer
