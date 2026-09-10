@@ -308,7 +308,7 @@ impl<C: Container> Producer<C> {
 		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
 			return;
 		};
-		if self.end.is_none_or(|prev| end > prev) {
+		if self.end.is_none_or(|prev| end >= prev) {
 			self.end = Some(end);
 			self.last_duration = duration.filter(|duration| !duration.is_zero());
 		}
@@ -951,6 +951,19 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(131_000, 0)));
+	}
+
+	#[tokio::test]
+	async fn an_unknown_tail_at_the_previous_endpoint_uses_current_cadence() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		let mut first = frame(0, true);
+		first.duration = Some(Timestamp::from_micros(40_000).unwrap());
+		producer.write(first).unwrap();
+		producer.write(frame(40_000, false)).unwrap();
+		producer.finish().unwrap();
+		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(80_000, 0)));
 	}
 
 	#[tokio::test(start_paused = true)]
