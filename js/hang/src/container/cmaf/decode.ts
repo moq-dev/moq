@@ -86,14 +86,8 @@ export interface InitSegment {
 	timescale: number;
 	/** Track ID from the init segment */
 	trackId: number;
-	/**
-	 * Whether the track is audio, whose samples are all independently decodable.
-	 *
-	 * Packagers flag every audio sample a sync sample. Reported as a keyframe, each would
-	 * open its own group, so audio samples decode with `keyframe` false and the consumer
-	 * marks the group start instead.
-	 */
-	audio: boolean;
+	/** Whether the track carries audio or video. */
+	kind: "audio" | "video";
 	/** Default sample duration from moov/mvex/trex, used when not overridden in tfhd/trun. */
 	defaultSampleDuration: number;
 	/** Default sample size from moov/mvex/trex, used when not overridden in tfhd/trun. */
@@ -116,7 +110,7 @@ export interface Sample {
 	data: Uint8Array;
 	/** Timestamp in microseconds */
 	timestamp: number;
-	/** Whether this is a video keyframe (sync sample). Always false for audio; see {@link InitSegment.audio}. */
+	/** Whether this is a video keyframe (sync sample). Always false for audio; see {@link InitSegment.kind}. */
 	keyframe: boolean;
 	/** Sample duration in microseconds (0 when the fragment doesn't carry one) */
 	duration: number;
@@ -161,7 +155,10 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 	if (!hdlr) {
 		throw new Error("No hdlr box found in init segment");
 	}
-	const audio = hdlr.handlerType === "soun";
+	const kind = hdlr.handlerType === "soun" ? "audio" : hdlr.handlerType === "vide" ? "video" : undefined;
+	if (!kind) {
+		throw new Error(`Unsupported track handler: ${hdlr.handlerType}`);
+	}
 
 	// Find moov > trak > mdia > minf > stbl > stsd for sample description
 	const stsd = findBox(boxes, isBoxType<SampleDescriptionBox & ParsedIsoBox>("stsd"));
@@ -185,7 +182,7 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 		description,
 		timescale: mdhd.timescale,
 		trackId,
-		audio,
+		kind,
 		defaultSampleDuration: trex?.defaultSampleDuration ?? 0,
 		defaultSampleSize: trex?.defaultSampleSize ?? 0,
 		defaultSampleFlags: trex?.defaultSampleFlags ?? 0,
@@ -418,7 +415,7 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
 		// If flag is 0, treat as keyframe for safety. Audio never reports one: every
 		// audio sample is a sync sample, and the group start is the consumer's to mark.
-		const keyframe = !init.audio && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
+		const keyframe = init.kind === "video" && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
 
 		samples.push({
 			data,

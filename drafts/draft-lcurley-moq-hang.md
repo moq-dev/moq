@@ -532,6 +532,8 @@ For a text track, the remainder is the cue in the track's declared `format` (for
 
 ## cmaf
 Each frame is a complete fragmented MP4 fragment (`moof`+`mdat`), carrying its own timestamps.
+Audio samples MUST be marked as sync samples, including samples inside a group.
+A sync sample does not declare an audio group boundary; the publisher chooses those boundaries.
 
 The `init` field is the initialization segment (`ftyp`+`moov`) for the track, base64-encoded ({{!RFC4648, Section 4}}).
 A consumer MUST feed `init` to the decoder before the first frame.
@@ -946,6 +948,7 @@ This document has no IANA actions.
 # Appendix A: Changelog
 
 ## moq-hang-03
+- Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
 

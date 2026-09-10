@@ -659,7 +659,7 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert_eq!(fragment.duration, std::time::Duration::from_secs_f64(1.0 / 30.0));
 	let timescale = moq_net::Timescale::new(90_000).unwrap();
-	let decoded = super::decode(fragment.data, timescale, false).unwrap();
+	let decoded = super::decode(fragment.data, timescale, crate::container::fmp4::Kind::Video).unwrap();
 	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 }
 

@@ -25,6 +25,11 @@ the inverse and skip stalled groups past a max age. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
+fMP4 export emits one fragment per publisher group by default, including audio.
+`fmp4::Export::with_fragment_duration` adds an explicit duration cap. CMAF audio
+samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
+only the first audio sample of a MoQ group.
+
 `catalog::Rendition::set`, `update`, and `estimate` return errors when a catalog
 edit cannot be serialized or published. Invalid jitter is rejected before the
 edit is retained, including while the initial catalog is reserved. Codec importers

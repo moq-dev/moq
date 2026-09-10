@@ -709,7 +709,11 @@ fn encode_fragment(track: &Fmp4Track, sequence_number: &mut u32, frames: Vec<Fra
 		track_id: track.track_id,
 		timescale,
 		sequence_number: seq,
-		audio: !track.is_video,
+		kind: if track.is_video {
+			super::Kind::Video
+		} else {
+			super::Kind::Audio
+		},
 	};
 	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
 }
