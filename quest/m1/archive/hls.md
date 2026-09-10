@@ -29,12 +29,13 @@ holds no completion marker: the reader finishes the replayed timeline track
 when its caller supplies finality out of band, so a standalone or BYOB archive
 without such a caller stays a reloadable playlist.
 
-Initially select the historic catalog snapshot by the existing moq-net timestamp
-rule. Explicit group-to-catalog identity belongs to the related
-[Catalog version binding](/quest/m1/archive/catalog-version.md) quest.
+Use the catalog supplied to the exporter. This quest does not establish which
+catalog update applies to a historic group; timestamps do not provide an
+explicit binding. Track immutability and update correlation belong to
+[Catalog track identity](/quest/m2/catalog-tracks.md), independently of DVR.
 
 Prove aligned audio/video switching, missing track segments, discontinuities,
-catalog changes, caller-supplied finality, and bounded LRU reads.
+caller-supplied finality, and bounded LRU reads.
 
 ## Required
 

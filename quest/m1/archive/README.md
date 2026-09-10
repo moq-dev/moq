@@ -108,9 +108,10 @@ protected broadcasts are out of scope.
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
-- [Catalog version binding](/quest/m1/archive/catalog-version.md) - bind groups to the catalog version that describes them, after the first archive ships
 
 ## Related
+
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 
 - [wildcard](/quest/m1/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m2/e2ee/README.md) - protected broadcasts are excluded initially

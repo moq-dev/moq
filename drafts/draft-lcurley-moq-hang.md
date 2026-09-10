@@ -943,6 +943,7 @@ A reader MUST check the lower bound and committed timeline membership before ser
 An unordered listing MUST be collected and sorted before selecting a candidate; taking its first result is insufficient.
 The reader reconstructs moq-lite FRAME headers from the stored timestamps and lengths, preserving the original payload bytes.
 A group absent from the recording is a normal FETCH failure.
+Recording catalog groups does not establish which catalog update applies to a media group; this format does not define that correlation.
 
 A reader deriving a presentation-ordered format renders it from the timeline and transmuxes segment objects on demand.
 Nothing derived needs to be stored: the playlist or manifest is a function of the timeline, and a media segment is a function of one recorded object.

@@ -43,13 +43,10 @@ omission on `Pending` beside `Pending::gap()` (:712-719), which clears every
 track; add it here. Never publish a range first and hope the relay still has
 it. A later segment continues normally after any omission.
 
-Commit prerequisites are new API: an application declares that one enrolled
-track's applicable group must be durable before other tracks' ranges in the
-same record are published. Store prerequisites first; if one fails, omit its
-dependents or fail the record according to application policy. HANG publishers
-use this to make the catalog snapshot durable before advertising media that
-needs it; the writer compares timestamps and durability but does not parse the
-catalog.
+Catalog update applicability and cross-track configuration dependencies belong
+to [Catalog track identity](/quest/m2/catalog-tracks.md). Recording a catalog
+as an ordinary track does not bind its updates to media groups; this writer
+does not introduce catalog-specific commit or retention prerequisites.
 
 The archive timeline uses the same object envelope but is not enrolled in its
 own records. After pushing segment N and applying retention pops, close the

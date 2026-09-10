@@ -53,4 +53,4 @@ draft's Timeline chapter (`drafts/draft-lcurley-moq-hang.md:560`) replacing
 
 ## Related
 
-- [Catalog version binding](/quest/m1/archive/catalog-version.md) - explicit historic applicability is deliberately separate
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - immutability and update applicability are separate from archive discovery

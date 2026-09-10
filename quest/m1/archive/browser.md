@@ -18,9 +18,8 @@ deferred commit Rust has (`Producer::deferred`,
 Persist one range-named object per track per segment after its groups complete,
 then publish the archive timeline record. Match the 19-digit group-bound keys,
 ascending delta-encoded IDs, and sequential timeline discovery used by Rust. A typical audio segment contains many
-one-group-per-frame audio groups. Match the Rust binary envelope bytes and `.info` property values, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), and share the
-writer's commit prerequisites so a failed catalog snapshot never leaves
-dependent media ranges advertised.
+one-group-per-frame audio groups. Match the Rust binary envelope bytes and `.info` property values, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without inferring catalog-to-group applicability.
+[Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.
 
 The missing piece in `js/net` is a `track::Dynamic` equivalent: a consumer can
 `fetchGroup` (`js/net/src/track.ts:272`), but nothing in `js/net/src` lets a

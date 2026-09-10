@@ -20,8 +20,8 @@ requests should hit the segment LRU.
 Cover the persistence boundary: a crash after segment PUT but before timeline
 commit leaves invisible orphan data that a listing bootstrap ignores; a failed
 or mismatched `.info` exposes no ranges; a failed independent track PUT omits
-only that track while the record's other tracks stay advertised; a failed
-catalog PUT never exposes dependent media; later segments remain usable. Also
+only that track while the record's other tracks stay advertised; later
+segments remain usable. Catalog-to-group applicability is outside this proof. Also
 cover a stalled pacing track forced to a gap, sparse group ranges, malformed
 table offsets, an unknown envelope or `.info` version treated as a missing
 segment, segment create collisions under the single-writer rule, a missing
