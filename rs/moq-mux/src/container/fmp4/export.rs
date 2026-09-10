@@ -211,8 +211,9 @@ impl<S: Stream> Export<S> {
 	/// an fMP4 import. Setting this caps each fragment to roughly `duration` of frames,
 	/// useful for downstream consumers that throttle by fragment rate, or to bound an
 	/// audio track whose publisher never cuts it. [`Duration::ZERO`] emits one fragment
-	/// per frame (the historical behavior); otherwise the cap applies in addition to
-	/// the group boundary.
+	/// per frame. Video with unknown duration waits for the next timestamp or endpoint
+	/// marker; audio and samples with explicit durations remain immediate. Otherwise
+	/// the cap applies in addition to the group boundary.
 	///
 	/// Accepts either `Duration` or `Option<Duration>` (where `None` restores
 	/// the per-group default).
@@ -303,11 +304,15 @@ impl<S: Stream> Export<S> {
 							break;
 						}
 						Poll::Ready(Some(Event::FrameEnd(end))) => {
-							if let Some(last) = track.buffer.last_mut()
+							if track.is_video
+								&& let Some(last) = track.buffer.last_mut()
 								&& last.duration.is_none()
 							{
 								last.duration =
 									timestamp_gap(last.timestamp, end, moq_net::Timescale::new(track.timescale)?)?;
+								if self.fragment_duration == Some(Duration::ZERO) && last.duration.is_some() {
+									break;
+								}
 							}
 						}
 						Poll::Ready(Some(Event::GroupEnd)) => {
@@ -372,9 +377,8 @@ impl<S: Stream> Export<S> {
 				let frag = self.fragment_duration;
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frame = track.pending.take().unwrap();
-				// A zero cap is one fragment per frame, which never depends on the
-				// successor, so emit immediately instead of buffering the frame until
-				// the next one flushes it.
+				// A zero cap emits one sample at a time. Unknown video duration still
+				// needs a successor timestamp or endpoint before it can be encoded.
 				if frag == Some(Duration::ZERO) {
 					// A catalog change can leave buffered frames behind. Drain them
 					// first and retry this frame on the next poll.
@@ -385,6 +389,10 @@ impl<S: Stream> Export<S> {
 						return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 					}
 					track.buffer_independent = frame.keyframe;
+					if track.is_video && frame.duration.is_none() {
+						track.buffer.push(frame);
+						continue;
+					}
 					let fragment = emit_fragment(track, &mut self.sequence_number, vec![frame], None)?;
 					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 				}
@@ -447,7 +455,13 @@ impl<S: Stream> Export<S> {
 		let earliest = self.tracks.values().filter_map(Fmp4Track::next_start).min()?;
 		self.tracks
 			.iter()
-			.filter(|(_, track)| (track.finished || track.group_finished) && !track.buffer.is_empty())
+			.filter(|(_, track)| {
+				!track.buffer.is_empty()
+					&& (track.finished
+						|| track.group_finished
+						|| (self.fragment_duration == Some(Duration::ZERO)
+							&& track.buffer.last().is_some_and(|frame| frame.duration.is_some())))
+			})
 			.map(|(name, track)| (Duration::from(track.buffer[0].timestamp), !track.is_video, name))
 			.filter(|(start, _, _)| *start <= earliest)
 			.min()
@@ -685,8 +699,8 @@ pub(crate) fn extract_init(
 /// Triggers when `frame` opens a group, or on the duration cap. The keyframe bit is the
 /// group boundary on every track: a video keyframe closes a GOP, and an audio frame
 /// carries it only where the publisher cut a group, which is the boundary the file
-/// should keep rather than one invented here. The per-frame mode never buffers and is
-/// handled before this check.
+/// should keep rather than one invented here. Per-frame output is handled before
+/// this check.
 fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
 	if track.buffer.is_empty() {
 		return false;

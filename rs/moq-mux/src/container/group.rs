@@ -56,7 +56,9 @@ impl<F: Container> GroupConsumer<F> {
 				Some(frames) => {
 					for frame in frames {
 						if let Some(bound) = self.format.end(&frame) {
-							if let Some(last) = self.pending.back_mut() {
+							if self.format.kind() == super::Kind::Video
+								&& let Some(last) = self.pending.back_mut()
+							{
 								super::close_duration(last, bound);
 							}
 						} else {

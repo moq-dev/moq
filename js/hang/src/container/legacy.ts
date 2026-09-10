@@ -24,7 +24,7 @@ export class Format implements ContainerFormat {
 		group.writeFrame({ payload: encodeFrame(new Uint8Array(), end), timestamp: Time.Timestamp.fromMicros(end) });
 	}
 
-	/** Return the exclusive end of the previous frame for an empty codec payload. */
+	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
 	end(frame: Frame): Time.Micro | undefined {
 		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
@@ -109,7 +109,7 @@ export class Producer {
 		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
 		if (this.#previous !== undefined && timestamp > this.#previous) {
 			const delta = (timestamp - this.#previous) as Time.Micro;
-			this.#interval = this.#interval === undefined ? delta : (Math.min(this.#interval, delta) as Time.Micro);
+			this.#interval = delta;
 		}
 		this.#previous = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;

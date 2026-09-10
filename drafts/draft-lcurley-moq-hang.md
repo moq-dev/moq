@@ -522,12 +522,17 @@ The default, used when the `container` field is absent.
 Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) encoded in microseconds.
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
-A frame with an empty codec payload is the exclusive end of the frame before it, not media.
-A video publisher SHOULD end each group with one when the exclusive end is known; audio has none.
+For video, a frame with an empty codec payload is the exclusive end of the frame before it, not media.
+A video publisher SHOULD end each group with one when the exclusive end is known.
 A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration.
 For reordered video, the group presentation endpoint does not necessarily bound the preceding frame in decode order; the publisher omits the marker unless that frame's exclusive end is known.
 A consumer MUST skip it and MUST NOT submit it to a decoder.
 It does not mean the track ended.
+
+For audio, an empty codec payload retains its terminal-trimming meaning: its timestamp is the exclusive endpoint of the source media.
+When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
+A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
+Audio publishers do not append per-group duration markers because the codec defines each packet's duration.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
@@ -543,9 +548,8 @@ A consumer MUST feed `init` to the decoder before the first frame.
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
 
-A frame with an empty codec payload is the exclusive end of the frame before it, not media.
-A consumer MUST skip it and MUST NOT submit it to a decoder.
-It does not mean the track ended.
+Consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
+A consumer MUST NOT submit it to a decoder.
 
 
 # Compression {#compression}
@@ -960,8 +964,8 @@ This document has no IANA actions.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
-- An empty codec payload is the exclusive end of the frame before it. A video publisher SHOULD end each group with one when the exclusive end is known; audio has none.
-A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration. A consumer skips it and does not submit it to a decoder. Removed the end-marker and terminal-packet rule.
+- For video, an empty codec payload is the exclusive end of the frame before it. A video publisher SHOULD end each group with one when the exclusive end is known. Audio retains its terminal-trimming marker before codec drain packets.
+A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration. A consumer skips it and does not submit it to a decoder. Audio terminal-packet trimming is unchanged.
 
 # Acknowledgments
 {:numbered="false"}

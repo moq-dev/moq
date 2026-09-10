@@ -150,6 +150,26 @@ test("Legacy Producer omits a reordered group's presentation endpoint marker", a
 	expect(payload.byteLength).toBe(0);
 });
 
+test("Legacy Producer estimates the tail from the current cadence", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [index, timestamp] of [0, 16_000, 32_000, 65_000, 98_000].entries()) {
+		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
+	}
+	producer.close();
+	const group = await subscriber.recvGroup();
+	expect(group).toBeDefined();
+	let end = 0;
+	for (;;) {
+		const frame = await group?.readFrame();
+		if (!frame) break;
+		const [timestamp, payload] = Varint.decode(frame.payload);
+		if (!payload.byteLength) end = timestamp;
+	}
+	expect(end).toBe(131_000);
+});
+
 test("LegacyFormat throws on truncated input", () => {
 	const format = new LegacyFormat("data");
 	// A varint that indicates more bytes follow but is truncated

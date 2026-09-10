@@ -575,6 +575,10 @@ async fn chunk_data_reaches_both_variants() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
 
+	live.track
+		.cut(Some(moq_net::Timestamp::from_micros(33_000).unwrap()))
+		.unwrap();
+
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 
@@ -590,20 +594,41 @@ async fn chunk_data_reaches_both_variants() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn zero_fragment_duration_emits_without_successor() {
+async fn zero_fragment_duration_waits_for_the_exact_video_endpoint() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
-
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
-	chunk_now(&mut exporter)
-		.await
-		.init()
-		.expect("the init segment comes first");
+	chunk_now(&mut exporter).await.init().expect("init");
+	assert!(drain_now(&mut exporter).await.is_empty(), "unknown duration must wait");
+	live.track
+		.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
+		.unwrap();
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("media fragment");
+	assert!(fragment.independent);
+	assert_eq!(fragment.duration, std::time::Duration::from_micros(15_000));
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 1)]);
+	assert!(drain_now(&mut exporter).await.is_empty());
+}
 
-	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
-	assert!(fragment.independent, "a keyframe-led fragment can start a segment");
-	assert!(fragment.duration > std::time::Duration::ZERO);
+#[tokio::test(start_paused = true)]
+async fn zero_fragment_duration_uses_the_successor_then_the_cut() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	chunk_now(&mut exporter).await.init().expect("init");
+	assert!(drain_now(&mut exporter).await.is_empty());
+	live.track.write(video_frame(10_000, false)).unwrap();
+	let first = chunk_now(&mut exporter).await.fragment().expect("first sample");
+	assert_eq!(first.duration, std::time::Duration::from_micros(10_000));
+	assert!(drain_now(&mut exporter).await.is_empty());
+	live.track
+		.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
+		.unwrap();
+	let last = chunk_now(&mut exporter).await.fragment().expect("last sample");
+	assert_eq!(last.duration, std::time::Duration::from_micros(5_000));
+	assert!(drain_now(&mut exporter).await.is_empty());
 }
 
 #[tokio::test(start_paused = true)]

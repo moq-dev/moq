@@ -77,6 +77,9 @@ pub struct Consumer<F: Container> {
 
 	// Timeline-discontinuity tracking: the live edge, rewind boundary, and event count.
 	rewind: Rewind,
+
+	// Exclusive audio endpoint delivered before terminal codec packets.
+	end: Option<Timestamp>,
 }
 
 /// Live state for detecting timeline rewinds and classifying out-of-order groups.
@@ -166,6 +169,7 @@ impl<F: Container> Consumer<F> {
 			startup: start.is_none(),
 			max_age,
 			rewind: Rewind::default(),
+			end: None,
 		}
 	}
 
@@ -179,6 +183,11 @@ impl<F: Container> Consumer<F> {
 	/// the read that bumps it is the first of the new timeline.
 	pub fn discontinuity(&self) -> u64 {
 		self.rewind.discontinuity
+	}
+
+	/// The exclusive audio endpoint delivered before terminal codec packets.
+	pub fn end(&self) -> Option<Timestamp> {
+		self.end
 	}
 
 	/// Read the next frame from the track.
@@ -200,7 +209,12 @@ impl<F: Container> Consumer<F> {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd(_)) => continue,
+				Some(Event::FrameEnd(end)) => {
+					if self.format.kind() == super::Kind::Audio {
+						self.end = Some(end);
+					}
+				}
+				Some(Event::GroupEnd) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -429,6 +443,7 @@ impl<F: Container> Consumer<F> {
 		}
 
 		self.rewind.discontinuity += count;
+		self.end = None;
 		self.rewind.live_edge = None;
 		self.rewind.boundary = None;
 	}
@@ -529,6 +544,7 @@ impl<F: Container> Consumer<F> {
 		});
 
 		self.rewind.discontinuity += 1;
+		self.end = None;
 		tracing::debug!(
 			prev_max = reset.prev_max,
 			group = reset.group,

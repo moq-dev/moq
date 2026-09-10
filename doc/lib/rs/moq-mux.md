@@ -27,7 +27,10 @@ you already have.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
-`fmp4::Export::with_fragment_duration` adds an explicit duration cap. CMAF audio
+`fmp4::Export::with_fragment_duration` adds an explicit duration cap. A zero cap
+emits one fragment per frame; video with unknown duration waits for the next
+timestamp or endpoint marker. Audio and samples with explicit durations remain
+immediate. CMAF audio
 samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.
 

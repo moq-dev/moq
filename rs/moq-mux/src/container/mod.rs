@@ -145,11 +145,11 @@ pub trait Container {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
-	/// Return the exclusive end of the previous frame when `frame` is a duration marker.
+	/// Return the endpoint timestamp when `frame` carries empty-payload metadata.
 	///
-	/// An empty codec payload on legacy and LOC. A consumer skips the marker, times the
-	/// previous frame with it, and never submits it to a decoder. It does not mean the
-	/// track ended. Formats without duration markers use the default.
+	/// For video this bounds the preceding frame; for audio it bounds source samples
+	/// before terminal codec packets. A consumer never submits the marker to a decoder.
+	/// Formats without endpoint metadata use the default.
 	fn end(&self, _frame: &Frame) -> Option<moq_net::Timestamp> {
 		None
 	}

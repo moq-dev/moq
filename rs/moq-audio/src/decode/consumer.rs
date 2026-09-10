@@ -36,10 +36,16 @@ pub struct Consumer {
 	/// filter leaves beyond the final input boundary.
 	trailing: Activity,
 	/// Timestamp of the first encoded packet in this decoder epoch, used to
-	/// interpret codec delay.
+	/// interpret codec delay and a terminal marker.
 	epoch: Option<moq_net::Timestamp>,
 	/// Codec delay trimmed since the current decoder epoch began.
 	delay_trimmed: usize,
+	/// Codec-rate terminal frames emitted since `terminal_start`.
+	frames_decoded: usize,
+	/// Logical endpoint carried by an empty legacy frame before terminal packets.
+	end: Option<moq_net::Timestamp>,
+	/// Presentation time of the first decoded terminal frame.
+	terminal_start: Option<moq_net::Timestamp>,
 	/// Last container discontinuity applied to codec and resampler state.
 	discontinuity: u64,
 }
@@ -105,6 +111,9 @@ impl Consumer {
 			trailing: Activity::Active,
 			epoch: None,
 			delay_trimmed: 0,
+			frames_decoded: 0,
+			end: None,
+			terminal_start: None,
 			discontinuity: 0,
 		})
 	}
@@ -155,12 +164,25 @@ impl Consumer {
 				return self.flush();
 			};
 
+			if let Some(end) = self.track.end()
+				&& self.end != Some(end)
+			{
+				self.end = Some(end);
+				self.frames_decoded = 0;
+				self.terminal_start = None;
+			}
+
 			// Undeclared holes are routine: a skipped stalled group, a packet the
 			// decoder refused, an ingest that resynced. Drop every stage's state at
 			// the edge, before the packet after it goes anywhere near the decoder.
-			if self
-				.next_start
-				.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
+			//
+			// Skipped once an end marker arrives, because from there the terminal
+			// phase reconstructs each batch's time from the marker rather than
+			// reading it off the packet, so there is nothing left to compare.
+			if self.end.is_none()
+				&& self
+					.next_start
+					.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
 				&& let Some(frame) = self.gap()?
 			{
 				self.ready.push_back(frame);
@@ -175,13 +197,28 @@ impl Consumer {
 			let trimmed = delay - self.decoder.delay_remaining();
 			self.delay_trimmed += trimmed;
 			let activity = decoded.activity;
-			let decoded = decoded.samples;
+			let mut decoded = decoded.samples;
+			if let Some(end) = self.end {
+				let terminal_start = *self
+					.terminal_start
+					.get_or_insert(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch));
+				let total = frames_between(terminal_start, end, rate)?;
+				let remaining = total.saturating_sub(self.frames_decoded);
+				decoded.truncate(remaining.saturating_mul(self.decoder.channel_count() as usize));
+			}
 
 			let frames = decoded.len() / self.decoder.channel_count().max(1) as usize;
-			// The codec delay is padding before the epoch, not a hole after the
-			// first short frame. Keep later output contiguous by moving it back over
-			// everything trimmed since this decoder epoch began.
-			let decoded_at = rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch);
+			let decoded_at = if let Some(terminal_start) = self.terminal_start {
+				advance(terminal_start, self.frames_decoded, rate)?
+			} else {
+				// The codec delay is padding before the epoch, not a hole after the
+				// first short frame. Keep later output contiguous by moving it back over
+				// everything trimmed since this decoder epoch began.
+				rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch)
+			};
+			if self.end.is_some() {
+				self.frames_decoded += frames;
+			}
 			// Packet continuity stays on the encoded timeline. `decoded_at` may be
 			// earlier because codec pre-skip is padding before the decoded epoch.
 			self.next_start = Some(advance(mux_frame.timestamp, frames + trimmed, rate)?);
@@ -259,6 +296,9 @@ impl Consumer {
 		self.trailing = Activity::Active;
 		self.epoch = None;
 		self.delay_trimmed = 0;
+		self.frames_decoded = 0;
+		self.end = None;
+		self.terminal_start = None;
 		Ok(())
 	}
 
@@ -390,6 +430,13 @@ fn advance(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Re
 
 	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
 	Ok(timestamp.checked_add(offset)?)
+}
+
+/// Codec-rate frames in the interval, rounding a microsecond marker to the nearest frame.
+fn frames_between(start: moq_net::Timestamp, end: moq_net::Timestamp, sample_rate: u32) -> Result<usize, Error> {
+	let duration = end.checked_sub(start)?;
+	let frames = (std::time::Duration::from(duration).as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
+	usize::try_from(frames).map_err(|_| Error::Unsupported("audio duration does not fit in memory".into()))
 }
 
 /// `timestamp` moved back by `frames` at `sample_rate`, in its own timescale.
@@ -795,16 +842,34 @@ mod tests {
 		assert_eq!(read[1].0, expected);
 	}
 
-	/// An old-style audio end marker is skipped rather than submitted to the decoder.
+	/// Once an end marker arrives the gap check stops running, because from there
+	/// each batch's time is reconstructed from the marker rather than read off the
+	/// packet. A packet that jumps forward then still moves whatever the resampler
+	/// is holding, and the activity that lands with it: those samples came from
+	/// before the jump and are labelled by the packet they came from.
 	#[tokio::test]
-	async fn an_old_style_audio_marker_is_skipped() {
-		let mut encoder = Encoder::new(&crate::encode::Config::new(Input {
-			channels: 1,
-			..Input::default()
-		}))
+	async fn a_terminal_jump_leaves_the_held_samples_alone() {
+		let mut encoder = Encoder::new(&crate::encode::Config {
+			dtx: true,
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
+			..crate::encode::Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
 		.unwrap();
 		let catalog = encoder.catalog();
-		let packet = encoder.encode(&vec![0.5f32; encoder.frame_size()]).unwrap();
+
+		// One coded packet, then a withheld one to follow it. Taken from the same
+		// encoder rather than published in between, so nothing fills the resampler's
+		// chunk between the two.
+		let active = encoder.encode(&vec![0.5f32; encoder.frame_size()]).unwrap();
+		assert!(active.activity.is_active());
+		let silence = vec![0.0f32; encoder.frame_size()];
+		let dtx = (0..200)
+			.map(|_| encoder.encode(&silence).unwrap())
+			.find(|packet| packet.activity.is_dtx())
+			.expect("silence should enter Opus DTX");
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -815,42 +880,45 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
-			.await
-			.unwrap();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				sample_rate: Some(44_100),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
 
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::ZERO,
-				duration: None,
-				payload: packet.payload.clone(),
-				keyframe: true,
-			})
-			.unwrap();
-		producer.cut(None).unwrap();
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(20_000).unwrap(),
-				duration: None,
-				payload: Bytes::new(),
-				keyframe: true,
-			})
-			.unwrap();
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(20_000).unwrap(),
-				duration: None,
-				payload: packet.payload,
-				keyframe: false,
-			})
-			.unwrap();
+		// A 20 ms Opus packet decodes 960 frames, less the pre-skip on the first one,
+		// so it doesn't fill the 960-frame chunk and is held whole.
+		let write = |producer: &mut moq_mux::container::Producer<_>, frames: u64, payload: Bytes| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_scale(frames, 48_000).unwrap(),
+					duration: None,
+					payload,
+					keyframe: true,
+				})
+				.unwrap();
+		};
+		write(&mut producer, 0, active.payload);
+		// The end marker, then the terminal packet a second past where it belongs.
+		write(&mut producer, 3 * 48_000, Bytes::new());
+		write(&mut producer, 48_000, dtx.payload);
 		producer.finish().unwrap();
 
-		let mut frames = 0;
-		while consumer.read().await.unwrap().is_some() {
-			frames += 1;
-		}
-		assert!(frames > 0, "media after the marker still plays");
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		// The output begins with the first packet's samples, so it is stamped and
+		// labelled from that packet. Rewinding from the terminal one instead drops it
+		// most of a second into the future, carrying the DTX label with it.
+		assert_eq!(frame.timestamp.as_micros(), 0, "held samples moved with the jump");
+		assert!(
+			frame.activity.is_active(),
+			"held samples took the terminal packet's label"
+		);
 	}
 
 	/// Every packet on the RTMP path lands beside where the last one ended: FLV

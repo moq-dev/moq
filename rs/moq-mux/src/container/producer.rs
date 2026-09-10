@@ -282,7 +282,7 @@ impl<C: Container> Producer<C> {
 			&& let Ok(delta) = timestamp.checked_sub(previous)
 			&& !delta.is_zero()
 		{
-			self.cadence = Some(self.cadence.map_or(delta, |cadence| cadence.min(delta)));
+			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some(timestamp);
 
@@ -924,6 +924,18 @@ mod tests {
 			Some(&(240_000, 0)),
 			"the next group can mark its tail"
 		);
+	}
+
+	#[tokio::test]
+	async fn duration_marker_follows_a_slower_cadence() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		for (index, timestamp) in [0, 16_000, 32_000, 65_000, 98_000].into_iter().enumerate() {
+			producer.write(frame(timestamp, index == 0)).unwrap();
+		}
+		producer.finish().unwrap();
+		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(131_000, 0)));
 	}
 
 	#[tokio::test]

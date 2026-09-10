@@ -38,7 +38,7 @@ const DEFAULT_TIMESCALE = 1_000_000;
  * timescale property are interpreted as microseconds.
  */
 export class Format {
-	/** Return the exclusive end of the previous frame for an empty codec payload. */
+	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
 	end(frame: Frame): Time.Micro | undefined {
 		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}

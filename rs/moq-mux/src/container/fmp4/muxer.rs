@@ -146,7 +146,8 @@ impl Muxer {
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
 				if let Some(bound) = self.container.end(&frame) {
-					if let Some(last) = out.last_mut()
+					if matches!(self.kind, Kind::Video(_))
+						&& let Some(last) = out.last_mut()
 						&& last.duration.is_none()
 					{
 						last.duration = super::export::timestamp_gap(last.timestamp, bound, self.timescale)?;
