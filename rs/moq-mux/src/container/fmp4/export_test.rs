@@ -740,6 +740,33 @@ async fn audio_fragment_is_the_publisher_group() {
 	assert_eq!(traf_samples(&fragment.data), vec![(1, 1)]);
 }
 
+/// A closed group is complete even when the live publisher pauses before its successor.
+#[tokio::test(start_paused = true)]
+async fn closed_audio_group_flushes_without_a_successor() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let mut live = Live::audio(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+	live.track.write(raw_frame(0, &[0x08, 0xaa], true)).unwrap();
+	live.track.write(raw_frame(20_000, &[0x08, 0xbb], false)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+	assert!(
+		drain_now(&mut exporter).await.is_empty(),
+		"an open group stays buffered"
+	);
+
+	live.track.cut(None).unwrap();
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("closed group");
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 2)]);
+	assert!(drain_now(&mut exporter).await.is_empty(), "the track is still live");
+
+	live.track.write(raw_frame(500_000, &[0x08, 0xcc], true)).unwrap();
+	live.track.cut(None).unwrap();
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("resumed group");
+	assert_eq!(traf_samples(&fragment.data), vec![(1, 1)]);
+}
+
 /// An audio track nobody cuts buffers until something does. The explicit cap is that
 /// something, and it says out loud how much latency the caller accepts.
 #[tokio::test(start_paused = true)]

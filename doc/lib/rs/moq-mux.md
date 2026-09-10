@@ -26,6 +26,7 @@ producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
+A closed group flushes even if the live publisher pauses before its next frame.
 `fmp4::Export::with_fragment_duration` adds an explicit duration cap. CMAF audio
 samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.

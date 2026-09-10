@@ -9,7 +9,7 @@ import MoqFFI
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
-/// A frame plus the codec metadata a media track carries.
+/// A media frame whose keyframe flag marks a group start or video keyframe; audio flags only group starts.
 public typealias MediaFrame = MoqFFI.MoqMediaFrame
 /// The JSON manifest describing a broadcast's tracks: video and audio
 /// renditions, display geometry, and untyped application sections.

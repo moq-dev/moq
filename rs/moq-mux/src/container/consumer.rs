@@ -5,6 +5,12 @@ use moq_net::Timestamp;
 
 use super::{Container, Frame};
 
+/// Media and clean group boundaries in delivery order.
+pub(crate) enum Event {
+	Frame(Frame),
+	GroupEnd,
+}
+
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
 /// presentation order.
 ///
@@ -203,6 +209,17 @@ impl<F: Container> Consumer<F> {
 	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+		loop {
+			match ready!(self.poll_event(waiter))? {
+				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
+				Some(Event::GroupEnd) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+
+	/// Read media or a clean group boundary without waiting for a successor group.
+	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -263,7 +280,7 @@ impl<F: Container> Consumer<F> {
 						if self.rewind.live_edge.is_none_or(|(_, high)| ts > high) {
 							self.rewind.live_edge = Some((seq, ts));
 						}
-						return Poll::Ready(Ok(Some(frame)));
+						return Poll::Ready(Ok(Some(Event::Frame(frame))));
 					}
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
@@ -295,7 +312,7 @@ impl<F: Container> Consumer<F> {
 						if empty {
 							self.mark_discontinuities(1);
 						}
-						continue 'read;
+						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 				}
 			}

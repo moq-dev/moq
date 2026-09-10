@@ -65,7 +65,8 @@ stdout pacing re-anchors. Other renditions resume at their own discontinuity
 boundary, so old-timeline frames cannot advance the new clock.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
-the publisher's cuts; video normally follows GOPs. `--fragment-duration 2s` caps
+the publisher's cuts; video normally follows GOPs. Closing a group flushes it
+even when the live publisher pauses. `--fragment-duration 2s` caps
 the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 

@@ -18,6 +18,7 @@ use std::task::{Poll, ready};
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
+use super::consumer::Event;
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
@@ -230,6 +231,17 @@ impl ExportSource {
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		loop {
+			match ready!(self.poll_event(waiter))? {
+				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
+				Some(Event::GroupEnd) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+
+	/// Read normalized media or a clean group boundary.
+	pub fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
 		// Resolve a cross-broadcast reference into a broadcast before subscribing.
 		if matches!(self.state, SourceState::Requesting(..)) {
 			let (broadcast, name) = {
@@ -265,15 +277,15 @@ impl ExportSource {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
-				let Some(frame) = ready!(consumer.poll_read(waiter))? else {
-					return Poll::Ready(Ok(None));
-				};
-				frame
+				match ready!(consumer.poll_event(waiter))? {
+					Some(Event::Frame(frame)) => frame,
+					event => return Poll::Ready(Ok(event)),
+				}
 			};
 
 			let Some(transform) = self.transform.as_mut() else {
 				self.resolve_video_dimensions(&frame.payload)?;
-				return Poll::Ready(Ok(Some(frame)));
+				return Poll::Ready(Ok(Some(Event::Frame(frame))));
 			};
 
 			match transform.transform(frame.payload.clone())? {
@@ -288,7 +300,7 @@ impl ExportSource {
 				Some(payload) => {
 					self.refresh_description();
 					self.resolve_video_dimensions(&payload)?;
-					return Poll::Ready(Ok(Some(Frame { payload, ..frame })));
+					return Poll::Ready(Ok(Some(Event::Frame(Frame { payload, ..frame }))));
 				}
 			}
 		}

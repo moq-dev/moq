@@ -13,6 +13,10 @@ futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
 since it can't load a native library.
 
+Media frames use `keyframe` to mark a group start or a video keyframe. For audio,
+it is true only on the first frame of each group, even when every sample can be
+decoded independently.
+
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```

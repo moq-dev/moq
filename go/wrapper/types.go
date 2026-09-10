@@ -32,7 +32,7 @@ type (
 	Dimensions = ffi.MoqDimensions
 	// Frame is a raw track frame: a payload and its presentation timestamp in microseconds.
 	Frame = ffi.MoqFrame
-	// MediaFrame is a Frame plus the codec-derived keyframe flag carried on a media track.
+	// MediaFrame is a Frame plus a flag for group starts or video keyframes; audio flags only group starts.
 	MediaFrame = ffi.MoqMediaFrame
 	// FetchGroupOptions configures a single FetchGroup call, currently just the delivery priority.
 	FetchGroupOptions = ffi.MoqFetchGroupOptions

@@ -10,6 +10,7 @@ use crate::Result;
 use crate::catalog::Stream;
 use crate::container::ExportSource;
 use crate::container::Frame;
+use crate::container::consumer::Event;
 use crate::container::fmp4::Error;
 use moq_net::Timestamp;
 
@@ -24,9 +25,8 @@ use moq_net::Timestamp;
 ///
 /// Use [`next`](Self::next) to pull byte chunks: the first call returns the merged
 /// init segment (ftyp + multi-track moov), subsequent calls return moof+mdat
-/// fragments. By default a fragment is a group: a track rolls whenever a frame opens a
-/// new group, which is a keyframe for video and whatever boundary the publisher drew
-/// for audio. [`with_fragment_duration`](Self::with_fragment_duration) caps the
+/// fragments. By default a fragment is a group, emitted when the group closes. A video
+/// keyframe also rolls the fragment within a group; audio follows publisher cuts. [`with_fragment_duration`](Self::with_fragment_duration) caps the
 /// fragment duration on top of that, for downstream consumers that throttle by
 /// fragment rate. Returns `None` when the broadcast ends.
 ///
@@ -152,6 +152,8 @@ struct Fmp4Track {
 
 	/// Whether the source has signalled end-of-track.
 	finished: bool,
+	/// The source group closed, so its buffered fragment can be emitted.
+	group_finished: bool,
 
 	track_id: u32,
 	timescale: u64,
@@ -226,7 +228,7 @@ impl<S: Stream> Export<S> {
 	/// and every track have ended.
 	///
 	/// A track's own fragments always ascend in timestamp. Across tracks the order is
-	/// only approximate: a fragment leaves when the frame that closes it arrives, so a
+	/// only approximate: a fragment leaves when its group closes or a frame rolls it, so a
 	/// video GOP follows the audio fragments that overlap it, and two video renditions
 	/// rolling on keyframes that do not coincide interleave by up to a GOP. Holding
 	/// fragments back to sort them would cost the length of the longest GOP in added
@@ -279,12 +281,12 @@ impl<S: Stream> Export<S> {
 			// instead of parking.
 			let waiting_for_init = !self.init_emitted;
 			for (name, track) in &mut self.tracks {
-				if track.pending.is_some() || track.finished {
+				if track.pending.is_some() || track.finished || track.group_finished {
 					continue;
 				}
 				loop {
-					match track.source.poll_read(waiter)? {
-						Poll::Ready(Some(frame)) => {
+					match track.source.poll_event(waiter)? {
+						Poll::Ready(Some(Event::Frame(frame))) => {
 							let geometry_ready = !track.is_video
 								|| self
 									.catalog_snapshot
@@ -298,6 +300,13 @@ impl<S: Stream> Export<S> {
 								continue;
 							}
 							track.pending = Some(frame);
+							break;
+						}
+						Poll::Ready(Some(Event::GroupEnd)) => {
+							if track.buffer.is_empty() {
+								continue;
+							}
+							track.group_finished = true;
 							break;
 						}
 						Poll::Ready(None) => {
@@ -327,13 +336,11 @@ impl<S: Stream> Export<S> {
 				return Poll::Pending;
 			}
 
-			// 4. Write out the buffered tail of a track that has ended, as soon as no
-			// other track still holds something earlier. Step 6 does the same, but
-			// only once every track is idle at the same moment, which a track fed by
-			// a recording or a fetch never is: the tail of a video track that ends
-			// mid-broadcast would otherwise trail the whole rest of the audio.
-			if let Some(name) = self.stranded_tail() {
+			// 4. A closed group is complete even when the track remains live. Emit it
+			// (or an ended track's tail) once no other track holds earlier content.
+			if let Some(name) = self.completed_fragment() {
 				let track = self.tracks.get_mut(&name).unwrap();
+				track.group_finished = false;
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(track, &mut self.sequence_number, frames, None)?;
 				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
@@ -389,15 +396,15 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 
-			// 6. Nothing pending anywhere. Step 4 has already written every finished
-			// tail that was next in order, so what's left is one held back by a track
+			// 6. Nothing pending anywhere. Step 4 has already written every completed
+			// fragment that was next in order, so what's left is one held back by a track
 			// that stalled without ending. Write it anyway, earliest first, rather
 			// than wait out a track that may never speak again.
 			let flushable = self
 				.tracks
 				.iter()
 				.filter_map(|(name, t)| {
-					if t.finished && !t.buffer.is_empty() {
+					if (t.finished || t.group_finished) && !t.buffer.is_empty() {
 						Some((Duration::from(t.buffer[0].timestamp), !t.is_video, name.clone()))
 					} else {
 						None
@@ -408,6 +415,7 @@ impl<S: Stream> Export<S> {
 
 			if let Some(name) = flushable {
 				let track = self.tracks.get_mut(&name).unwrap();
+				track.group_finished = false;
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(track, &mut self.sequence_number, frames, None)?;
 				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
@@ -426,17 +434,12 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// The track whose ended run can be written now: it is finished, so nothing
-	/// more will join its buffer, and nothing another track holds starts earlier.
-	///
-	/// A track that ends mid-broadcast has no successor to flush its tail, and the
-	/// other tracks keep the exporter busy for as long as they run, so without this
-	/// the tail would wait for every one of them to end too.
-	fn stranded_tail(&self) -> Option<String> {
+	/// The earliest completed group or ended track tail, if no track holds earlier content.
+	fn completed_fragment(&self) -> Option<String> {
 		let earliest = self.tracks.values().filter_map(Fmp4Track::next_start).min()?;
 		self.tracks
 			.iter()
-			.filter(|(_, track)| track.finished && !track.buffer.is_empty())
+			.filter(|(_, track)| (track.finished || track.group_finished) && !track.buffer.is_empty())
 			.map(|(name, track)| (Duration::from(track.buffer[0].timestamp), !track.is_video, name))
 			.filter(|(start, _, _)| *start <= earliest)
 			.min()
@@ -492,6 +495,7 @@ impl<S: Stream> Export<S> {
 					opus: false,
 					default_frame: Duration::from_secs_f64(1.0 / framerate),
 					finished: false,
+					group_finished: false,
 					track_id: next_track_id,
 					timescale,
 				},
@@ -519,6 +523,7 @@ impl<S: Stream> Export<S> {
 					// Fallback for a duration-less trailing sample (~1024 samples/frame).
 					default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 					finished: false,
+					group_finished: false,
 					track_id: next_track_id,
 					timescale,
 				},

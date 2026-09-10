@@ -452,7 +452,7 @@ pub struct moq_frame {
 	/// The presentation timestamp of the frame in microseconds
 	pub timestamp_us: u64,
 
-	/// Whether the frame is a keyframe, aka the start of a new group.
+	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
 }
 
