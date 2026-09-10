@@ -471,6 +471,7 @@ impl Config {
 	}
 
 	/// Reject knobs this build can't honor. Called when the endpoint is built.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		// Erroring beats silently ignoring the flag: the operator asked for traces and
 		// would otherwise go looking for files that were never going to appear.
@@ -509,12 +510,14 @@ impl Config {
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
 /// can't go on the wire.
+#[cfg(feature = "_transport")]
 const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
 
 /// Reject an idle timeout no QUIC connection can express.
 ///
 /// Checked here rather than in each backend because the conversion the backends do is
 /// infallible-by-panic, and this config reaches them from a TOML file or a C caller.
+#[cfg(feature = "_transport")]
 fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 	match idle_timeout {
 		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
@@ -524,6 +527,7 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 
 /// The largest value a QUIC varint can carry, which bounds every flow-control
 /// limit that goes on the wire as a transport parameter.
+#[cfg(feature = "_transport")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
 
 /// Reject a flow-control window no connection can honor.
@@ -532,6 +536,7 @@ const MAX_VARINT: u64 = (1 << 62) - 1;
 /// the connection rather than tighten it. The receive windows additionally have to
 /// fit a varint, since they are sent as transport parameters; the send window is
 /// local bookkeeping and only has to be non-zero.
+#[cfg(feature = "_transport")]
 fn validate_windows(quic: &Config) -> crate::Result<()> {
 	for (name, window, wire) in [
 		("receive_window", quic.receive_window, true),
@@ -781,6 +786,7 @@ mod tests {
 
 	/// A build that can't capture must reject the flag rather than ignore it, so an
 	/// operator isn't left waiting on trace files that will never appear.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn qlog_requires_the_feature() {
 		let unset = Config::default().validate();
@@ -800,6 +806,7 @@ mod tests {
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
@@ -844,6 +851,7 @@ mod tests {
 
 	/// A zero window credits nothing, so it would wedge the connection rather than
 	/// tighten it. Reject it here, where the message can name the knob.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn zero_windows_are_rejected() {
 		for (name, config) in [
@@ -876,6 +884,7 @@ mod tests {
 
 	/// The receive windows go on the wire as transport parameters, so they have to fit
 	/// a varint. The send window is local bookkeeping and does not.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn receive_windows_must_fit_a_varint() {
 		let over = Config {

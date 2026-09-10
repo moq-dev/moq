@@ -66,14 +66,7 @@ pub mod quinn;
 ))]
 mod resolve;
 pub mod runtime;
-#[cfg(any(
-	feature = "noq",
-	feature = "quinn",
-	feature = "quiche",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp"
-))]
+#[cfg(feature = "_transport")]
 pub mod server;
 #[doc(hidden)]
 pub mod settings;
@@ -102,14 +95,7 @@ pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
-#[cfg(any(
-	feature = "noq",
-	feature = "quinn",
-	feature = "quiche",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp"
-))]
+#[cfg(feature = "_transport")]
 pub use server::{Listener, Request, Server, Transport};
 
 // Re-export these crates.

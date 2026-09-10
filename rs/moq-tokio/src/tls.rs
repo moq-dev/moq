@@ -392,6 +392,7 @@ impl Peers {
 	}
 
 	/// Whether a raw digest is allowed, for the verifier's hot path.
+	#[cfg(feature = "_certs")]
 	fn contains_raw(&self, fingerprint: &[u8]) -> bool {
 		match <[u8; 32]>::try_from(fingerprint) {
 			Ok(fingerprint) => self.read().contains(&fingerprint),
@@ -673,6 +674,7 @@ impl CustomRoots {
 		})
 	}
 
+	#[cfg(any(feature = "watch", feature = "quiche"))]
 	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
 		read_roots(&self.paths)
 	}
@@ -1649,6 +1651,7 @@ impl Certificates {
 	}
 
 	/// An empty set, used when no TLS-bearing backend is configured.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn empty() -> Self {
 		Self {
 			info: Arc::new(RwLock::new(Info::default())),

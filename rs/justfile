@@ -388,16 +388,16 @@ tokio-features:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    cargo check --locked -p moq-tokio --no-default-features
-    cargo check --locked -p moq-tokio --all-features
-    cargo check --locked -p moq-tokio --no-default-features --features quiche
-    cargo check --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs
-    cargo check --locked -p moq-tokio --no-default-features --features quinn,ring
-    cargo check --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs
-    cargo check --locked -p moq-tokio --no-default-features --features noq,ring
+    cargo clippy --locked -p moq-tokio --no-default-features -- -D warnings
+    cargo clippy --locked -p moq-tokio --all-features -- -D warnings
+    cargo clippy --locked -p moq-tokio --no-default-features --features quiche -- -D warnings
+    cargo clippy --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs -- -D warnings
+    cargo clippy --locked -p moq-tokio --no-default-features --features quinn,ring -- -D warnings
+    cargo clippy --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs -- -D warnings
+    cargo clippy --locked -p moq-tokio --no-default-features --features noq,ring -- -D warnings
 
     for feature in aws-lc-rs ring tcp uds websocket; do
-        cargo check --locked -p moq-tokio --no-default-features --features "$feature"
+        cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
     done
 
     want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'

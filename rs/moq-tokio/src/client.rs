@@ -72,6 +72,7 @@ pub struct Client {
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
 	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
+	#[cfg(feature = "_transport")]
 	timeout: std::time::Duration,
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
@@ -107,15 +108,7 @@ impl Client {
 	/// Build a client from its config.
 	///
 	/// Errors if no transport feature is compiled in.
-	#[cfg(not(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	)))]
+	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
@@ -123,15 +116,7 @@ impl Client {
 	}
 
 	/// Build a client from its config, binding the QUIC socket up front.
-	#[cfg(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(feature = "_transport")]
 	pub fn new(config: Config) -> crate::Result<Self> {
 		let Config {
 			connect: config, quic, ..

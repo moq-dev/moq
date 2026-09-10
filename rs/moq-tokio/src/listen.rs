@@ -170,7 +170,10 @@ impl Config {
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
 /// forms a group here, and a member a caller could mint for itself would bind
 /// outside one.
-pub(crate) use moq_sock::shard::{Member, Shard};
+#[cfg(feature = "_transport")]
+pub(crate) use moq_sock::shard::Member;
+#[cfg(any(feature = "noq", feature = "quinn"))]
+pub(crate) use moq_sock::shard::Shard;
 
 /// The `--server-*` flags from before the accept side was named `listen`.
 ///
@@ -326,6 +329,7 @@ impl Config {
 	///
 	/// Checked here rather than with Usage's `requires`, which can only name one arg
 	/// id, and the nonce reaches this config from a TOML file as well as the flag.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		match (self.lb_id.is_some(), self.lb_nonce.is_some()) {
 			(false, true) => Err(crate::Error::LbNonceWithoutId),
@@ -416,6 +420,7 @@ mod tests {
 
 	/// A nonce with no server id is meaningless. Checked here rather than with a
 	/// Usage `requires`, which can only name one arg id and never sees a TOML file.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn lb_nonce_needs_an_id() {
 		let config = config_from(["test", "--listen-quic-lb-nonce", "8"]);
