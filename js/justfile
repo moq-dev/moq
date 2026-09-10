@@ -37,6 +37,17 @@ install:
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
+    # These Workers have independent lockfiles outside the Bun workspace.
+    # Validate the deploy bundle without publishing or requiring credentials.
+    for project in infra/apt infra/rpm demo/pub; do
+    	if [[ -z "$FILES" ]] || grep -qE "^($project/|js/justfile$)" <<< "$FILES"; then
+    		(
+    			cd "../$project"
+    			bun install --frozen-lockfile
+    			bun run deploy --dry-run
+    		)
+    	fi
+    done
     if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
     	echo "js: no JS changes; skipping."
     	exit 0
@@ -71,7 +82,7 @@ test $FILES="":
     	exit 0
     fi
     bun install --frozen-lockfile
-    bun test common/deps.test.ts
+    bun test common/deps.test.ts common/workers.test.ts
     if tty -s; then
         bun run --filter='*' --elide-lines=0 test
     else
