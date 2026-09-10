@@ -27,10 +27,21 @@ budget, or a schedule.
   public API; promoting them is [Latency
   ledger](/quest/m2/latency-ledger.md), which nothing here waits on.
 - The metric schema is the deliverable that outlives this quest, because the
-  native lane has to emit the same thing. Name each stage once (capture,
-  encode, publish flush, network, jitter buffer, decode, render) and define the
-  glitch counters exactly: an underrun is a quantum the ring could only partly
-  fill, a skip-ahead is a re-anchor that discarded buffered audio.
+  native lane and the ledger both have to emit the same thing. It is a
+  contract, so write it as one:
+  - Every counter defined, not just the two that are obvious. An underrun is a
+    quantum the ring could only partly fill; a skip-ahead is a re-anchor that
+    discarded buffered audio; short quanta and discarded samples need the same
+    treatment rather than being left to the reader.
+  - Units and clock domain stated once. Durations in one unit, and every
+    timestamp on a named clock, so a browser value and a native value are the
+    same measurement.
+  - Aggregation stated per metric: a count over the run, a max, or a
+    percentile. "Underruns: 3" and "underruns: 3/s" grade differently.
+  - Stages as exclusive, non-overlapping spans (capture, encode, publish flush,
+    network, jitter buffer, decode, render). The ledger's sum-to-end-to-end
+    identity is unimplementable if two stages can claim the same milliseconds,
+    and an unaccounted remainder is the finding, so give it a name too.
 - Extract the seeded shaper from [Impaired
   path](/quest/m0/transport-impairment-profile.md) into something that runs as
   its own process in front of a relay, so this harness and the drills share one
@@ -40,8 +51,15 @@ budget, or a schedule.
 - Profiles: near-zero, mild, bursty (the flush-span shape from #3477), and a
   step change that forces the target to move mid-run. Fixed seeds, recorded
   with the results.
-- Budgets in one checked-in file keyed by profile, so tightening one is a
-  visible diff and loosening one needs a reason in review.
+- One profile runs a fixed delay preset rather than auto, as the control. Every
+  other profile exercises adaptation, so without this the whole matrix can pass
+  while a fixed preset regresses, and fixed presets are what a viewer lands on
+  today.
+- Budgets in one checked-in file, keyed by the whole matrix row and not by
+  profile alone: runtime, codec, sample rate, profile, and the ring path, since
+  each of those moves the expected floor. A profile-only key silently grades
+  one row against another's threshold. Tightening a budget is then a visible
+  diff and loosening one needs a reason in review.
 - Trim the released ndjson traces from `rt-audio-traces-2026-09-06` into a
   fixture and replay them too, so a real recorded arrival pattern is graded
   next to the synthetic profiles.

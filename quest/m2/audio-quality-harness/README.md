@@ -40,7 +40,8 @@ audio quality number makes a failure hard to attribute.
 
 Nightly, not per-PR: the matrix is jitter profiles by runtime by codec and
 sample rate, which is more than a merge gate should carry, and `nightly.yml`
-already exists for exactly this trade.
+already exists for exactly this trade. Budgets are keyed by the full row, since
+each of those dimensions moves the expected floor.
 
 ## Quests
 

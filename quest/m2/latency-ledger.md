@@ -20,7 +20,10 @@ trade to get it running. This quest promotes them.
 - Switch the harness over, deleting the probes it replaces. A ledger with no
   consumer is how this drifts from reality.
 - The stages must sum to the measured end-to-end delay within a stated
-  tolerance, and that identity is itself a test. An unaccounted remainder is the
+  tolerance, and that identity is itself a test. It only holds on the harness's
+  terms: one duration unit, every timestamp on a named clock, and stages as
+  exclusive spans that cannot both claim the same milliseconds. Inherit those
+  from the schema rather than restating them. An unaccounted remainder is the
   bug this whole line exists to find, so it gets a name and a number rather
   than being absorbed into a neighbouring stage.
 

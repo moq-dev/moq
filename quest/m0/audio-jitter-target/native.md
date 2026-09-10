@@ -24,9 +24,23 @@ comment already promises the companion:
 - Measure arrivals at the same point the browser does, on the container
   consumer before the age budget can skip a group, so both languages estimate
   from the same observation.
-- Add `latency_min` to `decode::Config`: `None` measures and adapts, `Some`
-  pins a floor the way a fixed delay does in the browser. This is additive on a
-  `#[non_exhaustive]` struct, so it targets `main`.
+- Add `latency_min` to `decode::Config`, additive on a `#[non_exhaustive]`
+  struct, so it targets `main`. Its exact contract is a decision this quest
+  makes and records, not something to leave to the reader, because "floor" and
+  "fixed target" behave differently under an adaptive estimator:
+
+  1. **Floor.** `Some(d)` is a lower bound and the estimator may still raise
+     the target above it. Recommended: it matches how the browser treats a
+     rendition's advertised delay, and a viewer asking for more buffer rarely
+     means "and never more than that".
+  2. **Exact target.** `Some(d)` pins the target and disables adaptation,
+     mirroring a fixed browser preset exactly. Choose this if preserving a
+     fixed-latency preset byte for byte matters more than the parallel above.
+
+  Either way, state the precedence against the estimator and against
+  `latency_max`, and what happens when the requested floor exceeds the
+  effective `latency_max` that `Consumer` already clamps to publisher
+  retention. Refusing that combination loudly beats silently clamping it.
 - The estimator itself is internal. Only the config field and whatever the
   playback path needs to report its current target become public, and each one
   is argued for rather than exposed by default.

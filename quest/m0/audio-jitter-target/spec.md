@@ -55,6 +55,18 @@ Current defaults on main, for reference and not for copying blind: quantile
 forget weight `2`, reorder forget factor `0.9993`, `ms_per_loss_percent` `20`.
 The widely repeated "0.97" is a transitional value, not head.
 
+Say explicitly that the forget factor decays once per *resampled observation*,
+not once per arrival, and give the resulting wall-clock memory
+(`500ms / (1 - 0.983)`, about 29 s). Applying a per-observation factor per
+arrival is precisely the mistake #3517 made, and a number that reads plausible
+either way is exactly the kind that survives review.
+
+Define units once, for both the algorithm and the corpus: what clock arrival
+times are on, what timescale frame timestamps use and how they convert, and
+what a timestamp discontinuity does to the reference. Two implementations that
+disagree on any of these produce different targets from the same trace while
+both look correct.
+
 **What actually breaks #3517, reproduced.** A viewer on that branch reads a
 14.56 s jitter buffer in auto. The estimator cannot produce that from its
 histogram: the percentile is clamped to `BUCKETS * BUCKET`, one second. The

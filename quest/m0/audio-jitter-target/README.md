@@ -52,7 +52,7 @@ land in a follow-up". This questline is that follow-up.
 
 ## Related
 
-- [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - the advertised flush span the measured target is held above
+- [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - the advertised flush span, whose relationship to the measured target the spec settles
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - the automated proof, built on its own schedule
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - inaudible convergence, on top of this
 - [Plan: A/V clock](/quest/m1/plan-av-clock.md) - the clock this target eventually feeds

@@ -18,14 +18,20 @@ from whichever platform a user happened to be on.
 - `moq play` needs to emit the run's counters and stage timings as JSON for the
   analyzer. Add that output, and keep it useful outside the test: a user
   debugging their own latency wants the same dump.
-- Reuse the browser lane's analyzer and budget file. Native rows get their own
-  budgets in the same file, since the floor differs, but not their own schema.
+- Reuse the browser lane's analyzer and budget file, with the JSON field names
+  and meanings matching its schema exactly. Native rows get their own budget
+  values in the same file, keyed the same way, since the device floor differs;
+  they do not get their own schema.
 - Add the lane to the nightly matrix beside the browser one.
 
-Nothing here is a second estimator. If the native and browser numbers disagree
-beyond the profiles' tolerance, that is a finding against
-[Audio jitter target](/quest/m0/audio-jitter-target/README.md), not a reason to
-widen a budget.
+Nothing here is a second estimator. Compare the two runtimes at the estimator
+first: the target series each produces from the same arrival trace, which is
+the conformance corpus's own comparison and carries no device timing in it. A
+disagreement there is a finding against [Audio jitter
+target](/quest/m0/audio-jitter-target/README.md) and never a reason to widen a
+budget. Only then compare end-to-end totals, with the backend-dependent stages
+isolated: this lane deliberately accepts real device callback noise, so a
+difference in totals alone proves nothing about the estimator.
 
 ## Required
 
