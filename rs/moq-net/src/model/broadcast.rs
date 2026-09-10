@@ -214,6 +214,9 @@ struct BroadcastState {
 	// broadcast churning distinct track names stays bounded by the live count.
 	tracks: WeakCache<Arc<str>, track::TrackWeak>,
 
+	// Shared across suffixes and producer clones; cache eviction must not reset IDs.
+	unique: u64,
+
 	// Pending requests keyed by track name, coalescing concurrent `track()` calls
 	// and waiting for a dynamic handler to accept or deny them. A request leaves
 	// here once handed out (the handler caches it in `tracks`, so lookups keep
@@ -413,6 +416,8 @@ impl Producer {
 	}
 
 	/// Remove a track from the lookup.
+	///
+	/// Removing a track does not make its minted name available to [`Self::unique_name`] again.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
 		self.state.lock().tracks.remove(name).ok_or(Error::NotFound)?;
 		Ok(())
@@ -469,8 +474,7 @@ impl Producer {
 
 	/// Create a track with a unique name using the given suffix.
 	///
-	/// Generates names like `0{suffix}`, `1{suffix}`, etc. and picks the first
-	/// one not already used in this broadcast.
+	/// Uses [`Self::unique_name`]; minted names are never reused, even after removal or closure.
 	pub fn unique_track(
 		&mut self,
 		suffix: &str,
@@ -482,15 +486,30 @@ impl Producer {
 
 	/// Generate a unique track name from a suffix without creating the track.
 	///
-	/// Returns a fresh name like `0{suffix}`, `1{suffix}`, etc. Use this when
-	/// you need to set non-default Track properties (e.g. `with_timescale`,
-	/// `with_latency_max`) before handing the Track to [`Self::create_track`].
+	/// Returns `{id}{suffix}` with an increasing ID shared across all suffixes and
+	/// producer clones in this broadcast, skipping names already in the lookup.
+	/// A digit-leading suffix gets a `-` separator so it cannot be confused with the ID.
+	/// Minted names are never reused, even if no track is created or it is removed or closed.
+	/// Explicit calls to [`Self::create_track`] can still reuse names.
+	///
+	/// # Panics
+	///
+	/// Panics if the broadcast exhausts its `u64` IDs.
 	pub fn unique_name(&self, suffix: &str) -> String {
-		let state = self.state.read();
-		(0u16..)
-			.map(|i| format!("{i}{suffix}"))
-			.find(|name| !state.tracks.contains_key(name.as_str()))
-			.expect("u16 namespace exhausted; wow")
+		let mut state = self.state.lock();
+		let separator = if suffix.starts_with(|c: char| c.is_ascii_digit()) {
+			"-"
+		} else {
+			""
+		};
+		loop {
+			let id = state.unique;
+			state.unique = id.checked_add(1).expect("unique track IDs exhausted");
+			let name = format!("{id}{separator}{suffix}");
+			if !state.tracks.contains_key(name.as_str()) {
+				return name;
+			}
+		}
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
@@ -1300,6 +1319,57 @@ impl Consumer {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn unique_names_are_never_reused() {
+		let mut producer = Info::new().produce();
+		let name = producer.unique_name(".opus");
+		assert_eq!(name, "0.opus");
+		let track = producer.create_track(name.clone(), None).unwrap();
+		producer.remove_track(&name).unwrap();
+		assert_eq!(producer.unique_name(".opus"), "1.opus");
+		drop(track);
+	}
+
+	#[test]
+	fn unique_names_survive_closed_track_pruning() {
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.unique_track(".opus", None).unwrap();
+		assert_eq!(track.name(), "0.opus");
+		drop(track);
+		assert!(matches!(consumer.track_inner("0.opus"), Err(Error::NotFound)));
+		assert_eq!(producer.unique_name(".opus"), "1.opus");
+	}
+
+	#[test]
+	fn unique_name_skips_a_live_collision() {
+		let mut producer = Info::new().produce();
+		let track = producer.create_track("0.opus", None).unwrap();
+		assert_eq!(producer.unique_name(".opus"), "1.opus");
+		drop(track);
+		assert_eq!(producer.unique_name(".opus"), "2.opus");
+	}
+
+	#[test]
+	fn unique_names_share_a_counter() {
+		let producer = Info::new().produce();
+		assert_eq!(producer.unique_name("-video"), "0-video");
+		assert_eq!(producer.clone().unique_name("-audio"), "1-audio");
+		assert_eq!(producer.unique_name("-video"), "2-video");
+	}
+
+	#[test]
+	fn unique_names_separate_numeric_suffixes() {
+		let producer = Info::new().produce();
+		assert_eq!(producer.unique_name(""), "0");
+		let name = producer.unique_name("2");
+		assert_eq!(name, "1-2");
+		for _ in 2..12 {
+			producer.unique_name("");
+		}
+		assert_eq!(producer.unique_name(""), "12");
+	}
 
 	/// Await with a timeout so a missed demand wake fails the test instead of
 	/// hanging it (time is paused, so the timeout fires instantly when idle).
