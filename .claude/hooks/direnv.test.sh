@@ -29,8 +29,8 @@ bash "$hook"
 mode=$(ls -l "$CLAUDE_ENV_FILE.direnv")
 [[ $mode == -rw-------* ]]
 cp "$CLAUDE_ENV_FILE" "$fixture/original"
-export SNAPSHOT='second value with $quotes and a
-newline'
+export SNAPSHOT="second value with \$quotes and a
+newline"
 bash "$hook"
 cmp "$CLAUDE_ENV_FILE" "$fixture/original"
 [[ $(bash -c '. "$CLAUDE_ENV_FILE"; printf "%s" "$VALUE"') == "$SNAPSHOT" ]]
