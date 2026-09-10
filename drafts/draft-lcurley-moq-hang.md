@@ -777,7 +777,9 @@ An encoded name never contains `/` or begins with `.`, so a track cannot address
 `.info`, `groups`, and `segments` are reserved within a track directory.
 
 `<smallest>` and `<largest>` are the inclusive first and last group sequence numbers in the object.
-Each is a QUIC variable-length integer written as exactly 19 decimal digits, padded with leading zeros, so lexical and numeric order agree.
+Recorded group and segment IDs MUST be integers in the range 0 through 9007199254740991 (2^53 - 1), so timeline JSON preserves them exactly.
+Each filename field is written as exactly 19 decimal digits, padded with leading zeros, so lexical and numeric order agree.
+Writers and readers MUST reject IDs outside this range, including reconstructed group IDs in the binary table.
 A range-named object MUST contain at least one group, and its table's first and last sequences MUST match the filename.
 For each track, object ranges MUST be nonoverlapping and strictly increasing in timeline segment order; gaps are allowed both within and between objects.
 A track with no stored groups for a segment has no object or range in that record.
@@ -785,8 +787,9 @@ There are no empty index objects or duplicate copies addressed by segment number
 
 This layout applies to every recorded track, including the catalog, except the recording-owned timeline track identified by the catalog's `timeline` field ({{timeline-catalog}}).
 The timeline uses `segments/<segment>` with the same binary envelope and at least one complete Window group per object.
-`<segment>` is the committed timeline segment ID, encoded as 19 zero-padded decimal digits within the QUIC variable-length integer range.
+`<segment>` is the committed timeline segment ID, encoded as 19 zero-padded decimal digits within the recording ID range.
 After its first segment, the recording MUST commit consecutive segment IDs, including all-gap segments.
+A writer MUST stop before allocating an ID beyond the limit; IDs never wrap.
 Each track has its own objects so a reader can fetch one rendition without downloading the others.
 
 ## Track Objects {#recording-track}
@@ -834,7 +837,7 @@ Fields annotated `(i)` are variable-length integers using the QUIC encoding ({{!
 `Group Count` gives the number of group entries; each `Frame Count` gives the number of frame entries in that group.
 The first `Sequence Delta` is the absolute group sequence number.
 Each subsequent value is the group sequence number minus the previous sequence number minus one; zero therefore means the next consecutive group.
-Groups MUST have strictly ascending sequence numbers; reconstruction MUST reject values exceeding the QUIC variable-length integer limit.
+Groups MUST have strictly ascending sequence numbers; reconstruction MUST reject values exceeding the recording ID limit ({{recording-layout}}).
 For range-named objects, the sequences MUST match the ranges in the timeline.
 Frame entries appear in their original order within each group.
 `Timestamp` is the frame's absolute timestamp in the track's `timescale` units, not a delta.
@@ -909,7 +912,8 @@ The recovered records determine the committed track object keys; a missing or ma
 Objects not referenced by the recovered timeline do not advertise content on their own.
 Listing is not an atomic snapshot across tracks; absence from an earlier listing MUST NOT override a successful GET of an object referenced by a later durable timeline record.
 
-After replaying segment N, a reader follows an active recording by GET of `segments/N+1`, without refreshing media listings.
+After replaying segment N below the recording ID limit, a reader follows an active recording by GET of `segments/N+1`, without refreshing media listings.
+At the limit there is no next key; this does not establish a clean recording end.
 Not Found does not distinguish a pending commit, an expired DVR segment, or an interrupted recording.
 A reader that has fallen behind retention MUST bootstrap again from a retained checkpoint.
 Alternatively, a reader MAY list timeline keys after its last replayed key, consume all pages, sort the results, and replay them in order.
@@ -966,6 +970,7 @@ This document has no IANA actions.
 - Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
 - Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
+- Limited recorded group and segment IDs to JSON-safe integers, including delta reconstruction.
 
 # Acknowledgments
 {:numbered="false"}

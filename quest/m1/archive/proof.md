@@ -27,8 +27,10 @@ table offsets, an unknown envelope or `.info` version treated as a missing
 segment, segment create collisions under the single-writer rule, a missing
 tail, and a clean end without a completion marker.
 
-Exercise group 0, the largest QUIC varint, consecutive zero deltas, sparse
-deltas, overflow, empty objects, mismatched filename bounds, and overlapping
+Exercise group and segment IDs 0 and 2^53 - 1; reject 2^53 and the largest
+QUIC varint in keys and reconstructed group IDs. Cover consecutive zero
+deltas, sparse deltas, overflow, stopping at ID exhaustion without wrapping
+or inferring clean finality, empty objects, mismatched filename bounds, and overlapping
 ranges across segments. Reject decreasing or duplicate group arrivals while
 allowing accepted groups to complete out of order. Verify JSON-safe timescales.
 Test ordered S3 lookup at both endpoints and between ranges, unordered paginated

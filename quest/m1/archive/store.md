@@ -31,7 +31,9 @@ and, for range-named objects, agreement between the table and filename bounds. B
 table entry while decoding and refuse an unknown version. Restrict `.info`
 timescale to the JSON safe-integer range.
 
-Use fixed-width 19-digit decimal fields. Range-named objects have no segment ID
+Limit recorded group and segment IDs, including reconstructed deltas, to
+0 through 9007199254740991 (2^53 - 1). Refuse larger IDs rather than rounding
+or wrapping. Use fixed-width 19-digit decimal fields. Range-named objects have no segment ID
 or companion empty index file. Timeline objects alone use consecutive
 `segments/<segment>` keys. Listing names can build a sorted in-memory range
 index without reading payloads. `list_with_offset` supports incremental
