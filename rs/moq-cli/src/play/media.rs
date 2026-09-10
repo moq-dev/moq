@@ -127,6 +127,7 @@ impl Media {
 						}
 					};
 					let mut decode = moq_video::decode::Config::new();
+					decode.start = moq_video::decode::Start::Latest;
 					decode.latency_max = Some(self.args.latency_max);
 					match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
@@ -159,6 +160,7 @@ impl Media {
 						}
 					};
 					let mut decode = moq_audio::decode::Config::new();
+					decode.start = moq_audio::decode::Start::Latest;
 					decode.latency_max = Some(self.args.latency_max);
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.

@@ -16,6 +16,16 @@ pub enum Error {
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 
+	/// The codec session is over: its worker thread stopped, or a cancelled
+	/// call left it out of step with the stream it was decoding.
+	///
+	/// Distinct from [`Codec`](Self::Codec), which describes the bytes of one
+	/// picture and which a caller can reasonably skip past. Nothing about this
+	/// one improves by reading on: the session that would have decoded the next
+	/// picture no longer exists, and only a new encoder or decoder recovers it.
+	#[error("codec session ended: {0}")]
+	CodecGone(String),
+
 	/// The requested capture source or enumeration has no implementation on this
 	/// platform (the message names what is missing).
 	#[error("not supported on this platform: {0}")]
