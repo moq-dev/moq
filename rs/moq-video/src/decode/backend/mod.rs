@@ -46,6 +46,7 @@ mod v4l2;
 
 /// The video codec a decoder handles, derived from the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Codec {
 	/// H.264 / AVC video.
 	H264,
