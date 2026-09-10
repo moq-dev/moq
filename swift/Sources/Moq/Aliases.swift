@@ -96,3 +96,12 @@ public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.
 public typealias MoqError = MoqFFI.MoqError
+
+/// Whether a protocol code is from the session or stream registry.
+public typealias ErrorScope = MoqFFI.MoqErrorScope
+
+/// A recognized protocol kind, or `app` / `unknown` when the code is not named.
+public typealias ProtocolKind = MoqFFI.MoqProtocolKind
+
+/// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
+public typealias ProtocolError = MoqFFI.MoqProtocolError

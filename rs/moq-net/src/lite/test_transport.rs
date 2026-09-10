@@ -175,9 +175,7 @@ impl poll::RecvStream for PendingRecv {
 	}
 }
 
-/// What a reset stream's reads report: RESET_STREAM with application code 0,
-/// the code a routine group drop carries. `Error::from_transport` decodes it
-/// back to `Error::Cancel`.
+/// A reset with stream code 0, decoded as `Error::Stream(StreamError::Internal)`.
 #[derive(Debug, Clone, Default)]
 pub struct ResetError;
 

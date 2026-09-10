@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Register moq-lite stream codes NOT_FOUND 0x33, OLD 0x34, and EVICTED 0x35 so a cache miss round-trips as the named variant instead of an opaque reserved-range placeholder.
+- Every received protocol code is `Error::Session` / `Error::Stream`, preserving
+  its registry and numeric value, including cancellation and internal-error codes.
 
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-net-v0.2.18...moq-net-v0.2.19) - 2026-09-09
 

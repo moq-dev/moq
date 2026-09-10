@@ -150,9 +150,9 @@ impl Session {
 	/// Block until the transport session is closed, returning the reason.
 	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
-	/// rejection arrives as [`Error::Unauthorized`]); an unregistered code is kept
-	/// verbatim as [`Error::Remote`], and a close carrying no application code surfaces
-	/// as [`Error::Transport`]. See [`Error::from_transport`]. If the runtime drops
+	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
+	/// preserved as [`Error::Session`], and a close carrying no application code surfaces as
+	/// [`Error::Transport`]. See [`Error::from_transport`]. If the runtime drops
 	/// the machine instead of running it to completion, this resolves with
 	/// [`Error::Cancel`].
 	pub async fn closed(&self) -> Error {

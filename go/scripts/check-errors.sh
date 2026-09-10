@@ -7,7 +7,7 @@ TEST=$3
 
 generated=$(sed -n 's/^var \(ErrMoqError[[:alnum:]]*\) =.*/\1/p' "$GENERATED" | sort)
 wrapped=$(sed -n 's/^[[:space:]]*Err[[:alnum:]]* = ffi\.\(ErrMoqError[[:alnum:]]*\)$/\1/p' "$WRAPPER" | sort)
-tested=$(sed -n 's/.*ffi\.New\(MoqError[[:alnum:]]*\)().*/Err\1/p' "$TEST" | sort)
+tested=$(sed -n 's/.*ffi\.New\(MoqError[[:alnum:]]*\)(.*/Err\1/p' "$TEST" | sort)
 
 if [[ -z "$generated" || -z "$wrapped" || -z "$tested" ]]; then
     echo "go check: failed to discover MoqError sentinels" >&2

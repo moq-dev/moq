@@ -55,7 +55,7 @@ fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
 suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
     val consumer = subscribeCatalog()
     try {
-        return consumer.next() ?: throw MoqException.Closed("broadcast closed before a catalog was published")
+        return consumer.next() ?: throw MoqException.Closed()
     } finally {
         consumer.cancel()
     }

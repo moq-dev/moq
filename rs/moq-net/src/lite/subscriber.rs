@@ -782,8 +782,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						Ok(()) => {
 							let _ = group.finish();
 						}
-						Err(Error::Cancel) => {
-							let _ = group.abort(Error::Cancel);
+						Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
+							let _ = group.abort(err);
 						}
 						Err(err) => {
 							tracing::debug!(%err, group = %group.sequence, "group error");

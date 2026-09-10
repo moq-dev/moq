@@ -50,6 +50,8 @@ inbound stream cap for a subscriber to many tracks.
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
+`ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
+code, kind) when the peer sent a session or stream code.
 
 `moq.bandwidth()` divides the connection's send estimate; `reserve` a share
 for an app-owned encoder so several publishers on one session split the

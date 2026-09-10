@@ -518,7 +518,10 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					let res = ready!(run.poll(stream, origin, announced, waiter));
 					if let Err(err) = res {
 						match &err {
-							Error::Cancel | Error::Transport(_) => {
+							Error::Cancel
+							| Error::Stream(crate::StreamError::Cancel)
+							| Error::Session(crate::SessionError::Cancel)
+							| Error::Transport(_) => {
 								tracing::debug!(prefix = %origin.absolute(&run.prefix), "announcing cancelled");
 							}
 							err => {
@@ -889,7 +892,10 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 			Err(err) if matches!(self.state, TrackInfoState::Decode) => Poll::Ready(Err(err)),
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel)
+					| Error::Transport(_) => {
 						tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info cancelled")
 					}
 					err => {
@@ -1023,7 +1029,10 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 			Err(err) => {
 				match &err {
 					// TODO better classify WebTransport errors.
-					Error::Cancel | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel)
+					| Error::Transport(_) => {
 						tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed cancelled")
 					}
 					err => {
@@ -1254,7 +1263,10 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 			Err(err) if matches!(self.state, FetchState::Decode) => Poll::Ready(Err(err)),
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Stream(crate::StreamError::Cancel)
+					| Error::Session(crate::SessionError::Cancel)
+					| Error::Transport(_) => {
 						tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch cancelled")
 					}
 					err => {

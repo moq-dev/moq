@@ -70,7 +70,8 @@ to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(patt
 `datagrams`, `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
-`isShutdown` classify errors.
+`isShutdown` classify errors. `protocolError` is the structured protocol failure
+(scope, verbatim code, kind) when the peer sent one.
 
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac

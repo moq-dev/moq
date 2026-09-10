@@ -251,18 +251,33 @@ mod tests {
 	#[tokio::test]
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
-			(crate::Version::Ietf(crate::ietf::Version::Draft17), Error::Remote(0x4)),
-			(crate::Version::Ietf(crate::ietf::Version::Draft20), Error::GoingAway),
-			(crate::Version::Lite(crate::lite::Version::Lite05), Error::GoingAway),
+			(
+				crate::Version::Ietf(crate::ietf::Version::Draft17),
+				Error::Stream(crate::StreamError::Unknown(0x4)),
+			),
+			(
+				crate::Version::Ietf(crate::ietf::Version::Draft20),
+				Error::Stream(crate::StreamError::GoingAway),
+			),
+			(
+				crate::Version::Lite(crate::lite::Version::Lite05),
+				Error::Stream(crate::StreamError::GoingAway),
+			),
 		] {
 			let mut writer = Writer::new(Stopped(0x4), version);
 			let err = writer.write_all(&mut b"payload".as_slice()).await.unwrap_err();
 			assert!(
 				matches!(
-					(err, expected),
-					(Error::Remote(4), Error::Remote(4)) | (Error::GoingAway, Error::GoingAway)
+					(&err, &expected),
+					(
+						Error::Stream(crate::StreamError::Unknown(4)),
+						Error::Stream(crate::StreamError::Unknown(4))
+					) | (
+						Error::Stream(crate::StreamError::GoingAway),
+						Error::Stream(crate::StreamError::GoingAway)
+					)
 				),
-				"{version} decoded the STOP_SENDING with the wrong registry"
+				"{version} decoded the STOP_SENDING with the wrong registry: {err:?}"
 			);
 		}
 	}

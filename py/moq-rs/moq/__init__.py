@@ -6,7 +6,7 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 from moq_ffi import MoqError as Error
 
 from .client import Client, connect
-from .errors import is_auth, is_shutdown
+from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
     Announced,
@@ -65,9 +65,12 @@ from .types import (
     ContainerFormat,
     Datagram,
     Dimensions,
+    ErrorScope,
     FetchGroupOptions,
     Frame,
     MediaFrame,
+    ProtocolError,
+    ProtocolKind,
     Route,
     Subscription,
     TrackInfo,
@@ -118,7 +121,10 @@ __all__ = [
     "Datagram",
     "Dimensions",
     "Error",
+    "ErrorScope",
     "Frame",
+    "ProtocolError",
+    "ProtocolKind",
     "MediaFrame",
     "FetchGroupOptions",
     "GroupConsumer",
@@ -164,4 +170,5 @@ __all__ = [
     "is_auth",
     "is_shutdown",
     "log_level",
+    "protocol_error",
 ]

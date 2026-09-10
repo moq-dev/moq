@@ -31,6 +31,20 @@ private fun opusHead(): ByteArray =
     )
 
 class SmokeTest {
+    @Test
+    fun `stream abort preserves protocol details`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("errors", null)
+            val producer = track.appendGroup()
+            val group = broadcast.consume().fetchGroup("errors", 0uL, FetchGroupOptions())
+            producer.abort(404u)
+            val error = assertFailsWith<MoqException.Protocol> { group.readFrame() }
+            assertEquals(ErrorScope.STREAM, error.details.scope)
+            assertEquals(468u, error.details.code)
+            assertEquals(ProtocolKind.APP, error.details.kind)
+        }
+    }
+
     /**
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
      * URL fails fast, and the failure surfaces as a [MoqException]. Also proves

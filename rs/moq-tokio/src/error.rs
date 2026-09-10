@@ -245,7 +245,9 @@ impl Error {
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::Connect(err) => Some(*err),
-			Self::MoqNet(moq_net::Error::Unauthorized) => Some(crate::ConnectError::Unauthorized),
+			Self::MoqNet(
+				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
+			) => Some(crate::ConnectError::Unauthorized),
 			#[cfg(feature = "quinn")]
 			Self::Quinn(err) => err.connect_error(),
 			#[cfg(feature = "noq")]

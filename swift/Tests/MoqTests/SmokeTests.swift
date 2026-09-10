@@ -3,6 +3,24 @@ import XCTest
 @testable import Moq
 
 final class SmokeTests: XCTestCase {
+    func testStreamAbortPreservesProtocolDetails() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "errors")
+        let producer = try track.appendGroup()
+        let consumer = try broadcast.consume()
+        let group = try await consumer.fetchGroup(name: "errors", sequence: 0)
+        try producer.abort(errorCode: 404)
+        do {
+            _ = try await group.readFrame()
+            XCTFail("expected a protocol error")
+        } catch let error as MoqError {
+            let details = try XCTUnwrap(error.protocolError)
+            XCTAssertEqual(details.scope, .stream)
+            XCTAssertEqual(details.code, 468)
+            XCTAssertEqual(details.kind, .app)
+        }
+    }
+
     /// Verifies the native lib loads and the wrapper compiles against the
     /// generated API. No network needed: we just instantiate a few types and
     /// exercise the cancel path.

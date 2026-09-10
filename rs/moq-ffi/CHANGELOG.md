@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `MoqError` is no longer a flat error. `Protocol` carries a `MoqProtocolError` record
+  (session or stream scope, the verbatim wire code, a known kind, and a message). Transport
+  failures are `Transport`; local failures without a protocol code are `Internal`. Associated
+  data on other variants is now visible to bindings instead of being flattened into the message.
+
 - `publish_container_stream` takes a `MoqContainerFormat` instead of a `MoqContainerInit`, which
   carried leading bytes the stream importer discarded.
 
@@ -30,12 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MoqErrorScope`, `MoqProtocolKind`, and `MoqProtocolError` so every binding can read a
+  peer's session or stream code without parsing a message.
+
 - Publish and consume human-readable audio and video rendition labels.
 
 ### Changed
 
 - `publish_media` and `publish_media_stream` reject a `MoqInit` label or video hint on a container
   format, and an audio format rejects a video hint, instead of silently dropping either.
+
 
 ## [0.3.17](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.16...moq-ffi-v0.3.17) - 2026-09-09
 

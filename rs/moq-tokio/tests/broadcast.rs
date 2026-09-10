@@ -3226,7 +3226,10 @@ async fn abort_carries_its_code_to_the_peer() {
 		.await
 		.expect("the peer never saw the close")
 		.expect("server task gone");
-	assert!(matches!(reason, moq_net::Error::App(42)), "unexpected close: {reason}");
+	assert!(
+		matches!(reason, moq_net::Error::Session(moq_net::SessionError::App(42))),
+		"unexpected close: {reason}"
+	);
 
 	server_handle.abort();
 }

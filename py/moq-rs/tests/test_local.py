@@ -82,6 +82,27 @@ def test_origin_lifecycle():
     _consumer = origin.consume()
 
 
+async def test_fetch_abort_is_a_stream_app_code():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("events")
+    dynamic = track.dynamic()
+    consumer = broadcast.consume()
+
+    async def reject():
+        request = await dynamic.requested_group()
+        request.abort(404)
+
+    task = asyncio.create_task(reject())
+    with pytest.raises(moq.Error.Protocol) as raised:  # type: ignore[attr-defined]
+        await consumer.fetch_group("events", 5)
+    await task
+    protocol = moq.protocol_error(raised.value)
+    assert protocol is not None
+    assert protocol.scope == moq.ErrorScope.STREAM
+    assert protocol.code == 64 + 404
+    assert protocol.kind == moq.ProtocolKind.APP
+
+
 def test_publish_media_lifecycle():
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())

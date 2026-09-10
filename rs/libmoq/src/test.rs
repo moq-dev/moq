@@ -230,6 +230,110 @@ fn last_error_set_before_callback() {
 }
 
 #[test]
+fn last_error_protocol_is_none_for_a_local_failure() {
+	assert!(moq_origin_close(9999) < 0);
+	let mut out = moq_protocol_error {
+		scope: 99,
+		code: 99,
+		kind: 99,
+	};
+	assert!(unsafe { moq_error_protocol(&mut out) } < 0);
+	assert_eq!(out.scope, 99, "a non-protocol error must not write the record");
+}
+
+#[test]
+fn last_error_protocol_captures_a_stream_app_code() {
+	use crate::Error;
+	use crate::ffi::OnStatus;
+
+	extern "C" fn capture(user_data: *mut c_void, code: i32) {
+		assert!(code < 0, "expected a negative status, got {code}");
+		let slot = unsafe { &mut *(user_data as *mut Option<moq_protocol_error>) };
+		let mut out = moq_protocol_error {
+			scope: 0,
+			code: 0,
+			kind: 0,
+		};
+		assert_eq!(unsafe { moq_error_protocol(&mut out) }, 0);
+		*slot = Some(out);
+	}
+
+	let mut captured: Option<moq_protocol_error> = None;
+	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+	cb.call(Err::<(), Error>(Error::Moq(moq_net::StreamError::App(404).into())));
+
+	let protocol = captured.expect("expected a protocol error");
+	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32);
+	assert_eq!(protocol.code, 64 + 404);
+	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32);
+}
+
+#[test]
+fn last_error_protocol_captures_session_known_app_and_unknown() {
+	use crate::Error;
+	use crate::ffi::OnStatus;
+
+	extern "C" fn capture(user_data: *mut c_void, code: i32) {
+		assert!(code < 0, "expected a negative status, got {code}");
+		let slot = unsafe { &mut *(user_data as *mut Option<moq_protocol_error>) };
+		let mut out = moq_protocol_error {
+			scope: 0,
+			code: 0,
+			kind: 0,
+		};
+		assert_eq!(unsafe { moq_error_protocol(&mut out) }, 0);
+		*slot = Some(out);
+	}
+
+	for (err, scope, code, kind) in [
+		(
+			moq_net::Error::from(moq_net::SessionError::Cancel),
+			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+			0,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_CANCEL as u32,
+		),
+		(
+			moq_net::Error::from(moq_net::StreamError::Internal),
+			moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
+			0,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_INTERNAL as u32,
+		),
+		(
+			moq_net::Error::from(moq_net::SessionError::Unauthorized),
+			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+			0x2,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
+		),
+		(
+			moq_net::Error::from(moq_net::SessionError::App(7)),
+			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+			64 + 7,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32,
+		),
+		(
+			moq_net::Error::from(moq_net::SessionError::Unknown(0x1f)),
+			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+			0x1f,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNKNOWN as u32,
+		),
+		(
+			moq_net::Error::from(moq_net::StreamError::App(404)),
+			moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
+			64 + 404,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32,
+		),
+	] {
+		let mut captured: Option<moq_protocol_error> = None;
+		let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+		cb.call(Err::<(), Error>(Error::Moq(err)));
+		let protocol = captured.expect("expected a protocol error");
+		assert_eq!(protocol.scope, scope);
+		assert_eq!(protocol.code, code);
+		assert_eq!(protocol.kind, kind);
+	}
+}
+
+#[test]
 fn publish_media_lifecycle() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `moq_error_protocol` fills a `moq_protocol_error` (scope, verbatim wire code, kind) for
+  the last protocol failure on this thread. Do not parse `moq_error()` for that.
+
 ### Changed
 
 - `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and

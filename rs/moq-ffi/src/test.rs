@@ -1,7 +1,7 @@
 use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
-use super::session::MoqClient;
+use super::session::{MoqClient, MoqSession};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
@@ -14,6 +14,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: crate::error::MoqProtocolKind) {
+	match err {
+		MoqError::Protocol { details: protocol } => {
+			assert_eq!(protocol.scope, scope, "{err:?}");
+			assert_eq!(protocol.kind, kind, "{err:?}");
+		}
+		other => panic!("expected Protocol {kind:?}/{scope:?}, got {other:?}"),
+	}
+}
 
 #[tokio::test]
 async fn detached_cancels_inner_on_drop() {
@@ -324,7 +334,7 @@ async fn raw_audio_frame_durations() {
 
 	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000), None);
 	assert!(
-		matches!(coarse, Err(MoqError::Audio(moq_audio::Error::Unsupported(_)))),
+		matches!(coarse, Err(MoqError::Audio(_))),
 		"2 ms is not an opus frame duration"
 	);
 
@@ -864,7 +874,15 @@ async fn dynamic_track_rejects_fetch_miss() {
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
-	assert!(matches!(result, Err(MoqError::Protocol(moq_net::Error::App(404)))));
+	match result {
+		Err(MoqError::Protocol { details: protocol }) => {
+			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
+			assert_eq!(protocol.code, 64 + 404);
+			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
+		}
+		Err(other) => panic!("expected Protocol App(404), got {other:?}"),
+		Ok(_) => panic!("expected Protocol App(404), got a group"),
+	}
 	assert!(matches!(request.accept(), Err(MoqError::Closed)));
 }
 
@@ -1937,9 +1955,10 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.expect("timed out waiting for the retraction to reject the request")
 		.err()
 		.expect("nothing serves the prefix any more");
-	assert!(
-		matches!(err, MoqError::Protocol(moq_net::Error::Unroutable)),
-		"unexpected error: {err:?}"
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
 	);
 
 	served.finish().unwrap();
@@ -1953,10 +1972,7 @@ fn dynamic_refuses_a_non_prefix_pattern() {
 		.err()
 		.expect("a non-prefix pattern is refused");
 	assert!(
-		matches!(
-			err,
-			MoqError::Protocol(moq_net::Error::Unsupported) | MoqError::InvalidPattern(_)
-		),
+		matches!(err, MoqError::InvalidPattern(_)),
 		"unexpected error: {err:?}"
 	);
 }
@@ -2145,7 +2161,15 @@ async fn cancelling_dynamic_broadcasts_unregisters_the_handler() {
 	let result = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("missing".into(), None))
 		.await
 		.expect("request stayed pending after the dynamic handler was cancelled");
-	assert!(matches!(result, Err(MoqError::Protocol(moq_net::Error::Unroutable))));
+	let err = match result {
+		Err(err) => err,
+		Ok(_) => panic!("expected Unroutable, got a broadcast"),
+	};
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
 }
 
 #[test]
@@ -2984,4 +3008,73 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 
 	video.finish().unwrap();
 	broadcast.finish().unwrap();
+}
+
+async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept(None)
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false);
+	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+	(client_session, server_session, server)
+}
+
+fn protocol(err: MoqError) -> crate::error::MoqProtocolError {
+	match err {
+		MoqError::Protocol { details: protocol } => protocol,
+		other => panic!("expected Protocol, got {other:?}"),
+	}
+}
+
+/// A peer's session code survives the FFI: known, application, and unknown.
+#[tokio::test]
+async fn session_protocol_codes_cross_the_ffi() {
+	use crate::error::{MoqErrorScope, MoqProtocolKind};
+
+	for (code, kind) in [
+		(0x2, MoqProtocolKind::Unauthorized),
+		(64 + 404, MoqProtocolKind::App),
+		(0x1f, MoqProtocolKind::Unknown),
+	] {
+		let (client, server_session, server) = one_shot_peers().await;
+		server_session.cancel(code);
+		let err = match tokio::time::timeout(TIMEOUT, client.closed())
+			.await
+			.expect("closed timed out")
+		{
+			Err(err) => err,
+			Ok(()) => panic!("a session close with a code is an error"),
+		};
+		let protocol = protocol(err);
+		assert_eq!(protocol.scope, MoqErrorScope::Session, "code {code:#x}");
+		assert_eq!(protocol.code, code, "code {code:#x}");
+		assert_eq!(protocol.kind, kind, "code {code:#x}");
+		server.cancel();
+	}
 }
