@@ -10,7 +10,7 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
-use std::{num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
 use crate::Error;
 use crate::frame::Surface;
@@ -147,12 +147,25 @@ impl Camera {
 }
 
 /// An exact frame rate, expressed as a positive number of frames per interval.
+/// Equality and ordering compare the ratio, so 60 frames in 2 seconds equals 30 in 1.
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct Rate {
+	frames: NonZeroU32,
+	// The driver reports a rational interval with a 32-bit numerator in seconds.
+	// Keep that exact representation private; callers receive a typed duration.
+	seconds: NonZeroU32,
+}
+
+impl Rate {
 	/// Number of frames in the interval.
-	pub frames: NonZeroU32,
-	/// Length of the interval in seconds.
-	pub seconds: NonZeroU32,
+	pub fn frames(&self) -> NonZeroU32 {
+		self.frames
+	}
+
+	/// Time taken by the reported number of frames.
+	pub fn interval(&self) -> Duration {
+		Duration::from_secs(u64::from(self.seconds.get()))
+	}
 }
 
 impl Ord for Rate {

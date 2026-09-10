@@ -27,10 +27,11 @@ Highlights:
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
 With `capture` enabled, `capture::camera_modes` lists a Linux camera's convertible
-sizes and exact rates before configuring it. `capture::Rate` expresses frames
-per interval in seconds using two nonzero integers, preserving rates such as 30000/1001.
+sizes and exact rates before configuring it. `capture::Rate` exposes a nonzero frame count through `frames()` and a typed
+`Duration` through `interval()`, preserving exact rates such as 30000/1001.
 Sizes and rates shared by YUYV and MJPEG are combined; invalid I420 dimensions
-are excluded. A size range contributes its valid minimum and maximum corners,
+are excluded. A size range contributes its smallest and largest valid sizes aligned to the
+driver's step,
 and an empty rate list means no discrete intervals were reported. Device errors
 are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.

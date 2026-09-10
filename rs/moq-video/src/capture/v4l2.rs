@@ -109,14 +109,21 @@ pub(super) fn modes(selector: Option<&str>) -> Result<Vec<Mode>, Error> {
 ///
 /// A discrete entry is one size. A stepwise or continuous entry describes a
 /// whole rectangle of them, which on a driver with a one-pixel step is millions,
-/// so only its corners are reported. Those are the two a caller sizing a capture
-/// against the device needs; everything between them follows from the step.
+/// so only its smallest and largest I420-compatible sizes are reported.
 fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
 	let sizes = match size {
 		FrameSizeEnum::Discrete(discrete) => vec![(discrete.width, discrete.height)],
 		FrameSizeEnum::Stepwise(stepwise) => {
-			let smallest = (stepwise.min_width, stepwise.min_height);
-			let largest = (stepwise.max_width, stepwise.max_height);
+			let Some((min_width, max_width)) = bounds(stepwise.min_width, stepwise.max_width, stepwise.step_width)
+			else {
+				return Vec::new();
+			};
+			let Some((min_height, max_height)) = bounds(stepwise.min_height, stepwise.max_height, stepwise.step_height)
+			else {
+				return Vec::new();
+			};
+			let smallest = (min_width, min_height);
+			let largest = (max_width, max_height);
 			if smallest == largest {
 				vec![smallest]
 			} else {
@@ -128,6 +135,28 @@ fn reported_sizes(size: FrameSizeEnum) -> Vec<(u32, u32)> {
 		.into_iter()
 		.filter(|&(width, height)| Size::new(width, height).validate("camera resolution").is_ok())
 		.collect()
+}
+
+/// First and last nonzero even values on the driver's step grid.
+fn bounds(min: u32, max: u32, step: u32) -> Option<(u32, u32)> {
+	if min == max {
+		return (min != 0 && min.is_multiple_of(2)).then_some((min, min));
+	}
+	if min > max || step == 0 {
+		return None;
+	}
+	let mut first = if min == 0 { step } else { min };
+	let mut last = min + (max - min) / step * step;
+	if !first.is_multiple_of(2) {
+		if step.is_multiple_of(2) {
+			return None;
+		}
+		first = first.checked_add(step)?;
+	}
+	if !last.is_multiple_of(2) {
+		last = last.checked_sub(step)?;
+	}
+	(first <= last).then_some((first, last))
 }
 
 // Read one entry at a time: v4l's collection helpers treat every error after
@@ -581,11 +610,11 @@ mod tests {
 	#[test]
 	fn rates_preserve_fractional_and_sub_one_fps_intervals() {
 		let ntsc = rate(v4l::Fraction::new(1001, 30000)).unwrap();
-		assert_eq!(ntsc.frames.get(), 30000);
-		assert_eq!(ntsc.seconds.get(), 1001);
+		assert_eq!(ntsc.frames().get(), 30000);
+		assert_eq!(ntsc.interval(), std::time::Duration::from_secs(1001));
 		let slow = rate(v4l::Fraction::new(2, 1)).unwrap();
-		assert_eq!(slow.frames.get(), 1);
-		assert_eq!(slow.seconds.get(), 2);
+		assert_eq!(slow.frames().get(), 1);
+		assert_eq!(slow.interval(), std::time::Duration::from_secs(2));
 		assert!(slow < ntsc);
 		assert!(rate(v4l::Fraction::new(0, 30)).is_err());
 		assert!(rate(v4l::Fraction::new(1, 0)).is_err());
@@ -661,6 +690,38 @@ mod tests {
 	fn a_stepwise_frame_size_of_one_mode_is_reported_once() {
 		let size = stepwise((640, 480), (640, 480), 1);
 		assert_eq!(reported_sizes(size), vec![(640, 480)]);
+	}
+
+	#[test]
+	fn stepwise_sizes_keep_even_interior_endpoints() {
+		assert_eq!(
+			reported_sizes(stepwise((1, 1), (1919, 1079), 1)),
+			vec![(2, 2), (1918, 1078)]
+		);
+		assert_eq!(reported_sizes(stepwise((1, 1), (20, 20), 3)), vec![(4, 4), (16, 16)]);
+		assert_eq!(reported_sizes(stepwise((0, 0), (3, 3), 1)), vec![(2, 2)]);
+		assert!(reported_sizes(stepwise((1, 1), (19, 19), 2)).is_empty());
+	}
+
+	#[test]
+	fn stepwise_bounds_match_the_enumerated_grid() {
+		for min in 0..8 {
+			for max in min..16 {
+				for step in 1..8 {
+					let values: Vec<_> = (min..=max)
+						.step_by(step as usize)
+						.filter(|value| *value != 0 && value % 2 == 0)
+						.collect();
+					let expected = values.first().zip(values.last()).map(|(&first, &last)| (first, last));
+					assert_eq!(bounds(min, max, step), expected, "{min}..={max}, step {step}");
+				}
+			}
+		}
+		assert_eq!(bounds(u32::MAX - 4, u32::MAX, 3), Some((u32::MAX - 1, u32::MAX - 1)));
+		assert_eq!(bounds(0, u32::MAX, u32::MAX), None);
+		assert_eq!(bounds(2, 2, 0), Some((2, 2)));
+		assert_eq!(bounds(2, 4, 0), None);
+		assert_eq!(bounds(4, 2, 1), None);
 	}
 
 	/// The case that motivates scoring at all, taken from a real UVC webcam:
