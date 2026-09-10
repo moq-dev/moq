@@ -44,12 +44,14 @@ pub(crate) mod vaapi;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 mod v4l2;
 
-/// The video codec a decoder handles. Derived from the catalog, not chosen by the
-/// caller.
+/// The video codec a decoder handles, derived from the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Codec {
+pub enum Codec {
+	/// H.264 / AVC video.
 	H264,
+	/// H.265 / HEVC video.
 	H265,
+	/// AV1 video.
 	Av1,
 }
 
@@ -290,7 +292,7 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 		return match &config.kind {
 			Kind::Named(name) => Err(Error::UnknownDecoder {
 				name: name.clone(),
-				codec: codec.label().to_string(),
+				codec,
 				available: available.join(", "),
 			}),
 			kind => Err(Error::NoDecoder(format!(
@@ -402,8 +404,9 @@ mod tests {
 		config.kind = Kind::Named("vappi".to_owned());
 
 		match open(Codec::H264, &config) {
-			Err(Error::UnknownDecoder { name, available, .. }) => {
+			Err(Error::UnknownDecoder { name, codec, available }) => {
 				assert_eq!(name, "vappi");
+				assert_eq!(codec, crate::decode::Codec::H264);
 				// openh264 is unconditional, so every build has one to offer.
 				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
 			}
