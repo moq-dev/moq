@@ -25,6 +25,11 @@ the inverse and skip stalled groups past a max age. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
+`catalog::Rendition::set`, `update`, and `estimate` return errors when a catalog
+edit cannot be serialized or published. Invalid jitter is rejected before the
+edit is retained, including while the initial catalog is reserved. Codec importers
+propagate these errors through their configuration and frame-writing methods.
+
 ```bash
 cargo add moq-mux
 ```

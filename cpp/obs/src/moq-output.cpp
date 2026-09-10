@@ -194,8 +194,8 @@ bool MoQOutput::Start()
 
 	// Start establishing a session with the MoQ server
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
-	int handle = moq_session_connect(server_url.data(), server_url.size(), client.Pointer(), origin, 0,
-					 MoQOutput::SessionStatus, ref);
+	int handle =
+		moq_session_connect(url.data(), url.size(), client.Pointer(), origin, 0, MoQOutput::SessionStatus, ref);
 
 	if (handle < 0) {
 		const char *reason = moq_error();

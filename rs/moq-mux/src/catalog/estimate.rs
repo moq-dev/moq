@@ -13,7 +13,7 @@ const BITRATE_WINDOW: Duration = Duration::from_secs(1);
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Estimate {
-	/// The maximum jitter before the next frame is emitted.
+	/// The maximum delay between a frame being ready and the publisher flushing it.
 	pub jitter: Option<Duration>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
@@ -49,10 +49,10 @@ impl Estimate {
 /// use moq_mux::catalog::hang::Container;
 /// let mut track = catalog.media_producer(net, Container::Legacy)?;
 /// let mut rendition = reserved.video(track.name())?;
-/// rendition.set(config);
+/// rendition.set(config)?;
 ///
 /// track.write(frame)?;
-/// rendition.estimate(track.estimate());
+/// rendition.estimate(track.estimate())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -113,7 +113,12 @@ impl Estimator {
 	/// B-frame stream needs. Only a container knows this; the elementary stream carries no decode
 	/// time.
 	pub fn reorder(&mut self, delay: Timestamp) {
-		self.jitter.reorder(delay);
+		self.burst(Duration::from(delay));
+	}
+
+	/// Record the media duration emitted together by a container importer.
+	pub(crate) fn burst(&mut self, duration: Duration) {
+		self.jitter.max = self.jitter.max.max(duration);
 	}
 
 	/// Everything measured so far. Hand it to
@@ -231,25 +236,33 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 	bits_per_second.min(u64::MAX as u128) as u64
 }
 
-/// Tracks the catalog `jitter` for a video/audio track: the maximum delay before a frame can
-/// be emitted, so a player sizes its buffer to at least this much.
+/// Tracks the catalog `jitter` for a video/audio track: the maximum delay between a frame being
+/// ready and the publisher flushing it, so a player sizes its buffer to at least this much.
 ///
-/// It reports whichever is larger of two contributions:
-/// - the minimum frame duration (the steady inter-frame spacing), and
-/// - the reorder delay (`max(PTS - DTS)`), which is non-zero only for reordered (B-frame)
-///   streams and which a transmuxer also reuses as the decode-clock reserve.
+/// The reported value is the largest contribution ever seen:
+/// - the media span of a container batch,
+/// - the reorder delay (`max(PTS - DTS)`), non-zero only for reordered (B-frame) streams and
+///   which a transmuxer also reuses as the decode-clock reserve, and
+/// - the steady inter-frame spacing, the floor for a track that flushes each write on its own.
 ///
-/// A non-reordered stream reports the frame duration; a B-frame stream reports the deeper
-/// reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
+/// So a non-reordered, frame-at-a-time track reports the frame duration, and a B-frame stream
+/// reports the deeper reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
 ///
-/// Both contributions are kept as [`Duration`]s, since the two inputs are independently scaled
-/// (frame PTS vs a 90 kHz reorder delay) and only compare once normalized. See [`nanos`].
+/// It never shrinks. A publisher that held frames back once can do it again, so walking the
+/// advertised value back on a later, tighter measurement would just hand the player a buffer too
+/// small for the next time.
+///
+/// Contributions are kept as [`Duration`]s, since the inputs are independently scaled (frame PTS
+/// vs a 90 kHz reorder delay) and only compare once normalized. See [`nanos`].
 #[derive(Default)]
 struct Jitter {
 	/// Scale-free nanoseconds, per [`nanos`].
 	last: Option<u128>,
+	/// The steady inter-frame spacing: the smallest gap seen, so a stall or an ad break isn't
+	/// mistaken for the cadence.
 	min_duration: Option<Duration>,
-	max_reorder: Duration,
+	/// The largest contribution seen so far, which is what gets reported.
+	max: Duration,
 }
 
 impl Jitter {
@@ -259,15 +272,13 @@ impl Jitter {
 		if let Some(last) = self.last.replace(ts)
 			&& let Some(duration) = elapsed(last, ts)
 		{
-			self.min_duration = Some(match self.min_duration {
+			let min = match self.min_duration {
 				Some(min) => min.min(duration),
 				None => duration,
-			});
+			};
+			self.min_duration = Some(min);
+			self.max = self.max.max(min);
 		}
-	}
-
-	fn reorder(&mut self, delay: Timestamp) {
-		self.max_reorder = self.max_reorder.max(Duration::from(delay));
 	}
 
 	fn discontinuity(&mut self) {
@@ -275,8 +286,7 @@ impl Jitter {
 	}
 
 	fn current(&self) -> Option<Duration> {
-		let jitter = self.min_duration.unwrap_or(Duration::ZERO).max(self.max_reorder);
-		(!jitter.is_zero()).then_some(jitter)
+		(!self.max.is_zero()).then_some(self.max)
 	}
 }
 
@@ -289,7 +299,7 @@ mod tests {
 	}
 
 	#[test]
-	fn reports_the_minimum_frame_spacing() {
+	fn reports_the_frame_spacing() {
 		let mut estimator = Estimator::new();
 
 		estimator.write(micros(1_000), 1);
@@ -301,8 +311,8 @@ mod tests {
 		estimator.write(micros(101_000), 1);
 		assert_eq!(
 			estimator.estimate().jitter,
-			Some(Duration::from_millis(20)),
-			"the minimum wins"
+			Some(Duration::from_millis(40)),
+			"a tighter pair never lowers what was already advertised"
 		);
 	}
 

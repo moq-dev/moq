@@ -646,7 +646,7 @@ mod tests {
 		let mut config = video_config();
 		config.coded_width = None;
 		config.coded_height = None;
-		registration.set(config);
+		registration.set(config).unwrap();
 		drop(reserved);
 
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
@@ -719,10 +719,10 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut video_registration = reserved.video("video0").unwrap();
-		video_registration.set(video_config());
+		video_registration.set(video_config()).unwrap();
 		let mut audio_registration = reserved.audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio_registration.set(audio_config);
+		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
 		let video_track = broadcast.create_track("video0", None).unwrap();
@@ -799,7 +799,7 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
-		registration.set(video_config());
+		registration.set(video_config()).unwrap();
 		drop(reserved);
 
 		let track = broadcast.create_track("video0", None).unwrap();
@@ -859,7 +859,9 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
-		registration.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
+		registration
+			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+			.unwrap();
 		drop(reserved);
 
 		// 3s GOPs against the default 1s minimum: every segment is one whole GOP.
@@ -895,10 +897,10 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut video_registration = reserved.video("video0").unwrap();
-		video_registration.set(video_config());
+		video_registration.set(video_config()).unwrap();
 		let mut audio_registration = reserved.audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio_registration.set(audio_config);
+		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
 		let video_track = broadcast.create_track("video0", None).unwrap();
@@ -980,7 +982,7 @@ mod tests {
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
-		registration.set(config);
+		registration.set(config).unwrap();
 		drop(reserved);
 
 		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
@@ -1072,7 +1074,7 @@ mod tests {
 			let reserved = catalog.reserve();
 			let mut registration = reserved.video("video0").unwrap();
 			let config = video_config();
-			registration.set(config.clone());
+			registration.set(config.clone()).unwrap();
 			drop(reserved);
 
 			let track = broadcast.create_track("video0", None).unwrap();
@@ -1308,7 +1310,7 @@ mod tests {
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
-		registration.set(config);
+		registration.set(config).unwrap();
 		drop(reserved);
 
 		let track = broadcast.create_track("video0", None).unwrap();
@@ -1364,7 +1366,7 @@ mod tests {
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
-		registration.set(config);
+		registration.set(config).unwrap();
 		drop(reserved);
 
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.

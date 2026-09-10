@@ -20,6 +20,15 @@ export class CatalogProducer {
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
+		for (const section of ["audio", "video"] as const) {
+			for (const [name, config] of Object.entries(value[section]?.renditions ?? {})) {
+				if (config.jitter === 0) throw new Error("omit jitter for a track flushed immediately");
+				const previous = this.#value[section]?.renditions[name]?.jitter;
+				if (previous !== undefined && (config.jitter === undefined || config.jitter < previous)) {
+					throw new Error("jitter cannot decrease for an existing rendition");
+				}
+			}
+		}
 		this.#value = value;
 		for (const output of this.#outputs) output.update(value);
 	}

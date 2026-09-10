@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, btree_map};
 use bytes::Bytes;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, DurationMilliSeconds};
+use serde_with::DisplayFromStr;
 
 use crate::catalog::Container;
 use crate::catalog::hex::Hex;
+use crate::catalog::millis::MillisCeil;
 
 /// Information about an audio track in the catalog.
 ///
@@ -108,15 +109,19 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum jitter before the next frame is emitted in milliseconds.
+	/// The maximum delay between a frame being ready and the publisher flushing it.
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
-	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	/// This is measured at the publisher (encoder latency, packet packing, reordering),
+	/// never on the network a consumer sees. It only ever grows over the life of a stream.
+	///
+	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
+	/// rounds down into a promise the publisher can't keep.
 	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
-	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
+	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }

@@ -111,13 +111,13 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, JsonConfig>,
 		config: &Config,
-	) -> Self {
+	) -> crate::Result<Self> {
 		let inner = moq_json::snapshot::Producer::new(
 			track,
 			moq_json::snapshot::ProducerConfig::default().with_compression(config.compression),
 		);
-		rendition.set(config.entry(Mode::Snapshot));
-		Self { inner, rendition }
+		rendition.set(config.entry(Mode::Snapshot))?;
+		Ok(Self { inner, rendition })
 	}
 
 	/// The track name, which is also the catalog key.
@@ -164,17 +164,17 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, JsonConfig>,
 		config: &Config,
-	) -> Self {
+	) -> crate::Result<Self> {
 		let inner = moq_json::stream::Producer::new(
 			track,
 			moq_json::stream::ProducerConfig::default().with_compression(config.compression),
 		);
-		rendition.set(config.entry(Mode::Stream));
-		Self {
+		rendition.set(config.entry(Mode::Stream))?;
+		Ok(Self {
 			inner,
 			name: rendition.name().to_string(),
 			rendition: Some(rendition),
-		}
+		})
 	}
 
 	/// The track name, which is also the catalog key.

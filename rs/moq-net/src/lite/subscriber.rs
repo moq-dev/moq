@@ -459,8 +459,25 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 /// The subscriber half's driver: the announce prefixes, the uni-stream accept
 /// loop, PROBE feedback, datagrams, and the per-source serve machines. Only an
 /// error ends it.
+// Owns the active subscriptions for exactly as long as the driver. A dropped
+// driver is how a cancelled session unwinds, so cleanup cannot depend on any
+// poll returning Ready.
+struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
+
+impl Drop for SubscriptionCleanup {
+	fn drop(&mut self) {
+		// Group machines own their cancellation cleanup independently. This records
+		// session cancellation as the track's terminal state.
+		for (_, entry) in self.0.lock().drain() {
+			let _ = entry.producer.abort(Error::Cancel);
+		}
+	}
+}
+
 pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
+	/// Aborts whatever is still subscribed when the driver is dropped.
+	_cleanup: SubscriptionCleanup,
 	/// One machine per permitted prefix. Only an error ends the session; a
 	/// prefix finishing cleanly (publisher FIN) just retires.
 	prefixes: Vec<AnnouncePrefix<S>>,
@@ -486,6 +503,7 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 
 		Self {
 			prefixes,
+			_cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
 			uni: UniAccept::new(subscriber.clone()),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
@@ -685,7 +703,8 @@ enum GroupRecvState {
 	Header,
 	/// Filling the group, bailing if the track or group dies first.
 	Serve {
-		group: group::Producer,
+		/// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
+		group: crate::recv::Group,
 		track: track::Producer,
 		ingest: FrameIngest,
 	},
@@ -727,7 +746,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					// even registered), so frames decode immediately. No SUBSCRIBE_OK to
 					// wait on.
 					self.state = GroupRecvState::Serve {
-						group,
+						group: crate::recv::Group::new(group),
 						track,
 						ingest: FrameIngest::new(timescale),
 					};
@@ -754,7 +773,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					};
 					match res {
 						Ok(()) => {
-							let mut group = group;
 							let _ = group.finish();
 						}
 						Err(Error::Cancel) => {

@@ -18,12 +18,12 @@ regression test per Root Cause First.
 - [Play tune-in backpressure](/quest/m0/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
 - [Play audio rendition gap](/quest/m0/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
 - [Auto latency](/quest/m0/3477-watch-auto-latency.md) - js/watch: the measured auto latency (#3517 on dev) is proven clean in a browser and against the public relay
-- [Jitter estimator](/quest/m0/3479-mux-jitter-flush-span.md) - moq-mux: catalog jitter is the publisher's maximum flush span, never a running minimum
 - [WebKit gate](/quest/m0/webkit-webtransport-gate.md) - js/net: every WebKit engine takes the WebSocket path, not just the Safari brand, so iOS Chrome and Firefox stop freezing after two minutes
 - [FETCH_OK](/quest/m0/3559-ietf-fetch-ok.md) - moq-net: a FETCH is answered with FETCH_OK and a legal End Location, not REQUEST_OK and group 0
 - [Publisher priority](/quest/m0/3534-ietf-publisher-priority.md) - moq-net: a track's publisher priority survives a moq-transport hop instead of being flattened to 0
 - [TRACK_STATUS refusal](/quest/m0/3492-ietf-track-status-refusal.md) - moq-net: TRACK_STATUS gets a NOT_SUPPORTED refusal instead of a silent drop
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-native: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight; moq-ffi can disable the fallback
+- [Jitter clock](/quest/m0/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only
 - [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
 - [TS restart stall](/quest/m0/3533-ts-export-restart-stall.md) - moq export ts: a content restart on a continuous timeline no longer fences video and primary audio for good
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them

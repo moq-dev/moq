@@ -52,6 +52,7 @@ targeting a `0.0.x` crate.
 - [Route gauge](/quest/m2/route-gauge.md) - an operator sees how many routes a relay holds for a path
 - [PoP skipping](/quest/m2/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [Route cost in the JS origin](/quest/m2/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
+- [Publish channel count](/quest/m2/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/m2/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/m2/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
 - [Control timeout code](/quest/m2/control-timeout-code.md) - an unanswered control request resets with CONTROL_TIMEOUT on lite and INTERNAL_ERROR on IETF

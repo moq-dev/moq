@@ -256,7 +256,7 @@ impl Publish {
 	/// The catalog is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		rendition(&mut broadcast.video, &broadcast.catalog, name)?.set(config);
+		rendition(&mut broadcast.video, &broadcast.catalog, name)?.set(config)?;
 		Ok(())
 	}
 
@@ -265,7 +265,7 @@ impl Publish {
 	/// Same rules as [`Self::video_config`].
 	pub fn audio_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::AudioConfig) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		rendition(&mut broadcast.audio, &broadcast.catalog, name)?.set(config);
+		rendition(&mut broadcast.audio, &broadcast.catalog, name)?.set(config)?;
 		Ok(())
 	}
 

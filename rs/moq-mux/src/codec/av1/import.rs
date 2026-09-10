@@ -56,7 +56,7 @@ impl<E: CatalogExt> Import<E> {
 			last_seq: None,
 		};
 		if let Some(config) = import.catalog.initial_config() {
-			import.apply_config(config);
+			import.apply_config(config)?;
 		}
 		Ok(import)
 	}
@@ -77,7 +77,7 @@ impl<E: CatalogExt> Import<E> {
 		// fixed 4-byte header is read here, so don't gate on a larger size or a short
 		// out-of-band record falls through to raw-OBU scanning and leaves the config unset.
 		if data.len() >= 4 && data[0] == 0x81 {
-			self.init_from_av1c(data);
+			self.init_from_av1c(data)?;
 			return Ok(());
 		}
 
@@ -88,7 +88,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) {
+	fn init_from_av1c(&mut self, data: &[u8]) -> crate::Result<()> {
 		let seq_profile = (data[1] >> 5) & 0x07;
 		let seq_level_idx = data[1] & 0x1F;
 		let tier = ((data[2] >> 7) & 0x01) == 1;
@@ -110,10 +110,11 @@ impl<E: CatalogExt> Import<E> {
 			matrix_coefficients: 1,
 			full_range: false,
 		});
-		self.apply_config(config);
+		self.apply_config(config)?;
+		Ok(())
 	}
 
-	fn init(&mut self, seq_header: &SequenceHeaderObu) {
+	fn init(&mut self, seq_header: &SequenceHeaderObu) -> crate::Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_header.seq_profile,
 			level: seq_header
@@ -143,12 +144,13 @@ impl<E: CatalogExt> Import<E> {
 		});
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
-		self.apply_config(config);
+		self.apply_config(config)?;
+		Ok(())
 	}
 
 	/// Minimal config when sequence-header parsing fails, so the stream can still
 	/// flow (the catalog just won't carry full codec info).
-	fn init_minimal(&mut self) {
+	fn init_minimal(&mut self) -> crate::Result<()> {
 		let config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,
 			level: 0,
@@ -163,15 +165,16 @@ impl<E: CatalogExt> Import<E> {
 			matrix_coefficients: 2,      // Unspecified
 			full_range: false,
 		});
-		self.apply_config(config);
+		self.apply_config(config)?;
+		Ok(())
 	}
 
 	/// Apply a resolved config, updating the catalog rendition in place.
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks
 	/// to reject a reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
-		self.catalog.publish(&mut self.rendition, config);
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		self.catalog.publish(&mut self.rendition, config)
 	}
 
 	/// Resolve the config from a sequence-header OBU, falling back to a minimal
@@ -183,10 +186,10 @@ impl<E: CatalogExt> Import<E> {
 		self.last_seq = Some(seq_obu.clone());
 
 		match parse_sequence_header(seq_obu)? {
-			Some(seq_header) => self.init(&seq_header),
+			Some(seq_header) => self.init(&seq_header)?,
 			None if !self.catalog.configured() => {
 				tracing::debug!("sequence header parse failed, using minimal config");
-				self.init_minimal();
+				self.init_minimal()?;
 			}
 			None => {}
 		}
@@ -201,7 +204,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -213,21 +216,21 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) {
-		self.rendition.estimate(self.track.estimate());
+	fn estimate(&mut self) -> crate::Result<()> {
+		self.rendition.estimate(self.track.estimate())
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.track.cut(end)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -251,7 +254,7 @@ impl<E: CatalogExt> Import<E> {
 			self.track.write(frame)?;
 		}
 
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 

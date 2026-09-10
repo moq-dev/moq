@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
@@ -82,3 +82,74 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	effect.close();
 });
+
+test("catalog producer refuses zero jitter before retaining an edit", () => {
+	const catalog = new CatalogProducer();
+	for (const section of ["audio", "video"] as const) {
+		expect(() =>
+			catalog.mutate((value) => {
+				Object.assign(value, {
+					[section]: {
+						renditions: {
+							media: {
+								codec: "opus",
+								container: { kind: "legacy" },
+								sampleRate: 48000,
+								numberOfChannels: 2,
+								jitter: 0,
+							},
+						},
+					},
+				});
+			}),
+		).toThrow("omit jitter");
+	}
+	catalog.mutate((value) => {
+		expect(value).toEqual({});
+	});
+});
+
+for (const section of ["audio", "video"] as const) {
+	test(`catalog refuses ${section} jitter decreases without retaining them`, () => {
+		const catalog = new CatalogProducer();
+		catalog.mutate((value) => {
+			Object.assign(value, {
+				[section]: {
+					renditions: {
+						media: {
+							codec: "opus",
+							container: { kind: "legacy" },
+							sampleRate: 48000,
+							numberOfChannels: 2,
+							jitter: 100,
+						},
+					},
+				},
+			});
+		});
+		for (const jitter of [Catalog.u53(50), undefined]) {
+			expect(() =>
+				catalog.mutate((value) => {
+					value[section]!.renditions.media.jitter = jitter;
+				}),
+			).toThrow("jitter cannot decrease");
+			catalog.mutate((value) => {
+				expect(value[section]!.renditions.media.jitter).toBe(Catalog.u53(100));
+			});
+		}
+		catalog.mutate((value) => {
+			delete value[section]!.renditions.media;
+		});
+		catalog.mutate((value) => {
+			Object.assign(value[section]!.renditions, {
+				media: {
+					codec: "opus",
+					container: { kind: "legacy" },
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					jitter: 50,
+				},
+			});
+		});
+	});
+}

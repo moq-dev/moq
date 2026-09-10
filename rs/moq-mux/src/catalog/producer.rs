@@ -496,7 +496,7 @@ impl<E: CatalogExt> Producer<E> {
 		config: crate::json::Config,
 	) -> crate::Result<crate::json::Snapshot<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		Ok(crate::json::Snapshot::new(track, rendition, &config))
+		crate::json::Snapshot::new(track, rendition, &config)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -509,7 +509,7 @@ impl<E: CatalogExt> Producer<E> {
 		config: crate::json::Config,
 	) -> crate::Result<crate::json::Stream<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		Ok(crate::json::Stream::new(track, rendition, &config))
+		crate::json::Stream::new(track, rendition, &config)
 	}
 
 	/// Publish `track` as a latest-value binary track, advertising it in the catalog.
@@ -522,7 +522,7 @@ impl<E: CatalogExt> Producer<E> {
 		config: crate::binary::Config,
 	) -> crate::Result<crate::binary::Snapshot<E>> {
 		let rendition = self.data_entry(track.name())?;
-		Ok(crate::binary::Snapshot::new(track, rendition, &config))
+		crate::binary::Snapshot::new(track, rendition, &config)
 	}
 
 	/// Publish `track` as an append-log binary track, advertising it in the catalog.
@@ -535,7 +535,7 @@ impl<E: CatalogExt> Producer<E> {
 		config: crate::binary::Config,
 	) -> crate::Result<crate::binary::Stream<E>> {
 		let rendition = self.data_entry(track.name())?;
-		Ok(crate::binary::Stream::new(track, rendition, &config))
+		crate::binary::Stream::new(track, rendition, &config)
 	}
 
 	/// Reserve the catalog entry a data producer owns, keyed by its track name.
@@ -974,14 +974,14 @@ mod test {
 		drop(reserved); // done reserving; both renditions still outstanding
 
 		// Audio resolves first: withheld, because video is still outstanding.
-		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		assert!(
 			matches!(consumer.poll_next(&waiter), Poll::Pending),
 			"an audio-only catalog must not publish while video is unresolved"
 		);
 
 		// Video resolves: the complete catalog publishes now, in one snapshot.
-		video.set(h264_config());
+		video.set(h264_config()).unwrap();
 		let snapshot = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected the complete catalog, got {other:?}"),
@@ -1007,7 +1007,7 @@ mod test {
 			"the unresolved live rendition owns its name"
 		);
 		let mut audio = catalog.rendition::<AudioConfig>("audio0").unwrap();
-		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 
 		let snapshot = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,
@@ -1031,7 +1031,7 @@ mod test {
 		let video = reserved.video("video0").unwrap();
 		drop(reserved);
 
-		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		// The video stream never resolves and is cancelled; the audio-only catalog publishes.
@@ -1061,7 +1061,7 @@ mod test {
 		// rendition alive (dropping it would retire the track), so bind it.
 		let early = catalog.reserve();
 		let mut a0 = early.audio("audio0").unwrap();
-		a0.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		a0.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		drop(early);
 		assert!(
 			matches!(consumer.poll_next(&waiter), Poll::Pending),
@@ -1072,7 +1072,7 @@ mod test {
 		let mut late = deferred.audio("audio1").unwrap();
 		drop(deferred); // the importer releases its own hold; only the rendition's remains
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
-		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1));
+		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1)).unwrap();
 
 		let snapshot = match consumer.poll_next(&waiter) {
 			Poll::Ready(Ok(Some(c))) => c,

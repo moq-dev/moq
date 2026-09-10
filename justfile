@@ -439,7 +439,7 @@ _tools $FILES="":
     scoped() { [[ "$FILES" == ALL ]] || grep -qE "$1" <<< "$FILES"; }
 
     # `_check-common` runs on every invocation, so its tools are unconditional.
-    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
+    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
     scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)

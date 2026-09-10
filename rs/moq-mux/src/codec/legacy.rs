@@ -151,7 +151,7 @@ impl<E: CatalogExt> Import<E> {
 		// produce would be advertised to consumers but never served.
 		let media = reserved.producer().media_producer(track, wire)?;
 		let mut rendition = reserved.audio(name)?;
-		rendition.set(audio_config);
+		rendition.set(audio_config)?;
 
 		Ok(Self {
 			track: media,
@@ -167,7 +167,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -179,14 +179,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) {
-		self.rendition.estimate(self.track.estimate());
+	fn estimate(&mut self) -> crate::Result<()> {
+		self.rendition.estimate(self.track.estimate())
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -195,14 +195,14 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 
@@ -223,7 +223,7 @@ impl<E: CatalogExt> Import<E> {
 			payload: frame.into_bytes(),
 			keyframe,
 		})?;
-		self.estimate();
+		self.estimate()?;
 		Ok(())
 	}
 }
