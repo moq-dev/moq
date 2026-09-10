@@ -29,10 +29,18 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 test("Format treats an empty payload as a duration marker", () => {
 	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(33_000));
 	const frame = buildFrame(props, new Uint8Array());
-	const fmt = new Format();
+	const fmt = new Format("video");
 	const [decoded] = fmt.decode(frame);
 	expect(decoded.payload.byteLength).toBe(0);
 	expect(fmt.end(decoded)).toBe(33_000 as Time.Micro);
+});
+
+test("Format preserves empty data payloads", () => {
+	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(33_000));
+	const fmt = new Format();
+	const [decoded] = fmt.decode(buildFrame(props, new Uint8Array()));
+	expect(decoded.payload.byteLength).toBe(0);
+	expect(fmt.end(decoded)).toBeUndefined();
 });
 
 test("Format decodes timestamp at default microseconds timescale", () => {

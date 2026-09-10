@@ -18,7 +18,7 @@ impl Container for Wire {
 	type Error = crate::Error;
 
 	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
-		frame.payload.is_empty().then_some(frame.timestamp)
+		(self.0 != Kind::Data && frame.payload.is_empty()).then_some(frame.timestamp)
 	}
 
 	fn kind(&self) -> Kind {

@@ -1381,7 +1381,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		let media = |timestamp| Frame {
@@ -1390,11 +1390,11 @@ mod tests {
 			keyframe: false,
 			duration: None,
 		};
-		Container::Legacy(crate::container::Kind::Data)
+		Container::Legacy(crate::container::Kind::Video)
 			.write(&mut group, &[media(ts(0))])
 			.unwrap();
 		write_marker(&mut group, ts(16_000)); // closes the first frame
-		Container::Legacy(crate::container::Kind::Data)
+		Container::Legacy(crate::container::Kind::Video)
 			.write(&mut group, &[media(ts(33_000))])
 			.unwrap();
 		write_marker(&mut group, ts(50_000)); // the group's end
@@ -1412,11 +1412,11 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_marker(&mut group, ts(20_000));
-		Container::Legacy(crate::container::Kind::Data)
+		Container::Legacy(crate::container::Kind::Video)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1443,10 +1443,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Video));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy(crate::container::Kind::Data)
+		Container::Legacy(crate::container::Kind::Video)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1475,7 +1475,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Loc(crate::container::Kind::Data));
+		let mut consumer = Consumer::new(consumer_track, Container::Loc(crate::container::Kind::Video));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		let media = Frame {
@@ -1484,10 +1484,10 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		Container::Loc(crate::container::Kind::Data)
+		Container::Loc(crate::container::Kind::Video)
 			.write(&mut group, &[media])
 			.unwrap();
-		Container::Loc(crate::container::Kind::Data)
+		Container::Loc(crate::container::Kind::Video)
 			.write(
 				&mut group,
 				&[Frame {

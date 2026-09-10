@@ -18,7 +18,7 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::ts::{Export, catalog as tscat};
-use crate::container::{Frame, Producer};
+use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
 const SC: &[u8] = &[0, 0, 0, 1];
@@ -590,7 +590,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 	let (imported_name, video) = snapshot.video.renditions.iter().next().expect("an H.265 rendition");
 	assert!(video.codec.to_string().starts_with("hev1"), "codec was {}", video.codec);
 
-	let recovered = read_frames(&imported_consumer, imported_name).await;
+	let recovered = read_frames(&imported_consumer, imported_name, Kind::Video).await;
 	assert_eq!(recovered.len(), units.len(), "access unit count");
 	for (i, (got, nals)) in recovered.iter().zip(&units).enumerate() {
 		assert_eq!(got.as_slice(), annexb(nals).as_ref(), "access unit {i}");
@@ -1219,14 +1219,14 @@ async fn scte35_without_video_export_is_rejected() {
 }
 
 /// Subscribe to a track and read every retained frame payload it holds.
-async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
+async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: Kind) -> Vec<Vec<u8>> {
 	let track = consumer
 		.track(name)
 		.unwrap()
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(kind));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -1255,7 +1255,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	assert_eq!(names.len(), 2, "both Kyrion MP2 programs");
 	let mut ingested = Vec::new();
 	for name in &names {
-		let frames = read_frames(&consumer, name).await;
+		let frames = read_frames(&consumer, name, Kind::Audio).await;
 		assert!(!frames.is_empty(), "{name}: no MP2 frames");
 		assert!(
 			frames.iter().all(|f| f[0] == 0xFF && f[1] & 0xE0 == 0xE0),
@@ -1291,7 +1291,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	assert_eq!(names2.len(), 2, "round-trip lost an MP2 track");
 	let mut roundtripped = Vec::new();
 	for name in &names2 {
-		roundtripped.push(read_frames(&consumer2, name).await);
+		roundtripped.push(read_frames(&consumer2, name, Kind::Audio).await);
 	}
 
 	// Keyframe alignment drops the MP2 ahead of the first video keyframe (the dirty-start
@@ -1328,7 +1328,7 @@ async fn ac3_roundtrip_byte_exact() {
 		.next()
 		.expect("an AC-3 track")
 		.clone();
-	let ingested = read_frames(&consumer, &name).await;
+	let ingested = read_frames(&consumer, &name, Kind::Audio).await;
 	assert!(!ingested.is_empty(), "no AC-3 frames");
 	assert!(
 		ingested.iter().all(|f| f[0] == 0x0B && f[1] == 0x77),
@@ -1372,7 +1372,7 @@ async fn ac3_roundtrip_byte_exact() {
 		.next()
 		.expect("round-trip lost the AC-3 track")
 		.clone();
-	let roundtripped = read_frames(&consumer2, &name2).await;
+	let roundtripped = read_frames(&consumer2, &name2, Kind::Audio).await;
 	assert_eq!(roundtripped, ingested, "AC-3 frames must survive byte-for-byte");
 }
 
@@ -1398,7 +1398,7 @@ async fn eac3_roundtrip_byte_exact() {
 		.next()
 		.expect("an E-AC-3 track")
 		.clone();
-	let ingested = read_frames(&consumer, &name).await;
+	let ingested = read_frames(&consumer, &name, Kind::Audio).await;
 	assert!(!ingested.is_empty(), "no E-AC-3 frames");
 	assert!(
 		ingested.iter().all(|f| f[0] == 0x0B && f[1] == 0x77),
@@ -1445,7 +1445,7 @@ async fn eac3_roundtrip_byte_exact() {
 		.next()
 		.expect("round-trip lost the E-AC-3 track")
 		.clone();
-	let roundtripped = read_frames(&consumer2, &name2).await;
+	let roundtripped = read_frames(&consumer2, &name2, Kind::Audio).await;
 	assert_eq!(roundtripped, ingested, "E-AC-3 frames must survive byte-for-byte");
 }
 
@@ -1456,7 +1456,7 @@ async fn read_audio_by_codec(
 ) -> std::collections::BTreeMap<String, Vec<Vec<u8>>> {
 	let mut out = std::collections::BTreeMap::new();
 	for (name, config) in &catalog.snapshot().audio.renditions {
-		out.insert(config.codec.to_string(), read_frames(consumer, name).await);
+		out.insert(config.codec.to_string(), read_frames(consumer, name, Kind::Audio).await);
 	}
 	out
 }
@@ -3056,7 +3056,7 @@ async fn opus_export_import_roundtrip() {
 	assert_eq!(audio.channel_count, 2);
 
 	// The imported packets must match what we published.
-	let recovered = read_frames(&imported_consumer, opus_name).await;
+	let recovered = read_frames(&imported_consumer, opus_name, Kind::Audio).await;
 	assert_eq!(recovered.len(), packets.len(), "frame count");
 	for (orig, got) in packets.iter().zip(&recovered) {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");

@@ -123,6 +123,35 @@ mod tests {
 		assert!(group.read().await.unwrap().is_none());
 	}
 
+	#[tokio::test]
+	async fn empty_data_frames_survive_subscription_and_fetch() {
+		for config in [hang::catalog::Container::Legacy, hang::catalog::Container::Loc] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast.create_track("data", hang::container::track_info(0)).unwrap();
+			let subscription = track.subscribe(moq_net::track::Subscription::default());
+			let consumer = broadcast.consume();
+			let mut producer =
+				crate::container::Producer::new(track, Hang::new(&config, crate::container::Kind::Data).unwrap());
+			producer.write(frame(0, b"", true)).unwrap();
+			producer.write(frame(10_000, b"data", false)).unwrap();
+			producer.finish().unwrap();
+			let mut live = crate::container::Consumer::new(
+				subscription,
+				Hang::new(&config, crate::container::Kind::Data).unwrap(),
+			);
+			let first = live.read().await.unwrap().unwrap();
+			assert!(first.payload.is_empty());
+			assert!(first.keyframe);
+			assert_eq!(live.read().await.unwrap().unwrap().payload, b"data".as_slice());
+			assert!(live.read().await.unwrap().is_none());
+			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
+			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());
+			assert!(fetched.read().await.unwrap().unwrap().payload.is_empty());
+			assert_eq!(fetched.read().await.unwrap().unwrap().payload, b"data".as_slice());
+			assert!(fetched.read().await.unwrap().is_none());
+		}
+	}
+
 	/// An empty payload times the previous frame and is not returned as media.
 	#[tokio::test]
 	async fn a_duration_marker_times_the_last_frame() {

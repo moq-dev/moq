@@ -533,6 +533,7 @@ For audio, an empty codec payload retains its terminal-trimming meaning: its tim
 When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
 A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
 Audio publishers do not append per-group duration markers because the codec defines each packet's duration.
+Data tracks retain empty payloads as data, without endpoint semantics.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
@@ -548,7 +549,8 @@ A consumer MUST feed `init` to the decoder before the first frame.
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
 
-Consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
+For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
+Data tracks retain empty payloads as data.
 A consumer MUST NOT submit it to a decoder.
 
 

@@ -129,7 +129,8 @@ carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
 consumers to discard encoder padding beyond the source endpoint. LOC readers
 also skip empty payloads; LOC writers wait for the compatibility release before
-emitting markers.
+emitting markers. Empty payloads on data tracks remain data, including empty
+text cues.
 
 ## Groups and keyframes
 

@@ -26,7 +26,7 @@ export class Format implements ContainerFormat {
 
 	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
 	end(frame: Frame): Time.Micro | undefined {
-		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
+		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
 	/** Decode one legacy frame, including an empty-payload duration marker. */

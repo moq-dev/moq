@@ -70,7 +70,7 @@ test("LegacyFormat decodes a valid frame", () => {
 });
 
 test("LegacyFormat preserves a duration marker", () => {
-	const format = new LegacyFormat("data");
+	const format = new LegacyFormat("video");
 	const frame = encodeLegacyFrame(1000 as Time.Micro, new Uint8Array());
 
 	const [marker] = format.decode(frame);
@@ -525,7 +525,7 @@ test("Consumer next() returns group-done signals", async () => {
 
 test("Consumer reports a duration marker as metadata", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat("data"), maxAge: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat("video"), maxAge: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
 	group.writeFrame({
@@ -554,7 +554,7 @@ test("Consumer reports a duration marker as metadata", async () => {
 
 test("Consumer skips a leading marker and keeps the first media keyframe", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat("data"), maxAge: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat("video"), maxAge: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
 	group.writeFrame({
@@ -586,7 +586,7 @@ test("Consumer skips an empty LOC payload", async () => {
 	producer.encode(new Uint8Array(), 33_000 as Time.Micro, false);
 	producer.close();
 
-	const consumer = new Consumer(replay(track), { format: new LocFormat(), maxAge: 500 as Time.Milli });
+	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxAge: 500 as Time.Milli });
 	await settle();
 	const media = await consumer.next();
 	expect(media?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));
@@ -595,6 +595,23 @@ test("Consumer skips an empty LOC payload", async () => {
 	expect(marker?.end).toBe(33_000 as Time.Micro);
 	expect(marker?.frame).toBeUndefined();
 	consumer.close();
+});
+
+test("Consumer preserves empty Legacy and LOC data frames", async () => {
+	for (const kind of ["legacy", "loc"]) {
+		const track = new Track.Producer("data");
+		const producer =
+			kind === "legacy" ? new LegacyProducer(track, new LegacyFormat("data")) : new LocProducer(track);
+		producer.encode(new Uint8Array(), 0 as Time.Micro, true);
+		producer.close();
+		const format = kind === "legacy" ? new LegacyFormat("data") : new LocFormat();
+		const consumer = new Consumer(replay(track), { format, maxAge: 500 as Time.Milli });
+		const result = await consumer.next();
+		expect(result?.frame?.payload).toEqual(new Uint8Array());
+		expect(result?.frame?.keyframe).toBe(true);
+		expect(result?.end).toBeUndefined();
+		consumer.close();
+	}
 });
 
 // --- Rewinds at the playback cursor ---

@@ -70,7 +70,7 @@ impl ContainerTrait for Container {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).end(frame),
 			Self::Cmaf(cmaf) => cmaf.end(frame),
-			Self::Loc(_) => loc::Wire.end(frame),
+			Self::Loc(kind) => loc::Wire(*kind).end(frame),
 		}
 	}
 
@@ -89,7 +89,7 @@ impl ContainerTrait for Container {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).finish_group(group, end),
 			Self::Cmaf(wire) => wire.finish_group(group, end).map_err(Into::into),
-			Self::Loc(_) => loc::Wire.finish_group(group, end),
+			Self::Loc(kind) => loc::Wire(*kind).finish_group(group, end),
 		}
 	}
 
@@ -97,7 +97,7 @@ impl ContainerTrait for Container {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
-			Self::Loc(_) => loc::Wire.write(group, frames),
+			Self::Loc(kind) => loc::Wire(*kind).write(group, frames),
 		}
 	}
 
@@ -109,7 +109,7 @@ impl ContainerTrait for Container {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).poll_read(group, waiter),
 			Self::Cmaf(cmaf) => Poll::Ready(Ok(ready!(cmaf.poll_read(group, waiter))?)),
-			Self::Loc(_) => loc::Wire.poll_read(group, waiter),
+			Self::Loc(kind) => loc::Wire(*kind).poll_read(group, waiter),
 		}
 	}
 }
