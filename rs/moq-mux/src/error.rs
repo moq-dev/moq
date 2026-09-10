@@ -24,6 +24,10 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// An edit lowers or removes an existing rendition's jitter bound.
+	#[error("jitter cannot decrease for an existing rendition")]
+	JitterDecreased,
+
 	/// Error from the underlying moq-net transport.
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),

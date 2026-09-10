@@ -27,7 +27,9 @@ you already have.
 
 `catalog::Rendition::set`, `update`, and `estimate` return errors when a catalog
 edit cannot be serialized or published. Invalid jitter is rejected before the
-edit is retained, including while the initial catalog is reserved. Codec importers
+edit is retained, including while the initial catalog is reserved. Lowering or
+removing an existing audio, video, or text rendition's jitter returns
+`Error::JitterDecreased`; dropping the rendition ends that lifetime. Codec importers
 propagate these errors through their configuration and frame-writing methods.
 
 ```bash

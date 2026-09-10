@@ -482,7 +482,7 @@ It is never a measurement of the network, which a consumer observes for itself a
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
 A publisher MUST NOT advertise `0`; a track that flushes each frame immediately omits the field instead.
 A consumer receiving `0` SHOULD treat the field as absent, since it is a publisher rounding down rather than a claim of zero delay.
-A publisher MUST NOT lower a previously advertised value, since a burst it emitted once it may emit again.
+For the lifetime of an audio, video, or text rendition, a publisher MUST NOT lower or remove a previously advertised value, since a burst it emitted once it may emit again.
 
 For example:
 
@@ -946,6 +946,7 @@ This document has no IANA actions.
 # Appendix A: Changelog
 
 ## moq-hang-03
+- Clarified that jitter cannot be lowered or removed during the lifetime of an audio, video, or text rendition.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
 

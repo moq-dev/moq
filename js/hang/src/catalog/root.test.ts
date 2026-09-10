@@ -71,7 +71,7 @@ test("rendition without broadcast reference stays undefined", () => {
 	expect(parsed.video.renditions.video?.broadcast).toBeUndefined();
 });
 
-test("legacy zero jitter is absent for audio and video", () => {
+test("legacy zero jitter is absent for audio, video, and text", () => {
 	const parsed = RootSchema.parse({
 		audio: {
 			renditions: {
@@ -87,7 +87,9 @@ test("legacy zero jitter is absent for audio and video", () => {
 		video: {
 			renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, framerate: 30, jitter: 0 } },
 		},
+		text: { renditions: { text: { format: "vtt", container: { kind: "legacy" }, jitter: 0 } } },
 	});
+	expect(parsed.text?.renditions.text?.jitter).toBeUndefined();
 	expect(parsed.audio?.renditions.audio?.jitter).toBeUndefined();
 	expect(parsed.video?.renditions.video?.jitter).toBeUndefined();
 	expect(JSON.stringify(parsed)).not.toContain('"jitter"');

@@ -434,7 +434,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.timestamp(hint)
 	}
 
-	/// Validate and publish the rendition, fulfilling its reservation only after the edit succeeds.
+	/// Validate and publish the rendition without lowering jitter, fulfilling its reservation only on success.
 	///
 	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
 	/// rest are filled by [`estimate`](Self::estimate), seeded with anything already measured before
@@ -448,6 +448,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		{
 			let mut guard = self.catalog.lock();
 			let mut next = (*guard).clone();
+			if let Some(previous) = C::get_mut(&mut next, &self.name)
+				&& resolved.jitter < previous.estimate().jitter
+			{
+				return Err(crate::Error::JitterDecreased);
+			}
 			config.insert(&mut next, &self.name);
 			// Serialization must succeed before the reserved snapshot retains the edit.
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
@@ -493,7 +498,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		Ok(())
 	}
 
-	/// Refine the rendition, refusing an unserializable edit before retaining it.
+	/// Refine the rendition, refusing invalid edits or jitter decreases before retaining them.
 	pub fn update(&mut self, f: impl FnOnce(&mut C)) -> crate::Result<()> {
 		if !self.present {
 			return Ok(());
@@ -501,7 +506,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut guard = self.catalog.lock();
 		let mut next = (*guard).clone();
 		if let Some(config) = C::get_mut(&mut next, &self.name) {
+			let previous = config.estimate().jitter;
 			f(config);
+			if config.estimate().jitter < previous {
+				return Err(crate::Error::JitterDecreased);
+			}
 		}
 		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 		*guard = next;
@@ -566,6 +575,68 @@ mod tests {
 			catalog.snapshot().video.renditions.values().next().unwrap().jitter,
 			Some(Duration::from_millis(100))
 		);
+	}
+
+	#[test]
+	fn jitter_decreases_are_not_retained() {
+		fn check<C: RenditionConfig<()> + Clone>(mut config: C) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+			let mut rendition = Rendition::live(catalog.clone(), "media".into()).unwrap();
+			let initial = Some(Duration::from_millis(100));
+			config.set_estimate(Estimate {
+				jitter: initial,
+				..Default::default()
+			});
+			rendition.set(config.clone()).unwrap();
+			for jitter in [Some(Duration::from_millis(50)), None] {
+				config.set_estimate(Estimate {
+					jitter,
+					..Default::default()
+				});
+				assert!(rendition.set(config.clone()).is_err());
+				assert!(
+					rendition
+						.update(|config| config.set_estimate(Estimate {
+							jitter,
+							..Default::default()
+						}))
+						.is_err()
+				);
+				assert_eq!(
+					C::get_mut(&mut catalog.snapshot(), "media").unwrap().estimate().jitter,
+					initial
+				);
+			}
+			drop(rendition);
+			let mut rendition = Rendition::live(catalog.clone(), "media".into()).unwrap();
+			rendition.set(config).unwrap();
+			rendition
+				.estimate(Estimate {
+					jitter: initial,
+					..Default::default()
+				})
+				.unwrap();
+			assert!(
+				rendition
+					.estimate(Estimate {
+						jitter: Some(Duration::from_millis(50)),
+						..Default::default()
+					})
+					.is_err()
+			);
+			assert_eq!(
+				C::get_mut(&mut catalog.snapshot(), "media").unwrap().estimate().jitter,
+				initial
+			);
+		}
+		check(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
+		check(hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			48_000,
+			2,
+		));
+		check(hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt));
 	}
 
 	#[test]
@@ -677,7 +748,6 @@ mod tests {
 		resolved.coded_height = Some(720);
 		hint.apply(&mut resolved);
 		rendition.set(resolved).unwrap();
-		feed(&mut rendition);
 
 		let snapshot = catalog.snapshot();
 		let published = snapshot.video.renditions.get("v").unwrap();

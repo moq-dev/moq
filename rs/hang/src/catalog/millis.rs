@@ -58,6 +58,19 @@ mod test {
 		catalog
 	}
 
+	#[test]
+	fn text_jitter_encoding() {
+		let mut config = crate::catalog::TextConfig::new(crate::catalog::TextFormat::Vtt);
+		config.jitter = Some(std::time::Duration::from_micros(1));
+		assert_eq!(serde_json::to_value(&config).unwrap()["jitter"], 1);
+		config.jitter = Some(std::time::Duration::ZERO);
+		assert!(serde_json::to_value(&config).is_err());
+		config.jitter = Some(std::time::Duration::MAX);
+		assert!(serde_json::to_value(&config).is_err());
+		let config: crate::catalog::TextConfig = serde_json::from_str(r#"{"format":"vtt","jitter":0}"#).unwrap();
+		assert_eq!(config.jitter, None);
+	}
+
 	/// A sub-millisecond jitter must not reach the wire as 0: 0 means "flushed immediately",
 	/// which is the one thing a consumer must not believe about a track that buffers.
 	#[test]

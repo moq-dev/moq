@@ -85,14 +85,16 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 test("catalog producer refuses zero jitter before retaining an edit", () => {
 	const catalog = new CatalogProducer();
-	for (const section of ["audio", "video"] as const) {
+	for (const section of ["audio", "video", "text"] as const) {
 		expect(() =>
 			catalog.mutate((value) => {
 				Object.assign(value, {
 					[section]: {
 						renditions: {
 							media: {
-								codec: "opus",
+								...(section === "text"
+									? { format: "vtt" }
+									: { codec: section === "audio" ? "opus" : "vp8" }),
 								container: { kind: "legacy" },
 								sampleRate: 48000,
 								numberOfChannels: 2,
@@ -109,7 +111,7 @@ test("catalog producer refuses zero jitter before retaining an edit", () => {
 	});
 });
 
-for (const section of ["audio", "video"] as const) {
+for (const section of ["audio", "video", "text"] as const) {
 	test(`catalog refuses ${section} jitter decreases without retaining them`, () => {
 		const catalog = new CatalogProducer();
 		catalog.mutate((value) => {
@@ -117,7 +119,9 @@ for (const section of ["audio", "video"] as const) {
 				[section]: {
 					renditions: {
 						media: {
-							codec: "opus",
+							...(section === "text"
+								? { format: "vtt" }
+								: { codec: section === "audio" ? "opus" : "vp8" }),
 							container: { kind: "legacy" },
 							sampleRate: 48000,
 							numberOfChannels: 2,
@@ -143,7 +147,7 @@ for (const section of ["audio", "video"] as const) {
 		catalog.mutate((value) => {
 			Object.assign(value[section]!.renditions, {
 				media: {
-					codec: "opus",
+					...(section === "text" ? { format: "vtt" } : { codec: section === "audio" ? "opus" : "vp8" }),
 					container: { kind: "legacy" },
 					sampleRate: 48000,
 					numberOfChannels: 2,
